@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import sqlite3
 import subprocess
 import sys
@@ -17,6 +19,9 @@ from newsroom.editorial.packages import build_candidate_package, build_evidence_
 from newsroom.editorial.policy import load_shadow_policy
 from newsroom.editorial.publication_control import ShadowPublicationController
 from newsroom.editorial.publishers import RecordingAdapterResult
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 def evaluation(*, run_id: str = "run-1", rights: str = "PASS"):
@@ -316,3 +321,112 @@ def test_controller_import_graph_has_no_live_or_network_modules() -> None:
         text=True,
     )
     assert check.returncode == 0, check.stderr
+
+
+def test_cli_evaluate_and_eligible_record_have_no_network_egress(
+    tmp_path: Path,
+) -> None:
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if "GATEWAY" not in name.upper() and "DISCORD" not in name.upper()
+    }
+    environment["OPENCLAW_HOME"] = str(tmp_path / "empty-openclaw-home")
+    check = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+from contextlib import redirect_stdout
+import io
+import json
+from pathlib import Path
+import socket
+from tempfile import TemporaryDirectory
+
+attempts = []
+real_socket = socket.socket
+
+
+def deny(operation):
+    def denied(*args, **kwargs):
+        attempts.append(operation)
+        raise AssertionError(f"network egress attempted: {operation}")
+
+    return denied
+
+
+class DeniedSocket(real_socket):
+    connect = deny("socket.connect")
+    connect_ex = deny("socket.connect_ex")
+    sendto = deny("socket.sendto")
+    sendmsg = deny("socket.sendmsg")
+
+
+socket.socket = DeniedSocket
+socket.SocketType = DeniedSocket
+socket.create_connection = deny("socket.create_connection")
+socket.getaddrinfo = deny("socket.getaddrinfo")
+
+from scripts import newsroom_editorial_shadow as cli
+
+fixture_root = Path("newsroom/evals/editorial_shadow").resolve()
+
+
+def run(arguments, *, state_root=None):
+    output = io.StringIO()
+    with redirect_stdout(output):
+        return_code = cli.main(
+            arguments,
+            root_overrides={"repository-fixtures": fixture_root},
+            state_root_override=state_root,
+        )
+    return return_code, json.loads(output.getvalue())
+
+
+evaluate_code, evaluated = run(
+    [
+        "evaluate",
+        "--root-id",
+        "repository-fixtures",
+        "--path",
+        "eligible.json",
+    ]
+)
+assert evaluate_code == 0
+assert evaluated["decision"]["outcome"] == "AUTO_PUBLISH"
+
+with TemporaryDirectory() as temporary_directory:
+    state_root = Path(temporary_directory) / "state"
+    resume_code, _ = run(
+        ["resume", "--actor", "zero-egress-proof", "--reason", "record fixture"],
+        state_root=state_root,
+    )
+    assert resume_code == 0
+    record_code, recorded = run(
+        [
+            "record",
+            "--root-id",
+            "repository-fixtures",
+            "--path",
+            "eligible.json",
+        ],
+        state_root=state_root,
+    )
+
+assert record_code == 0
+assert recorded["decision"]["outcome"] == "AUTO_PUBLISH"
+assert "RECORDED_NOT_PUBLISHED" in {
+    recorded["delivery"].get("state"),
+    recorded["delivery"].get("status"),
+}
+assert attempts == [], attempts
+""",
+        ],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert check.returncode == 0, check.stderr or check.stdout
