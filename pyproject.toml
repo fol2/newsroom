@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "openclaw-newsroom"
 version = "0.1.0"
-description = "Automated AI newsroom -- LLM clustering, multi-source news pool, Discord publishing."
+description = "Utility newsroom for Hong Kongers in the UK with shadow-governed editorial automation."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
@@ -18,8 +18,8 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/fol2/openclaw-newsroom"
-Issues = "https://github.com/fol2/openclaw-newsroom/issues"
+Repository = "https://github.com/fol2/newsroom"
+Issues = "https://github.com/fol2/newsroom/issues"
 
 [project.optional-dependencies]
 charts = ["Pillow>=10.0"]

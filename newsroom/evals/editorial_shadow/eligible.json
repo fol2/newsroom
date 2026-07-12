@@ -1,0 +1,43 @@
+{
+  "schema_version": "editorial_shadow_fixture_v1",
+  "fixture_id": "eligible-uk-service-update",
+  "scenarios": ["eligible", "recording", "pause", "concurrency", "tamper", "stable-story-identity"],
+  "run_id": "fixture-run-eligible",
+  "story_id": "story_01",
+  "stable_story_id": "synthetic:uk-service-update",
+  "story_version": "v1",
+  "sources": [
+    {
+      "source_id": "synthetic-official-notice",
+      "source_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "rights_status": "PERMITTED"
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "synthetic-claim-1",
+      "evidence_refs": ["synthetic-official-notice"]
+    }
+  ],
+  "content_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "asset_digests": [],
+  "gate_results": {
+    "claim_evidence": "PASS",
+    "rights": "PASS",
+    "sensitive_risk": "PASS",
+    "jurisdiction": "PASS"
+  },
+  "validator_results": {
+    "article_contract": "PASS"
+  },
+  "publication_content": {
+    "headline": "英國公共服務安排有更新",
+    "body": "呢篇係公開安全嘅純合成測試文章，用嚟驗證治理流程，並不描述真實人物、機構或者事件。",
+    "geographies": ["UK"],
+    "categories": ["UK News"],
+    "source_refs": ["synthetic-official-notice"],
+    "publisher_id": "newsroom-shadow",
+    "content_language": "zh-HK",
+    "status": "READY"
+  }
+}

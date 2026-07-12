@@ -1,9 +1,55 @@
-# OpenClaw Newsroom -- Technical Architecture
+# Newsroom -- Technical Architecture
 
-This document describes the internals of the openclaw-newsroom system: an
-automated news pipeline that ingests links from multiple sources, clusters them
-into events using LLM classification, generates Cantonese-language news reports,
-and publishes them to Discord.
+Newsroom is being repurposed as a utility publication for Hong Kongers in the UK.
+This document distinguishes the new editorial shadow governance foundation from
+the legacy Discord automation retained in the repository.
+
+## 0. Repurposing Boundary
+
+The shadow governance path accepts only descriptor-pinned files from policy-named
+repository roots. It canonicalises public-safe evidence and candidate packages,
+applies a closed policy, records immutable decision authority and, for eligible
+candidates, invokes a recording-only publisher. Its terminal delivery state is
+`RECORDED_NOT_PUBLISHED`; it does not import or call the Gateway, Discord client,
+runner, network, LLM or credential code.
+
+```text
+policy-named input -> evidence -> candidate -> decision -> authority revision
+                                                        -> recording receipt
+                                                           (no live publish)
+```
+
+This slice is not production conformance. It establishes deterministic package,
+policy, audit, replay, concurrency and pause semantics while deliberately leaving
+real publisher integration and broader end-to-end controls outside the boundary.
+The local control plane trusts actors on the same OS account. `QA-051` tracks the
+deferred cross-account/operator hardening work.
+
+`newsroom-editorial-shadow evaluate` is read-only. `record` persists the exact
+packages and decision, then records an eligible intent once. Pause and resume are
+audited; resume never dispatches queued work. The legacy Discord pipeline remains
+operationally separate and is documented below for migration context.
+
+The authority lives in a policy-owned, account-private SQLite database under
+`~/.local/state/newsroom/editorial-shadow/`. A fresh database bootstraps paused at
+epoch 1. Package BLOBs, decisions, authority revisions, intents, receipts and the
+internally verifiable audit chain commit under explicit transactions; configured
+input, package, database, free-space and WAL limits fail closed. This audit is not
+described as externally immutable because a local administrator controls both the
+rows and their hashes.
+
+Production migration requires complete evidence, rights, sensitive-risk and
+article-contract implementations; separate runtime identities and credentials;
+authenticated emergency controls; provider reconciliation; stronger audit
+anchoring; and suite-wide evaluation including `QA-051`. The legacy publishing
+capability must remain until a separately approved cutover proves those gates and
+its rollback path.
+
+---
+
+The sections below describe the internals of the legacy automated pipeline: it
+ingests links from multiple sources, clusters them with LLM classification,
+generates Cantonese-language reports and publishes them to Discord.
 
 ---
 

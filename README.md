@@ -1,10 +1,67 @@
-# openclaw-newsroom
+# newsroom
 
-Automated AI newsroom -- LLM clustering, multi-source news pool, Discord publishing.
+Newsroom is being repurposed into a utility publication for Hong Kongers in the UK.
+Its editorial promise is practical: explain what happened, why it matters to this
+audience, and what readers can do next.
+
+## Product Direction and Shadow Governance
+
+The first repurposing slice is **shadow governance** for editorial automation. It
+turns a checked-in legacy job or public-safe synthetic fixture into immutable
+evidence, candidate, decision and (when eligible) publication packages. The
+decision and recording path is deterministic, credential-free and fail-closed.
+
+This is not production conformance. The shadow has no live publishing dependency
+edge: an eligible record ends in `RECORDED_NOT_PUBLISHED`. The legacy Discord
+planner, runner and publisher remain available as the historical system described
+below, but they are outside this shadow's conformance boundary.
+
+The local governance database, pause state and control actions trust operators on
+the same OS account. This is a documented local trust boundary; it does not
+protect controls from another process acting as that account.
+Cross-account/operator hardening remains deferred under `QA-051`.
+
+Evaluate the checked-in eligible fixture without Gateway or Discord credentials:
+
+```bash
+uv run newsroom-editorial-shadow evaluate \
+  --root-id repository-fixtures \
+  --path eligible.json \
+  --pretty
+```
+
+Use `record` instead of `evaluate` to persist the exact packages and create a
+recording-only delivery receipt. See [ARCHITECTURE.md](ARCHITECTURE.md) for the
+authority, pause and replay model.
+
+Fresh governance state is created paused at epoch 1 and requires an explicit,
+audited `resume` before an eligible package can enter recording. State is stored
+under the policy-owned `~/.local/state/newsroom/editorial-shadow/` directory in a
+private, bounded SQLite database; CLI arguments and environment variables cannot
+relocate it. `inspect` requires an exact authority ID and returns metadata only.
+
+The checked-in policy trace labels `AUTO-010` through `AUTO-014` as implemented
+in this shadow, while discovery, complete evidence, rights and risk evaluation
+remain foundation or compatibility work. Passing these tests therefore covers
+only the requirements named in the
+[implementation plan](docs/plans/2026-07-12-001-feat-editorial-shadow-governance-plan.md),
+not the complete [editorial automation specification](docs/specs/editorial-automation/README.md).
+
+Before a production publisher can replace the legacy path, a later plan must at
+minimum complete every mandatory evidence, rights, sensitive-risk and article
+gate; isolate runtime identities and public credentials; add authenticated pause
+and resume controls; reconcile ambiguous provider outcomes; externally anchor or
+otherwise strengthen audit evidence; and pass the suite-level end-to-end and
+`QA-051` comparison gates. Only then can the legacy publisher be migrated and
+retired through a separately reviewed rollout with rollback evidence.
+
+## Legacy System
+
+The remaining documentation describes the existing automated Discord newsroom.
 
 ## Architecture Overview
 
-openclaw-newsroom is a pipeline that transforms raw news links into polished, clustered stories published to Discord. The pipeline has four stages:
+The legacy system transforms raw news links into polished, clustered stories published to Discord. The pipeline has four stages:
 
 1. **News pool ingestion** -- Multiple source adapters (Brave News API, GDELT DOC 2.0, curated RSS/Atom feeds) continuously fetch links and upsert them into a local SQLite news pool database with deduplication and TTL expiry.
 
@@ -31,8 +88,8 @@ openclaw-newsroom is a pipeline that transforms raw news links into polished, cl
 ## Installation
 
 ```bash
-git clone https://github.com/fol2/openclaw-newsroom.git openclaw-newsroom
-cd openclaw-newsroom
+git clone https://github.com/fol2/newsroom.git newsroom
+cd newsroom
 uv sync
 ```
 
@@ -92,6 +149,7 @@ uv run python scripts/newsroom_runner.py --dry-run
 | `newsroom_hourly_inputs.py` | Hourly planner -- fetches pool links, LLM-clusters into events, selects 1-3 events for the hourly run. |
 | `newsroom_daily_inputs.py` | Daily planner -- same clustering pipeline, selects 10-15 events with category balance and HK guarantee. |
 | `newsroom_write_run_job.py` | Creates a story job JSON file from event data (used by hourly/daily planners). |
+| `newsroom_editorial_shadow.py` | Evaluates, records and inspects the credential-free editorial shadow governance path. |
 | `news_pool_update.py` | Fetches news from Brave News API and upserts links into the pool database. |
 | `gdelt_pool_update.py` | Fetches articles from GDELT DOC 2.0 API (free, no auth) and upserts into the pool. |
 | `rss_pool_update.py` | Fetches articles from curated RSS/Atom feeds and upserts into the pool. |

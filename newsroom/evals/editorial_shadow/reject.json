@@ -1,0 +1,29 @@
+{
+  "schema_version": "editorial_shadow_fixture_v1",
+  "fixture_id": "reject-insufficient-evidence",
+  "scenarios": ["reject", "reject-precedence"],
+  "run_id": "fixture-run-reject",
+  "story_id": "story_01",
+  "stable_story_id": "synthetic:insufficient-evidence",
+  "story_version": "v1",
+  "sources": [
+    {
+      "source_id": "synthetic-lead-only-source",
+      "source_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "rights_status": "UNKNOWN"
+    }
+  ],
+  "claims": [],
+  "content_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+  "asset_digests": [],
+  "gate_results": {
+    "claim_evidence": "REJECT",
+    "rights": "MISSING",
+    "sensitive_risk": "MISSING",
+    "jurisdiction": "MISSING"
+  },
+  "validator_results": {
+    "article_contract": "MISSING"
+  },
+  "publication_content": null
+}

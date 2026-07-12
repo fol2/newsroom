@@ -185,7 +185,10 @@ def _stable_story_id(story: Mapping[str, Any], *, run_id: str, story_id: str) ->
     return "compat-occurrence:" + hashlib.sha256(occurrence).hexdigest(), True
 
 
-def _project_legacy_job(value: Any, policy: EditorialPolicy) -> tuple[Any, Any, tuple[str, ...]]:
+def _project_legacy_job(
+    value: Any,
+    policy: EditorialPolicy,
+) -> tuple[PackageArtifact, PackageArtifact, Mapping[str, Any] | None, tuple[str, ...]]:
     if not isinstance(value, dict) or value.get("schema_version") != "story_job_v1":
         raise IntakeError("unsupported legacy schema_version")
     run = value.get("run")
@@ -269,7 +272,166 @@ def _project_legacy_job(value: Any, policy: EditorialPolicy) -> tuple[Any, Any, 
     compatibility_reasons = (
         ("MIGRATION_MISSING_STABLE_STORY_ID",) if compatibility_identity else ()
     )
-    return evidence, candidate, compatibility_reasons
+    return evidence, candidate, None, compatibility_reasons
+
+
+_FIXTURE_KEYS = frozenset(
+    {
+        "schema_version",
+        "fixture_id",
+        "scenarios",
+        "run_id",
+        "story_id",
+        "stable_story_id",
+        "story_version",
+        "sources",
+        "claims",
+        "content_digest",
+        "asset_digests",
+        "gate_results",
+        "validator_results",
+        "publication_content",
+    }
+)
+_SOURCE_KEYS = frozenset({"source_id", "source_digest", "rights_status"})
+_CLAIM_KEYS = frozenset({"claim_id", "evidence_refs"})
+_PUBLICATION_CONTENT_KEYS = frozenset(
+    {
+        "headline",
+        "body",
+        "geographies",
+        "categories",
+        "source_refs",
+        "publisher_id",
+        "content_language",
+        "status",
+    }
+)
+
+
+def _require_exact_keys(value: Mapping[str, Any], expected: frozenset[str], *, field: str) -> None:
+    actual = set(value)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        details = []
+        if missing:
+            details.append(f"missing={missing}")
+        if unexpected:
+            details.append(f"unexpected={unexpected}")
+        raise IntakeError(f"{field} has an invalid shape ({', '.join(details)})")
+
+
+def _require_string_list(value: Any, *, field: str, allow_empty: bool) -> list[str]:
+    if not isinstance(value, list) or (not allow_empty and not value):
+        raise IntakeError(f"fixture {field} must be a {'non-empty ' if not allow_empty else ''}list")
+    if any(not isinstance(item, str) or not item for item in value):
+        raise IntakeError(f"fixture {field} must contain non-empty strings")
+    if len(value) != len(set(value)):
+        raise IntakeError(f"fixture {field} contains duplicates")
+    return list(value)
+
+
+def _project_shadow_fixture(
+    value: Any,
+    policy: EditorialPolicy,
+) -> tuple[PackageArtifact, PackageArtifact, Mapping[str, Any] | None, tuple[str, ...]]:
+    if not isinstance(value, dict):
+        raise IntakeError("editorial shadow fixture root must be an object")
+    _require_exact_keys(value, _FIXTURE_KEYS, field="editorial shadow fixture")
+    _required_text(value.get("fixture_id"), field="fixture_id")
+    _require_string_list(value.get("scenarios"), field="scenarios", allow_empty=False)
+    run_id = _required_text(value.get("run_id"), field="run_id")
+    story_id = _required_text(value.get("story_id"), field="story_id")
+    stable_story_id = _required_text(value.get("stable_story_id"), field="stable_story_id")
+    story_version = _required_text(value.get("story_version"), field="story_version")
+
+    raw_sources = value.get("sources")
+    if not isinstance(raw_sources, list) or not raw_sources:
+        raise IntakeError("fixture sources must be a non-empty list")
+    sources: list[dict[str, Any]] = []
+    source_ids: set[str] = set()
+    for index, raw_source in enumerate(raw_sources):
+        if not isinstance(raw_source, dict):
+            raise IntakeError(f"fixture sources[{index}] must be an object")
+        _require_exact_keys(raw_source, _SOURCE_KEYS, field=f"fixture sources[{index}]")
+        source_id = _required_text(raw_source.get("source_id"), field=f"sources[{index}].source_id")
+        if source_id in source_ids:
+            raise IntakeError("fixture source_id values must be unique")
+        source_ids.add(source_id)
+        sources.append(dict(raw_source))
+
+    raw_claims = value.get("claims")
+    if not isinstance(raw_claims, list):
+        raise IntakeError("fixture claims must be a list")
+    claims: list[dict[str, Any]] = []
+    claim_ids: set[str] = set()
+    for index, raw_claim in enumerate(raw_claims):
+        if not isinstance(raw_claim, dict):
+            raise IntakeError(f"fixture claims[{index}] must be an object")
+        _require_exact_keys(raw_claim, _CLAIM_KEYS, field=f"fixture claims[{index}]")
+        claim_id = _required_text(raw_claim.get("claim_id"), field=f"claims[{index}].claim_id")
+        if claim_id in claim_ids:
+            raise IntakeError("fixture claim_id values must be unique")
+        claim_ids.add(claim_id)
+        refs = _require_string_list(
+            raw_claim.get("evidence_refs"),
+            field=f"claims[{index}].evidence_refs",
+            allow_empty=True,
+        )
+        if not set(refs).issubset(source_ids):
+            raise IntakeError("fixture claim references an unknown source_id")
+        claims.append({"claim_id": claim_id, "evidence_refs": refs})
+
+    evidence = build_evidence_package(
+        {
+            "schema_version": "evidence_package_v1",
+            "encoding_version": "rfc8785-restricted-v1",
+            "digest_algorithm": "sha256",
+            "provenance": {
+                "run_id": run_id,
+                "story_id": story_id,
+                "source_refs": sources,
+            },
+            "claims": claims,
+            "component_versions": {"extractor": "synthetic-fixture-v1"},
+        }
+    )
+
+    candidate = build_candidate_package(
+        {
+            "schema_version": "editorial_candidate_v1",
+            "encoding_version": "rfc8785-restricted-v1",
+            "digest_algorithm": "sha256",
+            "candidate_id": f"{run_id}:{story_id}",
+            "stable_story_id": stable_story_id,
+            "story_version": story_version,
+            "evidence_digest": evidence.digest,
+            "content_digest": value.get("content_digest"),
+            "asset_digests": value.get("asset_digests"),
+            "gate_results": value.get("gate_results"),
+            "policy_version": policy.policy_id,
+            "controller_version": policy.component_versions["controller"],
+            "validator_results": value.get("validator_results"),
+            "target": policy.target_allowlist[0],
+            "provenance": {"run_id": run_id, "story_id": story_id},
+        }
+    )
+
+    raw_publication = value.get("publication_content")
+    publication_content: Mapping[str, Any] | None
+    if raw_publication is None:
+        publication_content = None
+    elif isinstance(raw_publication, dict):
+        _require_exact_keys(
+            raw_publication,
+            _PUBLICATION_CONTENT_KEYS,
+            field="fixture publication_content",
+        )
+        publication_content = dict(raw_publication)
+    else:
+        raise IntakeError("fixture publication_content must be an object or null")
+    return evidence, candidate, publication_content, ()
 
 
 def prepare_input_file(
@@ -286,16 +448,25 @@ def prepare_input_file(
     )
     data = stable_read(root, relative_path, max_bytes=policy.limits.max_input_bytes)
     try:
-        legacy_value = parse_json_bytes(data, max_bytes=policy.limits.max_input_bytes)
-        evidence, candidate, compatibility_reasons = _project_legacy_job(
-            legacy_value,
-            policy,
-        )
+        input_value = parse_json_bytes(data, max_bytes=policy.limits.max_input_bytes)
+        schema_version = input_value.get("schema_version") if isinstance(input_value, dict) else None
+        if schema_version == "story_job_v1":
+            evidence, candidate, publication_content, compatibility_reasons = _project_legacy_job(
+                input_value,
+                policy,
+            )
+        elif schema_version == "editorial_shadow_fixture_v1":
+            evidence, candidate, publication_content, compatibility_reasons = _project_shadow_fixture(
+                input_value,
+                policy,
+            )
+        else:
+            raise IntakeError("unsupported input schema_version")
         decision = evaluate_candidate(
             candidate=candidate,
             evidence=evidence,
             policy=policy,
-            publication_content=None,
+            publication_content=publication_content,
             compatibility_reason_codes=compatibility_reasons,
         )
     except (PackageValidationError, DecisionEvaluationError) as exc:

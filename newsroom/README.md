@@ -1,5 +1,34 @@
 # Newsroom Engine (Planner + Deterministic Runner)
 
+## Editorial Shadow During Repository Repurposing
+
+The repository's new product direction is a utility publication for Hong Kongers
+in the UK. The first implementation is credential-free **shadow governance**:
+
+```bash
+uv run newsroom-editorial-shadow evaluate \
+  --root-id repository-fixtures \
+  --path eligible.json
+```
+
+The command admits only policy-named, same-account repository inputs and returns
+metadata and package digests. `record` persists immutable authority and uses a
+recording-only publisher whose successful terminal state is
+`RECORDED_NOT_PUBLISHED`. There is no live Gateway or Discord dependency edge.
+
+This foundation is not production conformance. The same OS account is the local
+operator trust boundary, and stronger cross-account/operator controls are deferred
+as `QA-051`. The legacy Discord planner and runner described below are unchanged
+and remain outside the shadow boundary.
+
+Governance state bootstraps paused at epoch 1 in the policy-owned account state
+directory. A later production cutover must complete the specification's evidence,
+rights, risk, identity, emergency-control, reconciliation and end-to-end gates;
+until that separately reviewed migration is reversible, the legacy publisher is
+not a removal candidate.
+
+## Legacy Planner and Runner
+
 This implements the architecture described in `ARCHITECTURE.md` and `AGENTS.md`:
 
 - **Planner (LLM)**: selects stories and writes `story_job_v1` JSON files under `workspace/jobs/`, then stops.
