@@ -116,7 +116,7 @@ def canonicalise_json(value: Any) -> bytes:
         raise PackageValidationError(f"RFC 8785 canonicalisation failed: {exc}") from exc
 
 
-def _digest(data: bytes) -> str:
+def digest_bytes(data: bytes) -> str:
     return f"{DIGEST_ALGORITHM}:{hashlib.sha256(data).hexdigest()}"
 
 
@@ -167,7 +167,7 @@ def _artifact(kind: str, value: Mapping[str, Any]) -> PackageArtifact:
         kind=kind,
         schema_version=str(value["schema_version"]),
         digest_algorithm=DIGEST_ALGORITHM,
-        digest=_digest(canonical_bytes),
+        digest=digest_bytes(canonical_bytes),
         byte_size=len(canonical_bytes),
         canonical_bytes=canonical_bytes,
         value=dict(value),
@@ -233,7 +233,7 @@ def build_publication_package(
 def verify_package_bytes(
     data: bytes, expected_digest: str, *, check_digest: bool = True
 ) -> dict[str, Any]:
-    if check_digest and _digest(data) != expected_digest:
+    if check_digest and digest_bytes(data) != expected_digest:
         raise PackageIntegrityError("package digest mismatch")
     try:
         value = parse_json_bytes(data)

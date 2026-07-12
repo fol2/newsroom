@@ -3,16 +3,18 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-import hashlib
 from pathlib import Path
 import shutil
 import sqlite3
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from .._util import is_non_empty_str
 from .packages import (
+    DIGEST_ALGORITHM,
     PackageArtifact,
     PackageIntegrityError,
     canonicalise_json,
+    digest_bytes,
     parse_json_bytes,
     verify_package_bytes,
 )
@@ -20,7 +22,7 @@ from .policy import ResourceLimits
 
 
 SCHEMA_VERSION = 1
-_ZERO_HASH = "sha256:" + "0" * 64
+_ZERO_HASH = f"{DIGEST_ALGORITHM}:" + "0" * 64
 _EXPECTED_TABLES = frozenset(
     {
         "packages",
@@ -161,14 +163,34 @@ def _parse_utc(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _sha256(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
 def _require_text(value: str, *, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if not is_non_empty_str(value):
         raise ValueError(f"{field} must be a non-empty string")
     return value
+
+
+def _audit_event_hash(
+    *,
+    sequence: int,
+    event_type: str,
+    entity_type: str,
+    entity_id: str,
+    payload_bytes: bytes,
+    previous_hash: str,
+    created_at: str,
+) -> str:
+    preimage = canonicalise_json(
+        {
+            "sequence": sequence,
+            "event_type": event_type,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "payload_digest": digest_bytes(payload_bytes),
+            "previous_hash": previous_hash,
+            "created_at": created_at,
+        }
+    )
+    return digest_bytes(preimage)
 
 
 class GovernanceStore:
@@ -195,7 +217,7 @@ class GovernanceStore:
             self._conn.row_factory = sqlite3.Row
             self._configure_connection()
             self._bootstrap_or_validate()
-            self._runtime = self._read_and_verify_runtime_configuration()
+            self._read_and_verify_runtime_configuration()
         except Exception:
             connection = getattr(self, "_conn", None)
             if connection is not None:
@@ -468,18 +490,15 @@ class GovernanceStore:
         previous_hash = str(head["head_hash"])
         timestamp = created_at or self._now()
         payload_bytes = canonicalise_json(dict(payload))
-        preimage = canonicalise_json(
-            {
-                "sequence": sequence,
-                "event_type": event_type,
-                "entity_type": entity_type,
-                "entity_id": entity_id,
-                "payload_digest": _sha256(payload_bytes),
-                "previous_hash": previous_hash,
-                "created_at": timestamp,
-            }
+        event_hash = _audit_event_hash(
+            sequence=sequence,
+            event_type=event_type,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            payload_bytes=payload_bytes,
+            previous_hash=previous_hash,
+            created_at=timestamp,
         )
-        event_hash = _sha256(preimage)
         self._conn.execute(
             """INSERT INTO audit_events(
                    sequence,event_type,entity_type,entity_id,payload_bytes,
@@ -539,18 +558,15 @@ class GovernanceStore:
                 if isinstance(exc, GovernanceIntegrityError):
                     raise
                 raise GovernanceIntegrityError("audit payload is invalid") from exc
-            preimage = canonicalise_json(
-                {
-                    "sequence": sequence,
-                    "event_type": str(row["event_type"]),
-                    "entity_type": str(row["entity_type"]),
-                    "entity_id": str(row["entity_id"]),
-                    "payload_digest": _sha256(payload_bytes),
-                    "previous_hash": previous_hash,
-                    "created_at": str(row["created_at"]),
-                }
+            actual = _audit_event_hash(
+                sequence=sequence,
+                event_type=str(row["event_type"]),
+                entity_type=str(row["entity_type"]),
+                entity_id=str(row["entity_id"]),
+                payload_bytes=payload_bytes,
+                previous_hash=previous_hash,
+                created_at=str(row["created_at"]),
             )
-            actual = _sha256(preimage)
             if actual != str(row["event_hash"]):
                 raise GovernanceIntegrityError("audit event hash mismatch")
             previous_hash = actual
@@ -602,7 +618,7 @@ class GovernanceStore:
             raise GovernanceIntegrityError(f"{kind} package value differs from its bytes")
         if artifact.schema_version != str(value.get("schema_version", "")):
             raise GovernanceIntegrityError(f"{kind} package schema metadata mismatch")
-        if artifact.digest_algorithm != "sha256":
+        if artifact.digest_algorithm != DIGEST_ALGORITHM:
             raise GovernanceIntegrityError(f"{kind} package digest algorithm is unsupported")
         return value
 
@@ -937,7 +953,7 @@ class GovernanceStore:
             raise GovernanceIntegrityError(f"stored package digest differs: {digest}") from exc
         if str(value.get("schema_version", "")) != str(row["schema_version"]):
             raise GovernanceIntegrityError(f"stored package schema differs: {digest}")
-        if str(row["digest_algorithm"]) != "sha256":
+        if str(row["digest_algorithm"]) != DIGEST_ALGORITHM:
             raise GovernanceIntegrityError(f"stored package algorithm differs: {digest}")
         return value
 
@@ -1213,7 +1229,7 @@ class GovernanceStore:
             ] is None:
                 raise GovernanceConflictError("authority is not eligible for intent")
             self._verify_authority_packages(authority)
-            intent_id = _sha256(
+            intent_id = digest_bytes(
                 canonicalise_json(
                     {
                         "schema_version": "shadow_delivery_intent_v1",
@@ -1312,7 +1328,7 @@ class GovernanceStore:
         receipt_bytes = canonicalise_json(dict(payload))
         if len(receipt_bytes) > int(self.limits.max_package_bytes):
             raise GovernanceResourceLimitError("receipt exceeds max_package_bytes")
-        receipt_digest = _sha256(receipt_bytes)
+        receipt_digest = digest_bytes(receipt_bytes)
         with self._write_transaction():
             intent = self._conn.execute(
                 """SELECT intent_id,authority_id,owner,fence,state
@@ -1401,7 +1417,7 @@ class GovernanceStore:
         if row is None:
             return None
         receipt_bytes = bytes(row["receipt_bytes"])
-        if _sha256(receipt_bytes) != str(row["receipt_digest"]):
+        if digest_bytes(receipt_bytes) != str(row["receipt_digest"]):
             raise GovernanceIntegrityError("receipt digest mismatch")
         try:
             receipt_value = parse_json_bytes(receipt_bytes)
@@ -1472,7 +1488,7 @@ class GovernanceStore:
                 "reason": reason,
             }
             receipt_bytes = canonicalise_json(payload)
-            receipt_digest = _sha256(receipt_bytes)
+            receipt_digest = digest_bytes(receipt_bytes)
             recorded_at = self._now()
             self._conn.execute(
                 """INSERT INTO receipts(

@@ -13,6 +13,7 @@ from .packages import (
     build_evidence_package,
     build_publication_package,
     canonicalise_json,
+    digest_bytes,
     parse_json_bytes,
     verify_package_bytes,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "build_evidence_package",
     "build_publication_package",
     "canonicalise_json",
+    "digest_bytes",
     "parse_json_bytes",
     "verify_package_bytes",
     "DecisionEvaluationError",

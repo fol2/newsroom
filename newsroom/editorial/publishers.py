@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 from typing import Any, Mapping
 
-from .packages import PackageIntegrityError, parse_json_bytes
+from .packages import PackageIntegrityError, digest_bytes, parse_json_bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,7 +26,7 @@ class RecordingOnlyPublisher:
             raise PackageIntegrityError("recording adapter requires a publication package")
         if value.get("outcome") != "AUTO_PUBLISH" or value.get("target") != "shadow-recording":
             raise PackageIntegrityError("recording adapter package is not shadow-eligible")
-        digest = "sha256:" + hashlib.sha256(publication_bytes).hexdigest()
+        digest = digest_bytes(publication_bytes)
         return RecordingAdapterResult(
             status="RECORDED_NOT_PUBLISHED",
             metadata={

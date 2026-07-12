@@ -187,15 +187,12 @@ def _open_store(
 ) -> Iterator[GovernanceStore]:
     database = _state_database(policy, state_root_override=state_root_override)
     previous_umask = os.umask(0o077)
-    store: GovernanceStore | None = None
     try:
-        store = GovernanceStore(database, limits=policy.limits)
-        _verify_sqlite_files(database)
-        yield store
-        _verify_sqlite_files(database)
+        with GovernanceStore(database, limits=policy.limits) as store:
+            _verify_sqlite_files(database)
+            yield store
+            _verify_sqlite_files(database)
     finally:
-        if store is not None:
-            store.close()
         os.umask(previous_umask)
         _verify_sqlite_files(database)
 

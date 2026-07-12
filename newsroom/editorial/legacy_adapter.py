@@ -7,13 +7,17 @@ from pathlib import Path, PurePosixPath
 import stat
 from typing import Any, Mapping
 
+from .._util import is_non_empty_str
 from .decisions import DecisionEvaluationError, DecisionResult, evaluate_candidate
 from .packages import (
+    DIGEST_ALGORITHM,
+    ENCODING_VERSION,
     PackageArtifact,
     PackageValidationError,
     build_candidate_package,
     build_evidence_package,
     canonicalise_json,
+    digest_bytes,
     parse_json_bytes,
 )
 from .policy import EditorialPolicy
@@ -161,13 +165,13 @@ def _resolve_root(
 
 
 def _required_text(value: Any, *, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if not is_non_empty_str(value):
         raise IntakeError(f"legacy occurrence is missing {field}")
     return value.strip()
 
 
 def _sha256_text(value: str) -> str:
-    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return digest_bytes(value.encode("utf-8"))
 
 
 def _stable_story_id(story: Mapping[str, Any], *, run_id: str, story_id: str) -> tuple[str, bool]:
@@ -222,8 +226,8 @@ def _project_legacy_job(
     evidence = build_evidence_package(
         {
             "schema_version": "evidence_package_v1",
-            "encoding_version": "rfc8785-restricted-v1",
-            "digest_algorithm": "sha256",
+            "encoding_version": ENCODING_VERSION,
+            "digest_algorithm": DIGEST_ALGORITHM,
             "provenance": {
                 "run_id": run_id,
                 "story_id": story_id,
@@ -244,12 +248,12 @@ def _project_legacy_job(
             else None,
         }
     )
-    content_digest = "sha256:" + hashlib.sha256(content_fingerprint).hexdigest()
+    content_digest = digest_bytes(content_fingerprint)
     candidate = build_candidate_package(
         {
             "schema_version": "editorial_candidate_v1",
-            "encoding_version": "rfc8785-restricted-v1",
-            "digest_algorithm": "sha256",
+            "encoding_version": ENCODING_VERSION,
+            "digest_algorithm": DIGEST_ALGORITHM,
             "candidate_id": candidate_id,
             "stable_story_id": stable_story_id,
             "story_version": "legacy:" + content_digest[7:23],
@@ -386,8 +390,8 @@ def _project_shadow_fixture(
     evidence = build_evidence_package(
         {
             "schema_version": "evidence_package_v1",
-            "encoding_version": "rfc8785-restricted-v1",
-            "digest_algorithm": "sha256",
+            "encoding_version": ENCODING_VERSION,
+            "digest_algorithm": DIGEST_ALGORITHM,
             "provenance": {
                 "run_id": run_id,
                 "story_id": story_id,
@@ -401,8 +405,8 @@ def _project_shadow_fixture(
     candidate = build_candidate_package(
         {
             "schema_version": "editorial_candidate_v1",
-            "encoding_version": "rfc8785-restricted-v1",
-            "digest_algorithm": "sha256",
+            "encoding_version": ENCODING_VERSION,
+            "digest_algorithm": DIGEST_ALGORITHM,
             "candidate_id": f"{run_id}:{story_id}",
             "stable_story_id": stable_story_id,
             "story_version": story_version,
