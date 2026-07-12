@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import stat
 from typing import Any, Mapping
 
-from .decisions import DecisionEvaluationError, evaluate_candidate
+from .decisions import DecisionEvaluationError, DecisionResult, evaluate_candidate
 from .packages import (
+    PackageArtifact,
     PackageValidationError,
     build_candidate_package,
     build_evidence_package,
@@ -19,6 +21,15 @@ from .policy import EditorialPolicy
 
 class IntakeError(ValueError):
     """Raised before semantic decision when compatibility input is unsafe."""
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedEvaluation:
+    root_id: str
+    input_byte_size: int
+    evidence: PackageArtifact
+    candidate: PackageArtifact
+    decision: DecisionResult
 
 
 _fstat = os.fstat
@@ -261,13 +272,13 @@ def _project_legacy_job(value: Any, policy: EditorialPolicy) -> tuple[Any, Any, 
     return evidence, candidate, compatibility_reasons
 
 
-def evaluate_legacy_file(
+def prepare_input_file(
     *,
     root_id: str,
     relative_path: str,
     policy: EditorialPolicy,
     root_overrides: Mapping[str, Path] | None = None,
-) -> dict[str, Any]:
+) -> PreparedEvaluation:
     root = _resolve_root(
         root_id=root_id,
         policy=policy,
@@ -290,11 +301,27 @@ def evaluate_legacy_file(
     except (PackageValidationError, DecisionEvaluationError) as exc:
         raise IntakeError(str(exc)) from exc
 
+    return PreparedEvaluation(
+        root_id=root_id,
+        input_byte_size=len(data),
+        evidence=evidence,
+        candidate=candidate,
+        decision=decision,
+    )
+
+
+def evaluation_metadata(prepared: PreparedEvaluation, policy: EditorialPolicy) -> dict[str, Any]:
+    evidence = prepared.evidence
+    candidate = prepared.candidate
+    decision = prepared.decision
     return {
         "status": "ok",
         "mode": "SHADOW_NOT_PRODUCTION",
         "policy_version": policy.policy_id,
-        "input": {"root_id": root_id, "byte_size": len(data)},
+        "input": {
+            "root_id": prepared.root_id,
+            "byte_size": prepared.input_byte_size,
+        },
         "evidence": {
             "digest": evidence.digest,
             "byte_size": evidence.byte_size,
@@ -323,3 +350,19 @@ def evaluate_legacy_file(
         "delivery": {"state": decision.delivery_state},
         "capability_boundary": "NO_LIVE_DEPENDENCY_EDGE",
     }
+
+
+def evaluate_legacy_file(
+    *,
+    root_id: str,
+    relative_path: str,
+    policy: EditorialPolicy,
+    root_overrides: Mapping[str, Path] | None = None,
+) -> dict[str, Any]:
+    prepared = prepare_input_file(
+        root_id=root_id,
+        relative_path=relative_path,
+        policy=policy,
+        root_overrides=root_overrides,
+    )
+    return evaluation_metadata(prepared, policy)

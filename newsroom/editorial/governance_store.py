@@ -82,6 +82,7 @@ class RuntimeConfiguration:
 class PauseState:
     paused: bool
     epoch: int
+    principal: str
     actor: str
     reason: str
     changed_at: str
@@ -398,6 +399,7 @@ class GovernanceStore:
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                 paused INTEGER NOT NULL CHECK (paused IN (0,1)),
                 epoch INTEGER NOT NULL CHECK (epoch > 0),
+                principal TEXT NOT NULL,
                 actor TEXT NOT NULL,
                 reason TEXT NOT NULL,
                 changed_at TEXT NOT NULL
@@ -428,8 +430,9 @@ class GovernanceStore:
                 (_ZERO_HASH,),
             )
             self._conn.execute(
-                """INSERT INTO pause_state(singleton,paused,epoch,actor,reason,changed_at)
-                   VALUES(1,1,1,'SYSTEM','BOOTSTRAP_FAIL_CLOSED',?)""",
+                """INSERT INTO pause_state(
+                       singleton,paused,epoch,principal,actor,reason,changed_at
+                   ) VALUES(1,1,1,'SYSTEM','SYSTEM','BOOTSTRAP_FAIL_CLOSED',?)""",
                 (created_at,),
             )
             self._append_audit(
@@ -439,6 +442,7 @@ class GovernanceStore:
                 payload={
                     "paused": True,
                     "epoch": 1,
+                    "principal": "SYSTEM",
                     "actor": "SYSTEM",
                     "reason": "BOOTSTRAP_FAIL_CLOSED",
                 },
@@ -727,7 +731,9 @@ class GovernanceStore:
         candidate: PackageArtifact,
         decision: PackageArtifact,
         publication: PackageArtifact | None,
+        principal: str = "SAME_ACCOUNT_UNSPECIFIED",
     ) -> AuthorityRevision:
+        principal = _require_text(principal, field="principal")
         _, candidate_value, decision_value, _ = self._validated_evaluation(
             evidence=evidence,
             candidate=candidate,
@@ -900,6 +906,7 @@ class GovernanceStore:
                     "decision_digest": decision.digest,
                     "publication_digest": publication_digest,
                     "outcome": str(decision_value["outcome"]),
+                    "principal": principal,
                 },
                 created_at=created_at,
             )
@@ -938,9 +945,15 @@ class GovernanceStore:
         for row in self._conn.execute("SELECT digest FROM packages ORDER BY digest"):
             self._verify_stored_package(str(row["digest"]))
 
-    def inspect_authority(self, authority_id: int) -> EvaluationInspection:
+    def inspect_authority(
+        self,
+        authority_id: int,
+        *,
+        principal: str = "SAME_ACCOUNT_UNSPECIFIED",
+    ) -> EvaluationInspection:
         if authority_id <= 0:
             raise ValueError("authority_id must be positive")
+        principal = _require_text(principal, field="principal")
         with self._write_transaction():
             rows = self._conn.execute(
                 """SELECT ar.authority_id,ar.stable_story_id,ar.story_version,ar.target,
@@ -976,6 +989,7 @@ class GovernanceStore:
                     "decision_digest": str(row["decision_digest"]),
                     "authority_id": authority.authority_id,
                     "revision": authority.revision,
+                    "principal": principal,
                 },
             )
             return EvaluationInspection(
@@ -1498,21 +1512,31 @@ class GovernanceStore:
 
     def pause_state(self) -> PauseState:
         row = self._conn.execute(
-            "SELECT paused,epoch,actor,reason,changed_at FROM pause_state WHERE singleton=1"
+            """SELECT paused,epoch,principal,actor,reason,changed_at
+               FROM pause_state WHERE singleton=1"""
         ).fetchone()
         if row is None:
             raise GovernanceIntegrityError("pause state is missing")
         return PauseState(
             paused=bool(row["paused"]),
             epoch=int(row["epoch"]),
+            principal=str(row["principal"]),
             actor=str(row["actor"]),
             reason=str(row["reason"]),
             changed_at=str(row["changed_at"]),
         )
 
-    def _set_pause(self, *, paused: bool, actor: str, reason: str) -> PauseState:
+    def _set_pause(
+        self,
+        *,
+        paused: bool,
+        actor: str,
+        reason: str,
+        principal: str,
+    ) -> PauseState:
         actor = _require_text(actor, field="actor")
         reason = _require_text(reason, field="reason")
+        principal = _require_text(principal, field="principal")
         with self._write_transaction():
             current = self.pause_state()
             if current.paused is paused:
@@ -1521,11 +1545,12 @@ class GovernanceStore:
             changed_at = self._now()
             changed = self._conn.execute(
                 """UPDATE pause_state
-                   SET paused=?,epoch=?,actor=?,reason=?,changed_at=?
+                   SET paused=?,epoch=?,principal=?,actor=?,reason=?,changed_at=?
                    WHERE singleton=1 AND epoch=? AND paused=?""",
                 (
                     int(paused),
                     epoch,
+                    principal,
                     actor,
                     reason,
                     changed_at,
@@ -1542,6 +1567,7 @@ class GovernanceStore:
                 payload={
                     "paused": paused,
                     "epoch": epoch,
+                    "principal": principal,
                     "actor": actor,
                     "reason": reason,
                     "previous_epoch": current.epoch,
@@ -1551,16 +1577,49 @@ class GovernanceStore:
             return PauseState(
                 paused=paused,
                 epoch=epoch,
+                principal=principal,
                 actor=actor,
                 reason=reason,
                 changed_at=changed_at,
             )
 
-    def pause(self, *, actor: str, reason: str) -> PauseState:
-        return self._set_pause(paused=True, actor=actor, reason=reason)
+    def pause(
+        self,
+        *,
+        actor: str,
+        reason: str,
+        principal: str = "SAME_ACCOUNT_UNSPECIFIED",
+    ) -> PauseState:
+        return self._set_pause(
+            paused=True, actor=actor, reason=reason, principal=principal
+        )
 
-    def resume(self, *, actor: str, reason: str) -> PauseState:
-        return self._set_pause(paused=False, actor=actor, reason=reason)
+    def resume(
+        self,
+        *,
+        actor: str,
+        reason: str,
+        principal: str = "SAME_ACCOUNT_UNSPECIFIED",
+    ) -> PauseState:
+        return self._set_pause(
+            paused=False, actor=actor, reason=reason, principal=principal
+        )
+
+    def verify_and_audit(
+        self,
+        *,
+        principal: str = "SAME_ACCOUNT_UNSPECIFIED",
+    ) -> AuditVerification:
+        principal = _require_text(principal, field="principal")
+        self.verify_audit_chain()
+        with self._write_transaction():
+            self._append_audit(
+                event_type="AUDIT_VERIFIED",
+                entity_type="governance_store",
+                entity_id="schema:1",
+                payload={"principal": principal, "schema_version": SCHEMA_VERSION},
+            )
+        return self.verify_audit_chain()
 
     def verify_audit_chain(self) -> AuditVerification:
         verified = self._verify_audit_chain_cursor(self._conn)
