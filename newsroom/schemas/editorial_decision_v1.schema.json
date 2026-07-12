@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://newsroom.local/schemas/editorial_decision_v1.schema.json",
+  "title": "Newsroom editorial decision v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "encoding_version",
+    "digest_algorithm",
+    "candidate_digest",
+    "evidence_digest",
+    "policy_version",
+    "controller_version",
+    "outcome",
+    "reason_codes"
+  ],
+  "properties": {
+    "schema_version": { "const": "editorial_decision_v1" },
+    "encoding_version": { "const": "rfc8785-restricted-v1" },
+    "digest_algorithm": { "const": "sha256" },
+    "candidate_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "evidence_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "policy_version": { "type": "string", "minLength": 1 },
+    "controller_version": { "type": "string", "minLength": 1 },
+    "outcome": { "enum": ["AUTO_PUBLISH", "HOLD_FOR_REVIEW", "REJECT"] },
+    "reason_codes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false
+}

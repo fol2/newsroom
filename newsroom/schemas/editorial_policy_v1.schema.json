@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://newsroom.local/schemas/editorial_policy_v1.schema.json",
+  "title": "Newsroom editorial shadow policy v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "policy_id",
+    "status",
+    "component_versions",
+    "target_allowlist",
+    "outcome_precedence",
+    "status_outcomes",
+    "gates",
+    "reason_order",
+    "trusted_input_roots",
+    "state_root",
+    "limits",
+    "specification_trace"
+  ],
+  "properties": {
+    "schema_version": { "const": "editorial_policy_v1" },
+    "policy_id": { "type": "string", "minLength": 1 },
+    "status": { "const": "SHADOW_NOT_PRODUCTION" },
+    "component_versions": {
+      "type": "object",
+      "required": ["policy", "controller", "package_encoding", "decision_schema"],
+      "properties": {
+        "policy": { "type": "string", "minLength": 1 },
+        "controller": { "type": "string", "minLength": 1 },
+        "package_encoding": { "const": "rfc8785-restricted-v1" },
+        "decision_schema": { "const": "editorial_decision_v1" }
+      },
+      "additionalProperties": false
+    },
+    "target_allowlist": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "outcome_precedence": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "REJECT" },
+        { "const": "HOLD_FOR_REVIEW" },
+        { "const": "AUTO_PUBLISH" }
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "status_outcomes": {
+      "type": "object",
+      "required": ["PASS", "HOLD", "REJECT", "MISSING", "UNKNOWN", "INDETERMINATE"],
+      "properties": {
+        "PASS": { "const": "AUTO_PUBLISH" },
+        "HOLD": { "const": "HOLD_FOR_REVIEW" },
+        "REJECT": { "const": "REJECT" },
+        "MISSING": { "const": "HOLD_FOR_REVIEW" },
+        "UNKNOWN": { "const": "HOLD_FOR_REVIEW" },
+        "INDETERMINATE": { "const": "HOLD_FOR_REVIEW" }
+      },
+      "additionalProperties": false
+    },
+    "gates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "source",
+          "reject_reason",
+          "hold_reason",
+          "missing_reason",
+          "unknown_reason",
+          "indeterminate_reason"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "source": { "enum": ["gate_results", "validator_results"] },
+          "reject_reason": { "type": "string", "minLength": 1 },
+          "hold_reason": { "type": "string", "minLength": 1 },
+          "missing_reason": { "type": "string", "minLength": 1 },
+          "unknown_reason": { "type": "string", "minLength": 1 },
+          "indeterminate_reason": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "reason_order": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "trusted_input_roots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "base", "relative_path"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "base": { "const": "repository" },
+          "relative_path": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "state_root": {
+      "type": "object",
+      "required": ["id", "base", "relative_path"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "base": { "const": "account_home" },
+        "relative_path": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "required": [
+        "max_input_bytes",
+        "max_package_bytes",
+        "max_database_bytes",
+        "min_free_bytes",
+        "wal_autocheckpoint_pages",
+        "busy_timeout_ms"
+      ],
+      "properties": {
+        "max_input_bytes": { "type": "integer", "minimum": 1 },
+        "max_package_bytes": { "type": "integer", "minimum": 1 },
+        "max_database_bytes": { "type": "integer", "minimum": 1 },
+        "min_free_bytes": { "type": "integer", "minimum": 1 },
+        "wal_autocheckpoint_pages": { "type": "integer", "minimum": 1 },
+        "busy_timeout_ms": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "specification_trace": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "status"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "status": {
+            "enum": [
+              "IMPLEMENTED_IN_SHADOW",
+              "FOUNDATION_ONLY",
+              "COMPATIBILITY_FOUNDATION",
+              "DEFERRED_NON_CONFORMANT"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

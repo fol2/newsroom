@@ -16,6 +16,8 @@ from .packages import (
     parse_json_bytes,
     verify_package_bytes,
 )
+from .decisions import DecisionEvaluationError, DecisionResult, evaluate_candidate
+from .policy import EditorialPolicy, PolicyValidationError, load_shadow_policy
 
 __all__ = [
     "PackageArtifact",
@@ -28,4 +30,10 @@ __all__ = [
     "canonicalise_json",
     "parse_json_bytes",
     "verify_package_bytes",
+    "DecisionEvaluationError",
+    "DecisionResult",
+    "evaluate_candidate",
+    "EditorialPolicy",
+    "PolicyValidationError",
+    "load_shadow_policy",
 ]

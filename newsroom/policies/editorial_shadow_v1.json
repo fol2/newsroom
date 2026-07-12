@@ -1,0 +1,135 @@
+{
+  "schema_version": "editorial_policy_v1",
+  "policy_id": "editorial-shadow-v1",
+  "status": "SHADOW_NOT_PRODUCTION",
+  "component_versions": {
+    "policy": "editorial-shadow-v1",
+    "controller": "shadow-controller-v1",
+    "package_encoding": "rfc8785-restricted-v1",
+    "decision_schema": "editorial_decision_v1"
+  },
+  "target_allowlist": [
+    "shadow-recording"
+  ],
+  "outcome_precedence": [
+    "REJECT",
+    "HOLD_FOR_REVIEW",
+    "AUTO_PUBLISH"
+  ],
+  "status_outcomes": {
+    "PASS": "AUTO_PUBLISH",
+    "HOLD": "HOLD_FOR_REVIEW",
+    "REJECT": "REJECT",
+    "MISSING": "HOLD_FOR_REVIEW",
+    "UNKNOWN": "HOLD_FOR_REVIEW",
+    "INDETERMINATE": "HOLD_FOR_REVIEW"
+  },
+  "gates": [
+    {
+      "id": "claim_evidence",
+      "source": "gate_results",
+      "reject_reason": "EVIDENCE_SUBSTANTIVELY_INSUFFICIENT",
+      "hold_reason": "GATE_REQUIRES_REVIEW",
+      "missing_reason": "MISSING_CLAIM_EVIDENCE",
+      "unknown_reason": "INDETERMINATE_CLAIM_EVIDENCE",
+      "indeterminate_reason": "INDETERMINATE_CLAIM_EVIDENCE"
+    },
+    {
+      "id": "rights",
+      "source": "gate_results",
+      "reject_reason": "RIGHTS_PROHIBITED",
+      "hold_reason": "GATE_REQUIRES_REVIEW",
+      "missing_reason": "MISSING_RIGHTS",
+      "unknown_reason": "INDETERMINATE_RIGHTS",
+      "indeterminate_reason": "INDETERMINATE_RIGHTS"
+    },
+    {
+      "id": "sensitive_risk",
+      "source": "gate_results",
+      "reject_reason": "KNOWN_PROHIBITION",
+      "hold_reason": "GATE_REQUIRES_REVIEW",
+      "missing_reason": "MISSING_SENSITIVE_RISK",
+      "unknown_reason": "INDETERMINATE_SENSITIVE_RISK",
+      "indeterminate_reason": "INDETERMINATE_SENSITIVE_RISK"
+    },
+    {
+      "id": "jurisdiction",
+      "source": "gate_results",
+      "reject_reason": "KNOWN_PROHIBITION",
+      "hold_reason": "GATE_REQUIRES_REVIEW",
+      "missing_reason": "MISSING_JURISDICTION",
+      "unknown_reason": "UNKNOWN_JURISDICTION",
+      "indeterminate_reason": "INDETERMINATE_JURISDICTION"
+    },
+    {
+      "id": "article_contract",
+      "source": "validator_results",
+      "reject_reason": "ARTICLE_CONTRACT_FAILED",
+      "hold_reason": "GATE_REQUIRES_REVIEW",
+      "missing_reason": "MISSING_ARTICLE_CONTRACT",
+      "unknown_reason": "INDETERMINATE_ARTICLE_CONTRACT",
+      "indeterminate_reason": "INDETERMINATE_ARTICLE_CONTRACT"
+    }
+  ],
+  "reason_order": [
+    "KNOWN_PROHIBITION",
+    "EVIDENCE_SUBSTANTIVELY_INSUFFICIENT",
+    "RIGHTS_PROHIBITED",
+    "ARTICLE_CONTRACT_FAILED",
+    "MIGRATION_MISSING_STABLE_STORY_ID",
+    "UNKNOWN_TARGET",
+    "UNKNOWN_POLICY_INPUT",
+    "MISSING_CLAIM_EVIDENCE",
+    "INDETERMINATE_CLAIM_EVIDENCE",
+    "MISSING_RIGHTS",
+    "INDETERMINATE_RIGHTS",
+    "MISSING_SENSITIVE_RISK",
+    "INDETERMINATE_SENSITIVE_RISK",
+    "MISSING_JURISDICTION",
+    "UNKNOWN_JURISDICTION",
+    "INDETERMINATE_JURISDICTION",
+    "MISSING_ARTICLE_CONTRACT",
+    "INDETERMINATE_ARTICLE_CONTRACT",
+    "MISSING_PUBLICATION_CONTENT",
+    "GATE_REQUIRES_REVIEW"
+  ],
+  "trusted_input_roots": [
+    {
+      "id": "repository-jobs",
+      "base": "repository",
+      "relative_path": "workspace/jobs"
+    },
+    {
+      "id": "repository-fixtures",
+      "base": "repository",
+      "relative_path": "newsroom/evals/editorial_shadow"
+    }
+  ],
+  "state_root": {
+    "id": "account-state",
+    "base": "account_home",
+    "relative_path": ".local/state/newsroom/editorial-shadow"
+  },
+  "limits": {
+    "max_input_bytes": 16777216,
+    "max_package_bytes": 16777216,
+    "max_database_bytes": 536870912,
+    "min_free_bytes": 268435456,
+    "wal_autocheckpoint_pages": 1000,
+    "busy_timeout_ms": 5000
+  },
+  "specification_trace": [
+    { "id": "AUTO-002", "status": "FOUNDATION_ONLY" },
+    { "id": "AUTO-010", "status": "IMPLEMENTED_IN_SHADOW" },
+    { "id": "AUTO-011", "status": "IMPLEMENTED_IN_SHADOW" },
+    { "id": "AUTO-012", "status": "IMPLEMENTED_IN_SHADOW" },
+    { "id": "AUTO-013", "status": "IMPLEMENTED_IN_SHADOW" },
+    { "id": "AUTO-014", "status": "IMPLEMENTED_IN_SHADOW" },
+    { "id": "AUTO-042", "status": "FOUNDATION_ONLY" },
+    { "id": "AUTO-043", "status": "FOUNDATION_ONLY" },
+    { "id": "EVID-036", "status": "FOUNDATION_ONLY" },
+    { "id": "RIGHTS-004", "status": "COMPATIBILITY_FOUNDATION" },
+    { "id": "RISK-001", "status": "COMPATIBILITY_FOUNDATION" },
+    { "id": "RISK-003", "status": "COMPATIBILITY_FOUNDATION" }
+  ]
+}
