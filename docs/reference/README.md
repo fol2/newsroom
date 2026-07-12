@@ -1,6 +1,8 @@
 # Reference material
 
-Reference documents preserve useful context without directly controlling the implementation. Humans and AI agents may use them to understand the product, identify risks, conduct research or draft a specification, but must not turn their contents into code or production behaviour unless an accepted spec or explicit owner instruction adopts the relevant requirement.
+Reference documents preserve useful context without directly controlling implementation. Humans and AI agents may use them to understand the product, identify risks, conduct research or draft a specification, but must not turn their contents into code or production behaviour unless an accepted spec or explicit owner instruction adopts the relevant requirement.
+
+Repository-authored reference documents default to Hong Kong Traditional Chinese (`zh-HK`) as the canonical language because they are primarily intended for owner and human review. English translations are development aids unless the document explicitly declares a different canonical language. External source material may remain in its original language, but any repository-authored interpretation must state its own canonical language.
 
 ## What belongs here
 
@@ -15,7 +17,7 @@ Examples include:
 - external articles, summaries and retained decision context;
 - detailed options that may later inform a spec or plan.
 
-As the collection grows, use subject subfolders such as `editorial/`, `legal/`, `business/` or `research/`. Do not create empty structure in advance.
+Use subject subfolders such as [`editorial/`](editorial/), `legal/`, `business/` or `research/` when there is real content to place in them. Do not create empty structure in advance.
 
 ## Authority
 
@@ -27,6 +29,18 @@ Reference material is non-normative.
 - It does not authorise code changes, model behaviour, automated publication rules or release decisions on its own.
 - A spec that adopts part of a reference document must state the adopted requirement explicitly.
 
+## Language and translation metadata
+
+A translated reference set must identify:
+
+- the canonical language and file;
+- the translation language and purpose;
+- which version controls if they differ;
+- the date or version last synchronised; and
+- any known translation gap.
+
+A translation must not introduce a new policy decision. If a development agent finds a mismatch, it must use the canonical version and surface the mismatch for correction.
+
 ## Recommended metadata
 
 ```markdown
@@ -35,6 +49,8 @@ Reference material is non-normative.
 **Status:** Working | Reviewed | Historical  
 **Type:** Editorial | Legal | Business | Research | Other  
 **Owner:** <name or role>  
+**Canonical language:** zh-HK | <declared exception>  
+**Translation status:** <canonical | development translation | none>  
 **As of:** YYYY-MM-DD  
 **Last reviewed:** YYYY-MM-DD  
 **Related specs or plans:** <links or none>  
