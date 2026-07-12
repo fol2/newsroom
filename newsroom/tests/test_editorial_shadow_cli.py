@@ -193,6 +193,10 @@ def test_stable_read_rejects_oversize_and_identity_change(
 
 def test_cli_has_no_arbitrary_root_flag_and_imports_no_live_modules(tmp_path: Path) -> None:
     write_job(tmp_path, legacy_job())
+    live_modules = {
+        name: sys.modules.get(name)
+        for name in ("newsroom.runner", "newsroom.gateway_client")
+    }
     output = io.StringIO()
     with redirect_stdout(output):
         rc = cli.main(
@@ -201,8 +205,8 @@ def test_cli_has_no_arbitrary_root_flag_and_imports_no_live_modules(tmp_path: Pa
         )
     assert rc == 0
     assert json.loads(output.getvalue())["decision"]["outcome"] == "HOLD_FOR_REVIEW"
-    assert "newsroom.runner" not in sys.modules
-    assert "newsroom.gateway_client" not in sys.modules
+    for name, existing_module in live_modules.items():
+        assert sys.modules.get(name) is existing_module
 
     with pytest.raises(SystemExit):
         cli.main(
