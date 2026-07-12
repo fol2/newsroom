@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://newsroom.local/schemas/publication_package_v1.schema.json",
+  "title": "Newsroom publication package v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "encoding_version",
+    "digest_algorithm",
+    "stable_story_id",
+    "story_version",
+    "candidate_digest",
+    "evidence_digest",
+    "decision_digest",
+    "outcome",
+    "headline",
+    "body",
+    "geographies",
+    "categories",
+    "source_refs",
+    "publisher_id",
+    "content_language",
+    "status",
+    "target",
+    "content_digest",
+    "asset_digests",
+    "policy_version",
+    "controller_version"
+  ],
+  "properties": {
+    "schema_version": { "const": "publication_package_v1" },
+    "encoding_version": { "const": "rfc8785-restricted-v1" },
+    "digest_algorithm": { "const": "sha256" },
+    "stable_story_id": { "type": "string", "minLength": 1 },
+    "story_version": { "type": "string", "minLength": 1 },
+    "candidate_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "evidence_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "decision_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "outcome": { "const": "AUTO_PUBLISH" },
+    "headline": { "type": "string", "minLength": 1 },
+    "body": { "type": "string", "minLength": 1 },
+    "geographies": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "categories": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "source_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "publisher_id": { "type": "string", "minLength": 1 },
+    "content_language": { "type": "string", "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$" },
+    "status": { "enum": ["READY"] },
+    "target": { "type": "string", "minLength": 1 },
+    "content_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "asset_digests": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+      "uniqueItems": true
+    },
+    "policy_version": { "type": "string", "minLength": 1 },
+    "controller_version": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://newsroom.local/schemas/editorial_candidate_v1.schema.json",
+  "title": "Newsroom editorial candidate v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "encoding_version",
+    "digest_algorithm",
+    "candidate_id",
+    "stable_story_id",
+    "story_version",
+    "evidence_digest",
+    "content_digest",
+    "asset_digests",
+    "gate_results",
+    "policy_version",
+    "controller_version",
+    "validator_results",
+    "target",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": { "const": "editorial_candidate_v1" },
+    "encoding_version": { "const": "rfc8785-restricted-v1" },
+    "digest_algorithm": { "const": "sha256" },
+    "candidate_id": { "type": "string", "minLength": 1 },
+    "stable_story_id": { "type": "string", "minLength": 1 },
+    "story_version": { "type": "string", "minLength": 1 },
+    "evidence_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "content_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "asset_digests": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+      "uniqueItems": true
+    },
+    "gate_results": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "enum": ["PASS", "HOLD", "REJECT", "MISSING", "UNKNOWN", "INDETERMINATE"]
+      }
+    },
+    "policy_version": { "type": "string", "minLength": 1 },
+    "controller_version": { "type": "string", "minLength": 1 },
+    "validator_results": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "enum": ["PASS", "HOLD", "REJECT", "MISSING", "UNKNOWN", "INDETERMINATE"]
+      }
+    },
+    "target": { "type": "string", "minLength": 1 },
+    "provenance": {
+      "type": "object",
+      "required": ["run_id", "story_id"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "story_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
