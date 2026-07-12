@@ -133,6 +133,9 @@ class DeliveryClaim:
 class DeliveryIntent:
     intent_id: str
     authority_id: int
+    publication_digest: str
+    decision_digest: str
+    target: str
     action_version: str
     owner: str
     fence: int
@@ -1208,7 +1211,8 @@ class GovernanceStore:
                 )
             )
             existing = self._conn.execute(
-                """SELECT intent_id,authority_id,action_version,owner,fence,state
+                """SELECT intent_id,authority_id,publication_digest,decision_digest,target,
+                          action_version,owner,fence,state
                    FROM delivery_intents
                    WHERE publication_digest=? AND decision_digest=? AND target=?
                      AND action_version=?""",
@@ -1225,6 +1229,9 @@ class GovernanceStore:
                 return DeliveryIntent(
                     intent_id=str(existing["intent_id"]),
                     authority_id=int(existing["authority_id"]),
+                    publication_digest=str(existing["publication_digest"]),
+                    decision_digest=str(existing["decision_digest"]),
+                    target=str(existing["target"]),
                     action_version=str(existing["action_version"]),
                     owner=str(existing["owner"]),
                     fence=int(existing["fence"]),
@@ -1266,6 +1273,9 @@ class GovernanceStore:
             return DeliveryIntent(
                 intent_id=intent_id,
                 authority_id=claim.authority_id,
+                publication_digest=str(authority["publication_digest"]),
+                decision_digest=str(authority["decision_digest"]),
+                target=str(authority["target"]),
                 action_version=action_version,
                 owner=claim.owner,
                 fence=claim.fence,
@@ -1349,6 +1359,137 @@ class GovernanceStore:
             return DeliveryReceipt(
                 intent_id=intent_id,
                 status=status,
+                receipt_digest=receipt_digest,
+            )
+
+    def publication_bytes(self, authority_id: int) -> tuple[str, bytes]:
+        """Return verified bytes for the current eligible authority revision."""
+
+        authority = self._current_authority_row(authority_id)
+        if str(authority["outcome"]) != "AUTO_PUBLISH" or authority[
+            "publication_digest"
+        ] is None:
+            raise GovernanceConflictError("authority is not eligible for recording")
+        self._verify_authority_packages(authority)
+        digest = str(authority["publication_digest"])
+        row = self._conn.execute(
+            "SELECT canonical_bytes FROM packages WHERE digest=?", (digest,)
+        ).fetchone()
+        if row is None:
+            raise GovernanceIntegrityError("publication package bytes are missing")
+        return digest, bytes(row["canonical_bytes"])
+
+    def receipt_for_intent(self, intent_id: str) -> DeliveryReceipt | None:
+        row = self._conn.execute(
+            "SELECT status,receipt_digest,receipt_bytes FROM receipts WHERE intent_id=?",
+            (intent_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        receipt_bytes = bytes(row["receipt_bytes"])
+        if _sha256(receipt_bytes) != str(row["receipt_digest"]):
+            raise GovernanceIntegrityError("receipt digest mismatch")
+        try:
+            receipt_value = parse_json_bytes(receipt_bytes)
+        except Exception as exc:
+            raise GovernanceIntegrityError("receipt bytes are invalid") from exc
+        if canonicalise_json(receipt_value) != receipt_bytes:
+            raise GovernanceIntegrityError("receipt bytes are not canonical")
+        return DeliveryReceipt(
+            intent_id=intent_id,
+            status=str(row["status"]),
+            receipt_digest=str(row["receipt_digest"]),
+        )
+
+    def mark_intent_unknown(
+        self,
+        intent_id: str,
+        *,
+        claim: DeliveryClaim,
+        reason: str,
+    ) -> DeliveryReceipt:
+        """Terminalise an entered intent without retrying its adapter action."""
+
+        intent_id = _require_text(intent_id, field="intent_id")
+        reason = _require_text(reason, field="reason")
+        with self._write_transaction():
+            self._assert_claim(
+                authority_id=claim.authority_id,
+                owner=claim.owner,
+                fence=claim.fence,
+            )
+            authority = self._conn.execute(
+                """SELECT ar.authority_id,ar.target,ar.decision_digest,
+                          ar.publication_digest,d.candidate_digest,d.evidence_digest,d.outcome
+                   FROM authority_revisions ar
+                   JOIN decisions d ON d.decision_digest=ar.decision_digest
+                   WHERE ar.authority_id=?""",
+                (claim.authority_id,),
+            ).fetchone()
+            if authority is None:
+                raise GovernanceConflictError("authority revision does not exist")
+            intent = self._conn.execute(
+                """SELECT intent_id,publication_digest,decision_digest,target,state
+                   FROM delivery_intents WHERE intent_id=?""",
+                (intent_id,),
+            ).fetchone()
+            if intent is None:
+                raise GovernanceConflictError("delivery intent does not exist")
+            semantic_identity = (
+                str(authority["publication_digest"]),
+                str(authority["decision_digest"]),
+                str(authority["target"]),
+            )
+            if (
+                str(intent["publication_digest"]),
+                str(intent["decision_digest"]),
+                str(intent["target"]),
+            ) != semantic_identity:
+                raise GovernanceConflictError("intent does not match current authority")
+            existing = self.receipt_for_intent(intent_id)
+            if existing is not None:
+                return existing
+            if str(intent["state"]) != "INTENT_RECORDED":
+                raise GovernanceConflictError("intent cannot transition to UNKNOWN")
+
+            payload = {
+                "schema_version": "shadow_unknown_receipt_v1",
+                "intent_id": intent_id,
+                "reason": reason,
+            }
+            receipt_bytes = canonicalise_json(payload)
+            receipt_digest = _sha256(receipt_bytes)
+            recorded_at = self._now()
+            self._conn.execute(
+                """INSERT INTO receipts(
+                       intent_id,status,receipt_digest,receipt_bytes,recorded_at
+                   ) VALUES(?,'UNKNOWN',?,?,?)""",
+                (intent_id, receipt_digest, receipt_bytes, recorded_at),
+            )
+            changed = self._conn.execute(
+                """UPDATE delivery_intents
+                   SET state='UNKNOWN',owner=?,fence=?
+                   WHERE intent_id=? AND state='INTENT_RECORDED'""",
+                (claim.owner, claim.fence, intent_id),
+            ).rowcount
+            if changed != 1:
+                raise GovernanceConflictError("intent could not become UNKNOWN")
+            self._append_audit(
+                event_type="DELIVERY_INTENT_UNKNOWN",
+                entity_type="delivery_intent",
+                entity_id=intent_id,
+                payload={
+                    "intent_id": intent_id,
+                    "reason": reason,
+                    "owner": claim.owner,
+                    "fence": claim.fence,
+                    "receipt_digest": receipt_digest,
+                },
+                created_at=recorded_at,
+            )
+            return DeliveryReceipt(
+                intent_id=intent_id,
+                status="UNKNOWN",
                 receipt_digest=receipt_digest,
             )
 
