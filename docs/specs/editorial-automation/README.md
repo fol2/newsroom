@@ -28,7 +28,7 @@ The suite describes target behaviour. It does not claim that the current Discord
 
 `MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` and `MAY` are normative when a specification is `Accepted`.
 
-Files remain review material until the owner changes their status to `Accepted` or explicitly authorises implementation. The Topic 1–4 discovery specifications are currently Accepted; `discovery-change-and-planned-agenda.md` and later-topic documents remain Draft unless their own metadata says otherwise.
+Files remain review material until the owner changes their status to `Accepted` or explicitly authorises implementation. The Topic 1–5 discovery specifications are currently Accepted; `discovery-triage-and-event-grouping.md` and later-topic documents remain Draft unless their own metadata says otherwise.
 
 Requirement identifiers are stable references for plans, issues, tests and implementation notes. Renumbering an existing identifier should be avoided; superseded requirements should remain traceable.
 
@@ -41,7 +41,8 @@ Requirement identifiers are stable references for plans, issues, tests and imple
 | [`discovery-workflow.md`](discovery-workflow.md) | Accepted trigger-to-candidate workflow, authority boundaries, failure paths, queueing and evidence handoff | Sections 2–6 and 13 |
 | [`discovery-record-semantics.md`](discovery-record-semantics.md) | Accepted discovery identities, revisions, immutable versions, decisions and exact lineage | Sections 2–6 and 13 |
 | [`discovery-source-roles-and-selection.md`](discovery-source-roles-and-selection.md) | Accepted source roles, portfolio functions, readiness gates, candidate paths and explicit source gaps | Sections 2–6 and 13 |
-| [`discovery-change-and-planned-agenda.md`](discovery-change-and-planned-agenda.md) | Proposed source observation models, revision and state-transition meanings, baselines and Planned Agenda lifecycle | Sections 3–6 and 13 |
+| [`discovery-change-and-planned-agenda.md`](discovery-change-and-planned-agenda.md) | Accepted observation models, revision and state-transition meanings, baselines and Planned Agenda lifecycle | Sections 3–6 and 13 |
+| [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md) | Proposed Work Item and execution-batch rules, retrieval context, event relationships, Event Hypotheses and Candidate formation | Sections 3–6 and 13 |
 | [`news-discovery.md`](news-discovery.md) | Cross-cutting discovery architecture, change-driven collection, bounded search and coverage health | Sections 3–6 and 13 |
 | [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Coverage, newsworthiness, sources, corroboration, analysis and claim evidence | Sections 3–7 |
 | [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution, headlines and article contract | Sections 8 and 10 |
@@ -88,7 +89,7 @@ Every plan targeting this suite MUST:
 - avoid changing a requirement merely through a task description; and
 - update or supersede the relevant specification when implementation reveals a genuine product decision change.
 
-The discovery review is deliberately topic-by-topic. It does not authorise implementation, and committing a Draft change, triage, search or evaluation document does not make it accepted.
+The discovery review is deliberately topic-by-topic. It does not authorise implementation, and committing a Draft triage, search or evaluation document does not make it accepted.
 
 ## Suite-level acceptance criteria
 
