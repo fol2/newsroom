@@ -6,32 +6,33 @@
 **Canonical language:** English  
 **Active review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
 **Accepted coverage contract:** [`discovery-coverage-contract.md`](discovery-coverage-contract.md)  
-**Related workflow draft:** [`discovery-workflow.md`](discovery-workflow.md)  
+**Accepted workflow:** [`discovery-workflow.md`](discovery-workflow.md)  
+**Related record-semantics draft:** [`discovery-record-semantics.md`](discovery-record-semantics.md)  
 **Related architecture plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)  
 **Related reference:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 3–6 and 13  
 **Related proposal:** [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md) (`Proposed`; owner review pending)  
-**Decision state:** The coverage boundary is Accepted. This Draft still contains candidate source architecture, search, orchestration, change-detection and shadow requirements that remain under sequential owner review.  
+**Decision state:** The coverage boundary and end-to-end workflow are Accepted. This Draft still contains candidate source architecture, search, orchestration, change-detection and shadow requirements that remain under sequential owner review.  
 **Supersedes:** None
 
 ## Purpose
 
-Define candidate source-architecture and cross-cutting discovery controls for monitoring the accepted coverage boundary without treating discovery as evidence or spending model work merely to prove that nothing changed.
+Define candidate source-architecture and cross-cutting discovery controls for monitoring the accepted coverage boundary through the accepted workflow without treating discovery as evidence or spending model work merely to prove that nothing changed.
 
-The accepted coverage contract defines what discovery is responsible for seeking. The separate workflow Draft defines the proposed trigger-to-candidate lifecycle. This specification must not choose a source architecture first and then redefine coverage to match the available sources.
+The accepted coverage contract defines what discovery is responsible for seeking. The accepted workflow defines the trigger-to-candidate lifecycle. The record-semantics Draft proposes the stable identities and lineage required by that workflow. This specification must not choose a source architecture first and then redefine coverage to match the available sources.
 
 ## Scope
 
 This specification covers candidate source selection controls, source-native change detection, bounded search, coverage auditing and cross-cutting safeguards.
 
-The detailed actors, transitions, queueing, triage routes, failures and evidence hand-off are reviewed in [`discovery-workflow.md`](discovery-workflow.md). Concrete source roles remain for Topic 4; exact change semantics for Topic 5; triage and grouping for Topic 6; search for Topic 7; and shadow evaluation for Topic 8.
+Detailed actors, transitions, queueing, triage routes, failures and evidence hand-off are defined in [`discovery-workflow.md`](discovery-workflow.md). Conceptual identities and lineage are under Topic 3 review in [`discovery-record-semantics.md`](discovery-record-semantics.md). Concrete source roles remain for Topic 4; exact change semantics for Topic 5; triage and grouping for Topic 6; search for Topic 7; and shadow evaluation for Topic 8.
 
-It defines proposed target behaviour. It does not claim that the current Brave-, RSS-, GDELT- and Gemini-based pool conforms, and it does not authorise implementation.
+It defines proposed target behaviour for the unresolved architecture topics. It does not claim that the current Brave-, RSS-, GDELT- and Gemini-based pool conforms, and it does not authorise implementation.
 
 ## Review state
 
-The accepted coverage contract is now the required basis for later source and workflow decisions. The requirements below remain Draft proposals. In particular, direct-watch-first discovery, the Source Registry, the Planned Agenda, search-last, batched triage and the smallest-source-subset approach must be reviewed through the active topic sequence before ADR 0004 may be accepted.
+The accepted coverage contract and workflow are required bases for later source, identity and operational decisions. The unresolved requirements below remain Draft proposals. In particular, direct-watch-first discovery, the Source Registry, the Planned Agenda, search-last and the smallest-source-subset approach must be reviewed through the active topic sequence before ADR 0004 may be accepted.
 
-Topic 2 is currently under owner review through `discovery-workflow.md`. Topic 4 will review source roles and selection. Topic 7 will review search. Topic 8 will review shadow evaluation.
+Topic 3 is currently under owner review through `discovery-record-semantics.md`. Topic 4 will review source roles and selection. Topic 7 will review search. Topic 8 will review shadow evaluation.
 
 ## Requirements
 
@@ -67,25 +68,25 @@ Topic 2 is currently under owner review through `discovery-workflow.md`. Topic 4
 
 ### Discovery states and gates
 
-**DISC-020 — Discovery Signal.** Every adapter output that represents a candidate observable change MUST first be represented as a Discovery Signal carrying the minimum permitted source, item, time, URL, observable-change and lineage metadata. A Discovery Signal is not a News Lead, Source Observation, verified fact or publication evidence. The proposed lifecycle is defined in `discovery-workflow.md`, and Topic 3 will define identity.
+**DISC-020 — Discovery Signal.** Every adapter output that represents a candidate observable change MUST first be represented as a Discovery Signal carrying the minimum permitted source, item, time, observable-change and lineage metadata. A Discovery Signal is not a News Lead, Source Observation, verified fact or publication evidence. The lifecycle is defined in the accepted workflow, and Topic 3 defines the proposed identity contract.
 
 **DISC-021 — Deterministic gates.** Before model work, the system MUST apply versioned deterministic checks for adapter integrity, stable identity, exact or rule-defined duplication, observable newness, time and version validity, and scope or exclusion rules that can be established without editorial inference.
 
 **DISC-022 — Ambiguity preserves recall.** A deterministic rule MUST NOT silently reject a signal merely because materiality, cross-geography relevance, development status or another editorial judgement is ambiguous. Such a signal MUST be routed to an inspectable watch or triage outcome unless another accepted rule independently requires rejection.
 
-**DISC-023 — News Lead.** Under the current workflow proposal, a Discovery Signal becomes a News Lead only after the applicable deterministic gates pass. Promotion MUST retain lineage to the signal and gate outcome. A News Lead is eligible for triage; it is not evidence.
+**DISC-023 — News Lead.** Under the accepted workflow, a Discovery Signal becomes a News Lead only after the applicable deterministic gates pass. Promotion MUST retain lineage to the signal and gate outcome. A News Lead is eligible for triage; it is not evidence.
 
-**DISC-024 — Story Candidate.** Under the current workflow proposal, one or more News Leads become a Story Candidate only after event retrieval, triage proposal validation and deterministic candidate admission establish enough likely relevance, utility, materiality and novelty to begin evidence acquisition. This transition MUST record its input leads, route and decision basis.
+**DISC-024 — Story Candidate.** Under the accepted workflow, one or more News Leads become a Story Candidate only after event retrieval, triage proposal validation and deterministic candidate admission establish enough likely relevance, utility, materiality and novelty to begin evidence acquisition. This transition MUST record its input leads, route and decision basis.
 
 **DISC-025 — Evidence boundary.** Passing discovery triage MUST NOT create a Source Observation, Governed Claim, Evidence Package or publication authority. Evidence acquisition MUST independently retrieve and govern the current permitted source material under the evidence and rights specifications.
 
-**DISC-026 — Inspectable outcome.** Every processed signal and lead MUST retain an inspectable outcome. The workflow Draft defines semantic distinctions; Topic 10 will define final outcome and reason vocabulary.
+**DISC-026 — Inspectable outcome.** Every processed signal and lead MUST retain an inspectable outcome. The accepted workflow defines semantic distinctions; Topic 10 will define final outcome and reason vocabulary.
 
 ### Model and search boundary
 
 **DISC-030 — No model for an empty tick.** A scheduler, collector or pre-check MUST end silently when no new eligible signal exists. It MUST NOT wake a model merely to confirm that there is no work.
 
-**DISC-031 — Batched triage.** The current proposal is that model assistance operates on bounded Triage Work Items rather than one unconditional model call per collected item. Prompts and outputs MUST be versioned, structured and treated as untrusted proposals. Topic 6 will decide urgent exceptions, batch formation and failure behaviour.
+**DISC-031 — Bounded triage.** Model assistance MUST operate on bounded Triage Work Items rather than one unconditional model call per collected item. Prompts and outputs MUST be versioned, structured and treated as untrusted proposals. Topic 6 will decide urgent exceptions, exact batch formation and failure behaviour.
 
 **DISC-032 — Deferred full acquisition.** Discovery SHOULD use source-supplied metadata and the minimum permitted changed fragment. Full source acquisition and evidence retention MUST be deferred until a Story Candidate enters the governed evidence workflow, except for a separately approved replay or evaluation fixture.
 
@@ -125,7 +126,7 @@ Topic 2 is currently under owner review through `discovery-workflow.md`. Topic 4
 8. A missing planned release produces a distinct operational finding if Planned Agenda monitoring is later accepted.
 9. Search budget exhaustion is visible and cannot be bypassed by an agent or an unapproved provider fallback.
 10. A Story Candidate preserves lineage to every contributing News Lead and Discovery Signal while evidence acquisition independently establishes its Source Observations.
-11. No source subset, shadow run or production implementation is authorised until the relevant workflow, source-role, search and evaluation decisions are accepted.
+11. No source subset, shadow run or production implementation is authorised until the relevant identity, source-role, search and evaluation decisions are accepted.
 
 ## Non-goals
 
@@ -135,7 +136,7 @@ It does not define source extraction for evidence, claim admission, drafting or 
 
 ## Open questions
 
-- Will the owner accept, amend or reject the proposed end-to-end workflow in `discovery-workflow.md`?
+- Will the owner accept, amend or reject the proposed record identities and lineage in `discovery-record-semantics.md`?
 - Which source roles and candidate interfaces satisfy the accepted coverage obligations?
 - What exact source-change and Planned Agenda semantics are required?
 - What role, if any, does recurring or on-demand search play at launch?
