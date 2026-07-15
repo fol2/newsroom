@@ -1,8 +1,9 @@
 # Discovery shadow-evaluation and release-evidence specification
 
-**Status:** Draft for owner review  
+**Status:** Accepted  
 **Owner:** Product owner  
 **Last updated:** 2026-07-15  
+**Accepted by owner:** 2026-07-15  
 **Canonical language:** English  
 **Related review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
 **Accepted coverage contract:** [`discovery-coverage-contract.md`](discovery-coverage-contract.md)  
@@ -14,23 +15,23 @@
 **Accepted search contract:** [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md)  
 **Related quality specification:** [`quality-evaluation-and-change-control.md`](quality-evaluation-and-change-control.md) (`Draft`)  
 **Related current evaluation:** [`../../evaluation/clustering_eval_dataset_v1.md`](../../evaluation/clustering_eval_dataset_v1.md)  
-**Decision state:** The evaluation protocol, review units, labels, metrics, blockers and decision rules below are proposals. Committing this Draft does not authorise source collection, search, model calls, shadow operation, provider use, spending or production activation.  
+**Implementation authority:** None. Acceptance defines evaluation semantics and release-evidence requirements; it authorises no source collection, search, model call, provider use, spending, shadow execution or production activation.  
 **Supersedes:** None
 
 ## Purpose
 
-Define how the proposed discovery portfolio, source adapters, change semantics, deterministic gates, triage policy, event grouping and bounded search earn credible release evidence before production authority.
+Define how a discovery portfolio, source adapters, change semantics, deterministic gates, triage policy, event grouping and bounded search earn credible release evidence before production authority.
 
-The protocol must answer six different questions without collapsing them into one score:
+The protocol answers separate questions rather than collapsing quality into one score:
 
-1. Did each source adapter observe source state correctly?
+1. Did each adapter observe source state correctly?
 2. Did the selected portfolio detect the in-scope developments it was expected to detect?
 3. Did deterministic gates preserve relevant ambiguity and reject only clear exclusions?
 4. Did triage route Leads and group events correctly without fragmentation or snowball absorption?
-5. Did the system meet its cost, latency and operational-behaviour assumptions?
-6. Which sources, Comparators, policies and components should be admitted, changed, retained for evaluation only or rejected?
+5. Did the system meet its latency, cost and operational-behaviour assumptions?
+6. Which sources, Comparators, policies and components should be admitted, changed, retained only for evaluation or rejected?
 
-No provider, legacy system or media feed is treated as complete ground truth. Evaluation constructs a reviewable, prospective and versioned evidence universe from several permitted paths and explicit human adjudication.
+No provider, media feed, legacy pipeline or union of paths is complete ground truth. Evaluation constructs a reviewable, prospective and versioned evidence universe from several permitted paths and authorised human adjudication.
 
 ## Scope
 
@@ -39,146 +40,108 @@ This specification defines:
 - shadow isolation and absence of public authority;
 - pre-registered Evaluation Plans and frozen Evaluation Epochs;
 - fixture, replay, live-shadow, prospective-comparator and fault-injection phases;
-- evaluation records and event-level review units;
-- prospective and retrospective evidence separation;
+- event-level review units and evaluation records;
+- prospective versus retrospective evidence;
 - contemporaneous and later-outcome labels;
 - reviewer, blinding, second-review and adjudication rules;
 - stage-specific coverage, transition, triage, grouping, latency, cost and operational metrics;
 - zero-tolerance release blockers and pre-registered non-zero thresholds;
-- source and provider contribution, ablation and add/remove decisions;
+- source and provider contribution, ablation and add or remove decisions;
 - rights-limited reproducibility and failed-run retention; and
-- the release-evidence package needed before Topic 9 operational admission and an owner activation decision.
+- release-evidence outcomes before operational qualification.
 
-It does not define:
+It does not define production schedules, retry budgets, alerts or on-call operation, which belong to Topic 9; final outcome strings or prioritisation, which belong to Topic 10; locality expansion, which belongs to Topic 11; physical deployment and migration, which belong to Topic 12; or evidence, drafting and publication evaluation after discovery handoff.
 
-- production polling intervals, retry budgets, alert thresholds, on-call processes or automatic containment, which belong to Topic 9;
-- final reason-code strings or prioritisation scores, which belong to Topic 10;
-- locality expansion, which belongs to Topic 11;
-- physical storage, deployment or migration, which belong to Topic 12;
-- evidence sufficiency, drafting or publication evaluation beyond the discovery hand-off; or
-- numerical thresholds for an actual qualification epoch, which must be owner-approved in its Evaluation Plan before results are reviewed.
+Numerical thresholds for an executable qualification Epoch are set in an owner-approved Evaluation Plan before results are reviewed.
 
 ## Core principles
 
-1. **Shadow means no public effect.** A shadow run cannot publish, notify readers, alter production evidence or create production authority.
-2. **No single comparator is truth.** Search, GDELT, media feeds, the legacy pipeline and editor-selected stories all have omissions and biases.
-3. **Prospective before retrospective.** Quantitative coverage claims use methods fixed before outcomes are known. Hindsight investigation is labelled separately.
-4. **Events and transitions, not result volume.** Ten duplicate URLs do not become ten discoveries, and one direct revision may be more valuable than broad media volume.
-5. **Stage-specific accountability.** Adapter, change, gate, triage, grouping, Candidate and operational errors are measured separately.
-6. **Contemporaneous fairness.** The primary label uses information reasonably available at the decision cutoff; later truth is recorded separately.
-7. **Frozen epochs.** Material source, policy, adapter, parser, model, prompt, retrieval, query or threshold changes start a new Evaluation Epoch.
-8. **Slices before aggregates.** A strong total score cannot hide failure in Hong Kong Chinese, an Active class, Urgent work, maintained-page revisions or another material slice.
-9. **Rights constrain evaluation.** Public accessibility does not authorise retention, replay, model submission or reviewer display.
-10. **Failures remain evidence.** Failed, inconclusive and superseded runs remain traceable and cannot be deleted because a later run passes.
-11. **Calendar duration is not sufficiency.** Running for a week or month does not prove readiness if required cases, slices or source states were not observed.
-12. **Evaluation itself is bounded.** Reviewer workload, source calls, search calls, model work, storage and cost are pre-authorised and measured.
+1. **Shadow has no public effect.** It cannot publish, notify readers or create production authority.
+2. **No comparator is truth.** Search, media, GDELT, the legacy pipeline and editor-selected stories all have omissions and bias.
+3. **Prospective precedes retrospective.** Quantitative coverage claims use methods fixed before outcomes are known.
+4. **Events and transitions are the units.** Duplicate URLs and repeated results do not multiply discoveries.
+5. **Stages remain attributable.** Adapter, change, gate, triage, grouping, Candidate and operational errors are measured separately.
+6. **Labels are contemporaneous.** Primary expected decisions use information available at the cutoff; later truth is recorded separately.
+7. **Epochs are frozen.** Material source, policy, adapter, parser, model, prompt, retrieval, query or threshold changes start another Epoch.
+8. **Slices precede aggregates.** Aggregate strength cannot hide failure in a material language, geography, coverage, urgency or transition slice.
+9. **Rights constrain evaluation.** Accessibility does not authorise retention, replay, model submission or reviewer display.
+10. **Failures remain evidence.** Failed, inconclusive and superseded Runs remain traceable.
+11. **Calendar duration is not sufficient exposure.** A long Run may still leave required classes unevaluated.
+12. **Evaluation is bounded.** External calls, model work, storage, reviewer time and cost are pre-authorised and measured.
 
 ## Shadow authority and isolation
 
-### Evaluation-only execution boundary
-
-A shadow implementation may use the accepted semantic contracts but must operate in an evaluation authority scope distinct from production.
-
-It must not:
+A shadow implementation operates in an evaluation authority scope distinct from production. It MUST NOT:
 
 - hold or invoke public publishing credentials;
 - create reader-visible stories, notifications or feeds;
 - commit production Story Candidates, Evidence Packages or publication records;
-- modify production Source Definition authority, coverage decisions or source rights;
-- silently affect the legacy live pipeline;
+- modify production source authority, coverage decisions, rights, Leads or Candidates;
+- silently alter the legacy live pipeline;
 - send reader or private data to evaluation providers; or
-- turn a shadow decision into production authority without a later release decision.
+- convert a shadow outcome into production authority without a later release decision.
 
-Evaluation-scoped Signals, Leads, Hypotheses and Candidate outcomes may mirror production semantics for testing, but their identities and authority scope remain distinguishable from production records.
+Evaluation-scoped Signals, Leads, Hypotheses and Candidate outcomes MAY mirror production semantics, but their identity and authority scope remain distinguishable.
 
-### Live external effects
+A live shadow request is still a real external request. Source and search access therefore require accepted rights, access method, rate limit, budget, query-data and retention decisions. Where terms permit transient processing only, the evaluation MAY retain request, attempt, outcome, counts, cost, reviewer decision and independently obtained publisher records without retaining prohibited result content.
 
-A live shadow source check or search request is still a real external request. It requires accepted rights, access method, rate limit, budget, query-data and retention decisions before execution.
-
-A rights restriction may require transient result processing or metadata-only retention. In that case the evaluation may retain request, attempt, outcome, counts, costs, reviewer decision and independently obtained publisher records without retaining prohibited result payloads.
-
-### Production history access
-
-A shadow evaluator may read bounded production or legacy history only under an approved purpose and access policy. It must not rewrite that history, treat legacy event identity as canonical truth or leak protected source material into an evaluation corpus.
+Bounded production or legacy history MAY be read under an approved purpose and access policy. Shadow MUST NOT rewrite it, treat legacy event identity as canonical truth or leak protected source material into an evaluation corpus.
 
 ## Evaluation records
 
-These are conceptual contracts, not required tables.
+These are semantic contracts, not required tables.
 
 ### Evaluation Plan
 
-An immutable, owner-approved plan established before a qualification run. It records:
+An immutable, owner-approved plan established before a qualification Run. It records:
 
-- evaluation purpose and decision scope;
+- decision purpose and scope;
 - candidate portfolio, Comparators and exact component versions;
-- coverage classes, source roles, observation models, languages and urgency classes in scope;
-- evaluation phases and start or stop conditions;
+- coverage, source roles, observation models, languages and urgency classes;
+- phases and start or stop conditions;
 - prospective windows and Search Requests;
-- sampling frames and randomisation controls;
+- sampling and randomisation controls;
 - label schema and reviewer instructions;
-- review, second-review and adjudication policy;
+- second-review and adjudication policy;
 - zero-tolerance blockers and non-zero thresholds;
 - minimum sample or exposure conditions by material slice;
 - rights, retention and reviewer-access rules;
-- request, model, reviewer-time and monetary budgets;
-- known excluded gaps and unresolved source paths;
+- external-request, model, reviewer-time and monetary budgets;
+- known excluded gaps and unresolved paths;
 - incident and early-stop rules; and
 - required report and release-decision format.
 
-A material plan change creates a new Plan version. A plan cannot be edited after results are known and still claim the same prospective method.
+A material Plan change creates a new version. A Plan cannot be edited after results are known and retain the same prospective claim.
 
 ### Evaluation Epoch
 
-A bounded period in which the evaluated portfolio, policy, adapters, parsers, observation models, retrieval, triage schema, model or worker, query methods and thresholds are frozen.
-
-A material change closes the current Epoch and starts another. Results from different Epochs may be compared but must not be pooled as if the method were unchanged.
+A bounded period in which portfolio, sources, policies, adapters, parsers, observation models, retrieval, triage schema, workers, queries and thresholds are frozen. A material change closes the Epoch and starts another. Different Epochs may be compared but MUST NOT be pooled as one unchanged method.
 
 ### Evaluation Run
 
-One execution under one Plan and Epoch, including environment, start and end, actual inputs, attempts, costs, deviations, incidents and result artefacts.
+One execution under one Plan and Epoch, including environment, start and end, inputs, attempts, costs, deviations, incidents and artefacts.
 
-A calibration Run estimates volume, label ambiguity and metric behaviour but cannot be used as qualification evidence if its results were used to set thresholds. A later frozen qualification Run is required.
+A calibration Run MAY estimate volume, ambiguity and threshold behaviour, but it is not qualification evidence when its results informed threshold selection. A later frozen qualification Run is required.
 
-### Evaluation Unit
+### Evaluation Unit and Case
 
-A unit selected for review. Depending on the stage, it may be:
+An Evaluation Unit may be one Check, Source Revision or transition, Signal, Gate Decision, Lead disposition, reviewed event or development, Event Hypothesis relationship, Candidate admission or omission, Planned expectation, Search Request or Operational Finding.
 
-- one Check Request or Check Outcome;
-- one Source Item, Revision, Representation or observable transition;
-- one Discovery Signal or Gate Decision;
-- one News Lead disposition;
-- one reviewed event or material development;
-- one Event Hypothesis relationship decision;
-- one Story Candidate admission or omission;
-- one Planned Agenda expectation and occurrence outcome;
-- one Search Request or comparator result set; or
-- one Operational Finding or fault-injection case.
+An Evaluation Case is an immutable manifest of the exact Unit, permitted material, contemporaneous cutoff, versions, rights, reviewer view, labels, disallowed errors and applicable requirements.
 
 ### Prospective Evaluation Event
 
-A reviewed event- or development-level unit assembled from permitted paths during a pre-registered window. It may be surfaced by an Anchor, Complement, Comparator, manual review or Planned Agenda occurrence.
+A reviewed event- or development-level unit assembled during a pre-registered window from permitted Anchors, Complements, Comparators, Planned occurrence paths or pre-declared editor additions. Human review establishes whether it is a distinct development, its coverage class, available time, expected paths and desired discovery outcome.
 
-It is not automatically in scope or a missed story. Human review establishes whether it represents one distinct development, its coverage class, available time, expected discovery paths and desired discovery outcome.
+### Label Set and Adjudication Decision
 
-### Evaluation Case
+A Label Set is immutable. Corrections create later versions. An Adjudication Decision resolves disagreement, ambiguity or launch-blocking interpretation and may retain uncertainty or mark a Case unreviewable.
 
-An immutable manifest containing the exact Evaluation Unit, allowed source or representation material, contemporaneous cutoff, versions, rights, reviewer view, labels, disallowed errors and applicable requirements.
+### Metric Report and Release-Evidence Decision
 
-### Label Set
+A Metric Report is reproducible and tied to exact Plan, Epoch, Run, Case labels and metric code.
 
-An immutable set of reviewer labels for one Case. A later corrected label creates another version and preserves the earlier review and reason.
-
-### Adjudication Decision
-
-A retained decision resolving reviewer disagreement, ambiguity or launch-blocking interpretation. It records the available material, reviewers, rationale, final label or `unreviewable` outcome and affected metrics.
-
-### Metric Report
-
-A reproducible report tied to one Plan, Epoch, Run, dataset or live ledger, label version and calculation version.
-
-### Discovery Release-Evidence Decision
-
-An owner decision that may classify the evaluated scope as:
+A Discovery Release-Evidence Decision classifies scope as one of:
 
 - not evaluated;
 - inconclusive or insufficient exposure;
@@ -189,427 +152,214 @@ An owner decision that may classify the evaluated scope as:
 - source or component rejected or retired; or
 - blocked by an unresolved Active-coverage deficiency.
 
-This decision does not itself activate production.
+It does not activate production.
 
 ## Evaluation phases
 
 ### Phase A — Contract and fixture qualification
 
-Every source adapter, observation model and deterministic transition rule must pass representative fixtures before live shadow use.
+Every source adapter, observation model and deterministic transition rule passes representative fixtures before live shadow use. Applicable fixtures include:
 
-Required fixture classes include, where applicable:
-
-- unchanged response and repeated delivery;
-- genuinely new item;
+- unchanged and repeated delivery;
+- genuinely new item or Revision;
 - maintained-page revision;
 - parser or normaliser change without source change;
-- rolling-feed disappearance;
+- rolling-list disappearance;
 - complete and partial current-state snapshots;
 - activation, escalation, de-escalation, clearance, expiry, cancellation and reactivation;
 - redirect, `404`, explicit tombstone, withdrawal and replacement;
 - first-run baseline and reset;
 - Agenda creation, reschedule, cancellation, occurrence, miss, failure and late occurrence;
-- duplicate or shared-origin results;
-- malformed, truncated, rate-limited and unavailable source responses; and
+- duplicate and shared-origin results;
+- malformed, truncated, rate-limited and unavailable responses; and
 - retry, replay and crash boundaries.
 
-Fixture success proves contract behaviour for those cases, not real-world coverage or timeliness.
+Fixture success proves contract behaviour for represented cases, not real-world coverage or latency.
 
 ### Phase B — Replay and regression
 
 A versioned, rights-permitted corpus replays known source, gate, triage and grouping cases without external calls where possible.
 
-The regression corpus must include English, Hong Kong Traditional Chinese and mixed-language cases; same-state, development, correction, related-but-distinct, new and uncertain relationships; clear exclusions; ambiguous materiality; single-source direct Leads; multi-source dependencies; false-merge and snowball challenges; and invalid or adversarial worker outputs.
+It includes English, Hong Kong Traditional Chinese and mixed-language cases; same-state, development, correction, related-but-distinct, new and uncertain relationships; clear exclusions; ambiguous materiality; single-source direct Leads; dependent sources; false-merge and snowball challenges; and invalid or adversarial worker outputs.
 
-The existing clustering evaluation may be retained as a legacy regression aid, but it is insufficient as qualification evidence because it collapses `development` and `new_event` labels and reflects legacy event mutation semantics.
+The existing clustering evaluation MAY remain a legacy regression aid. It is insufficient qualification evidence because it collapses `development` and `new_event` labels and reflects legacy mutable grouping.
 
 ### Phase C — Live prospective shadow
 
-The frozen candidate portfolio processes live permitted inputs without public effect.
+A frozen candidate portfolio processes live permitted inputs with no public effect. The Run records Checks, transitions, Signals, gates, Leads, Work Items, attempts, proposals, dispositions, Hypotheses and shadow Candidate outcomes, including zero-work and failure paths.
 
-The Run records every source check, transition, Signal, gate, Lead, Work Item, worker attempt, proposal, disposition, Hypothesis and shadow Candidate outcome, including zero-work and failure paths.
-
-A live Run must not be described as comprehensive merely because it lasted a set number of days. Required exposure and label conditions in the Plan determine whether evidence is sufficient.
+Calendar duration alone does not establish comprehensive exposure.
 
 ### Phase D — Prospective comparator audit
 
-Pre-registered media, search or index Comparators run under the accepted Topic 7 roles, rights and budgets.
-
-Comparator methods are fixed before review. Late-indexed, truncated, altered-query, rights-blocked and provider-failed results remain distinguishable. Comparator hits enter event-level review and do not automatically become Coverage Gaps.
+Pre-registered media, search or index Comparators run under Topic 7 roles, rights and budgets. Methods are fixed before review. Late indexing, truncation, altered queries, rights blocks and provider failures remain distinguishable. Hits enter event-level review and do not automatically create Coverage Gaps.
 
 ### Phase E — Fault injection and degraded operation
 
-Approved fixtures or isolated test controls exercise:
+Approved fixtures or isolated controls exercise source failure, partial snapshots, parser breaks, rate and budget limits, model timeout or malformed output, retrieval incompleteness, duplicate delivery, crash replay, ambiguous Evidence Intake and prohibited public-effect attempts.
 
-- source timeouts and malformed responses;
-- partial snapshots;
-- parser contract breaks;
-- rate limits and budget exhaustion;
-- model timeout, refusal, malformed and adversarial output;
-- retrieval incompleteness;
-- duplicate delivery and crash replay;
-- Evidence Intake ambiguity; and
-- prohibited public-effect attempts.
-
-Fault injection must not target or burden third-party production services beyond approved methods.
+Fault injection MUST NOT burden third-party services beyond approved methods.
 
 ### Phase F — Review, ablation and decision
 
-Reviewers label the prospective universe and sampled stage outputs. Reports calculate stage metrics and source contribution. Ablation analysis considers the effect of removing each source, role or component without claiming that a short zero-yield period proves permanent uselessness.
-
-The Run ends with a retained report and explicit decision. It does not silently graduate into production.
+Reviewers label the prospective universe and sampled stage outputs. Reports calculate stage metrics and source contribution. Ablation considers unique detection, timeliness, resilience, noise, cost and affected slices rather than raw volume. The Run ends with a retained explicit decision and never silently graduates into production.
 
 ## Evaluation universe and sampling
 
-### Prospective universe
-
-The prospective event-level universe is the deduplicated, reviewer-adjudicated union of permitted items available within the Plan window from:
+The prospective event-level universe is the deduplicated, reviewer-adjudicated union available within the Plan window from:
 
 - candidate Anchors and Complements;
 - approved media or specialist Comparators;
 - pre-registered search or index audits;
-- Planned Agenda occurrence paths;
-- authorised editor-added events identified during the same window under a pre-declared method; and
-- source or operational incidents relevant to coverage interpretation.
+- Planned occurrence paths;
+- authorised editor additions under a pre-declared method; and
+- source or operational incidents relevant to interpretation.
 
-The union improves review coverage but is not claimed to represent every real-world event.
+This union improves review coverage but is not complete real-world ground truth.
 
-### Retrospective additions
+A source, story or query added after a known miss creates a retrospective Case and Gap investigation. It is excluded from prospective coverage denominators unless its acquisition method was pre-registered.
 
-A story, source or query added after a known miss may create a retrospective Case and Gap investigation. It is excluded from prospective recall denominators unless the Plan explicitly defined that acquisition method before the window.
+The Plan includes:
 
-### Stage samples
-
-The Plan must include:
-
-- all shadow Story Candidate admissions;
-- all potentially Urgent Leads and all launch-blocking findings;
-- all comparator-only events plausibly in scope;
+- all shadow Candidate admissions;
+- all potentially Urgent Leads and launch-blocking findings;
+- all plausibly in-scope Comparator-only events;
 - all missed or unresolved Planned expectations;
-- all deterministic exclusions in high-risk or Active slices, plus a stratified sample of routine exclusions;
-- a stratified sample of rejects, watch outcomes and associations;
-- a stratified sample of successful unchanged checks;
+- all high-risk or Active deterministic exclusions and a stratified sample of routine exclusions;
+- stratified rejects, watch outcomes and associations;
+- stratified successful unchanged checks;
 - all false-clearance, identity-collision, duplicate-transition and public-effect findings; and
-- source-role, language, geography, observation-model and transition slices sufficient for the Plan's claims.
+- sufficient source-role, language, geography, observation-model and transition slices for the claimed scope.
 
-The Plan may review high-volume routine classes by sampling, but must report the sampling denominator and weight. It cannot sample away every negative or operational case.
-
-### Rare and absent classes
-
-Rare Urgent incidents, cancellations, withdrawals or court outcomes may not occur during one live window. Replay and fixture cases test semantics, while the report marks live coverage exposure as insufficient rather than claiming a pass.
-
-An Active class with no credible path remains launch-blocking under `COV-045` regardless of aggregate results.
+High-volume classes MAY be sampled, but denominator and weights remain visible. Rare classes absent from live shadow are tested by fixtures and replay while live exposure is reported as insufficient, not passed. An Active class without a credible path remains launch-blocking.
 
 ## Label contract
 
 ### Source and transition labels
 
-Review or fixture truth distinguishes:
-
-- correct unchanged;
-- correct new item or Revision;
-- representation-only change;
-- correct or false transition classification;
-- false activation, escalation, clearance, cancellation, withdrawal or deletion;
-- missed revision or transition;
-- baseline misclassification;
-- duplicate semantic emission; and
-- operational failure represented correctly or incorrectly.
+Labels distinguish correct unchanged, real new item or Revision, Representation-only change, transition correctness, false activation or ending, missed Revision, baseline error, duplicate semantic emission and correct or incorrect operational-failure representation.
 
 ### Coverage and relevance labels
 
-Each event-level Case records:
+Each event-level Case records in-scope, out-of-scope or unreviewable status; Active, Best-effort, deferred or excluded basis; geography, content class and urgency; whether a Lead was expected; whether evidence acquisition was likely justified; and expected discovery paths.
 
-- in scope, out of scope or unreviewable;
-- Active, Best effort, deferred gap or excluded basis;
-- geography and content class;
-- Urgent, Time-sensitive, Planned or Routine context;
-- whether discovery should have produced a Lead;
-- whether evidence acquisition was likely justified; and
-- which selected paths were reasonably expected to detect it.
+### Relationship and route labels
 
-### Relationship labels
+Relationship labels are same event state, development, correction or reversal, related but distinct, no adequate prior match and uncertain.
 
-Topic 6 labels remain separate:
-
-- same event state;
-- development of;
-- correction, clarification or reversal of;
-- related but distinct;
-- no adequate prior match; and
-- uncertain relationship.
-
-### Route labels
-
-Expected Lead route is one of:
-
-- deterministic exclusion;
-- editorial reject;
-- watch or defer;
-- associate without Candidate;
-- supplemental discovery;
-- Operational hold;
-- new-event Candidate;
-- development Candidate; or
-- correction-oriented Candidate where applicable.
+Expected routes distinguish deterministic exclusion, editorial reject, watch or defer, association without Candidate, supplemental discovery, Operational hold, new-event Candidate, development Candidate and correction-oriented Candidate where applicable.
 
 ### Contemporaneous and later-outcome labels
 
-The primary expected route uses only information available at the evaluation cutoff. A later outcome may record that an event proved larger, smaller, false, corrected or more important.
+Primary labels use information available at the evaluation cutoff. Later facts create separate later-outcome labels and do not rewrite or unfairly re-score the contemporaneous decision.
 
-Later information must not rewrite the contemporaneous label or unfairly credit a system for facts unavailable at decision time.
+### Dependency, timeliness and unreviewable labels
 
-### Dependency and timeliness labels
+Cases retain known wire, press-release, official-release, editorial-selection and later-republication dependencies. Timeliness uses the earliest credible permitted availability where it can be established; otherwise it remains unknown.
 
-Cases record common wire, press release, official release, editorial-selection and later-republication dependencies where known.
-
-A discovery-time label identifies the earliest credible permitted availability, the first selected-path detection, the first Lead and the first Candidate. If earliest availability cannot be established reliably, latency remains unknown rather than invented.
-
-### Unreviewable
-
-A reviewer may label a Case unreviewable because rights, missing source content, conflicting identity, insufficient contemporaneous material or another explicit limitation prevents a defensible answer. The system must not force a guessed label merely to complete metrics.
+Rights, missing source content, conflicting identity or insufficient contemporaneous material MAY produce an explicit unreviewable result rather than a guessed label.
 
 ## Review and adjudication
 
-### Reviewer authority
+Final release labels require authorised human review. A model MAY assist but cannot be sole ground truth or judge its own production eligibility.
 
-Final evaluation labels are made by authorised human reviewers or delegated editors under versioned instructions. A model may assist with candidate labels or summaries but cannot be the sole ground truth or judge the production eligibility of itself.
+Where practical, primary review conceals path, system confidence and committed outcome until the reviewer has judged relevance, relationship and expected route. Blinding must not remove material source-role context.
 
-### Blinding
+Independent second review or formal adjudication is required for:
 
-Where practical, the primary reviewer should label event relevance, relationship and expected route without seeing which path found the event, the system's confidence or its committed outcome. Path and system output may then be revealed for error analysis.
+- proposed launch-blocking Active misses;
+- zero-tolerance failures;
+- potentially Urgent material false negatives or false Candidates;
+- disputed relationship decisions that affect release conclusions;
+- proposed removal of an only or principal path; and
+- a pre-registered ordinary sample for reviewer-consistency measurement.
 
-Blinding must not hide source role or material needed to make the editorial decision.
+Disagreement remains visible and cannot resolve automatically in favour of better metrics or higher model confidence.
 
-### Second review
+## Metrics and required slices
 
-The Plan requires independent second review or explicit adjudication for:
-
-- every proposed launch-blocking Active miss;
-- every zero-tolerance failure;
-- every potentially Urgent false negative or false Candidate;
-- disputed same-state, development, correction or related-but-distinct decisions affecting release conclusions;
-- every proposed source removal where it is the only or principal path for an obligation; and
-- a pre-registered sample of ordinary Cases to estimate reviewer consistency.
-
-### Reviewer disagreement
-
-Disagreement remains visible. It does not resolve by model confidence, majority vote without policy or selecting the label that improves metrics.
-
-The adjudicator may choose a final label, retain uncertainty or mark the Case unreviewable. Agreement and adjudication rates are reported.
-
-## Metrics
-
-Every metric identifies its denominator, sample or full-population status, versions, observation window and uncertainty. Counts accompany rates.
+Every metric records counts, denominator, sample or population status, versions, window and appropriate uncertainty.
 
 ### Adapter and change metrics
 
-- successful unchanged correctness;
-- new-item and Revision detection on fixtures and reviewed live cases;
-- false-change and false-transition rate;
-- false clearance or false deletion rate;
-- representation-only change incorrectly reported as publisher change;
-- baseline historical re-emission and missed baseline-active state;
-- duplicate semantic transition rate;
-- partial or failed check incorrectly reported as unchanged; and
-- idempotent replay correctness.
+Measure unchanged correctness, new-item and Revision detection, false change, false transition or ending, Representation-only change reported as publisher activity, baseline re-emission, missed baseline-active state, duplicate transition, failure-as-unchanged and idempotent replay.
 
 ### Coverage metrics
 
-- reviewed prospective detection coverage within the constructed evaluation universe;
-- reviewed Active-class misses;
-- Best-effort detections and limitations;
-- Planned occurrence detected, missed, unresolved, late and source-failed outcomes;
-- comparator-only relevant events;
-- unique and materially earlier detections by Source Definition, source role and portfolio function;
-- overlap and dependency between paths; and
-- unresolved launch-blocking coverage gaps.
+Measure reviewed prospective detection coverage, Active misses, Best-effort contribution, Planned outcomes, Comparator-only relevant events, unique and earlier detection by source or role, overlap and dependency, and unresolved blockers. These are not absolute real-world recall claims.
 
-These metrics are not described as absolute real-world recall.
+### Gate, Lead, triage and Candidate metrics
 
-### Gate and Lead metrics
+Measure false deterministic exclusion, retained clear-exclusion noise, ambiguity preservation, expected and unnecessary Leads, Watch Condition validity, Operational-hold confusion, route agreement, justified Candidate precision, missed and unnecessary Candidates, same-state accuracy, false and missed development, false correction, false merge, fragmentation, snowball absorption, duplicate Candidate, related-but-distinct preservation and uncertain-relationship handling.
 
-- false deterministic exclusion;
-- clear-exclusion retention noise;
-- ambiguous-relevance preservation;
-- Lead creation where expected;
-- unnecessary Lead rate by source and class;
-- watch outcomes with valid Watch Conditions; and
-- operational holds incorrectly represented as editorial decisions.
+### Timeliness, efficiency, cost and operation
 
-### Triage and Candidate metrics
+Where credible source time exists, measure source availability to observation, observation to Signal, Signal to Lead, Lead to disposition, Lead to Candidate and Planned window to occurrence detection.
 
-- expected-route agreement;
-- Candidate justification precision within reviewed Cases;
-- missed Candidate opportunity within the prospective universe;
-- unnecessary Candidate admission;
-- same-state association correctness;
-- false development and missed development;
-- false correction or reversal classification;
-- false merge, fragmentation and snowball absorption;
-- duplicate Candidate admission;
-- related-but-distinct preservation;
-- uncertain relationship handling; and
-- Candidate Version changes caused by material versus non-material additions.
+Measure source checks, unchanged proportion, model wake-ups on unchanged checks, Leads and Candidates per transition, worker calls, tokens and retries, Search Requests by Purpose, gross cost before credits, reviewer time, cost per relevant event or justified Candidate and work amplification.
 
-### Timeliness metrics
-
-Where a credible availability time exists, reports measure:
-
-- source availability to first selected-path observation;
-- observation to Signal;
-- Signal to Lead;
-- Lead to disposition;
-- Lead to Candidate; and
-- Planned expected window to occurrence detection.
-
-Timeliness is reported by urgency, coverage class, source role and geography. Topic 9 later sets operational objectives.
-
-### Efficiency and cost metrics
-
-- checks per source and successful unchanged proportion;
-- model wake-ups per successful unchanged check;
-- Leads, Work Items and Candidates per source item or transition;
-- worker calls, tokens and retries per Lead and Candidate;
-- search requests and results by Search Purpose;
-- gross source, provider and model cost before credits;
-- reviewer time;
-- cost per reviewed relevant event, unique detection and justified Candidate; and
-- work amplification from one source item or search result.
-
-### Operational metrics
-
-- source, parser, rights, rate-limit, model, retrieval and handoff failure counts;
-- failure-to-no-news confusion;
-- queue or Work Item loss;
-- duplicate execution and semantic transition;
-- stale-version processing;
-- unresolved Operational Findings;
-- quarantine and recovery behaviour; and
-- public-effect or authority-boundary attempts.
-
-### Required slices
+Operational metrics cover source, parser, rights, rate, model, retrieval and handoff failures; failure-to-no-news confusion; queue loss; duplicate execution; stale-version processing; unresolved Findings; quarantine and recovery; and authority-boundary attempts.
 
 Reports separate at minimum:
 
 - United Kingdom, Hong Kong and qualifying Global;
 - England, Scotland, Wales and Northern Ireland where applicable;
 - English, Hong Kong Traditional Chinese and mixed-language;
-- Active, Best effort and deferred-gap context;
+- Active, Best effort and deferred context;
 - Urgent, Time-sensitive, Planned and Routine;
-- Originating authority, Responsible operator, Planned agenda, Established media radar, Specialist/local radar and approved Search Purpose;
+- source role and approved Search Purpose;
 - Anchor, Complement and Comparator;
-- append-only, maintained-document, complete current-state, rolling-list, explicit-delta and Planned Agenda models;
-- new item, Revision, activation, escalation, de-escalation, clearance, cancellation, withdrawal, reschedule and missed expectation; and
-- exact retrieval, degraded advisory retrieval and model or worker version.
+- append-only, maintained-document, complete-current-state, rolling-list, explicit-delta and Planned Agenda models;
+- material transition classes; and
+- retrieval and worker versions.
 
-A slice with insufficient exposure is reported as not evaluated or inconclusive, not silently pooled into an aggregate pass.
+Insufficient exposure is reported as not evaluated or inconclusive, not pooled into an aggregate pass.
 
 ## Release blockers and thresholds
 
-### Zero-tolerance blockers
+One confirmed occurrence of any following condition blocks qualification of the affected scope until remediation and a fresh qualifying Run:
 
-One confirmed occurrence blocks qualification of the affected scope until remediation and a fresh qualifying Run:
-
-- any public publication, notification or reader-visible effect from shadow;
+- public publication, notification or reader-visible effect from shadow;
 - shadow mutation of production discovery, evidence or publication authority;
-- unapproved source access, query data, retention, model submission or provider spending;
-- operational failure, partial response or budget block represented as successful unchanged or zero-result editorial meaning;
+- unapproved access, query data, retention, model submission or provider spending;
+- failure, partial response or budget block represented as successful unchanged or zero-result editorial meaning;
 - parser or normaliser change fabricated as publisher Revision;
-- rolling-list or partial-snapshot absence used to create withdrawal, deletion or clearance;
+- rolling-list or partial-snapshot absence used as withdrawal, deletion or clearance;
 - duplicate semantic Lead or Candidate transition from retry or replay;
-- destructive Event Hypothesis merge or loss of predecessor lineage;
-- Candidate admission without exact collision checks, required lineage or deterministic validation;
+- destructive Event Hypothesis merge or lost predecessor lineage;
+- Candidate admission without exact collision checks, lineage or deterministic validation;
 - model, result text or agent bypass of policy, rights, budget or tool authority;
 - search snippet or discovery record promoted directly into evidence;
 - omitted decision Lead or untracked public-impacting uncertainty; or
-- an Active coverage class with no credible candidate path or a demonstrated systemic inability to cover it.
+- an Active class with no credible path or demonstrated systemic inability to cover it.
 
-### Non-zero thresholds
+All non-zero thresholds are approved in the Evaluation Plan before qualification results are reviewed. A calibration Epoch may inform threshold selection but is not qualification evidence. Aggregate success cannot override a required-slice failure or missing exposure.
 
-Every other pass threshold is set in the Evaluation Plan before qualification results are reviewed. Thresholds identify scope, metric, minimum count or exposure, allowed uncertainty and slice behaviour.
+## Source and provider decisions
 
-A calibration Epoch may inform threshold selection but cannot count as qualification evidence. After thresholds are fixed, component or method changes require a new qualification Epoch.
+A source or Comparator MAY be proposed for a stronger role when it closes an Active blocker, adds unique or materially earlier detection, provides a distinct failure path, improves a required slice or supplies a necessary Agenda or occurrence path. Rights, noise, cost and Topic 9 readiness still apply.
 
-### Statistical honesty
+A source MAY remain a Complement or Comparator for resilience, revision visibility, current-state confirmation or audit even without many unique events.
 
-Reports include counts and uncertainty appropriate to the sample. A small sample cannot support a precise percentage claim merely because the calculated rate is high.
+Removal or rejection may follow sufficient evidence of no justified contribution, pure duplication, disproportionate noise or burden, unreliability, unsafe operation, rights failure or loss of coverage mapping. A short quiet period is insufficient to remove a rare-event Anchor, and Anchor removal requires coverage-impact review.
 
-Aggregate success cannot override a failed required slice. Missing exposure is not a passing result.
+Ablation reports event-level effects of removing each source, role, component or Search Purpose where data permits.
 
-## Source and provider contribution decisions
+## Legacy, reproducibility and retention
 
-### Add or promote
+The current Brave, RSS, GDELT and Gemini pipeline MAY be a rights-permitted legacy Comparator. It is not the correctness baseline, coverage definition or canonical event identity. Its scope mismatch, per-link model calls, forced new-event behaviour, mutable merges and evaluation-label limitations remain explicit.
 
-A source or Comparator may be proposed for a stronger role when evidence shows one or more of:
+Reports retain, subject to rights, Plan, Epoch, Run and component versions; source and provider versions; prospective windows and queries; sampling and reviewer assignment; labels and adjudications; metric code; environment and deviations; aggregate and slice results; incidents; cost; reviewer time; and release decision.
 
-- it closes an Active launch-blocking gap;
-- it provides unique relevant detections;
-- it detects materially earlier than existing paths;
-- it provides a distinct failure mode or resilience path;
-- it improves a required language, geography, observation-model or event-class slice; or
-- it supplies a necessary Agenda or occurrence-confirmation path.
+Protected source material MAY be represented through protected references, hashes, permitted extracts or independently reproducible fixtures. Public repository artefacts exclude secrets, prohibited expression, personal data and confidential review material.
 
-Rights, noise, cost and Topic 9 readiness must still pass.
-
-### Retain as Complement or Comparator
-
-A source may remain valuable without many unique events when it supplies justified resilience, current-state confirmation, revision visibility or a prospective audit function.
-
-A Comparator does not become production coverage merely because it finds more results.
-
-### Remove, retire or reject
-
-A source may be proposed for removal or rejection when it:
-
-- contributes no justified coverage or resilience after sufficient exposure;
-- duplicates another path without distinct value;
-- creates disproportionate noise, false change, cost or reviewer burden;
-- is unreliable or operationally unsafe;
-- cannot satisfy rights or provider terms; or
-- no longer maps to accepted coverage.
-
-A short quiet period is insufficient to remove a rare-event Anchor. Removal of an Anchor requires a coverage-impact assessment and cannot hide the resulting gap.
-
-### Ablation
-
-Reports show the event-level effect of excluding each source, role, model or search Purpose where data permits. Ablation considers unique detections, earlier detection, resilience, noise, cost and affected slices; it is not based only on total item count.
-
-## Legacy and comparator interpretation
-
-The current Brave, RSS, GDELT and Gemini pipeline may be run as a rights-permitted legacy Comparator if the Plan chooses. It is not a correctness baseline, coverage definition or source of authoritative event identity.
-
-Its scope mismatch, per-link model calls, forced new-event behaviour, mutable merges and existing evaluation-label limitations remain explicit.
-
-Existing production or legacy outcomes may reveal overlap, regressions or operational cost, but a disagreement is adjudicated against accepted contracts and review material rather than resolved automatically in favour of either system.
-
-## Reproducibility and retention
-
-Every report retains, subject to rights:
-
-- Plan, Epoch, Run and component versions;
-- source and provider versions;
-- exact prospective windows and query methods;
-- sampling frames, random seeds and reviewer assignment;
-- label and adjudication versions;
-- metric code and configuration;
-- environment and known deviations;
-- aggregate and slice results;
-- zero-tolerance incidents and remediation links;
-- cost and reviewer-time records; and
-- release, rejection or continuation decision.
-
-Rights-limited source material may be represented by protected references, hashes, permitted extracts or independently reproducible fixtures. The public repository must not contain prohibited content, secrets, personal data or confidential review material.
-
-Failed and superseded Runs remain traceable. A later pass does not erase earlier evidence.
-
-Confirmed incidents, false merges, false clearances, missed revisions, missed Candidates and material near misses should create or update stable regression Cases where rights permit.
+Failed and superseded Runs remain traceable. Confirmed errors and material near misses SHOULD create rights-permitted regression Cases.
 
 ## Requirements
 
 ### Shadow boundary
 
-**DEVAL-001 — No public effect.** Shadow execution MUST NOT publish, notify readers or create a reader-visible effect.
+**DEVAL-001 — No public effect.** Shadow MUST NOT publish, notify readers or create reader-visible effects.
 
 **DEVAL-002 — Authority isolation.** Shadow records MUST remain distinguishable from production discovery, evidence and publication authority.
 
@@ -623,133 +373,127 @@ Confirmed incidents, false merges, false clearances, missed revisions, missed Ca
 
 **DEVAL-011 — Frozen Epoch.** Material component, source, query, threshold or policy change MUST start a new Epoch.
 
-**DEVAL-012 — Calibration separation.** A Run used to choose thresholds MUST NOT also serve as the qualification Run for those thresholds.
+**DEVAL-012 — Calibration separation.** A Run used to choose thresholds MUST NOT also qualify those thresholds.
 
-**DEVAL-013 — Duration is not sufficiency.** Calendar time alone MUST NOT establish adequate evaluation exposure.
+**DEVAL-013 — Duration is not sufficiency.** Calendar duration alone MUST NOT establish adequate exposure.
 
-**DEVAL-014 — Early-stop evidence.** A zero-tolerance failure MAY stop a Run early but MUST still produce a retained failed report.
+**DEVAL-014 — Early-stop evidence.** An early-stopped Run MUST retain a failed or inconclusive report.
 
-### Evaluation universe and labels
+### Universe, labels and review
 
-**DEVAL-020 — Event-level universe.** Coverage comparison MUST deduplicate results into reviewed event or development units rather than count URLs or provider results.
+**DEVAL-020 — Event-level universe.** Coverage comparison MUST deduplicate results into reviewed events or developments rather than count URLs.
 
-**DEVAL-021 — No ground-truth provider.** No source, legacy pipeline, media feed, search provider or index MUST be treated as complete ground truth.
+**DEVAL-021 — No ground-truth provider.** No source, legacy pipeline, feed, search provider or index is complete ground truth.
 
-**DEVAL-022 — Prospective separation.** Prospective methods MUST be fixed before review; retrospective additions MUST remain separately labelled.
+**DEVAL-022 — Prospective separation.** Prospective methods MUST be fixed before review; retrospective additions remain separately labelled.
 
-**DEVAL-023 — Contemporaneous label.** Primary route and relationship labels MUST use information available at the evaluation cutoff.
+**DEVAL-023 — Contemporaneous label.** Primary route and relationship labels use information available at the cutoff.
 
-**DEVAL-024 — Later outcome separate.** Later facts MUST create later outcome labels and MUST NOT rewrite contemporaneous expected decisions.
+**DEVAL-024 — Later outcome separate.** Later facts do not rewrite contemporaneous expected decisions.
 
-**DEVAL-025 — Unreviewable allowed.** Rights or evidence limitations MUST support an explicit unreviewable label rather than forced judgement.
+**DEVAL-025 — Unreviewable allowed.** Rights or evidence limitations support explicit unreviewable status.
 
-**DEVAL-026 — Negative and failure sampling.** The sample MUST include unchanged, excluded, rejected, watched, associated and failed work, not only Candidates or positive comparator hits.
+**DEVAL-026 — Negative and failure sampling.** Samples include unchanged, excluded, rejected, watched, associated and failed work, not only positive outcomes.
 
-### Review and adjudication
+**DEVAL-030 — Human-reviewed labels.** Final release labels require authorised human review; models cannot be sole ground truth.
 
-**DEVAL-030 — Human-reviewed labels.** Final release labels MUST receive authorised human review; a model MAY assist but MUST NOT be sole ground truth.
+**DEVAL-031 — Blinding where practical.** Primary review SHOULD conceal path, confidence and system outcome where editorial context remains sufficient.
 
-**DEVAL-031 — Blinding where practical.** Primary review SHOULD conceal path, confidence and system outcome where doing so does not remove necessary editorial context.
+**DEVAL-032 — Second review.** Launch blockers, zero-tolerance failures, Urgent material errors and a planned ordinary sample require independent review or adjudication.
 
-**DEVAL-032 — Second review.** Launch-blocking Gaps, zero-tolerance failures, Urgent material errors and a planned ordinary sample MUST receive independent review or adjudication.
-
-**DEVAL-033 — Disagreement retained.** Reviewer disagreement MUST remain visible and MUST NOT resolve automatically in favour of better metrics or model confidence.
+**DEVAL-033 — Disagreement retained.** Reviewer disagreement remains visible and does not resolve by model confidence or metric preference.
 
 ### Metrics and slices
 
-**DEVAL-040 — Stage-specific metrics.** Adapter, transition, gate, triage, grouping, Candidate, latency, cost and operational metrics MUST remain separately attributable.
+**DEVAL-040 — Stage-specific metrics.** Adapter, transition, gate, triage, grouping, Candidate, latency, cost and operational metrics remain separately attributable.
 
-**DEVAL-041 — Coverage is bounded.** Reported detection coverage MUST be described as coverage within the reviewed prospective universe, not absolute real-world recall.
+**DEVAL-041 — Coverage is bounded.** Detection coverage is described within the reviewed prospective universe, not as absolute recall.
 
-**DEVAL-042 — Counts with rates.** Every rate MUST report its count, denominator, sampling method and applicable uncertainty.
+**DEVAL-042 — Counts with rates.** Every rate includes count, denominator, sampling method and uncertainty.
 
-**DEVAL-043 — Required slices.** Aggregate results MUST NOT hide material language, geography, coverage, urgency, source-role, observation-model or transition failures.
+**DEVAL-043 — Required slices.** Aggregate results MUST NOT hide material slice failures.
 
-**DEVAL-044 — Insufficient exposure.** A required slice without enough evidence MUST be reported as not evaluated or inconclusive.
+**DEVAL-044 — Insufficient exposure.** Required slices without enough evidence are not evaluated or inconclusive.
 
-**DEVAL-045 — Source contribution.** Evaluation MUST distinguish unique detection, earlier detection, resilience, overlap, dependency, noise and cost by source and portfolio function.
+**DEVAL-045 — Source contribution.** Evaluation distinguishes unique and earlier detection, resilience, overlap, dependency, noise and cost.
 
-**DEVAL-046 — Triage error classes.** Evaluation MUST measure false merge, fragmentation, snowball absorption, false development, missed development, duplicate Candidate and unnecessary Candidate creation.
+**DEVAL-046 — Triage error classes.** Evaluation measures false merge, fragmentation, snowball absorption, false or missed development, duplicate Candidate and unnecessary Candidate creation.
 
-**DEVAL-047 — Efficiency and amplification.** Evaluation MUST measure no-change model wake-ups, worker and search amplification, gross cost and reviewer burden.
+**DEVAL-047 — Efficiency and amplification.** Evaluation measures unchanged model wake-ups, worker and search amplification, gross cost and reviewer burden.
 
-### Release blockers and thresholds
+### Release blockers and decisions
 
-**DEVAL-050 — Zero-tolerance enforcement.** A confirmed zero-tolerance failure MUST block qualification of the affected scope until remediation and fresh evidence.
+**DEVAL-050 — Zero-tolerance enforcement.** Confirmed zero-tolerance failure blocks the affected scope pending remediation and fresh evidence.
 
-**DEVAL-051 — Thresholds before results.** Non-zero thresholds MUST be owner-approved before qualification results are reviewed.
+**DEVAL-051 — Thresholds before results.** Non-zero thresholds require owner approval before qualification review.
 
-**DEVAL-052 — No post-hoc pooling.** Runs from materially different Epochs MUST NOT be pooled to manufacture a pass.
+**DEVAL-052 — No post-hoc pooling.** Materially different Epochs MUST NOT be pooled to manufacture a pass.
 
-**DEVAL-053 — Slice can block.** A required slice failure MAY block release despite a passing aggregate.
+**DEVAL-053 — Slice can block.** Required slice failure may block release despite passing aggregate.
 
-**DEVAL-054 — Active path blocker.** Missing or systemically ineffective Active coverage remains launch-blocking regardless of other metrics.
+**DEVAL-054 — Active path blocker.** Missing or systemically ineffective Active coverage remains launch-blocking.
 
-### Source and provider decisions
-
-**DEVAL-060 — Evidence-based role change.** Source promotion, removal or role change MUST cite event-level contribution, coverage, resilience, rights, cost and operational evidence.
+**DEVAL-060 — Evidence-based role change.** Source promotion, removal or role change cites event-level coverage, resilience, rights, cost and operational evidence.
 
 **DEVAL-061 — Quiet-period guard.** A rare-event Anchor MUST NOT be removed solely because a short Run produced no unique event.
 
 **DEVAL-062 — Comparator non-promotion.** A Comparator MUST NOT become an Anchor merely because it returns more results.
 
-**DEVAL-063 — Search-purpose attribution.** Search value, noise, cost and misses MUST remain attributable to exact Search Purpose and provider version.
+**DEVAL-063 — Search-purpose attribution.** Search value, noise and cost remain attributable to exact Purpose and provider version.
 
-**DEVAL-064 — Rights-limited provider evaluation.** A provider that prohibits retained evaluation data MUST NOT be used to create a persistent corpus contrary to its terms.
+**DEVAL-064 — Rights-limited provider evaluation.** Provider data MUST NOT be retained for evaluation contrary to terms.
 
-### Reproducibility and decisions
+**DEVAL-070 — Reproducible report.** Every Run retains versions, methods, samples, labels, metrics, deviations, cost and environment sufficient for reasonable reproduction.
 
-**DEVAL-070 — Reproducible report.** Every Run MUST retain versions, methods, samples, labels, metrics, deviations, cost and environment sufficient for reasonable reproduction.
+**DEVAL-071 — Failed runs retained.** Failed and superseded reports remain traceable.
 
-**DEVAL-071 — Failed runs retained.** Failed and superseded reports MUST remain traceable.
+**DEVAL-072 — Public-repository safety.** Public artefacts exclude secrets, prohibited expression, personal data and confidential material.
 
-**DEVAL-072 — Public-repository safety.** Public artefacts MUST exclude secrets, prohibited source expression, personal data and confidential material.
+**DEVAL-073 — Explicit decision.** A completed Run ends with a retained owner decision or explicit unresolved status and never silently becomes production.
 
-**DEVAL-073 — Explicit decision.** A completed Run MUST end with a retained owner decision or an explicit unresolved status; it MUST NOT silently become production.
-
-**DEVAL-074 — Regression learning.** Confirmed errors and material near misses SHOULD create or update rights-permitted regression Cases.
+**DEVAL-074 — Regression learning.** Confirmed errors and material near misses SHOULD create rights-permitted regression Cases.
 
 ## Acceptance criteria
 
-1. A shadow model cannot publish or create production Candidate authority even when it proposes approval.
-2. A real source request in shadow remains blocked when its rights record is missing.
-3. A threshold chosen after seeing calibration results requires a later frozen qualification Epoch.
-4. A week-long Run with no Hong Kong Chinese or maintained-page revision exposure cannot claim those slices passed.
-5. Ten articles about one event become one reviewed prospective event, with dependencies retained.
-6. A comparator-only hit creates no Gap until in-scope relevance, timing, expected path and health are reviewed.
-7. A retrospective query written after a miss is excluded from prospective recall reporting.
-8. An item later proven false does not automatically make the contemporaneous watch or hold decision wrong if that was the appropriate decision at the cutoff.
-9. A partial HKO snapshot that falsely clears a warning is a zero-tolerance blocker.
-10. A parser upgrade that fabricates publisher activity is a zero-tolerance blocker.
-11. One model timeout remains an operational failure and cannot improve reject or no-news metrics.
-12. A high aggregate score cannot hide a false-merge problem in Hong Kong Chinese or an Active Urgent slice.
-13. A source with no unique event may still be retained when it provides a justified independent failure path.
-14. A rare-event Anchor is not removed solely because no rare event occurred during a short Run.
-15. Brave results are not retained in a persistent corpus unless approved terms permit that use.
-16. The legacy pipeline may be compared but cannot define correctness or canonical event identity.
-17. A failed qualification report remains available after a later pass.
-18. Topic 9 receives an explicit list of eligible scopes, unresolved blockers, source health assumptions and operational evidence needs rather than a generic pass statement.
-19. No source, search provider, model, schedule, spending or production activation is authorised merely by accepting this specification.
+1. A shadow model cannot publish or create production Candidate authority.
+2. A real shadow request remains blocked without required rights.
+3. Thresholds chosen from calibration require a later frozen qualification Epoch.
+4. A long Run without a required language or transition slice cannot claim that slice passed.
+5. Duplicate articles become one reviewed event with dependencies retained.
+6. A Comparator-only hit creates no Gap before relevance, timing, expected-path and health review.
+7. A hindsight query is excluded from prospective coverage reporting.
+8. Later truth does not automatically make a contemporaneously reasonable watch or hold wrong.
+9. False clearance from a partial current-state snapshot is a zero-tolerance blocker.
+10. Parser change fabricated as publisher activity is a zero-tolerance blocker.
+11. Worker timeout remains operational failure and cannot improve editorial metrics.
+12. Aggregate success cannot hide a material false-merge or Urgent Active failure.
+13. A source with no unique event may remain for justified resilience.
+14. A rare-event Anchor is not removed solely for a short quiet period.
+15. Rights-restricted provider results are not retained in a prohibited persistent corpus.
+16. The legacy pipeline may be compared but cannot define correctness.
+17. Failed qualification evidence remains available after a later pass.
+18. Topic 9 receives scoped eligibility, unresolved blockers and explicit operational evidence needs.
+19. Acceptance authorises no source, search provider, model, schedule, spending, run or production activation.
 
-## Owner decisions required to complete Topic 8
+## Completion record
 
-The Draft recommends these decisions:
+The product owner accepted this specification on 2026-07-15 with these decisions:
 
-1. Accept an evaluation-only authority scope with no public effects, production Candidate authority or silent production mutation.
-2. Accept owner-approved Evaluation Plans and frozen Evaluation Epochs, with calibration separated from qualification and material changes starting a new Epoch.
-3. Accept the phased protocol: contract fixtures, replay regression, live prospective shadow, prospective comparator audit, fault injection, review and ablation.
-4. Accept an event-level prospective evaluation universe built from several permitted paths, while explicitly refusing to call any provider, legacy pipeline or union complete ground truth.
-5. Accept prospective versus retrospective separation, including exclusion of hindsight queries and later-added stories from prospective recall claims.
-6. Accept contemporaneous primary labels, separate later-outcome labels and an explicit unreviewable result where defensible review is impossible.
-7. Accept authorised human final labels, practical blinding, mandatory second review for launch-blocking, zero-tolerance and Urgent material cases, and visible reviewer disagreement.
-8. Accept stage-specific metrics for adapter and change correctness, coverage, gates, triage, grouping, Candidate quality, timeliness, cost and operations rather than one composite score.
-9. Accept reviewed-prospective-universe detection coverage as a bounded metric rather than a claim of absolute recall.
-10. Accept required slices by geography, language, coverage class, urgency, source role, portfolio function, observation model, transition class and component version, with insufficient exposure reported as not evaluated.
-11. Accept the zero-tolerance blocker set, including public effect, rights or authority bypass, failure-as-no-news, false absence-based ending, fabricated Revision, duplicate semantic transition, destructive merge, invalid Candidate admission and discovery-to-evidence bypass.
-12. Accept owner-approved non-zero thresholds before qualification review, with calibration Runs ineligible as release evidence and no post-hoc pooling across changed Epochs.
-13. Accept event-level source contribution and ablation decisions that consider unique and earlier detections, resilience, overlap, noise, rights, cost and reviewer burden rather than raw item count.
-14. Accept that Comparators and search providers do not become Anchors merely by returning more results, and that rights-incompatible provider data cannot be used to build a persistent evaluation corpus.
-15. Accept that the legacy clustering pipeline and v1 dataset are comparison and regression aids only; Topic 8 requires relationship and route labels that distinguish development from new event and test snowball, false merge and fragmentation.
-16. Accept explicit release-evidence outcomes—insufficient, failed, continue shadow, Comparator-only, scoped Topic 9 eligibility, rejected or launch-blocked—with no silent graduation into production.
-17. Accept reproducible, rights-limited reports, retention of failed Runs and creation of regression Cases from confirmed errors and near misses.
-18. Accept that Topic 8 itself authorises no run; an executable Evaluation Plan, source and provider rights, budgets and Topic 9 operational controls remain separately required.
+- evaluation runs in a distinct authority scope with no public effect or production mutation;
+- owner-approved Evaluation Plans and frozen Evaluation Epochs are required, and calibration is separate from qualification;
+- the accepted phases are fixtures, replay, live prospective shadow, prospective comparator audit, fault injection, review and ablation;
+- the prospective evaluation universe is event-level and assembled from several permitted paths without claiming complete ground truth;
+- prospective and retrospective evidence remain separate, including exclusion of hindsight queries from prospective coverage claims;
+- contemporaneous labels, later-outcome labels and explicit unreviewable outcomes remain distinct;
+- final labels require authorised human review, practical blinding and second review for launch blockers, zero-tolerance and Urgent material cases;
+- adapter, change, coverage, gate, triage, grouping, Candidate, timeliness, cost and operation are evaluated separately rather than through one composite score;
+- detection coverage is bounded to the reviewed prospective universe and is not absolute recall;
+- required geography, language, coverage, urgency, source-role, portfolio, observation-model, transition and component slices cannot be hidden by aggregate results;
+- the accepted zero-tolerance blocker set includes public effect, rights or authority bypass, failure-as-no-news, false absence-based ending, fabricated Revision, duplicate transition, destructive merge, invalid Candidate admission and discovery-to-evidence bypass;
+- non-zero thresholds are owner-approved before qualification review, calibration Runs are not release evidence and changed Epochs cannot be pooled post hoc;
+- source contribution and ablation use unique and earlier detection, resilience, overlap, noise, rights, cost and reviewer burden rather than raw item count;
+- Comparators and search providers do not become Anchors merely by returning more results, and rights-incompatible provider data cannot form a persistent evaluation corpus;
+- the legacy pipeline and v1 clustering dataset are comparison or regression aids only and do not satisfy the accepted relationship and route evaluation contract;
+- release-evidence outcomes are explicit and include insufficient, failed, continue shadow, Comparator-only, scoped Topic 9 eligibility, rejected and launch-blocked;
+- reports are reproducible and rights-limited, failed Runs remain retained and confirmed errors feed regression Cases; and
+- Topic 8 authorises no run. Execution still requires an approved Plan, rights, budgets and Topic 9 operational controls.
