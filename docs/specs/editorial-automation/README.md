@@ -20,7 +20,7 @@ The suite describes target behaviour. It does not claim that the current Discord
 
 `MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` and `MAY` are normative only when the individual specification is `Accepted` or the owner explicitly authorises implementation.
 
-The Topic 1–7 discovery specifications are Accepted. `discovery-shadow-evaluation.md` and later-topic documents remain Draft unless their metadata says otherwise.
+The Topic 1–8 discovery specifications are Accepted. `discovery-reliability-and-operations.md` and later-topic documents remain Draft unless their metadata says otherwise.
 
 Requirement identifiers are stable references. Existing identifiers should not be renumbered; superseded requirements remain traceable.
 
@@ -36,7 +36,8 @@ Requirement identifiers are stable references. Existing identifiers should not b
 | [`discovery-change-and-planned-agenda.md`](discovery-change-and-planned-agenda.md) | Accepted observation models, transitions, baselines and Agenda lifecycle | Sections 3–6 and 13 |
 | [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md) | Accepted Work Items, retrieval, relationships, Hypotheses and Candidate formation | Sections 3–6 and 13 |
 | [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md) | Accepted bounded search roles, query controls, provider boundaries and coverage audit | Sections 3–6 and 13 |
-| [`discovery-shadow-evaluation.md`](discovery-shadow-evaluation.md) | Proposed shadow isolation, Plans and Epochs, review universe, metrics, blockers and release evidence | Sections 3–6 and 13–14 |
+| [`discovery-shadow-evaluation.md`](discovery-shadow-evaluation.md) | Accepted shadow isolation, Plans and Epochs, event-level review, metrics, blockers and release evidence | Sections 3–6 and 13–14 |
+| [`discovery-reliability-and-operations.md`](discovery-reliability-and-operations.md) | Proposed Operational Profiles, scheduling, health, retries, quarantine, capacity, recovery and admission | Sections 3–6 and 13–14 |
 | [`news-discovery.md`](news-discovery.md) | Cross-cutting discovery architecture, collection and safeguards | Sections 3–6 and 13 |
 | [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Story qualification, source authority, corroboration and evidence | Sections 3–7 |
 | [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution and article contract | Sections 8 and 10 |
@@ -58,6 +59,7 @@ Requirement identifiers are stable references. Existing identifiers should not b
 8. Accountability must reflect the recorded workflow honestly.
 9. Discovery Signals, Leads and Candidates are not evidence.
 10. A shadow result is not production authority.
+11. Operational admission is scoped and versioned and remains separate from activation.
 
 ## Conformance model
 
@@ -71,7 +73,7 @@ Conflicts between Accepted requirements stop the affected path and require owner
 
 Plans organise accepted requirements and cannot create or change them. A plan must identify exact files and requirement IDs, exclusions, milestones, acceptance evidence, temporary gaps and rollback.
 
-The discovery review remains topic-by-topic. Committing a Draft evaluation, operational, prioritisation or locality document does not make it accepted and authorises no run.
+The discovery review remains topic-by-topic. Committing a Draft operational, prioritisation or locality document does not make it accepted and authorises no run.
 
 ## Suite-level acceptance criteria
 
@@ -82,13 +84,13 @@ Before the suite is implemented:
 3. No generative agent can reach a publishing credential.
 4. Every public story traces to evidence, policy, validation and decision authority.
 5. Emergency stop preserves audit while preventing new public effects.
-6. Model, prompt, policy and validator versions can be evaluated and rolled back.
+6. Model, prompt, policy, adapter and validator versions can be evaluated, monitored and rolled back.
 7. Known deviations are explicit and owner-approved.
 
 ## Non-goals
 
-This suite does not select cloud, model, agent, database, identity, billing or deployment vendors except where an individual Accepted requirement says otherwise. It does not define investigative journalism, private-source collection, public comments or a general emergency-alert service.
+This suite does not select cloud, model, agent, database, identity, billing, observability or deployment vendors except where an individual Accepted requirement says otherwise. It does not define investigative journalism, private-source collection, public comments or a general emergency-alert service.
 
 ## Open questions
 
-Open suite questions include quantitative release thresholds, retention periods, reviewer attribution, notification preferences and controlled cutover or historical import. Discovery-specific open questions remain in the active review sequence.
+Open suite questions include quantitative operational and release thresholds, retention periods, reviewer attribution, notification preferences and controlled cutover or historical import. Discovery-specific open questions remain in the active review sequence.
