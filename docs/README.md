@@ -32,9 +32,10 @@ Each translated document must state its canonical language and translation statu
 
 ## Current future-product documents
 
-- [`specs/editorial-automation/`](specs/editorial-automation/) contains the draft normative specification suite derived from the autonomous product and editorial charter.
+- [`specs/editorial-automation/`](specs/editorial-automation/) contains the normative specification suite derived from the autonomous product and editorial charter. Each file's own status controls whether it is accepted.
 - [`plans/2026-07-15-002-discovery-specification-review.md`](plans/2026-07-15-002-discovery-specification-review.md) is the active owner-led review sequence for discovery. It is not an implementation plan or shadow-run authorisation.
-- [`specs/editorial-automation/discovery-coverage-contract.md`](specs/editorial-automation/discovery-coverage-contract.md) is the Topic 1 Draft that separates active coverage, best effort, explicit gaps and exclusions before source selection.
+- [`specs/editorial-automation/discovery-coverage-contract.md`](specs/editorial-automation/discovery-coverage-contract.md) is the Accepted Topic 1 coverage contract. It defines obligations independently from source and provider choices.
+- [`specs/editorial-automation/discovery-workflow.md`](specs/editorial-automation/discovery-workflow.md) is the Topic 2 Draft for the end-to-end source-check-to-evidence-handoff workflow. It is not yet accepted.
 - [`adr/0004-source-registry-first-change-driven-discovery.md`](adr/0004-source-registry-first-change-driven-discovery.md) is `proposed`. Its source-registry, search and orchestration choices are not owner-accepted.
 - The discovery section in [`plans/2026-07-15-001-integrated-newsroom-architecture.md`](plans/2026-07-15-001-integrated-newsroom-architecture.md) remains a Proposed architecture description. Any stale parenthetical describing ADR 0004 as Accepted is non-authoritative and is superseded by the ADR's current `proposed` status and the active review sequence.
 - [`adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md) and [`adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md) contain two independently reviewable decisions for one integrated target architecture: the durable authority boundary and its local SQLite implementation. They are not delivery stages, and neither is accepted yet.
