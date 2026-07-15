@@ -1,122 +1,94 @@
 # Autonomous Editorial System specification suite
 
-**Status:** Draft
-**Owner:** Product owner
-**Last updated:** 2026-07-15
-**Canonical language:** English
-**Related architecture plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)
-**Active discovery review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)
-**Canonical reference:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md)
-**Development translation:** [`../../reference/editorial/product-editorial-charter.en.md`](../../reference/editorial/product-editorial-charter.en.md)
+**Status:** Draft  
+**Owner:** Product owner  
+**Last updated:** 2026-07-15  
+**Canonical language:** English  
+**Related architecture plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)  
+**Active discovery review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
+**Canonical reference:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md)  
+**Development translation:** [`../../reference/editorial/product-editorial-charter.en.md`](../../reference/editorial/product-editorial-charter.en.md)  
 **Supersedes:** None
 
 ## Purpose
 
-This suite converts selected principles from the Autonomous News Product and Editorial Charter into testable requirements for an autonomous, agentic news application.
+This suite converts selected principles from the Autonomous News Product and Editorial Charter into testable requirements for a risk-bounded autonomous news application.
 
-The target is **risk-bounded autonomous publication**:
-
-- eligible routine stories can move from discovery to publication without per-story human approval;
-- models and agents operate only within versioned policy and tool boundaries;
-- a separate publication controller enforces the final decision;
-- unresolved high-risk cases are held for authorised review or rejected; and
-- the system fails closed and preserves an auditable decision trail.
-
-The suite describes target behaviour. It does not claim that the current Discord newsroom already conforms.
+The suite describes target behaviour. It does not claim that the current Discord newsroom conforms.
 
 ## Normative language
 
-`MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` and `MAY` are normative when a specification is `Accepted`.
+`MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` and `MAY` are normative only when the individual specification is `Accepted` or the owner explicitly authorises implementation.
 
-Files remain review material until the owner changes their status to `Accepted` or explicitly authorises implementation. The Topic 1–6 discovery specifications are currently Accepted; `discovery-search-and-coverage-audit.md` and later-topic documents remain Draft unless their own metadata says otherwise.
+The Topic 1–7 discovery specifications are Accepted. `discovery-shadow-evaluation.md` and later-topic documents remain Draft unless their metadata says otherwise.
 
-Requirement identifiers are stable references for plans, issues, tests and implementation notes. Renumbering an existing identifier should be avoided; superseded requirements should remain traceable.
+Requirement identifiers are stable references. Existing identifiers should not be renumbered; superseded requirements remain traceable.
 
 ## Specification map
 
 | File | Stable concern | Main charter basis |
 |---|---|---|
-| [`autonomy-and-publication-control.md`](autonomy-and-publication-control.md) | Autonomy boundary, decision outcomes, agent separation, human exceptions and emergency control | Sections 2, 13 and 14 |
-| [`discovery-coverage-contract.md`](discovery-coverage-contract.md) | Accepted Active obligations, Best-effort coverage, explicit gaps, exclusions and qualitative urgency | Sections 3–6 |
-| [`discovery-workflow.md`](discovery-workflow.md) | Accepted trigger-to-candidate workflow, authority boundaries, failure paths, queueing and evidence handoff | Sections 2–6 and 13 |
-| [`discovery-record-semantics.md`](discovery-record-semantics.md) | Accepted discovery identities, revisions, immutable versions, decisions and exact lineage | Sections 2–6 and 13 |
-| [`discovery-source-roles-and-selection.md`](discovery-source-roles-and-selection.md) | Accepted source roles, portfolio functions, readiness gates, candidate paths and explicit source gaps | Sections 2–6 and 13 |
-| [`discovery-change-and-planned-agenda.md`](discovery-change-and-planned-agenda.md) | Accepted observation models, revision and state-transition meanings, baselines and Planned Agenda lifecycle | Sections 3–6 and 13 |
-| [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md) | Accepted Work Item and execution-batch rules, retrieval context, event relationships, Event Hypotheses and Candidate formation | Sections 3–6 and 13 |
-| [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md) | Proposed bounded search roles, query and provider controls, budgets and coverage-audit interpretation | Sections 3–6 and 13 |
-| [`news-discovery.md`](news-discovery.md) | Cross-cutting discovery architecture, change-driven collection, bounded search and coverage health | Sections 3–6 and 13 |
-| [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Coverage, newsworthiness, sources, corroboration, analysis and claim evidence | Sections 3–7 |
-| [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution, headlines and article contract | Sections 8 and 10 |
-| [`rights-and-visuals.md`](rights-and-visuals.md) | Source access, copyright, storage, asset rights and visual generation | Sections 8 and 9 |
-| [`sensitive-content-and-escalation.md`](sensitive-content-and-escalation.md) | Personal information, courts, children, allegations and sensitive subject rules | Sections 11 and 14 |
-| [`publication-lifecycle-and-audit.md`](publication-lifecycle-and-audit.md) | Feed behaviour, publication surfaces, corrections, withdrawal, archive and audit records | Sections 12 and 13 |
-| [`publication-engineering-and-projection-control.md`](publication-engineering-and-projection-control.md) | Authoritative records, projections, immutable target payloads, dispatch, acknowledgement and reconciliation | Sections 12–14 plus adopted engineering constraints |
-| [`quality-evaluation-and-change-control.md`](quality-evaluation-and-change-control.md) | Pre-release evaluation, versioning, monitoring, rollback and policy change control | Sections 13 and 14 |
+| [`autonomy-and-publication-control.md`](autonomy-and-publication-control.md) | Autonomy boundary, decisions, agent separation and emergency control | Sections 2, 13 and 14 |
+| [`discovery-coverage-contract.md`](discovery-coverage-contract.md) | Accepted Active, Best-effort, deferred and excluded coverage | Sections 3–6 |
+| [`discovery-workflow.md`](discovery-workflow.md) | Accepted trigger-to-Candidate workflow and evidence handoff | Sections 2–6 and 13 |
+| [`discovery-record-semantics.md`](discovery-record-semantics.md) | Accepted identities, revisions, decisions and lineage | Sections 2–6 and 13 |
+| [`discovery-source-roles-and-selection.md`](discovery-source-roles-and-selection.md) | Accepted source roles, portfolio functions, readiness and candidate paths | Sections 2–6 and 13 |
+| [`discovery-change-and-planned-agenda.md`](discovery-change-and-planned-agenda.md) | Accepted observation models, transitions, baselines and Agenda lifecycle | Sections 3–6 and 13 |
+| [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md) | Accepted Work Items, retrieval, relationships, Hypotheses and Candidate formation | Sections 3–6 and 13 |
+| [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md) | Accepted bounded search roles, query controls, provider boundaries and coverage audit | Sections 3–6 and 13 |
+| [`discovery-shadow-evaluation.md`](discovery-shadow-evaluation.md) | Proposed shadow isolation, Plans and Epochs, review universe, metrics, blockers and release evidence | Sections 3–6 and 13–14 |
+| [`news-discovery.md`](news-discovery.md) | Cross-cutting discovery architecture, collection and safeguards | Sections 3–6 and 13 |
+| [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Story qualification, source authority, corroboration and evidence | Sections 3–7 |
+| [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution and article contract | Sections 8 and 10 |
+| [`rights-and-visuals.md`](rights-and-visuals.md) | Source access, copyright, storage and visual rights | Sections 8 and 9 |
+| [`sensitive-content-and-escalation.md`](sensitive-content-and-escalation.md) | Personal information, courts, children and sensitive-risk rules | Sections 11 and 14 |
+| [`publication-lifecycle-and-audit.md`](publication-lifecycle-and-audit.md) | Publication surfaces, corrections, withdrawal, archive and audit | Sections 12 and 13 |
+| [`publication-engineering-and-projection-control.md`](publication-engineering-and-projection-control.md) | Authority, projections, immutable payloads, dispatch and reconciliation | Sections 12–14 |
+| [`quality-evaluation-and-change-control.md`](quality-evaluation-and-change-control.md) | General versioning, evaluation, monitoring and rollback | Sections 13 and 14 |
 
 ## Cross-suite invariants
 
-The following invariants apply across every module:
-
-1. Public-source boundary: the system works from public, verifiable material and does not become an investigative service.
-2. Evidence before prose: a candidate must have an approved evidence package before a publication draft can become eligible.
-3. Models are untrusted producers, not policy authorities: generated output cannot approve itself or change governing rules.
-4. Separate publication authority: a generative agent never holds a public publishing credential; credential-bearing adapters remain inside the deterministic publication-controller boundary.
-5. Fail closed: missing policy, rights, evidence, validation, audit or infrastructure required for a safe decision blocks publication.
-6. No quota pressure: volume, freshness, queue size and engagement targets cannot lower an evidence or risk gate.
-7. Traceability: every central claim and public action must be reconstructable from retained decision evidence, subject to lawful retention limits.
-8. Honest accountability: the product must not claim human writing or approval when the recorded workflow shows otherwise.
-9. Discovery is not evidence: a Discovery Signal, News Lead or Story Candidate does not become publication evidence merely because it passed discovery triage.
+1. The system works from public, verifiable material and does not become an investigative service.
+2. A Candidate needs an approved Evidence Package before a draft may become publication-eligible.
+3. Models are untrusted producers, not policy authorities.
+4. Generative agents never hold public publishing credentials.
+5. Missing required policy, rights, evidence, validation, audit or infrastructure fails closed.
+6. Volume, freshness, queue size and engagement cannot lower gates.
+7. Central claims and public actions remain reconstructable, subject to lawful retention.
+8. Accountability must reflect the recorded workflow honestly.
+9. Discovery Signals, Leads and Candidates are not evidence.
+10. A shadow result is not production authority.
 
 ## Conformance model
 
-A candidate is conformant only when all applicable requirements across the suite are satisfied. Passing one module never bypasses another.
+A Candidate is conformant only when every applicable Accepted requirement is satisfied. Passing one module never bypasses another.
 
-The implementation MAY use different internal names, services or state enums from these documents if it preserves the required semantics and acceptance criteria.
+Implementation names and internal topology may differ only if required semantics and acceptance criteria are preserved.
 
-Where two accepted requirements appear to conflict, the system MUST stop the affected path and surface the conflict for owner resolution. A development agent MUST NOT silently choose the less restrictive interpretation.
+Conflicts between Accepted requirements stop the affected path and require owner resolution.
 
 ## Relationship between specifications and plans
 
-Specifications and plans do not need a one-to-one relationship.
+Plans organise accepted requirements and cannot create or change them. A plan must identify exact files and requirement IDs, exclusions, milestones, acceptance evidence, temporary gaps and rollback.
 
-A stable behavioural boundary should remain one specification even when it takes several delivery phases. Conversely, a practical implementation plan may need to change several specifications together to deliver one safe vertical slice.
-
-Every plan targeting this suite MUST:
-
-- list the exact specification files and requirement identifiers in scope;
-- state which requirements remain out of scope;
-- map milestones to observable acceptance evidence;
-- record temporary gaps and compatibility behaviour;
-- avoid changing a requirement merely through a task description; and
-- update or supersede the relevant specification when implementation reveals a genuine product decision change.
-
-The discovery review is deliberately topic-by-topic. It does not authorise implementation, and committing a Draft search, evaluation or operations document does not make it accepted.
+The discovery review remains topic-by-topic. Committing a Draft evaluation, operational, prioritisation or locality document does not make it accepted and authorises no run.
 
 ## Suite-level acceptance criteria
 
-Before the suite can be treated as implemented:
+Before the suite is implemented:
 
-1. Every accepted requirement has a trace to code, configuration, tests, operational control or an explicitly documented non-code procedure.
-2. End-to-end tests demonstrate automatic publication of an eligible low-risk story and fail-closed handling of every mandatory hold and reject class.
-3. No generative agent can reach a public publishing credential directly.
-4. Every public story can be traced to its evidence package, policy version, validation results and decision actor.
-5. The emergency stop prevents new public actions without destroying audit records.
-6. Model, prompt, policy and validator changes can be evaluated, released and rolled back by version.
-7. Known deviations from the charter are explicit and owner-approved.
+1. Every Accepted requirement traces to code, configuration, tests, controls or a documented procedure.
+2. End-to-end tests show eligible low-risk publication and fail-closed hold and reject paths.
+3. No generative agent can reach a publishing credential.
+4. Every public story traces to evidence, policy, validation and decision authority.
+5. Emergency stop preserves audit while preventing new public effects.
+6. Model, prompt, policy and validator versions can be evaluated and rolled back.
+7. Known deviations are explicit and owner-approved.
 
 ## Non-goals
 
-This suite does not select a cloud provider, model vendor, agent framework, database, identity provider, billing system or detailed deployment topology. `SERV-006` records the owner-selected Capacitor client boundary without selecting those other services.
-
-It does not define investigative journalism, witness contact, leak handling, private-document collection, public comments or a general-purpose emergency alert service.
+This suite does not select cloud, model, agent, database, identity, billing or deployment vendors except where an individual Accepted requirement says otherwise. It does not define investigative journalism, private-source collection, public comments or a general emergency-alert service.
 
 ## Open questions
 
-The following decisions remain open unless a module states a safe default:
-
-- the exact categories or jurisdictions that may receive narrowly scoped automatic-publication exceptions after legal review;
-- quantitative release thresholds for model and prompt evaluation;
-- retention periods for source material, decision logs and held candidates;
-- whether reader-facing articles show an individual reviewer when a human exception review occurs;
-- notification preferences beyond the charter's initial geography-based on/off model; and
-- the controlled cutover date and whether historical Discord content receives an explicitly approved one-time import.
+Open suite questions include quantitative release thresholds, retention periods, reviewer attribution, notification preferences and controlled cutover or historical import. Discovery-specific open questions remain in the active review sequence.
