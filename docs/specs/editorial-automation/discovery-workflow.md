@@ -1,20 +1,20 @@
 # Discovery workflow specification
 
-**Status:** Draft for owner review  
+**Status:** Accepted  
 **Owner:** Product owner  
 **Last updated:** 2026-07-15  
+**Accepted by owner:** 2026-07-15  
 **Canonical language:** English  
 **Related review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
 **Accepted coverage contract:** [`discovery-coverage-contract.md`](discovery-coverage-contract.md)  
 **Related discovery specification:** [`news-discovery.md`](news-discovery.md)  
-**Decision state:** The workflow below is a proposal. Committing this Draft does not constitute owner acceptance or implementation authority.  
 **Supersedes:** None
 
 ## Purpose
 
 Define the end-to-end workflow that takes an authorised discovery trigger through source checking, change detection, deterministic gates, lead triage and Story Candidate hand-off into governed evidence acquisition.
 
-The workflow must distinguish no news from system failure, preserve potentially relevant ambiguity, prevent models from authorising their own output and ensure that discovery never becomes publication evidence merely because a source changed.
+The workflow distinguishes no news from system failure, preserves potentially relevant ambiguity, prevents models from authorising their own output and ensures that discovery never becomes publication evidence merely because a source changed.
 
 ## Scope
 
@@ -63,13 +63,13 @@ The Trigger Controller creates work; it does not decide that news exists.
 
 ### Discovery Controller
 
-The deterministic authority for workflow transitions. It validates policy, rights, versions, identities, allowed routes and state preconditions before committing a check outcome, signal, lead, triage outcome, Story Candidate or hand-off state.
+The deterministic authority for discovery workflow transitions. It validates policy, rights, versions, identities, allowed routes and state preconditions before committing a Check Outcome, Discovery Signal, News Lead, triage outcome or hand-off state.
 
 The Discovery Controller may be implemented through several deterministic components, but generative agents and models are outside this authority boundary.
 
 ### Source Adapter
 
-Uses one approved access method to check a source or input channel, parse the permitted response and return a structured check result. It does not decide newsworthiness.
+Uses one approved access method to check a source or input channel, parse the permitted response and return a structured Check Outcome proposal. It does not decide newsworthiness or commit workflow state.
 
 ### Deterministic Gate Evaluator
 
@@ -95,12 +95,12 @@ Accepts an admitted Story Candidate into the separately governed evidence-acquis
 
 May resolve quarantines, policy conflicts or explicitly reviewable operational holds under later accepted permissions. Operator actions must be authenticated and audited and may not bypass coverage, rights, evidence or publication rules.
 
-## Provisional workflow artefacts
+## Functional workflow artefacts
 
-Topic 3 will define stable identity and immutability. Topic 2 uses the following functional artefacts:
+Topic 3 defines their stable identity and immutability. This workflow uses the following functional artefacts:
 
 - **Check Attempt:** one authorised attempt to inspect one configured source scope or input channel under exact adapter, policy and rights versions.
-- **Check Outcome:** the recorded result of a Check Attempt, including unchanged, observable change, partial/degraded result, blocked preflight or failure.
+- **Check Outcome:** the recorded result of a Check Attempt, including unchanged, observable change, partial or degraded result, blocked preflight or failure.
 - **Discovery Signal:** one normalised candidate new item, revision or other later-approved observable source transition produced by a successful or explicitly partial check.
 - **News Lead:** a Discovery Signal that survived the applicable deterministic gates and is eligible for editorial triage.
 - **Triage Work Item:** one bounded unit containing one or more News Leads, lineage, coverage and urgency context, and retrieved event candidates.
@@ -156,7 +156,7 @@ evidence-acquisition acknowledgement
     +--> structured feedback may return without rewriting history
 ```
 
-## Semantic outcome tables
+## Semantic outcome distinctions
 
 The labels below describe required distinctions. Topic 10 may choose final enum and reason-code names.
 
@@ -254,7 +254,7 @@ Closing or returning a candidate must not erase the candidate, its leads or the 
 
 **FLOW-031 — Idempotent signal transition.** Repeating the same Check Attempt, provider delivery or source revision MUST produce at most one equivalent downstream semantic transition.
 
-**FLOW-032 — No silent historical mutation.** A later observation or correction MUST create a new transition or relationship to prior work; it MUST NOT silently rewrite the earlier Check Outcome, Signal, Lead, proposal or Candidate. Topic 3 will define the exact identity model.
+**FLOW-032 — No silent historical mutation.** A later observation or correction MUST create a new transition or relationship to prior work; it MUST NOT silently rewrite the earlier Check Outcome, Signal, Lead, proposal or Candidate. Topic 3 defines the exact identity model.
 
 **FLOW-033 — Deterministic gate boundary.** Before model work, the workflow MUST evaluate adapter integrity, stable identity, exact or rule-defined duplication, observable newness, time and version validity, and any accepted scope or exclusion rule that requires no editorial inference.
 
@@ -272,7 +272,7 @@ Closing or returning a candidate must not erase the candidate, its leads or the 
 
 **FLOW-041 — Qualitative urgency route.** Each News Lead MUST carry the best supported Urgent, Time-sensitive, Planned or Routine workflow hint from the accepted coverage contract. Uncertainty MUST NOT silently demote a potentially urgent safety or public-health lead to Routine.
 
-**FLOW-042 — Urgent isolation.** A potentially Urgent lead MUST have a route that does not require it to wait behind an unbounded Routine backlog or a fixed routine batch. Topic 6 will define the exact flush and grouping policy.
+**FLOW-042 — Urgent isolation.** A potentially Urgent lead MUST have a route that does not require it to wait behind an unbounded Routine backlog or a fixed routine batch. Topic 6 defines the exact flush and grouping policy.
 
 **FLOW-043 — No silent queue drop.** Capacity limits, provider outages and backpressure MUST retain a visible lead or Operational Finding. The system MUST NOT discard a lead merely because a batch, queue or model limit is reached.
 
@@ -314,7 +314,7 @@ Closing or returning a candidate must not erase the candidate, its leads or the 
 - the bounded evidence-acquisition objective or questions to resolve; and
 - the policy, triage, retrieval and admission versions that produced it.
 
-Topic 3 will define stable identities and Topic 6 may refine event-relationship fields.
+Topic 3 defines stable identities and Topic 6 may refine event-relationship fields.
 
 **FLOW-061 — Candidate admission validation.** The Candidate Admission Controller MUST verify that the proposal uses an allowed route, references current leads, satisfies the accepted coverage contract, contains the minimum hand-off content and does not claim evidence or publication authority.
 
@@ -395,16 +395,16 @@ Topic 3 will define stable identities and Topic 6 may refine event-relationship 
 15. Quarantining one broken source does not turn its failures into unchanged checks and does not block unrelated healthy sources unless a broader accepted pause applies.
 16. An isolated relevant miss can create a Coverage Gap, while a systemic inability to cover an Active class can block launch under COV-045.
 
-## Owner decisions required to complete Topic 2
+## Completion record
 
-The Draft recommends the following decisions:
+The product owner accepted this workflow on 2026-07-15 with the following decisions:
 
-1. Accept the deterministic Discovery Controller and Candidate Admission Controller as the only authorities that commit workflow transitions; models and agents produce proposals only.
-2. Accept the Check Attempt and Check Outcome boundary so that unchanged, observable change, partial result, failure and quarantine remain distinct before any Signal exists.
-3. Accept that editorial ambiguity survives deterministic gates and normally becomes a News Lead rather than a deterministic rejection.
-4. Accept the proposed News Lead routes: reject, watch/defer, associate without candidate, approved supplemental discovery, operational hold, new-event candidate or development candidate.
-5. Accept a separate potentially Urgent route that cannot be blocked by an unbounded Routine batch, while leaving exact timing and batching to Topic 6 and Topic 9.
-6. Accept the Story Candidate minimum hand-off content in FLOW-060 and the requirement for deterministic admission.
-7. Accept durable Evidence Intake acknowledgement, pending retry on ambiguous intake outcome and structured evidence feedback without historical mutation.
-8. Accept that later-approved manual, reader, media, radar and search inputs use the same Signal-to-Candidate workflow and receive no bypass.
-9. Decide whether watch/defer is a first-class retained News Lead outcome, as recommended, or whether every Lead must reach a terminal reject, association or Candidate within one triage cycle.
+- the deterministic Discovery Controller and Candidate Admission Controller are the only authorities that commit discovery workflow transitions; models and agents produce proposals only;
+- the Check Attempt and Check Outcome boundary distinguishes unchanged, observable change, partial result, failure and quarantine before any Discovery Signal exists;
+- editorial ambiguity survives deterministic gates and normally becomes a News Lead rather than a deterministic rejection;
+- permitted News Lead routes include editorial reject, watch or defer, association without a new candidate, approved supplemental discovery, operational hold, new-event candidate and development candidate;
+- potentially Urgent work has an isolated route that cannot be blocked by an unbounded Routine backlog, while exact timing and batching remain for Topics 6 and 9;
+- Story Candidate admission requires the minimum hand-off content in FLOW-060 and deterministic validation;
+- Evidence Intake requires durable acknowledgement, ambiguous outcomes remain pending and retryable, and evidence feedback does not rewrite discovery history;
+- later-approved manual, reader, media, radar and search inputs use the same Signal-to-Candidate workflow and receive no bypass; and
+- watch or defer is a first-class retained News Lead outcome, distinct from an Operational hold and from a terminal editorial rejection.
