@@ -2,7 +2,7 @@
 
 **Status:** Draft  
 **Owner:** Product owner  
-**Last updated:** 2026-07-11  
+**Last updated:** 2026-07-15
 **Canonical language:** English  
 **Related plan:** None  
 **Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 13 and 14  
@@ -45,7 +45,7 @@ This specification covers versioning, evaluation datasets, release evidence, cha
 - risk or hold rules;
 - rights classification;
 - category or geography taxonomy;
-- publication package or controller;
+- `PublicationBundle`, `TargetOperation` or publication controller;
 - source adapter or source terms;
 - visual generation or chart logic; and
 - reader-facing article or notification template.

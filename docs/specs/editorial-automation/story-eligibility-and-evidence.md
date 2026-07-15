@@ -2,7 +2,7 @@
 
 **Status:** Draft  
 **Owner:** Product owner  
-**Last updated:** 2026-07-11  
+**Last updated:** 2026-07-15
 **Canonical language:** English  
 **Related plan:** None  
 **Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 3–7  
@@ -31,6 +31,8 @@ This specification covers geography, category, exclusions, newsworthiness, sourc
 **EVID-005 — Category.** Every candidate MUST carry at least one approved content category. Additional categories MUST require a substantive connection, not a passing mention.
 
 **EVID-006 — Explicit exclusions.** Entertainment, celebrity gossip, ordinary sports, lifestyle recommendations, affiliate-style content, ordinary individual delays, general live tracking, unrelated world news, editorials and party-political advocacy MUST be rejected unless the event independently qualifies through a material public-service, safety or infrastructure effect.
+
+**EVID-007 — Discovery hand-off.** A Discovery Signal or News Lead MUST NOT enter an evidence package. A Story Candidate MAY begin evidence acquisition, but its discovery promotion MUST NOT by itself establish substantive new information, qualification under `EVID-011` or `EVID-012`, source authority, corroboration or publication eligibility.
 
 ### Newsworthiness and volume
 
@@ -160,7 +162,7 @@ This specification covers geography, category, exclusions, newsworthiness, sourc
 
 1. An official government rule change is supported by the current primary document, carries the correct effective date and does not repeat the government's self-assessment as fact.
 2. Three outlets reproducing one wire report count as one evidential origin, not three independent sources.
-3. A social-media rumour creates a lead but cannot create a central claim or publishable package.
+3. A social-media rumour creates a lead but cannot create a Governed Claim, approved Evidence Package, authorising Publication Decision or dispatchable Target Operation.
 4. A development story identifies the new confirmed fact rather than republishing unchanged background.
 5. A writer-generated number absent from the evidence package fails validation.
 6. A provisional official statistic remains labelled provisional in the story.

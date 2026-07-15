@@ -2,7 +2,7 @@
 
 **Status:** Draft  
 **Owner:** Product owner  
-**Last updated:** 2026-07-11  
+**Last updated:** 2026-07-15
 **Canonical language:** English  
 **Related plan:** None  
 **Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 8 and 10  
@@ -122,27 +122,30 @@ These are content checks, not mandatory visible headings.
 
 ### Article contract
 
-**CONT-070 — Required fields.** A publishable article package MUST contain at least:
+**CONT-070 — Article surface payload.** A publishable article `SurfacePayload` MUST contain at least:
 
 - stable story and version identifiers;
 - headline;
 - body;
 - geography labels;
 - category labels;
-- first-publication and update timestamps or placeholders assigned by the publisher;
 - source references;
 - related-story references where applicable;
 - publisher or automated newsroom identity;
 - correction or withdrawal status; and
 - content-language identifier.
 
-**CONT-071 — Source footer.** Full source links approved for reader display MUST remain attached to the article package.
+The reader delivery contract MUST bind this exact payload digest to authoritative serving metadata containing `primary_feed_published_at` and `latest_update_at` where applicable. Those operational values are not editorial payload bytes and do not permit an adapter to rewrite the payload. `first_public_effect_at` and `target_acknowledged_at` are operational records and MUST NOT be fabricated as article-content fields before dispatch.
+
+**CONT-071 — Source footer.** Full source links approved for reader display MUST remain attached to the article `SurfacePayload`.
 
 **CONT-072 — Production honesty.** A human MUST NOT be identified as author, editor or approver unless the audit record shows that the person performed that role.
 
 **CONT-073 — Automation explanation.** The product MUST provide an accessible product-level explanation of automated production. Per-article model logs are not required unless another requirement mandates disclosure.
 
 **CONT-074 — Synthetic visual disclosure.** Any permitted factual graphic or other non-photographic visual MUST carry the description and source label required by the visual specification.
+
+**CONT-075 — Paid preview payload.** Every paid article MUST include an automatically derived, exact `PreviewExcerpt` surface payload containing no more than one quarter of the canonical article body's readable narrative text under a versioned segmentation rule. The denominator MUST be measured in Unicode grapheme clusters; headline, byline, metadata, sources, related links, images and captions MUST NOT contribute to it. The rule MUST derive the longest continuous leading prefix without skipping or reordering body content. Whenever at least one complete textual unit fits within the limit, the excerpt MUST end after the last complete sentence or list item that fits and MUST preserve its container structure. When no complete unit fits, the hard one-quarter cap MUST remain: the engine MUST use the last Unicode word boundary within the budget when one exists and otherwise cut at the Unicode grapheme boundary without splitting a grapheme. It MUST classify that result as a within-unit truncation and MUST NOT block publication solely because the first complete unit exceeds the limit. Every inline image, video, audio or interactive embed MUST be an indivisible block. The excerpt MAY include only the exact governed asset or derivative carrying rights-validated `PREVIEW_ALLOWED` permission; without that permission it MUST stop before the block and MUST NOT skip to later content. A media-led article MAY carry an empty text excerpt or only permitted preview media and MUST NOT be blocked solely because no preview media is permitted. The derivation engine MUST produce the exact preview payload and its boundary classification. An Inline Paywall Gate MUST follow that boundary, or the article header and any permitted hero media when the preview is hidden or empty; opening the article MUST NOT itself launch a purchase surface. A client MUST NOT cut or rederive the excerpt at request time. The excerpt MUST preserve the attribution, qualification and context needed to avoid making its visible portion misleading and MUST be validated, content-addressed and included in the same `PublicationBundle` before authorisation.
 
 ### Generation validation
 
@@ -172,6 +175,7 @@ These are content checks, not mandatory visible headings.
 8. A human is not shown as approver for an automatically published story.
 9. A development article omits repetitive background that adds no understanding of the new fact.
 10. Every central headline and introduction claim is traceable to the evidence package.
+11. A paid article's preview is an exact validated continuous leading prefix within one quarter of the canonical narrative-body Unicode-grapheme count, excludes headline, byline, metadata, sources, related links, images and captions from its denominator, uses the last complete sentence or list item that fits and otherwise falls back to the last word boundary or exact grapheme boundary. It includes an indivisible non-text block only when its exact governed asset or derivative is `PREVIEW_ALLOWED`, never skips a restricted block and neither blocks publication nor permits client-side rederivation when text or media cannot be shown.
 
 ## Non-goals
 

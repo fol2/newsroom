@@ -1,11 +1,11 @@
 # Publication lifecycle and audit specification
 
-**Status:** Draft  
-**Owner:** Product owner  
-**Last updated:** 2026-07-11  
-**Canonical language:** English  
-**Related plan:** None  
-**Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 12 and 13  
+**Status:** Draft
+**Owner:** Product owner
+**Last updated:** 2026-07-15
+**Canonical language:** English
+**Related plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)
+**Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 12 and 13
 **Supersedes:** None
 
 ## Purpose
@@ -22,9 +22,9 @@ This specification covers article identity and versions, feed behaviour, filters
 
 **LIFE-001 — Stable story identity.** Every public story MUST have a stable story identifier independent of its URL, channel message or publication target.
 
-**LIFE-002 — Immutable versions.** Every public content state MUST have a version identifier and content hash. A changed headline, body, metadata, asset or source set MUST create a new version record.
+**LIFE-002 — Immutable versions.** Every public editorial content state MUST have a version identifier and content hash. A changed headline, body, editorial metadata, governed asset or source set MUST create a new version record. A change to an external `AccessPolicyAssignment`, target attempt, acknowledgement, observation or reconciliation record MUST NOT create a new story version unless reader-visible editorial bytes also change.
 
-**LIFE-003 — First and latest times.** The system MUST record first-publication time and, where applicable, latest-update time separately.
+**LIFE-003 — Distinct publication clocks.** The system MUST record `primary_feed_published_at`, `first_public_effect_at`, `latest_update_at` where applicable and each target attempt's `target_acknowledged_at` as distinct fields with the meanings in [`../../../CONTEXT.md`](../../../CONTEXT.md). Reconciliation MAY establish an earlier `first_public_effect_at` after the fact but MUST NOT rewrite the primary-feed ordering time or target acknowledgement history.
 
 **LIFE-004 — Status.** The product MUST represent at least `PUBLISHED`, `CORRECTED`, `WITHDRAWN`, `REMOVED` and `SUPERSEDED` semantics, even if internal names differ.
 
@@ -32,7 +32,7 @@ This specification covers article identity and versions, feed behaviour, filters
 
 ### Feed, filtering and product presentation
 
-**LIFE-010 — Feed order.** The initial product's main feed MUST show published stories in reverse order of first publication.
+**LIFE-010 — Feed order.** The initial product's main feed MUST show published stories in reverse order of `primary_feed_published_at`.
 
 **LIFE-011 — No popularity ranking.** The feed MUST NOT rank by views, clicks, inferred preference, engagement or popularity.
 
@@ -54,7 +54,7 @@ This specification covers article identity and versions, feed behaviour, filters
 
 **LIFE-022 — No emergency guarantee.** The product MUST NOT represent its notifications as an emergency service or as a substitute for official alerts.
 
-**LIFE-023 — Publish-package binding.** A notification MUST be generated from the validated story package or a separately validated notification package linked to the same evidence and story version.
+**LIFE-023 — Publication-bundle binding.** A notification MUST use an exact validated notification `SurfacePayload` included in the authorised `PublicationBundle` for the same evidence package and story version. A target adapter MUST NOT generate or rewrite notification copy at dispatch time.
 
 **LIFE-024 — Correction propagation.** If a notification contains a materially wrong claim, the correction process MUST determine whether recipients require a correction notification and record the outcome.
 
@@ -74,7 +74,7 @@ This specification covers article identity and versions, feed behaviour, filters
 
 ### Reader-facing metadata and accountability
 
-**LIFE-040 — Header metadata.** The article header MUST show title, first-publication time, update time where applicable, geography, categories and the responsible publisher or automated newsroom identity.
+**LIFE-040 — Header metadata.** The article header MUST show title, `primary_feed_published_at` labelled as the reader-facing publication time, `latest_update_at` labelled as the update time where applicable, geography, categories and the responsible publisher or automated newsroom identity. `first_public_effect_at` and target acknowledgements belong to authorised Admin and audit projections rather than the default reader header.
 
 **LIFE-041 — Human role accuracy.** A human reviewer or author MUST be displayed only when the recorded workflow shows that the person materially performed that role and the disclosure is permitted by the approved safety policy.
 
@@ -134,7 +134,7 @@ This specification covers article identity and versions, feed behaviour, filters
 
 ### Audit record
 
-**AUDIT-001 — Candidate lineage.** The system MUST preserve lineage from lead through event, candidate, evidence package, draft, validation, decision, publication package, public target and later lifecycle actions.
+**AUDIT-001 — Candidate lineage.** The system MUST preserve applicable lineage from Source Definition and Planned Agenda Item through Discovery Signal, News Lead, event linkage, Story Candidate, `EvidencePackage`, draft, validation, `StoryVersion`, exact `SurfacePayload`, decision-free `PublicationBundle`, separate `PublicationDecision`, `TargetOperation`, attempt, acknowledgement or observation, reconciliation and later lifecycle actions. The lineage MUST NOT imply that every discovery record became evidence or a story.
 
 **AUDIT-002 — Required decision fields.** Each publication, hold, rejection, correction, withdrawal or removal record MUST include:
 
@@ -147,7 +147,7 @@ This specification covers article identity and versions, feed behaviour, filters
 - risk and rights outcomes;
 - final decision and reason codes;
 - automated controller or human decision actor;
-- target identifiers and timestamps; and
+- target-operation, attempt, acknowledgement and observation identifiers and their distinct timestamps; and
 - parent decision or prior version where applicable.
 
 **AUDIT-003 — Append-only history.** Decision history SHOULD be append-only or otherwise tamper-evident. Later correction or reviewer action MUST NOT erase the prior record.
@@ -164,7 +164,7 @@ This specification covers article identity and versions, feed behaviour, filters
 
 ### Operational reconciliation
 
-**AUDIT-010 — Publish acknowledgement.** A public action MUST record the target's acknowledgement or failure result.
+**AUDIT-010 — Target evidence.** A public action MUST record the target's acknowledgement or failure result as untrusted target input. Each acknowledgement or observation MUST be schema-validated and correlated to the authenticated adapter identity, target context, committed operation, exact attempt, target-native identity where available, observation time, raw-response or observed-content digest and verification result. Invalid, conflicting or unauthenticated evidence MUST be classified as ambiguous; it MUST NOT authorise publication, overwrite desired editorial state or be presented as clean reconciliation.
 
 **AUDIT-011 — Reconciliation.** The system MUST periodically reconcile intended publication state against controlled public targets to detect missing, duplicated, stale or uncorrected content.
 
@@ -174,7 +174,7 @@ This specification covers article identity and versions, feed behaviour, filters
 
 ## Acceptance criteria
 
-1. The same story published to an app and Discord maps both target identifiers to one story version.
+1. The same story published to the app article service and a secondary controlled target maps both target identifiers to one story version.
 2. A retry after one target succeeds and another fails does not duplicate the successful target.
 3. A material headline correction creates a new version, visible note and cross-surface update.
 4. A typo correction can be applied automatically only after meaning-preservation validation.
@@ -183,7 +183,7 @@ This specification covers article identity and versions, feed behaviour, filters
 7. A submitted reader lead cannot inject instructions into the agent workflow.
 8. Every public story can be reconstructed to its evidence, validators, policy version and decision actor.
 9. Failure to save the audit record prevents publication.
-10. Feed order remains based on first publication rather than popularity or last update.
+10. Feed order and the reader-facing “Published” label use `primary_feed_published_at`; an earlier public effect found by reconciliation is preserved separately as `first_public_effect_at`, and acknowledgement time remains per target attempt.
 
 ## Non-goals
 

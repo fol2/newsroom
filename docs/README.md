@@ -9,6 +9,8 @@ This repository is an automated, agentic newsroom system. Its documentation is s
 | [`specs/`](specs/) | Target application behaviour, agent and tool boundaries, workflows, automation, pipeline contracts, data models, quality gates and other testable requirements | Normative only when the document status is `Accepted`, or when the owner explicitly instructs implementation | English |
 | [`plans/`](plans/) | Time-bound implementation sequencing, milestones, migrations, rollout and validation work | Operational guidance only; a plan does not create or change product requirements | English |
 | [`reference/`](reference/) | Editorial principles, legal and compliance notes, research, business context, company material and other retained knowledge | Non-normative; it may inform a spec, but must not be implemented as a requirement on its own | Hong Kong Traditional Chinese (`zh-HK`) for repository-authored human reference, unless the document declares an exception |
+| [`research/`](research/) | Dated technical investigations, expert reviews and option studies | Non-normative; conclusions require an accepted spec, ADR or explicit owner decision before implementation | Declared by each document |
+| [`adr/`](adr/) | Durable architecture decisions and their trade-offs | Normative only when the ADR status is `accepted` | English |
 
 A spec may adopt selected constraints from a reference document. It must state those constraints explicitly. Linking to a reference document does not make the whole reference document normative.
 
@@ -20,14 +22,18 @@ Each translated document must state its canonical language and translation statu
 2. Implement an `Accepted` spec or an explicit owner instruction.
 3. Use an active plan to organise work against one or more specs; do not use a plan to invent requirements.
 4. Use reference material for context, research and risk awareness only, unless a spec explicitly adopts a requirement from it.
-5. If an accepted spec conflicts with current code, tests or current-system documentation, surface the conflict instead of silently choosing one side.
-6. Keep target behaviour separate from current behaviour. A spec describes the intended target; code, tests and current-system documentation describe what exists now.
-7. Preserve provenance, status, canonical language and review dates so later agents can judge whether a document is current.
-8. Where a development translation conflicts with its canonical document, use the canonical document and report the mismatch.
+5. Use research to compare evidence and alternatives; do not treat a research recommendation as an approved decision.
+6. Apply only an accepted ADR, and surface any conflict between that ADR and an accepted specification for owner resolution.
+7. If an accepted spec conflicts with current code, tests or current-system documentation, surface the conflict instead of silently choosing one side.
+8. Keep target behaviour separate from current behaviour. A spec describes the intended target; code, tests and current-system documentation describe what exists now.
+9. Preserve provenance, status, canonical language and review dates so later agents can judge whether a document is current.
+10. Where a development translation conflicts with its canonical document, use the canonical document and report the mismatch.
 
 ## Current future-product documents
 
 - [`specs/editorial-automation/`](specs/editorial-automation/) contains the draft normative specification suite derived from the autonomous product and editorial charter.
+- [`adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md) and [`adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md) contain two independently reviewable decisions for one integrated target architecture: the durable authority boundary and its local SQLite implementation. They are not delivery stages, and neither is accepted yet.
+- [`research/2026-07-15-database-architecture.md`](research/2026-07-15-database-architecture.md) and [`research/2026-07-15-local-agentic-graph-rag-database-options.md`](research/2026-07-15-local-agentic-graph-rag-database-options.md) retain the non-normative architecture evidence and expert review.
 - [`reference/editorial/product-editorial-charter.zh-HK.md`](reference/editorial/product-editorial-charter.zh-HK.md) is the canonical human reference charter.
 - [`reference/editorial/product-editorial-charter.en.md`](reference/editorial/product-editorial-charter.en.md) is its English development translation.
 
@@ -40,7 +46,7 @@ This taxonomy does not automatically reclassify the repository's established tec
 - `docs/evaluation/` contains evaluation methodology and supporting documentation.
 - `docs/cleanup_runs/` contains retained run evidence and generated artefacts.
 
-New future-product requirements should normally be written under `docs/specs/`. New implementation work programmes should normally be written under `docs/plans/`. Background material that should be retained without directly controlling implementation should normally be written under `docs/reference/`.
+New future-product requirements should normally be written under `docs/specs/`. New implementation work programmes should normally be written under `docs/plans/`. Dated investigations and option studies belong under `docs/research/`; broader retained background belongs under `docs/reference/`. Neither category controls implementation without explicit adoption.
 
 ## Recommended metadata
 
