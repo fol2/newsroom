@@ -28,7 +28,7 @@ The suite describes target behaviour. It does not claim that the current Discord
 
 `MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` and `MAY` are normative when a specification is `Accepted`.
 
-All files in this suite are currently `Draft`. They are review material until the owner changes their status to `Accepted` or explicitly authorises implementation.
+Files remain review material until the owner changes their status to `Accepted` or explicitly authorises implementation. `discovery-coverage-contract.md` is currently Accepted; the other files in this suite remain Draft unless their own metadata says otherwise.
 
 Requirement identifiers are stable references for plans, issues, tests and implementation notes. Renumbering an existing identifier should be avoided; superseded requirements should remain traceable.
 
@@ -37,7 +37,8 @@ Requirement identifiers are stable references for plans, issues, tests and imple
 | File | Stable concern | Main charter basis |
 |---|---|---|
 | [`autonomy-and-publication-control.md`](autonomy-and-publication-control.md) | Autonomy boundary, decision outcomes, agent separation, human exceptions and emergency control | Sections 2, 13 and 14 |
-| [`discovery-coverage-contract.md`](discovery-coverage-contract.md) | Active discovery obligations, best-effort coverage, explicit gaps, exclusions and qualitative urgency | Sections 3–6 |
+| [`discovery-coverage-contract.md`](discovery-coverage-contract.md) | Accepted active discovery obligations, best-effort coverage, explicit gaps, exclusions and qualitative urgency | Sections 3–6 |
+| [`discovery-workflow.md`](discovery-workflow.md) | Proposed trigger-to-candidate workflow, authority boundaries, failure paths, queueing and evidence hand-off | Sections 2–6 and 13 |
 | [`news-discovery.md`](news-discovery.md) | Candidate source architecture, change detection, discovery states, pre-model gates, bounded search and coverage health | Sections 3–6 and 13 |
 | [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Coverage, newsworthiness, sources, corroboration, analysis and claim evidence | Sections 3–7 |
 | [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution, headlines and article contract | Sections 8 and 10 |
@@ -86,7 +87,7 @@ Every plan targeting this suite MUST:
 
 A sensible future planning sequence may begin with publication control and audit, then evidence gates, generation, sensitive-risk routing, reader lifecycle and production rollout. That sequence is not approved by this draft and should follow a current-state gap analysis.
 
-The discovery review is deliberately topic-by-topic. The review sequence does not authorise implementation, and committing a Draft discovery document does not make its proposed coverage, source or workflow choices accepted.
+The discovery review is deliberately topic-by-topic. The review sequence does not authorise implementation, and committing a Draft discovery document does not make its proposed source or workflow choices accepted.
 
 ## Suite-level acceptance criteria
 
