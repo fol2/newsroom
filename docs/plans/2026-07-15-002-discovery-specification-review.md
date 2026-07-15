@@ -35,13 +35,13 @@ A research recommendation, Draft specification, Proposed plan or Proposed ADR is
 | 3. Discovery record semantics | Define stable identities, versions, decisions and lineage | Completed and Accepted | Identity and immutability are Agreed without selecting a database |
 | 4. Source roles and selection | Define source roles, portfolio functions, readiness gates and candidate paths | Completed and Accepted | Every Active obligation has a candidate Anchor or explicit launch-blocking gap |
 | 5. Change and Planned Agenda semantics | Define source observation, revision, disappearance, state transition, schedule and missed-expectation meaning | Completed and Accepted | Change classes and downstream meaning are Agreed |
-| 6. Triage and event grouping | Define Work Items, execution batches, retrieval, relationship semantics, Hypotheses and Candidate formation | Drafted in `discovery-triage-and-event-grouping.md`; owner review pending | Triage authority, grouping, outputs and failure handling are Agreed |
-| 7. Search and coverage audit | Define outer radar, gap search, planned-release recovery, recall audit and budgets | Pending | Search roles are bounded, measurable and rights-aware |
+| 6. Triage and event grouping | Define Work Items, execution batches, retrieval, relationships, Hypotheses and Candidate formation | Completed and Accepted | Triage authority, grouping, outputs and failure handling are Agreed |
+| 7. Search and coverage audit | Define search roles, query control, providers, budgets and audit interpretation | Drafted in `discovery-search-and-coverage-audit.md`; owner review pending | Search roles are bounded, measurable, rights-aware and do not become implicit coverage authority |
 | 8. Shadow evaluation | Define experiments, comparisons, labels, metrics and source add/remove criteria | Pending | A shadow protocol produces interpretable evidence |
 | 9. Reliability and operations | Define source health, parser contracts, quarantine, retry, alerting, replay and rollout | Pending | Operational failure cannot be confused with no news or source change |
 | 10. Prioritisation and outcome vocabulary | Define decision order, scoring need, outcomes and reason vocabulary | Pending | Prioritisation is testable and cannot override scope or evidence gates |
 | 11. Locality expansion | Decide selected localities or source classes based on coverage and shadow gaps | Pending | Any locality promise and deferred gap is explicit |
-| 12. Implementation plan | Map accepted requirements to code, migration, tests, rollout and rollback | Blocked by Topics 6–11 | Plan cites exact accepted requirements and acceptance evidence |
+| 12. Implementation plan | Map accepted requirements to code, migration, tests, rollout and rollback | Blocked by Topics 7–11 | Plan cites exact accepted requirements and acceptance evidence |
 
 ## Topic boundaries
 
@@ -56,6 +56,8 @@ The following distinctions apply throughout:
 - an execution batch is not an Event Hypothesis;
 - retrieval similarity is not event identity;
 - same-event relationship is not the same decision as Candidate creation;
+- a search result is not publisher evidence or recall ground truth;
+- a prospective audit is not a hindsight Gap investigation;
 - discovery is not evidence acquisition;
 - passing tests or committing documentation is not owner approval;
 - a shadow experiment is not production authority; and
@@ -145,7 +147,25 @@ The following distinctions apply throughout:
 
 ### Topic 6 — Triage and event grouping
 
-The Draft in [`../specs/editorial-automation/discovery-triage-and-event-grouping.md`](../specs/editorial-automation/discovery-triage-and-event-grouping.md) is ready for owner review. Its Work Item and execution-batch boundaries, retrieval rules, relationship semantics, Event Hypothesis decisions and Candidate-formation rules are not **Agreed** merely because they are committed.
+- **Agreed:** Triage Work Items, Execution Batches and editorial event grouping are separate.
+- **Agreed:** decision Leads and context-only Leads are distinct; every decision Lead gets one explicit disposition and context-only Leads cannot be mutated.
+- **Agreed:** bounded retrieval supplies context only; empty retrieval does not force new event and score or confidence is non-authoritative.
+- **Agreed:** Candidate admission requires a separate exact current Candidate and identity collision check.
+- **Agreed:** relationship classes are same event state, development, correction or reversal, related but distinct, no adequate prior match and uncertain relationship.
+- **Agreed:** relationship and Candidate creation are orthogonal; same-state repetition normally associates and material new state may create a development Candidate.
+- **Agreed:** every development Candidate identifies exact earlier and proposed new state.
+- **Agreed:** Hypothesis creation, association, versioning, consolidation and split are deterministic append-only decisions; destructive merge is prohibited.
+- **Agreed:** several Leads may form one coherent Candidate with complete lineage; unrelated Leads remain separate and a multi-topic Lead cannot be model-split without approved distinct Signals.
+- **Agreed:** Candidate formation has no minimum source or domain count at discovery.
+- **Agreed:** Urgent Work Items may be expedited without lower standards; degraded advisory retrieval requires exact collision checks and later reconciliation.
+- **Agreed:** proposals are structured and deterministically validated; confidence is metadata and timeout, refusal, malformed output and disagreement remain neutral.
+- **Agreed:** non-material association need not version a Candidate; material Hypothesis, urgency, uncertainty or evidence-objective change does.
+- **Agreed:** Topic 8 must replace or extend current clustering evaluation to test relationship and route classes, including false merge, snowball absorption, fragmentation and false development.
+- **Deferred:** exact batch sizes, wait limits, model/provider selection, retrieval engine, degraded-operation timing and adjudication policy.
+
+### Topic 7 — Search and coverage audit
+
+The Draft in [`../specs/editorial-automation/discovery-search-and-coverage-audit.md`](../specs/editorial-automation/discovery-search-and-coverage-audit.md) is ready for owner review. Its search roles, provider boundaries, query controls, budgets and audit interpretation are not **Agreed** merely because they are committed.
 
 ## Change discipline
 
