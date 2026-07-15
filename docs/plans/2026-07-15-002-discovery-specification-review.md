@@ -9,21 +9,21 @@
 
 ## Purpose
 
-Review news discovery in bounded topics so that research findings, product decisions, specifications, experiments and implementation plans are not collapsed into one approval. Each topic is reviewed and recorded before the next topic is treated as settled.
+Review news discovery in bounded topics so that research findings, product decisions, specifications, experiments and implementation plans are not collapsed into one approval. Each topic is reviewed and recorded before the next is treated as settled.
 
 The final implementation plan will be written only after the required product, editorial, workflow and architecture decisions have been accepted.
 
 ## Decision labels
 
-Each material item uses one of these review labels:
+Each material item uses one of:
 
-- **Agreed:** accepted by the product owner and eligible to be reflected in an Accepted specification or ADR.
+- **Agreed:** accepted by the product owner and eligible for an Accepted specification or ADR.
 - **Rejected:** considered and explicitly not adopted.
-- **Deferred:** intentionally left for a later topic because it does not block the current decision.
+- **Deferred:** intentionally left for a later topic.
 - **Needs experiment:** cannot be resolved responsibly without bounded test or shadow evidence.
 - **Unresolved:** still requires owner discussion; no default may be inferred.
 
-A research recommendation, Draft specification, Proposed plan or Proposed ADR is not **Agreed** merely because it is committed to the repository.
+A research recommendation, Draft specification, Proposed plan or Proposed ADR is not **Agreed** merely because it is committed.
 
 ## Review order
 
@@ -34,25 +34,28 @@ A research recommendation, Draft specification, Proposed plan or Proposed ADR is
 | 2. End-to-end discovery workflow | Define source check through Candidate and evidence handoff | Completed and Accepted | Every transition has actor, input, output, authority and failure outcome |
 | 3. Discovery record semantics | Define stable identities, versions, decisions and lineage | Completed and Accepted | Identity and immutability are Agreed without selecting a database |
 | 4. Source roles and selection | Define source roles, portfolio functions, readiness gates and candidate paths | Completed and Accepted | Every Active obligation has a candidate Anchor or explicit launch-blocking gap |
-| 5. Change and Planned Agenda semantics | Define source observation, revision, disappearance, state transition, schedule and missed-expectation meaning | Drafted in `discovery-change-and-planned-agenda.md`; owner review pending | Change classes and downstream meaning are Agreed |
-| 6. Triage and event grouping | Decide deterministic versus model judgement, batching, urgency and event/development grouping | Pending | Triage authority, outputs and failure handling are Agreed |
+| 5. Change and Planned Agenda semantics | Define source observation, revision, disappearance, state transition, schedule and missed-expectation meaning | Completed and Accepted | Change classes and downstream meaning are Agreed |
+| 6. Triage and event grouping | Define Work Items, execution batches, retrieval, relationship semantics, Hypotheses and Candidate formation | Drafted in `discovery-triage-and-event-grouping.md`; owner review pending | Triage authority, grouping, outputs and failure handling are Agreed |
 | 7. Search and coverage audit | Define outer radar, gap search, planned-release recovery, recall audit and budgets | Pending | Search roles are bounded, measurable and rights-aware |
 | 8. Shadow evaluation | Define experiments, comparisons, labels, metrics and source add/remove criteria | Pending | A shadow protocol produces interpretable evidence |
 | 9. Reliability and operations | Define source health, parser contracts, quarantine, retry, alerting, replay and rollout | Pending | Operational failure cannot be confused with no news or source change |
 | 10. Prioritisation and outcome vocabulary | Define decision order, scoring need, outcomes and reason vocabulary | Pending | Prioritisation is testable and cannot override scope or evidence gates |
 | 11. Locality expansion | Decide selected localities or source classes based on coverage and shadow gaps | Pending | Any locality promise and deferred gap is explicit |
-| 12. Implementation plan | Map accepted requirements to code, migration, tests, rollout and rollback | Blocked by Topics 5–11 | Plan cites exact accepted requirements and acceptance evidence |
+| 12. Implementation plan | Map accepted requirements to code, migration, tests, rollout and rollback | Blocked by Topics 6–11 | Plan cites exact accepted requirements and acceptance evidence |
 
 ## Topic boundaries
 
-The following distinctions apply throughout the review:
+The following distinctions apply throughout:
 
 - product scope is not launch monitoring completeness;
 - a source interface is not a coverage strategy;
 - a source role is not universal evidence authority;
-- a source revision is not necessarily an editorially material change;
+- a Source Revision is not necessarily an editorially material change;
 - absence from a feed is not necessarily deletion or resolution;
 - a Planned Agenda expectation is not occurrence evidence;
+- an execution batch is not an Event Hypothesis;
+- retrieval similarity is not event identity;
+- same-event relationship is not the same decision as Candidate creation;
 - discovery is not evidence acquisition;
 - passing tests or committing documentation is not owner approval;
 - a shadow experiment is not production authority; and
@@ -72,7 +75,7 @@ The following distinctions apply throughout the review:
 
 - **Agreed:** responsibility classes are Active, Best effort, Explicit deferred gap and Out of scope.
 - **Agreed:** the launch coverage matrix is independent from source or provider choices.
-- **Agreed:** authoritative public-safety warnings and clearly major unscheduled incidents are Active; other unscheduled verified crime and incident discovery is Best effort.
+- **Agreed:** authoritative public-safety warnings and clearly major unscheduled incidents are Active; other verified unscheduled crime and incident discovery is Best effort.
 - **Agreed:** Hong Kong Active coverage includes broad major public affairs and is not utility-only; district completeness is not promised.
 - **Agreed:** exhaustive UK local-body and institution monitoring is an explicit deferred gap, with no mandatory launch locality.
 - **Agreed:** ordinary global coverage requires material UK, Hong Kong or connected-family effect; genuinely exceptional events may enter Best-effort triage without invented relevance.
@@ -96,7 +99,7 @@ The following distinctions apply throughout the review:
 
 - **Agreed:** internal identities are separate from URLs, provider identifiers and content digests.
 - **Agreed:** Source Definition and Version, Source Item and Revision, and Revision and Representation are separate contracts.
-- **Agreed:** parser reprocessing of unchanged source state creates a Representation, not a source Revision.
+- **Agreed:** parser reprocessing of unchanged source state creates a Representation, not a Revision.
 - **Agreed:** Check Request, Attempt and Outcome separate logical work, retries and immutable results.
 - **Agreed:** one promoted Signal creates one Lead by default; later revisions and cross-source reports remain separate and explicitly related.
 - **Agreed:** Lead routes are immutable disposition decisions, and watch or defer requires a Watch Condition.
@@ -120,12 +123,29 @@ The following distinctions apply throughout the review:
 - **Agreed:** the coverage-completion shortlist and additional candidate paths are source-qualification work without automatic enablement.
 - **Agreed:** BBC UK and RTHK are legitimate established-media radar and Comparator candidates while remaining inside the evidence boundary.
 - **Agreed:** devolved administrations and warnings, courts and elections, UK–Hong Kong travel and aviation, Hong Kong courts and a global radar are mandatory unresolved pre-production source work.
-- **Agreed:** the final production portfolio is decided only after Topic 8 shadow evidence and Topic 9 operational readiness; Topic 4 authorises no run.
+- **Agreed:** final production portfolio follows Topic 8 shadow evidence and Topic 9 readiness; Topic 4 authorises no run.
 - **Deferred:** final source versions, exact intervals, executable shadow set and production admission.
 
 ### Topic 5 — Change and Planned Agenda semantics
 
-The Draft in [`../specs/editorial-automation/discovery-change-and-planned-agenda.md`](../specs/editorial-automation/discovery-change-and-planned-agenda.md) is ready for owner review. Its observation models, transition meanings, baseline rules, Agenda lifecycle and missed-expectation semantics are not **Agreed** merely because they are committed.
+- **Agreed:** every Source Definition Version declares an observation model and inference is limited to it.
+- **Agreed:** retrieval observation, Source Revision, observable transition and editorial interpretation are separate layers.
+- **Agreed:** validators, timestamps, HTTP status and disappearance are inputs to source-specific rules, not standalone proof.
+- **Agreed:** first observation, re-observation, Revision, Representation-only change, withdrawal, replacement, deletion, redirect, reappearance and linked-document follow-up remain distinct.
+- **Agreed:** activation, escalation, de-escalation, resolution or clearance, expiry, cancellation, withdrawal and reactivation remain distinct.
+- **Agreed:** absence ends active state only under successful complete-snapshot and confirmation rules; partial and rolling sources cannot clear state by absence.
+- **Agreed:** baseline policy is source-specific and may record first-observed-active without claiming start time.
+- **Agreed:** Planned Agenda Items and Versions are expectation records distinct from Signals, Leads, Candidates and occurrence evidence.
+- **Agreed:** Planned coverage uses agenda and occurrence-confirmation paths; announcements may create both a Signal and an Agenda Item.
+- **Agreed:** rescheduling and cancellation require source evidence and preserve schedule history.
+- **Agreed:** missed expectation means not observed through required paths, not proof of non-occurrence, cancellation or delay; source failure remains separate and late occurrence preserves the miss.
+- **Agreed:** clock passage alone creates no Lead, Candidate or reminder story.
+- **Agreed:** every observable transition enters normal gates, triage and evidence acquisition; models cannot create source history.
+- **Deferred:** exact grace periods, check schedules, retry policy and supplemental-search behaviour.
+
+### Topic 6 — Triage and event grouping
+
+The Draft in [`../specs/editorial-automation/discovery-triage-and-event-grouping.md`](../specs/editorial-automation/discovery-triage-and-event-grouping.md) is ready for owner review. Its Work Item and execution-batch boundaries, retrieval rules, relationship semantics, Event Hypothesis decisions and Candidate-formation rules are not **Agreed** merely because they are committed.
 
 ## Change discipline
 
@@ -134,5 +154,5 @@ At the end of each topic:
 1. update the topic specification or decision document;
 2. record Agreed, Rejected, Deferred, Needs experiment and Unresolved items here;
 3. update affected cross-references without silently expanding scope;
-4. commit the bounded changes to the review branch; and
+4. commit bounded changes to the review branch; and
 5. do not open the final pull request until the owner says the review sequence is complete.
