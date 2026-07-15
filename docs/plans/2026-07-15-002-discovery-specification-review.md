@@ -31,8 +31,8 @@ A research recommendation, Draft specification, Proposed plan or Proposed ADR is
 |---|---|---|---|
 | 0. Decision-state repair | Correct false approval signals and establish the review sequence | Completed on `agent/discovery-coverage-review`; ADR 0004 returned to Proposed | The ADR and documentation authority map no longer permit the discovery proposal to be treated as owner-accepted |
 | 1. Discovery coverage contract | Define what launch discovery must actively seek, what is best effort, what is an explicit gap and what is out of scope | Completed and Accepted in `discovery-coverage-contract.md` on 2026-07-15 | Coverage classes, geography treatment and launch obligations are Agreed |
-| 2. End-to-end discovery workflow | Define the path from source check to Story Candidate and evidence hand-off, including failures and retries | Drafted in `discovery-workflow.md`; owner review pending | Every transition has an actor, input, output, decision authority and failure outcome |
-| 3. Discovery record semantics | Define source item, revision, Discovery Signal, News Lead, event hypothesis, Story Candidate, Coverage Gap and lineage | Pending | Stable conceptual identities and immutability rules are Agreed without selecting a database |
+| 2. End-to-end discovery workflow | Define the path from source check to Story Candidate and evidence hand-off, including failures and retries | Completed and Accepted in `discovery-workflow.md` on 2026-07-15 | Every transition has an actor, input, output, decision authority and failure outcome |
+| 3. Discovery record semantics | Define source item, revision, Discovery Signal, News Lead, event hypothesis, Story Candidate, Coverage Gap and lineage | Drafted in `discovery-record-semantics.md`; owner review pending | Stable conceptual identities and immutability rules are Agreed without selecting a database |
 | 4. Source roles and selection | Decide the roles of official sources, responsible operators, media, specialist/local sources, reader leads and search; then select candidates | Pending | Every active coverage obligation has a justified source role and candidate path |
 | 5. Change and Planned Agenda semantics | Define new, revised, deleted, cancelled, rescheduled, escalated, ended and missed-expected-release behaviour | Pending | Change classes and their downstream meaning are Agreed |
 | 6. Triage and event grouping | Decide deterministic versus model judgement, batching, urgent handling, ambiguity and event/development grouping | Pending | Triage authority, outputs and failure handling are Agreed |
@@ -41,7 +41,7 @@ A research recommendation, Draft specification, Proposed plan or Proposed ADR is
 | 9. Reliability and operations | Define source health, parser contracts, quarantine, retry, alerting, replay and version rollout | Pending | Operational failure cannot be confused with no news or a substantive change |
 | 10. Prioritisation and outcome vocabulary | Define decision order, later scoring need, outcome semantics and reason vocabulary | Pending | Prioritisation is testable and cannot override scope or evidence gates |
 | 11. Locality expansion | Decide selected localities or source classes based on the agreed coverage contract and shadow gaps | Pending | Any locality promise and deferred gap is explicit |
-| 12. Implementation plan | Map accepted requirements to code, migration, tests, rollout and rollback | Blocked by Topics 2–11 | Plan cites exact accepted requirements and observable acceptance evidence |
+| 12. Implementation plan | Map accepted requirements to code, migration, tests, rollout and rollback | Blocked by Topics 3–11 | Plan cites exact accepted requirements and observable acceptance evidence |
 
 ## Topic boundaries
 
@@ -50,6 +50,7 @@ The following distinctions apply throughout the review:
 - product scope is not the same as launch monitoring completeness;
 - a source interface is not a coverage strategy;
 - a source change is not necessarily an editorially material development;
+- a parser or normaliser change is not a source revision;
 - discovery is not evidence acquisition;
 - passing tests or committing documentation is not owner approval;
 - a shadow experiment is not production authority; and
@@ -78,7 +79,20 @@ The following distinctions apply throughout the review:
 
 ### Topic 2 — End-to-end discovery workflow
 
-The Draft workflow is ready for owner review in [`../specs/editorial-automation/discovery-workflow.md`](../specs/editorial-automation/discovery-workflow.md). Its workflow authority, semantic outcomes, queueing, triage routes and evidence hand-off are not yet **Agreed** merely because they are present on this branch.
+- **Agreed:** only deterministic Discovery Controller and Candidate Admission Controller boundaries may commit workflow transitions; models, agents, adapters and retrieval components produce untrusted proposals or inputs.
+- **Agreed:** Check Attempt and Check Outcome semantics separate successful unchanged checks, observable changes, partial results, failures and quarantine before any Discovery Signal exists.
+- **Agreed:** editorial ambiguity survives deterministic gates and normally becomes a News Lead rather than a deterministic rejection.
+- **Agreed:** permitted Lead routes are editorial reject, watch or defer, association without a new candidate, approved supplemental discovery, operational hold, new-event candidate and development candidate.
+- **Agreed:** potentially Urgent work must not wait behind an unbounded Routine backlog; exact timing and batching remain for Topics 6 and 9.
+- **Agreed:** Story Candidate admission requires the FLOW-060 hand-off content and deterministic validation.
+- **Agreed:** Evidence Intake requires durable acknowledgement; ambiguous outcomes remain pending and retryable; evidence feedback does not rewrite discovery history.
+- **Agreed:** later-approved manual, reader, media, radar and search inputs use the same Signal-to-Candidate workflow and receive no bypass.
+- **Agreed:** watch or defer is a first-class retained News Lead outcome, distinct from an Operational hold and terminal rejection.
+- **Deferred:** physical queues, retry budgets, source roles, change taxonomy, batch formation, model prompts, search policy and implementation mechanisms remain for later topics.
+
+### Topic 3 — Discovery record semantics
+
+The Draft record contract is ready for owner review in [`../specs/editorial-automation/discovery-record-semantics.md`](../specs/editorial-automation/discovery-record-semantics.md). Its identity, versioning, immutability and lineage rules are not yet **Agreed** merely because they are present on this branch.
 
 ## Change discipline
 
