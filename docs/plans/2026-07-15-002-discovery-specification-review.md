@@ -29,9 +29,9 @@ A research recommendation, Draft specification, Proposed plan or Proposed ADR is
 
 | Topic | Scope | Current state | Completion condition |
 |---|---|---|---|
-| 0. Decision-state repair | Correct false approval signals and establish the review sequence | Authoritative status repaired on `agent/discovery-coverage-review`; ADR 0004 returned to Proposed | The ADR and documentation authority map no longer permit the discovery proposal to be treated as owner-accepted |
-| 1. Discovery coverage contract | Define what launch discovery must actively seek, what is best effort, what is an explicit gap and what is out of scope | Drafted in `discovery-coverage-contract.md`; owner review pending | Coverage classes, geography treatment and launch obligations are Agreed or explicitly left Unresolved |
-| 2. End-to-end discovery workflow | Define the path from source check to Story Candidate and evidence hand-off, including failures and retries | Next | Every transition has an actor, input, output, decision authority and failure outcome |
+| 0. Decision-state repair | Correct false approval signals and establish the review sequence | Completed on `agent/discovery-coverage-review`; ADR 0004 returned to Proposed | The ADR and documentation authority map no longer permit the discovery proposal to be treated as owner-accepted |
+| 1. Discovery coverage contract | Define what launch discovery must actively seek, what is best effort, what is an explicit gap and what is out of scope | Completed and Accepted in `discovery-coverage-contract.md` on 2026-07-15 | Coverage classes, geography treatment and launch obligations are Agreed |
+| 2. End-to-end discovery workflow | Define the path from source check to Story Candidate and evidence hand-off, including failures and retries | Drafted in `discovery-workflow.md`; owner review pending | Every transition has an actor, input, output, decision authority and failure outcome |
 | 3. Discovery record semantics | Define source item, revision, Discovery Signal, News Lead, event hypothesis, Story Candidate, Coverage Gap and lineage | Pending | Stable conceptual identities and immutability rules are Agreed without selecting a database |
 | 4. Source roles and selection | Decide the roles of official sources, responsible operators, media, specialist/local sources, reader leads and search; then select candidates | Pending | Every active coverage obligation has a justified source role and candidate path |
 | 5. Change and Planned Agenda semantics | Define new, revised, deleted, cancelled, rescheduled, escalated, ended and missed-expected-release behaviour | Pending | Change classes and their downstream meaning are Agreed |
@@ -41,7 +41,7 @@ A research recommendation, Draft specification, Proposed plan or Proposed ADR is
 | 9. Reliability and operations | Define source health, parser contracts, quarantine, retry, alerting, replay and version rollout | Pending | Operational failure cannot be confused with no news or a substantive change |
 | 10. Prioritisation and outcome vocabulary | Define decision order, later scoring need, outcome semantics and reason vocabulary | Pending | Prioritisation is testable and cannot override scope or evidence gates |
 | 11. Locality expansion | Decide selected localities or source classes based on the agreed coverage contract and shadow gaps | Pending | Any locality promise and deferred gap is explicit |
-| 12. Implementation plan | Map accepted requirements to code, migration, tests, rollout and rollback | Blocked by Topics 1–11 | Plan cites exact accepted requirements and observable acceptance evidence |
+| 12. Implementation plan | Map accepted requirements to code, migration, tests, rollout and rollback | Blocked by Topics 2–11 | Plan cites exact accepted requirements and observable acceptance evidence |
 
 ## Topic boundaries
 
@@ -67,7 +67,18 @@ The following distinctions apply throughout the review:
 
 ### Topic 1 — Discovery coverage contract
 
-The Draft coverage contract is ready for owner review. Its proposed coverage obligations are not yet **Agreed** merely because they are present on this branch.
+- **Agreed:** the four responsibility classes are Active coverage obligation, Best effort, Explicit deferred gap and Out of scope.
+- **Agreed:** the accepted launch coverage matrix in `discovery-coverage-contract.md` defines the coverage baseline independently from source or provider choices.
+- **Agreed:** authoritative public-safety warnings and clearly major unscheduled incidents are Active; other unscheduled verified crime and incident discovery is Best effort.
+- **Agreed:** Hong Kong active coverage includes broad major public affairs and is not utility-only; district-level completeness is not promised.
+- **Agreed:** exhaustive UK local-body and institution monitoring is an explicit deferred gap, with no mandatory launch locality under this contract.
+- **Agreed:** ordinary global coverage requires a UK, Hong Kong or connected-family material effect; genuinely exceptional international events may enter Best effort triage without invented relevance.
+- **Agreed:** missing or systemically ineffective detection for an Active class blocks launch; an isolated miss normally creates a Coverage Gap and remediation decision.
+- **Deferred:** exact detection paths, sources, search roles, locality expansion, quantitative recall and detection-time commitments belong to later topics.
+
+### Topic 2 — End-to-end discovery workflow
+
+The Draft workflow is ready for owner review in [`../specs/editorial-automation/discovery-workflow.md`](../specs/editorial-automation/discovery-workflow.md). Its workflow authority, semantic outcomes, queueing, triage routes and evidence hand-off are not yet **Agreed** merely because they are present on this branch.
 
 ## Change discipline
 
