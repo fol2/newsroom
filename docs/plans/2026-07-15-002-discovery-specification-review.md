@@ -35,11 +35,11 @@ A research recommendation, Draft specification, Proposed plan or Proposed ADR is
 | 5. Change and Planned Agenda | Observation, revision, state and schedule semantics | Completed and Accepted | Change and expectation meaning are Agreed |
 | 6. Triage and event grouping | Work Items, retrieval, relationships and Candidate formation | Completed and Accepted | Triage, grouping and failure behaviour are Agreed |
 | 7. Search and coverage audit | Search roles, query control, provider boundaries, budgets and audit | Completed and Accepted | Search is bounded, rights-aware and not implicit coverage authority |
-| 8. Shadow evaluation | Plans, epochs, review universe, labels, metrics, blockers and source decisions | Drafted in `discovery-shadow-evaluation.md`; owner review pending | Evaluation can produce reproducible, prospective and interpretable release evidence |
-| 9. Reliability and operations | Health, quarantine, retries, alerting, replay and rollout | Pending | Operational failure cannot be confused with no news or source change |
+| 8. Shadow evaluation | Plans, Epochs, review universe, labels, metrics, blockers and source decisions | Completed and Accepted | Evaluation produces prospective, reproducible and interpretable release evidence |
+| 9. Reliability and operations | Profiles, schedules, health, retries, quarantine, queues, recovery and admission | Drafted in `discovery-reliability-and-operations.md`; owner review pending | Operational failure cannot be confused with no news, health and containment are scoped, and admission is evidence-backed |
 | 10. Prioritisation and outcome vocabulary | Decision order, scoring need, outcomes and reasons | Pending | Prioritisation is testable and cannot override gates |
 | 11. Locality expansion | Selected localities or source classes based on evidence | Pending | Any locality promise and deferred gap is explicit |
-| 12. Implementation plan | Code, migration, tests, rollout and rollback | Blocked by Topics 8–11 | Plan cites accepted requirements and observable evidence |
+| 12. Implementation plan | Code, migration, tests, rollout and rollback | Blocked by Topics 9–11 | Plan cites accepted requirements and observable evidence |
 
 ## Topic boundaries
 
@@ -57,8 +57,10 @@ The following distinctions apply throughout:
 - a search result is not publisher evidence or recall ground truth;
 - prospective audit is not hindsight investigation;
 - a comparator union is not complete real-world ground truth;
-- a calendar duration is not sufficient evaluation exposure;
-- shadow evaluation is not production authority;
+- calendar duration is not sufficient evaluation exposure;
+- healthy silence is not the same as a stale or failed source;
+- source health is not portfolio coverage health;
+- operational admission is not production activation;
 - discovery is not evidence acquisition; and
 - a plan cannot create requirements not accepted in specifications.
 
@@ -181,7 +183,29 @@ The following distinctions apply throughout:
 
 ### Topic 8 — Shadow evaluation
 
-The Draft in [`../specs/editorial-automation/discovery-shadow-evaluation.md`](../specs/editorial-automation/discovery-shadow-evaluation.md) is ready for owner review. Its Plan and Epoch model, review universe, labels, metrics, blockers, thresholds and source-decision rules are not Agreed merely because they are committed.
+- **Agreed:** evaluation has a separate authority scope with no public effect or production mutation.
+- **Agreed:** owner-approved Evaluation Plans and frozen Epochs are required; calibration and qualification remain separate.
+- **Agreed:** phases are fixtures, replay, live prospective shadow, prospective comparator audit, fault injection, review and ablation.
+- **Agreed:** the prospective evaluation universe is event-level and assembled from several permitted paths without claiming complete ground truth.
+- **Agreed:** prospective and retrospective evidence remain separate; hindsight queries do not enter prospective coverage claims.
+- **Agreed:** contemporaneous labels, later-outcome labels and unreviewable outcomes remain distinct.
+- **Agreed:** final labels require authorised human review, practical blinding and second review for launch blockers, zero-tolerance and Urgent material cases.
+- **Agreed:** adapter, change, coverage, gate, triage, grouping, Candidate, timeliness, cost and operation are evaluated separately rather than by one composite score.
+- **Agreed:** detection coverage is bounded to the reviewed prospective universe and is not absolute recall.
+- **Agreed:** required geography, language, coverage, urgency, source-role, portfolio, observation-model, transition and component slices cannot be hidden by aggregates.
+- **Agreed:** zero-tolerance blockers include public effect, rights or authority bypass, failure-as-no-news, false absence-based ending, fabricated Revision, duplicate transition, destructive merge, invalid Candidate admission and discovery-to-evidence bypass.
+- **Agreed:** non-zero thresholds are approved before qualification review; calibration is not release evidence and changed Epochs cannot be pooled post hoc.
+- **Agreed:** source contribution and ablation use unique and earlier detection, resilience, overlap, noise, rights, cost and reviewer burden rather than raw item count.
+- **Agreed:** Comparators do not become Anchors because they return more results, and rights-incompatible provider data cannot form a persistent evaluation corpus.
+- **Agreed:** the legacy pipeline and v1 clustering dataset are comparison or regression aids only.
+- **Agreed:** release-evidence outcomes include insufficient, failed, continue shadow, Comparator-only, scoped Topic 9 eligibility, rejected and launch-blocked.
+- **Agreed:** reports are reproducible and rights-limited, failed Runs remain retained and confirmed errors feed regression Cases.
+- **Agreed:** Topic 8 authorises no run.
+- **Needs experiment:** numerical qualification thresholds, minimum exposure and actual source or component promotion decisions require a future owner-approved Evaluation Plan and frozen qualification Epoch.
+
+### Topic 9 — Reliability and operations
+
+The Draft in [`../specs/editorial-automation/discovery-reliability-and-operations.md`](../specs/editorial-automation/discovery-reliability-and-operations.md) is ready for owner review. Its Operational Profiles, scheduling, health, retry, quarantine, capacity, monitoring, recovery, security and admission rules are not Agreed merely because they are committed.
 
 ## Change discipline
 
