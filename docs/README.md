@@ -28,7 +28,7 @@ A link does not make an entire reference or research document normative. Transla
 ## Current future-product documents
 
 - [`specs/editorial-automation/`](specs/editorial-automation/) contains the normative specification suite; each file's own status controls authority.
-- [`plans/2026-07-15-002-discovery-specification-review.md`](plans/2026-07-15-002-discovery-specification-review.md) is the active owner-led discovery review sequence. It is not an implementation plan or shadow-run authorisation.
+- [`plans/2026-07-15-002-discovery-specification-review.md`](plans/2026-07-15-002-discovery-specification-review.md) is the active owner-led discovery review sequence. It is not an implementation plan or run authorisation.
 - [`specs/editorial-automation/discovery-coverage-contract.md`](specs/editorial-automation/discovery-coverage-contract.md) is the Accepted Topic 1 coverage contract.
 - [`specs/editorial-automation/discovery-workflow.md`](specs/editorial-automation/discovery-workflow.md) is the Accepted Topic 2 workflow.
 - [`specs/editorial-automation/discovery-record-semantics.md`](specs/editorial-automation/discovery-record-semantics.md) is the Accepted Topic 3 identity and lineage contract.
@@ -36,7 +36,8 @@ A link does not make an entire reference or research document normative. Transla
 - [`specs/editorial-automation/discovery-change-and-planned-agenda.md`](specs/editorial-automation/discovery-change-and-planned-agenda.md) is the Accepted Topic 5 source-change and Planned Agenda contract.
 - [`specs/editorial-automation/discovery-triage-and-event-grouping.md`](specs/editorial-automation/discovery-triage-and-event-grouping.md) is the Accepted Topic 6 triage and grouping contract. It authorises no model calls.
 - [`specs/editorial-automation/discovery-search-and-coverage-audit.md`](specs/editorial-automation/discovery-search-and-coverage-audit.md) is the Accepted Topic 7 search and audit contract. It authorises no provider, query, account or spending.
-- [`specs/editorial-automation/discovery-shadow-evaluation.md`](specs/editorial-automation/discovery-shadow-evaluation.md) is the Topic 8 Draft for shadow isolation, Evaluation Plans and Epochs, labels, metrics, blockers and release evidence. It authorises no run.
+- [`specs/editorial-automation/discovery-shadow-evaluation.md`](specs/editorial-automation/discovery-shadow-evaluation.md) is the Accepted Topic 8 evaluation and release-evidence contract. It authorises no run.
+- [`specs/editorial-automation/discovery-reliability-and-operations.md`](specs/editorial-automation/discovery-reliability-and-operations.md) is the Topic 9 Draft for Operational Profiles, health, scheduling, retry, quarantine, capacity, monitoring, recovery and admission. It authorises no process.
 - [`adr/0004-source-registry-first-change-driven-discovery.md`](adr/0004-source-registry-first-change-driven-discovery.md) remains `proposed`; the complete architecture decision is not owner-accepted.
 - The discovery section in [`plans/2026-07-15-001-integrated-newsroom-architecture.md`](plans/2026-07-15-001-integrated-newsroom-architecture.md) remains Proposed. Any stale parenthetical describing ADR 0004 as Accepted is non-authoritative and superseded by the ADR status and active review sequence.
 - ADR 0001 and ADR 0002 remain Proposed.
