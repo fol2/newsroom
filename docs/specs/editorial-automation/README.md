@@ -4,7 +4,8 @@
 **Owner:** Product owner
 **Last updated:** 2026-07-15
 **Canonical language:** English
-**Related plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)
+**Related architecture plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)
+**Active discovery review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)
 **Canonical reference:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md)
 **Development translation:** [`../../reference/editorial/product-editorial-charter.en.md`](../../reference/editorial/product-editorial-charter.en.md)
 **Supersedes:** None
@@ -36,7 +37,8 @@ Requirement identifiers are stable references for plans, issues, tests and imple
 | File | Stable concern | Main charter basis |
 |---|---|---|
 | [`autonomy-and-publication-control.md`](autonomy-and-publication-control.md) | Autonomy boundary, decision outcomes, agent separation, human exceptions and emergency control | Sections 2, 13 and 14 |
-| [`news-discovery.md`](news-discovery.md) | Source registry, planned monitoring, discovery states, pre-model gates, bounded search and coverage health | Sections 3–6 and 13 |
+| [`discovery-coverage-contract.md`](discovery-coverage-contract.md) | Active discovery obligations, best-effort coverage, explicit gaps, exclusions and qualitative urgency | Sections 3–6 |
+| [`news-discovery.md`](news-discovery.md) | Candidate source architecture, change detection, discovery states, pre-model gates, bounded search and coverage health | Sections 3–6 and 13 |
 | [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Coverage, newsworthiness, sources, corroboration, analysis and claim evidence | Sections 3–7 |
 | [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution, headlines and article contract | Sections 8 and 10 |
 | [`rights-and-visuals.md`](rights-and-visuals.md) | Source access, copyright, storage, asset rights and visual generation | Sections 8 and 9 |
@@ -83,6 +85,8 @@ Every plan targeting this suite MUST:
 - update or supersede the relevant specification when implementation reveals a genuine product decision change.
 
 A sensible future planning sequence may begin with publication control and audit, then evidence gates, generation, sensitive-risk routing, reader lifecycle and production rollout. That sequence is not approved by this draft and should follow a current-state gap analysis.
+
+The discovery review is deliberately topic-by-topic. The review sequence does not authorise implementation, and committing a Draft discovery document does not make its proposed coverage, source or workflow choices accepted.
 
 ## Suite-level acceptance criteria
 
