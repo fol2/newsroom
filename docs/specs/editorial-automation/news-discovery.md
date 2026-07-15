@@ -4,28 +4,41 @@
 **Owner:** Product owner  
 **Last updated:** 2026-07-15  
 **Canonical language:** English  
-**Related plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)  
+**Active review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
+**Related coverage contract:** [`discovery-coverage-contract.md`](discovery-coverage-contract.md)  
+**Related architecture plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)  
 **Related reference:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 3–6 and 13  
-**Related decision:** [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md)  
+**Related proposal:** [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md) (`Proposed`; owner review pending)  
+**Decision state:** This Draft contains candidate architecture and workflow requirements. The product owner has not accepted the source strategy, search role, launch subset, Hermes implementation or shadow plan.  
 **Supersedes:** None
 
 ## Purpose
 
-Define how the Newsroom monitors an owner-approved coverage boundary and turns source changes into News Leads and Story Candidates without treating discovery as evidence or spending model work to prove that nothing changed.
+Define a candidate workflow for turning observations from an owner-approved discovery coverage boundary into News Leads and Story Candidates without treating discovery as evidence or spending model work to prove that nothing changed.
+
+The separate coverage contract defines what discovery is responsible for seeking. This specification must not choose a source architecture first and then redefine coverage to match the available sources.
 
 ## Scope
 
-This specification covers source selection, source-native change detection, model-assisted triage, bounded search, coverage auditing and the hand-off into evidence acquisition.
+This specification covers candidate source selection controls, source-native change detection, model-assisted triage, bounded search, coverage auditing and the hand-off into evidence acquisition.
 
-It defines target behaviour. It does not claim that the current Brave-, RSS-, GDELT- and Gemini-based pool conforms.
+It does not define the launch coverage obligations, which remain under owner review in [`discovery-coverage-contract.md`](discovery-coverage-contract.md).
+
+It defines proposed target behaviour. It does not claim that the current Brave-, RSS-, GDELT- and Gemini-based pool conforms, and it does not authorise implementation.
+
+## Review state
+
+The requirements below remain Draft proposals. In particular, direct-watch-first discovery, the Source Registry, the Planned Agenda, search-last, batched triage and the smallest-source-subset approach must be reviewed through the active topic sequence before ADR 0004 may be accepted.
+
+Topic 2 will review the end-to-end workflow and may amend the Discovery Signal, News Lead, Story Candidate, batching, failure and hand-off requirements below. Topic 4 will review source roles and selection. Topic 7 will review search. Topic 8 will review shadow evaluation.
 
 ## Requirements
 
-### Coverage boundary
+### Candidate source architecture
 
-**DISC-001 — Direct-watch-first discovery.** The primary production discovery boundary MUST be an owner-approved source set aligned to the agreed beats, not one recurring broad search query per beat.
+**DISC-001 — Direct-watch-first discovery.** The proposed primary production discovery boundary is an owner-approved source set aligned to the accepted coverage contract, not one recurring broad search query per beat. This requirement remains subject to ADR 0004 review.
 
-**DISC-002 — Source purpose.** Every enabled source MUST identify its applicable beat or beats, geography, publisher, interface and permitted discovery use. Further implementation metadata is defined only when that source is activated.
+**DISC-002 — Source purpose.** Every enabled source MUST identify the accepted coverage obligation or best-effort role it serves, geography, publisher, interface and permitted discovery use. Further implementation metadata is defined only when that source is activated.
 
 **DISC-003 — Source-native transport.** An adapter SHOULD prefer the source's permitted structured interface, such as an API, webhook, calendar, RSS or Atom feed. Selector-based page change detection MAY fill an explicit high-value gap. General browser automation or whole-site crawling MUST NOT be the default transport.
 
@@ -33,13 +46,13 @@ It defines target behaviour. It does not claim that the current Brave-, RSS-, GD
 
 **DISC-005 — Rights before collection.** A production source definition MUST reference an owner-approved rights and permitted-use record before collection. Public availability, official status or an allowed robots path MUST NOT by itself authorise automated access, retention, model submission, quotation or display.
 
-**DISC-006 — Planned Agenda.** Known releases, proceedings, effective dates and deadlines that warrant monitoring MUST be represented independently from breaking or routine watch. A Planned Agenda Item MUST define an expected source and watch window, and a missed expected release MUST remain distinguishable from a successful check with no new item.
+**DISC-006 — Planned Agenda.** Known releases, proceedings, effective dates and deadlines that fall within the accepted coverage contract SHOULD be represented independently from breaking or routine watch. A Planned Agenda Item MUST define an expected source and watch window, and a missed expected release MUST remain distinguishable from a successful check with no new item. Exact semantics remain for Topic 5.
 
-**DISC-007 — Smallest useful launch set.** Launch MUST begin with the smallest owner-approved UK and Hong Kong source subset that covers the agreed beats. Additional national or local sources MUST be justified by an observed coverage gap; launch makes no locality-completeness or detection-time commitment.
+**DISC-007 — Smallest justified launch set.** A proposed launch source set MUST be no larger than necessary to cover the accepted active obligations and approved best-effort roles. It MUST NOT be selected before the coverage contract is accepted, and additional sources MUST be justified by an accepted obligation, an operational resilience need or observed gap. This requirement makes no locality-completeness or detection-time commitment.
 
 ### Change-driven collection
 
-**DISC-010 — Change before work.** Routine collection MUST determine whether a registered source emitted a new item or material revision before creating downstream triage work. An unchanged poll MUST NOT invoke a model.
+**DISC-010 — Change before work.** Routine collection MUST determine whether a registered source emitted a new item or observable revision before creating downstream triage work. An unchanged poll MUST NOT invoke a model.
 
 **DISC-011 — Per-source state.** Each enabled source MUST retain enough inspectable state to distinguish unchanged content, a new or revised item and a failed check. The storage representation is not defined here.
 
@@ -53,15 +66,15 @@ It defines target behaviour. It does not claim that the current Brave-, RSS-, GD
 
 ### Discovery states and gates
 
-**DISC-020 — Discovery Signal.** Every adapter output MUST first be represented as a Discovery Signal carrying the minimum permitted source, item, time, URL, change and lineage metadata. A Discovery Signal is not a News Lead, Source Observation, verified fact or publication evidence.
+**DISC-020 — Discovery Signal.** Every adapter output MUST first be represented as a Discovery Signal carrying the minimum permitted source, item, time, URL, observable-change and lineage metadata. A Discovery Signal is not a News Lead, Source Observation, verified fact or publication evidence. Topic 2 and Topic 3 may refine this contract.
 
 **DISC-021 — Deterministic gates.** Before model work, the system MUST apply versioned deterministic checks for adapter integrity, stable identity, exact or rule-defined duplication, observable newness, time and version validity, and scope or exclusion rules that can be established without editorial inference.
 
 **DISC-022 — Ambiguity preserves recall.** A deterministic rule MUST NOT silently reject a signal merely because materiality, cross-geography relevance, development status or another editorial judgement is ambiguous. Such a signal MUST be routed to an inspectable watch or triage outcome unless another accepted rule independently requires rejection.
 
-**DISC-023 — News Lead.** A Discovery Signal becomes a News Lead only after the applicable deterministic gates pass. Promotion MUST retain lineage to the signal and gate outcome. A News Lead is eligible for triage; it is not evidence.
+**DISC-023 — News Lead.** Under the current proposal, a Discovery Signal becomes a News Lead only after the applicable deterministic gates pass. Promotion MUST retain lineage to the signal and gate outcome. A News Lead is eligible for triage; it is not evidence. Topic 2 will confirm or amend this transition.
 
-**DISC-024 — Story Candidate.** One or more News Leads become a Story Candidate only after event retrieval and newsworthiness triage establish enough likely relevance, utility, materiality and novelty to begin evidence acquisition. This transition MUST record its input leads, route and decision basis.
+**DISC-024 — Story Candidate.** Under the current proposal, one or more News Leads become a Story Candidate only after event retrieval and newsworthiness triage establish enough likely relevance, utility, materiality and novelty to begin evidence acquisition. This transition MUST record its input leads, route and decision basis. Topic 2 will confirm or amend this transition.
 
 **DISC-025 — Evidence boundary.** Passing discovery triage MUST NOT create a Source Observation, Governed Claim, Evidence Package or publication authority. Evidence acquisition MUST independently retrieve and govern the current permitted source material under the evidence and rights specifications.
 
@@ -71,17 +84,17 @@ It defines target behaviour. It does not claim that the current Brave-, RSS-, GD
 
 **DISC-030 — No model for an empty tick.** A scheduler, collector or pre-check MUST end silently when no new eligible signal exists. It MUST NOT wake a model merely to confirm that there is no work.
 
-**DISC-031 — Batched triage.** Model assistance MUST operate on bounded batches of deterministic survivors rather than one unconditional model call per collected item. Prompts and outputs MUST be versioned, structured and treated as untrusted proposals.
+**DISC-031 — Batched triage.** The current proposal is that model assistance operates on bounded batches of deterministic survivors rather than one unconditional model call per collected item. Prompts and outputs MUST be versioned, structured and treated as untrusted proposals. Topic 2 and Topic 6 will decide urgent exceptions, batch formation and failure behaviour.
 
 **DISC-032 — Deferred full acquisition.** Discovery SHOULD use source-supplied metadata and the minimum permitted changed fragment. Full source acquisition and evidence retention MUST be deferred until a Story Candidate enters the governed evidence workflow, except for a separately approved replay or evaluation fixture.
 
-**DISC-033 — Search-last, not search-zero.** Search MUST be a provider-neutral, separately metered lane for outer-radar discovery, explicit coverage gaps and recall auditing. It MUST NOT be the recurring production clock or an unbounded generic firehose.
+**DISC-033 — Search-last, not search-zero.** The current proposal is that search remains a provider-neutral, separately metered lane for roles accepted in Topic 7, such as outer-radar discovery, explicit coverage gaps and recall auditing. It MUST NOT become an unbounded generic firehose. Whether search participates in the recurring production clock remains unresolved until Topic 7.
 
-**DISC-034 — Search triggers.** Automated search MAY be triggered only by an approved rule tied to an observed source gap, a failed selected source, a missing planned release, an editor or reader lead, or a bounded audit sample.
+**DISC-034 — Search triggers.** Automated search MAY be triggered only by a later accepted rule tied to an approved search role. Candidate triggers include an observed source gap, a failed selected source, a missing planned release, an editor or reader lead, or a bounded audit sample.
 
 **DISC-035 — Enforced budget.** Every automated search provider MUST have a configured request and cost budget that the agent cannot bypass. Exhaustion MUST produce a visible bounded-search outcome rather than silently switching to an unapproved provider or weakening another gate.
 
-**DISC-036 — Recall interpretation.** GDELT, media feeds and search indexes MUST NOT be treated as recall ground truth. Coverage evaluation MUST combine bounded comparison searches with an editor-led missed-story review and record actionable Coverage Gaps.
+**DISC-036 — Recall interpretation.** GDELT, media feeds and search indexes MUST NOT be treated as recall ground truth. Coverage evaluation MUST combine bounded comparison methods with an editor-led missed-story review and record actionable Coverage Gaps.
 
 ### Basic safeguards and validation
 
@@ -91,13 +104,13 @@ It defines target behaviour. It does not claim that the current Brave-, RSS-, GD
 
 **DISC-042 — No discovery quota.** Discovery and triage MUST support zero News Leads and zero Story Candidates in any interval. Beat balance, publication cadence or unused capacity MUST NOT promote a weaker signal.
 
-**DISC-050 — Shadow audit.** Shadow discovery MUST retain enough lineage to compare what direct watch found, what another permitted radar found and which relevant developments were missed.
+**DISC-050 — Shadow audit.** Any authorised shadow discovery MUST retain enough lineage to compare what each permitted path found and which relevant developments were missed. Topic 8 will define the protocol and interpretation.
 
 **DISC-051 — Source health.** Operational checks MUST make failed or broken sources and bounded-search usage visible. Detailed service objectives are not defined here.
 
-**DISC-052 — Shadow evaluation.** A selected source set and its change checks MUST pass shadow evaluation before production authority. Evaluation MUST include duplicates, unchanged content, source breakage and missed relevant developments.
+**DISC-052 — Shadow evaluation.** A selected source set and its change checks MUST pass an owner-approved shadow evaluation before production authority. Evaluation MUST include duplicates, unchanged content, source breakage and missed relevant developments. Committing this requirement does not authorise a shadow run.
 
-**DISC-053 — Coverage feedback.** A relevant in-scope development found only through another permitted channel MUST create a reviewable Coverage Gap. Closing a gap SHOULD improve source selection where justified rather than create a permanent dependency on broad search.
+**DISC-053 — Coverage feedback.** A relevant in-scope development found only through another permitted channel MUST create a reviewable Coverage Gap. Closing a gap SHOULD improve coverage, source selection or workflow where justified rather than create an unexamined permanent dependency on broad search.
 
 ## Acceptance criteria
 
@@ -106,12 +119,12 @@ It defines target behaviour. It does not claim that the current Brave-, RSS-, GD
 3. A parser break is visible as a failure or quarantine and is not reported as either no news or a content change.
 4. An exact duplicate collected twice creates at most one downstream semantic transition.
 5. A clearly excluded entertainment item is rejected deterministically; an ambiguous public-safety effect is retained for triage.
-6. A current official rule update can outrank a media-dense but low-utility event without requiring several outlets to repeat it.
+6. A current official rule update can be considered without requiring several outlets to repeat it.
 7. A search result may create a Discovery Signal or Coverage Gap but cannot enter an Evidence Package merely because search found it.
-8. A missing planned release produces a distinct operational finding and can trigger bounded gap search.
+8. A missing planned release produces a distinct operational finding if Planned Agenda monitoring is later accepted.
 9. Search budget exhaustion is visible and cannot be bypassed by an agent or an unapproved provider fallback.
 10. A Story Candidate preserves lineage to every contributing News Lead and Discovery Signal while evidence acquisition independently establishes its Source Observations.
-11. Launch begins with the selected smallest subset in shadow mode and makes no completeness claim that the shadow evidence does not support.
+11. No source subset, shadow run or production implementation is authorised until the relevant coverage, workflow, source-role, search and evaluation decisions are accepted.
 
 ## Non-goals
 
@@ -121,5 +134,8 @@ It does not define source extraction for evidence, claim admission, drafting or 
 
 ## Open questions
 
-- Which smallest candidate source subset covers the agreed beats well enough for shadow validation?
-- What does the shadow comparison miss that justifies adding or removing a source or invoking bounded search?
+- Which proposed coverage obligations in `discovery-coverage-contract.md` will the owner accept, amend, reject or defer?
+- What is the exact end-to-end workflow from source check to evidence hand-off?
+- Which source roles and candidate interfaces satisfy the accepted coverage obligations?
+- What role, if any, does recurring or on-demand search play at launch?
+- What shadow comparison and editorial labelling method is sufficient to justify production authority?
