@@ -29,7 +29,7 @@ A research recommendation, Draft specification, Proposed plan or Proposed ADR is
 
 | Topic | Scope | Current state | Completion condition |
 |---|---|---|---|
-| 0. Decision-state repair | Correct false approval signals and establish the review sequence | Completed on `agent/discovery-coverage-review`; ADR 0004 returned to Proposed | Repository no longer represents the discovery architecture as owner-accepted |
+| 0. Decision-state repair | Correct false approval signals and establish the review sequence | Authoritative status repaired on `agent/discovery-coverage-review`; ADR 0004 returned to Proposed | The ADR and documentation authority map no longer permit the discovery proposal to be treated as owner-accepted |
 | 1. Discovery coverage contract | Define what launch discovery must actively seek, what is best effort, what is an explicit gap and what is out of scope | Drafted in `discovery-coverage-contract.md`; owner review pending | Coverage classes, geography treatment and launch obligations are Agreed or explicitly left Unresolved |
 | 2. End-to-end discovery workflow | Define the path from source check to Story Candidate and evidence hand-off, including failures and retries | Next | Every transition has an actor, input, output, decision authority and failure outcome |
 | 3. Discovery record semantics | Define source item, revision, Discovery Signal, News Lead, event hypothesis, Story Candidate, Coverage Gap and lineage | Pending | Stable conceptual identities and immutability rules are Agreed without selecting a database |
@@ -63,6 +63,7 @@ The following distinctions apply throughout the review:
 - **Agreed:** ADR 0004 must remain Proposed until the owner explicitly accepts, amends or rejects it.
 - **Agreed:** no discovery shadow or production implementation is authorised by the existing research, Draft specification or Proposed ADR.
 - **Deferred:** exact implementation and migration changes to the legacy Brave/RSS/GDELT/Gemini pipeline.
+- **Deferred cleanup:** the Proposed integrated architecture plan still contains one stale parenthetical that labels ADR 0004 as Accepted. `docs/README.md` explicitly marks that parenthetical non-authoritative and superseded by the ADR's current status. The parenthetical should be removed when that large plan is next revised; it does not restore decision authority.
 
 ### Topic 1 — Discovery coverage contract
 
