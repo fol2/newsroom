@@ -31,3 +31,17 @@ Automated AI newsroom: LLM clustering, multi-source news pool, Discord publishin
 - No auto-formatting enforced; follow existing patterns
 - Validators must inherit structure from `newsroom/validators/`
 - New prompts need entries in `prompt_registry.json` + a matching validator
+
+## Agent skills
+
+### Issue tracker
+
+Engineering work is tracked in GitHub Issues. External pull requests are not a triage request surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical triage labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository, using a root `CONTEXT.md` and system-wide ADRs under `docs/adr/`. See `docs/agents/domain.md`.
