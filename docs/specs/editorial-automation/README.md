@@ -36,6 +36,7 @@ Requirement identifiers are stable references for plans, issues, tests and imple
 | File | Stable concern | Main charter basis |
 |---|---|---|
 | [`autonomy-and-publication-control.md`](autonomy-and-publication-control.md) | Autonomy boundary, decision outcomes, agent separation, human exceptions and emergency control | Sections 2, 13 and 14 |
+| [`news-discovery.md`](news-discovery.md) | Source registry, planned monitoring, discovery states, pre-model gates, bounded search and coverage health | Sections 3–6 and 13 |
 | [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Coverage, newsworthiness, sources, corroboration, analysis and claim evidence | Sections 3–7 |
 | [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution, headlines and article contract | Sections 8 and 10 |
 | [`rights-and-visuals.md`](rights-and-visuals.md) | Source access, copyright, storage, asset rights and visual generation | Sections 8 and 9 |
@@ -51,11 +52,12 @@ The following invariants apply across every module:
 1. Public-source boundary: the system works from public, verifiable material and does not become an investigative service.
 2. Evidence before prose: a candidate must have an approved evidence package before a publication draft can become eligible.
 3. Models are untrusted producers, not policy authorities: generated output cannot approve itself or change the governing rules.
-4. Separate publication authority: a generative agent never holds the credential that publishes to a public surface.
+4. Separate publication authority: a generative agent never holds the credential that publishes to a public surface; credential-bearing adapters remain inside the deterministic publication-controller boundary.
 5. Fail closed: missing policy, rights, evidence, validation, audit or infrastructure required for a safe decision blocks publication.
 6. No quota pressure: volume, freshness, queue size and engagement targets cannot lower an evidence or risk gate.
 7. Traceability: every central claim and public action must be reconstructable from retained decision evidence, subject to lawful retention limits.
 8. Honest accountability: the product must not claim that a human wrote or approved content when the recorded workflow shows otherwise.
+9. Discovery is not evidence: a Discovery Signal, News Lead or Story Candidate does not become publication evidence merely because it passed discovery triage.
 
 ## Conformance model
 
@@ -96,7 +98,7 @@ Before the suite can be treated as implemented:
 
 ## Non-goals
 
-This suite does not select a cloud provider, model vendor, agent framework, database, mobile framework, identity provider, billing system or detailed deployment topology.
+This suite does not select a cloud provider, model vendor, agent framework, database, identity provider, billing system or detailed deployment topology. `SERV-006` records the owner-selected Capacitor client boundary without selecting those other services.
 
 It does not define investigative journalism, witness contact, leak handling, private-document collection, public comments or a general-purpose emergency alert service.
 
@@ -109,4 +111,4 @@ The following decisions remain open and are kept out of normative requirements u
 - retention periods for source material, decision logs and held candidates;
 - whether reader-facing articles show an individual reviewer when a human exception review occurs;
 - notification preferences beyond the charter's initial geography-based on/off model; and
-- the implementation phases and migration path from the current Discord newsroom.
+- the controlled cutover date and whether any historical Discord content receives an explicitly approved one-time import.

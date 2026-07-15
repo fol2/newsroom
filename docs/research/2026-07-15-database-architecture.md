@@ -12,6 +12,8 @@
 > This article is retained as non-normative expert commentary. Adopted constraints are restated in UK-English specifications or ADRs; the article does not authorise implementation on its own. References to Discord illustrate the legacy system or a generic secondary public target only. Discord and OpenClaw are not target-platform dependencies.
 >
 > **Adopted interpretation:** references below to a first phase or to doing one item before another describe authority priority and engineering dependency, not two target architectures. The adopted plan defines publication, serving and governed knowledge projections against one canonical contract from inception and has one production-activation gate.
+>
+> **Later contract refinements:** the normative specifications now resolve entity mentions before dependent claim or relation admission; separate consumer-neutral ledger events from side-effecting target operations and consumer checkpoints; split primary-feed, first-public-effect and acknowledgement clocks; and permit only staged immutable bytes before the authoritative publication bundle, decision, audit and target operations commit together. Where the commentary's illustrative wording differs, the linked specifications and ADRs govern.
 
 ## 整體判斷
 

@@ -2,7 +2,7 @@
 
 **Status:** Draft  
 **Owner:** Product owner  
-**Last updated:** 2026-07-11  
+**Last updated:** 2026-07-15
 **Canonical language:** English  
 **Related plan:** None  
 **Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 8 and 9  
@@ -41,7 +41,7 @@ This specification covers source-access review, automated retrieval, extraction,
 
 **RIGHTS-003 — No assumption from public availability.** Public access, a search-result appearance or the absence of an obvious paywall MUST NOT be treated as permission for automated retrieval, copying, storage, model submission or commercial reuse.
 
-**RIGHTS-004 — Unknown rights.** A source or use with unknown, expired or conflicting rights status MUST NOT enter an automatically publishable package.
+**RIGHTS-004 — Unknown rights.** A source or use with unknown, expired or conflicting rights status MUST NOT enter an approved `EvidencePackage`, authorised `PublicationBundle` or dispatchable `TargetOperation`.
 
 **RIGHTS-005 — Use-specific decision.** Permission to read or retrieve a source MUST NOT be treated as permission to store, quote, submit to a model, redistribute, display an image or create a derivative.
 

@@ -42,7 +42,7 @@ Equivalent internal names MAY be used if their semantics and transitions remain 
 
 **AUTO-011 — Outcome reason.** `HOLD_FOR_REVIEW` and `REJECT` MUST carry at least one stable, machine-readable reason code and a human-readable explanation.
 
-**AUTO-012 — Terminal public decision.** Only `AUTO_PUBLISH` or an authorised reviewer approval of a held candidate MAY create a publishable package.
+**AUTO-012 — Terminal public decision.** Only `AUTO_PUBLISH` or an authorised reviewer approval of a held candidate MAY cause the authoritative transaction to commit a `PublicationBundle` record, its separate authorising `PublicationDecision`, the required audit record and dispatchable `TargetOperation` records. Exact `SurfacePayload` bytes and other immutable objects MAY be rendered, validated and staged before that decision, but staged or unreferenced bytes are not an authoritative publication bundle and are not dispatchable.
 
 **AUTO-013 — No passive approval.** Absence of an error, expiry of a timeout, empty reviewer queue, missing response or service recovery MUST NOT be interpreted as approval.
 
@@ -50,22 +50,24 @@ Equivalent internal names MAY be used if their semantics and transitions remain 
 
 ### Publication controller
 
-**AUTO-020 — Separate authority.** Public publication credentials MUST be available only to a dedicated publication controller or equivalent deterministic boundary component.
+**AUTO-020 — Separate authority.** Public publication credentials MUST be available only inside a dedicated deterministic publication-controller trust boundary. A credential-bearing target adapter is an internal component of that boundary, MUST accept only immutable committed target-operation identities from the controller and MUST use a distinct least-privilege credential per target, environment and permitted operation.
 
-**AUTO-021 — No direct generative publication.** A generative planner, researcher, extractor, writer, critic, translator, image generator or repair agent MUST NOT possess or invoke a public publishing credential directly.
+**AUTO-021 — No direct generative publication.** A generative planner, researcher, extractor, writer, critic, translator, image generator or repair agent MUST NOT possess or invoke a public publishing credential directly. Hermes, Web Admin clients, logs, ledger payloads and backups MUST NOT expose target credentials. Credential rotation and revocation MUST remain independent of model, agent and client deployment.
 
-**AUTO-022 — Validated package only.** The publication controller MUST accept only a versioned, immutable publication package that includes:
+**AUTO-022 — Committed target operation only.** The publication controller MUST execute only a versioned, immutable `TargetOperation` that references:
 
 - candidate and story identifiers;
-- content and asset hashes;
+- one exact publication-bundle digest and one exact surface-payload digest;
 - evidence-package reference;
 - applicable policy version;
 - required validator results;
-- decision outcome and reason data;
-- publication targets; and
+- one separate current authorising publication-decision identity and reason data;
+- one allow-listed publication target and operation; and
 - decision actor or automated controller identity.
 
-**AUTO-023 — Package integrity.** Any change to content, headline, metadata, source links, asset, target or notification after validation MUST invalidate the previous publish authorisation and trigger the applicable validation again.
+The controller MUST validate those committed references and current authority before execution. It MUST NOT mutate, regenerate, summarise or reinterpret the payload.
+
+**AUTO-023 — Bundle integrity.** Any change to reader-visible editorial content, headline, editorial metadata, source links, governed asset, policy-bound validation input, exact surface payload or the bundle's included target set after validation MUST create a new `PublicationBundle`, require the applicable validation again and require a new publication decision. A target attempt, acknowledgement, observation, reconciliation record or external `AccessPolicyAssignment` MUST NOT mutate the existing bundle.
 
 **AUTO-024 — Idempotency.** Publication MUST be idempotent by story, version and target so a retry cannot silently create duplicate public items.
 
@@ -109,6 +111,10 @@ Equivalent internal names MAY be used if their semantics and transitions remain 
 
 **AUTO-055 — Policy override visibility.** If a reviewer uses an explicitly permitted override, the audit record MUST identify the overridden requirement and the authority permitting that override. A generic “approved” note is insufficient.
 
+**AUTO-056 — Admin approval lifecycle.** Web Admin MUST expose a machine-readable lifecycle for held work covering queued, claimed where assignment is used, permission denied, stale-version conflict, approve, reject, redact or regenerate action in progress, action failure, mandatory revalidation, authority commit, dispatch, expiry and terminal completion. Every state and action MUST be keyed to the exact candidate, story version, evidence package, staged candidate-manifest digest and prior decision revision, with stable reason codes.
+
+**AUTO-057 — Concurrent and repeated action safety.** An Admin approval command MUST carry the acting principal, granted authority, idempotency identity and expected decision or aggregate version. A stale, repeated or unauthorised action MUST fail explicitly and MUST NOT approve different bytes, bypass revalidation or repeat an ambiguous external action.
+
 ### Emergency control
 
 **AUTO-060 — Global pause.** The operator MUST have a control that immediately prevents new autonomous publications and notifications across all targets.
@@ -127,12 +133,13 @@ Equivalent internal names MAY be used if their semantics and transitions remain 
 2. A candidate containing an unresolved serious allegation reaches `HOLD_FOR_REVIEW` with a stable reason code and creates no public item.
 3. A lead-only rumour reaches `REJECT` and cannot be released by timeout or queue expiry.
 4. A writing agent attempting to invoke the public publisher is denied by tool permissions.
-5. A content change after validation invalidates the old package and the controller refuses it.
+5. A content change after validation requires a new bundle and decision; the controller refuses an operation referring to the superseded authority.
 6. An unavailable required validator blocks publication and creates an observable failure record.
 7. A reviewer amendment is revalidated and the audit identifies both the original and amended packages.
 8. Activating the global pause prevents new stories and notifications while retaining the evidence and audit trail.
 9. Resuming after a policy update re-evaluates queued packages rather than publishing them under stale approval.
-10. Retrying the same valid package does not duplicate the public story.
+10. Retrying the same valid target operation does not duplicate the public story.
+11. Two reviewers acting on the same held revision cannot both commit conflicting outcomes; the stale action receives an explicit conflict and the Semantic UI projection shows the effective decision.
 
 ## Non-goals
 

@@ -134,7 +134,7 @@ Generated Cypher must not have a general write credential. LlamaIndex itself war
 
 Hermes should receive named tools such as `find_related_story_candidates`, `get_event_timeline`, `find_source_revision_impact` and `get_story_provenance`, not a generic `run_cypher` capability. Every result must identify a contiguous `projected_through_ledger_seq`, the projector and ontology versions, any projection gap or dead-letter state, the query validity time and the serving time. A later sequence must not conceal an earlier failed projection event.
 
-Proposal exploration, when explicitly enabled for research, must use a labelled trust scope. A source observation may still be malicious, stale, rights-restricted or evidentially insufficient, and an admitted relationship is not by itself a publishable evidence package. Publication validation must hydrate the exact governed evidence package from the ledger and object store.
+Proposal exploration, when explicitly enabled for research, must use a labelled trust scope. A source observation may still be malicious, stale, rights-restricted or evidentially insufficient, and a Governed Relation is not by itself approved publication evidence. Publication validation must hydrate the exact governed Evidence Package from the ledger and object store.
 
 ## Database decision matrix
 
@@ -176,14 +176,14 @@ FalkorDB and SurrealDB remain useful landscape references but are not simultaneo
 
 ## Integrated workstreams and dependency gates
 
-GraphRAG must not define reader-facing publication correctness, but its identity, event and projection contracts must exist from the same first durable schema:
+GraphRAG must not define reader-facing publication correctness, but its identity, event and projection contracts must exist from canonical production schema v1:
 
-1. obtain explicit owner acceptance of the authority/projection ADR;
-2. define the one canonical identity, temporal, trust and ordered-event contract used by publication, serving and knowledge projections;
-3. implement publication/serving and governed graph workstreams in parallel against that contract; and
+1. resolve the one canonical identity, temporal, trust, access and ordered-event contract, including its enforced command-writer and recovery boundaries;
+2. obtain explicit owner acceptance of the authority/projection and SQLite ADRs as one architecture decision;
+3. implement publication/serving and governed graph workstreams against canonical production schema v1; and
 4. run the integrated publication, reconciliation, Neo4j/Graphiti and Hermes acceptance proof before one production activation.
 
-PR [#75](https://github.com/fol2/newsroom/pull/75) provides shadow-only package, audit, authority, pause and recording-intent primitives. It does not supply the final graph, serving or publication architecture and must not be merged unchanged as an intermediate base. Approved algorithms and tests may be ported to the final contract after their residual authority/replay findings are resolved; its experimental schema creates no production migration obligation.
+PR [#75](https://github.com/fol2/newsroom/pull/75) provides shadow-only package, audit, authority, pause and recording-intent primitives. It does not supply the canonical graph, serving or publication architecture and must not be merged unchanged as an intermediate base. Approved algorithms and tests may be ported to the canonical contract after their residual authority/replay findings are resolved; its experimental schema creates no production migration obligation.
 
 The three initial graph use cases are:
 
