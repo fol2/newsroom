@@ -20,7 +20,7 @@ The suite describes target behaviour. It does not claim that the current Discord
 
 `MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` and `MAY` are normative only when the individual specification is `Accepted` or the owner explicitly authorises implementation.
 
-The Topic 1–8 discovery specifications are Accepted. `discovery-reliability-and-operations.md` and later-topic documents remain Draft unless their metadata says otherwise.
+The Topic 1–9 discovery specifications are Accepted. `discovery-prioritisation-and-outcomes.md` and later-topic documents remain Draft unless their metadata says otherwise.
 
 Requirement identifiers are stable references. Existing identifiers should not be renumbered; superseded requirements remain traceable.
 
@@ -37,7 +37,8 @@ Requirement identifiers are stable references. Existing identifiers should not b
 | [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md) | Accepted Work Items, retrieval, relationships, Hypotheses and Candidate formation | Sections 3–6 and 13 |
 | [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md) | Accepted bounded search roles, query controls, provider boundaries and coverage audit | Sections 3–6 and 13 |
 | [`discovery-shadow-evaluation.md`](discovery-shadow-evaluation.md) | Accepted shadow isolation, Plans and Epochs, event-level review, metrics, blockers and release evidence | Sections 3–6 and 13–14 |
-| [`discovery-reliability-and-operations.md`](discovery-reliability-and-operations.md) | Proposed Operational Profiles, scheduling, health, retries, quarantine, capacity, recovery and admission | Sections 3–6 and 13–14 |
+| [`discovery-reliability-and-operations.md`](discovery-reliability-and-operations.md) | Accepted Operational Profiles, scheduling, health, retry, quarantine, capacity, recovery and admission | Sections 3–6 and 13–14 |
+| [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md) | Proposed decision order, canonical outcomes, reason taxonomy, ordinal priority and scoring boundary | Sections 3–6 and 13–14 |
 | [`news-discovery.md`](news-discovery.md) | Cross-cutting discovery architecture, collection and safeguards | Sections 3–6 and 13 |
 | [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Story qualification, source authority, corroboration and evidence | Sections 3–7 |
 | [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution and article contract | Sections 8 and 10 |
@@ -60,6 +61,7 @@ Requirement identifiers are stable references. Existing identifiers should not b
 9. Discovery Signals, Leads and Candidates are not evidence.
 10. A shadow result is not production authority.
 11. Operational admission is scoped and versioned and remains separate from activation.
+12. Outcome, reason, current status and processing priority remain separate concepts.
 
 ## Conformance model
 
@@ -73,7 +75,7 @@ Conflicts between Accepted requirements stop the affected path and require owner
 
 Plans organise accepted requirements and cannot create or change them. A plan must identify exact files and requirement IDs, exclusions, milestones, acceptance evidence, temporary gaps and rollback.
 
-The discovery review remains topic-by-topic. Committing a Draft operational, prioritisation or locality document does not make it accepted and authorises no run.
+The discovery review remains topic-by-topic. Committing a Draft prioritisation or locality document does not make it accepted and authorises no run.
 
 ## Suite-level acceptance criteria
 
@@ -93,4 +95,4 @@ This suite does not select cloud, model, agent, database, identity, billing, obs
 
 ## Open questions
 
-Open suite questions include quantitative operational and release thresholds, retention periods, reviewer attribution, notification preferences and controlled cutover or historical import. Discovery-specific open questions remain in the active review sequence.
+Open suite questions include evidence-based operational and release thresholds, retention periods, reviewer attribution, notification preferences and controlled cutover or historical import. Discovery-specific open questions remain in the active review sequence.
