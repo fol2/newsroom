@@ -10,30 +10,29 @@
 **Accepted record semantics:** [`discovery-record-semantics.md`](discovery-record-semantics.md)  
 **Accepted source roles:** [`discovery-source-roles-and-selection.md`](discovery-source-roles-and-selection.md)  
 **Accepted change semantics:** [`discovery-change-and-planned-agenda.md`](discovery-change-and-planned-agenda.md)  
-**Related triage draft:** [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md)  
+**Accepted triage contract:** [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md)  
+**Related search Draft:** [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md)  
 **Related architecture plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)  
 **Related reference:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 3–6 and 13  
 **Related proposal:** [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md) (`Proposed`; owner review pending)  
-**Decision state:** Coverage, workflow, record semantics, source roles and source-change semantics are Accepted. Triage, search, shadow evaluation, operations and final architecture remain under sequential owner review.  
+**Decision state:** Coverage, workflow, record semantics, source roles, change semantics, triage and event grouping are Accepted. Search, shadow evaluation, operations and final architecture remain under sequential owner review.  
 **Supersedes:** None
 
 ## Purpose
 
-Define cross-cutting discovery controls for monitoring the accepted coverage boundary through the accepted workflow, identity model, source portfolio and source-change model without treating discovery as evidence or spending model work merely to prove that nothing changed.
+Define cross-cutting discovery controls for monitoring the accepted coverage boundary through the accepted workflow, identity model, source portfolio, source-change model and triage contract without treating discovery as evidence or spending model work merely to prove that nothing changed.
 
-Coverage defines what must be sought. Workflow defines how work moves. Record semantics define identity and lineage. Source roles define why sources are included. Change semantics define what source observations mean. Topic 6 now proposes how Leads are triaged and grouped. This file must not redefine accepted contracts to fit an endpoint, provider or implementation.
+Coverage defines what must be sought. Workflow defines how work moves. Record semantics define identity and lineage. Source roles define why sources are included. Change semantics define what observations mean. Triage defines how Leads become dispositions, Event Hypotheses and Candidates. Topic 7 now proposes the bounded role of search and coverage audit.
 
 ## Scope
 
 This specification covers source-architecture controls, change-driven collection, bounded search, coverage auditing and cross-cutting safeguards.
 
-Detailed transitions are in [`discovery-workflow.md`](discovery-workflow.md); identities are in [`discovery-record-semantics.md`](discovery-record-semantics.md); source roles and candidate paths are in [`discovery-source-roles-and-selection.md`](discovery-source-roles-and-selection.md); source-change and Planned Agenda meaning is in [`discovery-change-and-planned-agenda.md`](discovery-change-and-planned-agenda.md); triage and grouping are under Topic 6 review; search belongs to Topic 7; shadow evaluation to Topic 8; and operations to Topic 9.
-
-It does not claim that the current Brave-, RSS-, GDELT- and Gemini-based pool conforms, and it does not authorise implementation.
+Detailed contracts are maintained in the linked Topic specifications. This file does not claim that the current Brave-, RSS-, GDELT- and Gemini-based pool conforms, and it does not authorise implementation.
 
 ## Review state
 
-The accepted Topic 1–5 contracts are mandatory bases for later decisions. Requirements below remain Draft where they depend on unresolved triage, search, operations or evaluation.
+The accepted Topic 1–6 contracts are mandatory bases for later decisions. Requirements below remain Draft where they depend on unresolved search, shadow evaluation, operations or final architecture.
 
 ADR 0004 remains Proposed until the complete architecture decision is reviewed.
 
@@ -73,7 +72,7 @@ ADR 0004 remains Proposed until the complete architecture decision is reviewed.
 
 **DISC-016 — Observation-model constraint.** Transition inference remains within the accepted observation model for the exact Source Definition Version. Feed-window disappearance, partial snapshots and clock passage cannot be converted silently into withdrawal, ending or occurrence.
 
-### Discovery states, gates and triage boundary
+### Discovery states, gates and triage
 
 **DISC-020 — Discovery Signal.** Every accepted candidate observable transition enters through the Discovery Signal contract with exact source, item, revision, representation and lineage references. A Signal is not evidence.
 
@@ -83,27 +82,33 @@ ADR 0004 remains Proposed until the complete architecture decision is reviewed.
 
 **DISC-023 — News Lead.** A Signal becomes a Lead only through a committed Gate Decision and retains exact lineage. A Lead is eligible for triage and is not evidence.
 
-**DISC-024 — Story Candidate.** One or more Leads become a Candidate only through accepted retrieval, structured proposal validation and deterministic Candidate admission. The exact Candidate Version and basis are recorded.
+**DISC-024 — Story Candidate.** One or more Leads become a Candidate only through accepted Work Item formation, bounded retrieval, structured proposal validation and deterministic Candidate admission. The exact Candidate Version and basis are recorded.
 
 **DISC-025 — Evidence boundary.** Discovery MUST NOT create a Source Observation, Governed Claim, Evidence Package or publication authority. Evidence acquisition independently retrieves and governs current permitted source material.
 
 **DISC-026 — Inspectable outcome.** Every processed Check, Signal, Lead, Agenda expectation, triage decision and Candidate handoff retains an inspectable outcome. Final reason strings remain for Topic 10.
 
-### Model, batching and search boundary
+### Model and batching boundary
 
 **DISC-030 — No model for an empty tick.** Scheduling, preflight, collection, parsing, baseline comparison and unchanged detection MUST complete without waking a model merely to confirm no work.
 
-**DISC-031 — Bounded triage.** Model assistance operates on bounded Triage Work Items, optionally packaged in execution batches that do not imply editorial grouping. Prompts and outputs are versioned, structured and untrusted. Topic 6 decides the exact semantic contract.
+**DISC-031 — Bounded triage.** Model assistance operates on bounded Triage Work Items. Execution Batch membership does not imply editorial grouping. Prompts and outputs are versioned, structured and untrusted.
 
 **DISC-032 — Deferred full acquisition.** Discovery SHOULD use source-supplied metadata and minimum permitted changed fragments. Full evidence acquisition begins only after Candidate admission, except for approved replay or evaluation fixtures.
 
-**DISC-033 — Search role unresolved.** Search remains provider-neutral and separately metered until Topic 7 defines accepted roles. It MUST NOT become an unbounded firehose or silently compensate for a missing Anchor.
+### Search and coverage-audit boundary
 
-**DISC-034 — Search triggers.** Automated search MAY run only under a later accepted role and rule, such as observed gap, failed selected path, missed expectation, authorised lead or bounded audit sample.
+**DISC-033 — Search role under review.** Search remains provider-specific, separately metered and non-authoritative until Topic 7 is accepted. It MUST NOT become an unbounded firehose, the sole Anchor for an Active obligation or silent compensation for a missing source path.
 
-**DISC-035 — Enforced budget.** Every automated search provider MUST have an enforced request and cost budget. Exhaustion creates a visible outcome and cannot trigger unapproved switching or weaker gates.
+**DISC-034 — Search triggers.** Automated search MAY run only under an accepted Search Purpose and rule, such as prospective outer radar, pre-registered audit, reviewed Gap investigation, missed Planned occurrence, bounded supplemental discovery or explicit outage contingency.
 
-**DISC-036 — Recall interpretation.** GDELT, media feeds and search indexes are not recall ground truth. Coverage evaluation combines bounded comparisons with reviewed missed-story decisions and Coverage Gaps.
+**DISC-035 — Enforced search budget.** Every automated Search Purpose and provider MUST have enforced request, result, expansion, retry, downstream-work and gross-cost budgets. Exhaustion creates a visible outcome and cannot trigger unapproved switching or weaker gates.
+
+**DISC-036 — Recall interpretation.** Media feeds, GDELT and search indexes are not recall ground truth. Prospective audit, retrospective Gap investigation, source health and reviewed Coverage Gaps remain distinguishable.
+
+**DISC-037 — Search result rights.** Search-provider permission MUST NOT be treated as permission to persist results, evaluate a model, redistribute content, retrieve the linked publisher or use snippets as evidence. Provider and underlying-source rights remain separate.
+
+**DISC-038 — Query privacy.** External search queries MUST exclude private, confidential and unnecessary sensitive information and remain under deterministic purpose, provider and amplification control.
 
 ### Safeguards and validation
 
@@ -113,30 +118,31 @@ ADR 0004 remains Proposed until the complete architecture decision is reviewed.
 
 **DISC-042 — No discovery quota.** Discovery and triage support zero Leads and zero Candidates. Beat balance, cadence or unused capacity cannot promote a weaker signal.
 
-**DISC-050 — Shadow audit.** Any authorised shadow discovery retains exact lineage sufficient to compare portfolio paths, change detection, grouping and reviewed misses. Topic 8 defines protocol and interpretation.
+**DISC-050 — Shadow audit.** Any authorised shadow discovery retains exact lineage sufficient to compare portfolio paths, change detection, grouping, search purposes and reviewed misses. Topic 8 defines protocol and interpretation.
 
-**DISC-051 — Source health.** Operational checks make failed, partial, stale or broken sources and bounded-search usage visible. Detailed objectives belong to Topic 9.
+**DISC-051 — Source and provider health.** Operational checks make failed, partial, stale, rate-limited or broken sources and search providers visible. Detailed objectives belong to Topic 9.
 
-**DISC-052 — Shadow evaluation.** A proposed source portfolio, observation model, triage policy and adapters MUST pass owner-approved shadow evaluation before production authority. A shortlist or Draft does not authorise execution.
+**DISC-052 — Shadow evaluation.** A proposed source portfolio, observation model, triage policy, search role and adapters MUST pass owner-approved shadow evaluation before production authority. A shortlist or Draft does not authorise execution.
 
 **DISC-053 — Coverage feedback.** A relevant development found only through another permitted path may create a reviewed Coverage Gap. Closing it SHOULD improve coverage, source selection or workflow rather than create an unexamined broad-search dependency.
 
 ## Acceptance criteria
 
-1. An unchanged selected source completes without model call or Lead.
+1. An unchanged selected source completes without a model call or Lead.
 2. Invalid production source configuration fails closed instead of activating broad defaults.
 3. Parser break remains failure or quarantine and is not reported as no news or publisher change.
 4. Repeated delivery creates at most one equivalent semantic transition while retaining Occurrences.
 5. An official rule revision can be considered without several outlets repeating it.
 6. Rolling-feed disappearance cannot become withdrawal without a supporting source contract.
 7. Partial current-state snapshot cannot clear an active warning by absence.
-8. Media, search and index results cannot enter an Evidence Package merely because discovery found them.
-9. Planned expectation reaching its date does not itself become occurrence evidence or Candidate.
-10. An execution batch cannot itself establish that its Work Items describe one event.
-11. Retrieval similarity cannot create an Event Hypothesis, merge or Candidate directly.
-12. Search budget exhaustion remains visible and cannot be bypassed.
-13. A Candidate preserves exact contributing lineage while evidence acquisition creates its own Source Observations.
-14. No shadow run or production implementation is authorised until applicable triage, search, evaluation and operational decisions are accepted.
+8. An execution batch cannot establish that its Work Items describe one event.
+9. Empty or degraded retrieval cannot force a new Event Hypothesis or Candidate.
+10. A Planned expectation reaching its date does not itself become occurrence evidence or Candidate.
+11. Media, search and index results cannot enter an Evidence Package merely because discovery found them.
+12. Search-provider failure, zero results and budget exhaustion remain distinct and visible.
+13. A prospective audit cannot be silently replaced by a hindsight query.
+14. A Candidate preserves exact contributing lineage while evidence acquisition creates its own Source Observations.
+15. No shadow run or production implementation is authorised until applicable search, evaluation and operational decisions are accepted.
 
 ## Non-goals
 
@@ -146,7 +152,7 @@ It does not define evidence extraction, claim admission, drafting or publication
 
 ## Open questions
 
-- Will the owner accept, amend or reject the Topic 6 triage and event-grouping semantics?
-- What role, if any, does recurring or on-demand search play at launch?
+- Will the owner accept, amend or reject the Topic 7 search and coverage-audit contract?
 - What shadow method is sufficient to justify production authority?
-- What source-health, queueing and retry thresholds are required for production?
+- What source-health, queueing, retry and provider thresholds are required for production?
+- Which locality paths, if any, should later move beyond Best effort?
