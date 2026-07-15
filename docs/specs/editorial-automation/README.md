@@ -1,12 +1,12 @@
 # Autonomous Editorial System specification suite
 
-**Status:** Draft  
-**Owner:** Product owner  
-**Last updated:** 2026-07-11  
-**Canonical language:** English  
-**Related plan:** None  
-**Canonical reference:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md)  
-**Development translation:** [`../../reference/editorial/product-editorial-charter.en.md`](../../reference/editorial/product-editorial-charter.en.md)  
+**Status:** Draft
+**Owner:** Product owner
+**Last updated:** 2026-07-15
+**Canonical language:** English
+**Related plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)
+**Canonical reference:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md)
+**Development translation:** [`../../reference/editorial/product-editorial-charter.en.md`](../../reference/editorial/product-editorial-charter.en.md)
 **Supersedes:** None
 
 ## Purpose
@@ -41,6 +41,7 @@ Requirement identifiers are stable references for plans, issues, tests and imple
 | [`rights-and-visuals.md`](rights-and-visuals.md) | Source access, copyright, storage, asset rights and visual generation | Sections 8 and 9 |
 | [`sensitive-content-and-escalation.md`](sensitive-content-and-escalation.md) | Personal information, courts, children, allegations and sensitive subject rules | Sections 11 and 14 |
 | [`publication-lifecycle-and-audit.md`](publication-lifecycle-and-audit.md) | Feed behaviour, publication surfaces, corrections, withdrawal, archive and audit records | Sections 12 and 13 |
+| [`publication-engineering-and-projection-control.md`](publication-engineering-and-projection-control.md) | Authoritative records, projections, immutable target payloads, dispatch, acknowledgement and reconciliation | Sections 12–14 plus adopted engineering constraints |
 | [`quality-evaluation-and-change-control.md`](quality-evaluation-and-change-control.md) | Pre-release evaluation, versioning, monitoring, rollback and policy change control | Sections 13 and 14 |
 
 ## Cross-suite invariants

@@ -1,11 +1,11 @@
 # Autonomy and publication control specification
 
-**Status:** Draft  
-**Owner:** Product owner  
-**Last updated:** 2026-07-11  
-**Canonical language:** English  
-**Related plan:** None  
-**Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 2, 13 and 14  
+**Status:** Draft
+**Owner:** Product owner
+**Last updated:** 2026-07-15
+**Canonical language:** English
+**Related plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)
+**Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 2, 13 and 14
 **Supersedes:** None
 
 ## Purpose

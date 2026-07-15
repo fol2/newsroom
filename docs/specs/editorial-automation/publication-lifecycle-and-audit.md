@@ -1,11 +1,11 @@
 # Publication lifecycle and audit specification
 
-**Status:** Draft  
-**Owner:** Product owner  
-**Last updated:** 2026-07-11  
-**Canonical language:** English  
-**Related plan:** None  
-**Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 12 and 13  
+**Status:** Draft
+**Owner:** Product owner
+**Last updated:** 2026-07-15
+**Canonical language:** English
+**Related plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)
+**Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 12 and 13
 **Supersedes:** None
 
 ## Purpose
@@ -174,7 +174,7 @@ This specification covers article identity and versions, feed behaviour, filters
 
 ## Acceptance criteria
 
-1. The same story published to an app and Discord maps both target identifiers to one story version.
+1. The same story published to the app article service and a secondary controlled target maps both target identifiers to one story version.
 2. A retry after one target succeeds and another fails does not duplicate the successful target.
 3. A material headline correction creates a new version, visible note and cross-surface update.
 4. A typo correction can be applied automatically only after meaning-preservation validation.
