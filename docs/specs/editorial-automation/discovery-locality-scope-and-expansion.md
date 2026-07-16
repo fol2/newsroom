@@ -1,8 +1,9 @@
 # Discovery locality scope and expansion specification
 
-**Status:** Draft for owner review  
+**Status:** Accepted  
 **Owner:** Product owner  
 **Last updated:** 2026-07-16  
+**Accepted by owner:** 2026-07-16  
 **Canonical language:** English  
 **Related review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
 **Accepted coverage contract:** [`discovery-coverage-contract.md`](discovery-coverage-contract.md)  
@@ -16,145 +17,90 @@
 **Accepted operations contract:** [`discovery-reliability-and-operations.md`](discovery-reliability-and-operations.md)  
 **Accepted outcome contract:** [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md)  
 **Related discovery specification:** [`news-discovery.md`](news-discovery.md)  
-**Decision state:** The launch locality boundary, locality records, event-scoped watch and evidence-based expansion rules below are proposals. Committing this Draft does not select a locality, activate a local source, create a coverage promise, authorise a run or change product navigation.  
+**Implementation authority:** None. Acceptance defines the locality boundary and expansion semantics; it selects no locality or source, creates no coverage promise, authorises no run or spending and changes no product navigation.  
 **Supersedes:** None
 
 ## Purpose
 
-Define how UK local developments remain discoverable without claiming that the launch system systematically monitors every council, NHS body, police force, school, court, utility, transport operator or local publication.
+Define how material UK local developments remain discoverable without claiming that launch systematically monitors every council, NHS body, police force, school, court, utility, transport operator or local publication.
 
-The specification separates:
+The contract separates:
 
-- an evidence-supported locality label on a story;
+- an evidence-supported locality label on one story;
 - a material local event found through any permitted path;
-- a bounded event-scoped local watch;
-- a selected locality and source-class monitoring portfolio; and
+- a bounded Event-Scoped Local Watch;
+- a selected locality-plus-source-class portfolio; and
 - a public promise of systematic locality coverage.
 
 These are not equivalent.
 
 ## Scope
 
-This specification defines:
+This specification defines the initial UK locality boundary, locality and service-area identity, Event-Scoped Local Watch, evidence-based expansion, source-class independence, privacy and disclosure controls, and the treatment of Hong Kong district details and global locations.
 
-- the initial UK locality coverage boundary;
-- the distinction between nation-level and local coverage;
-- locality and service-boundary identity;
-- selected locality and source-class scope;
-- event-scoped local monitoring;
-- evidence-based locality proposal, evaluation, admission and retirement;
-- privacy, fairness, materiality and disclosure controls; and
-- the treatment of Hong Kong district information and global locations.
+It does not select councils, cities, police forces, health bodies, operators, endpoints, polling intervals, budgets, administrative-boundary providers, reader geolocation or personalised local feeds. Actual selected localities, source classes and numerical admission thresholds remain **Needs experiment**.
 
-It does not define:
+## Accepted launch boundary
 
-- a final list of councils, cities, police forces, health bodies or operators;
-- source endpoints, polling intervals, budgets or parser implementation;
-- reader geolocation or personalised local feeds;
-- publication prominence or notification targeting;
-- administrative-boundary data provider selection; or
-- physical storage or migration.
+The initial launch posture is **locality-aware and locality-uncommitted**:
 
-Actual selected localities, source classes and quantitative admission thresholds remain **Needs experiment** until owner-approved evaluation and operational evidence exists.
+1. No fixed UK city, county, borough, council area or service region receives systematic all-topic monitoring by default.
+2. No local source class is enabled merely to claim local-news coverage.
+3. Material local events found through national or nation-level sources, established-media radar, approved search, manual or reader leads, or an Event-Scoped Local Watch remain eligible for the normal Signal-to-Candidate workflow.
+4. National or nation-level sources may emit localised warnings or incidents for an accepted event class without establishing locality completeness.
+5. Permanent locality or source-class selection requires a versioned Locality Coverage Decision after source, rights, evaluation and operational qualification.
+6. Launch and operator documentation must state plainly that systematic UK locality completeness remains deferred unless an exact Locality Coverage Unit is later accepted.
 
-## Accepted baseline carried forward
-
-The Accepted coverage contract already establishes:
-
-- qualifying UK-wide and England-, Scotland-, Wales- and Northern-Ireland-level developments are Active for the accepted subject classes;
-- material local UK developments remain within product scope;
-- exhaustive local-source monitoring is an explicit deferred gap;
-- no locality is mandatory at launch under Topic 1;
-- a local story may proceed normally when found; and
-- Hong Kong is one geography and does not promise district-level completeness.
-
-Topic 11 must therefore make the deferred boundary explicit without either silently broadening it or treating all local news as out of scope.
+England-, Scotland-, Wales- and Northern-Ireland-level Active obligations remain separate from local expansion and cannot be deferred because no council or city is selected.
 
 ## Core distinctions
 
-### A local story is not a locality promise
+### Local story is not locality promise
 
-A Story Candidate may carry an evidence-supported city, county, borough, council or other locality even when the Newsroom does not systematically monitor that place.
+A Candidate or Story may carry the most specific locality supported by permitted evidence even where that place is not systematically monitored. Publishing one story about Leeds, Glasgow or Croydon does not imply recurring or complete coverage there.
 
-Publishing one story about Leeds, Glasgow or Croydon does not imply complete or recurring coverage of that locality.
+### Localised national path is not locality completeness
 
-### Nation-level is not local
+A national flood, weather, road or infrastructure source may detect localised events within its declared event class. It does not establish coverage of every council service, school, police incident, health body, local operator or local policy in those places.
 
-England, Scotland, Wales and Northern Ireland are accepted nation-level geographies. Explicit paths for their Active obligations are required independently of Topic 11.
+### Locality is not service boundary
 
-Failure to select local councils or cities does not defer nation-level coverage.
+A city, postcode, council area, police-force area, NHS geography, transport network, utility region and court circuit may overlap without being identical. The exact applicable administrative or service boundary remains explicit and versioned.
 
-### Localised national sources are not locality-complete portfolios
+### Selected locality is not all local news
 
-A national or nation-level source may emit geographically specific warnings or service states across many places, such as severe-weather, flood, strategic-road or nationally managed infrastructure alerts.
+A locality is selected only for exact obligations and exact source classes. Selecting a council source does not select policing, health, schools, transport, utilities, courts or local media automatically.
 
-Such a source may support an accepted event class across its declared scope. It does not establish systematic coverage of every local policy, school, health body, council service, police incident or transport operator in the same places.
+### Event-Scoped Local Watch is not permanent selection
 
-### Locality label is not service boundary
-
-A city name, postcode, council area, police-force area, NHS geography, transport network, utility region and court circuit may overlap without being identical.
-
-The system must retain the exact boundary or service scope relevant to the source and must not silently infer one from another.
-
-### Event-scoped watch is not permanent selection
-
-A clearly major incident may justify bounded monitoring of the responsible local authorities, operators and established local media for that event.
-
-That temporary watch does not create an ongoing locality portfolio or public completeness promise.
-
-### A selected locality is not all local news
-
-A locality may be selected for one or more source classes or coverage obligations. Selection of a council feed does not automatically select local policing, health, schools, transport, utilities, courts or media.
-
-## Proposed initial launch boundary
-
-The proposed launch posture is **locality-aware and locality-uncommitted**:
-
-1. No fixed UK city, county, borough, council area or service region is promised systematic all-topic local monitoring at initial launch.
-2. No local source class is enabled merely to claim that local news is covered.
-3. Material local events found through national or nation-level sources, established media radar, approved search, manual or reader leads, or event-scoped checks remain eligible for normal Signal-to-Candidate workflow.
-4. Nationally scoped sources that emit localised warnings or incidents may serve their accepted event-class obligations without creating a broad locality promise.
-5. Any permanent locality or source-class addition requires a separate, versioned Locality Coverage Decision after the accepted source, evaluation and operational gates.
-6. Launch documentation must state that systematic UK locality completeness remains deferred unless an exact selected scope is later accepted.
-
-This posture avoids an arbitrary London-first or city-popularity assumption while preserving the product's ability to report material local news wherever it occurs.
+A major incident or bounded discovery question may justify temporary monitoring of responsible local authorities, operators and established local media. The watch expires or closes explicitly and creates no permanent locality portfolio or completeness promise.
 
 ## Locality semantic records
 
-These are conceptual contracts, not required database tables.
+These are conceptual contracts rather than required tables.
 
 ### Locality Reference
 
-A stable internal reference to a geographic or service area. It records:
-
-- locality type, such as city, county, borough, council, combined authority or service area;
-- canonical name and recognised aliases;
-- parent geography where applicable;
-- authoritative boundary or service-definition source;
-- boundary version and validity period;
-- known overlaps or non-nesting relationships; and
-- uncertainty or disputed scope.
-
-A name alone is not sufficient identity.
+A stable internal reference containing locality type, canonical name and aliases, parent geography where applicable, authoritative boundary or service-definition source, boundary version and validity, known overlaps and uncertainty. A name alone is not sufficient identity.
 
 ### Locality Coverage Unit
 
-One exact proposed or selected combination of:
+One exact combination of:
 
 - Locality Reference and boundary version;
-- coverage obligations or Best-effort classes;
-- local source classes;
+- accepted obligations or Best-effort classes;
+- selected local source classes;
 - population, service or event scope;
-- languages where relevant;
+- languages where applicable;
 - source roles and portfolio functions;
 - exclusions and known gaps; and
 - governing evaluation and Operational Profile versions.
 
-A Coverage Unit is deliberately narrower than “all news in this place”.
+It is deliberately narrower than “all news in this place”.
 
 ### Locality Source-Class Scope
 
-The local institutional or radar class included in one Coverage Unit. Proposed classes are:
+Source classes are independently admitted:
 
 1. local government and combined-authority decisions;
 2. NHS, public-health and local healthcare bodies;
@@ -162,254 +108,79 @@ The local institutional or radar class included in one Coverage Unit. Proposed c
 4. schools, education authorities and major campuses;
 5. local and regional transport operators;
 6. utilities, infrastructure and environmental services;
-7. courts, planning, housing and building-safety bodies where an accepted public interface exists; and
+7. courts, planning, housing and building-safety bodies with an accepted public interface; and
 8. established local or community media radar.
-
-Each class is admitted separately. A source that republishes another origin retains that dependency.
 
 ### Locality Coverage Proposal
 
-An immutable proposal that identifies:
-
-- the exact Coverage Unit;
-- the accepted coverage or Gap basis;
-- why a permanent portfolio is preferable to event-scoped or Best-effort discovery;
-- candidate source roles and dependencies;
-- expected unique or earlier detections;
-- rights, technical, cost and operational assumptions;
-- privacy-safe audience or need evidence where used;
-- evaluation design and required slices;
-- alternatives considered; and
-- the consequence of not selecting the locality or class.
+An immutable proposal identifying the exact Coverage Unit, accepted Gap or coverage basis, reason permanent monitoring is preferable to Best-effort or event-scoped discovery, candidate sources and dependencies, expected contribution, rights and operational assumptions, privacy-safe audience evidence where used, evaluation design, alternatives and the consequence of not selecting it.
 
 ### Locality Coverage Decision
 
-An owner decision for an exact Coverage Unit and version. Possible semantic decisions include:
-
-- not selected;
-- Research or qualification candidate;
-- evaluation-only or Comparator-only;
-- selected for systematic monitoring within an exact scope;
-- selected with an explicit deferred sub-gap;
-- temporarily paused or operationally degraded;
-- retired; or
-- rejected.
-
-Selection does not itself activate sources. Source and operational activation remain separate.
+An immutable owner decision for one exact Coverage Unit version. Outcomes may include not selected, Research candidate, evaluation-only, selected for exact systematic scope, selected with an explicit sub-gap, paused, degraded, retired or rejected. Selection does not activate sources.
 
 ### Event-Scoped Local Watch
 
-A bounded monitoring decision tied to one exact Event Hypothesis, Lead, Candidate or major incident question. It records:
-
-- triggering event and coverage basis;
-- locality and service boundaries;
-- exact sources or source classes;
-- permitted purpose and expected transitions;
-- start, review and expiry conditions;
-- rights, request and cost limits;
-- owner and Operational Profile; and
-- closure or conversion criteria.
-
-Its default outcome at expiry is closure, not permanent locality selection.
+A bounded decision tied to one exact Event Hypothesis, Lead, Candidate or major-incident question. It records purpose, locality and service boundaries, exact sources, permitted transitions, start, review and expiry, rights, budget, owner, Operational Profile and closure or conversion conditions. Its default expiry outcome is closure.
 
 ### Locality Coverage Assessment
 
-A rebuildable, versioned view of what locality and source-class scopes are selected, evaluated, deferred, degraded or unavailable. It remains separate from individual source health and from story geography labels.
+A rebuildable, versioned view of selected, evaluated, deferred, degraded and unavailable locality-plus-source-class scopes. It remains separate from individual-source health and story geography labels.
 
-## Boundary and location rules
+## Boundary, precision and materiality
 
-### Evidence-supported precision
+The system uses only the most specific location supported by permitted source material. It must not infer a council, borough, postcode, campus or service area from a nearby city name.
 
-A Signal, Lead, Candidate or Story may use only the most specific location supported by permitted source material. The system must not infer a council, borough, postcode, campus or service area from a nearby city name.
+One event may retain several explicit geographies and service areas. Boundary changes create later configuration and assessment; they do not rewrite historical stories or decisions. Where mapping is uncertain, broader geography or explicit ambiguity is retained.
 
-### Multiple applicable geographies
+Locality does not lower the accepted scope, novelty, utility, rights, evidence or sensitive-content gates. Potentially qualifying local developments include major safety incidents, meaningful essential-service disruption, actionable public-service or housing changes affecting a meaningful group, building or environmental safety warnings, and substantive local democratic, court or civil-rights outcomes. Routine meeting notices, minor works, isolated delays, listings, promotional material and routine crime-roundup volume remain excluded.
 
-One event may carry several supported references, such as:
+## Event-Scoped Local Watch
 
-- a council area where a decision was made;
-- a wider transport network affected;
-- a nation-level policy basis; and
-- the UK label required by the product taxonomy.
+A bounded watch may follow an authoritative major warning, a plausible established-media or reader Lead, a Candidate requiring local state transitions, a Watch Condition or a bounded Evidence Intake question.
 
-These relationships remain explicit rather than flattened into one place string.
+It must:
 
-### Boundary versions
+- use the accepted source, rights, operational, Signal, Lead, triage and evidence boundaries;
+- identify one exact event purpose, source set, budget, owner and expiry;
+- avoid recursive whole-locality crawling;
+- keep unrelated local stories outside the watched Candidate;
+- create no evidence bypass; and
+- require a separate Locality Coverage Proposal before permanent conversion.
 
-Administrative and service boundaries change. A Locality Coverage Unit and source mapping must identify the boundary version used. Boundary change creates later configuration and assessment rather than rewriting historical stories or decisions.
+Repeated watches may inform a future proposal but do not create authority by repetition.
 
-### Boundary ambiguity
+## Evidence-based expansion
 
-When source scope and event location cannot be mapped defensibly, the system retains broader geography or explicit ambiguity. It must not guess precision to make local filtering appear complete.
+A permanent proposal may cite a combination of reviewed Coverage Gaps, missing Active paths, unique or materially earlier prospective detections, recurring material local events, privacy-safe aggregated audience need, resilience, necessary operator or Agenda paths, rights readiness, manageable noise and cost, and reasonable community representation.
 
-## Local materiality and editorial boundary
+No single factor is sufficient. A locality or source class must not be selected solely because an API exists, it is London or another prominent city, it has the largest population, one viral event occurred, it generates many articles, access is convenient, individual reader locations are available, a quota needs filling or the product wants to claim UK-local completeness.
 
-Locality does not lower the accepted newsworthiness threshold.
+Audience evidence must be aggregated, minimised and policy-approved. Individual addresses, precise reader histories and identifiable small cohorts must not drive source selection or external queries.
 
-Potentially qualifying local developments include:
-
-- authoritative public-safety warning or clearly major incident;
-- material disruption to an essential local service or route;
-- actionable council, school, health, housing, planning, utility or support change affecting a meaningful group;
-- building-safety, environmental, consumer or public-health warning;
-- local democratic, court or civil-rights outcome with substantive public consequence; or
-- a local development that creates a material UK–Hong Kong family or travel effect.
-
-Ordinary local noise remains excluded, including routine meeting notices, minor roadworks, isolated delays, ordinary event listings, small administrative updates, promotional material and crime-roundup volume without a qualifying public impact.
-
-A local source's output volume cannot create materiality.
-
-## Event-scoped local watch
-
-### Permitted triggers
-
-A bounded watch may be proposed after:
-
-- an authoritative major warning or incident;
-- an established-media or reader Lead that plausibly meets Active or Best-effort materiality;
-- an existing Candidate requiring local state transitions;
-- a Watch Condition requiring a responsible local source; or
-- Evidence Intake feedback requesting one bounded public-source question.
-
-### Limits
-
-An Event-Scoped Local Watch:
-
-- uses the normal source, rights, operational, Signal and triage boundaries;
-- has an exact event purpose and expiry;
-- cannot become recursive whole-locality crawling;
-- cannot silently add unrelated local stories to the Candidate;
-- cannot bypass evidence acquisition;
-- cannot imply that the locality is systematically covered; and
-- cannot convert one useful source into a recurring portfolio without a Locality Coverage Proposal and Decision.
-
-### Conversion to permanent coverage
-
-Repeated event-scoped watches may provide evidence for permanent selection. Conversion still requires Topic 8 evaluation, Topic 9 qualification and owner approval; repeated manual use alone is not authority.
-
-## Evidence-based selection and expansion
-
-A permanent Locality Coverage Proposal may be justified by a combination of:
-
-- repeated reviewed Coverage Gaps in one locality or source class;
-- an Active obligation lacking an adequate path for a materially affected population;
-- unique or materially earlier detections during prospective evaluation;
-- a recurring pattern of material local events relevant to the audience;
-- privacy-safe, aggregated audience need evidence;
-- a distinct resilience or failure mode not supplied by national paths;
-- a necessary responsible-operator, Agenda or occurrence-confirmation path;
-- acceptable rights, technical and operational readiness;
-- manageable noise, cost, review burden and amplification; and
-- reasonable geographic and community representation within the product strategy.
-
-No one factor is sufficient by itself.
-
-### Prohibited selection shortcuts
-
-A locality or source class must not be selected solely because:
-
-- an RSS feed or API exists;
-- it is London or another large or famous city;
-- it has the largest population;
-- one viral or tragic event occurred;
-- it generates many articles or social reactions;
-- a publisher offers convenient access;
-- individual readers' addresses or identifiable location history are available;
-- a category quota needs filling; or
-- the system wants to claim UK-local completeness.
-
-### Privacy-safe audience evidence
-
-Audience distribution MAY inform a proposal only through aggregated, minimised and policy-approved data. Individual addresses, precise reader locations or small identifiable cohorts must not enter source selection or external queries.
-
-## Qualification and admission path
-
-A selected systematic Locality Coverage Unit progresses through:
+The qualification path is:
 
 ```text
 Coverage or Gap basis
 → Locality Coverage Proposal
 → source-role and rights qualification
 → fixtures and replay
-→ prospective evaluation and source contribution review
+→ prospective evaluation and contribution review
 → Operational Profiles and capacity evidence
 → Locality Coverage Decision
 → source-specific admission and canary
 → separate activation decision
 ```
 
-The decision must identify exact sources, source classes, obligations, boundaries, languages, expected gaps, operational objectives, alerts, runbooks, rollback and disclosure.
+Evaluation considers event-level misses and contribution, earlier detection, overlap and dependency, ordinary local noise, boundary accuracy, language relevance, rights, health, latency, cost, amplification, reviewer burden, resilience and whether Event-Scoped Local Watch is the safer alternative. Raw article count, population and one quiet window are insufficient.
 
-Selection of one class does not inherit authority for another class. A new source, parser, boundary or Operational Profile version does not inherit prior authority.
+## Lifecycle and disclosure
 
-## Evaluation requirements
+Adding a locality, source class, obligation or boundary is a material change. Pause, degradation and retirement require explicit decisions, coverage-impact assessment, treatment of pending work and preserved history. A generic search or national Comparator cannot restore a failed selected local Anchor.
 
-A locality proposal is assessed using event-level and source-level evidence, including:
+Hong Kong remains one product geography with no district filter, quota or systematic district-completeness promise. Evidence-supported district and place details may appear in stories. Global also remains one product geography; factual locations create no country- or city-completeness promise.
 
-- relevant events and material misses;
-- unique and earlier detections;
-- overlap and shared-origin dependency;
-- false positives, ordinary local noise and reviewer burden;
-- boundary and location accuracy;
-- language and community relevance where applicable;
-- rights and source stability;
-- health, latency, cost and amplification;
-- Event-Scoped Watch frequency and whether it would have been a safer alternative;
-- resilience contribution; and
-- effect on required national, nation-level and Urgent capacity.
-
-Raw article count, population or one quiet evaluation window is not sufficient evidence.
-
-A selected locality or source class must still report insufficient exposure for rare event classes rather than claiming complete local recall.
-
-## Lifecycle, pause and retirement
-
-### Scope change
-
-Adding a locality, source class, obligation or boundary is a material product and operational change. It creates a new proposal, evaluation scope and decision.
-
-### Degraded or paused coverage
-
-When selected local paths fail, the system records the exact affected Coverage Unit and source class. A national Comparator or generic search cannot silently restore selected local coverage.
-
-### Retirement
-
-Retirement requires:
-
-- event-level contribution and coverage-impact assessment;
-- confirmation that no sole Active path is removed silently;
-- rights, cost, noise, reliability or strategy rationale;
-- treatment of pending watches and work;
-- updated user and operator disclosure; and
-- preserved historical decisions and source lineage.
-
-A short quiet period is not enough to retire a rare-event local Anchor.
-
-## Hong Kong and Global treatment
-
-### Hong Kong
-
-Hong Kong remains one geography for product filtering and navigation. The system may retain evidence-supported local place details in a story, but Topic 11 does not create district filters, district quotas or a systematic district-monitoring promise.
-
-A Hong Kong district name does not need to be suppressed when material to a story; it simply does not become a separate coverage section or automatic source-selection unit.
-
-### Global
-
-Global remains one product geography. Evidence-supported event locations may be retained for factual precision, but Topic 11 does not create country-by-country or city-by-city global monitoring promises.
-
-## Disclosure and diagnostics
-
-Internal and launch documentation must distinguish:
-
-- nation-level Active coverage;
-- national sources that emit localised items;
-- selected systematic Locality Coverage Units and source classes;
-- event-scoped local watches;
-- Best-effort local discovery; and
-- explicit deferred local gaps.
-
-If no Locality Coverage Unit is selected, documentation must say so plainly. Story locality labels and the number of local stories published must not be presented as evidence of systematic local monitoring.
-
-Coverage diagnostics may show locality and source-class counts, but they cannot create quotas or filler under the Accepted Topic 10 contract.
+Documentation must list selected Locality Coverage Units and explicit gaps, or state plainly that none is selected. Local story volume cannot be presented as proof of systematic monitoring.
 
 ## Requirements
 
@@ -475,7 +246,7 @@ Coverage diagnostics may show locality and source-class counts, but they cannot 
 
 **LOC-044 — Contribution metrics.** Evaluation MUST measure event-level unique and earlier detection, misses, overlap, noise, boundary accuracy, cost, health and reviewer burden rather than raw output count.
 
-**LOC-045 — Alternative assessment.** Evaluation MUST consider whether national localised sources, Best-effort radar or event-scoped watch can meet the need more safely than permanent locality monitoring.
+**LOC-045 — Alternative assessment.** Evaluation MUST consider whether national localised sources, Best-effort radar or Event-Scoped Local Watch can meet the need more safely than permanent locality monitoring.
 
 **LOC-046 — Rare-event honesty.** Quiet periods or absent rare events MUST NOT be treated as proof that a locality source is useless or fully evaluated.
 
@@ -485,11 +256,11 @@ Coverage diagnostics may show locality and source-class counts, but they cannot 
 
 **LOC-051 — Ordinary local noise excluded.** Routine notices, small delays, listings and low-impact administrative updates MUST NOT become Candidates merely because they are local.
 
-**LOC-052 — Coverage posture.** Selected local coverage health MUST be assessed by exact Coverage Unit and source class, separately from individual source and national portfolio health.
+**LOC-052 — Coverage posture.** Selected local coverage health MUST be assessed by exact Coverage Unit and source class, separately from individual-source and national-portfolio health.
 
 **LOC-053 — Comparator non-substitution.** Generic media or search availability MUST NOT repair a failed selected local Anchor or conceal the gap.
 
-**LOC-054 — Retirement impact.** Retirement MUST preserve history and assess the resulting coverage, pending work, disclosure and rollback consequences.
+**LOC-054 — Retirement impact.** Retirement MUST preserve history and assess resulting coverage, pending work, disclosure and rollback consequences.
 
 ### Hong Kong, Global and disclosure
 
@@ -505,44 +276,43 @@ Coverage diagnostics may show locality and source-class counts, but they cannot 
 
 ## Acceptance criteria
 
-1. A material Glasgow incident found by a national radar can proceed without Glasgow being a selected locality.
-2. Publishing that incident does not claim systematic Glasgow coverage.
+1. A material Glasgow incident found by a national radar can proceed without Glasgow being selected.
+2. Publishing it does not claim systematic Glasgow coverage.
 3. Scotland nation-level policy remains Active even when no Scottish council is selected.
-4. A national flood service may detect local warnings without implying that every council service is monitored.
-5. A London transport source is not enabled solely because London has a large population or the API is convenient.
+4. A national flood service may detect local warnings without implying every council service is monitored.
+5. A London transport source is not enabled solely because London is large or its API is convenient.
 6. A selected council feed does not imply selected police, NHS, school or utility coverage.
 7. A major incident may activate a bounded local watch that expires without creating a permanent portfolio.
-8. A city label is not inferred from an operator area that extends beyond the city.
-9. A local source producing many routine notices does not gain priority or Candidate authority from volume.
+8. A city label is not inferred from a wider operator area.
+9. Local-source volume creates no priority or Candidate authority.
 10. A local story outside selected scopes remains eligible when discovered.
 11. Audience evidence used for selection is aggregated and privacy-safe.
-12. Repeated Coverage Gaps may justify a proposal but do not activate sources automatically.
-13. A quiet pilot does not prove a rare-event local source has no value.
-14. A failed selected local Anchor remains degraded even when a generic search finds one related result.
-15. Retiring a locality source cannot silently remove the only path for an accepted selected obligation.
-16. Hong Kong district names may appear in stories without district navigation or completeness promises.
+12. Repeated Gaps may justify a proposal but do not activate sources automatically.
+13. A quiet pilot does not prove a rare-event source has no value.
+14. Generic search cannot repair a failed selected local Anchor.
+15. Retirement cannot remove a sole accepted path silently.
+16. Hong Kong district names may appear without district navigation or completeness claims.
 17. Launch documentation states whether any systematic Locality Coverage Units are selected.
-18. Acceptance of Topic 11 authorises no locality, source, query, run, spending, product filter or production activation.
+18. Acceptance authorises no locality, source, query, run, spending, filter, navigation change or production activation.
 
-## Owner decisions required to complete Topic 11
+## Completion record
 
-The Draft recommends these decisions:
+The product owner accepted this specification on 2026-07-16 with these decisions:
 
-1. Accept a **locality-aware, locality-uncommitted** initial launch: no fixed UK locality receives systematic all-topic monitoring by default.
-2. Accept that material local stories remain in scope and may proceed wherever discovered, without creating a monitoring promise.
-3. Accept that UK-wide and nation-level coverage is separate from locality expansion and remains governed by the Active coverage contract.
-4. Accept that nationally scoped sources may emit localised warnings or incidents for an accepted event class without establishing locality completeness.
-5. Accept Locality Reference, Locality Coverage Unit, Locality Source-Class Scope, Locality Coverage Proposal, Locality Coverage Decision, Event-Scoped Local Watch and Locality Coverage Assessment as conceptual records.
-6. Accept that a selected Coverage Unit is an exact geography-plus-source-class-plus-obligation scope, never “all news in this place”.
-7. Accept source-class independence across local government, health, public safety, education, transport, utilities, courts or planning, and local media.
-8. Accept bounded Event-Scoped Local Watch for a major incident or exact discovery question, with normal workflow, budget, owner and expiry, and no permanent-selection inference.
-9. Accept evidence-supported location precision, versioned boundaries and explicit separation of administrative and service geographies.
-10. Accept evidence-based selection using reviewed Gaps, prospective contribution, audience need, resilience, rights, cost and operational readiness, with no single-factor London-first, population, volume, API-availability or viral-event shortcut.
-11. Accept privacy-safe aggregated audience evidence only; individual or identifiable precise location data cannot drive source selection or external queries.
-12. Accept the full progression from proposal through rights, Topic 8 evaluation, Topic 9 qualification, owner decision, canary and separate activation.
-13. Accept that local materiality uses the same scope and utility gates as national coverage, and routine local noise remains excluded.
-14. Accept event-level contribution, boundary accuracy, noise, cost, health and reviewer burden as evaluation evidence rather than raw article count.
-15. Accept explicit pause, degradation and retirement decisions with coverage-impact assessment and preserved history.
-16. Accept that Hong Kong remains one product geography with no district filter or completeness promise, while evidence-supported local details may still appear.
-17. Accept that actual selected localities, source classes and numeric thresholds remain **Needs experiment**; no locality is selected merely by accepting Topic 11.
-18. Accept that Topic 11 authorises no locality, source, query, run, spending, navigation change or production activation.
+- initial launch is locality-aware and locality-uncommitted, with no fixed UK locality receiving systematic all-topic monitoring by default;
+- material local stories remain in scope wherever discovered and create no monitoring promise;
+- nation-level coverage remains separate from locality expansion;
+- nationally scoped sources may provide localised event-class detection without establishing locality completeness;
+- Locality Reference, Coverage Unit, Source-Class Scope, Proposal, Decision, Event-Scoped Local Watch and Coverage Assessment are accepted conceptual records;
+- selected coverage is exact geography plus source classes plus obligations, never all news in one place;
+- local source classes are independently selected;
+- Event-Scoped Local Watch is bounded, owned, budgeted and expiring and creates no permanent-selection inference;
+- location precision is evidence-supported and administrative and service boundaries remain distinct and versioned;
+- permanent selection uses reviewed Gaps, prospective contribution, privacy-safe audience need, resilience, rights, cost and operational readiness rather than London-first, population, volume, API convenience or one viral event;
+- expansion follows proposal, rights, Topic 8 evaluation, Topic 9 qualification, owner decision, canary and separate activation;
+- local materiality uses the same gates as national coverage and routine local noise remains excluded;
+- evaluation uses event contribution, boundary accuracy, noise, cost, health and reviewer burden rather than article count;
+- pause, degradation and retirement are explicit and preserve history;
+- Hong Kong remains one product geography without district filters or completeness promises, while supported local details remain permitted;
+- actual localities, source classes and numerical thresholds remain **Needs experiment**; and
+- Topic 11 authorises no locality, source, query, run, spending, navigation change or production activation.
