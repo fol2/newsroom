@@ -23,6 +23,7 @@ from .canonical import (
 from .models import (
     CommandDefinition,
     CommandValidationError,
+    CommittedCommandIdentity,
     InlinePayload,
     NO_PAYLOAD,
     NoPayload,
@@ -30,8 +31,21 @@ from .models import (
     ObjectAdmissionPayload,
     SemanticCommand,
 )
-from .policy import CommandRegistry, UnknownCommandDefinition
-from .service import AuthorizationReceipt, CommandService, ObjectAdmissionLookup
+from .policy import (
+    CommandRegistry,
+    PayloadSchemaContract,
+    PayloadSchemaRegistry,
+    PayloadSchemaValidationError,
+    UnknownCommandDefinition,
+    UnknownPayloadSchema,
+)
+from .service import (
+    AuthorizationReceipt,
+    CommandService,
+    CommittedCommandLookup,
+    IdempotencyIdentityConflict,
+    ObjectAdmissionLookup,
+)
 from .traceability import INCREMENT_1A_TRACEABILITY
 from .types import (
     AggregateId,
@@ -71,9 +85,12 @@ __all__ = [
     "CommandRegistry",
     "CommandService",
     "CommandValidationError",
+    "CommittedCommandIdentity",
+    "CommittedCommandLookup",
     "CorrelationId",
     "EventId",
     "INCREMENT_1A_TRACEABILITY",
+    "IdempotencyIdentityConflict",
     "InlinePayload",
     "NO_PAYLOAD",
     "NoPayload",
@@ -82,6 +99,9 @@ __all__ = [
     "ObjectAdmissionLookup",
     "ObjectAdmissionPayload",
     "PayloadMode",
+    "PayloadSchemaContract",
+    "PayloadSchemaRegistry",
+    "PayloadSchemaValidationError",
     "RightsDecisionId",
     "SemanticCommand",
     "StaticAuthenticator",
@@ -91,6 +111,7 @@ __all__ = [
     "TimePrecision",
     "TrustScope",
     "UnknownCommandDefinition",
+    "UnknownPayloadSchema",
     "UtcTimestamp",
     "canonical_json_bytes",
     "digest_bytes",
