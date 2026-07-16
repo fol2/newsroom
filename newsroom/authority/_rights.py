@@ -4,11 +4,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from .canonical import digest_canonical, validate_sha256_digest
-from .objects import (
-    ObjectAdmissionDefinition,
-    StaticRightsResolver,
+from .objects import ObjectAdmissionDefinition, StaticRightsResolver
+from .types import (
+    AuthenticationContextId,
+    AuthorizationDecisionId,
+    RightsDecisionId,
+    UtcTimestamp,
+    require_scope,
+    require_token,
 )
-from .types import RightsDecisionId, UtcTimestamp, require_scope, require_token
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,8 +36,8 @@ class _RightsDecision:
     def __post_init__(self) -> None:
         if not isinstance(self.rights_decision_id, RightsDecisionId):
             raise ValueError("rights decision identity must be typed")
-        require_token(self.authentication_context_id, field="authentication_context_id")
-        require_token(self.authorization_decision_id, field="authorization_decision_id")
+        AuthenticationContextId.parse(self.authentication_context_id)
+        AuthorizationDecisionId.parse(self.authorization_decision_id)
         validate_sha256_digest(self.request_digest, field="rights_request_digest")
         require_token(self.policy_version, field="rights_policy_version")
         if not isinstance(self.allowed, bool):
@@ -69,9 +73,7 @@ class _RightsDecision:
             "security_scope": self.security_scope,
             "retention_scope": self.retention_scope,
             "valid_from": self.valid_from.to_text(),
-            "valid_until": (
-                None if self.valid_until is None else self.valid_until.to_text()
-            ),
+            "valid_until": None if self.valid_until is None else self.valid_until.to_text(),
             "decided_at": self.decided_at.to_text(),
         }
 
