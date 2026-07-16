@@ -1,19 +1,21 @@
 # News discovery specification
 
-**Status:** Draft pending ADR 0004 and Topic 13 implementation-plan decisions  
+**Status:** Draft pending Topic 13 and ADR 0004 decisions  
 **Owner:** Product owner  
 **Last updated:** 2026-07-16  
 **Canonical language:** English  
 **Active review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
-**Accepted GraphRAG contract:** [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md)  
-**Topic 13 Draft:** [`../../plans/2026-07-16-004-integrated-discovery-graphrag-implementation.md`](../../plans/2026-07-16-004-integrated-discovery-graphrag-implementation.md)  
-**Accepted architecture decisions:** [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md)  
+**Accepted GraphRAG core:** [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md)  
+**Accepted native-production decision:** [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md)  
+**Detailed production amendment:** [`graphrag-native-production-deployment.md`](graphrag-native-production-deployment.md) (`Draft`)  
+**Topic 13 Draft:** [`../../plans/2026-07-16-005-native-graphrag-production-implementation.md`](../../plans/2026-07-16-005-native-graphrag-production-implementation.md)  
+**Accepted authority decisions:** [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md), [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md)  
 **Related Proposed decision:** [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md)  
 **Supersedes:** None
 
 ## Purpose
 
-Record cross-cutting discovery invariants spanning the Accepted Topic 1–12 specifications. This file does not replace those focused specifications and remains Draft until ADR 0004 and Topic 13 receive owner decisions.
+Record cross-cutting discovery invariants spanning the focused Accepted specifications and architecture decisions. This file does not replace them and remains Draft until Topic 13 and ADR 0004 receive owner decisions.
 
 It does not claim that the current Brave, RSS, GDELT and Gemini pool conforms and authorises no implementation or runtime action.
 
@@ -21,7 +23,7 @@ It does not claim that the current Brave, RSS, GDELT and Gemini pool conforms an
 
 The focused contracts for coverage, workflow, record semantics, source roles, change and Agenda, triage, search, evaluation, operations, outcomes, locality and governed GraphRAG are Accepted.
 
-Where this Draft conflicts with a focused Accepted specification or Accepted ADR, the focused record controls.
+ADR 0005 additionally establishes that GraphRAG is a repository-native, mandatory subsystem of the first production deployment. Where this Draft conflicts with a focused Accepted specification or Accepted ADR, the focused record controls.
 
 ## Cross-cutting requirements
 
@@ -119,7 +121,7 @@ Where this Draft conflicts with a focused Accepted specification or Accepted ADR
 
 **DISC-059 — Event-Scoped Local Watch.** A bounded local watch identifies exact event purpose, source set, owner, budget and expiry and creates no permanent locality promise.
 
-### Governed GraphRAG boundary
+### Governed and native-production GraphRAG
 
 **DISC-060 — Graph-aware canonical contract.** Graph-projection identities, trust, temporal and ordered-event contracts exist in canonical schema v1 rather than a later semantic migration.
 
@@ -131,9 +133,15 @@ Where this Draft conflicts with a focused Accepted specification or Accepted ADR
 
 **DISC-064 — Graph failure honesty.** Projection lag, gap or outage cannot be interpreted as no prior event or no relationship. Graph-dependent decisions use an accepted exact fallback or enter Watch or Operational Hold.
 
-**DISC-065 — GraphRAG timing.** The graph ontology, projector, extraction governance, hybrid retrieval and evaluation path belong to the first implementation programme and must be included before complete live-shadow qualification.
+**DISC-065 — Initial programme.** The graph ontology, projector, extraction governance, hybrid retrieval and evaluation path belong to the first implementation programme and must be included before complete live-shadow qualification.
 
 **DISC-066 — Named read-only tools.** Agentic retrieval uses bounded named tools rather than unrestricted graph write access or general production Cypher authority.
+
+**DISC-067 — Native production requirement.** The first production deployment includes an admitted governed graph, vector and full-text indexes and hybrid retrieval. GraphRAG is not a POC, optional plugin or later product stage.
+
+**DISC-068 — No graph-less qualifying target.** A production, canary or complete live-shadow target cannot omit GraphRAG or substitute a fake or no-op implementation.
+
+**DISC-069 — Qualification does not decide existence.** Qualification selects or admits an exact implementation. Failure requires repair or replacement before activation and does not authorise graph-less production.
 
 ### Migration boundary — proposed in Topic 13
 
@@ -169,14 +177,17 @@ Where this Draft conflicts with a focused Accepted specification or Accepted ADR
 18. Operational Admission cannot activate production by itself.
 19. Media volume, quota and model confidence cannot override a gate.
 20. Publishing a local story creates no locality-completeness promise.
-21. Graphiti proposal cannot become an admitted relation through confidence alone.
+21. An extraction proposal cannot become an admitted relation through confidence alone.
 22. Graph outage cannot become no prior match.
 23. Graph rebuild cannot rerun extraction and silently rewrite historical relations.
-24. Target implementation does not mutate legacy event authority silently.
-25. No implementation is authorised until Topic 13 and ADR 0004 are decided and later milestone-specific gates pass.
+24. A production deployment or complete shadow cannot omit GraphRAG.
+25. A failed initial graph implementation blocks activation or is replaced; it does not create a graph-less release.
+26. Target implementation does not mutate legacy event authority silently.
+27. No implementation is authorised until Topic 13 and ADR 0004 are decided and later milestone-specific gates pass.
 
 ## Open owner decisions
 
-- Accept or amend the integrated Topic 13 implementation plan.
-- Accept, amend, split or reject ADR 0004 against that plan.
+- Accept or amend the detailed native-production deployment amendment.
+- Accept or amend the Topic 13 implementation plan.
+- Accept, amend, split or reject ADR 0004 against those decisions.
 - Determine whether this cross-cutting Draft should become Accepted or be superseded by the focused specifications plus ADRs.
