@@ -27,14 +27,14 @@ A link does not make an entire reference or research document normative. A merge
 
 ## Current discovery and GraphRAG documents
 
-- [`plans/2026-07-15-002-discovery-specification-review.md`](plans/2026-07-15-002-discovery-specification-review.md) is the active owner-led decision record.
+- [`plans/2026-07-15-002-discovery-specification-review.md`](plans/2026-07-15-002-discovery-specification-review.md) is the completed owner-led decision record for Topics 0–13 and ADR 0004.
 - Topic 1–11 focused discovery specifications under [`specs/editorial-automation/`](specs/editorial-automation/) are Accepted and authorise no runtime action.
 - [`specs/editorial-automation/governed-graphrag-and-knowledge-projection.md`](specs/editorial-automation/governed-graphrag-and-knowledge-projection.md) and [`specs/editorial-automation/graphrag-native-production-deployment.md`](specs/editorial-automation/graphrag-native-production-deployment.md) are the Accepted governed and native-production GraphRAG contracts.
-- [`adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md) and [`adr/0005-native-graphrag-production-deployment.md`](adr/0005-native-graphrag-production-deployment.md) are Accepted. ADR 0005 rejects POC framing and requires GraphRAG in the first production deployment.
+- [`adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md), [`adr/0004-source-registry-first-change-driven-discovery.md`](adr/0004-source-registry-first-change-driven-discovery.md) and [`adr/0005-native-graphrag-production-deployment.md`](adr/0005-native-graphrag-production-deployment.md) are Accepted.
 - [`plans/2026-07-16-005-native-graphrag-production-implementation.md`](plans/2026-07-16-005-native-graphrag-production-implementation.md) is the Accepted Topic 13 implementation plan. Acceptance authorises no code or run.
 - [`plans/2026-07-16-003-discovery-implementation-and-migration.md`](plans/2026-07-16-003-discovery-implementation-and-migration.md) and [`plans/2026-07-16-004-integrated-discovery-graphrag-implementation.md`](plans/2026-07-16-004-integrated-discovery-graphrag-implementation.md) are superseded tombstones retained for decision history.
-- [`adr/0004-source-registry-first-change-driven-discovery.md`](adr/0004-source-registry-first-change-driven-discovery.md) remains Proposed pending the final owner decision.
-- [`specs/editorial-automation/news-discovery.md`](specs/editorial-automation/news-discovery.md) remains a Draft cross-cutting specification until ADR 0004 is decided.
+- [`specs/editorial-automation/news-discovery.md`](specs/editorial-automation/news-discovery.md) is a non-normative consolidated Draft retained for navigation; the focused Accepted specifications and ADRs govern.
+- [`plans/2026-07-15-001-integrated-newsroom-architecture.md`](plans/2026-07-15-001-integrated-newsroom-architecture.md) remains Proposed. Its earlier discovery wording, old ADR-status references and statement that discovery RAG was deferred are superseded by the completed review, Accepted ADRs and Accepted Topic 13 plan.
 - Dated database, GraphRAG and discovery research remains non-normative evidence.
 - [`reference/editorial/product-editorial-charter.zh-HK.md`](reference/editorial/product-editorial-charter.zh-HK.md) is the canonical human charter; the English file is a development translation.
 
