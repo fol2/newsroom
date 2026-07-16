@@ -1,8 +1,8 @@
-"""Public command-boundary contract for Newsroom authority Increment 1A1.
+"""Public authority contracts for Increment 1A1/A2a.
 
-Mutation-capable persistence, authentication contexts, authorization decisions,
-commit capabilities and blob storage are deliberately internal and are not
-exported from this package.
+Mutation-capable SQLite persistence, authentication contexts, authorization
+records and commit capabilities remain internal. Public application code receives
+only authenticated command and metadata-reader facades.
 """
 
 from .auth import (
@@ -31,6 +31,23 @@ from .models import (
     ObjectAdmissionPayload,
     SemanticCommand,
 )
+from .persistence import (
+    AuthenticationContextRecord,
+    AuthorityCommands,
+    AuthorityEvents,
+    AuthorityPersistenceError,
+    AuthoritySchemaError,
+    AuthorityWriterBusy,
+    AuthorizationDecisionRecord,
+    CommandResultRecord,
+    CommittedCommand,
+    EventProvenanceRecord,
+    ExpectedVersionConflict,
+    IdempotencyConflict,
+    LedgerEventRecord,
+    UnknownCausation,
+    UnsupportedPayloadMode,
+)
 from .policy import (
     CommandRegistry,
     PayloadSchemaContract,
@@ -46,6 +63,7 @@ from .service import (
     IdempotencyIdentityConflict,
     ObjectAdmissionLookup,
 )
+from .system import AuthorityEventSystem, open_authority_event_system
 from .traceability import INCREMENT_1A_TRACEABILITY
 from .types import (
     AggregateId,
@@ -59,6 +77,7 @@ from .types import (
     CorrelationId,
     EventId,
     ObjectAdmissionId,
+    PayloadId,
     PayloadMode,
     RightsDecisionId,
     TemporalValue,
@@ -72,9 +91,17 @@ __all__ = [
     "AggregateVersion",
     "AuditId",
     "AuthenticationContextId",
+    "AuthenticationContextRecord",
     "AuthenticationError",
     "AuthenticationProof",
+    "AuthorityCommands",
+    "AuthorityEventSystem",
+    "AuthorityEvents",
+    "AuthorityPersistenceError",
+    "AuthoritySchemaError",
+    "AuthorityWriterBusy",
     "AuthorizationDecisionId",
+    "AuthorizationDecisionRecord",
     "AuthorizationDenied",
     "AuthorizationReceipt",
     "CanonicalizationError",
@@ -83,21 +110,28 @@ __all__ = [
     "CommandDefinition",
     "CommandId",
     "CommandRegistry",
+    "CommandResultRecord",
     "CommandService",
     "CommandValidationError",
+    "CommittedCommand",
     "CommittedCommandIdentity",
     "CommittedCommandLookup",
     "CorrelationId",
     "EventId",
+    "EventProvenanceRecord",
+    "ExpectedVersionConflict",
     "INCREMENT_1A_TRACEABILITY",
+    "IdempotencyConflict",
     "IdempotencyIdentityConflict",
     "InlinePayload",
+    "LedgerEventRecord",
     "NO_PAYLOAD",
     "NoPayload",
     "ObjectAdmissionDescriptor",
     "ObjectAdmissionId",
     "ObjectAdmissionLookup",
     "ObjectAdmissionPayload",
+    "PayloadId",
     "PayloadMode",
     "PayloadSchemaContract",
     "PayloadSchemaRegistry",
@@ -110,11 +144,14 @@ __all__ = [
     "TemporalValue",
     "TimePrecision",
     "TrustScope",
+    "UnknownCausation",
     "UnknownCommandDefinition",
     "UnknownPayloadSchema",
+    "UnsupportedPayloadMode",
     "UtcTimestamp",
     "canonical_json_bytes",
     "digest_bytes",
     "digest_canonical",
+    "open_authority_event_system",
     "validate_sha256_digest",
 ]
