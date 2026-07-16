@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import timedelta
 
 import pytest
 
@@ -11,6 +12,8 @@ from newsroom.authority import (
     CommandValidationError,
     InlinePayload,
     SemanticCommand,
+    UtcTimestamp,
+    digest_canonical,
 )
 from newsroom.authority._capability import (
     InvalidCommitCapability,
@@ -111,3 +114,87 @@ def test_separate_issuer_cannot_validate_another_boundary_grant() -> None:
     grant = make_service()._authorize_for_commit(command(), proof=proof())
     with pytest.raises(InvalidCommitCapability):
         _CapabilityIssuer().verify(grant)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("principal_id", "principal.other"),
+        ("authority_domain", "other.authority"),
+        ("authentication_method", "OTHER_TOKEN"),
+        ("assurance_class", "OTHER_ASSURANCE"),
+        ("credential_binding_digest", digest_canonical({"binding": "other"})),
+    ],
+)
+def test_changing_authentication_provenance_with_same_id_invalidates_grant(
+    field: str, value: object
+) -> None:
+    service = make_service()
+    grant = service._authorize_for_commit(command(), proof=proof())
+    tampered_authentication = dataclasses.replace(
+        grant.authentication, **{field: value}
+    )
+    tampered = dataclasses.replace(grant, authentication=tampered_authentication)
+    with pytest.raises(InvalidCommitCapability):
+        service._issuer.verify(tampered)
+
+
+def test_changing_authentication_validity_with_same_id_invalidates_grant() -> None:
+    service = make_service()
+    grant = service._authorize_for_commit(command(), proof=proof())
+    changed_expiry = UtcTimestamp(
+        grant.authentication.expires_at.value + timedelta(seconds=60)
+    )
+    tampered = dataclasses.replace(
+        grant,
+        authentication=dataclasses.replace(
+            grant.authentication, expires_at=changed_expiry
+        ),
+    )
+    with pytest.raises(InvalidCommitCapability):
+        service._issuer.verify(tampered)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("authorization_policy_version", "authz-v999"),
+        ("effective_scopes", ("authority.observed.write", "extra.scope")),
+        ("reason_code", "AUTHZ_OTHER_REASON"),
+    ],
+)
+def test_changing_authorization_provenance_with_same_id_invalidates_grant(
+    field: str, value: object
+) -> None:
+    service = make_service()
+    grant = service._authorize_for_commit(command(), proof=proof())
+    tampered_decision = dataclasses.replace(grant.authorization, **{field: value})
+    tampered = dataclasses.replace(grant, authorization=tampered_decision)
+    with pytest.raises(InvalidCommitCapability):
+        service._issuer.verify(tampered)
+
+
+def test_changing_authorization_time_with_same_id_invalidates_grant() -> None:
+    service = make_service()
+    grant = service._authorize_for_commit(command(), proof=proof())
+    changed_time = UtcTimestamp(
+        grant.authorization.decided_at.value + timedelta(seconds=1)
+    )
+    tampered = dataclasses.replace(
+        grant,
+        authorization=dataclasses.replace(
+            grant.authorization, decided_at=changed_time
+        ),
+    )
+    with pytest.raises(InvalidCommitCapability):
+        service._issuer.verify(tampered)
+
+
+def test_changing_authorization_request_fields_while_retaining_digest_is_rejected() -> None:
+    service = make_service()
+    grant = service._authorize_for_commit(command(), proof=proof())
+    with pytest.raises(ValueError, match="digest"):
+        dataclasses.replace(
+            grant.authorization_request,
+            security_scope="authority.other",
+        )
