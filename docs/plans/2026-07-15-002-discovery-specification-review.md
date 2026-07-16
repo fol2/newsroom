@@ -6,7 +6,7 @@
 **Canonical language:** English  
 **Implementation authority:** None. This document records decisions and organises review. It authorises no code, source access, graph installation, extraction, embeddings, model call, spending, shadow run, canary or production activation.  
 **Related discovery ADR:** [`../adr/0004-source-registry-first-change-driven-discovery.md`](../adr/0004-source-registry-first-change-driven-discovery.md) (`Proposed`)  
-**Accepted authority ADRs:** [`../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md)  
+**Accepted architecture ADRs:** [`../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md), [`../adr/0005-native-graphrag-production-deployment.md`](../adr/0005-native-graphrag-production-deployment.md)  
 **Native production amendment:** [`../specs/editorial-automation/graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md)  
 **Current implementation Draft:** [`2026-07-16-005-native-graphrag-production-implementation.md`](2026-07-16-005-native-graphrag-production-implementation.md)
 
@@ -40,7 +40,7 @@ A committed Draft, passing test, merged pull request, Proposed plan or Proposed 
 | 9 | Reliability and operations | Accepted | [`discovery-reliability-and-operations.md`](../specs/editorial-automation/discovery-reliability-and-operations.md) |
 | 10 | Outcomes and prioritisation | Accepted | [`discovery-prioritisation-and-outcomes.md`](../specs/editorial-automation/discovery-prioritisation-and-outcomes.md) |
 | 11 | Locality boundary and expansion | Accepted | [`discovery-locality-scope-and-expansion.md`](../specs/editorial-automation/discovery-locality-scope-and-expansion.md) |
-| 12 | Governed GraphRAG core architecture | Accepted, with native-production amendment under review | Accepted core: [`governed-graphrag-and-knowledge-projection.md`](../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md); amendment Draft: [`graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md) |
+| 12 | Governed and native-production GraphRAG | Core and production requirement Accepted; implementation amendment under review | Accepted core: [`governed-graphrag-and-knowledge-projection.md`](../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md); Accepted ADR 0005; detailed amendment Draft: [`graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md) |
 | 13 | Native GraphRAG production implementation | Drafted; owner review pending | [`2026-07-16-005-native-graphrag-production-implementation.md`](2026-07-16-005-native-graphrag-production-implementation.md) |
 
 ## Accepted cross-topic boundaries
@@ -66,7 +66,8 @@ The following distinctions govern the plan:
 - projection status does not become editorial truth;
 - graph outage is not no prior match;
 - hybrid retrieval context is not Candidate authority;
-- GraphRAG is not a backlog item or optional later product stage;
+- GraphRAG is a required native production subsystem, not a POC, backlog item or optional plugin;
+- temporary graph outage is degraded operation, not a graph-free production profile;
 - native production support does not make the graph authoritative;
 - shadow is not production authority;
 - Operational Admission is not activation;
@@ -85,9 +86,9 @@ The following distinctions govern the plan:
 
 The product owner accepted the focused specifications covering coverage, workflow, identity, sources, change semantics, triage, search, evaluation, operations, prioritisation and locality. Those focused files remain the normative records.
 
-### Topic 12 — Governed GraphRAG
+### Topic 12 — Governed and native-production GraphRAG
 
-The following remain **Agreed**:
+The following are **Agreed**:
 
 - one graph-aware identity, temporal, trust and ordered-event contract from schema v1;
 - relational ledger and governed-object authority;
@@ -95,54 +96,59 @@ The following remain **Agreed**:
 - ADR 0001 and ADR 0002;
 - `OBSERVED`, `PROPOSED` and `ADMITTED` trust scopes;
 - governed entity resolution and reified editorial relations;
-- Graphiti as a proposal producer, not a governed-graph writer;
+- Graphiti or another extractor as a proposal producer rather than governed-graph writer;
 - idempotent projectors, checkpoints, visible gaps, generations and deterministic rebuild;
 - hybrid exact, full-text, vector and bounded graph retrieval;
 - named read-only tools;
-- GraphRAG as advisory context, with deterministic Hypothesis and Candidate authority; and
-- graph failure as explicit degradation rather than no match.
+- GraphRAG as advisory context with deterministic Hypothesis and Candidate authority;
+- graph failure as explicit degradation rather than no match;
+- ADR 0005: GraphRAG is natively implemented in the repository and mandatory in the first production deployment;
+- no graph-less production, canary or complete live-shadow product stage;
+- qualification verifies an exact mandatory implementation rather than deciding whether GraphRAG exists; and
+- temporary graph outage is degraded operation inside a GraphRAG deployment.
 
-The product owner subsequently made these decisions:
+The following are **Rejected**:
 
-- **Rejected:** describing GraphRAG as a `POC`, proof-of-concept lane or optional adoption decision.
-- **Agreed:** GraphRAG must be natively implemented in this repository and included in the first production deployment.
-- **Agreed:** there is no graph-less production, canary or complete live-shadow product stage.
-- **Agreed:** qualification verifies an exact mandatory implementation; it does not decide whether GraphRAG exists.
-- **Agreed:** temporary graph outage is degraded operation inside a GraphRAG deployment, not a supported graph-free profile.
+- GraphRAG as a `POC`, proof-of-concept lane, optional plugin or later adoption decision;
+- graph-less activation after a graph implementation fails qualification; and
+- a complete relational product slice being treated as the target before GraphRAG integration.
 
-The following detailed amendment decisions remain **Unresolved** until the owner reviews the Draft:
+The detailed amendment still asks the owner to decide:
 
-- Neo4j Community plus Graphiti as the initial production-target implementation rather than a POC;
-- replacement-before-activation if that implementation fails gates;
-- the exact native repository and deployment contract; and
-- the release and CI gates in `GRPROD-001`–`GRPROD-032`.
+- Neo4j Community plus Graphiti as the initial production-target implementation;
+- replacement-before-activation when that implementation fails gates;
+- exact native repository and deployment requirements;
+- graph-required production manifest and CI behaviour; and
+- the detailed `GRPROD-001`–`GRPROD-032` release contract.
 
-### Topic 13 — Native production implementation
+### Topic 13 — Native GraphRAG production implementation
 
-The earlier integrated plan is superseded because its POC language preserved a two-stage interpretation.
+Both earlier Topic 13 Drafts are superseded:
+
+- the first deferred GraphRAG behind a discovery-only semantic model;
+- the second integrated GraphRAG but retained POC framing.
 
 The current Draft proposes:
 
-- one repository-native production deployment including SQLite authority, governed objects, graph, vector, full-text, Graphiti admission and hybrid retrieval;
+- one repository-native production deployment including SQLite authority, governed objects, graph, vector, full-text, extraction/admission and hybrid retrieval;
 - no production profile that omits or fakes GraphRAG;
 - graph deployment and integration plumbing in the first code increment;
 - a graph-native first complete vertical slice;
 - production-equivalent complete shadow using the production-target graph stack;
 - component replacement before activation rather than graph removal;
-- focused dependency-ordered pull requests that are merge boundaries, not product stages; and
+- dependency-ordered pull requests that are merge boundaries, not product stages; and
 - separate Evaluation Plan, Operational Admission, canary, activation and retirement decisions.
 
 ## Completion condition
 
 The review is complete when the owner:
 
-1. accepts or amends the native-production amendment;
-2. accepts, amends or rejects ADR 0005;
-3. accepts or amends the native GraphRAG production implementation plan;
-4. accepts, amends, splits or rejects ADR 0004 against those decisions;
-5. confirms the branch remains documentation-only;
-6. authorises preparation of the documentation pull request; and
-7. leaves runtime actions behind later explicit gates.
+1. accepts or amends the detailed native-production amendment;
+2. accepts or amends the native GraphRAG production implementation plan;
+3. accepts, amends, splits or rejects ADR 0004 against those decisions;
+4. confirms the branch remains documentation-only;
+5. authorises preparation of the documentation pull request; and
+6. leaves runtime actions behind later explicit gates.
 
 ## Change discipline before the documentation pull request
 
