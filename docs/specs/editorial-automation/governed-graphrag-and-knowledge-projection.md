@@ -7,10 +7,11 @@
 **Canonical language:** English  
 **Related review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
 **Accepted discovery contracts:** [`discovery-coverage-contract.md`](discovery-coverage-contract.md), [`discovery-workflow.md`](discovery-workflow.md), [`discovery-record-semantics.md`](discovery-record-semantics.md), [`discovery-source-roles-and-selection.md`](discovery-source-roles-and-selection.md), [`discovery-change-and-planned-agenda.md`](discovery-change-and-planned-agenda.md), [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md), [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md), [`discovery-shadow-evaluation.md`](discovery-shadow-evaluation.md), [`discovery-reliability-and-operations.md`](discovery-reliability-and-operations.md), [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md), [`discovery-locality-scope-and-expansion.md`](discovery-locality-scope-and-expansion.md)  
-**Accepted architecture decisions:** [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md)  
+**Accepted architecture decisions:** [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md), [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md), [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md)  
+**Accepted production contract:** [`graphrag-native-production-deployment.md`](graphrag-native-production-deployment.md)  
 **Related research:** [`../../research/2026-07-15-local-agentic-graph-rag-database-options.md`](../../research/2026-07-15-local-agentic-graph-rag-database-options.md), [`../../research/2026-07-15-database-architecture.md`](../../research/2026-07-15-database-architecture.md)  
 **Implementation authority:** None. Acceptance defines the GraphRAG architecture and initial qualification boundary. It authorises no graph-engine installation, source access, extraction, embedding, model call, spending, shadow run, canary or production activation.  
-**Supersedes:** The rejected assumption that GraphRAG could be deferred until after a separate discovery-only implementation.
+**Supersedes:** The rejected assumption that GraphRAG could be deferred until after a separate discovery-only implementation, and the superseded experiment-only framing for the initial Neo4j Community plus Graphiti target.
 
 ## Purpose
 
@@ -42,10 +43,10 @@ This specification defines:
 - named read-only agent tools;
 - GraphRAG use in discovery triage and event grouping;
 - degraded behaviour when projection data is stale or unavailable;
-- the first proof-of-concept engine and framework lane; and
+- the initial production-target engine and framework qualification lane; and
 - the release-evidence gate before complete live-shadow qualification.
 
-It does not set the final physical schema, final production graph engine, commercial licence approval, model or embedding provider, extraction prompt, numeric retrieval thresholds, graph depth, latency objective, resource envelope or production activation.
+It does not set the final physical schema, exact engine or framework release, commercial licence approval, model or embedding provider, extraction prompt, numeric retrieval thresholds, graph depth, latency objective, resource envelope or production activation.
 
 ## Corrected implementation direction
 
@@ -385,17 +386,17 @@ Graph unavailability, lag or gap is never represented as `no prior match`.
 
 Graph independence is a resilience boundary, not permission to defer the graph contract.
 
-## Initial proof-of-concept lane
+## Initial production-target implementation
 
 ### Neo4j Community plus Graphiti
 
-The first compatibility-focused proof of concept uses:
+The initial repository-native production-target implementation uses:
 
 - Neo4j Community as the governed property-graph, vector and full-text projection engine;
 - Graphiti in an isolated proposal workspace for incremental temporal extraction; and
 - Neo4j GraphRAG retrievers or a thin Newsroom adapter behind named tools.
 
-This is a qualification baseline, not automatic production admission. Licence, backup, security, single-instance, resource and deployment constraints require separate evidence and approval.
+This is the mandatory initial implementation and qualification baseline. Evaluation and Operational Admission decide whether the exact releases and configuration are ready, not whether GraphRAG exists. Licence, backup, security, single-instance, resource and deployment constraints require separate evidence and approval.
 
 ### Conditional challenger
 
@@ -532,7 +533,7 @@ The graph ontology, projector, hybrid retrieval, trust-labelled context, gap det
 
 ### Initial engine and evaluation
 
-**GRAG-050 — Initial POC baseline.** Neo4j Community plus Graphiti is the first compatibility-focused proof-of-concept lane, not automatic production admission.
+**GRAG-050 — Initial production target.** Neo4j Community plus Graphiti is the initial repository-native production-target implementation, subject to exact release qualification; qualification decides readiness of the exact implementation, not whether the subsystem exists.
 
 **GRAG-051 — Conditional challenger only.** Another engine MAY be tested only after a measured blocker or owner-approved comparison purpose; multiple engines are not implemented in parallel by default.
 
@@ -568,7 +569,7 @@ The graph ontology, projector, hybrid retrieval, trust-labelled context, gap det
 14. A graph answer without provenance or temporal correctness fails qualification.
 15. Rights deletion followed by rebuild does not resurrect prohibited passages or embeddings.
 16. Hermes receives named bounded tools and no general graph write credential.
-17. POC success does not automatically select the production engine.
+17. Qualification failure blocks activation or requires repair or replacement; it never authorises graph-less production.
 18. Acceptance creates no runtime authority.
 
 ## Completion record
@@ -588,7 +589,7 @@ The product owner accepted this specification on 2026-07-16 with these decisions
 - agents use named read-only tools and receive no unrestricted graph write or production Cypher authority;
 - GraphRAG supplies advisory event, timeline and source-revision context while deterministic controllers retain Hypothesis, Candidate and evidence authority;
 - graph failure is not no-match, safe collection may continue and graph-dependent work falls back only through approved exact paths or enters Watch or Operational Hold;
-- Neo4j Community plus Graphiti is the first POC baseline, with another engine only as a conditional challenger;
+- Neo4j Community plus Graphiti is the initial production-target implementation, with another engine only after a measured blocker or separate owner-approved comparison purpose;
 - initial success cases are event or development precision, source-revision impact and long-running policy, bill, case or incident timelines;
 - GraphRAG evaluation includes entity and relation quality, temporal correctness, provenance, hybrid ablation, cost, lag, rebuild, security, rights purge and outage behaviour;
 - complete live-shadow qualification requires the governed graph and hybrid retrieval path; and
