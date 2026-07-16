@@ -132,7 +132,7 @@ The authority package cannot import Neo4j or Graphiti. The target implementation
 
 ### 4.2 Canonical IDs, versions, trust and time
 
-Controllers create opaque typed IDs as RFC 4122 UUID version 4 values, externally serialised as lowercase canonical hyphenated strings. URLs, provider IDs, titles, timestamps, digests and Neo4j internal IDs are never global Newsroom IDs. Each implemented aggregate has a stable `aggregate_id`, positive `aggregate_version` starting at 1, immutable version records where needed and explicit predecessor/supersession references. SHA-256 digests remain byte/payload identities, not domain identities.
+Controllers create opaque typed IDs as UUID version 4 values conforming to RFC 9562, externally serialised as lowercase canonical hyphenated strings. URLs, provider IDs, titles, timestamps, digests and Neo4j internal IDs are never global Newsroom IDs. Each implemented aggregate has a stable `aggregate_id`, positive `aggregate_version` starting at 1, immutable version records where needed and explicit predecessor/supersession references. SHA-256 digests remain byte/payload identities, not domain identities.
 
 The closed trust enum is `OBSERVED`, `PROPOSED`, `ADMITTED`. Unknown values fail. Confidence creates no authority. Proposed and admitted query surfaces remain distinct rather than depending on an optional status filter.
 
