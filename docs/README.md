@@ -30,10 +30,10 @@ A link does not make an entire reference or research document normative. A merge
 - [`plans/2026-07-15-002-discovery-specification-review.md`](plans/2026-07-15-002-discovery-specification-review.md) is the active owner-led decision record.
 - Topic 1–11 focused discovery specifications under [`specs/editorial-automation/`](specs/editorial-automation/) are Accepted; each explicitly authorises no runtime action.
 - [`specs/editorial-automation/discovery-locality-scope-and-expansion.md`](specs/editorial-automation/discovery-locality-scope-and-expansion.md) accepts a locality-aware, locality-uncommitted launch and selects no locality.
-- [`plans/2026-07-16-003-discovery-implementation-and-migration.md`](plans/2026-07-16-003-discovery-implementation-and-migration.md) is the Topic 12 Draft for a side-by-side discovery v2, milestone PRs, evaluation, canary, cutover and legacy retirement. It authorises no code or run.
-- [`adr/0004-source-registry-first-change-driven-discovery.md`](adr/0004-source-registry-first-change-driven-discovery.md) is the final Proposed source-portfolio-first architecture and is ready for owner review.
-- [`specs/editorial-automation/news-discovery.md`](specs/editorial-automation/news-discovery.md) remains the Draft cross-cutting architecture specification until ADR 0004 and Topic 12 are decided.
-- ADR 0001 and ADR 0002 remain Proposed. The discovery plan's scoped SQLite shadow-store proposal does not decide the product-wide database architecture.
+- [`specs/editorial-automation/governed-graphrag-and-knowledge-projection.md`](specs/editorial-automation/governed-graphrag-and-knowledge-projection.md) is the new Topic 12 Draft. It proposes a canonical relational-plus-GraphRAG architecture from schema v1 and authorises no engine, extraction, embedding or run.
+- [`plans/2026-07-16-003-discovery-implementation-and-migration.md`](plans/2026-07-16-003-discovery-implementation-and-migration.md) is the first implementation Draft and requires revision because its discovery-only SQLite sequence deferred GraphRAG.
+- ADR 0001, ADR 0002 and ADR 0004 remain Proposed pending the GraphRAG review and the revised integrated implementation plan.
+- [`specs/editorial-automation/news-discovery.md`](specs/editorial-automation/news-discovery.md) remains a Draft cross-cutting architecture specification until those decisions are complete.
 - The dated database, graph/RAG and discovery research documents remain non-normative evidence.
 - [`reference/editorial/product-editorial-charter.zh-HK.md`](reference/editorial/product-editorial-charter.zh-HK.md) is the canonical human charter; the English file is a development translation.
 
