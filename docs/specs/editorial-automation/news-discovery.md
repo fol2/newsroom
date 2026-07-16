@@ -50,7 +50,7 @@ Each requirement is defined once in its focused document. Cross-cutting implemen
 |---|---|
 | Relational ledger and governed object authority; rebuildable graph/vector/full-text projections | [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md) |
 | SQLite in the integrated target architecture | [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md) |
-| Source-registry-first, change-driven discovery | [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md) |
+| Source-portfolio-first, change-driven and natively GraphRAG discovery | [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md) |
 | Repository-native mandatory GraphRAG production deployment | [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md) |
 
 The accepted direction is one graph-aware canonical identity, trust, temporal and ordered-event contract from schema v1. Neo4j Community plus Graphiti is the initial production-target implementation. Models and extractors propose; deterministic or authorised controllers commit. Production, canary and complete live-shadow configurations cannot omit GraphRAG.
@@ -59,7 +59,7 @@ The accepted direction is one graph-aware canonical identity, trust, temporal an
 
 [`../../plans/2026-07-16-005-native-graphrag-production-implementation.md`](../../plans/2026-07-16-005-native-graphrag-production-implementation.md) is the accepted programme plan. Its increments are merge and verification boundaries, not independently activatable product stages.
 
-[`../../plans/2026-07-16-006-increment-1-implementation-readiness.md`](../../plans/2026-07-16-006-increment-1-implementation-readiness.md) is the bounded post-merge authority audit, traceability matrix, technical design, PR #75 donor map and first Increment 1 code-pull-request boundary.
+[`../../plans/2026-07-16-006-increment-1-implementation-readiness.md`](../../plans/2026-07-16-006-increment-1-implementation-readiness.md) is the completed post-merge authority audit, traceability matrix, technical design, PR #75 donor map and three-PR Increment 1 epic boundary.
 
 Neither plan starts live source access, Graphiti, models, embeddings, spending, shadow operation, canary or production activation.
 
