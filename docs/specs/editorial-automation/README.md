@@ -1,114 +1,107 @@
 # Autonomous Editorial System specification suite
 
-**Status:** Draft
-**Owner:** Product owner
-**Last updated:** 2026-07-15
-**Canonical language:** English
-**Related plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)
-**Canonical reference:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md)
-**Development translation:** [`../../reference/editorial/product-editorial-charter.en.md`](../../reference/editorial/product-editorial-charter.en.md)
-**Supersedes:** None
+**Status:** Draft suite; authority is controlled by each individual file  
+**Owner:** Product owner  
+**Last updated:** 2026-07-16  
+**Canonical language:** English  
+**Completed architecture review:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
+**Accepted Topic 13 plan:** [`../../plans/2026-07-16-005-native-graphrag-production-implementation.md`](../../plans/2026-07-16-005-native-graphrag-production-implementation.md)  
+**Canonical charter:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md)
 
 ## Purpose
 
-This suite converts selected principles from the Autonomous News Product and Editorial Charter into testable requirements for an autonomous, agentic news application.
+Convert selected charter principles into testable requirements for a risk-bounded autonomous news application. The suite describes target behaviour and does not claim that the current Discord newsroom conforms.
 
-The target is **risk-bounded autonomous publication**:
+`MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` and `MAY` are normative only when the individual specification is `Accepted` or the owner explicitly authorises implementation.
 
-- eligible routine stories can move from discovery to publication without per-story human approval;
-- models and agents operate only within versioned policy and tool boundaries;
-- a separate publication controller enforces the final decision;
-- unresolved high-risk cases are held for authorised review or rejected;
-- the system fails closed and preserves an auditable decision trail.
+Topic 1–13 focused discovery, governed GraphRAG and implementation records and ADRs 0001, 0002, 0004 and 0005 are Accepted. Acceptance authorises no source, graph engine, extractor, embedding, model, search, shadow run, queue, spending, canary or production activation.
 
-The suite describes target behaviour. It does not claim that the current Discord newsroom already conforms.
-
-## Normative language
-
-`MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` and `MAY` are normative when a specification is `Accepted`.
-
-All files in this suite are currently `Draft`. They are review material until the owner changes their status to `Accepted` or explicitly authorises implementation.
-
-Requirement identifiers are stable references for plans, issues, tests and implementation notes. Renumbering an existing identifier should be avoided; superseded requirements should remain traceable.
+Requirement identifiers are stable. Existing identifiers should not be renumbered; superseded requirements remain traceable.
 
 ## Specification map
 
-| File | Stable concern | Main charter basis |
-|---|---|---|
-| [`autonomy-and-publication-control.md`](autonomy-and-publication-control.md) | Autonomy boundary, decision outcomes, agent separation, human exceptions and emergency control | Sections 2, 13 and 14 |
-| [`news-discovery.md`](news-discovery.md) | Source registry, planned monitoring, discovery states, pre-model gates, bounded search and coverage health | Sections 3–6 and 13 |
-| [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Coverage, newsworthiness, sources, corroboration, analysis and claim evidence | Sections 3–7 |
-| [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution, headlines and article contract | Sections 8 and 10 |
-| [`rights-and-visuals.md`](rights-and-visuals.md) | Source access, copyright, storage, asset rights and visual generation | Sections 8 and 9 |
-| [`sensitive-content-and-escalation.md`](sensitive-content-and-escalation.md) | Personal information, courts, children, allegations and sensitive subject rules | Sections 11 and 14 |
-| [`publication-lifecycle-and-audit.md`](publication-lifecycle-and-audit.md) | Feed behaviour, publication surfaces, corrections, withdrawal, archive and audit records | Sections 12 and 13 |
-| [`publication-engineering-and-projection-control.md`](publication-engineering-and-projection-control.md) | Authoritative records, projections, immutable target payloads, dispatch, acknowledgement and reconciliation | Sections 12–14 plus adopted engineering constraints |
-| [`quality-evaluation-and-change-control.md`](quality-evaluation-and-change-control.md) | Pre-release evaluation, versioning, monitoring, rollback and policy change control | Sections 13 and 14 |
+| File | Status and stable concern |
+|---|---|
+| [`autonomy-and-publication-control.md`](autonomy-and-publication-control.md) | Autonomy boundary, decisions, agent separation and emergency control |
+| [`discovery-coverage-contract.md`](discovery-coverage-contract.md) | **Accepted:** Active, Best-effort, deferred and excluded coverage |
+| [`discovery-workflow.md`](discovery-workflow.md) | **Accepted:** trigger-to-Candidate workflow and Evidence Handoff |
+| [`discovery-record-semantics.md`](discovery-record-semantics.md) | **Accepted:** identities, revisions, immutable decisions and lineage |
+| [`discovery-source-roles-and-selection.md`](discovery-source-roles-and-selection.md) | **Accepted:** source roles, portfolio functions, readiness and candidate paths |
+| [`discovery-change-and-planned-agenda.md`](discovery-change-and-planned-agenda.md) | **Accepted:** observation models, transitions, baselines and Planned Agenda |
+| [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md) | **Accepted:** Work Items, retrieval, relationships, Hypotheses and Candidate formation |
+| [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md) | **Accepted:** bounded search roles, query controls, providers and coverage audit |
+| [`discovery-shadow-evaluation.md`](discovery-shadow-evaluation.md) | **Accepted:** shadow isolation, Plans, Epochs, event-level review and release evidence |
+| [`discovery-reliability-and-operations.md`](discovery-reliability-and-operations.md) | **Accepted:** Profiles, scheduling, health, retry, quarantine, recovery and admission |
+| [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md) | **Accepted:** decision order, canonical outcomes, reasons, ordinal lanes and scoring boundary |
+| [`discovery-locality-scope-and-expansion.md`](discovery-locality-scope-and-expansion.md) | **Accepted:** locality-aware launch, Coverage Units, Event-Scoped Watch and expansion |
+| [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md) | **Accepted:** authority, trust, ontology, proposal/admission, projection and hybrid retrieval |
+| [`graphrag-native-production-deployment.md`](graphrag-native-production-deployment.md) | **Accepted:** initial production target, repository ownership, graph-required profiles, CI and release mechanics |
+| [`news-discovery.md`](news-discovery.md) | **Consolidated Draft:** non-normative navigation across the focused Accepted specifications and ADRs |
+| [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Story qualification, source authority, corroboration and evidence |
+| [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution and article contract |
+| [`rights-and-visuals.md`](rights-and-visuals.md) | Source access, copyright, storage and visual rights |
+| [`sensitive-content-and-escalation.md`](sensitive-content-and-escalation.md) | Personal information, courts, children and sensitive-risk rules |
+| [`publication-lifecycle-and-audit.md`](publication-lifecycle-and-audit.md) | Publication surfaces, corrections, withdrawal, archive and audit |
+| [`publication-engineering-and-projection-control.md`](publication-engineering-and-projection-control.md) | Authority, projections, payloads, dispatch and reconciliation |
+| [`quality-evaluation-and-change-control.md`](quality-evaluation-and-change-control.md) | General versioning, evaluation, monitoring and rollback |
+
+## Architecture decisions
+
+Accepted:
+
+- [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md): relational ledger and governed objects are authority; graph, vector and full-text are rebuildable projections.
+- [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md): the initial canonical single-host ledger uses SQLite and is delivered with the graph workstream, not as a graph-less stage.
+- [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md): source-portfolio-first, change-driven, natively GraphRAG and scheduler-neutral discovery.
+- [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md): GraphRAG is repository-native and mandatory in the first production deployment; POC and optional-plugin interpretations are rejected.
 
 ## Cross-suite invariants
 
-The following invariants apply across every module:
+1. The system works from public, verifiable material and does not become an investigative service.
+2. A Candidate requires an approved Evidence Package before a draft may become publication-eligible.
+3. Models and extractors are untrusted producers, not policy authorities.
+4. Generative agents never hold public publishing credentials.
+5. Missing required policy, rights, evidence, validation, audit or infrastructure fails closed.
+6. Volume, freshness, queue size and engagement cannot lower gates.
+7. Central claims and public actions remain reconstructable, subject to lawful retention.
+8. Discovery Signals, Leads, Event Hypotheses and Candidates are not evidence.
+9. Graph, vector and full-text retrieval cannot become ungoverned editorial authority.
+10. Rebuildable graph projection is not permission to postpone GraphRAG.
+11. GraphRAG is mandatory in production but remains a projection rather than authority.
+12. No production, canary or complete live-shadow profile omits GraphRAG.
+13. Temporary graph outage is explicit degraded operation and not a supported graph-free product.
+14. Shadow results and Operational Admission are not production activation.
+15. Outcome, reason, next action, current status and priority remain separate.
+16. Locality label and Event-Scoped Local Watch create no systematic locality promise.
+17. A plan organises Accepted requirements and cannot create, weaken or omit them.
 
-1. Public-source boundary: the system works from public, verifiable material and does not become an investigative service.
-2. Evidence before prose: a candidate must have an approved evidence package before a publication draft can become eligible.
-3. Models are untrusted producers, not policy authorities: generated output cannot approve itself or change the governing rules.
-4. Separate publication authority: a generative agent never holds the credential that publishes to a public surface; credential-bearing adapters remain inside the deterministic publication-controller boundary.
-5. Fail closed: missing policy, rights, evidence, validation, audit or infrastructure required for a safe decision blocks publication.
-6. No quota pressure: volume, freshness, queue size and engagement targets cannot lower an evidence or risk gate.
-7. Traceability: every central claim and public action must be reconstructable from retained decision evidence, subject to lawful retention limits.
-8. Honest accountability: the product must not claim that a human wrote or approved content when the recorded workflow shows otherwise.
-9. Discovery is not evidence: a Discovery Signal, News Lead or Story Candidate does not become publication evidence merely because it passed discovery triage.
+## Plans and implementation
 
-## Conformance model
+The two earlier Topic 13 Drafts are retained as Superseded tombstones:
 
-A candidate is conformant only when all applicable requirements across the suite are satisfied. Passing one module never bypasses another.
+- the first deferred GraphRAG behind a discovery-only semantic model;
+- the second integrated GraphRAG but still described it as a POC lane.
 
-The implementation MAY use different internal names, services or state enums from those used in these documents, provided it preserves the required semantics and acceptance criteria.
+The Accepted Topic 13 plan defines one production system with repository-native GraphRAG, a production profile that cannot omit it, graph integration in the first code increment and a graph-native first complete vertical slice.
 
-Where two accepted requirements appear to conflict, the system MUST stop the affected path and surface the conflict for owner resolution. A development agent MUST NOT silently choose the less restrictive interpretation.
-
-## Relationship between specifications and plans
-
-Specifications and plans do not need a one-to-one relationship.
-
-A stable behavioural boundary should remain one specification even when it takes several delivery phases to implement. Conversely, a practical implementation plan may need to change several specifications together to deliver one safe vertical slice.
-
-Every plan targeting this suite MUST:
-
-- list the exact specification files and requirement identifiers in scope;
-- state which requirements remain out of scope;
-- map milestones to observable acceptance evidence;
-- record temporary gaps and compatibility behaviour;
-- avoid changing a requirement merely through a task description; and
-- update or supersede the relevant specification when implementation reveals a genuine product decision change.
-
-A sensible future planning sequence may begin with publication control and audit, then evidence gates, generation, sensitive-risk routing, reader lifecycle and production rollout. That sequence is not approved by this draft and should follow a current-state gap analysis.
+Every later code pull request must list exact specification files and requirement IDs, exclusions, acceptance evidence, temporary gaps and rollback. No runtime source, provider, model, extractor, embedding, graph engine or budget is enabled as a side effect of merging the documentation pull request.
 
 ## Suite-level acceptance criteria
 
 Before the suite can be treated as implemented:
 
-1. Every accepted requirement has a trace to code, configuration, tests, operational control or an explicitly documented non-code procedure.
-2. End-to-end tests demonstrate automatic publication of an eligible low-risk story and fail-closed handling of each mandatory hold and reject class.
-3. No generative agent can reach a public publishing credential directly.
-4. Every public story can be traced to its evidence package, policy version, validation results and decision actor.
-5. The emergency stop prevents new public actions without destroying audit records.
-6. Model, prompt, policy and validator changes can be evaluated, released and rolled back by version.
-7. Known deviations from the charter are explicit and owner-approved.
+1. Every Accepted requirement traces to code, configuration, tests, controls or a documented procedure.
+2. A fresh canonical schema supports relational authority and graph projection without semantic migration.
+3. The production deployment definition requires admitted GraphRAG components and cannot substitute fakes.
+4. The first complete vertical slice traverses ledger, graph, hybrid retrieval, triage and Candidate admission.
+5. End-to-end tests demonstrate eligible low-risk publication and fail-closed hold and reject paths.
+6. No generative agent can reach a publishing or graph-write credential.
+7. Every public story traces to evidence, policy, validation and decision authority.
+8. Governed graph and index projections rebuild from retained authority without stochastic historical rewrite.
+9. Model, prompt, policy, adapter, ontology, projector and validator versions can be evaluated, monitored and rolled back.
+10. Known deviations are explicit and owner-approved.
 
-## Non-goals
+## Non-goals and open questions
 
-This suite does not select a cloud provider, model vendor, agent framework, database, identity provider, billing system or detailed deployment topology. `SERV-006` records the owner-selected Capacitor client boundary without selecting those other services.
+The suite does not select cloud, model, agent framework, final admitted graph-engine version, billing, observability or deployment vendor except where an individual Accepted decision says otherwise. It does not define investigative journalism, private-source collection, public comments or a general emergency-alert service.
 
-It does not define investigative journalism, witness contact, leak handling, private-document collection, public comments or a general-purpose emergency alert service.
-
-## Open questions
-
-The following decisions remain open and are kept out of normative requirements unless a module states a safe default:
-
-- the exact categories or jurisdictions that may receive narrowly scoped automatic-publication exceptions after legal review;
-- quantitative release thresholds for model and prompt evaluation;
-- retention periods for source material, decision logs and held candidates;
-- whether reader-facing articles show an individual reviewer when a human exception review occurs;
-- notification preferences beyond the charter's initial geography-based on/off model; and
-- the controlled cutover date and whether any historical Discord content receives an explicitly approved one-time import.
+Open questions include exact schema and command-service mechanisms, Neo4j edition and licence qualification, ontology details, retrieval thresholds, release and operational thresholds, retention, Evidence Intake, production hosting and controlled cutover.
