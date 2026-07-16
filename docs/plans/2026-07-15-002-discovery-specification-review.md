@@ -4,10 +4,11 @@
 **Owner:** Product owner  
 **Last updated:** 2026-07-16  
 **Canonical language:** English  
-**Implementation authority:** None. This document records owner decisions and organises review. It authorises no code, external request, graph installation, extraction, embedding, model call, spending, shadow run, canary or production activation.  
+**Implementation authority:** None. This document records decisions and organises review. It authorises no code, source access, graph installation, extraction, embeddings, model call, spending, shadow run, canary or production activation.  
 **Related discovery ADR:** [`../adr/0004-source-registry-first-change-driven-discovery.md`](../adr/0004-source-registry-first-change-driven-discovery.md) (`Proposed`)  
 **Accepted authority ADRs:** [`../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md)  
-**Superseded first implementation Draft:** [`2026-07-16-003-discovery-implementation-and-migration.md`](2026-07-16-003-discovery-implementation-and-migration.md)
+**Native production amendment:** [`../specs/editorial-automation/graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md)  
+**Current implementation Draft:** [`2026-07-16-005-native-graphrag-production-implementation.md`](2026-07-16-005-native-graphrag-production-implementation.md)
 
 ## Purpose
 
@@ -39,12 +40,12 @@ A committed Draft, passing test, merged pull request, Proposed plan or Proposed 
 | 9 | Reliability and operations | Accepted | [`discovery-reliability-and-operations.md`](../specs/editorial-automation/discovery-reliability-and-operations.md) |
 | 10 | Outcomes and prioritisation | Accepted | [`discovery-prioritisation-and-outcomes.md`](../specs/editorial-automation/discovery-prioritisation-and-outcomes.md) |
 | 11 | Locality boundary and expansion | Accepted | [`discovery-locality-scope-and-expansion.md`](../specs/editorial-automation/discovery-locality-scope-and-expansion.md) |
-| 12 | Governed GraphRAG and knowledge projection | Accepted | [`governed-graphrag-and-knowledge-projection.md`](../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md), ADR 0001 and ADR 0002 |
-| 13 | Integrated implementation and migration | Drafting | New successor plan required; GraphRAG cannot be deferred |
+| 12 | Governed GraphRAG core architecture | Accepted, with native-production amendment under review | Accepted core: [`governed-graphrag-and-knowledge-projection.md`](../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md); amendment Draft: [`graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md) |
+| 13 | Native GraphRAG production implementation | Drafted; owner review pending | [`2026-07-16-005-native-graphrag-production-implementation.md`](2026-07-16-005-native-graphrag-production-implementation.md) |
 
 ## Accepted cross-topic boundaries
 
-The following distinctions now govern the implementation plan:
+The following distinctions govern the plan:
 
 - product scope is not monitoring completeness;
 - a source interface is not a coverage strategy;
@@ -57,17 +58,16 @@ The following distinctions now govern the implementation plan:
 - event relationship is not Candidate creation;
 - search result is not publisher evidence or recall ground truth;
 - prospective audit is not hindsight Gap investigation;
-- comparator union is not complete real-world ground truth;
-- calendar duration is not sufficient evaluation exposure;
 - healthy silence is not stale or failed source state;
 - source health is not portfolio Coverage Availability;
 - outcome, reason, next action, status and priority are separate;
-- priority is not eligibility;
 - local story is not locality coverage promise;
-- relational authority is not permission to postpone GraphRAG;
-- graph projection is not authoritative editorial truth;
+- the relational ledger is authority while graph and indexes are rebuildable projections;
+- projection status does not become editorial truth;
 - graph outage is not no prior match;
-- hybrid retrieval context is not Event Hypothesis or Candidate authority;
+- hybrid retrieval context is not Candidate authority;
+- GraphRAG is not a backlog item or optional later product stage;
+- native production support does not make the graph authoritative;
 - shadow is not production authority;
 - Operational Admission is not activation;
 - discovery is not evidence acquisition; and
@@ -79,80 +79,77 @@ The following distinctions now govern the implementation plan:
 
 - **Agreed:** decisions are reviewed sequentially.
 - **Agreed:** research, Draft specifications, Proposed plans and Proposed ADRs create no implementation authority.
-- **Agreed:** stale false-acceptance metadata must be corrected before the documentation pull request.
+- **Agreed:** rejected directions are marked superseded rather than silently rewritten.
 
 ### Topics 1–11 — Discovery contracts
 
-The product owner accepted the focused specifications covering:
+The product owner accepted the focused specifications covering coverage, workflow, identity, sources, change semantics, triage, search, evaluation, operations, prioritisation and locality. Those focused files remain the normative records.
 
-- Active, Best-effort, deferred and excluded coverage;
-- deterministic Check-to-Candidate workflow and Evidence Handoff;
-- stable identities, immutable versions and append-only lineage;
-- source roles, portfolio functions, readiness and no silent fallback;
-- observation models, Source Revisions, current-state transitions and Planned Agenda;
-- bounded triage, relationship classes and append-only Event Hypotheses;
-- bounded supplemental search and prospective coverage audit;
-- event-level, human-reviewed, sliced shadow evaluation;
-- Operational Profiles, health, quarantine, recovery and admission;
-- canonical outcomes, reasons, ordinal priority and removal of quotas; and
-- locality-aware, locality-uncommitted launch and evidence-based expansion.
+### Topic 12 — Governed GraphRAG
 
-The focused specifications remain the normative records. This sequence does not restate or narrow them.
+The following remain **Agreed**:
 
-### Topic 12 — Governed GraphRAG and authority architecture
+- one graph-aware identity, temporal, trust and ordered-event contract from schema v1;
+- relational ledger and governed-object authority;
+- graph, vector and full-text structures as rebuildable projections;
+- ADR 0001 and ADR 0002;
+- `OBSERVED`, `PROPOSED` and `ADMITTED` trust scopes;
+- governed entity resolution and reified editorial relations;
+- Graphiti as a proposal producer, not a governed-graph writer;
+- idempotent projectors, checkpoints, visible gaps, generations and deterministic rebuild;
+- hybrid exact, full-text, vector and bounded graph retrieval;
+- named read-only tools;
+- GraphRAG as advisory context, with deterministic Hypothesis and Candidate authority; and
+- graph failure as explicit degradation rather than no match.
 
-- **Agreed:** GraphRAG, vector and full-text projections are first-class parts of canonical schema v1 and the initial programme, not a later backlog item.
-- **Agreed:** the relational editorial ledger and governed object store are authority; graph and indexes are rebuildable projections.
-- **Agreed:** ADR 0001 is Accepted.
-- **Agreed:** ADR 0002 is Accepted; the canonical single-host ledger uses SQLite and is implemented together with the graph workstream rather than as a temporary graph-less phase.
-- **Agreed:** discovery, later evidence and publication, and graph consumers share one identity, temporal, trust and ordered-event contract.
-- **Agreed:** trust scopes distinguish `OBSERVED`, `PROPOSED` and `ADMITTED`.
-- **Agreed:** deterministic structural relationships remain separate from reified editorial relation proposals and assertions.
-- **Agreed:** entity resolution, merge, split and reversal are governed first-class decisions.
-- **Agreed:** Graphiti is an isolated proposal producer and cannot write governed graph state directly.
-- **Agreed:** projectors are idempotent, checkpointed, gap-aware, generation-versioned and rebuildable without stochastic re-extraction.
-- **Agreed:** retrieval is hybrid exact, full-text, vector and bounded graph traversal, with authority hydrated from the ledger or object store.
-- **Agreed:** Hermes or another agent receives named read-only tools and no graph write credential.
-- **Agreed:** GraphRAG supplies advisory event, timeline, dependency and source-revision context; deterministic controllers retain Hypothesis, Candidate and evidence authority.
-- **Agreed:** graph failure is not no-match. Safe collection may continue; graph-dependent decisions use an approved exact fallback or enter Watch or Operational Hold.
-- **Agreed:** Neo4j Community plus Graphiti is the first proof-of-concept baseline, not automatic production admission. Another engine is a conditional challenger only after measured need.
-- **Agreed:** complete live-shadow qualification requires the governed graph and hybrid retrieval path.
-- **Needs experiment:** exact ontology details, model and embedding versions, retrieval thresholds, projection freshness, graph depth, resource envelope, licence admission and production engine.
-- **Agreed:** Topic 12 acceptance authorises no execution.
+The product owner subsequently made these decisions:
 
-### Topic 13 — Integrated implementation and migration
+- **Rejected:** describing GraphRAG as a `POC`, proof-of-concept lane or optional adoption decision.
+- **Agreed:** GraphRAG must be natively implemented in this repository and included in the first production deployment.
+- **Agreed:** there is no graph-less production, canary or complete live-shadow product stage.
+- **Agreed:** qualification verifies an exact mandatory implementation; it does not decide whether GraphRAG exists.
+- **Agreed:** temporary graph outage is degraded operation inside a GraphRAG deployment, not a supported graph-free profile.
 
-The first Topic 13 Draft is rejected as the final plan because it proposed a discovery-only SQLite store followed by later GraphRAG work. It remains in history as a superseded Draft.
+The following detailed amendment decisions remain **Unresolved** until the owner reviews the Draft:
 
-The successor plan must:
+- Neo4j Community plus Graphiti as the initial production-target implementation rather than a POC;
+- replacement-before-activation if that implementation fails gates;
+- the exact native repository and deployment contract; and
+- the release and CI gates in `GRPROD-001`–`GRPROD-032`.
 
-- create canonical schema v1 directly;
-- implement the SQLite authority plane and governed object store;
-- define graph ontology and projection mappings from the first milestone;
-- deliver Neo4j projection, Graphiti proposal and admission, hybrid retrieval and named tools in the initial programme;
-- use the same canonical schema in offline, replay, shadow and later production environments;
-- avoid relational-and-graph co-authority dual write;
-- avoid legacy identity import and silent dual write;
-- keep real sources, providers, models and spending disabled until their exact gates pass;
-- require the graph path before complete end-to-end live-shadow qualification; and
-- retain separate owner decisions for Evaluation Plan, Operational Admission, canary, production activation and legacy retirement.
+### Topic 13 — Native production implementation
 
-## Topic 13 completion condition
+The earlier integrated plan is superseded because its POC language preserved a two-stage interpretation.
 
-Topic 13 is complete when the owner:
+The current Draft proposes:
 
-1. accepts or amends the integrated implementation plan;
-2. accepts, amends, splits or rejects ADR 0004 against that plan;
-3. confirms that the current branch remains documentation-only;
-4. authorises preparation of the documentation pull request; and
-5. leaves every runtime action behind a later milestone-specific approval gate.
+- one repository-native production deployment including SQLite authority, governed objects, graph, vector, full-text, Graphiti admission and hybrid retrieval;
+- no production profile that omits or fakes GraphRAG;
+- graph deployment and integration plumbing in the first code increment;
+- a graph-native first complete vertical slice;
+- production-equivalent complete shadow using the production-target graph stack;
+- component replacement before activation rather than graph removal;
+- focused dependency-ordered pull requests that are merge boundaries, not product stages; and
+- separate Evaluation Plan, Operational Admission, canary, activation and retirement decisions.
+
+## Completion condition
+
+The review is complete when the owner:
+
+1. accepts or amends the native-production amendment;
+2. accepts, amends or rejects ADR 0005;
+3. accepts or amends the native GraphRAG production implementation plan;
+4. accepts, amends, splits or rejects ADR 0004 against those decisions;
+5. confirms the branch remains documentation-only;
+6. authorises preparation of the documentation pull request; and
+7. leaves runtime actions behind later explicit gates.
 
 ## Change discipline before the documentation pull request
 
 1. Update all statuses and cross-references.
-2. Mark the first implementation Draft superseded rather than silently rewriting it.
+2. Keep superseded POC-framed plans as clear tombstones.
 3. Correct stale ADR references in the large integrated architecture plan.
 4. Validate Markdown links and requirement references.
-5. Record all Needs-experiment and deferred choices.
+5. Record Needs-experiment and deferred choices.
 6. Keep the branch documentation-only.
 7. Consolidate commits where repository tooling permits.
