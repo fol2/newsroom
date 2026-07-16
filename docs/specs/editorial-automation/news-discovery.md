@@ -1,44 +1,33 @@
 # News discovery specification
 
-**Status:** Draft pending GraphRAG, final architecture and revised implementation-plan decisions  
+**Status:** Draft pending ADR 0004 and Topic 13 implementation-plan decisions  
 **Owner:** Product owner  
 **Last updated:** 2026-07-16  
 **Canonical language:** English  
 **Active review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
-**GraphRAG Draft:** [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md)  
-**Implementation Draft requiring revision:** [`../../plans/2026-07-16-003-discovery-implementation-and-migration.md`](../../plans/2026-07-16-003-discovery-implementation-and-migration.md)  
-**Related architecture proposals:** [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md), [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md)  
+**Accepted GraphRAG contract:** [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md)  
+**Topic 13 Draft:** [`../../plans/2026-07-16-004-integrated-discovery-graphrag-implementation.md`](../../plans/2026-07-16-004-integrated-discovery-graphrag-implementation.md)  
+**Accepted architecture decisions:** [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md)  
+**Related Proposed decision:** [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md)  
 **Supersedes:** None
 
 ## Purpose
 
-Record cross-cutting discovery invariants spanning the Accepted Topic 1–11 specifications. This file does not replace those focused specifications and remains Draft until the governed GraphRAG boundary, relevant ADRs and revised implementation plan receive owner decisions.
+Record cross-cutting discovery invariants spanning the Accepted Topic 1–12 specifications. This file does not replace those focused specifications and remains Draft until ADR 0004 and Topic 13 receive owner decisions.
 
 It does not claim that the current Brave, RSS, GDELT and Gemini pool conforms and authorises no implementation or runtime action.
 
 ## Accepted foundations
 
-The following focused contracts are Accepted:
+The focused contracts for coverage, workflow, record semantics, source roles, change and Agenda, triage, search, evaluation, operations, outcomes, locality and governed GraphRAG are Accepted.
 
-- [`discovery-coverage-contract.md`](discovery-coverage-contract.md);
-- [`discovery-workflow.md`](discovery-workflow.md);
-- [`discovery-record-semantics.md`](discovery-record-semantics.md);
-- [`discovery-source-roles-and-selection.md`](discovery-source-roles-and-selection.md);
-- [`discovery-change-and-planned-agenda.md`](discovery-change-and-planned-agenda.md);
-- [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md);
-- [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md);
-- [`discovery-shadow-evaluation.md`](discovery-shadow-evaluation.md);
-- [`discovery-reliability-and-operations.md`](discovery-reliability-and-operations.md);
-- [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md); and
-- [`discovery-locality-scope-and-expansion.md`](discovery-locality-scope-and-expansion.md).
-
-Where this Draft conflicts with a focused Accepted specification, the focused Accepted specification controls. GraphRAG-specific requirements below remain proposals until Topic 12 is accepted.
+Where this Draft conflicts with a focused Accepted specification or Accepted ADR, the focused record controls.
 
 ## Cross-cutting requirements
 
 ### Source architecture
 
-**DISC-001 — Portfolio-first discovery.** The proposed production boundary is an owner-approved source portfolio aligned to Accepted coverage and source-role contracts, not one recurring generic search query per beat. Final architecture authority remains subject to ADR 0004.
+**DISC-001 — Portfolio-first discovery.** The proposed production boundary is an owner-approved source portfolio aligned to Accepted coverage and source-role contracts, not one recurring generic search query per beat. Final discovery architecture authority remains subject to ADR 0004.
 
 **DISC-002 — Source purpose.** Every executable Source Definition Version identifies accepted coverage mapping, source role, portfolio function, geography, publisher, interface and permitted use.
 
@@ -84,7 +73,7 @@ Where this Draft conflicts with a focused Accepted specification, the focused Ac
 
 **DISC-025 — Evidence boundary.** Discovery creates no Source Observation, Governed Claim, Evidence Package or publication authority. Evidence Intake independently retrieves and governs current permitted source material.
 
-**DISC-026 — Inspectable outcome.** Every Check, Signal, Lead, Agenda expectation, triage decision, search request, evaluation decision, operational assessment, locality decision and Candidate Handoff retains an inspectable outcome.
+**DISC-026 — Inspectable outcome.** Every Check, Signal, Lead, Agenda expectation, triage decision, search request, evaluation decision, operational assessment, locality decision, graph proposal or admission and Candidate Handoff retains an inspectable outcome.
 
 ### Models, grouping and search
 
@@ -130,15 +119,15 @@ Where this Draft conflicts with a focused Accepted specification, the focused Ac
 
 **DISC-059 — Event-Scoped Local Watch.** A bounded local watch identifies exact event purpose, source set, owner, budget and expiry and creates no permanent locality promise.
 
-### Governed GraphRAG boundary — proposed
+### Governed GraphRAG boundary
 
-**DISC-060 — Graph-aware canonical contract.** The proposed target defines graph-projection identities, trust, temporal and ordered-event contracts in canonical schema v1 rather than planning a later graph-aware semantic migration.
+**DISC-060 — Graph-aware canonical contract.** Graph-projection identities, trust, temporal and ordered-event contracts exist in canonical schema v1 rather than a later semantic migration.
 
-**DISC-061 — Relational and object authority.** The proposed relational editorial ledger owns authoritative Newsroom records and governed object storage owns exact retained permitted bytes and hashes. Graph, vector and full-text stores are rebuildable projections.
+**DISC-061 — Relational and object authority.** The relational editorial ledger owns authoritative Newsroom records and governed object storage owns exact retained permitted bytes and hashes. Graph, vector and full-text stores are rebuildable projections.
 
 **DISC-062 — Proposal and admission.** Graphiti or another extractor may create entity and relation proposals but cannot write governed editorial relations directly. Separate admission decisions remain authoritative.
 
-**DISC-063 — Hybrid retrieval.** Event and development retrieval should combine exact, full-text, vector and bounded graph paths with trust-labelled provenance. Similarity and graph proximity remain context rather than authority.
+**DISC-063 — Hybrid retrieval.** Event and development retrieval combines exact, full-text, vector and bounded graph paths with trust-labelled provenance. Similarity and graph proximity remain context rather than authority.
 
 **DISC-064 — Graph failure honesty.** Projection lag, gap or outage cannot be interpreted as no prior event or no relationship. Graph-dependent decisions use an accepted exact fallback or enter Watch or Operational Hold.
 
@@ -146,17 +135,17 @@ Where this Draft conflicts with a focused Accepted specification, the focused Ac
 
 **DISC-066 — Named read-only tools.** Agentic retrieval uses bounded named tools rather than unrestricted graph write access or general production Cypher authority.
 
-### Migration boundary — unresolved pending Topic 12
+### Migration boundary — proposed in Topic 13
 
-**DISC-070 — Legacy non-authority.** Legacy links, event IDs, merges, scores and quotas may inform a Comparator but do not become target identity or correctness ground truth.
+**DISC-070 — Canonical schema v1.** Topic 13 proposes one graph-aware canonical schema and event contract shared by test, replay, shadow and later production environments.
 
-**DISC-071 — No silent dual-write.** New authoritative discovery and graph records are not written into legacy event authority silently. Any bridge is explicit, versioned and evaluated.
+**DISC-071 — Legacy non-authority.** Legacy links, event IDs, merges, scores and quotas may inform a Comparator but do not become target identity or correctness ground truth.
 
-**DISC-072 — Evidence Intake dependency.** A complete production canary remains blocked until governed Evidence Intake exists and discovery cannot bridge directly to publication.
+**DISC-072 — No silent dual-write.** New authoritative discovery and graph records are not written into legacy event authority silently. Any bridge is explicit, versioned and evaluated.
 
-**DISC-073 — Revised plan required.** The first implementation Draft's discovery-only SQLite sequence is not accepted. Topic 13 must integrate the canonical relational ledger and GraphRAG workstreams from inception.
+**DISC-073 — Evidence Intake dependency.** Complete production canary remains blocked until governed Evidence Intake exists. Discovery cannot bridge directly to publication.
 
-**DISC-074 — Milestone authority.** Plan or code merge alone activates no source, provider, model, graph engine, shadow run, canary or production scope.
+**DISC-074 — Milestone authority.** Plan or code merge alone activates no source, provider, model, extractor, graph engine, shadow run, canary or production scope.
 
 ## Acceptance criteria
 
@@ -184,12 +173,10 @@ Where this Draft conflicts with a focused Accepted specification, the focused Ac
 22. Graph outage cannot become no prior match.
 23. Graph rebuild cannot rerun extraction and silently rewrite historical relations.
 24. Target implementation does not mutate legacy event authority silently.
-25. No implementation is authorised until Topic 12, the relevant ADRs and revised Topic 13 plan are accepted.
+25. No implementation is authorised until Topic 13 and ADR 0004 are decided and later milestone-specific gates pass.
 
 ## Open owner decisions
 
-- Accept, amend or reject the governed GraphRAG Topic 12.
-- Accept, amend or reject ADR 0001 and ADR 0002.
-- Rewrite and review the integrated implementation and migration plan as Topic 13.
-- After those decisions, accept, amend, split or reject ADR 0004.
+- Accept or amend the integrated Topic 13 implementation plan.
+- Accept, amend, split or reject ADR 0004 against that plan.
 - Determine whether this cross-cutting Draft should become Accepted or be superseded by the focused specifications plus ADRs.
