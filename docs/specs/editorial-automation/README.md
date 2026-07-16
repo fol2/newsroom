@@ -4,7 +4,7 @@
 **Owner:** Product owner  
 **Last updated:** 2026-07-16  
 **Canonical language:** English  
-**Active architecture review:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
+**Completed architecture review:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
 **Accepted Topic 13 plan:** [`../../plans/2026-07-16-005-native-graphrag-production-implementation.md`](../../plans/2026-07-16-005-native-graphrag-production-implementation.md)  
 **Canonical charter:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md)
 
@@ -14,7 +14,7 @@ Convert selected charter principles into testable requirements for a risk-bounde
 
 `MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` and `MAY` are normative only when the individual specification is `Accepted` or the owner explicitly authorises implementation.
 
-Topic 1–13 focused discovery, GraphRAG and implementation records are Accepted except for the cross-cutting `news-discovery.md` and ADR 0004, which remain under final owner review. Acceptance authorises no source, graph engine, extractor, embedding, model, search, shadow run, queue, spending, canary or production activation.
+Topic 1–13 focused discovery, governed GraphRAG and implementation records and ADRs 0001, 0002, 0004 and 0005 are Accepted. Acceptance authorises no source, graph engine, extractor, embedding, model, search, shadow run, queue, spending, canary or production activation.
 
 Requirement identifiers are stable. Existing identifiers should not be renumbered; superseded requirements remain traceable.
 
@@ -36,7 +36,7 @@ Requirement identifiers are stable. Existing identifiers should not be renumbere
 | [`discovery-locality-scope-and-expansion.md`](discovery-locality-scope-and-expansion.md) | **Accepted:** locality-aware launch, Coverage Units, Event-Scoped Watch and expansion |
 | [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md) | **Accepted:** authority, trust, ontology, proposal/admission, projection and hybrid retrieval |
 | [`graphrag-native-production-deployment.md`](graphrag-native-production-deployment.md) | **Accepted:** initial production target, repository ownership, graph-required profiles, CI and release mechanics |
-| [`news-discovery.md`](news-discovery.md) | **Draft:** cross-cutting architecture pending final ADR 0004 |
+| [`news-discovery.md`](news-discovery.md) | **Consolidated Draft:** non-normative navigation across the focused Accepted specifications and ADRs |
 | [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Story qualification, source authority, corroboration and evidence |
 | [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution and article contract |
 | [`rights-and-visuals.md`](rights-and-visuals.md) | Source access, copyright, storage and visual rights |
@@ -51,11 +51,8 @@ Accepted:
 
 - [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md): relational ledger and governed objects are authority; graph, vector and full-text are rebuildable projections.
 - [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md): the initial canonical single-host ledger uses SQLite and is delivered with the graph workstream, not as a graph-less stage.
+- [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md): source-portfolio-first, change-driven, natively GraphRAG and scheduler-neutral discovery.
 - [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md): GraphRAG is repository-native and mandatory in the first production deployment; POC and optional-plugin interpretations are rejected.
-
-Proposed:
-
-- [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md): final graph-aware discovery architecture, pending the explicit owner decision.
 
 ## Cross-suite invariants
 
@@ -107,4 +104,4 @@ Before the suite can be treated as implemented:
 
 The suite does not select cloud, model, agent framework, final admitted graph-engine version, billing, observability or deployment vendor except where an individual Accepted decision says otherwise. It does not define investigative journalism, private-source collection, public comments or a general emergency-alert service.
 
-Open questions include ADR 0004, exact schema and command-service mechanisms, Neo4j edition and licence qualification, ontology details, retrieval thresholds, release and operational thresholds, retention, Evidence Intake, production hosting and controlled cutover.
+Open questions include exact schema and command-service mechanisms, Neo4j edition and licence qualification, ontology details, retrieval thresholds, release and operational thresholds, retention, Evidence Intake, production hosting and controlled cutover.
