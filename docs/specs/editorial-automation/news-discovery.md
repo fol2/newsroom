@@ -1,29 +1,28 @@
 # News discovery specification
 
-**Status:** Draft pending Topic 13 and ADR 0004 decisions  
+**Status:** Draft pending ADR 0004 decision  
 **Owner:** Product owner  
 **Last updated:** 2026-07-16  
 **Canonical language:** English  
 **Active review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
 **Accepted GraphRAG core:** [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md)  
-**Accepted native-production decision:** [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md)  
-**Detailed production amendment:** [`graphrag-native-production-deployment.md`](graphrag-native-production-deployment.md) (`Draft`)  
-**Topic 13 Draft:** [`../../plans/2026-07-16-005-native-graphrag-production-implementation.md`](../../plans/2026-07-16-005-native-graphrag-production-implementation.md)  
+**Accepted native-production contract:** [`graphrag-native-production-deployment.md`](graphrag-native-production-deployment.md)  
+**Accepted implementation plan:** [`../../plans/2026-07-16-005-native-graphrag-production-implementation.md`](../../plans/2026-07-16-005-native-graphrag-production-implementation.md)  
 **Accepted authority decisions:** [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md), [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md)  
 **Related Proposed decision:** [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md)  
 **Supersedes:** None
 
 ## Purpose
 
-Record cross-cutting discovery invariants spanning the focused Accepted specifications and architecture decisions. This file does not replace them and remains Draft until Topic 13 and ADR 0004 receive owner decisions.
+Record cross-cutting discovery invariants spanning the focused Accepted specifications, architecture decisions and implementation plan. This file does not replace them and remains Draft until ADR 0004 receives an explicit owner decision.
 
 It does not claim that the current Brave, RSS, GDELT and Gemini pool conforms and authorises no implementation or runtime action.
 
 ## Accepted foundations
 
-The focused contracts for coverage, workflow, record semantics, source roles, change and Agenda, triage, search, evaluation, operations, outcomes, locality and governed GraphRAG are Accepted.
+The focused contracts for coverage, workflow, record semantics, source roles, change and Agenda, triage, search, evaluation, operations, outcomes, locality, governed GraphRAG, native GraphRAG production deployment and integrated implementation are Accepted.
 
-ADR 0005 additionally establishes that GraphRAG is a repository-native, mandatory subsystem of the first production deployment. Where this Draft conflicts with a focused Accepted specification or Accepted ADR, the focused record controls.
+Where this Draft conflicts with a focused Accepted specification, Accepted plan or Accepted ADR, the focused record controls.
 
 ## Cross-cutting requirements
 
@@ -143,9 +142,9 @@ ADR 0005 additionally establishes that GraphRAG is a repository-native, mandator
 
 **DISC-069 — Qualification does not decide existence.** Qualification selects or admits an exact implementation. Failure requires repair or replacement before activation and does not authorise graph-less production.
 
-### Migration boundary — proposed in Topic 13
+### Accepted migration boundary
 
-**DISC-070 — Canonical schema v1.** Topic 13 proposes one graph-aware canonical schema and event contract shared by test, replay, shadow and later production environments.
+**DISC-070 — Canonical schema v1.** One graph-aware canonical schema and event contract is shared by test, replay, shadow and later production environments.
 
 **DISC-071 — Legacy non-authority.** Legacy links, event IDs, merges, scores and quotas may inform a Comparator but do not become target identity or correctness ground truth.
 
@@ -183,11 +182,9 @@ ADR 0005 additionally establishes that GraphRAG is a repository-native, mandator
 24. A production deployment or complete shadow cannot omit GraphRAG.
 25. A failed initial graph implementation blocks activation or is replaced; it does not create a graph-less release.
 26. Target implementation does not mutate legacy event authority silently.
-27. No implementation is authorised until Topic 13 and ADR 0004 are decided and later milestone-specific gates pass.
+27. No runtime action is authorised by specification or plan acceptance; later milestone-specific gates still apply.
 
 ## Open owner decisions
 
-- Accept or amend the detailed native-production deployment amendment.
-- Accept or amend the Topic 13 implementation plan.
-- Accept, amend, split or reject ADR 0004 against those decisions.
+- Accept, amend, split or reject ADR 0004 against the Accepted focused contracts and implementation plan.
 - Determine whether this cross-cutting Draft should become Accepted or be superseded by the focused specifications plus ADRs.
