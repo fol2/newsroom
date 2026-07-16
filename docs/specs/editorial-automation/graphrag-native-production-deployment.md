@@ -5,237 +5,230 @@
 **Last updated:** 2026-07-16  
 **Canonical language:** English  
 **Amends:** [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md)  
+**Accepted invariant:** [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md)  
 **Related accepted decisions:** [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md)  
-**Related proposed decision:** [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md)  
-**Implementation authority:** None. This amendment defines a mandatory production capability. It does not install Neo4j, run Graphiti, create embeddings, access a source, call a model, spend money, start shadow operation, canary or production.  
-**Supersedes:** The `proof of concept`, `POC lane`, optional-adoption and graph-less-production interpretations of `GRAG-050` and related Topic 13 wording.
+**Implementation authority:** None. This Draft proposes detailed engine, repository, deployment, CI and release mechanics. It does not install an engine, run extraction or embeddings, access sources, call a model, spend money, start shadow operation, canary or production.  
+**Supersedes:** The `proof of concept`, `POC lane`, optional-adoption and graph-less-production interpretations of `GRAG-050` and earlier Topic 13 plans.
 
 ## Purpose
 
-Correct the remaining two-stage interpretation of GraphRAG.
+Translate Accepted ADR 0005 into testable production mechanics.
 
-The Newsroom does not build a complete relational discovery product and then decide whether GraphRAG should graduate from a proof of concept. GraphRAG is a native, required subsystem of the first production deployment.
+The following is already decided and is not reopened here:
 
-Qualification still decides whether an exact engine, extractor, ontology, projector and retrieval version is safe and effective enough to deploy. Qualification does **not** decide whether production contains GraphRAG.
+> GraphRAG is a repository-native mandatory subsystem of the first production deployment. There is no graph-less production, canary or complete live-shadow product stage.
 
-The accepted target is:
+This Draft decides how the first implementation satisfies that invariant without making the graph authoritative.
 
-```text
-one repository-owned production system
-  ├── canonical SQLite editorial ledger
-  ├── governed content-addressed object store
-  ├── governed graph projection
-  ├── vector and full-text indexes
-  ├── Graphiti proposal and admission path
-  ├── bounded hybrid retrieval tools
-  └── discovery, triage and later evidence consumers
-```
+## Authority boundary retained
 
-A production release without the governed graph and hybrid retrieval capability is not a reduced version of the target. It is a different, non-conforming architecture.
+- The relational ledger remains authoritative for identities, versions, proposals, admission decisions, outcomes and ordered history.
+- Governed objects remain authoritative for exact retained permitted bytes and hashes.
+- Graph, vector and full-text structures remain rebuildable projections.
+- Extractors and models remain proposal producers.
+- Deterministic or authorised admission remains required.
+- Graph paths, similarity and rank remain context rather than Candidate, evidence or publication authority.
 
-## Decisions not reopened
+Mandatory production deployment and editorial authority are separate concepts.
 
-This amendment does not change the accepted authority boundary:
+## Proposed native implementation contract
 
-- the relational ledger remains authoritative for identities, versions, proposals, admission decisions, outcomes and ordered history;
-- governed objects remain authoritative for exact retained permitted bytes and hashes;
-- graph, vector and full-text structures remain rebuildable projections;
-- Graphiti and models remain proposal producers;
-- deterministic or authorised admission remains required;
-- graph similarity and paths remain context rather than editorial authority; and
-- temporary graph failure must remain distinguishable from no prior event or no relation.
+GraphRAG is native only when the principal repository owns and tests:
 
-Native production support and projection authority are separate questions. GraphRAG is mandatory in the deployment without becoming the system of record.
-
-## Native project support
-
-GraphRAG is `native` only when the repository owns and tests the complete contract needed to operate it. The project must contain, or generate from versioned repository configuration:
-
-- canonical graph-aware identities, time fields, trust states and ordered event mappings;
-- the graph ontology and versioning rules;
-- graph, vector and full-text projector code;
-- projector checkpoints, gap, dead-letter, generation and rebuild logic;
-- the Graphiti extraction adapter and isolated proposal-workspace boundary;
-- entity and relation proposal, admission, rejection, merge, split and reversal records;
+- graph-aware canonical identities, time, trust and event mappings;
+- ontology and versioning;
+- graph, vector and full-text projectors;
+- checkpoints, gaps, dead letters, generations and rebuild;
+- extraction and proposal integration;
+- entity and relation admission, merge, split and reversal;
 - hybrid retrieval and authoritative hydration;
-- bounded named read-only retrieval tools;
-- production configuration and deployment definitions for the admitted graph stack;
-- readiness, liveness, lag, gap, storage and licence diagnostics;
-- backup, destructive rebuild, rights purge and recovery procedures;
-- security controls and credential separation;
-- integration, replay, fault-injection and end-to-end tests; and
-- migration and rollback behaviour.
+- bounded named read-only tools;
+- production configuration and deployment definitions;
+- readiness, lag, storage and licence diagnostics;
+- backup, purge and recovery;
+- security and credential separation; and
+- integration, replay, ablation and fault-injection tests.
 
-A separate experimental repository, notebook, manual Neo4j setup or operator-only script does not satisfy native support.
+A notebook, separately managed experimental repository, undocumented manual graph or optional plugin does not satisfy native support.
+
+## Proposed initial production implementation
+
+The Draft proposes **Neo4j Community plus Graphiti** as the initial production-target implementation:
+
+- Neo4j provides the governed property-graph projection and admitted vector or full-text capabilities where suitable;
+- Graphiti operates only in an isolated proposal workspace;
+- every extraction output and proposal is persisted in the ledger before admission;
+- only governed projectors write admitted graph state; and
+- Newsroom-owned named tools expose retrieval rather than raw graph credentials.
+
+This is not a POC and does not require a later adoption decision. It is the implementation built toward production.
+
+Exact Neo4j and Graphiti versions still require licence, security, backup, recovery, resource, performance, rights and quality gates.
+
+If that implementation fails a gate, it is repaired or replaced before production activation. GraphRAG is not removed. An alternative engine must satisfy the same canonical contracts and complete the same release evidence.
 
 ## Production deployment contract
 
-The first production activation must bind exact versions of:
+The production deployment definition binds exact versions of:
 
 - canonical ledger schema and event envelope;
-- governed object contract;
+- governed-object contract;
 - ontology;
-- graph projector;
-- vector and full-text indexers;
+- graph, vector and full-text projectors;
 - graph engine;
 - extraction framework and model where used;
 - entity and relation admission policy;
 - embedding, chunking and normalisation;
 - named retrieval tools;
 - projection freshness and degraded-operation policy;
-- backup, rebuild and purge procedures; and
-- operational, security and licence decisions.
+- backup, rebuild and purge procedures;
+- security roles and secrets;
+- resource and licence decisions; and
+- rollback or engine-replacement path.
 
-The production deployment definition must include the admitted graph service and retrieval components. A production build, deployment profile or activation decision must not silently omit them.
+A production build or deployment manifest must fail validation when a mandatory GraphRAG component is missing, incompatible, disabled or replaced by a fake.
 
-Test, fixture and local unit-test profiles may use in-memory or fake graph interfaces. A fake, disabled or no-op graph implementation is prohibited in the production profile.
-
-## Initial production implementation
-
-Neo4j Community plus Graphiti is the initial production-target implementation, not a proof-of-concept stage:
-
-- Neo4j supplies the governed property-graph projection and, where admitted, vector and full-text indexes;
-- Graphiti operates only in the isolated proposal path;
-- relation and entity proposals are persisted in the ledger before admission;
-- only governed projectors write admitted graph state; and
-- Newsroom-owned named tools expose retrieval rather than raw graph credentials.
-
-Neo4j, Graphiti and their exact versions still require licence, security, backup, resource, performance, recovery and product-use qualification.
-
-Failure of that qualification does not authorise graph-less production. It requires replacing the engine, framework or deployment mechanism before production activation while retaining the same canonical authority and projection contracts.
-
-Another engine is therefore an implementation substitution inside the same production architecture, not a later GraphRAG stage.
+Unit tests may use fake graph or extraction implementations. Production profiles may not.
 
 ## Delivery model
 
-Implementation pull requests may be dependency ordered, but there is no intermediate product release or qualifying complete shadow architecture without GraphRAG.
+Dependency-ordered pull requests are permitted, but they are not product stages.
 
-The first implementation milestone must establish both:
+The first code increment includes both the relational and graph production contract:
 
-1. the canonical relational authority contract; and
-2. the native graph production contract, including ontology, event mapping, graph client boundary, deployment configuration, health semantics and integration-test path.
+- graph-aware canonical schema;
+- ontology v1;
+- event-to-projection mapping;
+- graph client and credential boundary;
+- production deployment configuration;
+- graph readiness and gap semantics; and
+- an actual Neo4j integration-test path.
 
-The first complete vertical slice must exercise:
+The first complete vertical product slice includes:
 
 ```text
 source or fixture input
 → canonical ledger record
-→ governed graph projection
+→ governed graph and index projection
 → exact/full-text/vector/graph retrieval
 → trust-labelled Retrieval Context
-→ deterministic triage and Candidate decision
+→ deterministic triage and Candidate admission
 ```
 
-A ledger-only or adapter-only slice may be useful as an internal test, but it is not the first complete product slice and cannot qualify the target architecture.
+Ledger-only or adapter-only tests may occur earlier but cannot be called the first complete product slice or qualify the full target architecture.
 
-## Qualification is not a product stage
+## Production-equivalent evaluation
 
-The project may use pre-production environments, controlled datasets and shadow traffic to qualify the mandatory production implementation. These are release-verification activities, not a separate optional product phase.
+Complete live-shadow qualification runs the production-target graph engine, projector, indexes, extraction/admission path and hybrid retrieval, or an explicitly approved production-equivalent environment.
 
-The exact production-target GraphRAG stack must be exercised in a production-equivalent evaluation environment before activation. Where the physical environment differs, the Evaluation Plan must identify and justify every difference.
+The Evaluation Plan identifies every topology, resource, version or configuration difference from production.
 
-The following evidence is still required:
+Required evidence includes:
 
 - relation and entity quality;
-- bilingual and mixed-language identity resolution;
+- English, Traditional Chinese and mixed-language resolution;
 - temporal and provenance correctness;
-- hybrid retrieval ablation;
-- projection lag and gap behaviour;
+- exact/full-text/vector/graph hybrid ablation;
+- projection lag, gap and dead-letter behaviour;
 - destructive rebuild without stochastic historical rewrite;
 - rights and privacy purge followed by rebuild;
 - backup and recovery;
 - resource and cost envelope;
 - security and named-tool containment;
-- licence approval; and
-- degraded operation during temporary graph outage.
+- product-use licence approval; and
+- temporary graph-outage behaviour.
 
-Passing these gates admits the exact implementation to production. Failing them blocks activation or requires implementation replacement; it does not remove the GraphRAG requirement.
+Passing admits the exact implementation. Failing blocks activation or triggers implementation replacement; it never creates a graph-less production path.
 
-## Temporary outage is not optional deployment
+## Temporary outage
 
-A deployed graph may become temporarily unavailable. The accepted degraded behaviour remains:
+A deployed graph may become temporarily unavailable. That is degraded operation inside the mandatory architecture:
 
-- deterministic collection and durable Lead creation may continue where safe;
-- graph-dependent work reports an explicit unavailable, stale or gap outcome;
-- an approved exact relational fallback may serve only the routes for which it has been evaluated;
+- safe deterministic collection may continue where independent requirements pass;
+- graph-dependent work reports unavailable, stale or gap outcomes;
+- evaluated exact fallbacks serve only approved routes;
 - other graph-dependent Leads enter Watch or Operational Hold;
-- no graph failure becomes `no prior match`; and
-- recovery reconciles the same mandatory graph deployment.
-
-This resilience behaviour does not create a supported graph-free production mode.
+- no outage becomes `no prior match`; and
+- recovery restores and reconciles the mandatory graph deployment.
 
 ## Requirements
 
-### Native production requirement
+### Accepted invariant restatement
 
-**GRPROD-001 — Mandatory production subsystem.** The first production deployment MUST include an admitted governed graph projection, vector and full-text retrieval indexes and bounded hybrid GraphRAG retrieval.
+The following requirements restate ADR 0005 for traceability; ADR 0005 is the Accepted authority.
 
-**GRPROD-002 — No graph-less product stage.** The implementation programme MUST NOT define a production, canary or complete live-shadow target that omits GraphRAG and later migrates to it.
+**GRPROD-001 — Mandatory production subsystem.** The first production deployment includes an admitted governed graph projection, vector and full-text indexes and bounded hybrid GraphRAG retrieval.
 
-**GRPROD-003 — Native repository ownership.** The repository MUST own the ontology, projection, extraction-boundary, admission, retrieval, deployment, health, rebuild, security and test contracts required to operate GraphRAG.
+**GRPROD-002 — No graph-less product stage.** Production, canary and complete live shadow cannot omit GraphRAG and add it later.
 
-**GRPROD-004 — Production profile requires GraphRAG.** A production configuration or build profile MUST NOT select a fake, no-op, disabled or omitted graph implementation.
+**GRPROD-003 — Native repository ownership.** The principal repository owns GraphRAG code, ontology, projection, admission, retrieval, deployment, operations and tests.
 
-**GRPROD-005 — Same canonical contract.** Relational, graph, vector, full-text, discovery and later evidence consumers MUST use the same canonical identities, trust states, time semantics and ordered event contract.
+**GRPROD-004 — Production profile requires GraphRAG.** A production profile cannot use a fake, no-op, disabled or omitted graph implementation.
 
-### Initial implementation and substitution
+**GRPROD-005 — Same canonical contract.** Relational, graph, vector, full-text, discovery and later knowledge consumers use the same canonical identities, trust, time and ordered events.
 
-**GRPROD-010 — Initial production implementation.** Neo4j Community plus Graphiti is the initial production-target GraphRAG implementation, subject to exact release qualification rather than optional POC graduation.
+### Proposed implementation details
 
-**GRPROD-011 — Qualification decides version, not existence.** Evaluation and Operational Admission determine whether an exact GraphRAG implementation is production-ready; they MUST NOT be used to make GraphRAG optional.
+**GRPROD-010 — Initial production target.** Neo4j Community plus Graphiti is the initial production-target implementation, subject to exact release qualification rather than POC graduation.
 
-**GRPROD-012 — Replacement before activation.** If the initial engine or framework fails a release gate, an alternative implementation MUST satisfy the same contract before activation. The system MUST NOT activate without GraphRAG as a fallback response.
+**GRPROD-011 — Qualification decides version, not existence.** Evaluation and Operational Admission determine whether the exact implementation is ready; GraphRAG remains mandatory.
 
-**GRPROD-013 — No engine lock-in of domain semantics.** Canonical IDs, ontology meanings, proposal and admission history and retrieval-tool contracts MUST NOT depend on Neo4j internal IDs or Graphiti-private state.
+**GRPROD-012 — Replacement before activation.** Failure of the initial implementation requires repair or replacement before activation and cannot authorise graph-less production.
+
+**GRPROD-013 — Engine-neutral domain semantics.** Canonical IDs, ontology meanings, proposals, admissions and named tools cannot depend on Neo4j internal IDs or Graphiti private state.
+
+**GRPROD-014 — Repository deployment definition.** The project contains versioned development, evaluation and production GraphRAG deployment configuration or an equivalent generated contract.
+
+**GRPROD-015 — Production configuration validation.** Missing or incompatible mandatory graph configuration fails production build or readiness validation.
+
+**GRPROD-016 — Real integration path.** Repository CI includes an approved integration path against an actual graph service; pure fakes alone are insufficient.
 
 ### Integrated delivery
 
-**GRPROD-020 — Graph contract in first milestone.** The first implementation milestone MUST include the production graph contract, ontology version, projection-event mapping, deployment boundary, health model and integration-test path beside the relational authority foundation.
+**GRPROD-020 — Graph contract in first increment.** The first code increment includes ontology, projection-event mapping, graph boundary, deployment configuration, health semantics and integration tests beside relational authority.
 
-**GRPROD-021 — Graph-native complete slice.** The first complete end-to-end vertical slice MUST include governed projection and hybrid retrieval before triage and Candidate admission.
+**GRPROD-021 — Graph-native complete slice.** The first complete end-to-end product slice includes governed projection and hybrid retrieval before triage and Candidate admission.
 
-**GRPROD-022 — Production-equivalent shadow.** Complete live-shadow qualification MUST run the production-target graph, projector, indexes and retrieval path, or a documented production-equivalent environment approved in the Evaluation Plan.
+**GRPROD-022 — Production-equivalent shadow.** Complete live-shadow qualification uses the production-target graph stack or an approved production-equivalent environment.
 
-**GRPROD-023 — No optional-plugin semantics.** GraphRAG MAY have replaceable adapters, but the capability MUST NOT be modelled as an optional product plugin whose absence is a supported production state.
+**GRPROD-023 — No optional-plugin semantics.** Replaceable adapters are permitted, but GraphRAG cannot be an optional product capability.
 
-**GRPROD-024 — Outage is degraded operation.** Temporary graph outage MAY invoke accepted degraded behaviour but MUST NOT redefine the deployed architecture as graph-free.
+**GRPROD-024 — Outage is degradation.** Temporary graph outage invokes accepted degraded behaviour and does not define a graph-free production profile.
 
 ### Release and authority
 
-**GRPROD-030 — Activation binds graph versions.** Production activation MUST identify the exact graph engine, ontology, projector, extraction, admission, indexes, retrieval tools, Operational Profiles, licence decision and rollback or replacement path.
+**GRPROD-030 — Activation binds exact versions.** Production activation identifies the exact graph engine, ontology, projectors, extraction, admission, indexes, retrieval, licence decision and rollback or replacement path.
 
-**GRPROD-031 — Graph health is release health.** Missing, stale, gapped or unadmitted mandatory graph capability MUST block or scope production readiness according to the accepted release policy.
+**GRPROD-031 — Graph readiness is release readiness.** Missing, stale, gapped or unadmitted mandatory graph capability blocks or scopes production readiness under the release policy.
 
-**GRPROD-032 — Acceptance is not execution.** Acceptance of this amendment MUST NOT install an engine, run extraction or embeddings, access sources, spend money, start shadow operation or activate production.
+**GRPROD-032 — Acceptance is not execution.** Acceptance of this amendment starts no engine, source, extraction, embedding, model call, spending, shadow operation or production activation.
 
 ## Acceptance criteria
 
-1. The production deployment manifest cannot be rendered successfully without an admitted GraphRAG configuration.
+1. A production deployment manifest cannot validate without an admitted GraphRAG configuration.
 2. A production build cannot substitute the fake graph used by unit tests.
-3. The first complete vertical test traverses ledger, governed graph, hybrid retrieval, triage and Candidate admission.
-4. Neo4j qualification failure blocks activation or causes an implementation replacement; it never creates a graph-less release.
-5. Replacing Neo4j preserves canonical IDs, proposal and admission history and named-tool contracts.
+3. The first complete vertical integration test traverses ledger, graph, hybrid retrieval, triage and Candidate admission.
+4. Neo4j or Graphiti qualification failure blocks activation or causes implementation replacement; it never creates a graph-less release.
+5. Replacing the engine preserves canonical IDs, proposal and admission history and named-tool contracts.
 6. Complete shadow evidence includes the production-target graph and retrieval path.
-7. A temporary graph outage creates explicit degraded outcomes while the deployment remains a GraphRAG system.
-8. GraphRAG remains a projection and does not become authoritative merely because it is mandatory in production.
-9. The repository includes operational and rebuild procedures rather than relying on an undocumented manually managed graph.
+7. A temporary outage creates explicit degraded outcomes while the system remains a GraphRAG deployment.
+8. Mandatory deployment does not make GraphRAG authoritative.
+9. The repository includes operational and rebuild procedures rather than an undocumented manual graph.
 10. Acceptance creates no runtime authority.
 
 ## Owner decisions required
 
-The Draft recommends that the owner accept:
+The Draft asks the owner to accept:
 
-1. GraphRAG as a mandatory native subsystem of the first production deployment, not a POC, backlog item or optional later stage.
-2. No production, canary or complete live-shadow architecture without governed graph, vector, full-text and hybrid retrieval.
-3. Repository ownership of GraphRAG code, ontology, projection, admission, retrieval, deployment, operations and tests.
-4. Neo4j Community plus Graphiti as the initial production-target implementation rather than a proof-of-concept lane.
-5. Exact qualification of that implementation before activation, with replacement before activation if it fails and no graph-less fallback.
-6. One canonical relational-plus-graph contract, while preserving relational and object authority and graph rebuildability.
-7. Graph production contracts and integration plumbing in the first implementation milestone.
-8. A graph-native first complete vertical slice.
-9. Production-equivalent integrated shadow evidence.
-10. A prohibition on fake, disabled or omitted GraphRAG in production profiles.
-11. Temporary graph outage as degraded operation rather than a supported graph-free deployment mode.
-12. Production activation binding exact graph, projector, ontology, extraction, index, retrieval, licence and rollback versions.
-13. Engine substitution as an implementation change within one architecture, not a second product stage.
-14. Acceptance of this amendment authorising no runtime action.
+1. Neo4j Community plus Graphiti as the initial production-target implementation rather than a POC.
+2. Repair or replacement before activation if that implementation fails gates, with no graph-less fallback.
+3. The detailed native repository ownership boundary.
+4. Production configuration and deployment validation that cannot omit or fake GraphRAG.
+5. Actual graph-service integration in repository CI.
+6. Graph production contracts and integration plumbing in the first code increment.
+7. A graph-native first complete vertical slice.
+8. Production-equivalent complete shadow evidence.
+9. Engine-neutral canonical semantics and named-tool contracts.
+10. Temporary graph outage as degraded operation rather than optional deployment.
+11. Production activation binding exact graph and retrieval versions, licence and replacement path.
+12. Acceptance authorising no runtime action.
