@@ -56,6 +56,8 @@ It does not select live sources, models, embeddings, Graphiti prompts, final edi
 
 ### 2.3 Conflicts and missing executable contracts
 
+The findings below describe the audited base commit. The resolution column records the required state delivered by this readiness branch.
+
 | Finding | Risk | Resolution |
 |---|---|---|
 | Accepted governed GraphRAG spec still uses POC wording in scope, `GRAG-050`, acceptance and completion text. | Optional experiment or later graduation could be implemented. | Replace only superseded POC wording with the Accepted production-target qualification contract. |
@@ -130,7 +132,7 @@ The authority package cannot import Neo4j or Graphiti. The target implementation
 
 ### 4.2 Canonical IDs, versions, trust and time
 
-Controllers create opaque typed IDs, externally serialised as lowercase canonical UUID strings. URLs, provider IDs, titles, timestamps, digests and Neo4j internal IDs are never global Newsroom IDs. Each implemented aggregate has a stable `aggregate_id`, positive `aggregate_version` starting at 1, immutable version records where needed and explicit predecessor/supersession references. SHA-256 digests remain byte/payload identities, not domain identities.
+Controllers create opaque typed IDs as RFC 4122 UUID version 4 values, externally serialised as lowercase canonical hyphenated strings. URLs, provider IDs, titles, timestamps, digests and Neo4j internal IDs are never global Newsroom IDs. Each implemented aggregate has a stable `aggregate_id`, positive `aggregate_version` starting at 1, immutable version records where needed and explicit predecessor/supersession references. SHA-256 digests remain byte/payload identities, not domain identities.
 
 The closed trust enum is `OBSERVED`, `PROPOSED`, `ADMITTED`. Unknown values fail. Confidence creates no authority. Proposed and admitted query surfaces remain distinct rather than depending on an optional status filter.
 
@@ -147,7 +149,7 @@ payload_schema_version, payload_digest/object_ref, correlation_id,
 causation_id, producer_version, authentication_context_reference
 ```
 
-The boundary authenticates and authorises the principal, allow-lists command types, validates payload version/size, fences on expected aggregate version and records audit/result atomically. Reusing the same idempotency key with different payload is a conflict; the same key/payload returns the committed result without another mutation.
+The boundary authenticates and authorises the principal, allow-lists command types, validates payload version/size, requires expected aggregate version `0` for create and the exact current positive version for update, and records audit/result atomically. Reusing the same idempotency key with different payload is a conflict; the same key/payload returns the committed result without another mutation.
 
 Increment 1 provides an authenticator interface and deterministic test authenticator. Production transport/principal provisioning is `Needs experiment`; no production profile may start with an unauthenticated local writer.
 
