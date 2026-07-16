@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from newsroom.authority import (
     AggregateId,
@@ -8,14 +9,19 @@ from newsroom.authority import (
     CommandDefinition,
     CommandRegistry,
     CommandService,
+    CommittedCommandLookup,
     InlinePayload,
     PayloadMode,
+    PayloadSchemaContract,
+    PayloadSchemaRegistry,
+    PayloadSchemaValidationError,
     SemanticCommand,
     StaticAuthenticator,
     StaticAuthorizer,
     StaticPrincipal,
     TrustScope,
     UtcTimestamp,
+    canonical_json_bytes,
 )
 
 FIXED_NOW = UtcTimestamp(datetime(2026, 7, 16, 12, 0, tzinfo=UTC))
@@ -55,14 +61,44 @@ def admitted_definition() -> CommandDefinition:
     )
 
 
+def fixture_payload_bytes(value: Any) -> bytes:
+    if not isinstance(value, dict):
+        raise PayloadSchemaValidationError("fixture payload must be an object")
+    if set(value) != {"headline", "count"}:
+        raise PayloadSchemaValidationError(
+            "fixture payload requires exactly headline and count"
+        )
+    if not isinstance(value["headline"], str) or not value["headline"]:
+        raise PayloadSchemaValidationError("fixture headline must be non-empty")
+    if isinstance(value["count"], bool) or not isinstance(value["count"], int):
+        raise PayloadSchemaValidationError("fixture count must be an integer")
+    return canonical_json_bytes(value)
+
+
+def default_payload_schemas() -> PayloadSchemaRegistry:
+    return PayloadSchemaRegistry(
+        [
+            PayloadSchemaContract(
+                schema_version="fixture_payload_v1",
+                payload_mode=PayloadMode.INLINE,
+                canonicalizer=fixture_payload_bytes,
+            )
+        ]
+    )
+
+
 def make_service(
     *,
     policy_version: str = "authz-v1",
     scopes: frozenset[str] = frozenset({"authority.observed.write"}),
     credential: str = "token-1",
     definition_version: str = "cmd-v1",
+    registry: CommandRegistry | None = None,
+    committed_lookup: CommittedCommandLookup | None = None,
 ) -> CommandService:
-    registry = CommandRegistry([observed_definition(version=definition_version), admitted_definition()])
+    selected_registry = registry or CommandRegistry(
+        [observed_definition(version=definition_version), admitted_definition()]
+    )
     authenticator = StaticAuthenticator(
         credentials={credential: StaticPrincipal("principal.alpha")},
         authority_domain="newsroom.authority",
@@ -72,9 +108,11 @@ def make_service(
         grants_by_principal={"principal.alpha": scopes},
     )
     return CommandService(
-        registry=registry,
+        registry=selected_registry,
+        payload_schemas=default_payload_schemas(),
         authenticator=authenticator,
         authorizer=authorizer,
+        committed_lookup=committed_lookup,
         clock=lambda: FIXED_NOW,
     )
 
