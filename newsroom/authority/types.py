@@ -31,7 +31,6 @@ def require_scope(value: str, *, field: str) -> str:
 @dataclass(frozen=True, slots=True)
 class UUIDv4Id:
     """Opaque typed identity; never an ordering or causality source."""
-
     value: UUID
 
     def __post_init__(self) -> None:
@@ -72,6 +71,11 @@ class EventId(UUIDv4Id):
 
 @dataclass(frozen=True, slots=True)
 class AuditId(UUIDv4Id):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class PayloadId(UUIDv4Id):
     pass
 
 
@@ -213,14 +217,10 @@ class TemporalValue:
             return
         if self.precision is TimePrecision.CONFLICTING:
             if self.value is not None or len(self.conflicting_values) < 2:
-                raise AuthorityTypeError(
-                    "CONFLICTING time requires at least two retained alternatives"
-                )
+                raise AuthorityTypeError("CONFLICTING time requires alternatives")
             return
         if self.conflicting_values:
-            raise AuthorityTypeError(
-                "conflicting alternatives are valid only for CONFLICTING time"
-            )
+            raise AuthorityTypeError("conflicting values require CONFLICTING precision")
         if self.value is None:
             raise AuthorityTypeError(f"{self.precision} time requires a value")
         if self.precision is TimePrecision.DATE_ONLY:
@@ -228,9 +228,7 @@ class TemporalValue:
                 raise AuthorityTypeError("DATE_ONLY time requires a date")
             return
         if not isinstance(self.value, datetime):
-            raise AuthorityTypeError(
-                f"{self.precision} time requires an offset-aware datetime"
-            )
+            raise AuthorityTypeError("temporal time requires a datetime")
         if self.value.tzinfo is None or self.value.utcoffset() is None:
             raise AuthorityTypeError("temporal datetime requires an explicit offset")
         object.__setattr__(self, "value", self.value.astimezone(UTC))
