@@ -117,29 +117,25 @@ class _CapabilityIssuer:
         expected = self._signature(grant.unsigned_value())
         if not hmac.compare_digest(expected, grant.signature):
             raise InvalidCommitCapability("commit capability signature mismatch")
-        if grant.authorization_request.request_digest != grant.authorization_request.computed_digest:
+        request = grant.authorization_request
+        definition = grant.definition
+        payload = grant.payload
+        if request.request_digest != request.computed_digest:
             raise InvalidCommitCapability("authorization request digest changed")
         if (
-            grant.authorization_request.authentication_context_id
+            request.authentication_context_id
             != grant.authentication.authentication_context_id
-            or grant.authorization_request.principal_id != grant.authentication.principal_id
-            or grant.authorization_request.authority_domain
-            != grant.authentication.authority_domain
+            or request.principal_id != grant.authentication.principal_id
+            or request.authority_domain != grant.authentication.authority_domain
         ):
             raise InvalidCommitCapability(
                 "authorization request is not bound to the authentication context"
             )
-        if (
-            grant.authorization.authentication_context_id
-            != grant.authentication.authentication_context_id
-        ):
+        if grant.authorization.authentication_context_id != grant.authentication.authentication_context_id:
             raise InvalidCommitCapability(
                 "authorization decision is not bound to the authentication context"
             )
-        if (
-            grant.authorization.authorization_request_digest
-            != grant.authorization_request.request_digest
-        ):
+        if grant.authorization.authorization_request_digest != request.request_digest:
             raise InvalidCommitCapability(
                 "authorization decision is not bound to the exact request"
             )
@@ -155,3 +151,26 @@ class _CapabilityIssuer:
             raise InvalidCommitCapability("authorization occurred after authentication expiry")
         if not grant.authorization.allowed:
             raise InvalidCommitCapability("denied authorization cannot create a grant")
+        expected_semantics = (
+            request.command_definition_digest == definition.digest
+            and request.stable_semantic_request_digest
+            == grant.stable_semantic_request_digest
+            and request.aggregate_type == definition.aggregate_type
+            and request.aggregate_id == grant.aggregate_id
+            and request.event_type == definition.event_type
+            and request.event_schema_version == definition.event_schema_version
+            and request.payload_mode == definition.payload_mode.value
+            and request.payload_schema_version == definition.payload_schema_version
+            and request.trust_scope == definition.trust_scope.value
+            and request.security_scope == definition.security_scope
+            and request.retention_scope == definition.retention_scope
+            and request.object_class == definition.required_object_class
+            and request.allowed_use == definition.required_allowed_use
+            and grant.command_type == definition.command_type
+            and payload.kind == definition.payload_mode.value
+            and payload.schema_version == definition.payload_schema_version
+        )
+        if not expected_semantics:
+            raise InvalidCommitCapability(
+                "commit grant semantics do not match the authorised server definition"
+            )
