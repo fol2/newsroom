@@ -10,6 +10,7 @@ from ._security import (
     _AuthorizationDecision,
     _AuthorizationRequest,
     _VerifiedAuthenticationContext,
+    _effective_scope_digest,
 )
 from .canonical import digest_canonical
 from .types import (
@@ -33,6 +34,11 @@ class AuthenticationProof:
         require_token(self.method, field="authentication method")
         if not isinstance(self.credential, str) or not self.credential:
             raise AuthenticationError("authentication credential must be non-empty")
+        if not isinstance(self.untrusted_claims, Mapping):
+            raise AuthenticationError("untrusted claims must be a mapping")
+        for key, value in self.untrusted_claims.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise AuthenticationError("untrusted claim names and values must be strings")
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,20 +141,47 @@ class StaticAuthorizer:
         now: UtcTimestamp,
     ) -> _AuthorizationDecision:
         if request.authentication_context_id != context.authentication_context_id:
-            raise AuthorizationDenied(
-                _AuthorizationDecision(
-                    authorization_decision_id=AuthorizationDecisionId.new(),
-                    authentication_context_id=context.authentication_context_id,
-                    authorization_request_digest=request.request_digest,
-                    authorization_policy_version=self._policy_version,
-                    effective_scopes=(),
-                    effective_scope_digest=digest_canonical([]),
-                    allowed=False,
-                    reason_code="AUTHZ_CONTEXT_MISMATCH",
-                    decided_at=now,
-                )
+            decision = _AuthorizationDecision(
+                authorization_decision_id=AuthorizationDecisionId.new(),
+                authentication_context_id=context.authentication_context_id,
+                authorization_request_digest=request.request_digest,
+                authorization_policy_version=self._policy_version,
+                effective_scopes=(),
+                effective_scope_digest=_effective_scope_digest(context, ()),
+                allowed=False,
+                reason_code="AUTHZ_CONTEXT_MISMATCH",
+                decided_at=now,
             )
-        scopes = tuple(sorted(self._grants_by_principal.get(context.principal_id, frozenset())))
+            raise AuthorizationDenied(decision)
+        if request.principal_id != context.principal_id:
+            decision = _AuthorizationDecision(
+                authorization_decision_id=AuthorizationDecisionId.new(),
+                authentication_context_id=context.authentication_context_id,
+                authorization_request_digest=request.request_digest,
+                authorization_policy_version=self._policy_version,
+                effective_scopes=(),
+                effective_scope_digest=_effective_scope_digest(context, ()),
+                allowed=False,
+                reason_code="AUTHZ_PRINCIPAL_MISMATCH",
+                decided_at=now,
+            )
+            raise AuthorizationDenied(decision)
+        if request.authority_domain != context.authority_domain:
+            decision = _AuthorizationDecision(
+                authorization_decision_id=AuthorizationDecisionId.new(),
+                authentication_context_id=context.authentication_context_id,
+                authorization_request_digest=request.request_digest,
+                authorization_policy_version=self._policy_version,
+                effective_scopes=(),
+                effective_scope_digest=_effective_scope_digest(context, ()),
+                allowed=False,
+                reason_code="AUTHZ_DOMAIN_MISMATCH",
+                decided_at=now,
+            )
+            raise AuthorizationDenied(decision)
+        scopes = tuple(
+            sorted(self._grants_by_principal.get(context.principal_id, frozenset()))
+        )
         allowed = request.required_scope in scopes
         reason = "AUTHZ_ALLOWED" if allowed else "AUTHZ_SCOPE_MISSING"
         return _AuthorizationDecision(
@@ -157,13 +190,7 @@ class StaticAuthorizer:
             authorization_request_digest=request.request_digest,
             authorization_policy_version=self._policy_version,
             effective_scopes=scopes,
-            effective_scope_digest=digest_canonical(
-                {
-                    "authority_domain": context.authority_domain,
-                    "principal_id": context.principal_id,
-                    "effective_scopes": list(scopes),
-                }
-            ),
+            effective_scope_digest=_effective_scope_digest(context, scopes),
             allowed=allowed,
             reason_code=reason,
             decided_at=now,
