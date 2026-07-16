@@ -1,11 +1,12 @@
 # Discovery and knowledge-architecture review sequence
 
-**Status:** Active owner review  
+**Status:** Completed owner review  
 **Owner:** Product owner  
 **Last updated:** 2026-07-16  
+**Completed:** 2026-07-16  
 **Canonical language:** English  
 **Implementation authority:** None. This document records decisions and organises review. It authorises no code, source access, graph installation, extraction, embeddings, model call, spending, shadow run, canary or production activation.  
-**Related discovery ADR:** [`../adr/0004-source-registry-first-change-driven-discovery.md`](../adr/0004-source-registry-first-change-driven-discovery.md) (`Proposed`)  
+**Accepted discovery ADR:** [`../adr/0004-source-registry-first-change-driven-discovery.md`](../adr/0004-source-registry-first-change-driven-discovery.md)  
 **Accepted architecture ADRs:** [`../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md), [`../adr/0005-native-graphrag-production-deployment.md`](../adr/0005-native-graphrag-production-deployment.md)  
 **Accepted native production contract:** [`../specs/editorial-automation/graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md)  
 **Accepted implementation plan:** [`2026-07-16-005-native-graphrag-production-implementation.md`](2026-07-16-005-native-graphrag-production-implementation.md)
@@ -24,7 +25,7 @@ A committed Draft, passing test, merged pull request, Proposed plan or Proposed 
 - **Needs experiment:** cannot be resolved responsibly without bounded evidence.
 - **Unresolved:** still requires owner discussion; no default may be inferred.
 
-## Review order and state
+## Review order and final state
 
 | Topic | Scope | State | Canonical record |
 |---|---|---|---|
@@ -42,6 +43,7 @@ A committed Draft, passing test, merged pull request, Proposed plan or Proposed 
 | 11 | Locality boundary and expansion | Accepted | [`discovery-locality-scope-and-expansion.md`](../specs/editorial-automation/discovery-locality-scope-and-expansion.md) |
 | 12 | Governed and native-production GraphRAG | Accepted | [`governed-graphrag-and-knowledge-projection.md`](../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md), [`graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md), ADRs 0001, 0002 and 0005 |
 | 13 | Native GraphRAG production implementation | Accepted | [`2026-07-16-005-native-graphrag-production-implementation.md`](2026-07-16-005-native-graphrag-production-implementation.md) |
+| Architecture consolidation | Discovery architecture | Accepted | ADR 0004 |
 
 ## Accepted cross-topic boundaries
 
@@ -135,23 +137,20 @@ The product owner accepted:
 - no legacy identity import, silent dual write, source-count ranking, quotas or filler; and
 - no runtime authority from plan acceptance.
 
-## Remaining architecture decision
+### ADR 0004 — Consolidated discovery architecture
 
-ADR 0004 remains **Proposed**. Topic 0–13 acceptance does not silently accept it.
+The product owner accepted ADR 0004 on 2026-07-16. The accepted architecture is source-portfolio-first, change-driven, natively GraphRAG and scheduler-neutral.
 
-The review is complete when the product owner:
+## Completion and pull-request authority
 
-1. accepts, amends, splits or rejects ADR 0004;
-2. confirms that the branch remains documentation-only;
-3. authorises preparation and opening of the documentation pull request; and
-4. leaves runtime actions behind later explicit milestone-specific gates.
+The owner confirmed on 2026-07-16 that:
 
-## Change discipline before the documentation pull request
+1. the branch remains documentation-only;
+2. this review sequence is complete;
+3. final documentation cleanup and validation are authorised;
+4. a documentation-only pull request may be prepared and opened; and
+5. every runtime action remains behind later milestone-specific approval gates.
 
-1. Update all statuses and cross-references.
-2. Keep superseded POC-framed plans as clear tombstones.
-3. Correct stale ADR references in the large integrated architecture plan.
-4. Validate Markdown links and requirement references.
-5. Record Needs-experiment and deferred choices.
-6. Keep the branch documentation-only.
-7. Consolidate commits where repository tooling permits.
+## Preserved deferred and Needs-experiment decisions
+
+Acceptance does not resolve evidence-dependent choices including exact sources, polling and operational numbers, search provider, exact schema details, ontology predicates, admitted Neo4j and Graphiti versions, embeddings, retrieval thresholds, Evidence Intake transport, hosting, observability, locality selection or production activation date.
