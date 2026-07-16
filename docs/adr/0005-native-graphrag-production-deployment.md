@@ -25,6 +25,15 @@ There is no supported graph-less production, canary or complete live-shadow targ
 
 This decision supersedes any `POC`, proof-of-concept-lane, optional-plugin or later-adoption interpretation in earlier GraphRAG and implementation documents.
 
+## Requirement supersession
+
+The following parts of [`../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md`](../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md) are retained for history but no longer govern:
+
+- `GRAG-050` as worded with an `Initial POC baseline`; and
+- acceptance criterion 17 stating that POC success does not select the production engine.
+
+They are superseded by this ADR's mandatory native-production decision and by the detailed `GRPROD-*` contract once accepted. The exact engine still requires release qualification, but GraphRAG itself does not require a later adoption or graduation decision.
+
 ## Authority boundary
 
 Native production support does not make the graph authoritative.
