@@ -14,7 +14,7 @@ Convert selected charter principles into testable requirements for a risk-bounde
 
 `MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` and `MAY` are normative only when the individual specification is `Accepted` or the owner explicitly authorises implementation.
 
-Topic 1–11 focused discovery specifications and the core governed GraphRAG specification are Accepted. The native-production GraphRAG amendment, ADR 0005, Topic 13 plan, cross-cutting `news-discovery.md` and ADR 0004 remain under owner review. None authorises runtime action.
+Topic 1–11 focused discovery specifications, the core governed GraphRAG specification and ADRs 0001, 0002 and 0005 are Accepted. The detailed native-production deployment amendment, Topic 13 plan, cross-cutting `news-discovery.md` and ADR 0004 remain under owner review. None authorises runtime action.
 
 Requirement identifiers are stable. Existing identifiers should not be renumbered; superseded requirements remain traceable.
 
@@ -35,8 +35,8 @@ Requirement identifiers are stable. Existing identifiers should not be renumbere
 | [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md) | **Accepted:** decision order, canonical outcomes, reasons, ordinal lanes and scoring boundary |
 | [`discovery-locality-scope-and-expansion.md`](discovery-locality-scope-and-expansion.md) | **Accepted:** locality-aware launch, Coverage Units, Event-Scoped Watch and expansion |
 | [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md) | **Accepted core:** authority, trust, ontology, proposal/admission, projection and hybrid retrieval |
-| [`graphrag-native-production-deployment.md`](graphrag-native-production-deployment.md) | **Draft amendment:** mandatory native GraphRAG in the first production deployment; no POC or graph-less product stage |
-| [`news-discovery.md`](news-discovery.md) | **Draft:** cross-cutting architecture pending the native-production amendment and final ADRs |
+| [`graphrag-native-production-deployment.md`](graphrag-native-production-deployment.md) | **Draft detail:** engine, repository, CI, production manifest and release mechanics under Accepted ADR 0005 |
+| [`news-discovery.md`](news-discovery.md) | **Draft:** cross-cutting architecture pending the detailed amendment and final ADR 0004 |
 | [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Story qualification, source authority, corroboration and evidence |
 | [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution and article contract |
 | [`rights-and-visuals.md`](rights-and-visuals.md) | Source access, copyright, storage and visual rights |
@@ -51,11 +51,11 @@ Accepted:
 
 - [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md): relational ledger and governed objects are authority; graph, vector and full-text are rebuildable projections.
 - [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md): the initial canonical single-host ledger uses SQLite and is delivered with the graph workstream, not as a graph-less stage.
+- [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md): GraphRAG is repository-native and mandatory in the first production deployment; POC and optional-plugin interpretations are rejected.
 
 Proposed:
 
-- [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md): GraphRAG is a mandatory repository-native subsystem of the first production deployment.
-- [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md): final graph-aware discovery architecture, pending the amendment and Topic 13 plan.
+- [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md): final graph-aware discovery architecture, pending the detailed amendment and Topic 13 plan.
 
 ## Cross-suite invariants
 
@@ -69,12 +69,13 @@ Proposed:
 8. Discovery Signals, Leads, Event Hypotheses and Candidates are not evidence.
 9. Graph, vector and full-text retrieval cannot become ungoverned editorial authority.
 10. Rebuildable graph projection is not permission to postpone GraphRAG.
-11. Native mandatory production GraphRAG does not make the graph authoritative.
-12. Graph outage is not no prior match and does not create a supported graph-free profile.
-13. Shadow results and Operational Admission are not production activation.
-14. Outcome, reason, next action, current status and priority remain separate.
-15. Locality label and Event-Scoped Local Watch create no systematic locality promise.
-16. A plan organises Accepted requirements and cannot create, weaken or omit them.
+11. GraphRAG is mandatory in production but remains a projection rather than authority.
+12. No production, canary or complete live-shadow profile omits GraphRAG.
+13. Temporary graph outage is explicit degraded operation and not a supported graph-free product.
+14. Shadow results and Operational Admission are not production activation.
+15. Outcome, reason, next action, current status and priority remain separate.
+16. Locality label and Event-Scoped Local Watch create no systematic locality promise.
+17. A plan organises Accepted requirements and cannot create, weaken or omit them.
 
 ## Plans and implementation
 
@@ -106,4 +107,4 @@ Before the suite can be treated as implemented:
 
 The suite does not select cloud, model, agent framework, final admitted graph-engine version, billing, observability or deployment vendor except where an individual Accepted decision says otherwise. It does not define investigative journalism, private-source collection, public comments or a general emergency-alert service.
 
-Open questions include the detailed native-production amendment, ADR 0005, Topic 13, ADR 0004, exact schema and command-service mechanisms, Neo4j edition and licence qualification, ontology details, retrieval thresholds, release and operational thresholds, retention, Evidence Intake, production hosting and controlled cutover.
+Open questions include the detailed production implementation choice, Topic 13, ADR 0004, exact schema and command-service mechanisms, Neo4j edition and licence qualification, ontology details, retrieval thresholds, release and operational thresholds, retention, Evidence Intake, production hosting and controlled cutover.
