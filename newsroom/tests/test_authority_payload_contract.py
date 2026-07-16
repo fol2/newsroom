@@ -13,11 +13,15 @@ from newsroom.authority import (
     ObjectAdmissionId,
     ObjectAdmissionPayload,
     PayloadMode,
+    PayloadSchemaContract,
+    PayloadSchemaRegistry,
+    PayloadSchemaValidationError,
     SemanticCommand,
     StaticAuthenticator,
     StaticAuthorizer,
     StaticPrincipal,
     TrustScope,
+    canonical_json_bytes,
 )
 
 from .authority_helpers import FIXED_NOW, proof
@@ -32,16 +36,65 @@ class Lookup:
         return self.descriptor
 
 
-def service_for(definition: CommandDefinition, *, lookup: Lookup | None = None) -> CommandService:
+def _inline_schema(value: object) -> bytes:
+    if not isinstance(value, dict) or set(value) != {"a"}:
+        raise PayloadSchemaValidationError("inline schema requires exactly field a")
+    if isinstance(value["a"], bool) or not isinstance(value["a"], int):
+        raise PayloadSchemaValidationError("field a must be an integer")
+    return canonical_json_bytes(value)
+
+
+def _no_payload_schema(value: object) -> bytes:
+    if value is not None:
+        raise PayloadSchemaValidationError("no-payload schema accepts no value")
+    return b""
+
+
+def _object_schema(value: object) -> bytes:
+    if not isinstance(value, ObjectAdmissionDescriptor):
+        raise PayloadSchemaValidationError("object schema requires admission descriptor")
+    return canonical_json_bytes(
+        {
+            "admission_id": str(value.admission_id),
+            "object_class": value.object_class,
+            "allowed_use": value.allowed_use,
+        }
+    )
+
+
+def schemas_for(definition: CommandDefinition) -> PayloadSchemaRegistry:
+    if definition.payload_mode is PayloadMode.INLINE:
+        canonicalizer = _inline_schema
+    elif definition.payload_mode is PayloadMode.NO_PAYLOAD:
+        canonicalizer = _no_payload_schema
+    else:
+        canonicalizer = _object_schema
+    return PayloadSchemaRegistry(
+        [
+            PayloadSchemaContract(
+                schema_version=definition.payload_schema_version,
+                payload_mode=definition.payload_mode,
+                canonicalizer=canonicalizer,
+            )
+        ]
+    )
+
+
+def service_for(
+    definition: CommandDefinition, *, lookup: Lookup | None = None
+) -> CommandService:
     return CommandService(
         registry=CommandRegistry([definition]),
+        payload_schemas=schemas_for(definition),
         authenticator=StaticAuthenticator(
             credentials={"token-1": StaticPrincipal("principal.alpha")},
             authority_domain="newsroom.authority",
         ),
         authorizer=StaticAuthorizer(
             policy_version="authz-v1",
-            grants_by_principal={"principal.alpha": frozenset({definition.required_scope})},
+            grants_by_principal={
+                "principal.alpha": frozenset({definition.required_scope})
+            },
         ),
         admission_lookup=lookup,
         clock=lambda: FIXED_NOW,
@@ -54,7 +107,7 @@ def test_arbitrary_digest_only_payload_is_not_a_supported_request_form() -> None
     assert "payload_object_ref" not in fields
 
 
-def test_inline_payload_is_canonical_and_bounded() -> None:
+def test_inline_payload_is_schema_validated_and_bounded() -> None:
     definition = CommandDefinition(
         command_type="inline.write",
         definition_version="v1",
@@ -81,20 +134,31 @@ def test_inline_payload_is_canonical_and_bounded() -> None:
         proof=proof(),
     )
     assert receipt.payload_mode == "INLINE"
+    with pytest.raises(PayloadSchemaValidationError):
+        service.authorize(
+            SemanticCommand(
+                command_type="inline.write",
+                aggregate_id=AggregateId.new(),
+                expected_aggregate_version=0,
+                payload=InlinePayload({"unvalidated": True}),
+                idempotency_key="k-invalid",
+            ),
+            proof=proof(),
+        )
     with pytest.raises(ValueError, match="exceeds"):
         service.authorize(
             SemanticCommand(
                 command_type="inline.write",
                 aggregate_id=AggregateId.new(),
                 expected_aggregate_version=0,
-                payload=InlinePayload({"message": "x" * 100}),
+                payload=InlinePayload({"a": 10**12}),
                 idempotency_key="k2",
             ),
             proof=proof(),
         )
 
 
-def test_explicit_no_payload_is_required() -> None:
+def test_explicit_no_payload_is_required_and_schema_enforced() -> None:
     definition = CommandDefinition(
         command_type="no.payload",
         definition_version="v1",
@@ -133,7 +197,7 @@ def test_explicit_no_payload_is_required() -> None:
         )
 
 
-def test_object_payload_must_match_server_definition() -> None:
+def test_object_payload_must_match_server_definition_and_schema() -> None:
     admission_id = ObjectAdmissionId.new()
     descriptor = ObjectAdmissionDescriptor(
         admission_id=admission_id,
