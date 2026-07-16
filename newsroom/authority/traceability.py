@@ -16,6 +16,13 @@ INCREMENT_1A_TRACEABILITY: dict[str, tuple[str, ...]] = {
         "GRAG-010",
         "GRAG-030",
     ),
+    "newsroom.authority.policy": (
+        "DREC-006",
+        "DREC-076",
+        "GRAG-001",
+        "GRAG-011",
+        "GRPROD-005",
+    ),
     "newsroom.authority.service": (
         "ADR-0001",
         "ADR-0002",
@@ -27,6 +34,13 @@ INCREMENT_1A_TRACEABILITY: dict[str, tuple[str, ...]] = {
         "GRAG-012",
         "GRPROD-005",
         "GRPROD-020",
+    ),
+    "newsroom.authority._security": (
+        "ADR-0002",
+        "DREC-070",
+        "DREC-076",
+        "GRAG-002",
+        "GRAG-010",
     ),
     "newsroom.authority._capability": (
         "ADR-0002",
