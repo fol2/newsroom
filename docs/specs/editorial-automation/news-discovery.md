@@ -1,20 +1,21 @@
 # News discovery specification
 
-**Status:** Draft pending ADR 0004 decision  
+**Status:** Consolidated Draft; non-normative navigation  
 **Owner:** Product owner  
 **Last updated:** 2026-07-16  
 **Canonical language:** English  
-**Active review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
+**Completed review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
 **Accepted GraphRAG core:** [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md)  
 **Accepted native-production contract:** [`graphrag-native-production-deployment.md`](graphrag-native-production-deployment.md)  
 **Accepted implementation plan:** [`../../plans/2026-07-16-005-native-graphrag-production-implementation.md`](../../plans/2026-07-16-005-native-graphrag-production-implementation.md)  
-**Accepted authority decisions:** [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md), [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md)  
-**Related Proposed decision:** [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md)  
+**Accepted architecture decisions:** [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md), [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md), [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md)  
 **Supersedes:** None
 
 ## Purpose
 
-Record cross-cutting discovery invariants spanning the focused Accepted specifications, architecture decisions and implementation plan. This file does not replace them and remains Draft until ADR 0004 receives an explicit owner decision.
+Provide one navigational consolidation of cross-cutting discovery invariants spanning the focused Accepted specifications, architecture decisions and implementation plan.
+
+This file does not replace those records and creates no independent implementation authority. Where it conflicts with a focused Accepted specification, Accepted plan or Accepted ADR, the focused record controls.
 
 It does not claim that the current Brave, RSS, GDELT and Gemini pool conforms and authorises no implementation or runtime action.
 
@@ -22,13 +23,11 @@ It does not claim that the current Brave, RSS, GDELT and Gemini pool conforms an
 
 The focused contracts for coverage, workflow, record semantics, source roles, change and Agenda, triage, search, evaluation, operations, outcomes, locality, governed GraphRAG, native GraphRAG production deployment and integrated implementation are Accepted.
 
-Where this Draft conflicts with a focused Accepted specification, Accepted plan or Accepted ADR, the focused record controls.
-
 ## Cross-cutting requirements
 
 ### Source architecture
 
-**DISC-001 — Portfolio-first discovery.** The proposed production boundary is an owner-approved source portfolio aligned to Accepted coverage and source-role contracts, not one recurring generic search query per beat. Final discovery architecture authority remains subject to ADR 0004.
+**DISC-001 — Portfolio-first discovery.** The accepted production boundary is an owner-approved source portfolio aligned to Accepted coverage and source-role contracts, not one recurring generic search query per beat.
 
 **DISC-002 — Source purpose.** Every executable Source Definition Version identifies accepted coverage mapping, source role, portfolio function, geography, publisher, interface and permitted use.
 
@@ -184,7 +183,6 @@ Where this Draft conflicts with a focused Accepted specification, Accepted plan 
 26. Target implementation does not mutate legacy event authority silently.
 27. No runtime action is authorised by specification or plan acceptance; later milestone-specific gates still apply.
 
-## Open owner decisions
+## Completion status
 
-- Accept, amend, split or reject ADR 0004 against the Accepted focused contracts and implementation plan.
-- Determine whether this cross-cutting Draft should become Accepted or be superseded by the focused specifications plus ADRs.
+ADR 0004 and Topics 0–13 were accepted by the product owner on 2026-07-16. This consolidated Draft is retained only as a navigation aid; the focused Accepted specifications, Accepted implementation plan and Accepted ADRs remain authoritative.
