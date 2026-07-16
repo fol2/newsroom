@@ -2,7 +2,7 @@
 
 **Status:** Draft  
 **Owner:** Product owner  
-**Last updated:** 2026-07-15  
+**Last updated:** 2026-07-16  
 **Canonical language:** English  
 **Active review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
 **Accepted coverage contract:** [`discovery-coverage-contract.md`](discovery-coverage-contract.md)  
@@ -14,30 +14,31 @@
 **Accepted search contract:** [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md)  
 **Accepted evaluation contract:** [`discovery-shadow-evaluation.md`](discovery-shadow-evaluation.md)  
 **Accepted operations contract:** [`discovery-reliability-and-operations.md`](discovery-reliability-and-operations.md)  
-**Related prioritisation draft:** [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md)  
+**Accepted prioritisation contract:** [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md)  
+**Related locality Draft:** [`discovery-locality-scope-and-expansion.md`](discovery-locality-scope-and-expansion.md)  
 **Related architecture plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)  
 **Related reference:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 3–6 and 13  
 **Related proposal:** [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md) (`Proposed`; owner review pending)  
-**Decision state:** Topics 1–9 are Accepted. Prioritisation and outcome vocabulary, locality and the complete architecture decision remain under sequential owner review.  
+**Decision state:** Topics 1–10 are Accepted. Locality, implementation planning and the complete architecture decision remain under sequential owner review.  
 **Supersedes:** None
 
 ## Purpose
 
-Define cross-cutting discovery controls for monitoring the accepted coverage boundary through the accepted workflow, identity, source-role, change, triage, search, evaluation and operations contracts without treating discovery as evidence or spending model work merely to prove nothing changed.
+Define cross-cutting discovery controls for monitoring the accepted coverage boundary through the accepted workflow, identity, source-role, change, triage, search, evaluation, operational and prioritisation contracts without treating discovery as evidence or spending model work merely to prove nothing changed.
 
-This document does not replace the focused specifications. It records architectural invariants spanning them and remains Draft until the remaining prioritisation, locality and architecture decisions are completed.
+This document does not replace the focused specifications. It records architectural invariants spanning them and remains Draft until locality and the complete architecture decision are completed.
 
 ## Scope
 
-This specification covers source-architecture controls, change-driven collection, bounded search, coverage auditing, evaluation, operations and cross-cutting safeguards.
+This specification covers source-architecture controls, change-driven collection, bounded search, coverage audit, evaluation, operations, prioritisation and cross-cutting safeguards.
 
-Detailed semantics are defined in the focused Topic 1–9 specifications. Topic 10 owns final outcomes and prioritisation; Topic 11 locality; and Topic 12 implementation planning.
+Detailed semantics are defined in the focused Topic 1–10 specifications. Topic 11 owns locality scope and expansion; Topic 12 owns implementation planning.
 
 It does not claim that the current Brave-, RSS-, GDELT- and Gemini-based pool conforms and authorises no implementation.
 
 ## Review state
 
-The Accepted Topic 1–9 contracts are mandatory bases for later work. Requirements below remain Draft where they depend on unresolved outcome vocabulary, numeric prioritisation, final source admission or the complete architecture decision.
+The Accepted Topic 1–10 contracts are mandatory bases for later work. Requirements below remain Draft where they depend on locality, final source admission or the complete architecture decision.
 
 ADR 0004 remains Proposed.
 
@@ -91,7 +92,7 @@ ADR 0004 remains Proposed.
 
 **DISC-025 — Evidence boundary.** Discovery MUST NOT create Source Observations, Governed Claims, Evidence Packages or publication authority. Evidence acquisition independently retrieves and governs current permitted source material.
 
-**DISC-026 — Inspectable outcome.** Every Check, Signal, Lead, Agenda expectation, triage decision, search request, evaluation decision, operational assessment and Candidate handoff retains an inspectable outcome.
+**DISC-026 — Inspectable outcome.** Every Check, Signal, Lead, Agenda expectation, triage decision, search request, evaluation decision, operational assessment, Priority Decision and Candidate Handoff retains an inspectable outcome and reason.
 
 ### Model, batching and search
 
@@ -109,13 +110,17 @@ ADR 0004 remains Proposed.
 
 **DISC-036 — Recall interpretation.** Search, media indexes, Comparators and the legacy pipeline are not ground truth. Coverage Gaps require reviewed prospective or explicitly retrospective evidence.
 
-### Evaluation, operation and safeguards
+### Evaluation, operations, outcomes and safeguards
 
-**DISC-040 — No scoring decision.** This specification defines no numeric prioritisation weights. Accepted gates and editorial triage precede any later stage-local scoring decision.
+**DISC-040 — No launch global score.** Launch discovery uses Accepted gates, semantic outcomes and ordinal priority lanes rather than one global composite score. Later stage-local scoring remains Needs experiment and cannot override gates.
 
 **DISC-041 — Origins, not volume.** Article, result or domain count does not establish newsworthiness, independence, coverage, event identity or Candidate priority. Common origins and dependencies remain visible.
 
-**DISC-042 — No discovery quota.** Discovery and triage support zero Leads and zero Candidates. Beat, category, geography, finance, cadence and capacity quotas cannot promote weaker work.
+**DISC-042 — No discovery quota.** Discovery and triage support zero Leads and zero Candidates. Beat, category, geography, finance, cadence and capacity quotas cannot promote weaker work or create filler.
+
+**DISC-043 — Priority is not eligibility.** Urgency and processing priority may reduce waiting but MUST NOT change scope, rights, novelty, relationship, collision, admission or Handoff requirements.
+
+**DISC-044 — Outcome and reason integrity.** Outcome, reason, next action, current status and priority remain separate. Decisions are immutable for exact versions and later changes create later records.
 
 **DISC-050 — Prospective evaluation.** Qualification uses an owner-approved Evaluation Plan, frozen Epoch, event-level prospective universe, authorised labels, required slices and explicit release-evidence decision under Topic 8.
 
@@ -127,9 +132,17 @@ ADR 0004 remains Proposed.
 
 **DISC-054 — Shadow is not authority.** A shadow shortlist, Run, Candidate outcome or Comparator result MUST NOT publish, mutate production authority or graduate silently into production.
 
-**DISC-055 — Operational admission is scoped.** The production boundary requires exact versions, Operational Profiles, objectives, alerts, capacity, recovery, contingency, canary and rollback evidence. Admission and activation remain separate.
+**DISC-055 — Operational admission is scoped.** Production eligibility requires exact versions, Operational Profiles, objectives, alerts, capacity, recovery, contingency, canary and rollback evidence. Admission and activation remain separate.
 
-**DISC-056 — Outcome and priority separation.** The target MUST preserve outcome, reason, current status and processing priority as separate semantics. Priority or score cannot bypass a gate or change an editorial disposition.
+**DISC-056 — Canonical semantic mapping.** Implementations MUST preserve one-to-one mappings to the Accepted outcome, reason and priority semantics and MUST NOT collapse operational failure into editorial rejection or no news.
+
+### Proposed locality safeguards
+
+**DISC-057 — Local story is not locality completeness.** An evidence-supported local label or a published local story MUST NOT be represented as systematic monitoring of that place.
+
+**DISC-058 — Event-scoped local watch.** A bounded local watch MAY support one major event or exact discovery question but MUST NOT create permanent locality selection, unrelated crawling or an evidence bypass.
+
+**DISC-059 — Selected locality scope.** Any permanent locality promise MUST identify exact geography, boundary version, coverage obligations, source classes, known gaps, evaluation and operational admission. Topic 11 remains under review.
 
 ## Acceptance criteria
 
@@ -151,8 +164,9 @@ ADR 0004 remains Proposed.
 16. Evaluation cannot claim absolute recall or pool changed Epochs silently.
 17. A stale or failed source cannot be represented as healthy unchanged because it produced no items.
 18. Operational admission cannot activate production by itself.
-19. Media volume, category quota or model confidence cannot override a deterministic or editorial gate.
-20. No production implementation is authorised until prioritisation and locality decisions are completed as applicable.
+19. Media volume, category quota, geography slot or model confidence cannot override a gate.
+20. A local story label cannot be used as proof of systematic locality coverage.
+21. No production implementation is authorised until locality and implementation decisions are completed as applicable.
 
 ## Non-goals
 
@@ -160,7 +174,6 @@ This specification does not select implementation mechanisms, schedules, storage
 
 ## Open questions
 
-- Will the owner accept, amend or reject the Topic 10 outcome and prioritisation contract?
-- Will any stage-local numeric score later outperform the ordinal baseline without violating gates?
-- What locality scope, if any, will Topic 11 add?
+- Will the owner accept, amend or reject the Topic 11 locality boundary and expansion contract?
+- Which locality or source class, if any, will later evaluation justify?
 - When the focused topics are complete, should ADR 0004 be accepted, amended or replaced?
