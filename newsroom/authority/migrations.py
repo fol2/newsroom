@@ -72,13 +72,19 @@ MIGRATION_STATEMENTS: tuple[str, ...] = (
     ) STRICT""",
     """CREATE TABLE authority_payloads(
         payload_id TEXT PRIMARY KEY,
-        mode TEXT NOT NULL CHECK(mode IN ('INLINE','NO_PAYLOAD')),
+        mode TEXT NOT NULL
+            CHECK(mode IN ('INLINE','OBJECT_ADMISSION','NO_PAYLOAD')),
         schema_version TEXT NOT NULL,
         payload_digest TEXT NOT NULL,
-        payload_bytes BLOB NOT NULL,
+        payload_bytes BLOB,
+        object_admission_id TEXT,
         created_at TEXT NOT NULL,
-        CHECK((mode='INLINE' AND length(payload_bytes) > 0)
-           OR (mode='NO_PAYLOAD' AND length(payload_bytes) = 0))
+        CHECK((mode='INLINE' AND payload_bytes IS NOT NULL
+               AND length(payload_bytes) > 0 AND object_admission_id IS NULL)
+           OR (mode='OBJECT_ADMISSION' AND payload_bytes IS NULL
+               AND object_admission_id IS NOT NULL)
+           OR (mode='NO_PAYLOAD' AND payload_bytes IS NOT NULL
+               AND length(payload_bytes) = 0 AND object_admission_id IS NULL))
     ) STRICT""",
     """CREATE TABLE authority_aggregates(
         aggregate_type TEXT NOT NULL,
@@ -184,82 +190,30 @@ MIGRATION_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX idx_ledger_events_aggregate ON ledger_events(aggregate_type, aggregate_id, aggregate_version)",
     "CREATE INDEX idx_ledger_events_recorded ON ledger_events(recorded_at, ledger_seq)",
     "CREATE INDEX idx_authorization_decisions_context ON authorization_decisions(authentication_context_id, decided_at)",
-    """CREATE TRIGGER immutable_command_definitions_update
-        BEFORE UPDATE ON command_definitions BEGIN
-        SELECT RAISE(ABORT,'immutable command definition'); END""",
-    """CREATE TRIGGER immutable_command_definitions_delete
-        BEFORE DELETE ON command_definitions BEGIN
-        SELECT RAISE(ABORT,'immutable command definition'); END""",
-    """CREATE TRIGGER immutable_authentication_contexts_update
-        BEFORE UPDATE ON authentication_contexts BEGIN
-        SELECT RAISE(ABORT,'immutable authentication context'); END""",
-    """CREATE TRIGGER immutable_authentication_contexts_delete
-        BEFORE DELETE ON authentication_contexts BEGIN
-        SELECT RAISE(ABORT,'immutable authentication context'); END""",
-    """CREATE TRIGGER immutable_authorization_requests_update
-        BEFORE UPDATE ON authorization_requests BEGIN
-        SELECT RAISE(ABORT,'immutable authorization request'); END""",
-    """CREATE TRIGGER immutable_authorization_requests_delete
-        BEFORE DELETE ON authorization_requests BEGIN
-        SELECT RAISE(ABORT,'immutable authorization request'); END""",
-    """CREATE TRIGGER immutable_authorization_decisions_update
-        BEFORE UPDATE ON authorization_decisions BEGIN
-        SELECT RAISE(ABORT,'immutable authorization decision'); END""",
-    """CREATE TRIGGER immutable_authorization_decisions_delete
-        BEFORE DELETE ON authorization_decisions BEGIN
-        SELECT RAISE(ABORT,'immutable authorization decision'); END""",
-    """CREATE TRIGGER immutable_authority_payloads_update
-        BEFORE UPDATE ON authority_payloads BEGIN
-        SELECT RAISE(ABORT,'immutable authority payload'); END""",
-    """CREATE TRIGGER immutable_authority_payloads_delete
-        BEFORE DELETE ON authority_payloads BEGIN
-        SELECT RAISE(ABORT,'immutable authority payload'); END""",
-    """CREATE TRIGGER immutable_authority_commands_update
-        BEFORE UPDATE ON authority_commands BEGIN
-        SELECT RAISE(ABORT,'immutable authority command'); END""",
-    """CREATE TRIGGER immutable_authority_commands_delete
-        BEFORE DELETE ON authority_commands BEGIN
-        SELECT RAISE(ABORT,'immutable authority command'); END""",
-    """CREATE TRIGGER authority_aggregates_update_guard
-        BEFORE UPDATE ON authority_aggregates
-        WHEN NEW.aggregate_type != OLD.aggregate_type
-          OR NEW.aggregate_id != OLD.aggregate_id
-          OR NEW.current_version != OLD.current_version + 1
-          OR NEW.created_at != OLD.created_at
-        BEGIN SELECT RAISE(ABORT,'invalid aggregate-head update'); END""",
-    """CREATE TRIGGER authority_aggregates_delete_guard
-        BEFORE DELETE ON authority_aggregates BEGIN
-        SELECT RAISE(ABORT,'aggregate heads are retained'); END""",
-    """CREATE TRIGGER immutable_aggregate_versions_update
-        BEFORE UPDATE ON authority_aggregate_versions BEGIN
-        SELECT RAISE(ABORT,'immutable aggregate version'); END""",
-    """CREATE TRIGGER immutable_aggregate_versions_delete
-        BEFORE DELETE ON authority_aggregate_versions BEGIN
-        SELECT RAISE(ABORT,'immutable aggregate version'); END""",
-    """CREATE TRIGGER immutable_authority_audit_events_update
-        BEFORE UPDATE ON authority_audit_events BEGIN
-        SELECT RAISE(ABORT,'immutable audit event'); END""",
-    """CREATE TRIGGER immutable_authority_audit_events_delete
-        BEFORE DELETE ON authority_audit_events BEGIN
-        SELECT RAISE(ABORT,'immutable audit event'); END""",
-    """CREATE TRIGGER immutable_ledger_events_update
-        BEFORE UPDATE ON ledger_events BEGIN
-        SELECT RAISE(ABORT,'immutable ledger event'); END""",
-    """CREATE TRIGGER immutable_ledger_events_delete
-        BEFORE DELETE ON ledger_events BEGIN
-        SELECT RAISE(ABORT,'immutable ledger event'); END""",
+    """CREATE TRIGGER immutable_command_definitions_update BEFORE UPDATE ON command_definitions BEGIN SELECT RAISE(ABORT,'immutable command definition'); END""",
+    """CREATE TRIGGER immutable_command_definitions_delete BEFORE DELETE ON command_definitions BEGIN SELECT RAISE(ABORT,'immutable command definition'); END""",
+    """CREATE TRIGGER immutable_authentication_contexts_update BEFORE UPDATE ON authentication_contexts BEGIN SELECT RAISE(ABORT,'immutable authentication context'); END""",
+    """CREATE TRIGGER immutable_authentication_contexts_delete BEFORE DELETE ON authentication_contexts BEGIN SELECT RAISE(ABORT,'immutable authentication context'); END""",
+    """CREATE TRIGGER immutable_authorization_requests_update BEFORE UPDATE ON authorization_requests BEGIN SELECT RAISE(ABORT,'immutable authorization request'); END""",
+    """CREATE TRIGGER immutable_authorization_requests_delete BEFORE DELETE ON authorization_requests BEGIN SELECT RAISE(ABORT,'immutable authorization request'); END""",
+    """CREATE TRIGGER immutable_authorization_decisions_update BEFORE UPDATE ON authorization_decisions BEGIN SELECT RAISE(ABORT,'immutable authorization decision'); END""",
+    """CREATE TRIGGER immutable_authorization_decisions_delete BEFORE DELETE ON authorization_decisions BEGIN SELECT RAISE(ABORT,'immutable authorization decision'); END""",
+    """CREATE TRIGGER immutable_authority_payloads_update BEFORE UPDATE ON authority_payloads BEGIN SELECT RAISE(ABORT,'immutable authority payload'); END""",
+    """CREATE TRIGGER immutable_authority_payloads_delete BEFORE DELETE ON authority_payloads BEGIN SELECT RAISE(ABORT,'immutable authority payload'); END""",
+    """CREATE TRIGGER immutable_authority_commands_update BEFORE UPDATE ON authority_commands BEGIN SELECT RAISE(ABORT,'immutable authority command'); END""",
+    """CREATE TRIGGER immutable_authority_commands_delete BEFORE DELETE ON authority_commands BEGIN SELECT RAISE(ABORT,'immutable authority command'); END""",
+    """CREATE TRIGGER authority_aggregates_update_guard BEFORE UPDATE ON authority_aggregates WHEN NEW.aggregate_type != OLD.aggregate_type OR NEW.aggregate_id != OLD.aggregate_id OR NEW.current_version != OLD.current_version + 1 OR NEW.created_at != OLD.created_at BEGIN SELECT RAISE(ABORT,'invalid aggregate-head update'); END""",
+    """CREATE TRIGGER authority_aggregates_delete_guard BEFORE DELETE ON authority_aggregates BEGIN SELECT RAISE(ABORT,'aggregate heads are retained'); END""",
+    """CREATE TRIGGER immutable_aggregate_versions_update BEFORE UPDATE ON authority_aggregate_versions BEGIN SELECT RAISE(ABORT,'immutable aggregate version'); END""",
+    """CREATE TRIGGER immutable_aggregate_versions_delete BEFORE DELETE ON authority_aggregate_versions BEGIN SELECT RAISE(ABORT,'immutable aggregate version'); END""",
+    """CREATE TRIGGER immutable_authority_audit_events_update BEFORE UPDATE ON authority_audit_events BEGIN SELECT RAISE(ABORT,'immutable audit event'); END""",
+    """CREATE TRIGGER immutable_authority_audit_events_delete BEFORE DELETE ON authority_audit_events BEGIN SELECT RAISE(ABORT,'immutable audit event'); END""",
+    """CREATE TRIGGER immutable_ledger_events_update BEFORE UPDATE ON ledger_events BEGIN SELECT RAISE(ABORT,'immutable ledger event'); END""",
+    """CREATE TRIGGER immutable_ledger_events_delete BEFORE DELETE ON ledger_events BEGIN SELECT RAISE(ABORT,'immutable ledger event'); END""",
 )
 
-MIGRATION_CHECKSUM = digest_canonical(
-    {
-        "version": SCHEMA_VERSION,
-        "name": MIGRATION_NAME,
-        "statements": list(MIGRATION_STATEMENTS),
-    }
-)
-MIGRATION = MigrationRecord(
-    version=SCHEMA_VERSION, name=MIGRATION_NAME, checksum=MIGRATION_CHECKSUM
-)
+MIGRATION_CHECKSUM = digest_canonical({"version": SCHEMA_VERSION, "name": MIGRATION_NAME, "statements": list(MIGRATION_STATEMENTS)})
+MIGRATION = MigrationRecord(version=SCHEMA_VERSION, name=MIGRATION_NAME, checksum=MIGRATION_CHECKSUM)
 
 
 def _normalize(sql: str | None) -> str:
@@ -267,35 +221,16 @@ def _normalize(sql: str | None) -> str:
 
 
 def schema_fingerprint(conn: sqlite3.Connection) -> str:
-    rows = conn.execute(
-        "SELECT type,name,tbl_name,sql FROM sqlite_master "
-        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
-    ).fetchall()
-    return digest_canonical(
-        [
-            [str(row[0]), str(row[1]), str(row[2]), _normalize(row[3])]
-            for row in rows
-        ]
-    )
+    rows = conn.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").fetchall()
+    return digest_canonical([[str(row[0]), str(row[1]), str(row[2]), _normalize(row[3])] for row in rows])
 
 
-def apply_migration(
-    conn: sqlite3.Connection,
-    *,
-    applied_at: str,
-    statements: Iterable[str] = MIGRATION_STATEMENTS,
-) -> None:
-    """Apply schema v1 atomically; any failed statement rolls back all DDL."""
-
+def apply_migration(conn: sqlite3.Connection, *, applied_at: str, statements: Iterable[str] = MIGRATION_STATEMENTS) -> None:
     try:
         conn.execute("BEGIN EXCLUSIVE")
         for statement in statements:
             conn.execute(statement)
-        conn.execute(
-            "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
-            "VALUES(?,?,?,?)",
-            (SCHEMA_VERSION, MIGRATION_NAME, MIGRATION_CHECKSUM, applied_at),
-        )
+        conn.execute("INSERT INTO authority_migrations(version,name,checksum,applied_at) VALUES(?,?,?,?)", (SCHEMA_VERSION, MIGRATION_NAME, MIGRATION_CHECKSUM, applied_at))
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.execute("COMMIT")
     except Exception:
@@ -315,6 +250,4 @@ def _expected_fingerprint() -> str:
 
 
 EXPECTED_SCHEMA_FINGERPRINT = _expected_fingerprint()
-EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
-    (SCHEMA_VERSION, MIGRATION_NAME, MIGRATION_CHECKSUM),
-)
+EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = ((SCHEMA_VERSION, MIGRATION_NAME, MIGRATION_CHECKSUM),)
