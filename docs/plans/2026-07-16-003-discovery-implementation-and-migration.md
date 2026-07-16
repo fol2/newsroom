@@ -1,77 +1,71 @@
-# News discovery implementation and migration plan — first Draft
+# Superseded discovery-only implementation Draft
 
-**Status:** Revision required; not accepted  
+**Status:** Superseded Draft  
 **Owner:** Product owner  
-**Last updated:** 2026-07-16  
+**Originally drafted:** 2026-07-16  
+**Superseded:** 2026-07-16  
 **Canonical language:** English  
-**Implementation authority:** None. This historical Draft authorises no code, external request, model call, graph-engine installation, source activation, spending, shadow run, canary or cutover.  
-**Related review sequence:** [`2026-07-15-002-discovery-specification-review.md`](2026-07-15-002-discovery-specification-review.md)  
-**Blocking review:** [`../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md`](../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md)  
-**Successor:** A revised integrated relational-plus-GraphRAG implementation plan will be written after Topic 12 is accepted or amended.  
-**Historical version:** The complete first Draft remains available in Git history at blob `80b871a18118d847b61ea2514995112f700ee50a`.
+**Implementation authority:** None  
+**Successor:** [`2026-07-16-004-integrated-discovery-graphrag-implementation.md`](2026-07-16-004-integrated-discovery-graphrag-implementation.md)
 
-## Decision record
+## Why this Draft was superseded
 
-The first Draft proposed:
+The first Topic 13 Draft proposed:
 
-- a side-by-side discovery v2 rather than in-place mutation of legacy `links` and `events`;
-- a scheduler-neutral deterministic command surface;
-- a separate append-only discovery SQLite store for offline, replay and shadow;
-- generic adapters before named live sources;
-- an evaluation Evidence Intake sink before real downstream integration;
-- milestone pull requests through evaluation, canary, activation and legacy retirement; and
-- no carry-forward of source-count ranking, category or finance caps, Hong Kong guaranteed slots or filler quotas.
+- a separate discovery-v2 authority scope;
+- a discovery-specific SQLite store for offline, replay and shadow work; and
+- governed GraphRAG work after a substantially complete relational discovery implementation.
 
-The product owner accepted several of those boundaries in principle but **rejected the sequencing that treated GraphRAG as later product-wide work after a separate discovery-only implementation**.
+The product owner rejected that sequencing.
 
-The rejected shape was:
+Although the Draft correctly separated relational authority from graph projection, it incorrectly treated graph independence as permission to defer the knowledge-graph contract. That would have created a planned semantic migration:
 
 ```text
-discovery-only relational model
-        ↓ later
-GraphRAG ontology, projection and hybrid retrieval
+discovery-only identities, events and retrieval
+        ↓ later redesign
+graph-aware identity, ontology, trust and retrieval
 ```
 
-The required replacement shape is:
+The accepted Topic 12 decision instead requires:
 
 ```text
 canonical identity, temporal, trust and ordered-event contract from schema v1
-        ├── relational ledger and governed object authority
-        ├── governed graph projection
+        ├── SQLite relational authority
+        ├── governed object store
+        ├── graph projection
         ├── vector and full-text indexes
-        └── bounded hybrid retrieval tools
+        └── bounded hybrid GraphRAG tools
 ```
 
-## Elements retained for the revised plan
+## Decisions retained by the successor
 
-The successor plan should retain, subject to the GraphRAG and ADR decisions:
+The following principles from the first Draft remain valid and are carried into the successor plan:
 
-1. side-by-side migration from the legacy pool rather than in-place mutation;
-2. separate target identities and no automatic legacy event import;
-3. no silent target-to-legacy dual-write;
-4. scheduler-neutral repository-owned deterministic commands;
-5. append-only authoritative history and rebuildable projections;
-6. generic adapters and offline fixtures before named live source activation;
-7. external requests, models, embeddings and providers disabled by default;
-8. an evaluation Evidence Intake sink before governed downstream integration;
-9. requirement-traced milestone pull requests with tests and rollback;
-10. explicit Evaluation Plan, Operational Admission, canary, activation and retirement gates; and
-11. reversible legacy retirement.
+- side-by-side replacement of the legacy Brave, RSS, GDELT and Gemini pipeline;
+- no in-place mutation of legacy `links` and `events` as the target authority model;
+- no automatic import of legacy event identity;
+- no silent dual write;
+- scheduler-neutral deterministic commands;
+- generic adapters and fixtures before live source activation;
+- offline-by-default development;
+- separate approval for every live source, provider, model and budget;
+- an evaluation-scoped Evidence Intake sink before governed downstream integration;
+- milestone-sized implementation pull requests;
+- no source-count ranking, category or finance caps, Hong Kong guaranteed slots or filler quotas; and
+- separate Evaluation Plan, Operational Admission, canary, production activation and legacy-retirement decisions.
 
-## Required changes in the successor plan
+## Decisions rejected by the successor
 
-The successor must:
+The following are not carried forward:
 
-- adopt the final authority boundary from ADR 0001;
-- adopt or amend the integrated SQLite-ledger boundary in ADR 0002;
-- include graph ontology and projection event contracts in canonical schema v1;
-- implement the graph projector, Graphiti proposal and admission path, hybrid retrieval and named tools in the first architectural workstreams;
-- include Neo4j Community plus Graphiti as the initial POC lane if Topic 12 accepts it;
-- require GraphRAG replay, ablation, provenance, temporal and rebuild evidence before complete live-shadow qualification;
-- define graph-gap and graph-outage behaviour without treating failure as no match;
-- prevent a graph engine or extractor from becoming editorial authority; and
-- preserve the accepted discovery workflow, evidence boundary, operational and locality contracts.
+- a discovery-only semantic schema that later migrates to a graph-aware model;
+- a separate `DiscoveryStore` contract that omits the canonical graph event and trust model;
+- treating GraphRAG as a later product-wide dependency rather than part of the first programme;
+- qualifying the complete target architecture through a live shadow that omits governed graph projection and hybrid retrieval; and
+- using a temporary discovery database as the conceptual production authority.
 
-## Current authority
+## Historical status
 
-No part of this historical Draft may be implemented merely because it was committed. Topic 13 begins only after Topic 12 and the relevant ADR decisions are complete.
+Git history preserves the complete earlier Draft and review sequence. This file is a tombstone so future agents do not treat the rejected plan as current guidance.
+
+No code or runtime action was authorised or performed under the superseded Draft.
