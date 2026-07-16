@@ -5,7 +5,7 @@
 **Last updated:** 2026-07-16  
 **Canonical language:** English  
 **Active architecture review:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
-**Current Topic 13 Draft:** [`../../plans/2026-07-16-005-native-graphrag-production-implementation.md`](../../plans/2026-07-16-005-native-graphrag-production-implementation.md)  
+**Accepted Topic 13 plan:** [`../../plans/2026-07-16-005-native-graphrag-production-implementation.md`](../../plans/2026-07-16-005-native-graphrag-production-implementation.md)  
 **Canonical charter:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md)
 
 ## Purpose
@@ -14,7 +14,7 @@ Convert selected charter principles into testable requirements for a risk-bounde
 
 `MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` and `MAY` are normative only when the individual specification is `Accepted` or the owner explicitly authorises implementation.
 
-Topic 1–11 focused discovery specifications, the core governed GraphRAG specification and ADRs 0001, 0002 and 0005 are Accepted. The detailed native-production deployment amendment, Topic 13 plan, cross-cutting `news-discovery.md` and ADR 0004 remain under owner review. None authorises runtime action.
+Topic 1–13 focused discovery, GraphRAG and implementation records are Accepted except for the cross-cutting `news-discovery.md` and ADR 0004, which remain under final owner review. Acceptance authorises no source, graph engine, extractor, embedding, model, search, shadow run, queue, spending, canary or production activation.
 
 Requirement identifiers are stable. Existing identifiers should not be renumbered; superseded requirements remain traceable.
 
@@ -34,9 +34,9 @@ Requirement identifiers are stable. Existing identifiers should not be renumbere
 | [`discovery-reliability-and-operations.md`](discovery-reliability-and-operations.md) | **Accepted:** Profiles, scheduling, health, retry, quarantine, recovery and admission |
 | [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md) | **Accepted:** decision order, canonical outcomes, reasons, ordinal lanes and scoring boundary |
 | [`discovery-locality-scope-and-expansion.md`](discovery-locality-scope-and-expansion.md) | **Accepted:** locality-aware launch, Coverage Units, Event-Scoped Watch and expansion |
-| [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md) | **Accepted core:** authority, trust, ontology, proposal/admission, projection and hybrid retrieval |
-| [`graphrag-native-production-deployment.md`](graphrag-native-production-deployment.md) | **Draft detail:** engine, repository, CI, production manifest and release mechanics under Accepted ADR 0005 |
-| [`news-discovery.md`](news-discovery.md) | **Draft:** cross-cutting architecture pending the detailed amendment and final ADR 0004 |
+| [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md) | **Accepted:** authority, trust, ontology, proposal/admission, projection and hybrid retrieval |
+| [`graphrag-native-production-deployment.md`](graphrag-native-production-deployment.md) | **Accepted:** initial production target, repository ownership, graph-required profiles, CI and release mechanics |
+| [`news-discovery.md`](news-discovery.md) | **Draft:** cross-cutting architecture pending final ADR 0004 |
 | [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Story qualification, source authority, corroboration and evidence |
 | [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution and article contract |
 | [`rights-and-visuals.md`](rights-and-visuals.md) | Source access, copyright, storage and visual rights |
@@ -55,7 +55,7 @@ Accepted:
 
 Proposed:
 
-- [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md): final graph-aware discovery architecture, pending the detailed amendment and Topic 13 plan.
+- [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md): final graph-aware discovery architecture, pending the explicit owner decision.
 
 ## Cross-suite invariants
 
@@ -84,7 +84,7 @@ The two earlier Topic 13 Drafts are retained as Superseded tombstones:
 - the first deferred GraphRAG behind a discovery-only semantic model;
 - the second integrated GraphRAG but still described it as a POC lane.
 
-The current Topic 13 Draft proposes one production system with repository-native GraphRAG, a production profile that cannot omit it, graph integration in the first code increment and a graph-native first complete vertical slice.
+The Accepted Topic 13 plan defines one production system with repository-native GraphRAG, a production profile that cannot omit it, graph integration in the first code increment and a graph-native first complete vertical slice.
 
 Every later code pull request must list exact specification files and requirement IDs, exclusions, acceptance evidence, temporary gaps and rollback. No runtime source, provider, model, extractor, embedding, graph engine or budget is enabled as a side effect of merging the documentation pull request.
 
@@ -107,4 +107,4 @@ Before the suite can be treated as implemented:
 
 The suite does not select cloud, model, agent framework, final admitted graph-engine version, billing, observability or deployment vendor except where an individual Accepted decision says otherwise. It does not define investigative journalism, private-source collection, public comments or a general emergency-alert service.
 
-Open questions include the detailed production implementation choice, Topic 13, ADR 0004, exact schema and command-service mechanisms, Neo4j edition and licence qualification, ontology details, retrieval thresholds, release and operational thresholds, retention, Evidence Intake, production hosting and controlled cutover.
+Open questions include ADR 0004, exact schema and command-service mechanisms, Neo4j edition and licence qualification, ontology details, retrieval thresholds, release and operational thresholds, retention, Evidence Intake, production hosting and controlled cutover.
