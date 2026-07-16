@@ -5,14 +5,17 @@
 **Last updated:** 2026-07-16  
 **Canonical language:** English  
 **Implementation authority:** None. This document records owner decisions and organises review; it authorises no code, external request, model call, spending, shadow run, canary or production activation.  
-**Related architecture proposal:** [`../adr/0004-source-registry-first-change-driven-discovery.md`](../adr/0004-source-registry-first-change-driven-discovery.md)  
-**Topic 12 plan:** [`2026-07-16-003-discovery-implementation-and-migration.md`](2026-07-16-003-discovery-implementation-and-migration.md)
+**Related discovery proposal:** [`../adr/0004-source-registry-first-change-driven-discovery.md`](../adr/0004-source-registry-first-change-driven-discovery.md)  
+**Related authority proposals:** [`../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md)  
+**Implementation-plan Draft requiring revision:** [`2026-07-16-003-discovery-implementation-and-migration.md`](2026-07-16-003-discovery-implementation-and-migration.md)
 
 ## Purpose
 
 Review news discovery in bounded topics so research findings, product decisions, specifications, experiments and implementation plans are not collapsed into one approval.
 
 A committed Draft, passing test, merged PR, Proposed plan or Proposed ADR is not owner approval. Runtime authority is always separate from specification acceptance.
+
+The product owner rejected the assumption that GraphRAG may be deferred until after a separate discovery-only implementation. A governed GraphRAG architecture topic is therefore reviewed before the implementation and migration plan is finalised.
 
 ## Decision labels
 
@@ -38,11 +41,12 @@ A committed Draft, passing test, merged PR, Proposed plan or Proposed ADR is not
 | 9. Reliability and operations | Profiles, health, retries, quarantine, recovery and admission | Accepted | [`discovery-reliability-and-operations.md`](../specs/editorial-automation/discovery-reliability-and-operations.md) |
 | 10. Outcomes and priority | Decision order, outcomes, reasons and ordinal lanes | Accepted | [`discovery-prioritisation-and-outcomes.md`](../specs/editorial-automation/discovery-prioritisation-and-outcomes.md) |
 | 11. Locality | Initial boundary, Event-Scoped Watch and expansion | Accepted | [`discovery-locality-scope-and-expansion.md`](../specs/editorial-automation/discovery-locality-scope-and-expansion.md) |
-| 12. Implementation and migration | Architecture consolidation, milestones, tests, rollout and rollback | Drafted; owner review pending | [`2026-07-16-003-discovery-implementation-and-migration.md`](2026-07-16-003-discovery-implementation-and-migration.md) |
+| 12. Governed GraphRAG and knowledge projection | Authority, ontology, trust, projection, extraction, hybrid retrieval and first POC | Drafted; owner review pending | [`governed-graphrag-and-knowledge-projection.md`](../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md) |
+| 13. Implementation and migration | Integrated relational-plus-GraphRAG architecture, milestones, tests, rollout and rollback | Blocked; first Draft requires revision | A revised successor to [`2026-07-16-003-discovery-implementation-and-migration.md`](2026-07-16-003-discovery-implementation-and-migration.md) after Topic 12 |
 
 ## Cross-topic boundaries
 
-The following distinctions are now accepted:
+The following distinctions are accepted or, for GraphRAG-specific items, proposed in Topic 12:
 
 - product scope is not monitoring completeness;
 - a source interface is not a coverage strategy;
@@ -63,9 +67,12 @@ The following distinctions are now accepted:
 - outcome, reason, next action, status and priority are separate;
 - priority is not eligibility;
 - local story is not locality coverage promise;
+- GraphRAG is not an authoritative editorial ledger;
+- a rebuildable graph is not permission to postpone the graph contract;
+- graph outage is not no prior match;
 - shadow is not production authority;
 - discovery is not evidence acquisition; and
-- implementation plan cannot create requirements absent from Accepted specifications.
+- an implementation plan cannot create requirements absent from Accepted specifications or ADRs.
 
 ## Decision record
 
@@ -74,7 +81,7 @@ The following distinctions are now accepted:
 - **Agreed:** discovery decisions are reviewed sequentially.
 - **Agreed:** ADR 0004 remains Proposed until explicitly accepted, amended, split or rejected.
 - **Agreed:** research, Draft specifications and Proposed plans or ADRs authorise no implementation.
-- **Deferred cleanup:** remove any stale false-acceptance text in the large integrated architecture plan before the documentation PR is opened.
+- **Deferred cleanup:** remove stale false-acceptance text in the large integrated architecture plan before the documentation PR is opened.
 
 ### Topic 1 — Coverage
 
@@ -89,7 +96,7 @@ The following distinctions are now accepted:
 - **Agreed:** deterministic controllers commit transitions and models propose.
 - **Agreed:** successful unchanged, change, partial, failure and quarantine are separate before a Signal exists.
 - **Agreed:** ambiguity normally survives to Lead triage.
-- **Agreed:** watch/defer is a first-class outcome with a Watch Condition.
+- **Agreed:** watch or defer is a first-class outcome with a Watch Condition.
 - **Agreed:** Evidence Handoff requires durable acknowledgement and idempotent retry.
 
 ### Topic 3 — Records
@@ -98,7 +105,7 @@ The following distinctions are now accepted:
 - **Agreed:** Source Definition, Item, Revision and Representation are separate and versioned.
 - **Agreed:** Signals, Leads, Hypotheses, Candidates and Handoffs are immutable and append-only.
 - **Agreed:** Coverage Gaps require reviewed misses.
-- **Deferred:** physical schema, retention and product-wide database architecture.
+- **Deferred:** physical schema and retention details; the GraphRAG topic now resolves the authority and projection boundary before implementation.
 
 ### Topic 4 — Sources
 
@@ -106,7 +113,7 @@ The following distinctions are now accepted:
 - **Agreed:** source roles and portfolio functions are explicit; silent fallback is prohibited.
 - **Agreed:** official, media, RSS and search are not sufficient purposes.
 - **Agreed:** the research shortlist is validation work, not coverage completeness or run authority.
-- **Agreed:** devolved paths, courts/elections, UK–Hong Kong travel/aviation, Hong Kong courts and a global radar remain mandatory pre-production source work.
+- **Agreed:** devolved paths, courts and elections, UK–Hong Kong travel and aviation, Hong Kong courts and a global radar remain mandatory pre-production source work.
 
 ### Topic 5 — Change and Agenda
 
@@ -166,38 +173,55 @@ The following distinctions are now accepted:
 - **Agreed:** Hong Kong remains one product geography without district filters or district-completeness promises.
 - **Needs experiment:** actual localities, source classes and numerical admission thresholds.
 
-### Topic 12 — Implementation and migration
+### Topic 12 — Governed GraphRAG and knowledge projection
 
-The Draft plan proposes:
+The product owner rejected deferring GraphRAG behind a separate discovery-only implementation.
 
-- a side-by-side discovery v2 rather than in-place mutation of legacy events;
-- a scheduler-neutral deterministic command surface;
-- a separate append-only `DiscoveryStore` with an initial SQLite implementation for offline, replay and shadow;
-- generic adapters before live named sources;
-- an evaluation Evidence Intake sink before real downstream integration;
-- milestone PRs from semantic kernel through live shadow, canary, activation and legacy retirement;
-- no legacy quota or source-count ranking carry-forward; and
-- no runtime authority from plan acceptance alone.
+The Draft now proposes:
 
-ADR 0004 has been amended into its final Proposed architecture form and is ready for the owner's decision together with Topic 12.
+- one canonical identity, temporal, trust and ordered-event contract from schema v1;
+- relational ledger and governed objects as authority;
+- graph, vector and full-text as first-class rebuildable projections in the initial programme;
+- explicit `OBSERVED`, `PROPOSED` and `ADMITTED` trust scopes;
+- Graphiti as an isolated proposal producer rather than a graph authority;
+- reified and admitted editorial relations;
+- first-class entity resolution;
+- ordered idempotent projection with visible gaps and blue-green rebuild;
+- hybrid exact, full-text, vector and graph retrieval through named read-only tools;
+- graph-assisted discovery grouping without graph authority over Hypotheses or Candidates;
+- graph failure as degraded context rather than no match;
+- Neo4j Community plus Graphiti as the first POC baseline; and
+- a full live-shadow gate requiring the graph and hybrid retrieval path.
+
+ADR 0001 and ADR 0002 remain Proposed until this topic is accepted, amended or rejected.
+
+### Topic 13 — Implementation and migration
+
+- **Rejected from the first Draft:** a graph-less discovery-only implementation followed by later GraphRAG integration.
+- **Retained for reconsideration:** side-by-side migration from the legacy pool, scheduler-neutral commands, append-only authority, generic adapters before live sources, no legacy event identity import, no silent dual-write, Evidence Intake isolation, milestone PRs and explicit activation gates.
+- **Required revision:** replace the temporary `DiscoveryStore`-first architecture with one canonical relational-plus-GraphRAG delivery programme consistent with Topic 12 and final ADR decisions.
+- **Blocked:** no implementation plan may be accepted until Topic 12 resolves the graph authority, ontology, projection and engine-qualification boundaries.
 
 ## Topic 12 completion condition
 
 Topic 12 is complete when the owner:
 
-1. accepts, amends or rejects the implementation plan;
-2. accepts, amends, splits or rejects ADR 0004;
-3. confirms that the current branch remains documentation-only;
-4. confirms whether the documentation PR may be prepared and opened; and
-5. leaves every runtime action behind its later milestone-specific approval gate.
+1. accepts, amends or rejects the governed GraphRAG specification;
+2. accepts, amends or rejects the authority boundary in ADR 0001;
+3. accepts, amends or rejects the integrated SQLite-ledger boundary in ADR 0002;
+4. confirms the first POC lane and GraphRAG timing gate; and
+5. leaves every runtime action behind later implementation, evaluation and operational approval.
+
+Topic 13 then rewrites the implementation and migration plan. ADR 0004 receives its final decision only after that integrated plan is reviewable.
 
 ## Change discipline
 
 Before the final documentation PR:
 
 1. update all document statuses and cross-references;
-2. remove stale false-acceptance text;
-3. validate links and requirement references;
-4. record all Needs-experiment and deferred decisions explicitly;
-5. consolidate branch commits where feasible; and
-6. do not include production code or activate any runtime path.
+2. supersede or rewrite the first Topic 12 implementation Draft;
+3. remove stale false-acceptance text;
+4. validate links and requirement references;
+5. record all Needs-experiment and deferred decisions explicitly;
+6. consolidate branch commits where feasible; and
+7. do not include production code or activate any runtime path.
