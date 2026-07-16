@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Final
 
-from .canonical import canonical_json_bytes, digest_bytes
+from .canonical import canonical_json_bytes, digest_bytes, validate_sha256_digest
 from .types import (
     AggregateId,
     CausationRef,
+    CommandId,
     CorrelationId,
     ObjectAdmissionId,
     PayloadMode,
@@ -67,7 +68,9 @@ class SemanticCommand:
             raise CommandValidationError(
                 "expected_aggregate_version must be a non-negative integer"
             )
-        if not isinstance(self.payload, (InlinePayload, ObjectAdmissionPayload, NoPayload)):
+        if not isinstance(
+            self.payload, (InlinePayload, ObjectAdmissionPayload, NoPayload)
+        ):
             raise CommandValidationError("payload must use a closed payload request type")
         if not isinstance(self.idempotency_key, str) or not self.idempotency_key.strip():
             raise CommandValidationError("idempotency_key must be non-empty")
@@ -132,8 +135,12 @@ class CommandDefinition:
                 "non-inline commands cannot declare an inline byte limit"
             )
         if self.payload_mode is PayloadMode.OBJECT_ADMISSION:
-            require_token(self.required_object_class or "", field="required_object_class")
-            require_token(self.required_allowed_use or "", field="required_allowed_use")
+            require_token(
+                self.required_object_class or "", field="required_object_class"
+            )
+            require_token(
+                self.required_allowed_use or "", field="required_allowed_use"
+            )
         elif self.required_object_class is not None or self.required_allowed_use is not None:
             raise CommandValidationError(
                 "object class/use constraints apply only to object-admission payloads"
@@ -163,6 +170,42 @@ class CommandDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class CommittedCommandIdentity:
+    """Read-only identity needed to recover a lost response after a rollout."""
+
+    command_id: str
+    authority_domain: str
+    principal_id: str
+    command_type: str
+    idempotency_namespace: str
+    idempotency_key: str
+    command_definition_version: str
+    command_definition_digest: str
+    stable_semantic_request_digest: str
+
+    def __post_init__(self) -> None:
+        CommandId.parse(self.command_id)
+        require_token(self.authority_domain, field="authority_domain")
+        require_token(self.principal_id, field="principal_id")
+        require_token(self.command_type, field="command_type")
+        validate_sha256_digest(
+            self.idempotency_namespace, field="idempotency_namespace"
+        )
+        if not isinstance(self.idempotency_key, str) or not self.idempotency_key:
+            raise CommandValidationError("idempotency key must be non-empty")
+        require_token(
+            self.command_definition_version, field="command_definition_version"
+        )
+        validate_sha256_digest(
+            self.command_definition_digest, field="command_definition_digest"
+        )
+        validate_sha256_digest(
+            self.stable_semantic_request_digest,
+            field="stable_semantic_request_digest",
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ObjectAdmissionDescriptor:
     """Read-only server-resolved object-use authority used by command policy."""
 
@@ -177,6 +220,9 @@ class ObjectAdmissionDescriptor:
     def __post_init__(self) -> None:
         if not isinstance(self.admission_id, ObjectAdmissionId):
             raise CommandValidationError("admission descriptor requires typed identity")
+        normalized = validate_sha256_digest(self.blob_digest, field="blob_digest")
+        if normalized != self.blob_digest:
+            raise CommandValidationError("blob digest must be canonical lowercase")
         require_token(self.object_class, field="object_class")
         require_token(self.allowed_use, field="allowed_use")
         require_scope(self.security_scope, field="security_scope")
