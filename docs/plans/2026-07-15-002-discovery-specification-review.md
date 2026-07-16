@@ -2,7 +2,7 @@
 
 **Status:** Active review sequence  
 **Owner:** Product owner  
-**Last updated:** 2026-07-15  
+**Last updated:** 2026-07-16  
 **Canonical language:** English  
 **Implementation authority:** None; this document organises owner review and authorises no shadow or production implementation  
 **Related proposal:** [`../adr/0004-source-registry-first-change-driven-discovery.md`](../adr/0004-source-registry-first-change-driven-discovery.md)
@@ -11,7 +11,7 @@
 
 Review news discovery in bounded topics so research findings, product decisions, specifications, experiments and implementation plans are not collapsed into one approval. Each topic is recorded before the next is treated as settled.
 
-The implementation plan is written only after the required product, editorial, workflow, evaluation, operational, prioritisation and locality decisions are accepted.
+The implementation plan is written only after product, editorial, workflow, evaluation, operational, prioritisation and locality decisions are accepted.
 
 ## Decision labels
 
@@ -37,9 +37,9 @@ A research recommendation, Draft specification, Proposed plan or Proposed ADR is
 | 7. Search and coverage audit | Search roles, query control, provider boundaries, budgets and audit | Completed and Accepted | Search is bounded, rights-aware and not implicit coverage authority |
 | 8. Shadow evaluation | Plans, Epochs, review universe, labels, metrics, blockers and source decisions | Completed and Accepted | Evaluation produces prospective, reproducible and interpretable release evidence |
 | 9. Reliability and operations | Profiles, schedules, health, retries, quarantine, queues, recovery and admission | Completed and Accepted | Operational failure cannot be confused with no news; health, recovery and admission are scoped |
-| 10. Prioritisation and outcome vocabulary | Decision order, canonical outcomes, reason taxonomy and scoring boundary | Drafted in `discovery-prioritisation-and-outcomes.md`; owner review pending | Outcomes and prioritisation are testable and cannot override gates |
-| 11. Locality expansion | Selected localities or source classes based on evidence | Pending | Any locality promise and deferred gap is explicit |
-| 12. Implementation plan | Code, migration, tests, rollout and rollback | Blocked by Topics 10–11 | Plan cites Accepted requirements and observable evidence |
+| 10. Prioritisation and outcomes | Decision order, outcomes, reasons, ordinal priority and scoring boundary | Completed and Accepted | Priority cannot override gates and outcomes remain inspectable |
+| 11. Locality scope and expansion | Launch locality boundary, event-scoped watch and evidence-based expansion | Drafted in `discovery-locality-scope-and-expansion.md`; owner review pending | Any locality promise, selected source class and deferred gap is explicit |
+| 12. Implementation plan | Code, migration, tests, evaluation, rollout and rollback | Blocked by Topic 11 | Plan cites Accepted requirements and observable evidence |
 
 ## Topic boundaries
 
@@ -61,8 +61,11 @@ The following distinctions apply throughout:
 - healthy silence is not a stale or failed source;
 - source health is not portfolio coverage health;
 - operational admission is not production activation;
-- outcome, reason, status and processing priority are different concepts;
+- outcome, reason, status and priority are separate;
 - priority is not eligibility;
+- a local story label is not a systematic locality-coverage promise;
+- an event-scoped local watch is not permanent locality selection;
+- nation-level UK coverage is not locality expansion;
 - discovery is not evidence acquisition; and
 - a plan cannot create requirements not accepted in specifications.
 
@@ -74,7 +77,7 @@ The following distinctions apply throughout:
 - **Agreed:** ADR 0004 remains Proposed until explicitly accepted, amended or rejected.
 - **Agreed:** research and Draft or Proposed documents authorise no shadow or production implementation.
 - **Deferred:** migration changes to the legacy Brave/RSS/GDELT/Gemini pipeline.
-- **Deferred cleanup:** remove the stale ADR 0004 `Accepted` parenthetical from the large Proposed integrated plan when that plan is revised; it is non-authoritative now.
+- **Deferred cleanup:** remove the stale ADR 0004 `Accepted` parenthetical from the large Proposed integrated plan when it is revised; it is non-authoritative now.
 
 ### Topic 1 — Discovery coverage contract
 
@@ -85,56 +88,48 @@ The following distinctions apply throughout:
 - **Agreed:** exhaustive UK local-body and institution monitoring is an explicit deferred gap with no mandatory launch locality.
 - **Agreed:** ordinary global coverage requires material UK, Hong Kong or connected-family effect; exceptional events may enter Best-effort triage without invented relevance.
 - **Agreed:** missing or systemically ineffective Active detection blocks launch; an isolated miss normally creates a Gap and remediation decision.
-- **Deferred:** exact locality expansion, recall and detection-time commitments.
 
 ### Topic 2 — End-to-end workflow
 
 - **Agreed:** deterministic Discovery and Candidate Admission controllers commit transitions; models and agents propose.
 - **Agreed:** Check Request, Attempt and Outcome distinguish unchanged, change, partial, failure and quarantine before a Signal exists.
 - **Agreed:** editorial ambiguity survives deterministic gates and normally becomes a Lead.
-- **Agreed:** Lead routes include reject, watch or defer, association, supplemental discovery, Operational hold, new-event Candidate and development Candidate.
-- **Agreed:** potentially Urgent work cannot be blocked by an unbounded Routine backlog.
-- **Agreed:** Candidate admission requires the `FLOW-060` handoff manifest and deterministic validation.
-- **Agreed:** Evidence Intake requires durable acknowledgement; ambiguity remains pending and retryable; feedback does not rewrite history.
+- **Agreed:** Lead routes include reject, watch or defer, association, supplemental discovery, Operational hold and Candidate routes.
+- **Agreed:** potentially Urgent work cannot be blocked by unbounded Routine backlog.
+- **Agreed:** Candidate admission is deterministic and Evidence Intake requires durable acknowledgement.
 - **Agreed:** manual, reader, media, radar and search inputs receive no bypass.
-- **Agreed:** watch or defer is retained with a defined Watch Condition.
+- **Agreed:** watch or defer requires a Watch Condition.
 
 ### Topic 3 — Record semantics
 
 - **Agreed:** internal identities are separate from URLs, provider identifiers and content digests.
 - **Agreed:** Source Definition and Version, Source Item and Revision, and Revision and Representation are separate.
 - **Agreed:** parser reprocessing of unchanged source state creates a Representation, not a Revision.
-- **Agreed:** Check Request, Attempt and Outcome separate logical work, retries and immutable results.
-- **Agreed:** one promoted Signal creates one Lead by default; later revisions and cross-source reports remain separate and explicitly related.
-- **Agreed:** Lead routes are immutable decisions, and watch or defer requires a Watch Condition.
-- **Agreed:** Event Hypotheses remain unverified and distinct from canonical events, Stories, relations and evidence.
-- **Agreed:** Candidates have stable identity and immutable versions allocated through deterministic admission and distinct from Story identity.
-- **Agreed:** each exact Candidate Version and Evidence Intake boundary has one semantic Handoff.
-- **Agreed:** Coverage Gaps require reviewed miss decisions and separate isolated, systemic, Best-effort or deferred-gap assessment.
+- **Agreed:** logical work, Attempts and Outcomes remain distinct.
+- **Agreed:** one promoted Signal creates one Lead by default; later revisions and cross-source reports retain separate lineage.
+- **Agreed:** Event Hypotheses remain unverified and Candidates have immutable versions distinct from Stories.
+- **Agreed:** each exact Candidate Version has one semantic Evidence Handoff.
+- **Agreed:** Coverage Gaps require reviewed miss decisions.
 - **Agreed:** lineage is append-only and current status is rebuildable.
 - **Deferred:** physical schema, retention, queue, transaction and storage mechanisms.
 
 ### Topic 4 — Source roles and selection
 
 - **Agreed:** source role is separate from evidence authority; `official` is not a sufficient purpose.
-- **Agreed:** non-search roles are Originating authority, Responsible operator, Planned agenda, Established media radar, Specialist/local radar and Manual/editor/reader lead.
-- **Agreed:** portfolio functions are Anchor, Complement, Comparator, Explicit contingency and Manual-only, with no silent fallback.
-- **Agreed:** every Active class needs a candidate Anchor or blocker; Planned coverage needs expectation and occurrence paths; guidance needs maintained-page revision paths; Urgent unscheduled coverage needs a fast warning, operator or established-media path.
-- **Agreed:** GOV.UK does not satisfy devolved coverage by default, and Hong Kong broad public affairs needs broad radar plus direct official and sector paths.
-- **Agreed:** editorial, rights, technical, operational and evaluation gates precede executable shadow use.
-- **Agreed:** `UK-01`–`UK-11`, `HK-01`–`HK-05`, RTHK and BBC UK are an adapter and workflow shortlist, not completeness.
-- **Agreed:** devolved paths, courts and elections, UK–Hong Kong travel and aviation, Hong Kong courts and global radar remain mandatory unresolved source work.
-- **Agreed:** final production portfolio follows evaluation and operational readiness.
+- **Agreed:** source roles and portfolio functions are explicit, with no silent fallback.
+- **Agreed:** every Active class needs a candidate Anchor or launch blocker; Planned, maintained-page and Urgent paths have distinct requirements.
+- **Agreed:** GOV.UK does not satisfy devolved coverage by default, and Hong Kong needs broad radar plus direct sector paths.
+- **Agreed:** editorial, rights, technical, operational and evaluation gates precede executable use.
+- **Agreed:** the initial tested interfaces are a validation shortlist, not completeness.
+- **Agreed:** devolved paths, courts and elections, UK–Hong Kong travel and aviation, Hong Kong courts and a global radar remain required source-qualification work.
 
 ### Topic 5 — Change and Planned Agenda
 
 - **Agreed:** every Source Definition Version declares an observation model and inference is limited to it.
 - **Agreed:** retrieval observation, Source Revision, observable transition and editorial interpretation are separate.
 - **Agreed:** validators, timestamps, HTTP status and disappearance are inputs, not standalone proof.
-- **Agreed:** first observation, re-observation, Revision, Representation-only change, withdrawal, replacement, deletion, redirect, reappearance and linked-document follow-up remain distinct.
-- **Agreed:** activation, escalation, de-escalation, clearance, expiry, cancellation, withdrawal and reactivation remain distinct.
+- **Agreed:** source transition types, current-state lifecycle and baselines remain distinct.
 - **Agreed:** partial and rolling sources cannot clear state by absence.
-- **Agreed:** baselines are source-specific and may record first-observed-active without claiming start time.
 - **Agreed:** Agenda Items are expectation records distinct from occurrence evidence.
 - **Agreed:** rescheduling and cancellation require source evidence and preserve history.
 - **Agreed:** missed expectation means not observed through required paths, not proof of non-occurrence.
@@ -144,29 +139,26 @@ The following distinctions apply throughout:
 
 - **Agreed:** Work Items, Execution Batches and editorial grouping are separate.
 - **Agreed:** decision Leads and context-only Leads are distinct; every decision Lead gets one disposition.
-- **Agreed:** bounded retrieval supplies context only; empty retrieval does not force new event and scores are non-authoritative.
+- **Agreed:** retrieval supplies context only; empty retrieval does not force new event and scores are non-authoritative.
 - **Agreed:** Candidate admission requires exact current Candidate and identity collision checks.
-- **Agreed:** relationship classes are same state, development, correction or reversal, related but distinct, no adequate prior match and uncertain.
+- **Agreed:** same state, development, correction or reversal, related but distinct, no adequate prior match and uncertain remain distinct.
 - **Agreed:** relationship and Candidate creation are orthogonal.
-- **Agreed:** every development Candidate identifies earlier and proposed new state.
-- **Agreed:** Hypothesis creation, association, versioning, consolidation and split are append-only; destructive merge is prohibited.
+- **Agreed:** Hypothesis changes are append-only and destructive merge is prohibited.
 - **Agreed:** coherent Leads may form one Candidate; unrelated Leads remain separate.
 - **Agreed:** Candidate formation has no minimum source or domain count.
-- **Agreed:** Urgent Work Items may be expedited without lower standards.
-- **Agreed:** proposals are structured and deterministically validated; confidence is metadata and failure remains neutral.
-- **Agreed:** Topic 8 must test false merge, snowball absorption, fragmentation and false development.
+- **Agreed:** Urgent work may be expedited without lower standards.
+- **Agreed:** proposals are structured and deterministically validated; confidence is metadata and failure is neutral.
 
 ### Topic 7 — Search and coverage audit
 
 - **Agreed:** search and media indexes are supplemental channels and Comparators, never the sole Active Anchor or primary generic clock.
-- **Agreed:** bounded purposes are outer radar, recall audit, Gap investigation, Planned recovery, supplemental discovery, outage contingency and manual research.
-- **Agreed:** Search Purpose, Request, Attempt, Outcome, Result Reference and Review Decision remain separate.
-- **Agreed:** queries are purpose-specific, versioned and bounded; one-query-per-beat and recursive agent search are prohibited.
+- **Agreed:** Search Purposes are bounded and every Request, Attempt, Outcome, Result Reference and review remains distinct.
+- **Agreed:** one-query-per-beat and recursive agent search are prohibited.
 - **Agreed:** models may propose but not execute or expand queries.
-- **Agreed:** provider query-data, result retention, model use and publisher rights are reviewed separately.
-- **Agreed:** budgets are hard, purpose-specific and cannot trigger silent provider switching.
-- **Agreed:** results enter normal workflow; rank and snippets are non-authoritative.
-- **Agreed:** prospective and retrospective audit remain separate and a Gap requires review.
+- **Agreed:** provider query data, result retention, model use and publisher rights are reviewed separately.
+- **Agreed:** budgets are hard, purpose-specific and cannot trigger silent switching.
+- **Agreed:** results enter normal workflow; ranks and snippets are non-authoritative.
+- **Agreed:** prospective and retrospective audit remain separate and Gaps require review.
 - **Agreed:** GDELT is Held, Brave is Rights Review Required and SearXNG or unofficial wrappers remain Research candidates.
 - **Agreed:** Topic 7 authorises no provider, schedule, spending or run.
 
@@ -174,46 +166,51 @@ The following distinctions apply throughout:
 
 - **Agreed:** evaluation has a separate authority scope with no public effect or production mutation.
 - **Agreed:** owner-approved Plans and frozen Epochs are required; calibration and qualification remain separate.
-- **Agreed:** phases are fixtures, replay, live prospective shadow, prospective comparator audit, fault injection, review and ablation.
+- **Agreed:** fixtures, replay, live prospective shadow, prospective comparator audit, fault injection, review and ablation are distinct phases.
 - **Agreed:** the event-level prospective universe uses several permitted paths without claiming complete ground truth.
-- **Agreed:** prospective and retrospective evidence remain separate.
-- **Agreed:** contemporaneous, later-outcome and unreviewable labels remain distinct.
-- **Agreed:** final labels require authorised human review, practical blinding and second review for material blockers.
-- **Agreed:** adapter, change, coverage, gate, triage, grouping, Candidate, timeliness, cost and operation are evaluated separately.
-- **Agreed:** required slices cannot be hidden by aggregates.
-- **Agreed:** zero-tolerance blockers include public effect, authority or rights bypass, failure-as-no-news, false absence-based ending, fabricated Revision, duplicate transition, destructive merge, invalid Candidate admission and discovery-to-evidence bypass.
-- **Agreed:** thresholds are approved before qualification review and changed Epochs cannot be pooled post hoc.
-- **Agreed:** source contribution uses unique and earlier detection, resilience, overlap, noise, rights, cost and reviewer burden.
+- **Agreed:** prospective, retrospective, contemporaneous, later-outcome and unreviewable evidence remain distinct.
+- **Agreed:** final labels require authorised human review and material blockers receive second review.
+- **Agreed:** adapter, change, coverage, gate, triage, grouping, Candidate, timeliness, cost and operations are measured separately.
+- **Agreed:** required slices cannot be hidden by aggregates and zero-tolerance failures block qualification.
+- **Agreed:** source contribution uses event-level value, resilience, noise, rights, cost and reviewer burden.
 - **Agreed:** the legacy pipeline and v1 dataset are comparison or regression aids only.
-- **Agreed:** Topic 8 authorises no run.
-- **Needs experiment:** qualification thresholds, minimum exposure and source or component promotion decisions require a future approved Plan and frozen Epoch.
+- **Needs experiment:** qualification thresholds, minimum exposure and actual promotion decisions require a future approved Plan and frozen Epoch.
 
 ### Topic 9 — Reliability and operations
 
-- **Agreed:** every executable source, provider, worker, queue and handoff scope has a versioned Operational Profile; exact numbers are approved separately.
-- **Agreed:** due-work, jitter, missed-schedule, catch-up and one-logical-operation semantics prevent duplicate checks and historical storms.
-- **Agreed:** bounded ownership, heartbeats and reconciliation provide at-most-once semantic effects over at-least-once delivery.
-- **Agreed:** health is multidimensional across authority, schedule, transport, parser, freshness, semantic integrity, downstream capacity and budget.
-- **Agreed:** healthy unchanged requires a successful qualifying check; stale is not quiet and last success remains separate from last change.
-- **Agreed:** portfolio Coverage Availability Assessment triggers scoped containment when every credible path for an Active obligation is lost; Comparators cannot repair Anchor health.
-- **Agreed:** strict transport, egress, TLS, redirect, timeout, body, content-type, parser-resource and authenticated-delivery controls apply.
-- **Agreed:** retries are source-specific, bounded, backoff- and jitter-aware, respect provider back-pressure and do not refresh health.
-- **Agreed:** circuit breaking and quarantine are scoped, with no automatic unquarantine.
-- **Agreed:** contingencies are pre-approved and role-aware; silent fallback is prohibited.
-- **Agreed:** queues preserve or explicitly close work, reserve Urgent capacity, retain deadlines and fairness and revalidate stale work.
-- **Agreed:** transition delivery is durable or deterministically reconcilable; store and audit failure fail closed.
-- **Agreed:** deterministic reconciliation, replay, bounded catch-up and tested backup, restore, integrity and rebuild evidence precede production admission.
-- **Agreed:** metrics and logs are version-attributed and cover schedules, success age, parser, retry, queues, budgets, coverage, storage and reconciliation.
-- **Agreed:** alerts are consequence-based, ownership and runbooks are explicit and incidents retain root cause and regression follow-up.
-- **Agreed:** least privilege, restricted egress, SSRF resistance, safe parsing, webhook authentication, secret protection and audited manual actions are required.
-- **Agreed:** versions progress independently through evaluation, operational qualification, canary and activation, with no inherited authority and with tested rollback.
-- **Needs experiment:** exact cadence, freshness, retry, capacity, queue and alert values are set by a later owner-approved qualification and admission package.
-- **Agreed:** Operational Admission binds exact evidence, Profiles, objectives, capacity, alerts, runbooks, recovery, contingencies and rollback but is not activation.
-- **Agreed:** Topic 9 authorises no schedule, source, provider, credential, process, spending, run or production activation.
+- **Agreed:** every executable scope has a versioned Operational Profile; exact numerical objectives are approved separately.
+- **Agreed:** due-work, jitter, missed-schedule, catch-up, leases and reconciliation prevent duplicate work and historical storms.
+- **Agreed:** health is multidimensional and healthy unchanged requires a successful qualifying observation.
+- **Agreed:** source health and portfolio Coverage Availability remain distinct; loss of every Active path triggers scoped containment.
+- **Agreed:** strict access, transport, parser, egress and delivered-input controls apply.
+- **Agreed:** retries, circuit breakers, quarantine and contingencies are bounded, explicit and role-aware.
+- **Agreed:** queues preserve or explicitly close work, reserve Urgent capacity and revalidate stale work.
+- **Agreed:** transition delivery is durable or reconcilable; store and audit failure fail closed.
+- **Agreed:** backup, restore, replay, catch-up, monitoring, alerts, runbooks, security, canary and rollback are required.
+- **Needs experiment:** cadence, freshness, retry, queue, capacity and alert numbers are set by a later qualification and admission package.
+- **Agreed:** Operational Admission is evidence-backed, scoped and separate from activation.
 
 ### Topic 10 — Prioritisation and outcome vocabulary
 
-The Draft in [`../specs/editorial-automation/discovery-prioritisation-and-outcomes.md`](../specs/editorial-automation/discovery-prioritisation-and-outcomes.md) is ready for owner review. Its canonical outcomes, reason families, ordinal priority lanes, quota removal and scoring boundary are not Agreed merely because they are committed.
+- **Agreed:** authority, source semantics, deterministic gates, triage, relationship, Candidate admission and Handoff form a non-bypassable order.
+- **Agreed:** outcome, reason, next action, status and processing priority are separate.
+- **Agreed:** canonical Check, Signal, Lead, relationship, Candidate, Handoff, health and coverage-availability families are accepted.
+- **Agreed:** outcomes are immutable for exact versions; later Revisions and re-evaluations create later decisions.
+- **Agreed:** watch, hold and pending require inspectable conditions.
+- **Agreed:** reasons are namespaced, versioned and append-only with explicit basis class and input references.
+- **Agreed:** priority lanes are `CONTAINMENT`, `URGENT`, `TIME_SENSITIVE`, `PLANNED_WINDOW`, `ROUTINE` and `OPTIONAL_EVALUATION`.
+- **Agreed:** deadlines, delay consequence, staleness, fairness, dependency readiness and deterministic identity order work within a lane.
+- **Agreed:** urgency expedites work but never lowers gates.
+- **Agreed:** volume, publisher tier, search rank, confidence, similarity, virality and legacy child status are non-authoritative proxies.
+- **Agreed:** target discovery quotas, finance caps, Hong Kong guarantees and filler promotion are removed.
+- **Agreed:** coverage is protected through scope, source portfolio, evaluation and coverage posture rather than Candidate quotas.
+- **Agreed:** launch uses no global composite score.
+- **Needs experiment:** any later stage-local scoring and thresholds require owner-approved evaluation against the ordinal baseline.
+- **Agreed:** Topic 10 authorises no score, threshold, queue, model, source, run, spending or activation.
+
+### Topic 11 — Locality scope and expansion
+
+The Draft in [`../specs/editorial-automation/discovery-locality-scope-and-expansion.md`](../specs/editorial-automation/discovery-locality-scope-and-expansion.md) is ready for owner review. Its locality-uncommitted launch boundary, Locality Coverage Units, Event-Scoped Local Watch, selection criteria and Hong Kong district boundary are not Agreed merely because they are committed.
 
 ## Change discipline
 
