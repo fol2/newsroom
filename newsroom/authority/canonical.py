@@ -1,0 +1,96 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+MIN_SAFE_INTEGER = -9_007_199_254_740_991
+MAX_SAFE_INTEGER = 9_007_199_254_740_991
+DIGEST_ALGORITHM = "sha256"
+
+
+class CanonicalizationError(ValueError):
+    """Raised when a value cannot enter the canonical authority domain."""
+
+
+def _validate_string(value: str, path: str) -> None:
+    for character in value:
+        if 0xD800 <= ord(character) <= 0xDFFF:
+            raise CanonicalizationError(f"lone surrogate is unsupported at {path}")
+
+
+def _validate_restricted_value(value: Any, path: str = "$") -> None:
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        if not MIN_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER:
+            raise CanonicalizationError(
+                f"integer outside the interoperable safe range at {path}"
+            )
+        return
+    if isinstance(value, float):
+        raise CanonicalizationError(f"floating-point values are unsupported at {path}")
+    if isinstance(value, str):
+        _validate_string(value, path)
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise CanonicalizationError(f"object names must be strings at {path}")
+            _validate_string(key, f"{path}.<key>")
+            _validate_restricted_value(item, f"{path}.{key}")
+        return
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray, memoryview)
+    ):
+        for index, item in enumerate(value):
+            _validate_restricted_value(item, f"{path}[{index}]")
+        return
+    raise CanonicalizationError(
+        f"unsupported value type at {path}: {type(value).__name__}"
+    )
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """Return deterministic UTF-8 JSON for the restricted authority domain.
+
+    Authority digests deliberately exclude floats and integers outside the
+    interoperable JSON safe range. The domain currently contains only the
+    simple scalars and collections needed by command, audit and event
+    envelopes, so sorted compact JSON is sufficient and reviewable.
+    """
+
+    _validate_restricted_value(value)
+    try:
+        text = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise CanonicalizationError(f"canonical JSON encoding failed: {exc}") from exc
+    return text.encode("utf-8", errors="strict")
+
+
+def digest_bytes(data: bytes) -> str:
+    return f"{DIGEST_ALGORITHM}:{hashlib.sha256(data).hexdigest()}"
+
+
+def digest_canonical(value: Any) -> str:
+    return digest_bytes(canonical_json_bytes(value))
+
+
+def validate_sha256_digest(value: str, *, field: str = "digest") -> str:
+    if not isinstance(value, str) or not value.startswith("sha256:"):
+        raise CanonicalizationError(f"{field} must use sha256:<hex>")
+    hexadecimal = value.removeprefix("sha256:")
+    if len(hexadecimal) != 64:
+        raise CanonicalizationError(f"{field} must contain 64 hexadecimal characters")
+    try:
+        int(hexadecimal, 16)
+    except ValueError as exc:
+        raise CanonicalizationError(f"{field} contains non-hexadecimal characters") from exc
+    return value.lower()

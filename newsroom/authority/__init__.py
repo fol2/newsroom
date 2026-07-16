@@ -1,0 +1,115 @@
+"""Canonical single-writer authority foundation for the target Newsroom.
+
+This package is deliberately independent of Neo4j, Graphiti, live sources,
+models and publication adapters. It implements the Increment 1A contracts only.
+"""
+
+from .auth import (
+    AuthenticationError,
+    AuthenticationProof,
+    AuthorizationDecision,
+    AuthorizationDenied,
+    AuthorizationRule,
+    StaticAuthenticator,
+    StaticAuthorizer,
+    StaticPrincipal,
+    VerifiedAuthenticationContext,
+)
+from .canonical import (
+    CanonicalizationError,
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
+from .models import (
+    AuditRecord,
+    CommittedCommand,
+    CommandValidationError,
+    LedgerEvent,
+    RuntimeConfiguration,
+    SemanticCommand,
+)
+from .objects import (
+    GovernedObject,
+    GovernedObjectStore,
+    ObjectAdmissionError,
+    ObjectIntegrityError,
+    ObjectStoreError,
+)
+from .service import CommandService
+from .store import (
+    AuthorityStore,
+    AuthorityStoreError,
+    ExpectedVersionConflict,
+    IdempotencyConflict,
+    MigrationChecksumError,
+    ObjectMetadataConflict,
+    UnknownObjectReference,
+    UnsupportedSchemaVersionError,
+    UnversionedDatabaseError,
+)
+from .traceability import INCREMENT_1A_TRACEABILITY
+from .types import (
+    AggregateId,
+    AggregateVersion,
+    AuditId,
+    AuthenticationContextId,
+    AuthorizationDecisionId,
+    CommandId,
+    EventId,
+    RightsStatus,
+    TemporalValue,
+    TimePrecision,
+    TrustScope,
+    UtcTimestamp,
+)
+
+__all__ = [
+    "AggregateId",
+    "AggregateVersion",
+    "AuditId",
+    "AuditRecord",
+    "AuthenticationContextId",
+    "AuthenticationError",
+    "AuthenticationProof",
+    "AuthorityStore",
+    "AuthorityStoreError",
+    "AuthorizationDecision",
+    "AuthorizationDecisionId",
+    "AuthorizationDenied",
+    "AuthorizationRule",
+    "CanonicalizationError",
+    "CommandId",
+    "CommandService",
+    "CommandValidationError",
+    "CommittedCommand",
+    "EventId",
+    "ExpectedVersionConflict",
+    "GovernedObject",
+    "GovernedObjectStore",
+    "IdempotencyConflict",
+    "INCREMENT_1A_TRACEABILITY",
+    "LedgerEvent",
+    "MigrationChecksumError",
+    "ObjectAdmissionError",
+    "ObjectIntegrityError",
+    "ObjectMetadataConflict",
+    "ObjectStoreError",
+    "RightsStatus",
+    "RuntimeConfiguration",
+    "SemanticCommand",
+    "StaticAuthenticator",
+    "StaticAuthorizer",
+    "StaticPrincipal",
+    "TemporalValue",
+    "TimePrecision",
+    "TrustScope",
+    "UnknownObjectReference",
+    "UnsupportedSchemaVersionError",
+    "UnversionedDatabaseError",
+    "UtcTimestamp",
+    "VerifiedAuthenticationContext",
+    "canonical_json_bytes",
+    "digest_bytes",
+    "digest_canonical",
+]
