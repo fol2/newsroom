@@ -1,12 +1,14 @@
 # Native GraphRAG production implementation plan
 
-**Status:** Draft for owner review  
+**Status:** Accepted  
 **Owner:** Product owner  
 **Last updated:** 2026-07-16  
+**Accepted by owner:** 2026-07-16  
 **Canonical language:** English  
-**Implementation authority:** None. This plan organises future code work. It authorises no engine installation, source access, extraction, embeddings, model call, spending, shadow run, canary, cutover or production activation.  
+**Implementation authority:** None. Acceptance organises future code work. It authorises no engine installation, source access, extraction, embeddings, model call, spending, shadow run, canary, cutover or production activation.  
 **Related review sequence:** [`2026-07-15-002-discovery-specification-review.md`](2026-07-15-002-discovery-specification-review.md)  
 **Accepted architecture decisions:** [`../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md), [`../adr/0005-native-graphrag-production-deployment.md`](../adr/0005-native-graphrag-production-deployment.md)  
+**Accepted native-production contract:** [`../specs/editorial-automation/graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md)  
 **Related discovery ADR:** [`../adr/0004-source-registry-first-change-driven-discovery.md`](../adr/0004-source-registry-first-change-driven-discovery.md) (`Proposed`)  
 **Supersedes:** [`2026-07-16-004-integrated-discovery-graphrag-implementation.md`](2026-07-16-004-integrated-discovery-graphrag-implementation.md), whose POC framing preserved an incorrect two-stage interpretation
 
@@ -20,9 +22,9 @@ Code is delivered in dependency order and small pull requests. Dependency order 
 
 ## Normative basis
 
-Implementation must conform to the applicable Accepted discovery requirements (`COV`, `FLOW`, `DREC`, `SRC`, `CHG`, `AGEN`, `TRI`, `SRCH`, `CAUD`, `DEVAL`, `DOPS`, `DOUT`, `DPRI`, `LOC` and `GRAG`) and to ADR 0001, ADR 0002 and ADR 0005.
+Implementation must conform to the applicable Accepted discovery requirements (`COV`, `FLOW`, `DREC`, `SRC`, `CHG`, `AGEN`, `TRI`, `SRCH`, `CAUD`, `DEVAL`, `DOPS`, `DOUT`, `DPRI`, `LOC`, `GRAG` and `GRPROD`) and to ADR 0001, ADR 0002 and ADR 0005.
 
-The detailed [`graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md) contract becomes normative when accepted. This plan cannot make the graph authoritative and cannot make it optional.
+This plan cannot make the graph authoritative and cannot make it optional.
 
 ## Non-negotiable production invariant
 
@@ -45,7 +47,7 @@ A release missing the graph, indexes or hybrid retrieval is non-conforming and c
 
 Temporary graph outage is degraded operation inside this architecture. It is not a graph-free deployment mode.
 
-## Proposed implementation decisions
+## Accepted implementation decisions
 
 1. Build beside the legacy pipeline; do not mutate legacy `links` and `events` into canonical records.
 2. Create canonical production schema v1 directly, including graph identities, trust, time and projection events.
@@ -345,7 +347,7 @@ Failure blocks activation or requires implementation replacement. It does not ma
 
 ## Engine substitution
 
-Neo4j Community plus Graphiti is the proposed initial production target.
+Neo4j Community plus Graphiti is the accepted initial production target.
 
 An alternative may replace it before activation only when evidence shows a blocker. Replacement must preserve canonical IDs, event replay, trust, provenance, proposal/admission history, rebuild and named-tool behaviour and must pass the same gates.
 
@@ -411,30 +413,25 @@ Implementation uses focused pull requests matching the increments. Several may p
 | GraphRAG cost exceeds value | Pre-registered quality, cost and capacity gates while the capability remains mandatory |
 | Legacy creates two authorities | Side-by-side isolation and no silent dual write |
 
-## Decisions required to accept Topic 13
-
-The plan asks the owner to accept:
-
-1. One production system with native mandatory GraphRAG and no POC or optional-adoption stage.
-2. Canonical graph-aware schema v1 and side-by-side legacy replacement.
-3. SQLite ledger and governed objects as authority without making GraphRAG optional.
-4. Neo4j Community plus Graphiti as the initial production-target implementation.
-5. Repair or replacement before activation if that implementation fails, with no graph-less fallback.
-6. Repository-native GraphRAG code, deployment, operations and tests.
-7. A production profile that cannot omit or fake GraphRAG.
-8. Graph deployment and integration plumbing in the first code increment.
-9. A graph-native first complete vertical slice.
-10. Persisted extraction proposals and separate admission before projection.
-11. Ordered graph/vector/full-text projectors and hybrid named-tool retrieval.
-12. Relational authority for exact identities and Candidate collision.
-13. Generic adapters and offline fixtures before live source enablement.
-14. Production-equivalent complete shadow using the production-target graph stack.
-15. Eleven dependency-ordered increments as merge boundaries, not product stages.
-16. Separate Evaluation Plan, Operational Admission, Evidence Intake canary, activation and retirement decisions.
-17. No legacy identity import, silent dual write, ranking quotas or filler.
-18. The current branch remaining documentation-only until its pull request is approved.
-19. Acceptance authorising no runtime action.
-
 ## Open implementation choices
 
 Acceptance leaves evidence-dependent details to later decisions: exact SQLite tables and command process; object storage; ontology predicates; Neo4j edition, packaging and backup; Graphiti/model/embedding versions; vector and full-text implementation; named-tool limits; live sources; search provider; Operational Profiles; Evidence Intake transport; hosting and observability; locality selection; and activation date.
+
+## Completion record
+
+The product owner accepted this plan on 2026-07-16.
+
+The accepted clarifications are:
+
+1. Neo4j Community plus Graphiti is the initial production-target implementation, not a POC.
+2. An implementation that fails release gates is repaired or replaced before activation; the product does not launch graph-less.
+3. GraphRAG code, deployment, operations and tests are native to the principal repository.
+4. A production profile cannot disable, omit or fake GraphRAG.
+5. The first code increment includes graph deployment, ontology, projection and actual graph-service integration plumbing.
+6. The first complete vertical slice traverses the ledger, governed GraphRAG retrieval and deterministic Candidate admission.
+7. Complete live shadow uses the production-target graph stack or an explicitly approved production-equivalent environment.
+8. The eleven increments are merge and verification boundaries rather than product stages.
+9. Exact identity and Candidate-collision authority remains relational.
+10. Graphiti output is persisted as proposals and separately admitted before governed projection.
+11. Evaluation Plan, Operational Admission, Evidence Intake canary, production activation and retirement remain separate safety gates.
+12. Acceptance authorises no runtime action.
