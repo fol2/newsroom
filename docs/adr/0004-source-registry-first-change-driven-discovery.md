@@ -1,26 +1,24 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-15
 last_updated: 2026-07-16
-owner_review: ready_final
+accepted_by_owner: 2026-07-16
 ---
 
 # Source-portfolio-first, change-driven and natively GraphRAG news discovery
 
 ## Decision status
 
-This ADR remains **Proposed** and now requires only the product owner's explicit final decision.
+This ADR is **Accepted**.
 
-The product owner has accepted:
+The product owner accepted the consolidated architecture after accepting:
 
 - discovery Topics 1–11;
 - the governed and native-production GraphRAG contracts;
 - ADR 0001, ADR 0002 and ADR 0005; and
 - the native GraphRAG production implementation plan.
 
-Those accepted records establish the authority, native-production, migration and implementation boundaries on which this ADR depends.
-
-Acceptance of this ADR would approve the consolidated discovery architecture boundary. It would authorise no code, source collection, search, graph installation, extraction, embeddings, model calls, spending, shadow execution, canary or production activation.
+Acceptance approves the discovery architecture boundary. It authorises no code, source collection, search, graph installation, extraction, embeddings, model calls, spending, shadow execution, canary or production activation.
 
 ## Context
 
@@ -36,7 +34,7 @@ The current Newsroom relies on broad Brave queries, GDELT, broad media RSS, one-
 
 The accepted review also established that event identity, multilingual entities, long-running policies and cases, source dependencies and revision impact cannot be safely added after a graph-less product has already fixed a different semantic model.
 
-## Proposed decision
+## Decision
 
 Adopt a **source-portfolio-first, change-driven, natively GraphRAG and scheduler-neutral discovery architecture**.
 
@@ -256,6 +254,6 @@ This ADR does not by itself select or activate exact:
 - Locality Coverage Unit; or
 - production activation date.
 
-## Owner decision required
+## Completion record
 
-The supporting specifications, architecture ADRs and implementation plan are Accepted. The product owner must now explicitly accept, amend, split or reject this consolidated discovery architecture. Any acceptance still authorises no runtime action.
+The product owner accepted this ADR on 2026-07-16. Acceptance consolidates the approved architecture and still authorises no runtime action.
