@@ -2,24 +2,25 @@
 status: proposed
 date: 2026-07-15
 last_updated: 2026-07-16
-owner_review: pending_native_production_decisions
+owner_review: ready_final
 ---
 
 # Source-portfolio-first, change-driven and natively GraphRAG news discovery
 
 ## Decision status
 
-This ADR remains **Proposed**.
+This ADR remains **Proposed** and now requires only the product owner's explicit final decision.
 
-The product owner has accepted discovery Topics 1–11, the governed GraphRAG core, ADR 0001 and ADR 0002. The owner subsequently rejected any interpretation of GraphRAG as a proof of concept, optional plugin or later adoption stage and required it to be native in the first production deployment.
+The product owner has accepted:
 
-Final review therefore depends on:
+- discovery Topics 1–11;
+- the governed and native-production GraphRAG contracts;
+- ADR 0001, ADR 0002 and ADR 0005; and
+- the native GraphRAG production implementation plan.
 
-- [`0005-native-graphrag-production-deployment.md`](0005-native-graphrag-production-deployment.md);
-- [`../specs/editorial-automation/graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md); and
-- [`../plans/2026-07-16-005-native-graphrag-production-implementation.md`](../plans/2026-07-16-005-native-graphrag-production-implementation.md).
+Those accepted records establish the authority, native-production, migration and implementation boundaries on which this ADR depends.
 
-Acceptance of this ADR would approve the discovery architecture boundary. It would authorise no code, source collection, search, graph installation, extraction, embeddings, model calls, spending, shadow execution, canary or production activation.
+Acceptance of this ADR would approve the consolidated discovery architecture boundary. It would authorise no code, source collection, search, graph installation, extraction, embeddings, model calls, spending, shadow execution, canary or production activation.
 
 ## Context
 
@@ -124,7 +125,7 @@ The project owns:
 
 There is no graph-less production, canary or complete live-shadow target and no later GraphRAG graduation decision.
 
-Neo4j Community plus Graphiti is proposed as the initial production-target implementation under ADR 0005. Its qualification decides whether that exact implementation is ready. Failure requires replacement before activation and does not permit a graph-less release.
+Neo4j Community plus Graphiti is the accepted initial production-target implementation under ADR 0005 and the native-production contract. Qualification decides whether the exact versions are ready. Failure requires repair or replacement before activation and does not permit a graph-less release.
 
 Mandatory production deployment does not make the graph authoritative. Graphiti, embeddings, similarity and graph paths remain proposals or Retrieval Context.
 
@@ -257,4 +258,4 @@ This ADR does not by itself select or activate exact:
 
 ## Owner decision required
 
-Acceptance should occur only after the owner accepts or amends ADR 0005 and the native GraphRAG production implementation plan. Acceptance would approve this architecture but still authorise no runtime action.
+The supporting specifications, architecture ADRs and implementation plan are Accepted. The product owner must now explicitly accept, amend, split or reject this consolidated discovery architecture. Any acceptance still authorises no runtime action.
