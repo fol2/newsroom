@@ -2,7 +2,7 @@
 
 **Status:** Draft  
 **Owner:** Product owner  
-**Last updated:** 2026-07-15  
+**Last updated:** 2026-07-16  
 **Canonical language:** English  
 **Related architecture plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)  
 **Active discovery review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
@@ -20,7 +20,7 @@ The suite describes target behaviour. It does not claim that the current Discord
 
 `MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` and `MAY` are normative only when the individual specification is `Accepted` or the owner explicitly authorises implementation.
 
-The Topic 1–9 discovery specifications are Accepted. `discovery-prioritisation-and-outcomes.md` and later-topic documents remain Draft unless their metadata says otherwise.
+The Topic 1–10 discovery specifications are Accepted. `discovery-locality-scope-and-expansion.md` and later implementation documents remain Draft unless their metadata says otherwise.
 
 Requirement identifiers are stable references. Existing identifiers should not be renumbered; superseded requirements remain traceable.
 
@@ -38,7 +38,8 @@ Requirement identifiers are stable references. Existing identifiers should not b
 | [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md) | Accepted bounded search roles, query controls, provider boundaries and coverage audit | Sections 3–6 and 13 |
 | [`discovery-shadow-evaluation.md`](discovery-shadow-evaluation.md) | Accepted shadow isolation, Plans and Epochs, event-level review, metrics, blockers and release evidence | Sections 3–6 and 13–14 |
 | [`discovery-reliability-and-operations.md`](discovery-reliability-and-operations.md) | Accepted Operational Profiles, scheduling, health, retry, quarantine, capacity, recovery and admission | Sections 3–6 and 13–14 |
-| [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md) | Proposed decision order, canonical outcomes, reason taxonomy, ordinal priority and scoring boundary | Sections 3–6 and 13–14 |
+| [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md) | Accepted decision order, canonical outcomes, reasons, ordinal priority and scoring boundary | Sections 3–6 and 13–14 |
+| [`discovery-locality-scope-and-expansion.md`](discovery-locality-scope-and-expansion.md) | Proposed launch locality boundary, Coverage Units, event-scoped watch and evidence-based expansion | Sections 3–6 and 13–14 |
 | [`news-discovery.md`](news-discovery.md) | Cross-cutting discovery architecture, collection and safeguards | Sections 3–6 and 13 |
 | [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Story qualification, source authority, corroboration and evidence | Sections 3–7 |
 | [`content-generation-and-presentation.md`](content-generation-and-presentation.md) | Original writing, language, attribution and article contract | Sections 8 and 10 |
@@ -61,7 +62,8 @@ Requirement identifiers are stable references. Existing identifiers should not b
 9. Discovery Signals, Leads and Candidates are not evidence.
 10. A shadow result is not production authority.
 11. Operational admission is scoped and versioned and remains separate from activation.
-12. Outcome, reason, current status and processing priority remain separate concepts.
+12. Outcome, reason, current status and processing priority remain separate.
+13. A locality label or event-scoped local watch does not create a systematic locality-coverage promise.
 
 ## Conformance model
 
@@ -75,7 +77,7 @@ Conflicts between Accepted requirements stop the affected path and require owner
 
 Plans organise accepted requirements and cannot create or change them. A plan must identify exact files and requirement IDs, exclusions, milestones, acceptance evidence, temporary gaps and rollback.
 
-The discovery review remains topic-by-topic. Committing a Draft prioritisation or locality document does not make it accepted and authorises no run.
+The discovery review remains topic-by-topic. Committing the Draft locality specification does not make it accepted, select a locality or authorise a run.
 
 ## Suite-level acceptance criteria
 
