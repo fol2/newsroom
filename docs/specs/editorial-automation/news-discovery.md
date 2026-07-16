@@ -1,179 +1,173 @@
 # News discovery specification
 
-**Status:** Draft  
+**Status:** Draft pending final architecture and implementation-plan decision  
 **Owner:** Product owner  
 **Last updated:** 2026-07-16  
 **Canonical language:** English  
 **Active review sequence:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
-**Accepted coverage contract:** [`discovery-coverage-contract.md`](discovery-coverage-contract.md)  
-**Accepted workflow:** [`discovery-workflow.md`](discovery-workflow.md)  
-**Accepted record semantics:** [`discovery-record-semantics.md`](discovery-record-semantics.md)  
-**Accepted source roles:** [`discovery-source-roles-and-selection.md`](discovery-source-roles-and-selection.md)  
-**Accepted change semantics:** [`discovery-change-and-planned-agenda.md`](discovery-change-and-planned-agenda.md)  
-**Accepted triage contract:** [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md)  
-**Accepted search contract:** [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md)  
-**Accepted evaluation contract:** [`discovery-shadow-evaluation.md`](discovery-shadow-evaluation.md)  
-**Accepted operations contract:** [`discovery-reliability-and-operations.md`](discovery-reliability-and-operations.md)  
-**Accepted prioritisation contract:** [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md)  
-**Related locality Draft:** [`discovery-locality-scope-and-expansion.md`](discovery-locality-scope-and-expansion.md)  
-**Related architecture plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)  
-**Related reference:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 3–6 and 13  
-**Related proposal:** [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md) (`Proposed`; owner review pending)  
-**Decision state:** Topics 1–10 are Accepted. Locality, implementation planning and the complete architecture decision remain under sequential owner review.  
+**Topic 12 plan:** [`../../plans/2026-07-16-003-discovery-implementation-and-migration.md`](../../plans/2026-07-16-003-discovery-implementation-and-migration.md)  
+**Related architecture proposal:** [`../../adr/0004-source-registry-first-change-driven-discovery.md`](../../adr/0004-source-registry-first-change-driven-discovery.md) (`Proposed`; owner review ready)  
 **Supersedes:** None
 
 ## Purpose
 
-Define cross-cutting discovery controls for monitoring the accepted coverage boundary through the accepted workflow, identity, source-role, change, triage, search, evaluation, operational and prioritisation contracts without treating discovery as evidence or spending model work merely to prove nothing changed.
+Record cross-cutting discovery invariants spanning the Accepted Topic 1–11 specifications. This file does not replace those focused specifications and remains Draft until ADR 0004 and Topic 12 receive final owner decisions.
 
-This document does not replace the focused specifications. It records architectural invariants spanning them and remains Draft until locality and the complete architecture decision are completed.
+It does not claim that the current Brave, RSS, GDELT and Gemini pool conforms and authorises no implementation or runtime action.
 
-## Scope
+## Accepted foundations
 
-This specification covers source-architecture controls, change-driven collection, bounded search, coverage audit, evaluation, operations, prioritisation and cross-cutting safeguards.
+The following focused contracts are Accepted:
 
-Detailed semantics are defined in the focused Topic 1–10 specifications. Topic 11 owns locality scope and expansion; Topic 12 owns implementation planning.
+- [`discovery-coverage-contract.md`](discovery-coverage-contract.md);
+- [`discovery-workflow.md`](discovery-workflow.md);
+- [`discovery-record-semantics.md`](discovery-record-semantics.md);
+- [`discovery-source-roles-and-selection.md`](discovery-source-roles-and-selection.md);
+- [`discovery-change-and-planned-agenda.md`](discovery-change-and-planned-agenda.md);
+- [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md);
+- [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md);
+- [`discovery-shadow-evaluation.md`](discovery-shadow-evaluation.md);
+- [`discovery-reliability-and-operations.md`](discovery-reliability-and-operations.md);
+- [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md); and
+- [`discovery-locality-scope-and-expansion.md`](discovery-locality-scope-and-expansion.md).
 
-It does not claim that the current Brave-, RSS-, GDELT- and Gemini-based pool conforms and authorises no implementation.
+Where this Draft conflicts with a focused Accepted specification, the focused Accepted specification controls.
 
-## Review state
-
-The Accepted Topic 1–10 contracts are mandatory bases for later work. Requirements below remain Draft where they depend on locality, final source admission or the complete architecture decision.
-
-ADR 0004 remains Proposed.
-
-## Requirements
+## Cross-cutting requirements
 
 ### Source architecture
 
-**DISC-001 — Portfolio-first discovery.** The proposed primary production boundary is an owner-approved source portfolio aligned to accepted coverage and source-role contracts, not one recurring broad search query per beat. Final acceptance remains subject to ADR 0004 review.
+**DISC-001 — Portfolio-first discovery.** The proposed production boundary is an owner-approved source portfolio aligned to Accepted coverage and source-role contracts, not one recurring generic search query per beat. Final architecture authority remains subject to ADR 0004.
 
-**DISC-002 — Source purpose.** Every enabled Source Definition Version MUST identify accepted coverage mapping, source role, portfolio function, geography, publisher, interface and permitted use.
+**DISC-002 — Source purpose.** Every executable Source Definition Version identifies accepted coverage mapping, source role, portfolio function, geography, publisher, interface and permitted use.
 
-**DISC-003 — Source-native transport.** An adapter SHOULD prefer a permitted API, webhook, calendar, RSS or Atom interface. Selector-based change detection MAY fill an explicit high-value gap. Whole-site crawling and general browser automation MUST NOT be the default.
+**DISC-003 — Source-native transport.** An adapter should prefer a permitted API, webhook, calendar, RSS or Atom interface. Maintained-document or selector-based change detection may fill an explicit high-value gap. Whole-site crawling and general browser automation are not the default.
 
-**DISC-004 — No silent broad fallback.** Missing or invalid production source configuration MUST fail closed. A collector MUST NOT substitute broad media feeds, generic search or a weaker source role silently.
+**DISC-004 — No silent broad fallback.** Missing or invalid production source configuration fails closed. Broad media feeds, generic search and weaker source roles are never substituted silently.
 
-**DISC-005 — Rights before collection.** Every executable Source Definition Version MUST reference an owner-approved rights and permitted-use record. Public availability, official status and robots access do not independently authorise retrieval, retention, model submission, quotation or display.
+**DISC-005 — Rights before collection.** Every executable source and channel references an owner-approved permitted-use record. Public availability, official status and robots access do not independently authorise retrieval, retention, model submission, quotation or display.
 
-**DISC-006 — Planned Agenda.** Known releases, proceedings, effective dates and deadlines within accepted coverage use the Accepted Agenda and occurrence-confirmation semantics.
+**DISC-006 — Planned Agenda.** Known releases, proceedings, effective dates and deadlines use the Accepted Agenda identity, version and occurrence-confirmation semantics.
 
-**DISC-007 — Smallest sufficient portfolio.** A portfolio is minimised only after accepted obligations, resilience and evaluation needs are met. Endpoint count MUST NOT be reduced by leaving an Active obligation without a credible Anchor or explicit blocker.
+**DISC-007 — Smallest sufficient portfolio.** The portfolio is minimised only after coverage, resilience and evaluation needs are satisfied. Endpoint count cannot leave an Active obligation without a credible Anchor or explicit blocker.
 
-**DISC-008 — Source readiness.** Acceptance of roles or a shortlist does not authorise collection. Executable sources must pass editorial, rights, technical, evaluation and operational gates.
+**DISC-008 — Source readiness.** A source shortlist creates no authority. Executable use requires editorial, rights, technical, evaluation and operational gates.
 
 ### Change-driven collection
 
-**DISC-010 — Change before editorial work.** Routine collection MUST establish an accepted candidate observable transition before downstream editorial work. A successful unchanged check MUST NOT invoke a model.
+**DISC-010 — Change before editorial work.** Routine collection establishes an accepted candidate observable transition before downstream editorial work. A successful unchanged check invokes no model and creates no Lead.
 
-**DISC-011 — Per-source state.** Each enabled source MUST retain inspectable state sufficient to distinguish unchanged content, item or Revision change, current-state transition, Planned expectation and failed check.
+**DISC-011 — Per-source state.** Each enabled source retains inspectable state sufficient to distinguish unchanged content, item or Revision change, current-state transition, Planned expectation and failed check.
 
-**DISC-012 — Conditional retrieval.** Where supported, collectors SHOULD use ETag and `Last-Modified` validators. Validators are retrieval optimisations, not proof of substantive change.
+**DISC-012 — Conditional retrieval.** Where supported, collectors use ETag or `Last-Modified` validators. Validators optimise retrieval and do not prove substantive change.
 
-**DISC-013 — Failure semantics.** Parser, authentication, rights, transport, malformed-content, rate-limit and quarantine outcomes remain distinct from unchanged, disappearance, zero-result and missed-expectation outcomes.
+**DISC-013 — Failure honesty.** Parser, authentication, rights, transport, malformed-content, rate-limit, budget and quarantine outcomes remain distinct from unchanged, disappearance, zero results and missed expectation.
 
-**DISC-014 — Delivery semantics.** Collection MAY be at least once, but semantic transitions MUST remain idempotent against Accepted identities and versions.
+**DISC-014 — Delivery semantics.** Collection may be at least once, while semantic effects remain idempotent against Accepted identities and versions.
 
-**DISC-015 — Quarantine.** A source or adapter outside its contract enters visible degraded or quarantined state. Parser failure and layout churn MUST NOT be emitted as publisher change.
+**DISC-015 — Quarantine.** A source or adapter outside its contract enters visible degraded or quarantined state. Parser failure and layout churn do not become publisher change.
 
-**DISC-016 — Observation-model constraint.** Transition inference MUST remain within the observation model for the exact Source Definition Version. Feed-window disappearance, partial snapshots and clock passage cannot become withdrawal, ending or occurrence silently.
+**DISC-016 — Observation-model constraint.** Transition inference remains within the exact Source Definition Version's observation model. Rolling-list disappearance, partial snapshots and clock passage do not silently become withdrawal, ending or occurrence.
 
-### Discovery states, gates and triage
+### Discovery states and authority
 
-**DISC-020 — Discovery Signal.** Every candidate observable transition enters through the Accepted Signal contract with exact source, item, Revision, Representation and lineage references. A Signal is not evidence.
+**DISC-020 — Discovery Signal.** Every accepted candidate transition enters through the Signal contract with exact source, Item, Revision, Representation and lineage. A Signal is not evidence.
 
-**DISC-021 — Deterministic gates.** Before editorial triage, the system applies versioned integrity, identity, duplicate, observable-newness, time-validity and unambiguous scope or exclusion checks.
+**DISC-021 — Deterministic gates.** Before editorial triage, versioned integrity, identity, duplicate, observable-newness, time-validity and unambiguous exclusion checks run.
 
-**DISC-022 — Ambiguity preserves recall.** Materiality, cross-geography relevance, development status and transition ambiguity MUST NOT become deterministic editorial rejection silently. They proceed to Lead triage or Operational hold.
+**DISC-022 — Ambiguity preserves recall.** Materiality, cross-geography relevance, development status and transition ambiguity do not become deterministic editorial rejection. They proceed to Lead triage or an Operational hold.
 
-**DISC-023 — News Lead.** A Signal becomes a Lead only through a committed Gate Decision. It retains exact lineage and is not evidence.
+**DISC-023 — News Lead.** A Signal becomes a Lead only through a committed Gate Decision and retains exact lineage.
 
-**DISC-024 — Story Candidate.** Leads become a Candidate only through Accepted bounded retrieval, structured proposal validation and deterministic Candidate admission.
+**DISC-024 — Story Candidate.** Leads become a Candidate only through bounded retrieval, structured proposal validation and deterministic Candidate admission.
 
-**DISC-025 — Evidence boundary.** Discovery MUST NOT create Source Observations, Governed Claims, Evidence Packages or publication authority. Evidence acquisition independently retrieves and governs current permitted source material.
+**DISC-025 — Evidence boundary.** Discovery creates no Source Observation, Governed Claim, Evidence Package or publication authority. Evidence Intake independently retrieves and governs current permitted source material.
 
-**DISC-026 — Inspectable outcome.** Every Check, Signal, Lead, Agenda expectation, triage decision, search request, evaluation decision, operational assessment, Priority Decision and Candidate Handoff retains an inspectable outcome and reason.
+**DISC-026 — Inspectable outcome.** Every Check, Signal, Lead, Agenda expectation, triage decision, search request, evaluation decision, operational assessment, locality decision and Candidate Handoff retains an inspectable outcome.
 
-### Model, batching and search
+### Models, grouping and search
 
-**DISC-030 — No model for an empty tick.** Scheduling, preflight, collection, parsing, baseline comparison and unchanged detection MUST complete without waking a model merely to confirm no work.
+**DISC-030 — No model for an empty tick.** Due-work calculation, preflight, source checking, parsing, baselining and unchanged detection complete without waking a model merely to confirm no work.
 
-**DISC-031 — Bounded triage.** Model assistance operates on bounded Triage Work Items. Execution batching does not imply event grouping. Prompts and outputs are versioned, structured and untrusted.
+**DISC-031 — Bounded triage.** Model assistance operates on bounded Triage Work Items. Execution batching does not imply event grouping. Output is structured, versioned and untrusted.
 
-**DISC-032 — Deferred full acquisition.** Discovery SHOULD use source metadata and minimum permitted changed fragments. Full evidence acquisition begins after Candidate admission except for approved replay or evaluation fixtures.
+**DISC-032 — Deferred full acquisition.** Discovery uses permitted metadata and minimum necessary changed fragments. Full evidence acquisition begins after Candidate admission except for approved fixtures or replay.
 
-**DISC-033 — Search is supplemental.** Search is provider-specific, separately metered and limited to Accepted Topic 7 purposes. It MUST NOT become an Active Anchor, generic firehose or silent source replacement.
+**DISC-033 — Search is supplemental.** Search is provider-specific, separately metered and limited to Accepted Search Purposes. It is not an Active Anchor, generic firehose, evidence source or silent replacement.
 
-**DISC-034 — Search triggers.** Automated search runs only through an Accepted Search Purpose, authorised Request, privacy validation and enforced budget.
+**DISC-034 — Search control.** Automated search runs only through an authorised Search Request with privacy validation, rights and enforced budgets.
 
-**DISC-035 — Enforced budget.** Search request, result, expansion, retry, cost and downstream-work limits are hard. Exhaustion is visible and cannot cause unapproved provider switching.
+**DISC-035 — Hard search budget.** Request, result, expansion, retry, cost and downstream-work limits are enforced. Exhaustion remains visible and causes no provider switching.
 
 **DISC-036 — Recall interpretation.** Search, media indexes, Comparators and the legacy pipeline are not ground truth. Coverage Gaps require reviewed prospective or explicitly retrospective evidence.
 
-### Evaluation, operations, outcomes and safeguards
+### Evaluation, operations, outcomes and locality
 
-**DISC-040 — No launch global score.** Launch discovery uses Accepted gates, semantic outcomes and ordinal priority lanes rather than one global composite score. Later stage-local scoring remains Needs experiment and cannot override gates.
+**DISC-040 — No governing global score.** Accepted gates, semantic routes and ordinal lanes govern launch. Any bounded stage-local score remains Needs experiment and cannot override gates.
 
-**DISC-041 — Origins, not volume.** Article, result or domain count does not establish newsworthiness, independence, coverage, event identity or Candidate priority. Common origins and dependencies remain visible.
+**DISC-041 — Origins, not volume.** Article, result and domain count do not establish newsworthiness, independence, coverage, event identity or Candidate priority. Common origins remain visible.
 
-**DISC-042 — No discovery quota.** Discovery and triage support zero Leads and zero Candidates. Beat, category, geography, finance, cadence and capacity quotas cannot promote weaker work or create filler.
+**DISC-042 — No discovery quota.** Discovery supports zero Leads and zero Candidates. Beat, category, geography, finance, cadence and capacity quotas cannot promote weaker work or create filler.
 
-**DISC-043 — Priority is not eligibility.** Urgency and processing priority may reduce waiting but MUST NOT change scope, rights, novelty, relationship, collision, admission or Handoff requirements.
+**DISC-050 — Prospective evaluation.** Qualification uses an owner-approved Evaluation Plan, frozen Epoch, event-level prospective universe, authorised labels, required slices and explicit release-evidence decision.
 
-**DISC-044 — Outcome and reason integrity.** Outcome, reason, next action, current status and priority remain separate. Decisions are immutable for exact versions and later changes create later records.
+**DISC-051 — Operational health.** Failed, partial, stale, rate-limited, blocked and broken paths remain distinct from successful silence under exact Operational Profiles.
 
-**DISC-050 — Prospective evaluation.** Qualification uses an owner-approved Evaluation Plan, frozen Epoch, event-level prospective universe, authorised labels, required slices and explicit release-evidence decision under Topic 8.
+**DISC-052 — Production evidence.** Source portfolio, observation models, triage policy, search roles and adapters pass Accepted evaluation and operational qualification before production authority.
 
-**DISC-051 — Source and provider health.** Failed, partial, stale, rate-limited, blocked and broken paths remain distinct from successful silence under exact Operational Profiles.
+**DISC-053 — Coverage feedback.** Relevant developments found through another permitted path may create reviewed Coverage Gaps. Remediation should improve sources, adapters or workflow rather than create an unexamined broad-search dependency.
 
-**DISC-052 — Production evidence.** Source portfolio, observation model, triage policy, search role and adapters MUST pass Accepted evaluation and operational qualification before production authority.
+**DISC-054 — Shadow is not authority.** A shortlist, shadow Run, Candidate outcome or Comparator result cannot publish, mutate production authority or graduate silently.
 
-**DISC-053 — Coverage feedback.** A relevant development found through another permitted path may create a reviewed Coverage Gap. Remediation SHOULD improve source roles, adapters or workflow rather than create an unexamined broad-search dependency.
+**DISC-055 — Operational Admission is scoped.** Production eligibility binds exact versions, Profiles, objectives, alerts, capacity, recovery, contingency, canary and rollback. Admission is not activation.
 
-**DISC-054 — Shadow is not authority.** A shadow shortlist, Run, Candidate outcome or Comparator result MUST NOT publish, mutate production authority or graduate silently into production.
+**DISC-056 — Outcome and priority separation.** Outcome, reason, next action, current status and processing priority remain separate. Priority and score cannot change eligibility or disposition.
 
-**DISC-055 — Operational admission is scoped.** Production eligibility requires exact versions, Operational Profiles, objectives, alerts, capacity, recovery, contingency, canary and rollback evidence. Admission and activation remain separate.
+**DISC-057 — Locality-aware boundary.** Material local UK stories remain eligible wherever discovered, while no fixed locality receives systematic all-topic monitoring without an exact Locality Coverage Decision.
 
-**DISC-056 — Canonical semantic mapping.** Implementations MUST preserve one-to-one mappings to the Accepted outcome, reason and priority semantics and MUST NOT collapse operational failure into editorial rejection or no news.
+**DISC-058 — Locality precision and source classes.** Locality labels use evidence-supported, versioned boundaries. Selecting one local source class does not select all local news.
 
-### Proposed locality safeguards
+**DISC-059 — Event-Scoped Local Watch.** A bounded local watch identifies exact event purpose, source set, owner, budget and expiry and creates no permanent locality promise.
 
-**DISC-057 — Local story is not locality completeness.** An evidence-supported local label or a published local story MUST NOT be represented as systematic monitoring of that place.
+### Migration boundary
 
-**DISC-058 — Event-scoped local watch.** A bounded local watch MAY support one major event or exact discovery question but MUST NOT create permanent locality selection, unrelated crawling or an evidence bypass.
+**DISC-060 — Side-by-side migration proposed.** Topic 12 proposes a separate discovery v2 authority scope and store rather than in-place mutation of legacy links and events.
 
-**DISC-059 — Selected locality scope.** Any permanent locality promise MUST identify exact geography, boundary version, coverage obligations, source classes, known gaps, evaluation and operational admission. Topic 11 remains under review.
+**DISC-061 — Legacy non-authority.** Legacy links, event IDs, merges, scores and quotas may inform a Comparator but do not become v2 identity or correctness ground truth.
+
+**DISC-062 — No silent dual-write.** V2 discovery records are not written into legacy event authority silently. Any bridge is explicit, versioned and evaluated.
+
+**DISC-063 — Evidence Intake dependency.** The first vertical slice ends at an evaluation Handoff sink. Production canary remains blocked until governed Evidence Intake exists.
+
+**DISC-064 — Milestone authority.** Plan or code merge alone activates no source, provider, model, shadow run, canary or production scope.
 
 ## Acceptance criteria
 
 1. An unchanged source completes without model call or Lead.
-2. Invalid source configuration fails closed instead of activating broad defaults.
+2. Invalid configuration fails closed rather than activating broad defaults.
 3. Parser failure remains failure or quarantine rather than no news or publisher change.
 4. Repeated delivery produces at most one equivalent semantic transition while retaining Occurrences.
-5. An official rule Revision can proceed without media repetition.
-6. Rolling-feed disappearance cannot become withdrawal without a supporting source contract.
-7. A partial snapshot cannot clear an active warning by absence.
+5. An official guidance Revision may proceed with one source and no media repetition.
+6. Rolling-feed disappearance does not become withdrawal without a supporting source contract.
+7. A partial snapshot cannot clear active state by absence.
 8. Search and media results cannot enter evidence merely because discovery found them.
-9. An Agenda date does not become occurrence evidence or Candidate.
-10. An Execution Batch cannot establish one event.
+9. Agenda date does not become occurrence evidence or Candidate.
+10. Execution Batch cannot establish one event.
 11. Retrieval similarity cannot create a Hypothesis, merge or Candidate directly.
-12. A generic search cannot be an Active Anchor.
+12. Generic search cannot be an Active Anchor.
 13. Search exhaustion remains visible and cannot be bypassed.
-14. A Candidate preserves exact lineage while evidence creates its own Source Observations.
-15. Shadow produces no public effect and cannot create production Candidate authority.
+14. Candidate preserves exact lineage while evidence creates its own observations.
+15. Shadow creates no public effect or production Candidate authority.
 16. Evaluation cannot claim absolute recall or pool changed Epochs silently.
-17. A stale or failed source cannot be represented as healthy unchanged because it produced no items.
-18. Operational admission cannot activate production by itself.
-19. Media volume, category quota, geography slot or model confidence cannot override a gate.
-20. A local story label cannot be used as proof of systematic locality coverage.
-21. No production implementation is authorised until locality and implementation decisions are completed as applicable.
+17. Stale or failed source cannot be represented as healthy unchanged because it emitted no items.
+18. Operational Admission cannot activate production by itself.
+19. Media volume, quota and model confidence cannot override a gate.
+20. Publishing a local story creates no locality-completeness promise.
+21. V2 implementation does not mutate legacy event authority silently.
+22. No production implementation is authorised until ADR 0004, Topic 12 and later milestone-specific gates are accepted.
 
-## Non-goals
+## Open owner decisions
 
-This specification does not select implementation mechanisms, schedules, storage, evidence store, RAG, model provider, observability or deployment technology. It does not define evidence extraction, drafting or publication beyond the discovery boundary.
-
-## Open questions
-
-- Will the owner accept, amend or reject the Topic 11 locality boundary and expansion contract?
-- Which locality or source class, if any, will later evaluation justify?
-- When the focused topics are complete, should ADR 0004 be accepted, amended or replaced?
+- Accept, amend, split or reject ADR 0004.
+- Accept or amend the Topic 12 implementation and migration plan.
+- After those decisions, determine whether this cross-cutting specification should become Accepted or be superseded by the focused specifications plus ADR.
