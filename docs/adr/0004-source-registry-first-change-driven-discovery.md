@@ -2,83 +2,86 @@
 status: proposed
 date: 2026-07-15
 last_updated: 2026-07-16
-owner_review: pending_graphrag_and_revised_plan
+owner_review: ready_with_topic_13
 ---
 
-# Source-portfolio-first, change-driven news discovery
+# Source-portfolio-first, change-driven and graph-aware news discovery
 
 ## Decision status
 
-This ADR remains **Proposed**. The product owner accepted discovery Topics 1–11 but rejected deferring GraphRAG behind a separate discovery-only implementation.
+This ADR is ready for the product owner's final decision together with the integrated Topic 13 implementation plan.
 
-Final review now depends on:
+The product owner has already accepted:
 
-- [`../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md`](../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md);
-- ADR 0001's authority and rebuildable-projection boundary;
-- ADR 0002's integrated SQLite-ledger decision; and
-- a rewritten implementation and migration plan that delivers the relational ledger and GraphRAG workstreams from canonical schema v1.
+- discovery Topics 1–11;
+- the governed GraphRAG and knowledge-projection specification;
+- ADR 0001, which makes the relational ledger and governed objects authoritative and graph or indexes rebuildable projections; and
+- ADR 0002, which selects SQLite for the initial canonical single-host ledger while requiring the graph workstream in the same programme.
 
-Acceptance of this ADR would approve the discovery architecture boundary. It would not authorise implementation, graph-engine installation, source collection, search, extraction, embeddings, model calls, spending, shadow execution, canary or production activation.
+This ADR remains **Proposed** until explicitly accepted, amended, split or rejected.
+
+Acceptance would approve the discovery architecture boundary. It would not authorise code, source collection, search, graph installation, extraction, embedding, model calls, spending, shadow execution, canary or production activation.
 
 ## Context
 
-The current Newsroom uses broad Brave queries, GDELT, broad media RSS feeds, one-link-per-call Gemini clustering, mutable event merges and source-count-based selection. It does not reliably distinguish a new item, maintained-page revision, successful silence, parser failure, source outage or Planned occurrence. Its default queries and quotas conflict with the utility-first coverage contract.
+The current Newsroom uses broad Brave queries, GDELT, broad media RSS feeds, one-link-per-call Gemini clustering, mutable event merges and source-count-based selection. It does not reliably distinguish:
 
-The owner-led review established Accepted contracts for:
+- a new source item from a maintained-page revision;
+- successful silence from source, parser or scheduler failure;
+- a current-state transition from feed disappearance;
+- a Planned Agenda expectation from occurrence evidence;
+- same-state repetition from a development;
+- media density from reader utility; or
+- retrieval similarity from event identity.
 
-1. coverage;
-2. end-to-end workflow;
-3. record identity and lineage;
-4. source roles and selection;
-5. source change and Planned Agenda;
-6. triage and event grouping;
-7. bounded search and coverage audit;
-8. shadow evaluation;
-9. reliability and operations;
-10. outcomes and ordinal prioritisation; and
-11. locality scope.
+Its default queries and quota-driven selection conflict with the Accepted utility-first coverage and prioritisation contracts.
 
-Those contracts replace the assumption that a source list, generic search loop or LLM clustering prompt can define discovery architecture.
-
-The remaining architecture question is not whether discovery should use GraphRAG. The owner has required that graph-aware identity, temporal, trust, projection and hybrid-retrieval contracts exist from inception rather than being added after a separate discovery data model has already shipped.
+The accepted review established that discovery must also avoid a second failure: building a graph-less relational model and adding GraphRAG later through a semantic migration. News event identity, long-running policy or case timelines, source dependencies and revision impact require graph-aware identities, trust states and ordered events from canonical schema v1.
 
 ## Proposed decision
 
-Adopt a **source-portfolio-first, change-driven, graph-aware and scheduler-neutral discovery architecture** with the following boundaries.
+Adopt a **source-portfolio-first, change-driven, graph-aware and scheduler-neutral discovery architecture**.
 
 ### Coverage before sources
 
-An owner-approved coverage contract defines Active, Best-effort, explicit deferred and excluded development classes before source selection. Every Active class has a credible candidate Anchor or a visible launch-blocking gap.
+An owner-approved coverage contract defines Active, Best-effort, explicit deferred and excluded development classes before source selection.
+
+Every Active class has a credible candidate Anchor or a visible launch-blocking gap. A source, endpoint, query or model prompt cannot create or silently broaden the product scope.
 
 ### Versioned source portfolio
 
-Discovery uses versioned Source Definitions with explicit source roles, portfolio functions, rights references, observation models and Operational Profiles.
+Discovery uses versioned Source Definitions with explicit:
 
-The portfolio may include:
+- coverage mappings;
+- source roles;
+- portfolio functions;
+- permitted-use references;
+- observation models;
+- identity and revision rules;
+- Operational Profiles; and
+- failure consequences.
 
-- originating authorities;
-- responsible operators;
-- Planned Agenda sources;
-- established-media radar;
-- justified specialist or local radar;
-- manual, editor and reader lead channels; and
-- bounded search or index roles accepted under the search contract.
+The portfolio may include originating authorities, responsible operators, Planned Agenda sources, established-media radar, justified specialist or local radar, manual or reader channels and bounded search or index roles.
 
-`Official`, `media`, `RSS` and `search` are not sufficient purposes on their own.
+`Official`, `media`, `RSS` and `search` are transports or labels, not sufficient purposes.
 
-### Source-native, selective transport
+### Source-native and selective collection
 
-Prefer permitted APIs, webhooks, calendars, RSS or Atom interfaces. Use maintained-document or selector-based change detection only for an explicit high-value gap. Whole-site crawling and generic browser automation are not the default.
+Prefer permitted APIs, webhooks, calendars, RSS or Atom interfaces. Use maintained-document or selector-based change detection only for an explicit high-value gap.
+
+Whole-site crawling, generic browser automation and one recurring broad search query per beat are not the default.
 
 RSS is a transport, not a coverage model.
 
 ### Change before editorial work
 
-Routine checking establishes a source-specific observable transition before downstream editorial work. Successful unchanged checks end without a Signal, Lead or model call.
+Routine checking establishes a source-specific observable transition before downstream editorial work.
 
-Transport, parser, rights, authentication, rate, partial and quarantine failures remain distinct from unchanged and no-news conclusions.
+A successful unchanged check ends without a Signal, Lead or model call.
 
-### Append-only discovery semantics
+Transport, parser, rights, authentication, rate-limit, budget, partial, stale and quarantine outcomes remain distinct from unchanged and no-news conclusions.
+
+### Canonical append-only semantics
 
 The architecture separates and versions:
 
@@ -104,71 +107,96 @@ Trigger
 
 Current status is rebuildable. Retries, later revisions, consolidation, split, feedback and correction do not erase earlier history.
 
-### Models propose; controllers commit
+### Canonical relational authority from schema v1
 
-Source adapters, retrieval components, models and agents do not create authoritative Leads, Event Hypotheses, Candidates, evidence or publication decisions directly.
+The Newsroom uses one canonical identity, temporal, trust and ordered-event contract from schema v1.
 
-Deterministic controllers validate and commit exact workflow transitions. Model output is structured, versioned and untrusted.
+The accepted SQLite relational ledger owns authoritative Newsroom records. Governed content-addressed object storage owns exact retained permitted bytes and hashes. Test, replay, shadow and later production use separate physical environments created from the same canonical migrations and event contract.
+
+There is no discovery-only authority model followed by a graph-aware semantic migration.
+
+### Governed GraphRAG from the initial programme
+
+Graph, vector and full-text stores are rebuildable projections delivered in the same initial programme.
+
+The initial GraphRAG lane includes:
+
+- graph ontology and ledger-event projection mappings;
+- explicit `OBSERVED`, `PROPOSED` and `ADMITTED` trust scopes;
+- first-class entity-resolution proposals and decisions;
+- reified editorial relation proposals and assertions;
+- isolated Graphiti extraction;
+- separate admission before governed projection;
+- idempotent projectors with contiguous checkpoints and visible gaps;
+- hybrid exact, full-text, vector and bounded graph retrieval; and
+- named read-only retrieval tools.
+
+Neo4j Community plus Graphiti is the first compatibility-focused proof-of-concept baseline. It is not automatic production admission.
+
+Graphiti, similarity and graph proximity create proposals or Retrieval Context. They do not allocate authoritative entity, Event Hypothesis or Candidate identity and do not establish evidence.
+
+### Models and extractors propose; deterministic authorities commit
+
+Source adapters, retrieval components, models, extractors and agents do not create authoritative Leads, admitted entity or relation state, Event Hypotheses, Candidates, evidence or publication decisions directly.
+
+Deterministic or authorised controllers validate and commit exact workflow transitions and admission decisions. Model and extraction output is structured, versioned, attributable and untrusted.
 
 ### Batching is not grouping
 
 Several independent Work Items may share one worker invocation for efficiency. Batch membership does not establish event identity.
 
-Retrieval similarity, graph proximity, source count, domain prestige, confidence and recency may rank context but cannot create an Event Hypothesis, merge records, reject a Lead or admit a Candidate.
-
-### Governed GraphRAG from canonical schema v1
-
-The canonical identity, temporal, trust and ordered-event contract includes graph projection from its first schema version. The target does not plan a graph-less discovery model followed by later GraphRAG migration.
-
-The authority boundary is:
-
-```text
-relational editorial ledger + governed object store
-        ↓ ordered idempotent projection
-knowledge graph + vector/full-text indexes
-        ↓ bounded named retrieval tools
-triage and research context
-```
-
-Graph, vector and full-text stores are rebuildable projections, not independent editorial or evidence authority.
-
-Graphiti or another extractor creates immutable entity and relation proposals in an isolated workspace. A separate admission decision is required before governed projection. `OBSERVED`, `PROPOSED` and `ADMITTED` trust scopes remain explicit.
-
-GraphRAG participates in initial event and development retrieval, long-running process timelines and source-revision impact analysis. It returns context and proposals; deterministic controllers retain Hypothesis and Candidate authority.
-
-Graph outage, lag or projection gap is not `no match`. An approved exact fallback may be used for a bounded route; otherwise graph-dependent work enters Watch or Operational Hold.
+Retrieval score, graph path, source count, domain prestige, confidence and recency may rank context but cannot merge records, reject a Lead, create a development or admit a Candidate.
 
 ### Discovery is not evidence
 
-Signals, Leads, search results, media headlines, graph paths, Event Hypotheses and Story Candidates are discovery artefacts. Evidence Intake independently retrieves and governs current permitted source material.
+Signals, Leads, search results, media headlines, Event Hypotheses, graph proposals and Story Candidates are discovery artefacts.
 
-Discovery and GraphRAG have no public publishing credential.
+Evidence Intake independently retrieves and governs current permitted source material before creating Source Observations, claims or Evidence Packages.
+
+Discovery, GraphRAG and retrieval actors have no public publishing credential.
 
 ### Search is bounded and supplemental
 
-Search and media indexes are supplemental channels and Comparators. They are not the sole Anchor for an Active obligation, the primary generic production clock, evidence or recall ground truth.
+Search and media indexes are supplemental channels and Comparators. They are not:
 
-Every Search Request has one accepted purpose, versioned query, privacy validation, rights decision and hard request, result, expansion, cost and downstream-work budget. There is no silent provider switching.
+- the sole Anchor for an Active obligation;
+- the generic production clock;
+- publication evidence; or
+- recall ground truth.
+
+Every Search Request has one accepted purpose, versioned query, privacy validation, rights decision and hard request, result, expansion, cost and downstream-work budgets. There is no silent provider switching.
 
 ### Planned Agenda is expectation plus confirmation
 
-Known releases, proceedings, effective dates and deadlines use separate Agenda identities and occurrence-confirmation paths. Clock passage does not create a Lead, Candidate or reminder story.
+Known releases, proceedings, effective dates and deadlines use separate Agenda identities and occurrence-confirmation paths.
+
+Clock passage opens or changes monitoring work. It does not create a Lead, Candidate or reminder story.
 
 ### Health and coverage are separate
 
 Successful silence requires a complete qualifying check. Last successful observation, last complete observation and last source change remain separate.
 
-Component health, graph-projection health and portfolio Coverage Availability are evaluated separately. A Comparator cannot repair a failed Anchor. A graph gap cannot be hidden by a later checkpoint. Loss of every credible healthy path for an Active obligation triggers scoped containment.
+Component health and portfolio Coverage Availability are evaluated separately. A Comparator cannot repair a failed Anchor's health. Loss of every credible healthy path for an Active obligation triggers scoped containment.
 
-### Evaluation precedes authority
+Graph projection health is also separate. Projection lag, gap or outage is never represented as no prior event or no relationship.
 
-Sources, adapters, observation models, triage policy, search roles, graph extraction, entity resolution, relation admission, projectors, retrieval tools and workers earn authority through pre-registered fixtures, replay, prospective shadow, ablation, fault injection and operational evidence.
+### Graph-degraded operation
 
-No source, provider, graph engine, legacy pipeline or union of paths is complete ground truth. Shadow has no public effect and does not graduate silently into production.
+Healthy scheduling, source collection, change detection, deterministic gates and durable Lead creation may continue when the graph is unavailable and their own dependencies are healthy.
 
-The first GraphRAG qualification lane is Neo4j Community plus Graphiti. It is a compatibility-focused POC, not automatic production selection. A challenger is introduced only after a measured blocker or owner-approved comparison purpose.
+Graph-dependent work uses an approved exact relational fallback or enters Watch or Operational Hold. Candidate admission never treats graph outage as no match. Exact identity and Candidate-collision checks remain relational authority.
 
-### Ordinal priority, no discovery quotas
+Graph independence is a resilience boundary, not permission to postpone GraphRAG.
+
+### Evaluation before authority
+
+Sources, adapters, observation models, triage policy, search roles, entity resolution, relation extraction, projectors and retrievers earn authority through pre-registered fixture, replay, prospective shadow, comparator, fault-injection and operational evidence.
+
+No source, provider, model, graph engine, legacy pipeline or union of paths is complete ground truth.
+
+Complete end-to-end live-shadow qualification includes the governed graph, hybrid retrieval, projection-gap behaviour and GraphRAG evaluation. Adapter-only checks may occur earlier but do not qualify the complete target architecture.
+
+### Ordinal priority and no quotas
 
 Discovery uses semantic outcomes, structured reasons and ordinal lanes:
 
@@ -181,101 +209,100 @@ ROUTINE
 OPTIONAL_EVALUATION
 ```
 
-Priority never creates eligibility. Launch has no governing global composite discovery score, category quota, finance cap, Hong Kong guaranteed slot or filler target.
+Priority never creates eligibility.
+
+Launch has no governing global composite discovery score, category quota, finance cap, Hong Kong guaranteed slot or filler target.
 
 ### Locality-aware, locality-uncommitted launch
 
-Material local UK stories remain in scope wherever discovered, but no fixed UK locality receives systematic all-topic monitoring by default. Locality expansion requires an exact geography-plus-source-class decision and its own evidence.
+Material local UK stories remain in scope wherever discovered, but no fixed UK locality receives systematic all-topic monitoring by default.
 
-Hong Kong remains one product geography without district filters or district-completeness promises.
+Locality expansion requires an exact geography-plus-source-class decision and its own evidence. Hong Kong remains one product geography without district filters or district-completeness promises.
 
 ### Scheduler neutrality
 
-The semantic architecture does not require Hermes, cron or a particular agent framework. A repository-owned deterministic command surface may be invoked by approved orchestration later.
+The semantic architecture does not require Hermes, cron or another agent framework.
 
-Scheduler neutrality does not imply storage or knowledge-contract neutrality. The ledger, object, graph projection and hybrid retrieval contracts must be decided before implementation.
+The implementation plan provides a repository-owned deterministic command surface. Hermes or another scheduler may invoke bounded commands and named retrieval tools without becoming authority.
 
-## Implementation and migration boundary
+## Implementation and migration
 
-The first Topic 12 implementation Draft is not accepted because it proposed a separate discovery-only SQLite sequence with GraphRAG deferred.
+Implementation follows [`../plans/2026-07-16-004-integrated-discovery-graphrag-implementation.md`](../plans/2026-07-16-004-integrated-discovery-graphrag-implementation.md).
 
-The revised plan must:
+The proposed migration is side-by-side:
 
-- implement one canonical identity, temporal, trust and ordered-event spine from schema v1;
-- implement the relational authority and graph projection as one delivery programme;
-- use separate target identities from legacy `links` and `events`;
-- keep legacy outcomes read-only as Comparator context;
-- implement graph ontology, projector, Graphiti proposal or admission and hybrid retrieval in the first architectural milestones;
-- allow offline adapter fixtures before graph completion but require GraphRAG before complete live-shadow qualification;
-- use an evaluation Evidence Intake sink before real downstream integration;
-- require explicit Evaluation Plan, Operational Admission, canary and activation; and
-- retire legacy paths explicitly and reversibly.
+- canonical schema v1 is created directly;
+- legacy `links` and `events` remain untouched initially;
+- legacy records may be read only as attributed Comparator context;
+- SQLite authority and graph-aware event contracts are implemented together;
+- graph projection begins before live source activation;
+- generic adapters and fixtures precede named live sources;
+- entity and relation proposals, admission and hybrid retrieval precede complete live shadow;
+- an evaluation Evidence Intake sink precedes real downstream integration;
+- production requires separate Evaluation Plan, Operational Admission, graph admission, canary and activation; and
+- legacy retirement is explicit and reversible.
 
-## Consequences
-
-### Positive
+## Positive consequences
 
 - No model work is spent merely to prove nothing changed.
-- Maintained guidance revisions and current-state transitions become first-class discovery inputs.
+- Maintained guidance revisions and current-state transitions become first-class inputs.
 - Official changes need not wait for media repetition.
 - Unscheduled incidents retain legitimate media and operator radar paths.
-- GraphRAG improves cross-language event grouping, long-running process context and revision-impact discovery from the first target implementation.
-- The graph contract does not require a later identity or event-model rewrite.
-- Search remains useful without defining the coverage model or creating an uncontrolled cost centre.
+- Search remains useful without defining coverage or uncontrolled cost.
 - Failures, stale sources, partial responses and successful silence remain distinguishable.
-- Every Candidate is reconstructable from exact upstream identities and versions.
+- Every Candidate is reconstructable from exact upstream versions.
+- GraphRAG supports multilingual event identity, long-running timelines, source dependencies and revision impact from the initial programme.
+- Graph or index replacement does not migrate editorial authority.
 - Hong Kong coverage is protected by real source and evaluation obligations rather than quotas.
 - Local stories remain reportable without a false all-UK locality claim.
 - The new system can be evaluated beside the legacy pipeline before cutover.
 
-### Costs and trade-offs
+## Costs and trade-offs
 
-- Canonical ontology, entity resolution, graph projection and retrieval governance increase the first implementation scope.
 - Source qualification, rights review and source-specific identity rules require editorial and engineering work.
-- Append-only semantics and projections are more complex than mutable link and event rows.
-- Neo4j and Graphiti introduce another local process, resource footprint, licence review and operational surface.
-- Human review is required to construct credible relation, entity, evaluation and Coverage Gap labels.
-- Some exact polling, graph depth, threshold, source, model and provider decisions remain evidence-dependent.
-- Two systems coexist during shadow and canary, increasing temporary operational complexity.
-- Launch may remain blocked while an Active class or required GraphRAG slice lacks credible evidence.
+- Append-only authority, graph proposals, projectors and rebuilds are more complex than mutable event rows.
+- GraphRAG adds ontology, entity-resolution, embedding, model, licence and operational evaluation work.
+- Human review is required for credible evaluation labels, relation admission and Coverage Gaps.
+- Two systems coexist during shadow and canary.
+- Launch may remain blocked while an Active class or required graph capability lacks a credible path.
 
 ## Rejected alternatives
 
-### Keep generic search as the production clock
+### Generic search as production clock
 
 Rejected because it spends on unchanged periods, inherits index bias, cannot prove recall and conflicts with source-specific change and failure semantics.
 
 ### Official-only discovery
 
-Rejected because unscheduled incidents, lived impact and official blind spots require established-media, operator or other permitted radar roles.
+Rejected because unscheduled incidents, lived impact and official blind spots require media, operator or other permitted radar roles.
 
 ### RSS-only discovery
 
-Rejected because RSS does not cover every maintained page, current-state API, Planned Agenda, webhook or service transition and does not define identity or revision meaning.
+Rejected because RSS does not cover every maintained page, current-state API, Agenda, webhook or service transition and does not define identity or revision meaning.
 
 ### Search-zero architecture
 
-Rejected as a universal rule. Search remains permitted for bounded radar, audit, Gap, Planned recovery, supplemental and outage roles under strict controls.
+Rejected as a universal rule. Search remains permitted for bounded radar, audit, Gap, Planned recovery, supplemental and outage roles.
 
-### Graph-less discovery followed by later GraphRAG
+### Graph as authoritative truth
 
-Rejected because it would create a planned migration of identity, event, temporal and retrieval semantics after the core discovery implementation already exists.
+Rejected because probabilistic extraction, trust mixing and graph-engine recovery cannot enter the editorial authority boundary.
 
-### Make the graph authoritative
+### Graph-less implementation followed by GraphRAG
 
-Rejected because probabilistic extraction, trust mixing and graph-engine recovery would enter the editorial correctness boundary.
+Rejected because it creates a planned semantic migration in identity, ontology, event history, retrieval and source-revision impact.
 
-### Synchronous ledger-and-graph co-authority
+### Relational and graph synchronous co-authority
 
-Rejected because partial failure would create irreconcilable truth without a distributed transaction.
+Rejected because partial failure creates irreconcilable truth and graph replacement becomes an authority migration.
 
 ### In-place mutation of the legacy pool
 
-Rejected as the primary migration path because legacy URL, event, merge and ranking semantics conflict with Accepted identity, append-only, triage and outcome contracts.
+Rejected because legacy URL, event, merge and ranking semantics conflict with Accepted identity, append-only, triage, GraphRAG and outcome contracts.
 
 ### Big-bang replacement
 
-Rejected because it would combine semantic, graph, source, model, evaluation, operational and cutover risk in one release.
+Rejected because it combines source, semantic, graph, model, evaluation, operational and cutover risk in one release. Dependency-ordered pull requests remain part of one target architecture and one final activation boundary.
 
 ### Global composite scoring and quotas
 
@@ -283,26 +310,28 @@ Rejected for launch because volume, confidence, recency, category and geography 
 
 ### Mandatory London-first locality
 
-Rejected because no evidence yet justifies a fixed locality or source-class commitment and convenience is not a coverage decision.
+Rejected because no evidence justifies a fixed locality or source-class commitment and convenience is not coverage.
 
 ## Non-decisions
 
-This ADR does not finally select:
+This ADR does not select:
 
-- exact sources or source versions;
-- polling intervals, freshness objectives or retry thresholds;
-- model, prompt, embedding or extraction version;
-- final production graph engine or licence;
+- exact source versions;
+- polling, freshness or retry values;
+- final ontology details;
+- model, prompt, embedding or chunking versions;
+- final graph engine or commercial licence approval;
+- exact Neo4j deployment;
+- retrieval thresholds, graph depth or tool budgets;
 - search provider;
-- scheduler or Hermes deployment;
-- exact relational and graph physical schema;
+- scheduler deployment;
 - Evidence Intake transport;
 - cloud, observability or on-call platform;
 - Locality Coverage Unit; or
 - production activation date.
 
-Those decisions remain governed by the relevant Accepted contracts, GraphRAG review, Evaluation Plans, Operational Profiles and owner approvals.
+Those decisions remain governed by Accepted specifications, the Topic 13 plan, Evaluation Plans, Operational Profiles and explicit owner approvals.
 
 ## Owner decision required
 
-This ADR is not ready for final acceptance until Topic 12, ADR 0001, ADR 0002 and the revised integrated implementation plan are reviewable together. Acceptance would still authorise no runtime action by itself.
+Accepting this ADR would approve the architecture above and allow the Topic 13 plan to organise implementation work. It would still authorise no runtime action by itself.
