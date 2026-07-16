@@ -53,13 +53,7 @@ def _validate_restricted_value(value: Any, path: str = "$") -> None:
 
 
 def canonical_json_bytes(value: Any) -> bytes:
-    """Return deterministic UTF-8 JSON for the restricted authority domain.
-
-    Authority digests deliberately exclude floats and integers outside the
-    interoperable JSON safe range. The domain currently contains only the
-    simple scalars and collections needed by command, audit and event
-    envelopes, so sorted compact JSON is sufficient and reviewable.
-    """
+    """Return deterministic UTF-8 JSON for the restricted authority domain."""
 
     _validate_restricted_value(value)
     try:
@@ -76,6 +70,8 @@ def canonical_json_bytes(value: Any) -> bytes:
 
 
 def digest_bytes(data: bytes) -> str:
+    if not isinstance(data, bytes):
+        raise CanonicalizationError("digest input must be immutable bytes")
     return f"{DIGEST_ALGORITHM}:{hashlib.sha256(data).hexdigest()}"
 
 
@@ -84,7 +80,9 @@ def digest_canonical(value: Any) -> str:
 
 
 def validate_sha256_digest(value: str, *, field: str = "digest") -> str:
-    if not isinstance(value, str) or not value.startswith("sha256:"):
+    if not isinstance(value, str) or value != value.strip().lower():
+        raise CanonicalizationError(f"{field} must be lowercase canonical text")
+    if not value.startswith("sha256:"):
         raise CanonicalizationError(f"{field} must use sha256:<hex>")
     hexadecimal = value.removeprefix("sha256:")
     if len(hexadecimal) != 64:
@@ -93,4 +91,4 @@ def validate_sha256_digest(value: str, *, field: str = "digest") -> str:
         int(hexadecimal, 16)
     except ValueError as exc:
         raise CanonicalizationError(f"{field} contains non-hexadecimal characters") from exc
-    return value.lower()
+    return value

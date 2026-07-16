@@ -1,60 +1,64 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
-from .canonical import validate_sha256_digest
-from .types import AggregateId, AggregateVersion, TrustScope, UtcTimestamp
-
-_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
-_SCOPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./:-]{0,255}$")
+from .canonical import canonical_json_bytes, digest_bytes
+from .types import (
+    AggregateId,
+    CausationRef,
+    CorrelationId,
+    ObjectAdmissionId,
+    PayloadMode,
+    TrustScope,
+    require_scope,
+    require_token,
+)
 
 
 class CommandValidationError(ValueError):
-    """Raised when a semantic command is malformed before authentication."""
+    """Raised when a caller command or server command definition is malformed."""
 
 
-def _require_token(value: str, *, field: str) -> str:
-    if not isinstance(value, str) or _TOKEN.fullmatch(value) is None:
-        raise CommandValidationError(f"{field} is not a valid authority token")
-    return value
+@dataclass(frozen=True, slots=True)
+class InlinePayload:
+    value: Any
 
 
-def _require_scope(value: str, *, field: str) -> str:
-    if not isinstance(value, str) or _SCOPE.fullmatch(value) is None:
-        raise CommandValidationError(f"{field} is not a valid scope token")
-    return value
+@dataclass(frozen=True, slots=True)
+class ObjectAdmissionPayload:
+    admission_id: ObjectAdmissionId
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.admission_id, ObjectAdmissionId):
+            raise CommandValidationError("object payload requires ObjectAdmissionId")
+
+
+@dataclass(frozen=True, slots=True)
+class NoPayload:
+    """Explicit schema-defined no-payload request."""
+
+
+NO_PAYLOAD: Final = NoPayload()
+PayloadRequest = InlinePayload | ObjectAdmissionPayload | NoPayload
 
 
 @dataclass(frozen=True, slots=True)
 class SemanticCommand:
-    """Caller-supplied semantic command with no authoritative identity claims."""
+    """Caller request with no authority-bearing event, trust or scope fields."""
 
     command_type: str
-    aggregate_type: str
     aggregate_id: AggregateId
     expected_aggregate_version: int
-    payload_schema_version: str
-    payload_digest: str
+    payload: PayloadRequest
     idempotency_key: str
-    issued_at: UtcTimestamp
-    producer_version: str
-    event_type: str
-    event_schema_version: int = 1
-    payload_object_ref: str | None = None
-    trust_scope: TrustScope = TrustScope.OBSERVED
-    security_scope: str = "authority.internal"
-    retention_scope: str = "authority.default"
-    correlation_id: str | None = None
-    causation_id: str | None = None
+    correlation_id: CorrelationId | None = None
+    causation: CausationRef | None = None
 
     def __post_init__(self) -> None:
-        _require_token(self.command_type, field="command_type")
-        _require_token(self.aggregate_type, field="aggregate_type")
-        _require_token(self.payload_schema_version, field="payload_schema_version")
-        _require_token(self.producer_version, field="producer_version")
-        _require_token(self.event_type, field="event_type")
+        require_token(self.command_type, field="command_type")
+        if not isinstance(self.aggregate_id, AggregateId):
+            raise CommandValidationError("aggregate_id must be AggregateId")
         if (
             isinstance(self.expected_aggregate_version, bool)
             or not isinstance(self.expected_aggregate_version, int)
@@ -63,98 +67,119 @@ class SemanticCommand:
             raise CommandValidationError(
                 "expected_aggregate_version must be a non-negative integer"
             )
+        if not isinstance(self.payload, (InlinePayload, ObjectAdmissionPayload, NoPayload)):
+            raise CommandValidationError("payload must use a closed payload request type")
+        if not isinstance(self.idempotency_key, str) or not self.idempotency_key.strip():
+            raise CommandValidationError("idempotency_key must be non-empty")
+        if len(self.idempotency_key.encode("utf-8")) > 256:
+            raise CommandValidationError("idempotency_key exceeds 256 UTF-8 bytes")
+        if self.correlation_id is not None and not isinstance(
+            self.correlation_id, CorrelationId
+        ):
+            raise CommandValidationError("correlation_id must be CorrelationId")
+        if self.causation is not None and not isinstance(self.causation, CausationRef):
+            raise CommandValidationError("causation must be CausationRef")
+
+
+@dataclass(frozen=True, slots=True)
+class CommandDefinition:
+    """Versioned server-side authority semantics for one command type."""
+
+    command_type: str
+    definition_version: str
+    aggregate_type: str
+    event_type: str
+    event_schema_version: int
+    payload_mode: PayloadMode
+    payload_schema_version: str
+    trust_scope: TrustScope
+    security_scope: str
+    retention_scope: str
+    required_scope: str
+    max_inline_bytes: int = 0
+    required_object_class: str | None = None
+    required_allowed_use: str | None = None
+
+    def __post_init__(self) -> None:
+        require_token(self.command_type, field="command_type")
+        require_token(self.definition_version, field="definition_version")
+        require_token(self.aggregate_type, field="aggregate_type")
+        require_token(self.event_type, field="event_type")
+        require_token(self.payload_schema_version, field="payload_schema_version")
+        require_scope(self.security_scope, field="security_scope")
+        require_scope(self.retention_scope, field="retention_scope")
+        require_scope(self.required_scope, field="required_scope")
+        if not isinstance(self.payload_mode, PayloadMode):
+            raise CommandValidationError("payload_mode must be typed")
+        if not isinstance(self.trust_scope, TrustScope):
+            raise CommandValidationError("trust_scope must be typed")
         if (
             isinstance(self.event_schema_version, bool)
             or not isinstance(self.event_schema_version, int)
             or self.event_schema_version <= 0
         ):
             raise CommandValidationError("event_schema_version must be positive")
-        if not isinstance(self.idempotency_key, str) or not self.idempotency_key.strip():
-            raise CommandValidationError("idempotency_key must be non-empty")
-        if len(self.idempotency_key.encode("utf-8")) > 256:
-            raise CommandValidationError("idempotency_key exceeds 256 UTF-8 bytes")
-        validate_sha256_digest(self.payload_digest, field="payload_digest")
-        if self.payload_object_ref is not None:
-            validate_sha256_digest(
-                self.payload_object_ref, field="payload_object_ref"
+        if (
+            isinstance(self.max_inline_bytes, bool)
+            or not isinstance(self.max_inline_bytes, int)
+            or self.max_inline_bytes < 0
+        ):
+            raise CommandValidationError("max_inline_bytes must be non-negative")
+        if self.payload_mode is PayloadMode.INLINE and self.max_inline_bytes <= 0:
+            raise CommandValidationError("inline commands require a positive byte limit")
+        if self.payload_mode is not PayloadMode.INLINE and self.max_inline_bytes != 0:
+            raise CommandValidationError(
+                "non-inline commands cannot declare an inline byte limit"
             )
-            if self.payload_object_ref != self.payload_digest:
-                raise CommandValidationError(
-                    "payload_object_ref must equal the exact payload_digest"
-                )
-        _require_scope(self.security_scope, field="security_scope")
-        _require_scope(self.retention_scope, field="retention_scope")
-        for field_name in ("correlation_id", "causation_id"):
-            value = getattr(self, field_name)
-            if value is not None:
-                _require_token(value, field=field_name)
+        if self.payload_mode is PayloadMode.OBJECT_ADMISSION:
+            require_token(self.required_object_class or "", field="required_object_class")
+            require_token(self.required_allowed_use or "", field="required_allowed_use")
+        elif self.required_object_class is not None or self.required_allowed_use is not None:
+            raise CommandValidationError(
+                "object class/use constraints apply only to object-admission payloads"
+            )
 
-
-@dataclass(frozen=True, slots=True)
-class CommittedCommand:
-    command_id: str
-    aggregate_type: str
-    aggregate_id: str
-    aggregate_version: AggregateVersion
-    ledger_seq: int
-    event_id: str
-    result_digest: str
-    replayed: bool = False
-
-    def to_canonical_value(self) -> dict[str, Any]:
+    def canonical_value(self) -> dict[str, Any]:
         return {
-            "command_id": self.command_id,
+            "command_type": self.command_type,
+            "definition_version": self.definition_version,
             "aggregate_type": self.aggregate_type,
-            "aggregate_id": self.aggregate_id,
-            "aggregate_version": int(self.aggregate_version),
-            "ledger_seq": self.ledger_seq,
-            "event_id": self.event_id,
+            "event_type": self.event_type,
+            "event_schema_version": self.event_schema_version,
+            "payload_mode": self.payload_mode.value,
+            "payload_schema_version": self.payload_schema_version,
+            "trust_scope": self.trust_scope.value,
+            "security_scope": self.security_scope,
+            "retention_scope": self.retention_scope,
+            "required_scope": self.required_scope,
+            "max_inline_bytes": self.max_inline_bytes,
+            "required_object_class": self.required_object_class,
+            "required_allowed_use": self.required_allowed_use,
         }
 
+    @property
+    def digest(self) -> str:
+        return digest_bytes(canonical_json_bytes(self.canonical_value()))
+
 
 @dataclass(frozen=True, slots=True)
-class LedgerEvent:
-    ledger_seq: int
-    event_id: str
-    event_type: str
-    event_schema_version: int
-    aggregate_type: str
-    aggregate_id: str
-    aggregate_version: int
-    recorded_at: str
-    command_id: str
-    principal_id: str
-    authentication_context_id: str
-    authorization_decision_id: str
-    correlation_id: str | None
-    causation_id: str | None
-    producer_version: str
-    payload_digest: str
-    payload_object_ref: str | None
+class ObjectAdmissionDescriptor:
+    """Read-only server-resolved object-use authority used by command policy."""
+
+    admission_id: ObjectAdmissionId
+    blob_digest: str
+    object_class: str
+    allowed_use: str
     security_scope: str
     retention_scope: str
-    trust_scope: TrustScope
+    active: bool
 
-
-@dataclass(frozen=True, slots=True)
-class AuditRecord:
-    audit_id: str
-    command_id: str
-    event_type: str
-    principal_id: str
-    authentication_context_id: str
-    authorization_decision_id: str
-    authorization_policy_version: str
-    effective_scope_digest: str
-    semantic_request_digest: str
-    detail_digest: str
-    recorded_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeConfiguration:
-    schema_version: int
-    journal_mode: str
-    synchronous: int
-    foreign_keys: bool
-    busy_timeout_ms: int
+    def __post_init__(self) -> None:
+        if not isinstance(self.admission_id, ObjectAdmissionId):
+            raise CommandValidationError("admission descriptor requires typed identity")
+        require_token(self.object_class, field="object_class")
+        require_token(self.allowed_use, field="allowed_use")
+        require_scope(self.security_scope, field="security_scope")
+        require_scope(self.retention_scope, field="retention_scope")
+        if not isinstance(self.active, bool):
+            raise CommandValidationError("admission active flag must be boolean")

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
+import re
 from typing import Self
 from uuid import UUID, RFC_4122, uuid4
 
@@ -11,15 +12,25 @@ class AuthorityTypeError(ValueError):
     """Raised when a typed authority value is invalid."""
 
 
+_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
+_SCOPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./:-]{0,255}$")
+
+
+def require_token(value: str, *, field: str) -> str:
+    if not isinstance(value, str) or _TOKEN.fullmatch(value) is None:
+        raise AuthorityTypeError(f"{field} is not a valid authority token")
+    return value
+
+
+def require_scope(value: str, *, field: str) -> str:
+    if not isinstance(value, str) or _SCOPE.fullmatch(value) is None:
+        raise AuthorityTypeError(f"{field} is not a valid scope token")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class UUIDv4Id:
-    """Base for opaque typed identifiers.
-
-    UUIDv4 supplies identity only. It carries no ordering or causality; callers
-    must use ledger sequence and explicit temporal fields for those meanings.
-    Equality remains type-sensitive because distinct authority domains must not
-    become interchangeable merely because their UUID bytes match.
-    """
+    """Opaque typed identity; never an ordering or causality source."""
 
     value: UUID
 
@@ -80,6 +91,21 @@ class AuthorizationDecisionId(UUIDv4Id):
 
 
 @dataclass(frozen=True, slots=True)
+class ObjectAdmissionId(UUIDv4Id):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class RightsDecisionId(UUIDv4Id):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class CorrelationId(UUIDv4Id):
+    """Opaque trace/workflow identity; it does not need to resolve to authority."""
+
+
+@dataclass(frozen=True, slots=True)
 class AggregateVersion:
     value: int
 
@@ -99,18 +125,40 @@ class TrustScope(StrEnum):
     ADMITTED = "ADMITTED"
 
 
-class RightsStatus(StrEnum):
-    PERMITTED = "PERMITTED"
-    RESTRICTED = "RESTRICTED"
-    PROHIBITED = "PROHIBITED"
-    REVIEW_REQUIRED = "REVIEW_REQUIRED"
-    EXPIRED = "EXPIRED"
-    CONFLICTING = "CONFLICTING"
-    UNSUPPORTED = "UNSUPPORTED"
+class PayloadMode(StrEnum):
+    INLINE = "INLINE"
+    OBJECT_ADMISSION = "OBJECT_ADMISSION"
+    NO_PAYLOAD = "NO_PAYLOAD"
 
-    @property
-    def permits_installation(self) -> bool:
-        return self in {RightsStatus.PERMITTED, RightsStatus.RESTRICTED}
+
+class CausationKind(StrEnum):
+    COMMAND = "COMMAND"
+    EVENT = "EVENT"
+    EXTERNAL = "EXTERNAL"
+
+
+@dataclass(frozen=True, slots=True)
+class CausationRef:
+    kind: CausationKind
+    identifier: str
+    external_system: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, CausationKind):
+            raise AuthorityTypeError("causation kind must be typed")
+        if not isinstance(self.identifier, str) or not self.identifier.strip():
+            raise AuthorityTypeError("causation identifier must be non-empty")
+        if self.kind is CausationKind.COMMAND:
+            CommandId.parse(self.identifier)
+            if self.external_system is not None:
+                raise AuthorityTypeError("command causation cannot name an external system")
+        elif self.kind is CausationKind.EVENT:
+            EventId.parse(self.identifier)
+            if self.external_system is not None:
+                raise AuthorityTypeError("event causation cannot name an external system")
+        else:
+            require_token(self.external_system or "", field="external_system")
+            require_token(self.identifier, field="external causation identifier")
 
 
 class TimePrecision(StrEnum):
@@ -152,13 +200,13 @@ class UtcTimestamp:
 
 @dataclass(frozen=True, slots=True)
 class TemporalValue:
-    """A source-asserted temporal value with explicit precision/uncertainty."""
-
     value: datetime | date | None
     precision: TimePrecision
     conflicting_values: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if not isinstance(self.precision, TimePrecision):
+            raise AuthorityTypeError("time precision must be typed")
         if self.precision is TimePrecision.UNKNOWN:
             if self.value is not None or self.conflicting_values:
                 raise AuthorityTypeError("UNKNOWN time cannot carry a value")

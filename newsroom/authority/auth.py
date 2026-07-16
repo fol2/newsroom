@@ -3,111 +3,36 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Protocol
 
+from ._security import (
+    AuthenticationError,
+    AuthorizationDenied,
+    _AuthorizationDecision,
+    _AuthorizationRequest,
+    _VerifiedAuthenticationContext,
+)
 from .canonical import digest_canonical
 from .types import (
     AuthenticationContextId,
     AuthorizationDecisionId,
     UtcTimestamp,
+    require_scope,
+    require_token,
 )
-
-
-class AuthenticationError(PermissionError):
-    """Raised when a caller cannot establish a verified authentication context."""
-
-
-class AuthorizationDenied(PermissionError):
-    """Raised when a server-side policy denies a semantic command."""
-
-    def __init__(self, decision: AuthorizationDecision) -> None:
-        super().__init__(f"authorization denied: {decision.reason_code}")
-        self.decision = decision
 
 
 @dataclass(frozen=True, slots=True)
 class AuthenticationProof:
-    """Untrusted transport proof supplied by a caller.
-
-    `untrusted_claims` is retained only to make the trust boundary explicit in
-    tests and adapters. An authenticator must not copy caller-supplied principal,
-    role or scope values into verified authority without independently proving
-    them from its server-side credential configuration.
-    """
+    """Untrusted transport proof supplied by a caller."""
 
     method: str
     credential: str
     untrusted_claims: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.method or not self.credential:
-            raise AuthenticationError("authentication proof requires method and credential")
-
-
-@dataclass(frozen=True, slots=True)
-class VerifiedAuthenticationContext:
-    authentication_context_id: AuthenticationContextId
-    principal_id: str
-    authority_domain: str
-    authentication_method: str
-    assurance_class: str
-    credential_binding_digest: str
-    authenticated_at: UtcTimestamp
-    expires_at: UtcTimestamp
-
-    def __post_init__(self) -> None:
-        for field_name in (
-            "principal_id",
-            "authority_domain",
-            "authentication_method",
-            "assurance_class",
-            "credential_binding_digest",
-        ):
-            value = getattr(self, field_name)
-            if not isinstance(value, str) or not value.strip():
-                raise AuthenticationError(f"{field_name} must be non-empty")
-        if self.expires_at.value <= self.authenticated_at.value:
-            raise AuthenticationError("authentication context expiry must follow issue time")
-
-    def require_current(self, now: UtcTimestamp) -> None:
-        if now.value >= self.expires_at.value:
-            raise AuthenticationError("authentication context has expired")
-
-
-@dataclass(frozen=True, slots=True)
-class AuthorizationRequest:
-    command_type: str
-    aggregate_type: str
-    aggregate_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class AuthorizationDecision:
-    authorization_decision_id: AuthorizationDecisionId
-    authorization_policy_version: str
-    effective_scope_digest: str
-    allowed: bool
-    reason_code: str
-
-    def require_allowed(self) -> None:
-        if not self.allowed:
-            raise AuthorizationDenied(self)
-
-
-class Authenticator(Protocol):
-    def authenticate(
-        self, proof: AuthenticationProof, *, now: UtcTimestamp
-    ) -> VerifiedAuthenticationContext:
-        ...
-
-
-class Authorizer(Protocol):
-    def authorize(
-        self,
-        context: VerifiedAuthenticationContext,
-        request: AuthorizationRequest,
-    ) -> AuthorizationDecision:
-        ...
+        require_token(self.method, field="authentication method")
+        if not isinstance(self.credential, str) or not self.credential:
+            raise AuthenticationError("authentication credential must be non-empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,16 +41,18 @@ class StaticPrincipal:
     assurance_class: str = "TEST_STATIC_TOKEN"
     credential_binding_id: str | None = None
 
+    def __post_init__(self) -> None:
+        require_token(self.principal_id, field="principal_id")
+        require_token(self.assurance_class, field="assurance_class")
+        if self.credential_binding_id is not None:
+            require_token(self.credential_binding_id, field="credential_binding_id")
+
     def binding_id(self) -> str:
         return self.credential_binding_id or f"static:{self.principal_id}"
 
 
 class StaticAuthenticator:
-    """Deterministic authenticated adapter for tests and local integration.
-
-    Credentials and their principal bindings are server-side constructor input.
-    Caller claims are ignored. There is intentionally no anonymous fallback.
-    """
+    """Deterministic test/local adapter with server-owned credential bindings."""
 
     def __init__(
         self,
@@ -137,8 +64,8 @@ class StaticAuthenticator:
     ) -> None:
         if not credentials:
             raise ValueError("static authenticator requires at least one credential")
-        if not authority_domain.strip():
-            raise ValueError("authority_domain must be non-empty")
+        require_token(authority_domain, field="authority_domain")
+        require_token(method, field="method")
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
         self._credentials = dict(credentials)
@@ -147,15 +74,17 @@ class StaticAuthenticator:
         self._ttl_seconds = ttl_seconds
 
     def authenticate(
-        self, proof: AuthenticationProof, *, now: UtcTimestamp
-    ) -> VerifiedAuthenticationContext:
+        self, proof: object, *, now: UtcTimestamp
+    ) -> _VerifiedAuthenticationContext:
+        if not isinstance(proof, AuthenticationProof):
+            raise AuthenticationError("unsupported authentication proof type")
         if proof.method != self._method:
             raise AuthenticationError("unsupported authentication method")
         principal = self._credentials.get(proof.credential)
         if principal is None:
             raise AuthenticationError("invalid authentication credential")
         expires_at = UtcTimestamp(now.value + timedelta(seconds=self._ttl_seconds))
-        return VerifiedAuthenticationContext(
+        return _VerifiedAuthenticationContext(
             authentication_context_id=AuthenticationContextId.new(),
             principal_id=principal.principal_id,
             authority_domain=self._authority_domain,
@@ -174,66 +103,78 @@ class StaticAuthenticator:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class AuthorizationRule:
-    required_scope: str
-    aggregate_types: frozenset[str]
-
-    def __post_init__(self) -> None:
-        if not self.required_scope.strip():
-            raise ValueError("required_scope must be non-empty")
-        if not self.aggregate_types:
-            raise ValueError("authorization rule requires aggregate types")
-
-
 class StaticAuthorizer:
-    """Server-side policy used by tests and the first integration boundary."""
+    """Server-side authorization policy for tests and local integration."""
 
     def __init__(
         self,
         *,
         policy_version: str,
         grants_by_principal: Mapping[str, frozenset[str]],
-        rules_by_command: Mapping[str, AuthorizationRule],
     ) -> None:
-        if not policy_version.strip():
-            raise ValueError("policy_version must be non-empty")
+        require_token(policy_version, field="authorization policy version")
         self._policy_version = policy_version
         self._grants_by_principal = {
             principal: frozenset(scopes)
             for principal, scopes in grants_by_principal.items()
         }
-        self._rules_by_command = dict(rules_by_command)
+        for principal, scopes in self._grants_by_principal.items():
+            require_token(principal, field="principal_id")
+            for scope in scopes:
+                require_scope(scope, field="effective scope")
+
+    @property
+    def policy_version(self) -> str:
+        return self._policy_version
 
     def authorize(
         self,
-        context: VerifiedAuthenticationContext,
-        request: AuthorizationRequest,
-    ) -> AuthorizationDecision:
-        scopes = self._grants_by_principal.get(context.principal_id, frozenset())
-        rule = self._rules_by_command.get(request.command_type)
-        allowed = False
-        reason = "AUTHZ_UNKNOWN_COMMAND"
-        if rule is not None:
-            if request.aggregate_type not in rule.aggregate_types:
-                reason = "AUTHZ_AGGREGATE_TYPE_DENIED"
-            elif rule.required_scope not in scopes:
-                reason = "AUTHZ_SCOPE_MISSING"
-            else:
-                allowed = True
-                reason = "AUTHZ_ALLOWED"
-        effective_scope_digest = digest_canonical(
-            {
-                "authority_domain": context.authority_domain,
-                "principal_id": context.principal_id,
-                "policy_version": self._policy_version,
-                "effective_scopes": sorted(scopes),
-            }
-        )
-        return AuthorizationDecision(
+        context: _VerifiedAuthenticationContext,
+        request: _AuthorizationRequest,
+        *,
+        now: UtcTimestamp,
+    ) -> _AuthorizationDecision:
+        if request.authentication_context_id != context.authentication_context_id:
+            raise AuthorizationDenied(
+                _AuthorizationDecision(
+                    authorization_decision_id=AuthorizationDecisionId.new(),
+                    authentication_context_id=context.authentication_context_id,
+                    authorization_request_digest=request.request_digest,
+                    authorization_policy_version=self._policy_version,
+                    effective_scopes=(),
+                    effective_scope_digest=digest_canonical([]),
+                    allowed=False,
+                    reason_code="AUTHZ_CONTEXT_MISMATCH",
+                    decided_at=now,
+                )
+            )
+        scopes = tuple(sorted(self._grants_by_principal.get(context.principal_id, frozenset())))
+        allowed = request.required_scope in scopes
+        reason = "AUTHZ_ALLOWED" if allowed else "AUTHZ_SCOPE_MISSING"
+        return _AuthorizationDecision(
             authorization_decision_id=AuthorizationDecisionId.new(),
+            authentication_context_id=context.authentication_context_id,
+            authorization_request_digest=request.request_digest,
             authorization_policy_version=self._policy_version,
-            effective_scope_digest=effective_scope_digest,
+            effective_scopes=scopes,
+            effective_scope_digest=digest_canonical(
+                {
+                    "authority_domain": context.authority_domain,
+                    "principal_id": context.principal_id,
+                    "effective_scopes": list(scopes),
+                }
+            ),
             allowed=allowed,
             reason_code=reason,
+            decided_at=now,
         )
+
+
+__all__ = [
+    "AuthenticationError",
+    "AuthenticationProof",
+    "AuthorizationDenied",
+    "StaticAuthenticator",
+    "StaticAuthorizer",
+    "StaticPrincipal",
+]

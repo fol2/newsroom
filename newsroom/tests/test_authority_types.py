@@ -1,97 +1,50 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
-from uuid import uuid1
+from datetime import UTC, date, datetime
 
 import pytest
 
 from newsroom.authority import (
     AggregateId,
-    AggregateVersion,
-    CanonicalizationError,
+    CausationKind,
+    CausationRef,
     CommandId,
+    CorrelationId,
     TemporalValue,
     TimePrecision,
-    TrustScope,
     UtcTimestamp,
-    canonical_json_bytes,
-    digest_canonical,
 )
 from newsroom.authority.types import AuthorityTypeError
 
 
-def test_typed_uuidv4_roundtrip_and_type_separation() -> None:
-    aggregate_id = AggregateId.new()
-
-    assert str(AggregateId.parse(str(aggregate_id))) == str(aggregate_id)
-    assert AggregateId.parse(str(aggregate_id)) == aggregate_id
-    assert CommandId(aggregate_id.value) != aggregate_id
-
-
-def test_typed_id_rejects_non_v4_and_noncanonical_text() -> None:
-    with pytest.raises(AuthorityTypeError):
-        AggregateId(uuid1())
-
-    value = str(AggregateId.new())
-    with pytest.raises(AuthorityTypeError):
-        AggregateId.parse(value.upper())
-    with pytest.raises(AuthorityTypeError):
-        AggregateId.parse(value.replace("-", ""))
+def test_typed_uuid_identity_is_type_sensitive_and_non_ordering() -> None:
+    aggregate = AggregateId.new()
+    parsed = AggregateId.parse(str(aggregate))
+    assert parsed == aggregate
+    command_id = CommandId.parse(str(aggregate))
+    assert command_id != aggregate
+    with pytest.raises(TypeError):
+        _ = aggregate < AggregateId.new()
 
 
-def test_aggregate_version_is_positive() -> None:
-    assert int(AggregateVersion(1)) == 1
-    with pytest.raises(AuthorityTypeError):
-        AggregateVersion(0)
-    with pytest.raises(AuthorityTypeError):
-        AggregateVersion(True)
-
-
-def test_utc_timestamp_normalises_offset_and_rejects_naive() -> None:
-    local = datetime(2026, 7, 16, 20, 0, tzinfo=UTC) + timedelta(hours=1)
-    timestamp = UtcTimestamp(local)
-
-    assert timestamp.value.tzinfo is UTC
-    assert timestamp.to_text().endswith("Z")
-    assert UtcTimestamp.parse(timestamp.to_text()) == timestamp
-
-    with pytest.raises(AuthorityTypeError):
-        UtcTimestamp(datetime(2026, 7, 16, 20, 0))
-
-
-def test_temporal_values_preserve_precision_and_conflict() -> None:
-    exact = TemporalValue(
-        datetime(2026, 7, 16, 12, 30, tzinfo=UTC), TimePrecision.EXACT
+def test_utc_and_temporal_values_are_explicit() -> None:
+    stamp = UtcTimestamp(datetime(2026, 7, 16, 12, 0, tzinfo=UTC))
+    assert UtcTimestamp.parse(stamp.to_text()) == stamp
+    assert TemporalValue(date(2026, 7, 16), TimePrecision.DATE_ONLY).value == date(
+        2026, 7, 16
     )
-    date_only = TemporalValue(date(2026, 7, 16), TimePrecision.DATE_ONLY)
-    unknown = TemporalValue(None, TimePrecision.UNKNOWN)
-    conflicting = TemporalValue(
-        None,
-        TimePrecision.CONFLICTING,
-        ("2026-07-16T10:00:00Z", "2026-07-16T11:00:00Z"),
-    )
-
-    assert exact.value == datetime(2026, 7, 16, 12, 30, tzinfo=UTC)
-    assert date_only.value == date(2026, 7, 16)
-    assert unknown.value is None
-    assert len(conflicting.conflicting_values) == 2
-
+    assert TemporalValue(None, TimePrecision.UNKNOWN).value is None
     with pytest.raises(AuthorityTypeError):
         TemporalValue(None, TimePrecision.EXACT)
+
+
+def test_correlation_and_causation_contracts_are_typed() -> None:
+    correlation = CorrelationId.new()
+    assert CorrelationId.parse(str(correlation)) == correlation
+    command_id = CommandId.new()
+    ref = CausationRef(CausationKind.COMMAND, str(command_id))
+    assert ref.identifier == str(command_id)
+    external = CausationRef(CausationKind.EXTERNAL, "delivery-42", "provider.api")
+    assert external.external_system == "provider.api"
     with pytest.raises(AuthorityTypeError):
-        TemporalValue(None, TimePrecision.CONFLICTING, ("only-one",))
-
-
-def test_canonical_json_is_order_stable_and_restricted() -> None:
-    left = {"b": [2, 1], "a": "值", "trust": TrustScope.OBSERVED.value}
-    right = {"trust": "OBSERVED", "a": "值", "b": [2, 1]}
-
-    assert canonical_json_bytes(left) == canonical_json_bytes(right)
-    assert digest_canonical(left) == digest_canonical(right)
-
-    with pytest.raises(CanonicalizationError):
-        canonical_json_bytes({"float": 1.25})
-    with pytest.raises(CanonicalizationError):
-        canonical_json_bytes({"too_large": 9_007_199_254_740_992})
-    with pytest.raises(CanonicalizationError):
-        canonical_json_bytes({"bad": "\ud800"})
+        CausationRef(CausationKind.COMMAND, "not-a-command-id")

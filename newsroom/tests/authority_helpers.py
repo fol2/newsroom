@@ -1,103 +1,106 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
 
 from newsroom.authority import (
     AggregateId,
     AuthenticationProof,
-    AuthorityStore,
-    AuthorizationRule,
+    CommandDefinition,
+    CommandRegistry,
     CommandService,
-    GovernedObjectStore,
+    InlinePayload,
+    PayloadMode,
     SemanticCommand,
     StaticAuthenticator,
     StaticAuthorizer,
     StaticPrincipal,
     TrustScope,
     UtcTimestamp,
-    digest_bytes,
 )
 
-FIXED_TIME = UtcTimestamp(datetime(2026, 7, 16, 18, 0, tzinfo=UTC))
+FIXED_NOW = UtcTimestamp(datetime(2026, 7, 16, 12, 0, tzinfo=UTC))
 
 
-def clock() -> UtcTimestamp:
-    return FIXED_TIME
+def observed_definition(*, version: str = "cmd-v1") -> CommandDefinition:
+    return CommandDefinition(
+        command_type="record.observed",
+        definition_version=version,
+        aggregate_type="fixture_record",
+        event_type="fixture.observed.recorded",
+        event_schema_version=1,
+        payload_mode=PayloadMode.INLINE,
+        payload_schema_version="fixture_payload_v1",
+        trust_scope=TrustScope.OBSERVED,
+        security_scope="authority.internal",
+        retention_scope="authority.default",
+        required_scope="authority.observed.write",
+        max_inline_bytes=4096,
+    )
 
 
-def components(
-    tmp_path: Path,
+def admitted_definition() -> CommandDefinition:
+    return CommandDefinition(
+        command_type="record.admitted",
+        definition_version="cmd-v1",
+        aggregate_type="fixture_record",
+        event_type="fixture.admitted.recorded",
+        event_schema_version=1,
+        payload_mode=PayloadMode.INLINE,
+        payload_schema_version="fixture_payload_v1",
+        trust_scope=TrustScope.ADMITTED,
+        security_scope="authority.restricted",
+        retention_scope="authority.long",
+        required_scope="authority.admitted.write",
+        max_inline_bytes=4096,
+    )
+
+
+def make_service(
     *,
-    grants: frozenset[str] = frozenset({"authority.write"}),
-) -> tuple[AuthorityStore, GovernedObjectStore, CommandService]:
-    store = AuthorityStore(tmp_path / "authority.sqlite3", clock=clock)
-    object_store = GovernedObjectStore(tmp_path / "objects")
+    policy_version: str = "authz-v1",
+    scopes: frozenset[str] = frozenset({"authority.observed.write"}),
+    credential: str = "token-1",
+    definition_version: str = "cmd-v1",
+) -> CommandService:
+    registry = CommandRegistry([observed_definition(version=definition_version), admitted_definition()])
     authenticator = StaticAuthenticator(
-        credentials={
-            "writer-token": StaticPrincipal("writer-service"),
-            "reader-token": StaticPrincipal("reader-service"),
-        },
-        authority_domain="newsroom.test.authority",
+        credentials={credential: StaticPrincipal("principal.alpha")},
+        authority_domain="newsroom.authority",
     )
     authorizer = StaticAuthorizer(
-        policy_version="authority-test-policy-v1",
-        grants_by_principal={
-            "writer-service": grants,
-            "reader-service": frozenset({"authority.read"}),
-        },
-        rules_by_command={
-            "CREATE_RECORD": AuthorizationRule(
-                "authority.write", frozenset({"fixture"})
-            ),
-            "UPDATE_RECORD": AuthorizationRule(
-                "authority.write", frozenset({"fixture"})
-            ),
-        },
+        policy_version=policy_version,
+        grants_by_principal={"principal.alpha": scopes},
     )
-    service = CommandService(
-        store=store,
+    return CommandService(
+        registry=registry,
         authenticator=authenticator,
         authorizer=authorizer,
-        object_store=object_store,
-        clock=clock,
+        clock=lambda: FIXED_NOW,
     )
-    return store, object_store, service
 
 
 def command(
     *,
-    aggregate_id: AggregateId,
-    key: str,
-    expected: int = 0,
-    command_type: str = "CREATE_RECORD",
-    payload: bytes = b'{"fixture":"one"}',
-    payload_object_ref: str | None = None,
+    command_type: str = "record.observed",
+    aggregate_id: AggregateId | None = None,
+    expected_version: int = 0,
+    key: str = "idem-1",
 ) -> SemanticCommand:
     return SemanticCommand(
         command_type=command_type,
-        aggregate_type="fixture",
-        aggregate_id=aggregate_id,
-        expected_aggregate_version=expected,
-        payload_schema_version="fixture_v1",
-        payload_digest=digest_bytes(payload),
-        payload_object_ref=payload_object_ref,
+        aggregate_id=aggregate_id or AggregateId.new(),
+        expected_aggregate_version=expected_version,
+        payload=InlinePayload({"headline": "Example", "count": 1}),
         idempotency_key=key,
-        issued_at=FIXED_TIME,
-        producer_version="test-suite-v1",
-        event_type="FIXTURE_RECORDED",
-        trust_scope=TrustScope.OBSERVED,
-        correlation_id="corr-fixture",
     )
 
 
-def proof(
-    credential: str = "writer-token",
-    *,
-    claims: dict[str, str] | None = None,
-) -> AuthenticationProof:
+def proof(*, credential: str = "token-1") -> AuthenticationProof:
     return AuthenticationProof(
         method="STATIC_TOKEN",
         credential=credential,
-        untrusted_claims=claims or {},
+        untrusted_claims={
+            "principal_id": "attacker",
+            "scope": "authority.admitted.write",
+        },
     )
