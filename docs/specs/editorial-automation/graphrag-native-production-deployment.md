@@ -1,24 +1,25 @@
 # Native GraphRAG production-deployment amendment
 
-**Status:** Draft for owner review  
+**Status:** Accepted  
 **Owner:** Product owner  
 **Last updated:** 2026-07-16  
+**Accepted by owner:** 2026-07-16  
 **Canonical language:** English  
 **Amends:** [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md)  
 **Accepted invariant:** [`../../adr/0005-native-graphrag-production-deployment.md`](../../adr/0005-native-graphrag-production-deployment.md)  
 **Related accepted decisions:** [`../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](../../adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](../../adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md)  
-**Implementation authority:** None. This Draft proposes detailed engine, repository, deployment, CI and release mechanics. It does not install an engine, run extraction or embeddings, access sources, call a model, spend money, start shadow operation, canary or production.  
+**Implementation authority:** None. Acceptance defines detailed engine, repository, deployment, CI and release mechanics. It does not install an engine, run extraction or embeddings, access sources, call a model, spend money, start shadow operation, canary or production.  
 **Supersedes:** The `proof of concept`, `POC lane`, optional-adoption and graph-less-production interpretations of `GRAG-050` and earlier Topic 13 plans.
 
 ## Purpose
 
 Translate Accepted ADR 0005 into testable production mechanics.
 
-The following is already decided and is not reopened here:
+The following is decided and is not reopened here:
 
 > GraphRAG is a repository-native mandatory subsystem of the first production deployment. There is no graph-less production, canary or complete live-shadow product stage.
 
-This Draft decides how the first implementation satisfies that invariant without making the graph authoritative.
+This contract defines how the first implementation satisfies that invariant without making the graph authoritative.
 
 ## Authority boundary retained
 
@@ -31,7 +32,7 @@ This Draft decides how the first implementation satisfies that invariant without
 
 Mandatory production deployment and editorial authority are separate concepts.
 
-## Proposed native implementation contract
+## Accepted native implementation contract
 
 GraphRAG is native only when the principal repository owns and tests:
 
@@ -51,9 +52,9 @@ GraphRAG is native only when the principal repository owns and tests:
 
 A notebook, separately managed experimental repository, undocumented manual graph or optional plugin does not satisfy native support.
 
-## Proposed initial production implementation
+## Accepted initial production implementation
 
-The Draft proposes **Neo4j Community plus Graphiti** as the initial production-target implementation:
+The initial production-target implementation is **Neo4j Community plus Graphiti**:
 
 - Neo4j provides the governed property-graph projection and admitted vector or full-text capabilities where suitable;
 - Graphiti operates only in an isolated proposal workspace;
@@ -167,7 +168,7 @@ The following requirements restate ADR 0005 for traceability; ADR 0005 is the Ac
 
 **GRPROD-005 — Same canonical contract.** Relational, graph, vector, full-text, discovery and later knowledge consumers use the same canonical identities, trust, time and ordered events.
 
-### Proposed implementation details
+### Accepted implementation details
 
 **GRPROD-010 — Initial production target.** Neo4j Community plus Graphiti is the initial production-target implementation, subject to exact release qualification rather than POC graduation.
 
@@ -216,19 +217,19 @@ The following requirements restate ADR 0005 for traceability; ADR 0005 is the Ac
 9. The repository includes operational and rebuild procedures rather than an undocumented manual graph.
 10. Acceptance creates no runtime authority.
 
-## Owner decisions required
+## Completion record
 
-The Draft asks the owner to accept:
+The product owner accepted this amendment on 2026-07-16 with these decisions:
 
-1. Neo4j Community plus Graphiti as the initial production-target implementation rather than a POC.
-2. Repair or replacement before activation if that implementation fails gates, with no graph-less fallback.
-3. The detailed native repository ownership boundary.
-4. Production configuration and deployment validation that cannot omit or fake GraphRAG.
-5. Actual graph-service integration in repository CI.
-6. Graph production contracts and integration plumbing in the first code increment.
-7. A graph-native first complete vertical slice.
-8. Production-equivalent complete shadow evidence.
-9. Engine-neutral canonical semantics and named-tool contracts.
-10. Temporary graph outage as degraded operation rather than optional deployment.
-11. Production activation binding exact graph and retrieval versions, licence and replacement path.
-12. Acceptance authorising no runtime action.
+1. Neo4j Community plus Graphiti is the initial production-target implementation rather than a POC.
+2. A failing implementation is repaired or replaced before activation, with no graph-less fallback.
+3. GraphRAG code, deployment, operations and tests are repository-native.
+4. Production configuration and deployment validation cannot omit, disable or fake GraphRAG.
+5. Repository CI includes an approved actual graph-service integration path.
+6. Graph production contracts and integration plumbing enter the first code increment.
+7. The first complete vertical slice is graph-native.
+8. Complete live-shadow evidence uses the production-target graph stack or an approved production-equivalent environment.
+9. Engine-neutral canonical semantics and named-tool contracts are preserved.
+10. Temporary graph outage is degraded operation rather than optional deployment.
+11. Production activation binds exact graph and retrieval versions, licence decision and replacement path.
+12. Acceptance authorises no runtime action.
