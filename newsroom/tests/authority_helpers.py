@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Callable
 
 from newsroom.authority import (
     AggregateId,
@@ -11,6 +11,7 @@ from newsroom.authority import (
     CommandService,
     CommittedCommandLookup,
     InlinePayload,
+    PayloadGoldenVector,
     PayloadMode,
     PayloadSchemaContract,
     PayloadSchemaRegistry,
@@ -25,40 +26,10 @@ from newsroom.authority import (
 )
 
 FIXED_NOW = UtcTimestamp(datetime(2026, 7, 16, 12, 0, tzinfo=UTC))
-
-
-def observed_definition(*, version: str = "cmd-v1") -> CommandDefinition:
-    return CommandDefinition(
-        command_type="record.observed",
-        definition_version=version,
-        aggregate_type="fixture_record",
-        event_type="fixture.observed.recorded",
-        event_schema_version=1,
-        payload_mode=PayloadMode.INLINE,
-        payload_schema_version="fixture_payload_v1",
-        trust_scope=TrustScope.OBSERVED,
-        security_scope="authority.internal",
-        retention_scope="authority.default",
-        required_scope="authority.observed.write",
-        max_inline_bytes=4096,
-    )
-
-
-def admitted_definition() -> CommandDefinition:
-    return CommandDefinition(
-        command_type="record.admitted",
-        definition_version="cmd-v1",
-        aggregate_type="fixture_record",
-        event_type="fixture.admitted.recorded",
-        event_schema_version=1,
-        payload_mode=PayloadMode.INLINE,
-        payload_schema_version="fixture_payload_v1",
-        trust_scope=TrustScope.ADMITTED,
-        security_scope="authority.restricted",
-        retention_scope="authority.long",
-        required_scope="authority.admitted.write",
-        max_inline_bytes=4096,
-    )
+FIXTURE_SCHEMA_VERSION = "fixture_payload_v1"
+FIXTURE_SCHEMA_CONTRACT_VERSION = "fixture-contract-v1"
+FIXTURE_CANONICALIZER_VERSION = "fixture-canonicalizer-v1"
+FIXTURE_VECTOR_VALUE = {"headline": "Golden", "count": 1}
 
 
 def fixture_payload_bytes(value: Any) -> bytes:
@@ -69,22 +40,100 @@ def fixture_payload_bytes(value: Any) -> bytes:
             "fixture payload requires exactly headline and count"
         )
     if not isinstance(value["headline"], str) or not value["headline"]:
-        raise PayloadSchemaValidationError("fixture headline must be non-empty")
-    if isinstance(value["count"], bool) or not isinstance(value["count"], int):
-        raise PayloadSchemaValidationError("fixture count must be an integer")
+        raise PayloadSchemaValidationError(
+            "fixture headline must be non-empty"
+        )
+    if isinstance(value["count"], bool) or not isinstance(
+        value["count"], int
+    ):
+        raise PayloadSchemaValidationError(
+            "fixture count must be an integer"
+        )
     return canonical_json_bytes(value)
 
 
-def default_payload_schemas() -> PayloadSchemaRegistry:
-    return PayloadSchemaRegistry(
-        [
-            PayloadSchemaContract(
-                schema_version="fixture_payload_v1",
-                payload_mode=PayloadMode.INLINE,
-                canonicalizer=fixture_payload_bytes,
-            )
-        ]
+def fixture_payload_contract(
+    *,
+    contract_version: str = FIXTURE_SCHEMA_CONTRACT_VERSION,
+    canonicalizer_version: str = FIXTURE_CANONICALIZER_VERSION,
+    canonicalizer: Callable[[Any], bytes] = fixture_payload_bytes,
+) -> PayloadSchemaContract:
+    expected = fixture_payload_bytes(FIXTURE_VECTOR_VALUE)
+    return PayloadSchemaContract(
+        schema_version=FIXTURE_SCHEMA_VERSION,
+        payload_mode=PayloadMode.INLINE,
+        contract_version=contract_version,
+        canonicalizer_implementation_version=canonicalizer_version,
+        canonicalizer=canonicalizer,
+        golden_vectors=(
+            PayloadGoldenVector(
+                name="fixture_basic",
+                input_identity="fixture-basic-v1",
+                value=FIXTURE_VECTOR_VALUE,
+                expected_bytes=expected,
+            ),
+        ),
     )
+
+
+def observed_definition(
+    *,
+    version: str = "cmd-v1",
+    schema_contract: PayloadSchemaContract | None = None,
+) -> CommandDefinition:
+    contract = schema_contract or fixture_payload_contract()
+    return CommandDefinition(
+        command_type="record.observed",
+        definition_version=version,
+        aggregate_type="fixture_record",
+        event_type="fixture.observed.recorded",
+        event_schema_version=1,
+        payload_mode=PayloadMode.INLINE,
+        payload_schema_version=contract.schema_version,
+        payload_schema_contract_version=contract.contract_version,
+        payload_schema_contract_digest=contract.contract_digest,
+        payload_canonicalizer_version=(
+            contract.canonicalizer_implementation_version
+        ),
+        trust_scope=TrustScope.OBSERVED,
+        security_scope="authority.internal",
+        retention_scope="authority.default",
+        required_scope="authority.observed.write",
+        max_inline_bytes=4096,
+    )
+
+
+def admitted_definition(
+    *,
+    schema_contract: PayloadSchemaContract | None = None,
+) -> CommandDefinition:
+    contract = schema_contract or fixture_payload_contract()
+    return CommandDefinition(
+        command_type="record.admitted",
+        definition_version="cmd-v1",
+        aggregate_type="fixture_record",
+        event_type="fixture.admitted.recorded",
+        event_schema_version=1,
+        payload_mode=PayloadMode.INLINE,
+        payload_schema_version=contract.schema_version,
+        payload_schema_contract_version=contract.contract_version,
+        payload_schema_contract_digest=contract.contract_digest,
+        payload_canonicalizer_version=(
+            contract.canonicalizer_implementation_version
+        ),
+        trust_scope=TrustScope.ADMITTED,
+        security_scope="authority.restricted",
+        retention_scope="authority.long",
+        required_scope="authority.admitted.write",
+        max_inline_bytes=4096,
+    )
+
+
+def default_payload_schemas(
+    *contracts: PayloadSchemaContract,
+) -> PayloadSchemaRegistry:
+    selected = contracts or (fixture_payload_contract(),)
+    return PayloadSchemaRegistry(selected)
 
 
 def make_service(
@@ -94,10 +143,18 @@ def make_service(
     credential: str = "token-1",
     definition_version: str = "cmd-v1",
     registry: CommandRegistry | None = None,
+    payload_schemas: PayloadSchemaRegistry | None = None,
     committed_lookup: CommittedCommandLookup | None = None,
 ) -> CommandService:
+    contract = fixture_payload_contract()
     selected_registry = registry or CommandRegistry(
-        [observed_definition(version=definition_version), admitted_definition()]
+        [
+            observed_definition(
+                version=definition_version,
+                schema_contract=contract,
+            ),
+            admitted_definition(schema_contract=contract),
+        ]
     )
     authenticator = StaticAuthenticator(
         credentials={credential: StaticPrincipal("principal.alpha")},
@@ -109,7 +166,9 @@ def make_service(
     )
     return CommandService(
         registry=selected_registry,
-        payload_schemas=default_payload_schemas(),
+        payload_schemas=(
+            payload_schemas or default_payload_schemas(contract)
+        ),
         authenticator=authenticator,
         authorizer=authorizer,
         committed_lookup=committed_lookup,
