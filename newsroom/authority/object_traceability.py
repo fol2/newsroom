@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+
+INCREMENT_1A2B_TRACEABILITY: dict[str, tuple[str, ...]] = {
+    "newsroom.authority.objects": (
+        "ADR-0001",
+        "ADR-0002",
+        "DREC-006",
+        "DREC-016",
+        "DREC-070",
+        "DREC-073",
+        "DREC-074",
+        "DREC-076",
+        "DREC-077",
+        "GRAG-002",
+        "GRAG-003",
+        "GRAG-005",
+        "GRAG-010",
+        "GRAG-030",
+        "GRPROD-005",
+        "GRPROD-020",
+    ),
+    "newsroom.authority.object_policy": (
+        "ADR-0001",
+        "ADR-0002",
+        "DREC-016",
+        "DREC-070",
+        "DREC-073",
+        "DREC-076",
+        "DREC-077",
+        "GRAG-002",
+        "GRAG-005",
+        "GRAG-010",
+        "GRPROD-005",
+    ),
+    "newsroom.tests.test_authority_a2b_contracts": (
+        "ADR-0001",
+        "ADR-0002",
+        "DREC-006",
+        "DREC-016",
+        "DREC-070",
+        "DREC-074",
+        "GRAG-002",
+        "GRAG-003",
+        "GRAG-005",
+    ),
+    "newsroom.tests.test_authority_a2b_policy": (
+        "DREC-016",
+        "DREC-070",
+        "DREC-073",
+        "DREC-076",
+        "DREC-077",
+        "GRAG-002",
+        "GRAG-005",
+        "GRAG-010",
+        "GRPROD-005",
+    ),
+    "newsroom.tests.test_authority_a2b_traceability": (
+        "ADR-0001",
+        "ADR-0002",
+        "GRPROD-020",
+    ),
+}
+
+
+# This Draft starts with the exact immutable contracts and deterministic
+# server-side policy seam. These items remain mandatory before A2b can leave
+# Draft. In particular, GRAG-028 is not claimed until deletion/non-resurrection
+# implementation and evidence exist.
+INCREMENT_1A2B_PENDING: tuple[str, ...] = (
+    "SQLITE_RIGHTS_AND_ADMISSION_MIGRATION",
+    "HMAC_BOUND_ADMISSION_AND_MAINTENANCE_CAPABILITIES",
+    "STREAMING_FILESYSTEM_CAS",
+    "GLOBAL_AND_CLASS_SIZE_LIMIT_ENFORCEMENT",
+    "DISK_HEADROOM_ENFORCEMENT",
+    "FAIL_CLOSED_FILE_AND_DIRECTORY_FSYNC",
+    "READ_ONLY_INSTALLED_BLOBS",
+    "PINNED_FD_FINAL_REHASH",
+    "OBJECT_BACKED_COMMAND_TRANSACTION_RECHECK",
+    "AUTHENTICATED_BOUNDED_HYDRATION",
+    "ACCESS_DECISION_PERSISTENCE_POLICY",
+    "ORDERED_ADMISSION_EVENT",
+    "ORDERED_REVOCATION_EVENT",
+    "ORDERED_DELETION_REQUEST_EVENT",
+    "ORDERED_TOMBSTONE_AND_COMPLETION_EVENTS",
+    "LAWFUL_DELETION_OF_REFERENCED_BYTES",
+    "DELETION_NON_RESURRECTION_REPLAY",
+    "AUTHORITATIVE_GARBAGE_COLLECTION",
+    "RECOVERY_PIN_PERSISTENCE",
+    "STARTUP_RECONCILIATION",
+    "REPLAY_WITHOUT_STAGING_LEAKS",
+    "FSYNC_UNLINK_MUTATION_AND_GC_INTERLEAVING_FAULTS",
+    "CONSTRUCTOR_FAILURE_LOCK_CLEANUP",
+    "GRAG_028_COMPLETION_EVIDENCE",
+)
+
+
+INCREMENT_1A2B_EXCLUSIONS: tuple[str, ...] = (
+    "NEO4J",
+    "GRAPHITI_EXECUTION",
+    "LIVE_SOURCES",
+    "MODEL_CALLS",
+    "EMBEDDINGS",
+    "SEARCH_PROVIDER_CALLS",
+    "EVIDENCE_INTAKE",
+    "PUBLICATION",
+    "SHADOW",
+    "CANARY",
+    "PRODUCTION_ACTIVATION",
+    "SPENDING",
+)
