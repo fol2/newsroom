@@ -9,12 +9,16 @@ from newsroom.authority import (
     CommittedCommandIdentity,
     IdempotencyIdentityConflict,
     InlinePayload,
+    PayloadMode,
+    PayloadSchemaRegistry,
     SemanticCommand,
 )
 
 from .authority_helpers import (
+    FIXTURE_SCHEMA_VERSION,
     admitted_definition,
     command,
+    fixture_payload_contract,
     make_service,
     observed_definition,
     proof,
@@ -39,11 +43,21 @@ class ExistingLookup:
 def test_stable_semantic_digest_survives_policy_version_change() -> None:
     aggregate_id = command().aggregate_id
     request = command(aggregate_id=aggregate_id)
-    first = make_service(policy_version="authz-v1").authorize(request, proof=proof())
-    second = make_service(policy_version="authz-v2").authorize(request, proof=proof())
-    assert first.stable_semantic_request_digest == second.stable_semantic_request_digest
+    first = make_service(policy_version="authz-v1").authorize(
+        request, proof=proof()
+    )
+    second = make_service(policy_version="authz-v2").authorize(
+        request, proof=proof()
+    )
+    assert (
+        first.stable_semantic_request_digest
+        == second.stable_semantic_request_digest
+    )
     assert first.idempotency_namespace == second.idempotency_namespace
-    assert first.authorization_policy_version != second.authorization_policy_version
+    assert (
+        first.authorization_policy_version
+        != second.authorization_policy_version
+    )
 
 
 def test_stable_semantic_digest_survives_irrelevant_scope_change() -> None:
@@ -53,9 +67,14 @@ def test_stable_semantic_digest_survives_irrelevant_scope_change() -> None:
         scopes=frozenset({"authority.observed.write"})
     ).authorize(request, proof=proof())
     second = make_service(
-        scopes=frozenset({"authority.observed.write", "unrelated.read"})
+        scopes=frozenset(
+            {"authority.observed.write", "unrelated.read"}
+        )
     ).authorize(request, proof=proof())
-    assert first.stable_semantic_request_digest == second.stable_semantic_request_digest
+    assert (
+        first.stable_semantic_request_digest
+        == second.stable_semantic_request_digest
+    )
     assert first.effective_scope_digest != second.effective_scope_digest
 
 
@@ -69,8 +88,14 @@ def test_credential_rotation_for_same_principal_keeps_namespace() -> None:
         request, proof=proof(credential="new-token")
     )
     assert first.idempotency_namespace == second.idempotency_namespace
-    assert first.stable_semantic_request_digest == second.stable_semantic_request_digest
-    assert first.authentication_context_id != second.authentication_context_id
+    assert (
+        first.stable_semantic_request_digest
+        == second.stable_semantic_request_digest
+    )
+    assert (
+        first.authentication_context_id
+        != second.authentication_context_id
+    )
 
 
 def test_genuinely_different_command_changes_semantic_digest() -> None:
@@ -80,21 +105,33 @@ def test_genuinely_different_command_changes_semantic_digest() -> None:
         command_type=first_command.command_type,
         aggregate_id=aggregate_id,
         expected_aggregate_version=0,
-        payload=InlinePayload({"headline": "Different", "count": 1}),
+        payload=InlinePayload(
+            {"headline": "Different", "count": 1}
+        ),
         idempotency_key=first_command.idempotency_key,
     )
     service = make_service()
     first = service.authorize(first_command, proof=proof())
     second = service.authorize(second_command, proof=proof())
-    assert first.stable_semantic_request_digest != second.stable_semantic_request_digest
+    assert (
+        first.stable_semantic_request_digest
+        != second.stable_semantic_request_digest
+    )
 
 
 def test_definition_version_change_changes_new_command_semantic_identity() -> None:
     aggregate_id = command().aggregate_id
     request = command(aggregate_id=aggregate_id)
-    first = make_service(definition_version="cmd-v1").authorize(request, proof=proof())
-    second = make_service(definition_version="cmd-v2").authorize(request, proof=proof())
-    assert first.stable_semantic_request_digest != second.stable_semantic_request_digest
+    first = make_service(definition_version="cmd-v1").authorize(
+        request, proof=proof()
+    )
+    second = make_service(definition_version="cmd-v2").authorize(
+        request, proof=proof()
+    )
+    assert (
+        first.stable_semantic_request_digest
+        != second.stable_semantic_request_digest
+    )
 
 
 def _existing_identity(
@@ -116,7 +153,9 @@ def _existing_identity(
 def test_lost_response_retry_uses_retained_definition_after_upgrade() -> None:
     aggregate_id = command().aggregate_id
     request = command(aggregate_id=aggregate_id)
-    first = make_service(definition_version="cmd-v1").authorize(request, proof=proof())
+    first = make_service(definition_version="cmd-v1").authorize(
+        request, proof=proof()
+    )
     existing = _existing_identity(first, request)
     registry = CommandRegistry(
         [
@@ -136,7 +175,66 @@ def test_lost_response_retry_uses_retained_definition_after_upgrade() -> None:
     ).authorize(request, proof=proof())
     assert retry.replay_of_command_id == existing.command_id
     assert retry.command_definition_version == "cmd-v1"
-    assert retry.command_definition_digest == existing.command_definition_digest
+    assert (
+        retry.command_definition_digest
+        == existing.command_definition_digest
+    )
+    assert (
+        retry.stable_semantic_request_digest
+        == existing.stable_semantic_request_digest
+    )
+
+
+def test_lost_response_retry_retains_historical_payload_schema_contract() -> None:
+    old_contract = fixture_payload_contract(
+        contract_version="fixture-contract-v1",
+        canonicalizer_version="fixture-canon-v1",
+    )
+    new_contract = fixture_payload_contract(
+        contract_version="fixture-contract-v2",
+        canonicalizer_version="fixture-canon-v2",
+    )
+    old_definition = observed_definition(
+        version="cmd-v1", schema_contract=old_contract
+    )
+    new_definition = observed_definition(
+        version="cmd-v2", schema_contract=new_contract
+    )
+    initial_registry = CommandRegistry([old_definition])
+    initial_schemas = PayloadSchemaRegistry([old_contract])
+    request = command()
+    first = make_service(
+        registry=initial_registry,
+        payload_schemas=initial_schemas,
+    ).authorize(request, proof=proof())
+    existing = _existing_identity(first, request)
+
+    upgraded_registry = CommandRegistry(
+        [old_definition, new_definition],
+        current_versions={"record.observed": "cmd-v2"},
+    )
+    upgraded_schemas = PayloadSchemaRegistry(
+        [old_contract, new_contract],
+        current_versions={
+            (FIXTURE_SCHEMA_VERSION, PayloadMode.INLINE):
+                "fixture-contract-v2"
+        },
+    )
+    retry = make_service(
+        policy_version="authz-v2",
+        registry=upgraded_registry,
+        payload_schemas=upgraded_schemas,
+        committed_lookup=ExistingLookup(existing),
+    ).authorize(request, proof=proof())
+    assert retry.replay_of_command_id == existing.command_id
+    assert (
+        retry.payload_schema_contract_version
+        == old_contract.contract_version
+    )
+    assert (
+        retry.payload_schema_contract_digest
+        == old_contract.contract_digest
+    )
     assert (
         retry.stable_semantic_request_digest
         == existing.stable_semantic_request_digest
@@ -161,11 +259,15 @@ def test_existing_idempotency_key_conflicts_with_different_payload() -> None:
     different = SemanticCommand(
         command_type=request.command_type,
         aggregate_id=request.aggregate_id,
-        expected_aggregate_version=request.expected_aggregate_version,
-        payload=InlinePayload({"headline": "Different", "count": 1}),
+        expected_aggregate_version=(
+            request.expected_aggregate_version
+        ),
+        payload=InlinePayload(
+            {"headline": "Different", "count": 1}
+        ),
         idempotency_key=request.idempotency_key,
     )
     with pytest.raises(IdempotencyIdentityConflict):
-        make_service(committed_lookup=ExistingLookup(existing)).authorize(
-            different, proof=proof()
-        )
+        make_service(
+            committed_lookup=ExistingLookup(existing)
+        ).authorize(different, proof=proof())
