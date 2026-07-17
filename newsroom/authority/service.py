@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from ._capability import _AuthorizedCommandGrant, _CapabilityIssuer, _ResolvedPayload
+from ._capability import (
+    _AuthorizedCommandGrant,
+    _CapabilityIssuer,
+    _ResolvedPayload,
+    _derive_idempotency_namespace,
+    _derive_stable_semantic_request_digest,
+)
 from ._security import _AuthorizationRequest
 from .auth import AuthenticationProof
 from .canonical import digest_bytes, digest_canonical
@@ -54,6 +60,9 @@ class AuthorizationReceipt:
     event_schema_version: int
     payload_mode: str
     payload_schema_version: str
+    payload_schema_contract_version: str
+    payload_schema_contract_digest: str
+    payload_canonicalizer_version: str
     payload_digest: str
     trust_scope: str
     security_scope: str
@@ -62,14 +71,7 @@ class AuthorizationReceipt:
 
 
 class CommandService:
-    """The only public authority-bearing command boundary in Increment 1A.
-
-    This boundary authenticates the transport proof, selects either the retained
-    historical definition for an existing idempotency identity or the explicit
-    current server definition, validates the registered payload schema, derives
-    all authority-bearing semantics, authorises the exact request and issues an
-    opaque internal commit capability.
-    """
+    """The only public authority-bearing command boundary in Increment 1A."""
 
     def __init__(
         self,
@@ -90,7 +92,8 @@ class CommandService:
             or authorizer is None
         ):
             raise ValueError(
-                "command service requires definition, payload-schema and security adapters"
+                "command service requires definition, payload-schema and "
+                "security adapters"
             )
         self._registry = registry
         self._payload_schemas = payload_schemas
@@ -100,6 +103,19 @@ class CommandService:
         self._committed_lookup = committed_lookup
         self._clock = clock
         self._issuer = _issuer or _CapabilityIssuer()
+        self._validate_replay_horizon()
+
+    def _validate_replay_horizon(self) -> None:
+        """Fail composition when any retained definition lost its schema contract."""
+
+        for definition in self._registry.definitions():
+            self._payload_schemas.resolve_exact(
+                definition.payload_schema_version,
+                definition.payload_mode,
+                definition.payload_schema_contract_version,
+                definition.payload_schema_contract_digest,
+                definition.payload_canonicalizer_version,
+            )
 
     def authorize(
         self, command: SemanticCommand, *, proof: AuthenticationProof
@@ -112,13 +128,17 @@ class CommandService:
             authorization_decision_id=str(
                 grant.authorization.authorization_decision_id
             ),
-            authorization_request_digest=grant.authorization_request.request_digest,
+            authorization_request_digest=(
+                grant.authorization_request.request_digest
+            ),
             authorization_policy_version=(
                 grant.authorization.authorization_policy_version
             ),
             effective_scope_digest=grant.authorization.effective_scope_digest,
             idempotency_namespace=grant.idempotency_namespace,
-            stable_semantic_request_digest=grant.stable_semantic_request_digest,
+            stable_semantic_request_digest=(
+                grant.stable_semantic_request_digest
+            ),
             command_definition_version=grant.definition.definition_version,
             command_definition_digest=grant.definition.digest,
             aggregate_type=grant.definition.aggregate_type,
@@ -126,6 +146,13 @@ class CommandService:
             event_schema_version=grant.definition.event_schema_version,
             payload_mode=grant.payload.kind,
             payload_schema_version=grant.payload.schema_version,
+            payload_schema_contract_version=(
+                grant.payload.schema_contract_version
+            ),
+            payload_schema_contract_digest=(
+                grant.payload.schema_contract_digest
+            ),
+            payload_canonicalizer_version=grant.payload.canonicalizer_version,
             payload_digest=grant.payload.digest,
             trust_scope=grant.definition.trust_scope.value,
             security_scope=grant.definition.security_scope,
@@ -142,12 +169,9 @@ class CommandService:
         authentication = self._authenticator.authenticate(proof, now=now)
         authentication.require_current(now)
 
-        idempotency_namespace = digest_canonical(
-            {
-                "authority_domain": authentication.authority_domain,
-                "principal_id": authentication.principal_id,
-                "command_type": command.command_type,
-            }
+        current_definition = self._registry.resolve(command.command_type)
+        idempotency_namespace = _derive_idempotency_namespace(
+            authentication, current_definition
         )
         existing = (
             None
@@ -158,7 +182,7 @@ class CommandService:
             )
         )
         if existing is None:
-            definition = self._registry.resolve(command.command_type)
+            definition = current_definition
         else:
             self._validate_existing_identity(
                 existing,
@@ -172,10 +196,22 @@ class CommandService:
                 existing.command_definition_version,
                 existing.command_definition_digest,
             )
+            retained_namespace = _derive_idempotency_namespace(
+                authentication, definition
+            )
+            if retained_namespace != idempotency_namespace:
+                raise IdempotencyIdentityConflict(
+                    "retained definition changed the durable idempotency namespace"
+                )
 
         payload = self._resolve_payload(command, definition)
-        stable_semantic_request_digest = self._semantic_digest(
-            command, definition=definition, payload=payload
+        stable_semantic_request_digest = (
+            _derive_stable_semantic_request_digest(
+                definition=definition,
+                aggregate_id=str(command.aggregate_id),
+                expected_aggregate_version=command.expected_aggregate_version,
+                payload=payload,
+            )
         )
         if (
             existing is not None
@@ -194,7 +230,9 @@ class CommandService:
             "authority_domain": authentication.authority_domain,
             "operation_type": f"command:{definition.command_type}",
             "required_scope": definition.required_scope,
-            "stable_semantic_request_digest": stable_semantic_request_digest,
+            "stable_semantic_request_digest": (
+                stable_semantic_request_digest
+            ),
             "command_definition_digest": definition.digest,
             "aggregate_type": definition.aggregate_type,
             "aggregate_id": str(command.aggregate_id),
@@ -202,6 +240,15 @@ class CommandService:
             "event_schema_version": definition.event_schema_version,
             "payload_mode": definition.payload_mode.value,
             "payload_schema_version": definition.payload_schema_version,
+            "payload_schema_contract_version": (
+                definition.payload_schema_contract_version
+            ),
+            "payload_schema_contract_digest": (
+                definition.payload_schema_contract_digest
+            ),
+            "payload_canonicalizer_version": (
+                definition.payload_canonicalizer_version
+            ),
             "trust_scope": definition.trust_scope.value,
             "security_scope": definition.security_scope,
             "retention_scope": definition.retention_scope,
@@ -210,12 +257,16 @@ class CommandService:
         }
         request_digest = digest_canonical(request_value)
         authorization_request = _AuthorizationRequest(
-            authentication_context_id=authentication.authentication_context_id,
+            authentication_context_id=(
+                authentication.authentication_context_id
+            ),
             principal_id=authentication.principal_id,
             authority_domain=authentication.authority_domain,
             operation_type=f"command:{definition.command_type}",
             required_scope=definition.required_scope,
-            stable_semantic_request_digest=stable_semantic_request_digest,
+            stable_semantic_request_digest=(
+                stable_semantic_request_digest
+            ),
             command_definition_digest=definition.digest,
             aggregate_type=definition.aggregate_type,
             aggregate_id=str(command.aggregate_id),
@@ -223,6 +274,15 @@ class CommandService:
             event_schema_version=definition.event_schema_version,
             payload_mode=definition.payload_mode.value,
             payload_schema_version=definition.payload_schema_version,
+            payload_schema_contract_version=(
+                definition.payload_schema_contract_version
+            ),
+            payload_schema_contract_digest=(
+                definition.payload_schema_contract_digest
+            ),
+            payload_canonicalizer_version=(
+                definition.payload_canonicalizer_version
+            ),
             trust_scope=definition.trust_scope.value,
             security_scope=definition.security_scope,
             retention_scope=definition.retention_scope,
@@ -233,21 +293,38 @@ class CommandService:
         authorization = self._authorizer.authorize(
             authentication, authorization_request, now=now
         )
-        if authorization.authentication_context_id != authentication.authentication_context_id:
-            raise PermissionError("authorizer returned a context-mismatched decision")
+        if (
+            authorization.authentication_context_id
+            != authentication.authentication_context_id
+        ):
+            raise PermissionError(
+                "authorizer returned a context-mismatched decision"
+            )
         if authorization.authorization_request_digest != request_digest:
-            raise PermissionError("authorizer returned a request-mismatched decision")
+            raise PermissionError(
+                "authorizer returned a request-mismatched decision"
+            )
         authorization.require_allowed()
 
         correlation_id = (
-            None if command.correlation_id is None else str(command.correlation_id)
+            None
+            if command.correlation_id is None
+            else str(command.correlation_id)
         )
-        causation_kind = None if command.causation is None else command.causation.kind.value
+        causation_kind = (
+            None
+            if command.causation is None
+            else command.causation.kind.value
+        )
         causation_identifier = (
-            None if command.causation is None else command.causation.identifier
+            None
+            if command.causation is None
+            else command.causation.identifier
         )
         causation_external_system = (
-            None if command.causation is None else command.causation.external_system
+            None
+            if command.causation is None
+            else command.causation.external_system
         )
         return self._issuer.issue(
             command_type=definition.command_type,
@@ -260,31 +337,16 @@ class CommandService:
             authorization=authorization,
             idempotency_namespace=idempotency_namespace,
             idempotency_key=command.idempotency_key,
-            stable_semantic_request_digest=stable_semantic_request_digest,
+            stable_semantic_request_digest=(
+                stable_semantic_request_digest
+            ),
             correlation_id=correlation_id,
             causation_kind=causation_kind,
             causation_identifier=causation_identifier,
             causation_external_system=causation_external_system,
-            replay_of_command_id=(None if existing is None else existing.command_id),
-        )
-
-    @staticmethod
-    def _semantic_digest(
-        command: SemanticCommand,
-        *,
-        definition: CommandDefinition,
-        payload: _ResolvedPayload,
-    ) -> str:
-        return digest_canonical(
-            {
-                "command_type": definition.command_type,
-                "command_definition_version": definition.definition_version,
-                "command_definition_digest": definition.digest,
-                "aggregate_type": definition.aggregate_type,
-                "aggregate_id": str(command.aggregate_id),
-                "expected_aggregate_version": command.expected_aggregate_version,
-                "payload": payload.canonical_value(),
-            }
+            replay_of_command_id=(
+                None if existing is None else existing.command_id
+            ),
         )
 
     @staticmethod
@@ -297,78 +359,116 @@ class CommandService:
         idempotency_namespace: str,
     ) -> None:
         if existing.authority_domain != authentication_domain:
-            raise IdempotencyIdentityConflict("existing command authority domain differs")
+            raise IdempotencyIdentityConflict(
+                "existing command authority domain differs"
+            )
         if existing.principal_id != principal_id:
-            raise IdempotencyIdentityConflict("existing command principal differs")
+            raise IdempotencyIdentityConflict(
+                "existing command principal differs"
+            )
         if existing.command_type != command.command_type:
-            raise IdempotencyIdentityConflict("existing command type differs")
+            raise IdempotencyIdentityConflict(
+                "existing command type differs"
+            )
         if existing.idempotency_namespace != idempotency_namespace:
-            raise IdempotencyIdentityConflict("existing idempotency namespace differs")
+            raise IdempotencyIdentityConflict(
+                "existing idempotency namespace differs"
+            )
         if existing.idempotency_key != command.idempotency_key:
-            raise IdempotencyIdentityConflict("existing idempotency key differs")
+            raise IdempotencyIdentityConflict(
+                "existing idempotency key differs"
+            )
 
     def _resolve_payload(
         self, command: SemanticCommand, definition: CommandDefinition
     ) -> _ResolvedPayload:
         payload = command.payload
-        schema = self._payload_schemas.resolve(
-            definition.payload_schema_version, definition.payload_mode
+        schema = self._payload_schemas.resolve_exact(
+            definition.payload_schema_version,
+            definition.payload_mode,
+            definition.payload_schema_contract_version,
+            definition.payload_schema_contract_digest,
+            definition.payload_canonicalizer_version,
         )
+        common = {
+            "schema_version": definition.payload_schema_version,
+            "schema_contract_version": schema.contract_version,
+            "schema_contract_digest": schema.contract_digest,
+            "canonicalizer_version": (
+                schema.canonicalizer_implementation_version
+            ),
+        }
         if definition.payload_mode is PayloadMode.INLINE:
             if not isinstance(payload, InlinePayload):
                 raise ValueError("command requires bounded inline payload")
             inline_bytes = schema.canonicalize(payload.value)
             if len(inline_bytes) > definition.max_inline_bytes:
-                raise ValueError("inline payload exceeds command-definition limit")
+                raise ValueError(
+                    "inline payload exceeds command-definition limit"
+                )
             return _ResolvedPayload(
                 kind=PayloadMode.INLINE.value,
-                schema_version=definition.payload_schema_version,
                 digest=digest_bytes(inline_bytes),
                 inline_bytes=inline_bytes,
                 object_admission_id=None,
                 blob_digest=None,
                 object_class=None,
                 allowed_use=None,
+                **common,
             )
         if definition.payload_mode is PayloadMode.NO_PAYLOAD:
             if not isinstance(payload, NoPayload):
                 raise ValueError("command requires explicit NO_PAYLOAD")
             canonical = schema.canonicalize(None)
             if canonical != b"":
-                raise ValueError("NO_PAYLOAD schema must canonicalize to empty bytes")
+                raise ValueError(
+                    "NO_PAYLOAD schema must canonicalize to empty bytes"
+                )
             return _ResolvedPayload(
                 kind=PayloadMode.NO_PAYLOAD.value,
-                schema_version=definition.payload_schema_version,
                 digest=digest_bytes(b""),
                 inline_bytes=b"",
                 object_admission_id=None,
                 blob_digest=None,
                 object_class=None,
                 allowed_use=None,
+                **common,
             )
         if not isinstance(payload, ObjectAdmissionPayload):
-            raise ValueError("command requires governed object-admission payload")
+            raise ValueError(
+                "command requires governed object-admission payload"
+            )
         if self._admission_lookup is None:
-            raise ValueError("object-admission command requires an admission resolver")
+            raise ValueError(
+                "object-admission command requires an admission resolver"
+            )
         descriptor = self._admission_lookup.resolve(payload.admission_id)
         if not descriptor.active:
             raise ValueError("object admission is not active")
         if descriptor.object_class != definition.required_object_class:
-            raise ValueError("object admission class is not permitted by command definition")
+            raise ValueError(
+                "object admission class is not permitted by command definition"
+            )
         if descriptor.allowed_use != definition.required_allowed_use:
-            raise ValueError("object admission use is not permitted by command definition")
+            raise ValueError(
+                "object admission use is not permitted by command definition"
+            )
         if descriptor.security_scope != definition.security_scope:
-            raise ValueError("object admission security scope does not match command policy")
+            raise ValueError(
+                "object admission security scope does not match command policy"
+            )
         if descriptor.retention_scope != definition.retention_scope:
-            raise ValueError("object admission retention scope does not match command policy")
+            raise ValueError(
+                "object admission retention scope does not match command policy"
+            )
         schema.canonicalize(descriptor)
         return _ResolvedPayload(
             kind=PayloadMode.OBJECT_ADMISSION.value,
-            schema_version=definition.payload_schema_version,
             digest=descriptor.blob_digest,
             inline_bytes=None,
             object_admission_id=descriptor.admission_id,
             blob_digest=descriptor.blob_digest,
             object_class=descriptor.object_class,
             allowed_use=descriptor.allowed_use,
+            **common,
         )
