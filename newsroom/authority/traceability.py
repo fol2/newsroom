@@ -117,6 +117,19 @@ INCREMENT_1A2A_TRACEABILITY: dict[str, tuple[str, ...]] = {
         "GRAG-030",
         "GRPROD-005",
     ),
+    "newsroom.authority._event_store_guards": (
+        "ADR-0001",
+        "ADR-0002",
+        "DREC-070",
+        "DREC-073",
+        "DREC-074",
+        "DREC-076",
+        "DREC-077",
+        "GRAG-002",
+        "GRAG-005",
+        "GRAG-010",
+        "GRAG-030",
+    ),
     "newsroom.authority._event_system": (
         "ADR-0001",
         "ADR-0002",
@@ -162,6 +175,14 @@ INCREMENT_1A2A_TRACEABILITY: dict[str, tuple[str, ...]] = {
         "GRAG-002",
         "GRAG-010",
         "GRPROD-005",
+    ),
+    "newsroom.tests.test_authority_a2a_review_guards": (
+        "ADR-0002",
+        "DREC-070",
+        "DREC-076",
+        "GRAG-002",
+        "GRAG-005",
+        "GRAG-010",
     ),
 }
 
