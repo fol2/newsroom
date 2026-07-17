@@ -19,6 +19,7 @@ from .canonical import (
     validate_sha256_digest,
 )
 from .models import CommandDefinition
+from .policy import CommandRegistry, PayloadSchemaRegistry
 from .types import AggregateId, ObjectAdmissionId, PayloadMode
 
 
@@ -238,12 +239,106 @@ def _validate_resolved_payload(
 
 
 class _CapabilityIssuer:
-    """Issues request-bound opaque grants for the internal persistence boundary."""
+    """Issues and verifies grants against an immutable server contract snapshot."""
 
-    def __init__(self, secret: bytes | None = None) -> None:
+    def __init__(
+        self,
+        secret: bytes | None = None,
+        *,
+        command_registry: CommandRegistry | None = None,
+        payload_schemas: PayloadSchemaRegistry | None = None,
+    ) -> None:
         self._secret = secret or secrets.token_bytes(32)
         if len(self._secret) < 32:
             raise ValueError("capability secret must be at least 256 bits")
+        self._definition_snapshot: dict[
+            tuple[str, str, str], CommandDefinition
+        ] | None = None
+        self._schema_snapshot: frozenset[
+            tuple[str, str, str, str, str]
+        ] | None = None
+        if command_registry is not None or payload_schemas is not None:
+            if command_registry is None or payload_schemas is None:
+                raise ValueError(
+                    "capability contract binding requires both registries"
+                )
+            self.bind_contracts(command_registry, payload_schemas)
+
+    def bind_contracts(
+        self,
+        command_registry: CommandRegistry,
+        payload_schemas: PayloadSchemaRegistry,
+    ) -> None:
+        definitions = {
+            (
+                definition.command_type,
+                definition.definition_version,
+                definition.digest,
+            ): definition
+            for definition in command_registry.definitions()
+        }
+        schemas = frozenset(
+            (
+                contract.schema_version,
+                contract.payload_mode.value,
+                contract.contract_version,
+                contract.contract_digest,
+                contract.canonicalizer_implementation_version,
+            )
+            for contract in payload_schemas.contracts()
+        )
+        if not definitions or not schemas:
+            raise ValueError(
+                "capability contract snapshot cannot be empty"
+            )
+        if self._definition_snapshot is not None:
+            previous = {
+                key: value.canonical_value()
+                for key, value in self._definition_snapshot.items()
+            }
+            current = {
+                key: value.canonical_value()
+                for key, value in definitions.items()
+            }
+            if previous != current or self._schema_snapshot != schemas:
+                raise ValueError(
+                    "capability issuer is already bound to different contracts"
+                )
+            return
+        self._definition_snapshot = definitions
+        self._schema_snapshot = schemas
+
+    def _require_registered_contracts(
+        self, definition: CommandDefinition
+    ) -> None:
+        if self._definition_snapshot is None or self._schema_snapshot is None:
+            raise InvalidCommitCapability(
+                "capability issuer is not bound to the server contract registry"
+            )
+        key = (
+            definition.command_type,
+            definition.definition_version,
+            definition.digest,
+        )
+        registered = self._definition_snapshot.get(key)
+        if (
+            registered is None
+            or registered.canonical_value() != definition.canonical_value()
+        ):
+            raise InvalidCommitCapability(
+                "commit definition is not an exact registered server contract"
+            )
+        schema_key = (
+            definition.payload_schema_version,
+            definition.payload_mode.value,
+            definition.payload_schema_contract_version,
+            definition.payload_schema_contract_digest,
+            definition.payload_canonicalizer_version,
+        )
+        if schema_key not in self._schema_snapshot:
+            raise InvalidCommitCapability(
+                "commit payload schema is not an exact registered server contract"
+            )
 
     def _signature(self, value: dict[str, Any]) -> str:
         mac = hmac.new(
@@ -270,6 +365,7 @@ class _CapabilityIssuer:
 
         request = grant.authorization_request
         definition = grant.definition
+        self._require_registered_contracts(definition)
         authentication = grant.authentication
         authorization = grant.authorization
 
