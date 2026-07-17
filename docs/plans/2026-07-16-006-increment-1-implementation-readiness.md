@@ -2,8 +2,9 @@
 
 **Status:** Completed  
 **Owner:** Product owner  
-**Last updated:** 2026-07-16  
+**Last updated:** 2026-07-17  
 **Completed by owner:** 2026-07-16  
+**Implementation correction recorded:** 2026-07-17  
 **Canonical language:** English  
 **Target branch:** `agent/increment-1-readiness-audit`  
 **Base:** `main` at `6c6b24dcf3c450fcca562be1c5f277b82ad8171d`  
@@ -15,7 +16,7 @@
 
 ## 1. Outcome and boundary
 
-The owner-authorised post-merge audit found no owner-level architecture conflict. The readiness work is complete and Increment 1 may begin after this documentation pull request merges.
+The owner-authorised post-merge audit found no owner-level architecture conflict. The readiness work is complete and Increment 1 may proceed through the active implementation epic.
 
 The accepted direction is not reopened:
 
@@ -29,6 +30,8 @@ The accepted direction is not reopened:
 
 This package closes only the contracts required to begin the native integrated foundation safely. It does not select live sources, models, embeddings, Graphiti prompts, final editorial predicates, retrieval thresholds, publication tables, Evidence Intake transport, shadow scope, canary scope or activation values.
 
+The 2026-07-17 correction records implementation-contract details discovered while applying the completed plan. It does not reopen the accepted architecture. It separates stable semantic command identity from per-attempt authentication and authorisation, records the actual A1/A2a/A2b review boundaries inside Authority Foundation, and makes filesystem-type qualification an explicit deferred item rather than an unsupported promise.
+
 ## 2. Repository authority and consistency audit
 
 ### 2.1 Authority register
@@ -38,7 +41,8 @@ This package closes only the contracts required to begin the native integrated f
 | Accepted ADRs | ADR 0001, 0002, 0004 and 0005 | Normative architecture authority. ADR 0003 is Accepted but outside this increment. |
 | Accepted specifications | Focused discovery Topics 1–11, governed GraphRAG and native-production GraphRAG | Normative behaviour and safety requirements. |
 | Accepted plan | Plan 005 | Accepted sequencing; cannot weaken an ADR or specification. |
-| Completed plan | This document | Completed owner-authorised readiness audit and epic boundary. |
+| Completed plan | This document | Completed owner-authorised readiness audit and corrected epic boundary. |
+| Active implementation | Epic #79 and linked tickets | Implements the accepted records; merge state alone creates no activation authority. |
 | Proposed | Plan 001 and any individually Proposed record | Non-authoritative where not independently adopted. Earlier GraphRAG deferral is superseded. |
 | Draft | Publication, rights, autonomy, lifecycle and other individually Draft specifications | Non-normative evidence. Increment 1 must not freeze their later physical schemas. |
 | Superseded | Plans 003 and 004 | Historical only. Graph-less or POC staging cannot control implementation. |
@@ -61,36 +65,37 @@ This package closes only the contracts required to begin the native integrated f
 | Ordered projection and rebuild | ADR 0001; `GRAG-024` to `GRAG-028` | `GRPROD-020` | Consumer-specific authority outboxes or skipped gaps |
 | Increment 1 epic boundary | Plan 005 plus this document | `GRPROD-020` and `GRPROD-021` | PR #75's shadow feature boundary |
 
-### 2.3 Findings resolved by this pull request
+### 2.3 Findings resolved by the readiness and corrective reviews
 
-| Finding in audited base | Risk | Resolution |
+| Finding in audited base or first implementation draft | Risk | Resolution |
 |---|---|---|
-| Accepted governed GraphRAG text retained POC wording. | Optional experiment or later graduation could be implemented. | `GRAG-050`, scope, acceptance and completion text now use the production-target repair-or-replace contract. |
+| Accepted governed GraphRAG text retained POC wording. | Optional experiment or later graduation could be implemented. | `GRAG-050`, scope, acceptance and completion text use the production-target repair-or-replace contract. |
 | Plan 005 called ADR 0004 Proposed. | Accepted discovery direction could be treated as unresolved. | ADR 0004 is marked Accepted. |
 | `news-discovery.md` duplicated focused requirements. | Drift and wrong-source implementation. | It is navigation and canonical-source mapping only. |
-| Command text exposed `principal_scopes` in the command envelope. | Caller-controlled privilege escalation. | Identity and effective permissions are now derived from verified authentication and server-side authorisation; caller claims have no authority. |
-| Idempotency covered only key plus payload. | A result could be replayed across a different command, aggregate or version. | A server-derived namespace and canonical semantic request digest are required. |
-| One proposed code PR contained the whole increment. | Unreviewable implementation change. | Increment 1 is one epic with three stacked dependency-ordered code PRs. |
+| Command text exposed caller principal/scope authority. | Caller-controlled privilege escalation. | Identity and effective permissions derive from verified authentication and server-side authorisation; caller claims have no authority. |
+| Idempotency covered only key plus payload, then an early correction mixed in transient authz attempt state. | Results could replay across different commands, while policy or credential rollout could strand a committed result. | Use a server-derived namespace and stable semantic request digest; recheck current authn/authz on every retry and preserve original commit provenance. |
+| Payload schema was only a label. | Canonicalisation could change silently under the same identity. | Versioned schema contracts have explicit immutable identity, canonicalizer implementation version and golden vectors. |
+| One proposed code PR contained the whole increment. | Unreviewable implementation change. | Increment 1 remains one epic; Authority Foundation is reviewed as A1, A2a and A2b before Native Graph Foundation begins. |
 | PR #75 trusts candidate rights gates and can revisit unfinished publication intents. | Prohibited use or duplicate public effects. | Those paths are rejected; independent rights admission and ambiguous-intent reconciliation remain invariants. |
 | Neo4j Community has narrower privilege and online-backup capabilities than Enterprise. | Unsupported RBAC or backup promises. | Require process/network/API controls, exact-version evidence and offline dump/rebuild; failure blocks activation or requires replacement. |
 
-The audit therefore selects outcome A: a documentation-only implementation-readiness pull request. No owner-level decision packet is required.
+The audit therefore selects outcome A: a documentation-only implementation-readiness record. No owner-level architecture decision packet is required.
 
 ## 3. Requirement-to-implementation traceability
 
-`A`, `B` and `C` are stacked review/merge boundaries inside one Increment 1 epic. They are not product stages. No intermediate merge creates an activatable graph-less production, canary or complete-shadow profile.
+`A`, `B` and `C` are dependency-ordered implementation boundaries inside one Increment 1 epic. `A1`, `A2a` and `A2b` are smaller review/merge units inside `A`. None is a product stage. No intermediate merge creates an activatable graph-less production, canary or complete-shadow profile.
 
 | Requirement | Canonical source | Planned component | Invariant/evidence | Boundary | Dependency/status |
 |---|---|---|---|---|---|
-| ADR 0001; `GRAG-002`–`005` | ADR 0001; governed GraphRAG | Authority, objects, events | Ledger/objects remain authority; no synchronous Neo4j co-authority | A, then B/C proof | Ready |
-| ADR 0002 | ADR 0002 | SQLite writer, migrations, CAS | One writer, local filesystem, verified object before ledger reference | A | Numeric operating limits Deferred |
-| ADR 0004 | ADR 0004 | Shared IDs/events and no-legacy boundary | No query-first or legacy mutable identity assumption | A | Live source runtime later |
+| ADR 0001; `GRAG-002`–`005` | ADR 0001; governed GraphRAG | Authority, objects, events | Ledger/objects remain authority; no synchronous Neo4j co-authority | A1/A2a/A2b, then B/C proof | Ready |
+| ADR 0002 | ADR 0002 | SQLite writer, migrations, CAS | One writer, local supported profile, verified object before ledger reference | A2a/A2b | Numeric and filesystem-type qualification Deferred |
+| ADR 0004 | ADR 0004 | Shared IDs/events and no-legacy boundary | No query-first or legacy mutable identity assumption | A1/A2a | Live source runtime later |
 | ADR 0005; `GRPROD-001`–`005` | ADR 0005; native deployment spec | Graph-required configuration | GraphRAG cannot be missing, disabled, fake or no-op in qualifying profiles | B/C | Exact versions Need experiment |
-| `DREC-001`–`007` | Discovery record semantics | Typed IDs and versions | Locator/digest separate from domain identity; no reuse; immutable versions | A | Ready |
-| `DREC-016`, `DREC-070`–`077` | Discovery record semantics | CAS, events, lineage and time | Rights-limited identity, exact upstream references, explicit time/provenance | A | Final rights register Deferred |
-| `GRAG-010`–`016` | Governed GraphRAG | Trust and ontology seams | Closed trust states; confidence is not admission; structural/editorial relations differ | A/B | Full entity/relation behaviour Deferred |
+| `DREC-001`–`007` | Discovery record semantics | Typed IDs and versions | Locator/digest separate from domain identity; no reuse; immutable versions | A1/A2a | Ready |
+| `DREC-016`, `DREC-070`–`077` | Discovery record semantics | Rights admission, CAS, events, lineage and time | Rights-limited identity, exact upstream references, explicit time/provenance | A1/A2a/A2b | Final rights register Deferred |
+| `GRAG-010`–`016` | Governed GraphRAG | Trust and ontology seams | Closed trust states; confidence is not admission; structural/editorial relations differ | A1/B | Full entity/relation behaviour Deferred |
 | `GRAG-020`–`023` | Governed GraphRAG | Extraction/admission boundaries | Graphiti proposal workspace cannot mutate governed authority | B interface only | Execution Deferred |
-| `GRAG-024`–`028` | Governed GraphRAG | Projector state and rebuild | Idempotent ordered consumption; no gap skipping or stochastic historical rewrite | B/C | Actual Neo4j CI |
+| `GRAG-024`–`028` | Governed GraphRAG | Projector state and rebuild | Idempotent ordered consumption; no gap skipping or stochastic historical rewrite | B/C; deletion evidence begins A2b | Actual Neo4j CI |
 | `GRAG-030`, `GRAG-034`, `GRAG-035` | Governed GraphRAG | Time, graph repository and metadata | Separate time meanings; no agent writes; watermark/version/gap/trust metadata | A/B/C | Ready |
 | `GRAG-031`–`033` | Governed GraphRAG | Retrieval interfaces | Hybrid retrieval and authoritative hydration remain mandatory | C seam only | Full implementation later |
 | `GRAG-042`–`046` | Governed GraphRAG | Structural projection and degraded states | Lineage projectable; outage is not no-match; no graph-less complete shadow | B/C | Decision flow later |
@@ -128,7 +133,7 @@ Temporal values distinguish source publication/revision, Newsroom observation, s
 
 ### 4.3 Authentication and authority provenance
 
-The caller submits a semantic command, an idempotency key and transport credentials or an equivalent authentication proof. It does **not** authoritatively submit `principal_id`, roles or scopes.
+The caller submits a semantic command, an idempotency key and transport credentials or an equivalent authentication proof. It does **not** authoritatively submit `principal_id`, roles, scopes, event semantics, trust, security, retention or payload authority.
 
 A trusted authenticator converts the transport proof into a verified authentication context containing at least:
 
@@ -138,14 +143,17 @@ authentication_method, assurance_class, credential_binding_digest,
 authenticated_at, expires_at
 ```
 
-A server-side authoriser evaluates that verified context against the allow-listed command type, aggregate target and policy version. It produces:
+The context is valid only while `authenticated_at <= now < expires_at`. Raw credentials are never included in canonical audit values and public proof types redact them from representations.
+
+A versioned server-side command definition and payload-schema contract derive the aggregate, event, payload, trust, security, retention and required-scope semantics. A server-side authoriser evaluates the exact derived request and produces:
 
 ```text
-authorization_decision_id, authorization_policy_version,
-effective_scope_digest, decision, reason_code
+authorization_decision_id, authorization_request_digest,
+authorization_policy_version, effective_scopes, effective_scope_digest,
+decision, reason_code, decided_at
 ```
 
-Only an allowing decision may reach the command writer. Caller-provided principal, role or scope claims are ignored or rejected and never copied into effective authority. The committed command result and audit record identify the verified `authentication_context_id`, server-derived `principal_id`, `authorization_decision_id`, `authorization_policy_version` and `effective_scope_digest` used.
+Only an allowing decision may reach the writer. The request-bound capability includes canonical digests of the complete authentication context, exact authorization request, authorization decision and resolved payload. Persistence independently recomputes operation, required scope, namespace, stable semantic digest and closed payload invariants before accepting the capability.
 
 Increment 1 provides authenticator and authoriser interfaces plus deterministic test implementations. Production transport and principal provisioning remain `Needs experiment`, but production configuration has no unauthenticated local-writer fallback.
 
@@ -163,45 +171,56 @@ The durable idempotency identity is:
 idempotency_namespace + idempotency_key
 ```
 
-Before execution, the service creates a canonical semantic request digest over at least:
+The stable semantic request digest covers the command itself rather than a particular authentication attempt:
 
 ```text
-command_type, aggregate_type, aggregate_id, expected_aggregate_version,
-payload_schema_version, payload_digest,
-authenticated principal_id, authority_domain,
-authorization_policy_version, effective_scope_digest
+command type;
+exact command-definition version and digest;
+exact payload-schema contract version, digest and canonicalizer implementation version;
+server-derived aggregate type and typed aggregate ID;
+expected aggregate version;
+closed resolved payload mode, canonical bytes or admission identity, and payload digest.
 ```
 
-Reusing the same durable idempotency identity with the same semantic request digest returns the committed result without another mutation. Reusing it with a different digest is an explicit conflict. A matching payload body cannot replay a result for a different command type, aggregate, expected version or authenticated authority context.
+It deliberately excludes ephemeral authentication-context IDs, credential rotation, authorization-policy rollout, unrelated effective-scope changes, and non-semantic correlation/causation metadata. Those values remain in the request and original commit provenance where applicable, but do not make an already committed business command a different command.
 
-Create commands require expected aggregate version `0`; updates require the exact current positive version. The semantic digest and expected-version check are both evaluated before returning or committing a result.
+Every request and retry performs current authentication and authorisation. A caller who is still authorised may receive the exact original committed result. A caller who is no longer authorised is denied. The original commit provenance remains immutable. Reusing the durable idempotency identity for a genuinely different command is an explicit conflict.
+
+Historical command definitions and payload-schema contracts remain resolvable for the idempotency/result-retention horizon. Composition fails closed if a retained definition loses its exact schema contract.
+
+Create commands require expected aggregate version `0`; updates require the exact current positive version.
 
 ### 4.5 Consumer-neutral ordered events
 
 Each authoritative domain change appends one event in the same SQLite transaction as its mutation and audit record. No authoritative per-consumer outbox is created.
 
-The envelope contains non-sensitive routing metadata:
+The envelope contains non-sensitive routing metadata sufficient for an independent projector:
 
 ```text
 ledger_seq, event_id, event_type, event_schema_version,
 aggregate_type, aggregate_id, aggregate_version, recorded_at,
 command_id, principal_id, authentication_context_id,
-authorization_decision_id, correlation_id, causation_id,
-producer_version, payload_digest, payload_object_ref,
-security_scope, retention_scope
+authorization_request_digest, authorization_decision_id,
+producer_version, command_definition_version, command_definition_digest,
+correlation_id, causation_kind, causation_identifier,
+payload_id, payload_mode, payload_schema_version,
+payload_schema_contract_digest, payload_digest,
+object_admission_id nullable, security_scope, retention_scope, trust_scope
 ```
 
-Sensitive payload access is separately authorised. Unknown required event versions create a visible projector gap. Replay never fabricates sequence numbers or recording times. Neo4j is never part of the authoritative transaction.
+Sensitive payload bytes are separately authorised. Unknown required event versions create a visible projector gap. Replay never fabricates sequence numbers or recording times. Neo4j is never part of the authoritative transaction.
 
 ### 4.6 SQLite, migrations and governed objects
 
-The supported authority profile is one SQLite file on one host and a local filesystem with supported locking and durability. NFS, SMB, cloud-synchronised folders and multi-host direct access fail validation. Connections enforce foreign keys, WAL, `synchronous=FULL`, bounded busy timeout, bounded write duration and an explicit checkpoint policy.
+The supported authority profile is one SQLite file on one host, one accepted writer and a local filesystem profile with the required locking and durability behaviour. The implementation immediately enforces checks it can prove reliably: no symlink roots, writer ownership and restrictive modes, a lifetime single-writer lock, foreign keys, WAL, `synchronous=FULL`, bounded busy timeout, bounded write duration and explicit checkpoint policy.
 
-Migrations are forward-only, exclusive and checksummed. Startup fails on a changed checksum, newer database version, non-empty unversioned database or missing expected constraints. Rollback after an incompatible migration uses a verified pre-migration recovery point rather than unreviewed reverse SQL.
+Multi-host direct SQLite access is unsupported. Reliable filesystem-type qualification for NFS, SMB and cloud-synchronised folders is **Deferred** pending platform-specific evidence; the implementation must not claim universal detection that it cannot prove. Production qualification must still fail closed when the actual hosting profile or required locking/durability evidence is unresolved.
 
-Governed objects are immutable `sha256:<hex>` values. Installation writes bounded bytes to a same-filesystem temporary file, enforces rights/security/retention scope, verifies size and digest, durably flushes, atomically installs, verifies the installed object and only then commits a ledger reference. A committed reference cannot point to missing, partial, corrupt or prohibited bytes.
+Migrations are forward-only, exclusive, atomic and checksummed. Startup fails on a changed checksum, newer database version, non-empty unversioned database, schema fingerprint drift, missing expected constraints or integrity-check failure. Rollback after an incompatible migration uses a verified pre-migration recovery point rather than unreviewed reverse SQL.
 
-`PROHIBITED`, expired, conflicting or unsupported use is a hard admission failure for the covered object class. Candidate, model or extractor output cannot override it. Deletion and tombstone decisions propagate to projections and prevent rebuild resurrection.
+Governed blob identity is separate from governed use admission. Installation writes bounded bytes to a same-filesystem staging file, applies global and object-class limits, verifies size and digest, durably flushes, atomically installs read-only bytes, re-verifies through the pinned file descriptor and only then permits an authoritative admission or ledger reference.
+
+A governed admission identifies the blob, object class, allowed use, rights decision and policy, security scope, retention scope and validity. Candidate, model or extractor output cannot grant permitted use. `PROHIBITED`, expired, conflicting or unsupported use is a hard admission failure. Admission, revocation and deletion/tombstone changes have ordered event semantics. Deletion propagates to projections and prevents rebuild resurrection while retaining only permitted audit identity.
 
 ### 4.7 Projector state and ontology v1
 
@@ -246,33 +265,49 @@ PR #75 remains open and unmerged.
 
 ## 6. Increment 1 epic and stacked code boundaries
 
-The epic is **Increment 1 — Native Integrated Foundation**. It has three stacked code PRs. Each branch starts from its declared dependency, but the epic begins from the latest `main`. These are review boundaries only.
+The epic is **Increment 1 — Native Integrated Foundation**. Its boundaries are review and merge units, not independently activatable product stages.
 
 ### A. Authority foundation
 
-**Deliverables**
+Authority Foundation completes only after all three dependency-ordered units merge:
 
-- typed canonical UUIDv4 IDs, aggregate versions, trust and temporal value types;
-- verified authentication and server-side authorisation interfaces;
-- committed authentication/authorisation provenance;
-- server-derived idempotency namespace and canonical semantic request digest;
-- expected-version fencing and deterministic command results;
-- fresh SQLite authority schema and checked forward migrations;
-- consumer-neutral ordered events;
-- governed filesystem CAS and rights-scope seam; and
-- explicit no-legacy-dual-write/import boundary.
+#### A1 — Command, authentication and authorisation contract
 
-**Tests and exit evidence**
+- typed IDs, trust and time values;
+- caller-minimal semantic command;
+- versioned server-side command definitions;
+- immutable payload-schema contract identity and golden canonicalisation vectors;
+- verified authentication, exact authorisation request/decision binding and opaque commit capabilities;
+- stable semantic idempotency plus current authn/authz recheck;
+- expected-version contract and no-legacy boundary.
 
-Authentication spoofing, caller-supplied scope rejection, unauthorised commands, idempotent replay, semantic-digest conflicts, cross-aggregate/key conflicts, stale versions, migration checksums, SQLite profile, object crash/corruption/prohibited-rights cases, event causality and existing repository gates all pass.
+#### A2a — SQLite event authority
 
-**Rollback**
+- atomic checked schema and migrations;
+- immutable command-definition, schema-contract, authn/authz, payload, command, audit, aggregate-version and event records;
+- inline and explicit no-payload authority;
+- ordered consumer-neutral event envelope and exact provenance;
+- causation, result replay, writer locking, schema fingerprint and authenticated bounded metadata reads.
 
-No production migration or activation. Revert code and remove disposable test authority/object data; a test migration restores its verified pre-migration fixture.
+A2a does not claim filesystem CAS, rights admission, deletion or `GRAG-028` completion.
+
+#### A2b — Governed rights, object admission and CAS lifecycle
+
+- immutable blob identity separated from use admission;
+- server-side rights decisions and exact allowed-use admission;
+- bounded streaming CAS, read-only installed bytes and pinned-FD verification;
+- authenticated purpose-bounded hydration;
+- transaction-time validity checks;
+- admission, revocation and deletion/tombstone events;
+- authoritative GC, recovery pins, reconciliation and fault-injection evidence.
+
+**Authority Foundation exit evidence:** authentication spoofing, caller authority rejection, capability derivation attacks, schema-contract drift, idempotent replay, current denial, stale versions, atomic migrations, schema tamper, event causality, object corruption/prohibited-rights/deletion cases and complete repository gates all pass. All A1/A2a/A2b reviews are clean before issue #80 closes.
+
+**Rollback:** No production migration or activation. Revert the affected review unit and remove disposable test authority/object data; a test migration restores its verified pre-migration fixture.
 
 ### B. Native graph foundation
 
-**Dependency:** A merged.
+**Dependency:** Authority Foundation merged and issue #80 closed.
 
 **Deliverables**
 
@@ -285,13 +320,9 @@ No production migration or activation. Revert code and remove disposable test au
 - actual Neo4j Community CI; and
 - deterministic structural wipe/rebuild proof.
 
-**Tests and exit evidence**
+**Tests and exit evidence:** duplicate delivery, required gaps, retry/dead-letter behaviour, validated generation activation, structural mapping allow-list, actual-service projection, credential isolation, graph wipe/rebuild and rejection of missing/fake/disabled graph profiles all pass.
 
-Duplicate delivery, required gaps, retry/dead-letter behaviour, validated generation activation, structural mapping allow-list, actual-service projection, credential isolation, graph wipe/rebuild and rejection of missing/fake/disabled graph profiles all pass.
-
-**Rollback**
-
-Revert code, remove the disposable graph and rebuild no authority. SQLite/object authority remains intact.
+**Rollback:** Revert code, remove the disposable graph and rebuild no authority. SQLite/object authority remains intact.
 
 ### C. Integrated foundation proof
 
@@ -307,13 +338,9 @@ Revert code, remove the disposable graph and rebuild no authority. SQLite/object
 - deletion/tombstone non-resurrection; and
 - negative production and complete-shadow profile tests.
 
-**Tests and exit evidence**
+**Tests and exit evidence:** the fixture traverses authority to governed structural projection, trust-labelled context and deterministic Candidate admission. There is no graph-free passing variant. Wipe/rebuild restores the projection without changing authority, and deletion prevents resurrection.
 
-The fixture traverses authority to governed structural projection, trust-labelled context and deterministic Candidate admission. There is no graph-free passing variant. Wipe/rebuild restores the projection without changing authority, and deletion prevents resurrection.
-
-**Rollback**
-
-Revert the fixture/proof code and remove disposable graph/index data. No source, model, publication or production state exists.
+**Rollback:** Revert the fixture/proof code and remove disposable graph/index data. No source, model, publication or production state exists.
 
 ### Epic-wide exclusions
 
@@ -324,9 +351,12 @@ No live source access, RSS/search/GDELT/Brave execution, Graphiti execution, mod
 | Item | Status | Required later evidence |
 |---|---|---|
 | Production command transport and principal provisioning | Needs experiment | Security design and integration evidence; no unauthenticated fallback. |
+| Production authentication method and credential lifecycle | Needs experiment | Rotation, revocation, expiry and incident evidence. |
+| Filesystem-type qualification for NFS/SMB/cloud-sync | Deferred | Platform-specific locking/durability tests; unresolved evidence blocks admission. |
 | Exact Neo4j Community version/image and read/write capability | Needs experiment | Pin, image provenance, licence/security and compensating-control tests. |
 | Neo4j backup procedure | Needs experiment | Offline dump/load plus authoritative rebuild drill. |
-| Numeric SQLite limits and operational thresholds | Deferred | Intended-hardware measurements and Operational Profile. |
+| Numeric SQLite/CAS limits and operational thresholds | Deferred | Intended-hardware measurements and Operational Profile. |
+| Read-access audit retention policy | Deferred | Security/privacy decision and bounded audit implementation. |
 | Final discovery, entity, relation, Evidence Intake and publication tables | Deferred | Later accepted designs and increments. |
 | Graphiti/model/prompt/embedding versions | Deferred | Rights, cost and Evaluation Plan approval. |
 | Full vector/full-text implementation, chunking and hybrid thresholds | Deferred | Later implementation and pre-registered ablation. |
@@ -334,17 +364,18 @@ No live source access, RSS/search/GDELT/Brave execution, Graphiti execution, mod
 | Shadow/canary/production values | Deferred | Evaluation Plan, Operational Admission and activation decision. |
 | Backup encryption, keys, cadence, RPO/RTO | Deferred | Hosting/risk decisions and restore drill. |
 
-## 8. Completion record
+## 8. Completion and correction record
 
-The product owner completed this readiness audit on 2026-07-16 after reviewing PR #78 and requiring these final corrections:
+The product owner completed this readiness audit on 2026-07-16 after reviewing PR #78. The 2026-07-17 corrective implementation review clarified, without reopening the accepted architecture, that:
 
 1. principal identity and permissions are server-derived from verified authentication and authorisation, never caller-controlled;
-2. audit and events retain authentication and authorisation provenance;
-3. idempotency uses a server-derived namespace plus a canonical semantic request digest covering command, aggregate, expected version, payload and authenticated authority context;
-4. UUIDv4 supplies identity only, while `ledger_seq` and explicit time fields supply order;
-5. Increment 1 is one epic with three stacked review boundaries rather than one unreviewable code PR;
-6. those boundaries are not product stages and create no graph-less qualifying profile;
-7. canonical discovery wording is source-portfolio-first, change-driven and natively GraphRAG; and
-8. PR #75 remains an open donor and is neither merged nor cherry-picked wholesale.
+2. audit and events retain resolvable authentication and authorisation provenance;
+3. idempotency uses a server-derived namespace plus stable semantic command identity, while every retry performs current authentication and authorisation and preserves original commit provenance;
+4. payload-schema contracts have explicit immutable identity and retained historical versions for the replay horizon;
+5. UUIDv4 supplies identity only, while `ledger_seq` and explicit time fields supply order;
+6. Authority Foundation uses A1, A2a and A2b review boundaries; these are not product stages and create no graph-less qualifying profile;
+7. filesystem checks enforce what the implementation can prove now, while filesystem-type qualification remains Deferred;
+8. canonical discovery wording is source-portfolio-first, change-driven and natively GraphRAG; and
+9. PR #75 remains an open donor and is neither merged nor cherry-picked wholesale.
 
-Increment 1 may start after this documentation pull request is merged. A separate Active GitHub epic owns implementation progress. PR #75 remains open unless a later owner decision closes or repurposes it.
+A separate Active GitHub epic owns implementation progress. Issue #81 remains blocked until A1, A2a and A2b have merged and issue #80 is closed. PR #75 remains open unless a later owner decision closes or repurposes it.
