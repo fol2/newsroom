@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+INCREMENT_1A_REVIEW_BOUNDARIES: tuple[str, ...] = (
+    "A1_COMMAND_AUTHENTICATION_AUTHORIZATION_CONTRACT",
+    "A2A_SQLITE_EVENT_AUTHORITY",
+    "A2B_GOVERNED_OBJECT_ADMISSION_AND_CAS",
+)
+
 INCREMENT_1A_TRACEABILITY: dict[str, tuple[str, ...]] = {
     "newsroom.authority.types": (
         "ADR-0001", "ADR-0002", "ADR-0004", "DREC-001", "DREC-002",
