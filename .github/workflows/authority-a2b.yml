@@ -1,0 +1,46 @@
+name: Authority A2b
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  focused-governed-object-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Lockfile Check
+        run: uv lock --check
+
+      - name: Sync (Dev)
+        run: uv sync --dev --locked
+
+      - name: Focused A2b Tests
+        id: focused
+        continue-on-error: true
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_authority_a2b_*.py \
+            --junitxml=a2b-results.xml
+
+      - name: Upload A2b Test Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authority-a2b-test-evidence
+          path: a2b-results.xml
+          if-no-files-found: error
+
+      - name: Enforce Focused Gate
+        if: steps.focused.outcome != 'success'
+        run: exit 1
