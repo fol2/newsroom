@@ -74,15 +74,19 @@ def test_later_work_remains_explicitly_excluded() -> None:
     }.issubset(INCREMENT_1A2B_EXCLUSIONS)
 
 
-def test_public_api_exposes_contracts_but_not_mutation_capabilities() -> None:
+def test_public_api_exposes_fail_closed_contracts_not_mutation_helpers() -> None:
     assert "ObjectAdmissionDefinition" in authority.__all__
     assert "StaticRightsResolver" in authority.__all__
+    assert "authorize_admission_preflight" in authority.__all__
+    assert "activate_admission_with_event" in authority.__all__
     prohibited = {
         "BlobStore",
         "GovernedObjectStore",
         "ObjectAuthorityStore",
         "AdmissionCommitCapability",
         "MaintenanceCommitCapability",
+        "prepare_admission",
+        "activate_admission_contract",
     }
     assert prohibited.isdisjoint(authority.__all__)
     for name in prohibited:
