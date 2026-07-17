@@ -102,7 +102,11 @@ class CommandService:
         self._admission_lookup = admission_lookup
         self._committed_lookup = committed_lookup
         self._clock = clock
-        self._issuer = _issuer or _CapabilityIssuer()
+        self._issuer = _issuer or _CapabilityIssuer(
+            command_registry=registry, payload_schemas=payload_schemas
+        )
+        if _issuer is not None:
+            self._issuer.bind_contracts(registry, payload_schemas)
         self._validate_replay_horizon()
 
     def _validate_replay_horizon(self) -> None:
