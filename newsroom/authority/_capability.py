@@ -39,12 +39,8 @@ class _ResolvedPayload:
             "kind": self.kind,
             "schema_version": self.schema_version,
             "digest": self.digest,
-            "inline_digest": (
-                None if self.inline_bytes is None else digest_bytes(self.inline_bytes)
-            ),
-            "object_admission_id": (
-                None if self.object_admission_id is None else str(self.object_admission_id)
-            ),
+            "inline_digest": None if self.inline_bytes is None else digest_bytes(self.inline_bytes),
+            "object_admission_id": None if self.object_admission_id is None else str(self.object_admission_id),
             "blob_digest": self.blob_digest,
             "object_class": self.object_class,
             "allowed_use": self.allowed_use,
@@ -163,29 +159,16 @@ class _CapabilityIssuer:
         return f"hmac-sha256:{mac.hexdigest()}"
 
     @staticmethod
-    def _verify_security(
-        authentication: _VerifiedAuthenticationContext,
-        request: _AuthorizationRequest,
-        authorization: _AuthorizationDecision,
-    ) -> None:
+    def _verify_security(authentication: _VerifiedAuthenticationContext, request: _AuthorizationRequest, authorization: _AuthorizationDecision) -> None:
         if request.request_digest != request.computed_digest:
             raise InvalidCommitCapability("authorization request digest changed")
-        if (
-            request.authentication_context_id
-            != authentication.authentication_context_id
-            or request.principal_id != authentication.principal_id
-            or request.authority_domain != authentication.authority_domain
-        ):
-            raise InvalidCommitCapability(
-                "authorization request is not bound to authentication provenance"
-            )
+        if request.authentication_context_id != authentication.authentication_context_id or request.principal_id != authentication.principal_id or request.authority_domain != authentication.authority_domain:
+            raise InvalidCommitCapability("authorization request is not bound to authentication provenance")
         if authorization.authentication_context_id != authentication.authentication_context_id:
             raise InvalidCommitCapability("authorization context mismatch")
         if authorization.authorization_request_digest != request.request_digest:
             raise InvalidCommitCapability("authorization request mismatch")
-        if authorization.effective_scope_digest != _effective_scope_digest(
-            authentication, authorization.effective_scopes
-        ):
+        if authorization.effective_scope_digest != _effective_scope_digest(authentication, authorization.effective_scopes):
             raise InvalidCommitCapability("authorization scope digest mismatch")
         if authorization.decided_at.value < authentication.authenticated_at.value:
             raise InvalidCommitCapability("authorization predates authentication")
@@ -196,69 +179,73 @@ class _CapabilityIssuer:
 
     def issue(self, **kwargs: Any) -> _AuthorizedCommandGrant:
         provisional = _AuthorizedCommandGrant(signature="", **kwargs)
-        return _AuthorizedCommandGrant(
-            signature=self._signature(provisional.unsigned_value()), **kwargs
-        )
+        return _AuthorizedCommandGrant(signature=self._signature(provisional.unsigned_value()), **kwargs)
 
     def verify(self, grant: _AuthorizedCommandGrant) -> None:
         if not isinstance(grant, _AuthorizedCommandGrant):
             raise InvalidCommitCapability("command commit requires an authorised grant")
-        if not hmac.compare_digest(
-            self._signature(grant.unsigned_value()), grant.signature
-        ):
+        if not hmac.compare_digest(self._signature(grant.unsigned_value()), grant.signature):
             raise InvalidCommitCapability("command capability signature mismatch")
-        self._verify_security(
-            grant.authentication, grant.authorization_request, grant.authorization
-        )
+        self._verify_security(grant.authentication, grant.authorization_request, grant.authorization)
+        request = grant.authorization_request
+        definition = grant.definition
+        payload = grant.payload
+        if not (
+            request.command_definition_digest == definition.digest
+            and request.stable_semantic_request_digest == grant.stable_semantic_request_digest
+            and request.aggregate_type == definition.aggregate_type
+            and request.aggregate_id == grant.aggregate_id
+            and request.event_type == definition.event_type
+            and request.event_schema_version == definition.event_schema_version
+            and request.payload_mode == definition.payload_mode.value
+            and request.payload_schema_version == definition.payload_schema_version
+            and request.trust_scope == definition.trust_scope.value
+            and request.security_scope == definition.security_scope
+            and request.retention_scope == definition.retention_scope
+            and request.object_class == definition.required_object_class
+            and request.allowed_use == definition.required_allowed_use
+            and grant.command_type == definition.command_type
+            and payload.kind == definition.payload_mode.value
+            and payload.schema_version == definition.payload_schema_version
+        ):
+            raise InvalidCommitCapability("command grant semantics do not match the authorised server definition")
 
     def issue_admission(self, **kwargs: Any) -> _AuthorizedAdmissionGrant:
         provisional = _AuthorizedAdmissionGrant(signature="", **kwargs)
-        return _AuthorizedAdmissionGrant(
-            signature=self._signature(provisional.unsigned_value()), **kwargs
-        )
+        return _AuthorizedAdmissionGrant(signature=self._signature(provisional.unsigned_value()), **kwargs)
 
     def verify_admission(self, grant: _AuthorizedAdmissionGrant) -> None:
         if not isinstance(grant, _AuthorizedAdmissionGrant):
             raise InvalidCommitCapability("object admission requires an authorised grant")
-        if not hmac.compare_digest(
-            self._signature(grant.unsigned_value()), grant.signature
-        ):
+        if not hmac.compare_digest(self._signature(grant.unsigned_value()), grant.signature):
             raise InvalidCommitCapability("object admission capability signature mismatch")
-        self._verify_security(
-            grant.authentication, grant.authorization_request, grant.authorization
-        )
+        self._verify_security(grant.authentication, grant.authorization_request, grant.authorization)
+        request = grant.authorization_request
+        if not (
+            request.stable_semantic_request_digest == grant.stable_semantic_request_digest
+            and request.aggregate_id == str(grant.admission_id)
+            and request.object_class == grant.definition.object_class
+            and request.allowed_use == grant.definition.allowed_use
+            and request.security_scope == grant.definition.security_scope
+            and request.retention_scope == grant.definition.retention_scope
+        ):
+            raise InvalidCommitCapability("admission grant semantics do not match the authorised use")
         if not grant.rights.allowed:
             raise InvalidCommitCapability("denied rights cannot create an admission")
-        if (
-            grant.rights.authentication_context_id
-            != str(grant.authentication.authentication_context_id)
-            or grant.rights.authorization_decision_id
-            != str(grant.authorization.authorization_decision_id)
-        ):
+        if grant.rights.authentication_context_id != str(grant.authentication.authentication_context_id) or grant.rights.authorization_decision_id != str(grant.authorization.authorization_decision_id):
             raise InvalidCommitCapability("rights provenance is not security-bound")
         if grant.rights.blob_digest != grant.blob_digest:
             raise InvalidCommitCapability("rights decision is not blob-bound")
-        if (
-            grant.rights.object_class != grant.definition.object_class
-            or grant.rights.allowed_use != grant.definition.allowed_use
-            or grant.rights.security_scope != grant.definition.security_scope
-            or grant.rights.retention_scope != grant.definition.retention_scope
-        ):
+        if grant.rights.object_class != grant.definition.object_class or grant.rights.allowed_use != grant.definition.allowed_use or grant.rights.security_scope != grant.definition.security_scope or grant.rights.retention_scope != grant.definition.retention_scope:
             raise InvalidCommitCapability("rights decision is not use-bound")
 
     def issue_maintenance(self, **kwargs: Any) -> _AuthorizedMaintenanceGrant:
         provisional = _AuthorizedMaintenanceGrant(signature="", **kwargs)
-        return _AuthorizedMaintenanceGrant(
-            signature=self._signature(provisional.unsigned_value()), **kwargs
-        )
+        return _AuthorizedMaintenanceGrant(signature=self._signature(provisional.unsigned_value()), **kwargs)
 
     def verify_maintenance(self, grant: _AuthorizedMaintenanceGrant) -> None:
         if not isinstance(grant, _AuthorizedMaintenanceGrant):
             raise InvalidCommitCapability("maintenance requires an authorised grant")
-        if not hmac.compare_digest(
-            self._signature(grant.unsigned_value()), grant.signature
-        ):
+        if not hmac.compare_digest(self._signature(grant.unsigned_value()), grant.signature):
             raise InvalidCommitCapability("maintenance capability signature mismatch")
-        self._verify_security(
-            grant.authentication, grant.authorization_request, grant.authorization
-        )
+        self._verify_security(grant.authentication, grant.authorization_request, grant.authorization)
