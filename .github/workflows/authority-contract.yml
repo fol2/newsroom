@@ -1,0 +1,37 @@
+name: Authority Contract
+
+on:
+  push:
+    paths:
+      - "newsroom/authority/**"
+      - "newsroom/tests/authority_*.py"
+      - "newsroom/tests/test_authority_*.py"
+      - "newsroom/tests/test_governed_*.py"
+      - ".github/workflows/authority-contract.yml"
+  pull_request:
+    paths:
+      - "newsroom/authority/**"
+      - "newsroom/tests/authority_*.py"
+      - "newsroom/tests/test_authority_*.py"
+      - "newsroom/tests/test_governed_*.py"
+      - ".github/workflows/authority-contract.yml"
+
+jobs:
+  authority-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+      - name: Sync (Dev)
+        run: uv sync --dev --locked
+      - name: Authority Contract Tests
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_authority_*.py \
+            newsroom/tests/test_governed_*.py
