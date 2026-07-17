@@ -95,6 +95,9 @@ class CommandDefinition:
     event_schema_version: int
     payload_mode: PayloadMode
     payload_schema_version: str
+    payload_schema_contract_version: str
+    payload_schema_contract_digest: str
+    payload_canonicalizer_version: str
     trust_scope: TrustScope
     security_scope: str
     retention_scope: str
@@ -109,6 +112,22 @@ class CommandDefinition:
         require_token(self.aggregate_type, field="aggregate_type")
         require_token(self.event_type, field="event_type")
         require_token(self.payload_schema_version, field="payload_schema_version")
+        require_token(
+            self.payload_schema_contract_version,
+            field="payload_schema_contract_version",
+        )
+        normalized = validate_sha256_digest(
+            self.payload_schema_contract_digest,
+            field="payload_schema_contract_digest",
+        )
+        if normalized != self.payload_schema_contract_digest:
+            raise CommandValidationError(
+                "payload schema contract digest must be canonical lowercase"
+            )
+        require_token(
+            self.payload_canonicalizer_version,
+            field="payload_canonicalizer_version",
+        )
         require_scope(self.security_scope, field="security_scope")
         require_scope(self.retention_scope, field="retention_scope")
         require_scope(self.required_scope, field="required_scope")
@@ -155,6 +174,11 @@ class CommandDefinition:
             "event_schema_version": self.event_schema_version,
             "payload_mode": self.payload_mode.value,
             "payload_schema_version": self.payload_schema_version,
+            "payload_schema_contract_version": (
+                self.payload_schema_contract_version
+            ),
+            "payload_schema_contract_digest": self.payload_schema_contract_digest,
+            "payload_canonicalizer_version": self.payload_canonicalizer_version,
             "trust_scope": self.trust_scope.value,
             "security_scope": self.security_scope,
             "retention_scope": self.retention_scope,
