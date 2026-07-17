@@ -1,8 +1,9 @@
-"""Public command-boundary contract for Newsroom authority Increment 1A1.
+"""Public authority contracts for Increment 1A1 and Increment 1A2a.
 
-Mutation-capable persistence, authentication contexts, authorization decisions,
-commit capabilities and blob storage are deliberately internal and are not
-exported from this package.
+Mutation-capable SQLite persistence, authentication contexts, authorization
+records, commit capabilities and retained payload bytes remain internal. Public
+application code receives authenticated command and policy-bound metadata
+facades only.
 """
 
 from .auth import (
@@ -31,6 +32,32 @@ from .models import (
     ObjectAdmissionPayload,
     SemanticCommand,
 )
+from .persistence import (
+    AuthenticationContextRecord,
+    AuthorityCommands,
+    AuthorityEvents,
+    AuthorityPersistenceError,
+    AuthoritySchemaError,
+    AuthorityWriterBusy,
+    AuthorizationDecisionRecord,
+    AuthorizationRequestRecord,
+    CommandDefinitionRecord,
+    CommandResultRecord,
+    CommittedCommand,
+    EventProvenanceRecord,
+    EventReadPolicy,
+    ExpectedVersionConflict,
+    IdempotencyConflict,
+    LedgerEventRecord,
+    MetadataClass,
+    PayloadId,
+    PayloadSchemaContractRecord,
+    ReadPolicyDenied,
+    SUCCESSFUL_READ_AUDIT_STATUS,
+    UnknownCausation,
+    UnsupportedPayloadMode,
+    projector_service_read_policy,
+)
 from .policy import (
     CommandRegistry,
     PayloadGoldenVector,
@@ -47,7 +74,12 @@ from .service import (
     IdempotencyIdentityConflict,
     ObjectAdmissionLookup,
 )
-from .traceability import INCREMENT_1A_TRACEABILITY
+from .system import AuthorityEventSystem, open_authority_event_system
+from .traceability import (
+    INCREMENT_1A_TRACEABILITY,
+    INCREMENT_1A2A_DEFERRED,
+    INCREMENT_1A2A_TRACEABILITY,
+)
 from .types import (
     AggregateId,
     AggregateVersion,
@@ -73,26 +105,46 @@ __all__ = [
     "AggregateVersion",
     "AuditId",
     "AuthenticationContextId",
+    "AuthenticationContextRecord",
     "AuthenticationError",
     "AuthenticationProof",
+    "AuthorityCommands",
+    "AuthorityEventSystem",
+    "AuthorityEvents",
+    "AuthorityPersistenceError",
+    "AuthoritySchemaError",
+    "AuthorityWriterBusy",
     "AuthorizationDecisionId",
+    "AuthorizationDecisionRecord",
     "AuthorizationDenied",
     "AuthorizationReceipt",
+    "AuthorizationRequestRecord",
     "CanonicalizationError",
     "CausationKind",
     "CausationRef",
     "CommandDefinition",
+    "CommandDefinitionRecord",
     "CommandId",
     "CommandRegistry",
+    "CommandResultRecord",
     "CommandService",
     "CommandValidationError",
+    "CommittedCommand",
     "CommittedCommandIdentity",
     "CommittedCommandLookup",
     "CorrelationId",
     "EventId",
+    "EventProvenanceRecord",
+    "EventReadPolicy",
+    "ExpectedVersionConflict",
     "INCREMENT_1A_TRACEABILITY",
+    "INCREMENT_1A2A_DEFERRED",
+    "INCREMENT_1A2A_TRACEABILITY",
+    "IdempotencyConflict",
     "IdempotencyIdentityConflict",
     "InlinePayload",
+    "LedgerEventRecord",
+    "MetadataClass",
     "NO_PAYLOAD",
     "NoPayload",
     "ObjectAdmissionDescriptor",
@@ -100,11 +152,15 @@ __all__ = [
     "ObjectAdmissionLookup",
     "ObjectAdmissionPayload",
     "PayloadGoldenVector",
+    "PayloadId",
     "PayloadMode",
     "PayloadSchemaContract",
+    "PayloadSchemaContractRecord",
     "PayloadSchemaRegistry",
     "PayloadSchemaValidationError",
+    "ReadPolicyDenied",
     "RightsDecisionId",
+    "SUCCESSFUL_READ_AUDIT_STATUS",
     "SemanticCommand",
     "StaticAuthenticator",
     "StaticAuthorizer",
@@ -112,11 +168,15 @@ __all__ = [
     "TemporalValue",
     "TimePrecision",
     "TrustScope",
+    "UnknownCausation",
     "UnknownCommandDefinition",
     "UnknownPayloadSchema",
+    "UnsupportedPayloadMode",
     "UtcTimestamp",
     "canonical_json_bytes",
     "digest_bytes",
     "digest_canonical",
+    "open_authority_event_system",
+    "projector_service_read_policy",
     "validate_sha256_digest",
 ]
