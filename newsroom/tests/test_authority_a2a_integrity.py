@@ -137,8 +137,8 @@ def test_aggregate_head_tamper_is_detected_on_restart(
     with open_test_system(database) as system:
         system.commands.execute(command(), proof=proof())
 
-    # Simulate an out-of-contract raw writer, then restore the exact schema so
-    # startup relational validation—not fingerprint drift—detects the damage.
+    # Simulate an out-of-contract raw writer, then restore the exact schema.
+    # The composite FK or the explicit head check must fail closed on reopen.
     conn = sqlite3.connect(database)
     try:
         conn.execute("PRAGMA foreign_keys=OFF")
@@ -158,7 +158,9 @@ def test_aggregate_head_tamper_is_detected_on_restart(
         conn.commit()
     finally:
         conn.close()
-    with pytest.raises(AuthoritySchemaError, match="aggregate head"):
+    with pytest.raises(
+        AuthoritySchemaError, match="foreign-key|aggregate head"
+    ):
         open_test_system(database)
 
 
