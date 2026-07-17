@@ -1,3 +1,5 @@
+"""Requirement evidence for the merged A1 contract and clean A2a review unit."""
+
 from __future__ import annotations
 
 INCREMENT_1A_TRACEABILITY: dict[str, tuple[str, ...]] = {
