@@ -33,6 +33,7 @@ from .models import (
 )
 from .policy import (
     CommandRegistry,
+    PayloadGoldenVector,
     PayloadSchemaContract,
     PayloadSchemaRegistry,
     PayloadSchemaValidationError,
@@ -98,6 +99,7 @@ __all__ = [
     "ObjectAdmissionId",
     "ObjectAdmissionLookup",
     "ObjectAdmissionPayload",
+    "PayloadGoldenVector",
     "PayloadMode",
     "PayloadSchemaContract",
     "PayloadSchemaRegistry",
