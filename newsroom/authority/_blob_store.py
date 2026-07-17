@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import BinaryIO, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
 import os
@@ -9,7 +9,7 @@ import shutil
 import stat
 import tempfile
 import time
-from typing import Iterator
+from typing import BinaryIO, Iterator
 
 from .canonical import validate_sha256_digest
 from .objects import ObjectIntegrityError, ObjectLimitError, ObjectLimits
@@ -280,7 +280,9 @@ class _BlobStore:
         else:
             descriptor = os.open(
                 target,
-                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
             )
             try:
                 os.fchmod(descriptor, 0o400)
@@ -303,7 +305,9 @@ class _BlobStore:
         target = self.path_for(blob_digest)
         descriptor = os.open(
             target,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
         )
         try:
             info = os.fstat(descriptor)
@@ -387,7 +391,11 @@ class _BlobStore:
         expected_size: int,
         require_read_only: bool,
     ) -> None:
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         descriptor = os.open(path, flags)
         try:
             info = os.fstat(descriptor)
