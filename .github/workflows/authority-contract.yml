@@ -31,7 +31,24 @@ jobs:
       - name: Sync (Dev)
         run: uv sync --dev --locked
       - name: Authority Contract Tests
+        shell: bash
         run: |
+          set +e
           uv run python -m pytest -q \
             newsroom/tests/test_authority_*.py \
-            newsroom/tests/test_governed_*.py
+            newsroom/tests/test_governed_*.py \
+            > authority-test.log 2>&1
+          status=$?
+          tail -n 300 authority-test.log > authority-test-tail.log
+          cat authority-test-tail.log
+          exit "$status"
+      - name: Upload Authority Failure Detail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authority-test-detail
+          path: |
+            authority-test.log
+            authority-test-tail.log
+          if-no-files-found: error
+          retention-days: 7
