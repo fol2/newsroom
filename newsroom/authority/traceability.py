@@ -40,6 +40,10 @@ INCREMENT_1A_TRACEABILITY: dict[str, tuple[str, ...]] = {
         "ADR-0001", "ADR-0002", "DREC-016", "DREC-070", "DREC-076",
         "GRAG-010", "GRAG-028", "GRPROD-005",
     ),
+    "newsroom.authority._object_system": (
+        "ADR-0001", "ADR-0002", "DREC-016", "GRAG-003", "GRAG-028",
+        "GRPROD-020",
+    ),
 }
 
 INCREMENT_1A_EVIDENCE: dict[str, tuple[str, ...]] = {
@@ -60,5 +64,6 @@ INCREMENT_1A_EVIDENCE: dict[str, tuple[str, ...]] = {
         "test_governed_blob_faults.py",
         "test_governed_object_validity.py",
         "test_governed_object_deletion.py",
+        "test_governed_object_reconciliation.py",
     ),
 }
