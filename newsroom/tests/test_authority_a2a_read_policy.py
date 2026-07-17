@@ -146,8 +146,12 @@ def test_projector_policy_seam_is_bounded_and_not_a_projector(
         committed = system.commands.execute(
             command(), proof=proof()
         )
-        assert len(
+        # The facade default is deliberately not allowed to widen a smaller
+        # server policy. The consumer must request an in-policy bound.
+        with pytest.raises(ReadPolicyDenied):
             system.events.after(0, proof=proof())
+        assert len(
+            system.events.after(0, limit=5, proof=proof())
         ) == 1
         assert system.events.provenance(
             committed.event_id, proof=proof()
