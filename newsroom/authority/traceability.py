@@ -41,3 +41,24 @@ INCREMENT_1A_TRACEABILITY: dict[str, tuple[str, ...]] = {
         "GRAG-010", "GRAG-028", "GRPROD-005",
     ),
 }
+
+INCREMENT_1A_EVIDENCE: dict[str, tuple[str, ...]] = {
+    "A1": (
+        "test_authority_boundary.py",
+        "test_authority_security_records.py",
+        "test_authority_idempotency_contract.py",
+        "test_authority_payload_contract.py",
+    ),
+    "A2a": (
+        "test_authority_event_persistence.py",
+        "test_authority_migrations_and_integrity.py",
+        "test_authority_concurrency_and_causation.py",
+    ),
+    "A2b": (
+        "test_governed_object_admission.py",
+        "test_governed_object_capability_binding.py",
+        "test_governed_blob_faults.py",
+        "test_governed_object_validity.py",
+        "test_governed_object_deletion.py",
+    ),
+}
