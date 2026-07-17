@@ -62,7 +62,8 @@ class EventReadPolicy:
 
     A public caller never supplies security/trust filters. The composed system
     binds one immutable policy to a facade and the store applies its bounds and
-    row filters.
+    row filters. Every collection is required to be a ``frozenset`` so trusted
+    composition cannot widen the policy in place after system startup.
     """
 
     policy_id: str
@@ -80,6 +81,17 @@ class EventReadPolicy:
         require_token(self.policy_id, field="event_read_policy_id")
         require_token(self.purpose, field="event_read_purpose")
         require_scope(self.required_scope, field="event_read_required_scope")
+        collection_fields = (
+            "allowed_principal_ids",
+            "allowed_security_scopes",
+            "allowed_trust_scopes",
+            "metadata_classes",
+        )
+        for field_name in collection_fields:
+            if not isinstance(getattr(self, field_name), frozenset):
+                raise ValueError(
+                    f"{field_name} must be an immutable frozenset"
+                )
         if not self.allowed_principal_ids:
             raise ValueError("event read policy requires at least one principal")
         for principal in self.allowed_principal_ids:
@@ -90,11 +102,17 @@ class EventReadPolicy:
             require_scope(scope, field="event_read_security_scope")
         if not self.allowed_trust_scopes:
             raise ValueError("event read policy requires trust scopes")
-        if not all(isinstance(value, TrustScope) for value in self.allowed_trust_scopes):
+        if not all(
+            isinstance(value, TrustScope)
+            for value in self.allowed_trust_scopes
+        ):
             raise ValueError("event read trust scopes must be typed")
         if not self.metadata_classes:
             raise ValueError("event read policy requires metadata classes")
-        if not all(isinstance(value, MetadataClass) for value in self.metadata_classes):
+        if not all(
+            isinstance(value, MetadataClass)
+            for value in self.metadata_classes
+        ):
             raise ValueError("metadata classes must be typed")
         if (
             isinstance(self.minimum_ledger_seq, bool)
@@ -114,7 +132,9 @@ class EventReadPolicy:
             or not isinstance(self.max_results, int)
             or not 1 <= self.max_results <= 1000
         ):
-            raise ValueError("event read result bound must be between 1 and 1000")
+            raise ValueError(
+                "event read result bound must be between 1 and 1000"
+            )
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -122,7 +142,9 @@ class EventReadPolicy:
             "purpose": self.purpose,
             "required_scope": self.required_scope,
             "allowed_principal_ids": sorted(self.allowed_principal_ids),
-            "allowed_security_scopes": sorted(self.allowed_security_scopes),
+            "allowed_security_scopes": sorted(
+                self.allowed_security_scopes
+            ),
             "allowed_trust_scopes": sorted(
                 value.value for value in self.allowed_trust_scopes
             ),
@@ -140,35 +162,50 @@ class EventReadPolicy:
 
     def require_principal(self, principal_id: str) -> None:
         if principal_id not in self.allowed_principal_ids:
-            raise ReadPolicyDenied("principal is outside the server read policy")
-
-    def require_metadata_class(self, metadata_class: MetadataClass) -> None:
-        if metadata_class not in self.metadata_classes:
             raise ReadPolicyDenied(
-                f"metadata class {metadata_class.value} is outside the server read policy"
+                "principal is outside the server read policy"
             )
 
-    def require_window(self, *, after_ledger_seq: int, limit: int) -> None:
+    def require_metadata_class(
+        self, metadata_class: MetadataClass
+    ) -> None:
+        if metadata_class not in self.metadata_classes:
+            raise ReadPolicyDenied(
+                f"metadata class {metadata_class.value} is outside "
+                "the server read policy"
+            )
+
+    def require_window(
+        self, *, after_ledger_seq: int, limit: int
+    ) -> None:
         if (
             isinstance(after_ledger_seq, bool)
             or not isinstance(after_ledger_seq, int)
             or after_ledger_seq < 0
         ):
-            raise ValueError("after_ledger_seq must be a non-negative integer")
+            raise ValueError(
+                "after_ledger_seq must be a non-negative integer"
+            )
         if after_ledger_seq < self.minimum_ledger_seq - 1:
-            raise ReadPolicyDenied("requested sequence precedes the policy window")
+            raise ReadPolicyDenied(
+                "requested sequence precedes the policy window"
+            )
         if (
             self.maximum_ledger_seq is not None
             and after_ledger_seq >= self.maximum_ledger_seq
         ):
-            raise ReadPolicyDenied("requested sequence is outside the policy window")
+            raise ReadPolicyDenied(
+                "requested sequence is outside the policy window"
+            )
         if (
             isinstance(limit, bool)
             or not isinstance(limit, int)
             or limit <= 0
             or limit > self.max_results
         ):
-            raise ReadPolicyDenied("requested result limit exceeds server policy")
+            raise ReadPolicyDenied(
+                "requested result limit exceeds server policy"
+            )
 
 
 def projector_service_read_policy(
@@ -221,6 +258,7 @@ class CommandDefinitionRecord:
     definition_digest: str
     command_type: str
     definition_version: str
+    payload_schema_contract_digest: str
     canonical_bytes: bytes
 
 
@@ -327,7 +365,9 @@ class AuthorityCommands:
 
     def __init__(
         self,
-        execute: Callable[[SemanticCommand, AuthenticationProof], CommittedCommand],
+        execute: Callable[
+            [SemanticCommand, AuthenticationProof], CommittedCommand
+        ],
     ) -> None:
         self.__execute = execute
 
@@ -351,9 +391,16 @@ class AuthorityEvents:
         self,
         *,
         policy_id: str,
-        read: Callable[[int, int, AuthenticationProof], tuple[LedgerEventRecord, ...]],
-        provenance: Callable[[str, AuthenticationProof], EventProvenanceRecord],
-        result: Callable[[str, AuthenticationProof], CommandResultRecord],
+        read: Callable[
+            [int, int, AuthenticationProof],
+            tuple[LedgerEventRecord, ...],
+        ],
+        provenance: Callable[
+            [str, AuthenticationProof], EventProvenanceRecord
+        ],
+        result: Callable[
+            [str, AuthenticationProof], CommandResultRecord
+        ],
     ) -> None:
         require_token(policy_id, field="event_read_policy_id")
         self.policy_id = policy_id
