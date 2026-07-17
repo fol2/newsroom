@@ -12,9 +12,14 @@ from ._security import (
     _VerifiedAuthenticationContext,
     _effective_scope_digest,
 )
-from .canonical import canonical_json_bytes, digest_bytes
+from .canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+    validate_sha256_digest,
+)
 from .models import CommandDefinition
-from .types import ObjectAdmissionId
+from .types import AggregateId, ObjectAdmissionId, PayloadMode
 
 
 class InvalidCommitCapability(PermissionError):
@@ -25,6 +30,9 @@ class InvalidCommitCapability(PermissionError):
 class _ResolvedPayload:
     kind: str
     schema_version: str
+    schema_contract_version: str
+    schema_contract_digest: str
+    canonicalizer_version: str
     digest: str
     inline_bytes: bytes | None
     object_admission_id: ObjectAdmissionId | None
@@ -36,12 +44,19 @@ class _ResolvedPayload:
         return {
             "kind": self.kind,
             "schema_version": self.schema_version,
+            "schema_contract_version": self.schema_contract_version,
+            "schema_contract_digest": self.schema_contract_digest,
+            "canonicalizer_version": self.canonicalizer_version,
             "digest": self.digest,
             "inline_digest": (
-                None if self.inline_bytes is None else digest_bytes(self.inline_bytes)
+                None
+                if self.inline_bytes is None
+                else digest_bytes(self.inline_bytes)
             ),
             "object_admission_id": (
-                None if self.object_admission_id is None else str(self.object_admission_id)
+                None
+                if self.object_admission_id is None
+                else str(self.object_admission_id)
             ),
             "blob_digest": self.blob_digest,
             "object_class": self.object_class,
@@ -79,18 +94,147 @@ class _AuthorizedCommandGrant:
             "definition_version": self.definition.definition_version,
             "payload": self.payload.canonical_value(),
             "authentication_context_digest": self.authentication.digest,
-            "authorization_request_record_digest": self.authorization_request.digest,
-            "authorization_request_digest": self.authorization_request.request_digest,
+            "authorization_request_record_digest": (
+                self.authorization_request.digest
+            ),
+            "authorization_request_digest": (
+                self.authorization_request.request_digest
+            ),
             "authorization_decision_digest": self.authorization.digest,
             "idempotency_namespace": self.idempotency_namespace,
             "idempotency_key": self.idempotency_key,
-            "stable_semantic_request_digest": self.stable_semantic_request_digest,
+            "stable_semantic_request_digest": (
+                self.stable_semantic_request_digest
+            ),
             "correlation_id": self.correlation_id,
             "causation_kind": self.causation_kind,
             "causation_identifier": self.causation_identifier,
             "causation_external_system": self.causation_external_system,
             "replay_of_command_id": self.replay_of_command_id,
         }
+
+
+def _derive_idempotency_namespace(
+    authentication: _VerifiedAuthenticationContext,
+    definition: CommandDefinition,
+) -> str:
+    return digest_canonical(
+        {
+            "authority_domain": authentication.authority_domain,
+            "principal_id": authentication.principal_id,
+            "command_type": definition.command_type,
+        }
+    )
+
+
+def _derive_stable_semantic_request_digest(
+    *,
+    definition: CommandDefinition,
+    aggregate_id: str,
+    expected_aggregate_version: int,
+    payload: _ResolvedPayload,
+) -> str:
+    return digest_canonical(
+        {
+            "command_type": definition.command_type,
+            "command_definition_version": definition.definition_version,
+            "command_definition_digest": definition.digest,
+            "aggregate_type": definition.aggregate_type,
+            "aggregate_id": aggregate_id,
+            "expected_aggregate_version": expected_aggregate_version,
+            "payload": payload.canonical_value(),
+        }
+    )
+
+
+def _validate_resolved_payload(
+    payload: _ResolvedPayload, definition: CommandDefinition
+) -> None:
+    if not isinstance(payload, _ResolvedPayload):
+        raise InvalidCommitCapability("commit payload must be resolved")
+    validate_sha256_digest(payload.digest, field="payload_digest")
+    validate_sha256_digest(
+        payload.schema_contract_digest,
+        field="payload_schema_contract_digest",
+    )
+    if (
+        payload.kind != definition.payload_mode.value
+        or payload.schema_version != definition.payload_schema_version
+        or payload.schema_contract_version
+        != definition.payload_schema_contract_version
+        or payload.schema_contract_digest
+        != definition.payload_schema_contract_digest
+        or payload.canonicalizer_version
+        != definition.payload_canonicalizer_version
+    ):
+        raise InvalidCommitCapability(
+            "resolved payload schema identity does not match server definition"
+        )
+
+    object_fields = (
+        payload.object_admission_id,
+        payload.blob_digest,
+        payload.object_class,
+        payload.allowed_use,
+    )
+    if definition.payload_mode is PayloadMode.INLINE:
+        if not isinstance(payload.inline_bytes, bytes):
+            raise InvalidCommitCapability(
+                "inline payload must retain immutable canonical bytes"
+            )
+        if any(value is not None for value in object_fields):
+            raise InvalidCommitCapability(
+                "inline payload cannot carry object-admission fields"
+            )
+        if digest_bytes(payload.inline_bytes) != payload.digest:
+            raise InvalidCommitCapability(
+                "inline payload digest does not match retained bytes"
+            )
+        if len(payload.inline_bytes) > definition.max_inline_bytes:
+            raise InvalidCommitCapability(
+                "inline payload exceeds server definition limit"
+            )
+        return
+
+    if definition.payload_mode is PayloadMode.NO_PAYLOAD:
+        if payload.inline_bytes != b"":
+            raise InvalidCommitCapability(
+                "NO_PAYLOAD must retain the exact empty payload"
+            )
+        if any(value is not None for value in object_fields):
+            raise InvalidCommitCapability(
+                "NO_PAYLOAD cannot carry object-admission fields"
+            )
+        if digest_bytes(b"") != payload.digest:
+            raise InvalidCommitCapability("NO_PAYLOAD digest is not empty")
+        return
+
+    if payload.inline_bytes is not None:
+        raise InvalidCommitCapability(
+            "object-admission payload cannot carry inline bytes"
+        )
+    if not isinstance(payload.object_admission_id, ObjectAdmissionId):
+        raise InvalidCommitCapability(
+            "object-admission payload requires typed admission identity"
+        )
+    if payload.blob_digest is None:
+        raise InvalidCommitCapability(
+            "object-admission payload requires blob digest"
+        )
+    normalized = validate_sha256_digest(
+        payload.blob_digest, field="blob_digest"
+    )
+    if normalized != payload.blob_digest or payload.digest != payload.blob_digest:
+        raise InvalidCommitCapability(
+            "object-admission payload digest is inconsistent"
+        )
+    if (
+        payload.object_class != definition.required_object_class
+        or payload.allowed_use != definition.required_allowed_use
+    ):
+        raise InvalidCommitCapability(
+            "object-admission payload class/use does not match server definition"
+        )
 
 
 class _CapabilityIssuer:
@@ -102,7 +246,9 @@ class _CapabilityIssuer:
             raise ValueError("capability secret must be at least 256 bits")
 
     def _signature(self, value: dict[str, Any]) -> str:
-        mac = hmac.new(self._secret, canonical_json_bytes(value), hashlib.sha256)
+        mac = hmac.new(
+            self._secret, canonical_json_bytes(value), hashlib.sha256
+        )
         return f"hmac-sha256:{mac.hexdigest()}"
 
     def issue(self, **kwargs: Any) -> _AuthorizedCommandGrant:
@@ -113,64 +259,126 @@ class _CapabilityIssuer:
 
     def verify(self, grant: _AuthorizedCommandGrant) -> None:
         if not isinstance(grant, _AuthorizedCommandGrant):
-            raise InvalidCommitCapability("commit requires an authorised command grant")
+            raise InvalidCommitCapability(
+                "commit requires an authorised command grant"
+            )
         expected = self._signature(grant.unsigned_value())
         if not hmac.compare_digest(expected, grant.signature):
-            raise InvalidCommitCapability("commit capability signature mismatch")
+            raise InvalidCommitCapability(
+                "commit capability signature mismatch"
+            )
+
         request = grant.authorization_request
         definition = grant.definition
-        payload = grant.payload
+        authentication = grant.authentication
+        authorization = grant.authorization
+
+        AggregateId.parse(grant.aggregate_id)
+        if (
+            isinstance(grant.expected_aggregate_version, bool)
+            or not isinstance(grant.expected_aggregate_version, int)
+            or grant.expected_aggregate_version < 0
+        ):
+            raise InvalidCommitCapability(
+                "grant expected version must be a non-negative integer"
+            )
+        if (
+            not isinstance(grant.idempotency_key, str)
+            or not grant.idempotency_key.strip()
+            or len(grant.idempotency_key.encode("utf-8")) > 256
+        ):
+            raise InvalidCommitCapability("grant idempotency key is invalid")
+
+        authentication.require_current(authorization.decided_at)
         if request.request_digest != request.computed_digest:
-            raise InvalidCommitCapability("authorization request digest changed")
+            raise InvalidCommitCapability(
+                "authorization request digest changed"
+            )
         if (
             request.authentication_context_id
-            != grant.authentication.authentication_context_id
-            or request.principal_id != grant.authentication.principal_id
-            or request.authority_domain != grant.authentication.authority_domain
+            != authentication.authentication_context_id
+            or request.principal_id != authentication.principal_id
+            or request.authority_domain != authentication.authority_domain
         ):
             raise InvalidCommitCapability(
-                "authorization request is not bound to the authentication context"
+                "authorization request is not bound to authentication context"
             )
-        if grant.authorization.authentication_context_id != grant.authentication.authentication_context_id:
-            raise InvalidCommitCapability(
-                "authorization decision is not bound to the authentication context"
-            )
-        if grant.authorization.authorization_request_digest != request.request_digest:
-            raise InvalidCommitCapability(
-                "authorization decision is not bound to the exact request"
-            )
-        if grant.authorization.effective_scope_digest != _effective_scope_digest(
-            grant.authentication, grant.authorization.effective_scopes
+        if (
+            authorization.authentication_context_id
+            != authentication.authentication_context_id
         ):
             raise InvalidCommitCapability(
-                "authorization scope digest is not bound to authentication provenance"
+                "authorization decision is not bound to authentication context"
             )
-        if grant.authorization.decided_at.value < grant.authentication.authenticated_at.value:
-            raise InvalidCommitCapability("authorization predates authentication")
-        if grant.authorization.decided_at.value >= grant.authentication.expires_at.value:
-            raise InvalidCommitCapability("authorization occurred after authentication expiry")
-        if not grant.authorization.allowed:
-            raise InvalidCommitCapability("denied authorization cannot create a grant")
+        if (
+            authorization.authorization_request_digest
+            != request.request_digest
+        ):
+            raise InvalidCommitCapability(
+                "authorization decision is not bound to exact request"
+            )
+        if authorization.effective_scope_digest != _effective_scope_digest(
+            authentication, authorization.effective_scopes
+        ):
+            raise InvalidCommitCapability(
+                "authorization scopes are not bound to authentication provenance"
+            )
+        if not authorization.allowed:
+            raise InvalidCommitCapability(
+                "denied authorization cannot create a grant"
+            )
+
+        _validate_resolved_payload(grant.payload, definition)
+        expected_namespace = _derive_idempotency_namespace(
+            authentication, definition
+        )
+        expected_semantic_digest = _derive_stable_semantic_request_digest(
+            definition=definition,
+            aggregate_id=grant.aggregate_id,
+            expected_aggregate_version=grant.expected_aggregate_version,
+            payload=grant.payload,
+        )
+        expected_operation = f"command:{definition.command_type}"
+
+        if grant.idempotency_namespace != expected_namespace:
+            raise InvalidCommitCapability(
+                "idempotency namespace was not server-derived"
+            )
+        if (
+            grant.stable_semantic_request_digest
+            != expected_semantic_digest
+        ):
+            raise InvalidCommitCapability(
+                "stable semantic request digest was not server-derived"
+            )
         expected_semantics = (
-            request.command_definition_digest == definition.digest
+            grant.command_type == definition.command_type
+            and request.operation_type == expected_operation
+            and request.required_scope == definition.required_scope
+            and request.command_definition_digest == definition.digest
             and request.stable_semantic_request_digest
-            == grant.stable_semantic_request_digest
+            == expected_semantic_digest
             and request.aggregate_type == definition.aggregate_type
             and request.aggregate_id == grant.aggregate_id
             and request.event_type == definition.event_type
-            and request.event_schema_version == definition.event_schema_version
+            and request.event_schema_version
+            == definition.event_schema_version
             and request.payload_mode == definition.payload_mode.value
-            and request.payload_schema_version == definition.payload_schema_version
+            and request.payload_schema_version
+            == definition.payload_schema_version
+            and request.payload_schema_contract_version
+            == definition.payload_schema_contract_version
+            and request.payload_schema_contract_digest
+            == definition.payload_schema_contract_digest
+            and request.payload_canonicalizer_version
+            == definition.payload_canonicalizer_version
             and request.trust_scope == definition.trust_scope.value
             and request.security_scope == definition.security_scope
             and request.retention_scope == definition.retention_scope
             and request.object_class == definition.required_object_class
             and request.allowed_use == definition.required_allowed_use
-            and grant.command_type == definition.command_type
-            and payload.kind == definition.payload_mode.value
-            and payload.schema_version == definition.payload_schema_version
         )
         if not expected_semantics:
             raise InvalidCommitCapability(
-                "commit grant semantics do not match the authorised server definition"
+                "commit grant semantics do not match authorised server definition"
             )
