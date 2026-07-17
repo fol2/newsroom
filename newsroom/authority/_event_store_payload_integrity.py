@@ -3,7 +3,11 @@ from __future__ import annotations
 import sqlite3
 
 from .canonical import digest_bytes, validate_sha256_digest
-from .persistence import AuthorityPersistenceError, UnsupportedPayloadMode
+from .persistence import (
+    AuthorityPersistenceError,
+    PayloadId,
+    UnsupportedPayloadMode,
+)
 from .types import (
     AggregateId,
     AuthenticationContextId,
@@ -31,6 +35,7 @@ class _PayloadAndEnvelopeIntegrity:
         for row in conn.execute(
             "SELECT * FROM authority_payloads"
         ).fetchall():
+            PayloadId.parse(str(row["payload_id"]))
             mode = PayloadMode(str(row["mode"]))
             if mode is PayloadMode.OBJECT_ADMISSION:
                 raise UnsupportedPayloadMode(
@@ -97,6 +102,7 @@ class _PayloadAndEnvelopeIntegrity:
             )
         EventId.parse(str(row["event_id"]))
         CommandId.parse(str(row["command_id"]))
+        PayloadId.parse(str(row["payload_id"]))
         AggregateId.parse(str(row["aggregate_id"]))
         AuthenticationContextId.parse(
             str(row["authentication_context_id"])
