@@ -24,21 +24,29 @@ from .types import (
 
 @dataclass(frozen=True, slots=True)
 class AuthenticationProof:
-    """Untrusted transport proof supplied by a caller."""
+    """Untrusted transport proof supplied by a caller.
+
+    The raw credential is deliberately excluded from repr to avoid accidental
+    token disclosure through debug logging and exception rendering.
+    """
 
     method: str
-    credential: str
+    credential: str = field(repr=False)
     untrusted_claims: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         require_token(self.method, field="authentication method")
         if not isinstance(self.credential, str) or not self.credential:
-            raise AuthenticationError("authentication credential must be non-empty")
+            raise AuthenticationError(
+                "authentication credential must be non-empty"
+            )
         if not isinstance(self.untrusted_claims, Mapping):
             raise AuthenticationError("untrusted claims must be a mapping")
         for key, value in self.untrusted_claims.items():
             if not isinstance(key, str) or not isinstance(value, str):
-                raise AuthenticationError("untrusted claim names and values must be strings")
+                raise AuthenticationError(
+                    "untrusted claim names and values must be strings"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +59,9 @@ class StaticPrincipal:
         require_token(self.principal_id, field="principal_id")
         require_token(self.assurance_class, field="assurance_class")
         if self.credential_binding_id is not None:
-            require_token(self.credential_binding_id, field="credential_binding_id")
+            require_token(
+                self.credential_binding_id, field="credential_binding_id"
+            )
 
     def binding_id(self) -> str:
         return self.credential_binding_id or f"static:{self.principal_id}"
@@ -69,7 +79,9 @@ class StaticAuthenticator:
         ttl_seconds: int = 300,
     ) -> None:
         if not credentials:
-            raise ValueError("static authenticator requires at least one credential")
+            raise ValueError(
+                "static authenticator requires at least one credential"
+            )
         require_token(authority_domain, field="authority_domain")
         require_token(method, field="method")
         if ttl_seconds <= 0:
@@ -89,7 +101,9 @@ class StaticAuthenticator:
         principal = self._credentials.get(proof.credential)
         if principal is None:
             raise AuthenticationError("invalid authentication credential")
-        expires_at = UtcTimestamp(now.value + timedelta(seconds=self._ttl_seconds))
+        expires_at = UtcTimestamp(
+            now.value + timedelta(seconds=self._ttl_seconds)
+        )
         return _VerifiedAuthenticationContext(
             authentication_context_id=AuthenticationContextId.new(),
             principal_id=principal.principal_id,
@@ -140,47 +154,37 @@ class StaticAuthorizer:
         *,
         now: UtcTimestamp,
     ) -> _AuthorizationDecision:
+        context.require_current(now)
         if request.authentication_context_id != context.authentication_context_id:
-            decision = _AuthorizationDecision(
-                authorization_decision_id=AuthorizationDecisionId.new(),
-                authentication_context_id=context.authentication_context_id,
-                authorization_request_digest=request.request_digest,
-                authorization_policy_version=self._policy_version,
-                effective_scopes=(),
-                effective_scope_digest=_effective_scope_digest(context, ()),
-                allowed=False,
-                reason_code="AUTHZ_CONTEXT_MISMATCH",
-                decided_at=now,
+            decision = self._denial(
+                context,
+                request,
+                now=now,
+                reason="AUTHZ_CONTEXT_MISMATCH",
             )
             raise AuthorizationDenied(decision)
         if request.principal_id != context.principal_id:
-            decision = _AuthorizationDecision(
-                authorization_decision_id=AuthorizationDecisionId.new(),
-                authentication_context_id=context.authentication_context_id,
-                authorization_request_digest=request.request_digest,
-                authorization_policy_version=self._policy_version,
-                effective_scopes=(),
-                effective_scope_digest=_effective_scope_digest(context, ()),
-                allowed=False,
-                reason_code="AUTHZ_PRINCIPAL_MISMATCH",
-                decided_at=now,
+            decision = self._denial(
+                context,
+                request,
+                now=now,
+                reason="AUTHZ_PRINCIPAL_MISMATCH",
             )
             raise AuthorizationDenied(decision)
         if request.authority_domain != context.authority_domain:
-            decision = _AuthorizationDecision(
-                authorization_decision_id=AuthorizationDecisionId.new(),
-                authentication_context_id=context.authentication_context_id,
-                authorization_request_digest=request.request_digest,
-                authorization_policy_version=self._policy_version,
-                effective_scopes=(),
-                effective_scope_digest=_effective_scope_digest(context, ()),
-                allowed=False,
-                reason_code="AUTHZ_DOMAIN_MISMATCH",
-                decided_at=now,
+            decision = self._denial(
+                context,
+                request,
+                now=now,
+                reason="AUTHZ_DOMAIN_MISMATCH",
             )
             raise AuthorizationDenied(decision)
         scopes = tuple(
-            sorted(self._grants_by_principal.get(context.principal_id, frozenset()))
+            sorted(
+                self._grants_by_principal.get(
+                    context.principal_id, frozenset()
+                )
+            )
         )
         allowed = request.required_scope in scopes
         reason = "AUTHZ_ALLOWED" if allowed else "AUTHZ_SCOPE_MISSING"
@@ -192,6 +196,26 @@ class StaticAuthorizer:
             effective_scopes=scopes,
             effective_scope_digest=_effective_scope_digest(context, scopes),
             allowed=allowed,
+            reason_code=reason,
+            decided_at=now,
+        )
+
+    def _denial(
+        self,
+        context: _VerifiedAuthenticationContext,
+        request: _AuthorizationRequest,
+        *,
+        now: UtcTimestamp,
+        reason: str,
+    ) -> _AuthorizationDecision:
+        return _AuthorizationDecision(
+            authorization_decision_id=AuthorizationDecisionId.new(),
+            authentication_context_id=context.authentication_context_id,
+            authorization_request_digest=request.request_digest,
+            authorization_policy_version=self._policy_version,
+            effective_scopes=(),
+            effective_scope_digest=_effective_scope_digest(context, ()),
+            allowed=False,
             reason_code=reason,
             decided_at=now,
         )
