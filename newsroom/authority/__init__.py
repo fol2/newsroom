@@ -32,6 +32,10 @@ from .models import (
     ObjectAdmissionPayload,
     SemanticCommand,
 )
+from .object_boundary import (
+    activate_admission_with_event,
+    authorize_admission_preflight,
+)
 from .object_policy import (
     AdmissionPreflight,
     ObjectAdmissionRegistry,
@@ -39,8 +43,6 @@ from .object_policy import (
     StaticRightsResolver,
     StaticRightsRule,
     UnknownObjectAdmissionDefinition,
-    activate_admission_contract,
-    prepare_admission,
 )
 from .object_traceability import (
     INCREMENT_1A2B_EXCLUSIONS,
@@ -249,12 +251,12 @@ __all__ = [
     "UnknownPayloadSchema",
     "UnsupportedPayloadMode",
     "UtcTimestamp",
-    "activate_admission_contract",
+    "activate_admission_with_event",
+    "authorize_admission_preflight",
     "canonical_json_bytes",
     "digest_bytes",
     "digest_canonical",
     "open_authority_event_system",
-    "prepare_admission",
     "projector_service_read_policy",
     "validate_sha256_digest",
 ]
