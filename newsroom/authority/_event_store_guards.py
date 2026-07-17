@@ -3,10 +3,10 @@ from __future__ import annotations
 import sqlite3
 
 from ._capability import _AuthorizedCommandGrant
-from ._security import _effective_scope_digest
-from .canonical import canonical_json_bytes, digest_canonical
+from .canonical import canonical_json_bytes, digest_bytes, digest_canonical
 from .persistence import (
     AuthorityPersistenceError,
+    CommandDefinitionRecord,
     EventProvenanceRecord,
     EventReadPolicy,
 )
@@ -15,6 +15,36 @@ from .types import UtcTimestamp
 
 class _ExactAuthorityGuards:
     """Cross-record checks that cannot be expressed by IDs or FKs alone."""
+
+    def _definition_record_from_row(
+        self, row: sqlite3.Row
+    ) -> CommandDefinitionRecord:
+        data = bytes(row["canonical_bytes"])
+        value = self._decode_canonical(data)  # type: ignore[attr-defined]
+        digest = str(row["definition_digest"])
+        schema_digest = str(row["payload_schema_contract_digest"])
+        if digest_bytes(data) != digest:
+            raise AuthorityPersistenceError(
+                "stored command definition digest mismatch"
+            )
+        if (
+            not isinstance(value, dict)
+            or value.get("command_type") != str(row["command_type"])
+            or value.get("definition_version")
+            != str(row["definition_version"])
+            or value.get("payload_schema_contract_digest")
+            != schema_digest
+        ):
+            raise AuthorityPersistenceError(
+                "stored command definition fields mismatch"
+            )
+        return CommandDefinitionRecord(
+            definition_digest=digest,
+            command_type=str(row["command_type"]),
+            definition_version=str(row["definition_version"]),
+            payload_schema_contract_digest=schema_digest,
+            canonical_bytes=data,
+        )
 
     def _persist_security(
         self,
