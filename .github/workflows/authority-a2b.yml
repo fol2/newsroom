@@ -41,6 +41,19 @@ jobs:
           path: a2b-results.xml
           if-no-files-found: error
 
+      - name: Export corrective worktree
+        if: always()
+        run: |
+          git archive --format=tar.gz --output=newsroom-a2b-worktree.tar.gz HEAD
+
+      - name: Upload corrective worktree
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authority-a2b-worktree
+          path: newsroom-a2b-worktree.tar.gz
+          if-no-files-found: error
+
       - name: Enforce Focused Gate
         if: steps.focused.outcome != 'success'
         run: exit 1
