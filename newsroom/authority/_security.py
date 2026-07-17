@@ -46,17 +46,25 @@ class _VerifiedAuthenticationContext:
             self.credential_binding_digest, field="credential_binding_digest"
         )
         if normalized != self.credential_binding_digest:
-            raise AuthenticationError("credential binding digest must be canonical lowercase")
+            raise AuthenticationError(
+                "credential binding digest must be canonical lowercase"
+            )
         if not isinstance(self.authenticated_at, UtcTimestamp) or not isinstance(
             self.expires_at, UtcTimestamp
         ):
-            raise AuthenticationError("authentication validity times must be typed UTC values")
+            raise AuthenticationError(
+                "authentication validity times must be typed UTC values"
+            )
         if self.expires_at.value <= self.authenticated_at.value:
-            raise AuthenticationError("authentication expiry must follow authentication time")
+            raise AuthenticationError(
+                "authentication expiry must follow authentication time"
+            )
 
     def require_current(self, now: UtcTimestamp) -> None:
         if not isinstance(now, UtcTimestamp):
             raise AuthenticationError("current time must be a typed UTC value")
+        if now.value < self.authenticated_at.value:
+            raise AuthenticationError("authentication context is not yet valid")
         if now.value >= self.expires_at.value:
             raise AuthenticationError("authentication context has expired")
 
@@ -92,6 +100,9 @@ class _AuthorizationRequest:
     event_schema_version: int
     payload_mode: str
     payload_schema_version: str
+    payload_schema_contract_version: str
+    payload_schema_contract_digest: str
+    payload_canonicalizer_version: str
     trust_scope: str
     security_scope: str
     retention_scope: str
@@ -125,6 +136,18 @@ class _AuthorizationRequest:
             raise ValueError("event_schema_version must be positive")
         require_token(self.payload_mode, field="payload_mode")
         require_token(self.payload_schema_version, field="payload_schema_version")
+        require_token(
+            self.payload_schema_contract_version,
+            field="payload_schema_contract_version",
+        )
+        validate_sha256_digest(
+            self.payload_schema_contract_digest,
+            field="payload_schema_contract_digest",
+        )
+        require_token(
+            self.payload_canonicalizer_version,
+            field="payload_canonicalizer_version",
+        )
         require_token(self.trust_scope, field="trust_scope")
         require_scope(self.security_scope, field="security_scope")
         require_scope(self.retention_scope, field="retention_scope")
@@ -132,9 +155,13 @@ class _AuthorizationRequest:
             require_token(self.object_class, field="object_class")
         if self.allowed_use is not None:
             require_token(self.allowed_use, field="allowed_use")
-        validate_sha256_digest(self.request_digest, field="authorization_request_digest")
+        validate_sha256_digest(
+            self.request_digest, field="authorization_request_digest"
+        )
         if self.request_digest != self.computed_digest:
-            raise ValueError("authorization request digest does not match exact request")
+            raise ValueError(
+                "authorization request digest does not match exact request"
+            )
 
     def unsigned_value(self) -> dict[str, Any]:
         return {
@@ -151,6 +178,11 @@ class _AuthorizationRequest:
             "event_schema_version": self.event_schema_version,
             "payload_mode": self.payload_mode,
             "payload_schema_version": self.payload_schema_version,
+            "payload_schema_contract_version": (
+                self.payload_schema_contract_version
+            ),
+            "payload_schema_contract_digest": self.payload_schema_contract_digest,
+            "payload_canonicalizer_version": self.payload_canonicalizer_version,
             "trust_scope": self.trust_scope,
             "security_scope": self.security_scope,
             "retention_scope": self.retention_scope,
@@ -205,7 +237,9 @@ class _AuthorizationDecision:
             self.effective_scope_digest, field="effective_scope_digest"
         )
         if normalized != self.effective_scope_digest:
-            raise ValueError("effective scope digest must be canonical lowercase")
+            raise ValueError(
+                "effective scope digest must be canonical lowercase"
+            )
         if not isinstance(self.allowed, bool):
             raise ValueError("authorization allowed value must be boolean")
         require_token(self.reason_code, field="authorization_reason_code")
