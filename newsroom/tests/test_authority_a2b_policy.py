@@ -10,6 +10,7 @@ from newsroom.authority import (
     AuthenticationContextId,
     AuthorizationDecisionId,
     BlobState,
+    EventId,
     ImmutableBlobIdentity,
     ObjectAdmissionDefinition,
     ObjectAdmissionDenied,
@@ -19,9 +20,9 @@ from newsroom.authority import (
     StaticRightsResolver,
     StaticRightsRule,
     UtcTimestamp,
-    activate_admission_contract,
+    activate_admission_with_event,
+    authorize_admission_preflight,
     digest_canonical,
-    prepare_admission,
 )
 
 from .authority_helpers import FIXED_NOW
@@ -117,8 +118,10 @@ def test_registry_retains_historical_admission_definitions() -> None:
         )
 
 
-def test_known_denial_preflight_accepts_no_bytes_digest_or_source() -> None:
-    parameters = set(inspect.signature(prepare_admission).parameters)
+def test_known_denial_fails_closed_before_bytes_digest_or_source() -> None:
+    parameters = set(
+        inspect.signature(authorize_admission_preflight).parameters
+    )
     assert {
         "data",
         "bytes",
@@ -129,21 +132,35 @@ def test_known_denial_preflight_accepts_no_bytes_digest_or_source() -> None:
     }.isdisjoint(parameters)
 
     selected = definition()
-    preflight = prepare_admission(
+    with pytest.raises(ObjectAdmissionDenied, match="PROHIBITED"):
+        authorize_admission_preflight(
+            registry=ObjectAdmissionRegistry([selected]),
+            rights_resolver=resolver(allowed=False),
+            request=ObjectAdmissionRequest(
+                admission_type="source.capture",
+                idempotency_key="deny-before-stage",
+            ),
+            principal_id="principal.alpha",
+            authority_domain="newsroom.authority",
+            now=FIXED_NOW,
+        )
+
+
+def test_allowed_preflight_returns_server_required_scope() -> None:
+    selected = definition()
+    preflight = authorize_admission_preflight(
         registry=ObjectAdmissionRegistry([selected]),
-        rights_resolver=resolver(allowed=False),
+        rights_resolver=resolver(),
         request=ObjectAdmissionRequest(
             admission_type="source.capture",
-            idempotency_key="deny-before-stage",
+            idempotency_key="allowed-before-stage",
         ),
         principal_id="principal.alpha",
         authority_domain="newsroom.authority",
         now=FIXED_NOW,
     )
     assert preflight.required_write_scope == "authority.objects.admit"
-    assert not preflight.rights.allowed
-    with pytest.raises(ObjectAdmissionDenied, match="PROHIBITED"):
-        preflight.require_allowed()
+    assert preflight.rights.allowed
 
 
 def test_exact_rights_decision_binds_blob_use_and_security_provenance() -> None:
@@ -172,10 +189,11 @@ def test_denied_and_expired_rights_cannot_activate() -> None:
     selected = definition()
     denied = decide(selected, selected_resolver=resolver(allowed=False))
     with pytest.raises(ObjectAdmissionDenied, match="PROHIBITED"):
-        activate_admission_contract(
+        activate_admission_with_event(
             definition=selected,
             blob=BLOB,
             rights=denied,
+            activation_event_id=EventId.new(),
             now=FIXED_NOW,
         )
 
@@ -184,12 +202,36 @@ def test_denied_and_expired_rights_cannot_activate() -> None:
         FIXED_NOW.value + timedelta(seconds=300)
     )
     with pytest.raises(ObjectAdmissionDenied, match="EXPIRED"):
-        activate_admission_contract(
+        activate_admission_with_event(
             definition=selected,
             blob=BLOB,
             rights=allowed,
+            activation_event_id=EventId.new(),
             now=after_expiry,
         )
+
+
+def test_active_admission_contract_requires_ordered_event_identity() -> None:
+    selected = definition()
+    rights = decide(selected)
+    with pytest.raises(ObjectPolicyError, match="event"):
+        activate_admission_with_event(
+            definition=selected,
+            blob=BLOB,
+            rights=rights,
+            activation_event_id="not-an-event",  # type: ignore[arg-type]
+            now=FIXED_NOW,
+        )
+    event_id = EventId.new()
+    receipt = activate_admission_with_event(
+        definition=selected,
+        blob=BLOB,
+        rights=rights,
+        activation_event_id=event_id,
+        now=FIXED_NOW,
+    )
+    assert receipt.active
+    assert receipt.activation_event_id == event_id
 
 
 def test_same_blob_supports_distinct_governed_use_admissions() -> None:
@@ -210,16 +252,18 @@ def test_same_blob_supports_distinct_governed_use_admissions() -> None:
     publish_rights = decide(
         publishing, selected_resolver=selected_resolver
     )
-    discovery_admission = activate_admission_contract(
+    discovery_admission = activate_admission_with_event(
         definition=discovery,
         blob=BLOB,
         rights=discovery_rights,
+        activation_event_id=EventId.new(),
         now=FIXED_NOW,
     )
-    publish_admission = activate_admission_contract(
+    publish_admission = activate_admission_with_event(
         definition=publishing,
         blob=BLOB,
         rights=publish_rights,
+        activation_event_id=EventId.new(),
         now=FIXED_NOW,
     )
 
@@ -238,10 +282,11 @@ def test_activation_rejects_rights_for_another_definition_or_blob() -> None:
     rights = decide(selected)
     other_definition = definition(allowed_use="publish.article")
     with pytest.raises(ObjectPolicyError, match="definition"):
-        activate_admission_contract(
+        activate_admission_with_event(
             definition=other_definition,
             blob=BLOB,
             rights=rights,
+            activation_event_id=EventId.new(),
             now=FIXED_NOW,
         )
 
@@ -250,9 +295,10 @@ def test_activation_rejects_rights_for_another_definition_or_blob() -> None:
         size_bytes=BLOB.size_bytes,
     )
     with pytest.raises(ObjectPolicyError, match="blob"):
-        activate_admission_contract(
+        activate_admission_with_event(
             definition=selected,
             blob=other_blob,
             rights=rights,
+            activation_event_id=EventId.new(),
             now=FIXED_NOW,
         )
