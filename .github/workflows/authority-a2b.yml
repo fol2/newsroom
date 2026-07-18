@@ -13,11 +13,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: agent/increment-1a2b-object-lifecycle
           fetch-depth: 0
           persist-credentials: true
 
       - name: Restore exact verified A2b source from branch history
-        if: github.event_name == 'push'
         shell: bash
         run: |
           set -euo pipefail
