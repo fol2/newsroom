@@ -1,0 +1,60 @@
+name: Restore verified A2b source from history
+
+on:
+  push:
+    branches:
+      - agent/increment-1a2b-object-lifecycle
+    paths:
+      - .github/workflows/a2b-restore-history.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: a2b-restore-history
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1a2b-object-lifecycle
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Recover and verify exact historical source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit=b806e62802a67ddedfbc58f4e1ee8ad4a53a2ff2
+          for part in 000 001 002; do
+            git show "$source_commit:.github/a2b-clean-source/part-$part" > "/tmp/part-$part"
+          done
+          cat /tmp/part-000 /tmp/part-001 /tmp/part-002 | base64 -d > /tmp/a2b-source.tar.gz
+          echo "01e0efd66a1b8816e3f48d0d8020c952ba85c0d11a376fa9d0eec4d8d007ec80  /tmp/a2b-source.tar.gz" | sha256sum -c -
+          if tar -tzf /tmp/a2b-source.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))'; then
+            echo "unsafe archive path" >&2
+            exit 1
+          fi
+          tar -xzf /tmp/a2b-source.tar.gz -C .
+          rm -rf .github/a2b-source .github/a2b-clean-source .github/a2b-apply .github/a2b-source-transfer
+          rm -f .github/workflows/a2b-restore-history.yml
+          rm -f .github/workflows/a2b-apply-corrective.yml .github/workflows/a2b-install-exact-source.yml
+          git add -A
+          git diff --cached --check
+          test "$(git write-tree)" = "8600a71b096f50f052df35fbe64debf356a2c20d"
+          test -f newsroom/authority/_object_system.py
+          test -f newsroom/authority/_object_store.py
+          test -f newsroom/authority/_object_cas.py
+          test -f newsroom/tests/test_authority_a2b_fault_matrix.py
+
+      - name: Commit and push restored source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat(authority): restore governed object lifecycle implementation"
+          git push origin HEAD:agent/increment-1a2b-object-lifecycle
