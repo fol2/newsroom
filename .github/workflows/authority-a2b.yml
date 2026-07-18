@@ -32,12 +32,13 @@ jobs:
           source_commit=b806e62802a67ddedfbc58f4e1ee8ad4a53a2ff2
           git cat-file -e "$source_commit^{commit}"
           echo "source_commit=$source_commit"
+          : > /tmp/a2b-source.tar.gz
           for part in 000 001 002; do
             path=".github/a2b-clean-source/part-$part"
             git show "$source_commit:$path" > "/tmp/part-$part"
             echo "part=$part bytes=$(wc -c < /tmp/part-$part) sha256=$(sha256sum /tmp/part-$part | awk '{print $1}')"
+            tr -d '\r\n' < "/tmp/part-$part" | base64 -d >> /tmp/a2b-source.tar.gz
           done
-          cat /tmp/part-000 /tmp/part-001 /tmp/part-002 | tr -d '\r\n' | base64 -d > /tmp/a2b-source.tar.gz
           actual_archive_sha="$(sha256sum /tmp/a2b-source.tar.gz | awk '{print $1}')"
           echo "archive_bytes=$(wc -c < /tmp/a2b-source.tar.gz)"
           echo "archive_sha256=$actual_archive_sha"
