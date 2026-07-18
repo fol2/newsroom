@@ -1,0 +1,486 @@
+ion commit grant is required")
++        self._verify_signature(grant)
++        self.verify_preflight(grant.preflight, now=now)
++        definition = grant.preflight.definition
++        policy = grant.preflight.rights_policy
++        expected_semantic = digest_canonical(
++            {
++                "preflight_digest": grant.preflight.digest,
++                "blob": grant.blob.canonical_value(),
++                "stage_id": grant.stage_id,
++                "staged_name": grant.staged_name,
++            }
++        )
++        if grant.stable_semantic_request_digest != expected_semantic:
++            raise InvalidObjectCapability("admission semantic digest changed")
++        self._verify_security(
++            grant.authentication,
++            grant.authorization_request,
++            grant.authorization,
++            expected_operation=(
++                f"object:admission:commit:{definition.admission_type}"
++            ),
++            expected_scope=definition.required_write_scope,
++            expected_stable_digest=expected_semantic,
++            expected_definition_digest=definition.digest,
++            now=now,
++        )
++        rights = grant.rights
++        expected_rights_request = digest_canonical(
++            {
++                "preflight_digest": grant.preflight.digest,
++                "blob": grant.blob.canonical_value(),
++                "final_authentication_context_digest": grant.authentication.digest,
++                "final_authorization_request_digest": (
++                    grant.authorization_request.request_digest
++                ),
++                "final_authorization_decision_digest": grant.authorization.digest,
++                "rights_policy_contract_digest": policy.contract_digest,
++            }
++        )
++        if rights.rights_request_digest != expected_rights_request:
++            raise InvalidObjectCapability("rights request digest changed")
++        expected_rights = (
++            rights.policy_contract_digest == policy.contract_digest
++            and rights.admission_definition_digest == definition.digest
++            and rights.blob == grant.blob
++            and rights.object_class == definition.object_class
++            and rights.allowed_use == definition.allowed_use
++            and rights.security_scope == definition.security_scope
++            and rights.retention_scope == definition.retention_scope
++            and rights.allowed == policy.preflight_allowed
++            and rights.reason_code == policy.reason_code
++        )
++        if not expected_rights:
++            raise InvalidObjectCapability(
++                "rights proposal differs from retained exact policy contracts"
++            )
++        if rights.decided_at != grant.authorization.decided_at:
++            raise InvalidObjectCapability(
++                "rights decision time differs from exact authorization decision"
++            )
++        expected_valid_from = UtcTimestamp(
++            rights.decided_at.value
++            + timedelta(
++                seconds=policy.valid_from_delay_seconds
++            )
++        )
++        expected_valid_until = (
++            None
++            if policy.validity_seconds is None
++            else UtcTimestamp(
++                expected_valid_from.value
++                + timedelta(
++                    seconds=policy.validity_seconds
++                )
++            )
++        )
++        if rights.valid_from != expected_valid_from:
++            raise InvalidObjectCapability(
++                "rights valid_from was not derived from retained policy"
++            )
++        if rights.valid_until != expected_valid_until:
++            raise InvalidObjectCapability(
++                "rights valid_until was not derived from retained policy"
++            )
++        rights.require_current(now)
++
++    def verify_maintenance(self, grant: _MaintenanceGrant, *, now: UtcTimestamp) -> None:
++        if not isinstance(grant, _MaintenanceGrant):
++            raise InvalidObjectCapability("maintenance grant is required")
++        self._verify_signature(grant)
++        require_token(grant.operation_type, field="object_maintenance_operation")
++        require_token(grant.reason_code, field="object_maintenance_reason")
++        definition = self._command_registry.resolve_exact(
++            grant.lifecycle_definition.command_type,
++            grant.lifecycle_definition.definition_version,
++            grant.lifecycle_definition.digest,
++        )
++        expected_semantic = digest_canonical(
++            {
++                "operation_type": grant.operation_type,
++                "target_identity": grant.target_identity,
++                "reason_code": grant.reason_code,
++                "lifecycle_definition_digest": definition.digest,
++                "idempotency_key": grant.idempotency_key,
++            }
++        )
++        expected_namespace = digest_canonical(
++            {
++                "authority_domain": grant.authentication.authority_domain,
++                "principal_id": grant.authentication.principal_id,
++                "operation_type": grant.operation_type,
++            }
++        )
++        if grant.stable_semantic_request_digest != expected_semantic:
++            raise InvalidObjectCapability("maintenance semantic digest changed")
++        if grant.idempotency_namespace != expected_namespace:
++            raise InvalidObjectCapability("maintenance namespace changed")
++        self._verify_security(
++            grant.authentication,
++            grant.authorization_request,
++            grant.authorization,
++            expected_operation=f"object:maintenance:{grant.operation_type}",
++            expected_scope=definition.required_scope,
++            expected_stable_digest=expected_semantic,
++            expected_definition_digest=definition.digest,
++            now=now,
++        )
++        if grant.decided_at != grant.authorization.decided_at:
++            raise InvalidObjectCapability("maintenance time differs from authorization")
++
++    def verify_hydration(self, grant: _HydrationGrant, *, now: UtcTimestamp) -> None:
++        if not isinstance(grant, _HydrationGrant):
++            raise InvalidObjectCapability("hydration grant is required")
++        self._verify_signature(grant)
++        policy = self._hydration_policies.resolve_exact(
++            grant.policy.policy_id,
++            grant.policy.contract_version,
++            grant.policy.contract_digest,
++        )
++        if self._hydration_snapshot.get(policy.contract_digest) != policy.canonical_value():
++            raise InvalidObjectCapability("hydration policy snapshot changed")
++        expected_semantic = digest_canonical(
++            {
++                "policy_contract_digest": policy.contract_digest,
++                "admission_id": str(grant.request.admission_id),
++                "purpose": grant.request.purpose,
++                "offset": grant.request.offset,
++                "length": grant.request.length,
++            }
++        )
++        if grant.stable_semantic_request_digest != expected_semantic:
++            raise InvalidObjectCapability("hydration semantic digest changed")
++        self._verify_security(
++            grant.authentication,
++            grant.authorization_request,
++            grant.authorization,
++            expected_operation=f"object:hydrate:{policy.purpose}",
++            expected_scope=policy.required_scope,
++            expected_stable_digest=expected_semantic,
++            expected_definition_digest=policy.contract_digest,
++            now=now,
++        )
++        if grant.decided_at != grant.authorization.decided_at:
++            raise InvalidObjectCapability("hydration time differs from authorization")
++
++
++__all__ = [
++    "InvalidObjectCapability",
++    "_AdmissionCommitGrant",
++    "_AdmissionPreflightGrant",
++    "_HydrationGrant",
++    "_MaintenanceGrant",
++    "_ObjectCapabilityIssuer",
++    "_RightsProposal",
++]
+diff --git a/newsroom/authority/_object_cas.py b/newsroom/authority/_object_cas.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..95fc1b41779ab0c4df224a1ece5a3d25bbf8fe57
+--- /dev/null
++++ b/newsroom/authority/_object_cas.py
+@@ -0,0 +1,466 @@
++from __future__ import annotations
++
++from collections.abc import Iterable, Iterator
++from typing import BinaryIO
++from dataclasses import dataclass
++import hashlib
++import os
++from pathlib import Path
++import shutil
++import stat
++import tempfile
++from typing import Callable, Protocol
++
++from .objects import (
++    BlobIdentity,
++    ObjectIntegrityError,
++    ObjectLimitError,
++    ObjectLimits,
++)
++from .types import UtcTimestamp
++
++
++class _FaultHook(Protocol):
++    def __call__(self, checkpoint: str) -> None:
++        ...
++
++
++@dataclass(slots=True)
++class _StagedBlob:
++    stage_id: str
++    staged_name: str
++    path: Path
++    identity: BlobIdentity
++    created_at: UtcTimestamp
++
++
++@dataclass(slots=True)
++class _PinnedBlob:
++    fd: int
++    path: Path
++    identity: BlobIdentity
++    installed_new: bool = False
++    closed: bool = False
++
++    def close(self) -> None:
++        if not self.closed:
++            os.close(self.fd)
++            self.closed = True
++
++    def __enter__(self) -> _PinnedBlob:
++        return self
++
++    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
++        self.close()
++
++
++class _GovernedCAS:
++    """Bounded, same-filesystem content-addressed byte store.
++
++    SQLite remains the source of authority.  This class implements durable byte
++    installation and pinned-file verification; it never decides rights or use.
++    """
++
++    def __init__(
++        self,
++        root: Path,
++        *,
++        limits: ObjectLimits,
++        clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
++        fault_hook: _FaultHook | None = None,
++        disk_usage: Callable[[Path], shutil._ntuple_diskusage] = shutil.disk_usage,
++    ) -> None:
++        self.root = Path(root)
++        self.limits = limits
++        self._clock = clock
++        self._fault_hook = fault_hook or (lambda _checkpoint: None)
++        self._disk_usage = disk_usage
++        self.staging_root = self.root / "staging"
++        self.objects_root = self.root / "objects"
++        self._prepare_roots()
++
++    def _fault(self, checkpoint: str) -> None:
++        self._fault_hook(checkpoint)
++
++    @staticmethod
++    def _validate_owner_mode(path: Path, *, directory: bool) -> None:
++        if path.is_symlink():
++            raise ObjectIntegrityError(f"CAS path cannot be a symlink: {path}")
++        info = path.stat()
++        if directory and not stat.S_ISDIR(info.st_mode):
++            raise ObjectIntegrityError(f"CAS path must be a directory: {path}")
++        if not directory and not stat.S_ISREG(info.st_mode):
++            raise ObjectIntegrityError(f"CAS path must be a regular file: {path}")
++        if hasattr(os, "getuid") and info.st_uid != os.getuid():
++            raise ObjectIntegrityError("CAS paths must be owned by the authority writer")
++        if directory and stat.S_IMODE(info.st_mode) & 0o077:
++            raise ObjectIntegrityError("CAS directories must not grant group/other access")
++
++    @staticmethod
++    def _directory_fd(path: Path) -> int:
++        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
++            os, "O_NOFOLLOW", 0
++        )
++        try:
++            return os.open(path, flags)
++        except OSError as exc:
++            raise ObjectIntegrityError(
++                f"cannot open CAS directory for durability: {path}"
++            ) from exc
++
++    def _fsync_directory(self, path: Path) -> None:
++        self._fault("before_directory_fsync")
++        descriptor = self._directory_fd(path)
++        try:
++            os.fsync(descriptor)
++        except OSError as exc:
++            raise ObjectIntegrityError(
++                f"CAS directory fsync failed: {path}"
++            ) from exc
++        finally:
++            os.close(descriptor)
++        self._fault("after_directory_fsync")
++
++    def _mkdir_durable(self, path: Path, *, parent: Path) -> None:
++        if path.exists():
++            self._validate_owner_mode(path, directory=True)
++            return
++        path.mkdir(mode=0o700)
++        os.chmod(path, 0o700)
++        self._validate_owner_mode(path, directory=True)
++        self._fsync_directory(parent)
++
++    def _prepare_roots(self) -> None:
++        parent = self.root.parent
++        if self.root.exists():
++            self._validate_owner_mode(self.root, directory=True)
++        else:
++            parent.mkdir(parents=True, exist_ok=True)
++            if parent.is_symlink():
++                raise ObjectIntegrityError("CAS parent cannot be a symlink")
++            self.root.mkdir(mode=0o700)
++            os.chmod(self.root, 0o700)
++            self._validate_owner_mode(self.root, directory=True)
++            self._fsync_directory(parent)
++        self._mkdir_durable(self.staging_root, parent=self.root)
++        self._mkdir_durable(self.objects_root, parent=self.root)
++        # Persist both child directory entries.
++        self._fsync_directory(self.root)
++
++    def _check_disk_headroom(self, incoming_bytes: int) -> None:
++        usage = self._disk_usage(self.root)
++        if usage.free - incoming_bytes < self.limits.min_free_bytes:
++            raise ObjectLimitError("CAS disk-headroom requirement is not met")
++
++    @staticmethod
++    def _chunks(source: bytes | bytearray | memoryview | BinaryIO | Iterable[bytes], chunk_size: int) -> Iterator[bytes]:
++        if isinstance(source, (bytes, bytearray, memoryview)):
++            data = bytes(source)
++            for offset in range(0, len(data), chunk_size):
++                yield data[offset : offset + chunk_size]
++            return
++        read = getattr(source, "read", None)
++        if callable(read):
++            while True:
++                chunk = read(chunk_size)
++                if chunk in (b"", None):
++                    break
++                if not isinstance(chunk, (bytes, bytearray, memoryview)):
++                    raise TypeError("object stream read() must return bytes")
++                yield bytes(chunk)
++            return
++        if not isinstance(source, Iterable):
++            raise TypeError("object source must be bytes, a binary stream, or byte chunks")
++        for chunk in source:
++            if not isinstance(chunk, (bytes, bytearray, memoryview)):
++                raise TypeError("object source chunks must be bytes")
++            data = bytes(chunk)
++            if data:
++                yield data
++
++    def stage(
++        self,
++        source: bytes | bytearray | memoryview | BinaryIO | Iterable[bytes],
++        *,
++        object_class: str,
++    ) -> _StagedBlob:
++        maximum = self.limits.maximum_for(object_class)
++        self._check_disk_headroom(min(maximum, self.limits.io_chunk_bytes))
++        descriptor, raw_name = tempfile.mkstemp(
++            prefix="stage-", suffix=".tmp", dir=self.staging_root
++        )
++        path = Path(raw_name)
++        os.fchmod(descriptor, 0o600)
++        hasher = hashlib.sha256()
++        size = 0
++        try:
++            self._fault("before_stage_stream")
++            for chunk in self._chunks(source, self.limits.io_chunk_bytes):
++                new_size = size + len(chunk)
++                if new_size > maximum or new_size > int(self.limits.max_staging_bytes):
++                    raise ObjectLimitError("object exceeds bounded staging limit")
++                self._check_disk_headroom(len(chunk))
++                view = memoryview(chunk)
++                while view:
++                    written = os.write(descriptor, view)
++                    if written <= 0:
++                        raise ObjectIntegrityError("CAS staging write made no progress")
++                    view = view[written:]
++                hasher.update(chunk)
++                size = new_size
++                self._fault("after_stage_chunk")
++            self.limits.require_object_size(object_class, size)
++            self._fault("before_stage_file_fsync")
++            os.fsync(descriptor)
++            self._fault("after_stage_file_fsync")
++        except Exception:
++            try:
++                os.close(descriptor)
++            finally:
++                path.unlink(missing_ok=True)
++                self._fsync_directory(self.staging_root)
++            raise
++        os.close(descriptor)
++        identity = BlobIdentity(
++            blob_digest=f"sha256:{hasher.hexdigest()}", size_bytes=size
++        )
++        self._fsync_directory(self.staging_root)
++        return _StagedBlob(
++            stage_id=path.stem,
++            staged_name=path.name,
++            path=path,
++            identity=identity,
++            created_at=self._clock(),
++        )
++
++    def _object_directory(self, identity: BlobIdentity) -> Path:
++        hex_digest = identity.blob_digest.split(":", 1)[1]
++        return self.objects_root / hex_digest[:2]
++
++    def object_path(self, identity: BlobIdentity) -> Path:
++        hex_digest = identity.blob_digest.split(":", 1)[1]
++        return self._object_directory(identity) / hex_digest
++
++    @staticmethod
++    def _open_read_only(path: Path) -> int:
++        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
++            os, "O_NOFOLLOW", 0
++        )
++        try:
++            return os.open(path, flags)
++        except OSError as exc:
++            raise ObjectIntegrityError(f"cannot open installed blob: {path}") from exc
++
++    @staticmethod
++    def _hash_fd(fd: int, chunk_size: int) -> tuple[str, int]:
++        os.lseek(fd, 0, os.SEEK_SET)
++        hasher = hashlib.sha256()
++        size = 0
++        while True:
++            data = os.read(fd, chunk_size)
++            if not data:
++                break
++            hasher.update(data)
++            size += len(data)
++        os.lseek(fd, 0, os.SEEK_SET)
++        return f"sha256:{hasher.hexdigest()}", size
++
++    def verify_pinned(self, pinned: _PinnedBlob) -> None:
++        if pinned.closed:
++            raise ObjectIntegrityError("pinned blob is closed")
++        self._fault("before_pinned_rehash")
++        digest, size = self._hash_fd(pinned.fd, self.limits.io_chunk_bytes)
++        info = os.fstat(pinned.fd)
++        if not stat.S_ISREG(info.st_mode):
++            raise ObjectIntegrityError("pinned blob is not a regular file")
++        if info.st_nlink < 1:
++            raise ObjectIntegrityError("pinned blob was unlinked before commit")
++        if stat.S_IMODE(info.st_mode) & 0o222:
++            raise ObjectIntegrityError("installed blob remains writable")
++        if digest != pinned.identity.blob_digest or size != pinned.identity.size_bytes:
++            raise ObjectIntegrityError("pinned blob digest or size changed")
++        try:
++            path_info = pinned.path.stat(follow_symlinks=False)
++        except FileNotFoundError as exc:
++            raise ObjectIntegrityError("installed blob path is missing") from exc
++        if not stat.S_ISREG(path_info.st_mode) or (
++            path_info.st_dev != info.st_dev or path_info.st_ino != info.st_ino
++        ):
++            raise ObjectIntegrityError("installed blob path no longer names pinned inode")
++        self._fault("after_pinned_rehash")
++
++    def install(self, staged: _StagedBlob) -> _PinnedBlob:
++        if staged.path.parent != self.staging_root or staged.path.name != staged.staged_name:
++            raise ObjectIntegrityError("staged object path escaped the CAS staging root")
++        self._validate_owner_mode(staged.path, directory=False)
++        directory = self._object_directory(staged.identity)
++        self._mkdir_durable(directory, parent=self.objects_root)
++        final_path = self.object_path(staged.identity)
++        installed_new = False
++        self._fault("before_atomic_install")
++        try:
++            try:
++                os.link(staged.path, final_path, follow_symlinks=False)
++                installed_new = T
