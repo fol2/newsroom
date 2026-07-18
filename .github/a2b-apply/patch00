@@ -1,0 +1,825 @@
+diff --git a/.github/workflows/authority-a2b.yml b/.github/workflows/authority-a2b.yml
+index 07c9d0307f58e99cbf2af6e2e7f8a0168f648ba6..32dd1537d4f0d761036ec5a3b635227731c1d995 100644
+--- a/.github/workflows/authority-a2b.yml
++++ b/.github/workflows/authority-a2b.yml
+@@ -5,7 +5,7 @@ on:
+   pull_request:
+ 
+ jobs:
+-  focused-governed-object-contract:
++  governed-object-authority:
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -30,17 +30,67 @@ jobs:
+         continue-on-error: true
+         run: |
+           uv run python -m pytest -q \
+-            newsroom/tests/test_authority_a2b_*.py \
+-            --junitxml=a2b-results.xml
++            newsroom/tests/test_authority_a2b_boundary.py \
++            newsroom/tests/test_authority_a2b_contracts.py \
++            newsroom/tests/test_authority_a2b_policy.py \
++            newsroom/tests/test_authority_a2b_admission_hydration.py \
++            newsroom/tests/test_authority_a2b_lifecycle.py \
++            newsroom/tests/test_authority_a2b_sqlite.py \
++            newsroom/tests/test_authority_a2b_traceability.py \
++            --junitxml=a2b-focused-results.xml
+ 
+-      - name: Upload A2b Test Evidence
++      - name: Upload Focused A2b Evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: authority-a2b-test-evidence
+-          path: a2b-results.xml
++          name: authority-a2b-focused-evidence
++          path: a2b-focused-results.xml
+           if-no-files-found: error
+ 
+-      - name: Enforce Focused Gate
+-        if: steps.focused.outcome != 'success'
+-        run: exit 1
++      - name: A1 and A2a Regression Tests
++        id: regression
++        continue-on-error: true
++        shell: bash
++        run: |
++          mapfile -t files < <(
++            find newsroom/tests -maxdepth 1 -name 'test_authority_*.py' \
++              ! -name 'test_authority_a2b_*' | sort
++          )
++          uv run python -m pytest -q "${files[@]}" \
++            --junitxml=a2b-regression-results.xml
++
++      - name: Upload A1 and A2a Regression Evidence
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: authority-a2b-regression-evidence
++          path: a2b-regression-results.xml
++          if-no-files-found: error
++
++      - name: Independent A2b Fault Matrix
++        id: faults
++        continue-on-error: true
++        run: |
++          uv run python -m pytest -q \
++            newsroom/tests/test_authority_a2b_integrity_faults.py \
++            newsroom/tests/test_authority_a2b_fault_matrix.py \
++            --junitxml=a2b-fault-matrix-results.xml
++
++      - name: Upload A2b Fault Matrix Evidence
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: authority-a2b-fault-matrix-evidence
++          path: a2b-fault-matrix-results.xml
++          if-no-files-found: error
++
++      - name: Enforce A2b Gates
++        if: always()
++        env:
++          FOCUSED_OUTCOME: ${{ steps.focused.outcome }}
++          REGRESSION_OUTCOME: ${{ steps.regression.outcome }}
++          FAULT_OUTCOME: ${{ steps.faults.outcome }}
++        run: |
++          test "$FOCUSED_OUTCOME" = success
++          test "$REGRESSION_OUTCOME" = success
++          test "$FAULT_OUTCOME" = success
+diff --git a/newsroom/authority/__init__.py b/newsroom/authority/__init__.py
+index 1ba797be5e0f005665b48183d9538bdbb5ab73bb..59bc44998e22d1aff1e3bd64a386cd96efba5bf0 100644
+--- a/newsroom/authority/__init__.py
++++ b/newsroom/authority/__init__.py
+@@ -2,8 +2,8 @@
+ 
+ Mutation-capable SQLite persistence, authentication contexts, authorization
+ records, commit capabilities, CAS writers and retained payload bytes remain
+-internal. Public application code receives authenticated command/read facades
+-and non-mutating governed-object contracts only.
++internal. Public application code receives authenticated command/read/object
++facades plus immutable policy contracts and non-authoritative views.
+ """
+ 
+ from .auth import (
+@@ -33,48 +33,63 @@ from .models import (
+     SemanticCommand,
+ )
+ from .object_boundary import (
+-    activate_admission_with_event,
+-    authorize_admission_preflight,
++    GovernedObjectAuthoritySystem,
++    GovernedObjects,
++    HydratedObject,
++    ObjectAdmissionResult,
++    open_governed_object_authority_system,
+ )
+ from .object_policy import (
+-    AdmissionPreflight,
++    HydrationPolicyRegistry,
+     ObjectAdmissionRegistry,
+-    RightsPreflight,
+-    StaticRightsResolver,
+-    StaticRightsRule,
++    RightsPolicyRegistry,
++    UnknownHydrationPolicyContract,
+     UnknownObjectAdmissionDefinition,
++    UnknownRightsPolicyContract,
+ )
+ from .object_traceability import (
++    INCREMENT_1A2B_DEFERRED,
+     INCREMENT_1A2B_EXCLUSIONS,
+     INCREMENT_1A2B_PENDING,
+     INCREMENT_1A2B_TRACEABILITY,
+ )
+ from .objects import (
+-    AdmissionRevocationReceipt,
++    AdmissionRevocationView,
+     AdmissionState,
+-    BlobState,
++    BlobIdentity,
++    BlobIntegrityState,
++    BlobLifecycleState,
++    BlobLifecycleView,
+     DeletionState,
+     GovernedDeletionId,
+-    GovernedDeletionReceipt,
+-    HydrationPolicy,
++    GovernedDeletionView,
++    HydrationPolicyContract,
++    HydrationRequest,
+     ImmutableBlobIdentity,
+     ObjectAccessDecision,
+     ObjectAccessDecisionId,
++    ObjectAccessDecisionView,
+     ObjectAdmissionDefinition,
+     ObjectAdmissionDenied,
+     ObjectAdmissionReceipt,
+     ObjectAdmissionRequest,
++    ObjectAdmissionView,
+     ObjectHydrationDenied,
+     ObjectIntegrityError,
+     ObjectLifecycleError,
+     ObjectLifecycleEventType,
+-    ObjectLimits,
+     ObjectLimitError,
++    ObjectLimits,
+     ObjectLivenessSnapshot,
++    ObjectOperationId,
+     ObjectPolicyError,
++    ObjectPreflightId,
+     RecoveryPinId,
+-    RecoveryPinReceipt,
++    RecoveryPinState,
++    RecoveryPinView,
+     RightsDecision,
++    RightsDecisionView,
++    RightsPolicyContract,
+ )
+ from .persistence import (
+     AuthenticationContextRecord,
+@@ -145,8 +160,7 @@ from .types import (
+ )
+ 
+ __all__ = [
+-    "AdmissionPreflight",
+-    "AdmissionRevocationReceipt",
++    "AdmissionRevocationView",
+     "AdmissionState",
+     "AggregateId",
+     "AggregateVersion",
+@@ -166,7 +180,10 @@ __all__ = [
+     "AuthorizationDenied",
+     "AuthorizationReceipt",
+     "AuthorizationRequestRecord",
+-    "BlobState",
++    "BlobIdentity",
++    "BlobIntegrityState",
++    "BlobLifecycleState",
++    "BlobLifecycleView",
+     "CanonicalizationError",
+     "CausationKind",
+     "CausationRef",
+@@ -187,11 +204,17 @@ __all__ = [
+     "EventReadPolicy",
+     "ExpectedVersionConflict",
+     "GovernedDeletionId",
+-    "GovernedDeletionReceipt",
+-    "HydrationPolicy",
++    "GovernedDeletionView",
++    "GovernedObjectAuthoritySystem",
++    "GovernedObjects",
++    "HydratedObject",
++    "HydrationPolicyContract",
++    "HydrationPolicyRegistry",
++    "HydrationRequest",
+     "INCREMENT_1A_TRACEABILITY",
+     "INCREMENT_1A2A_DEFERRED",
+     "INCREMENT_1A2A_TRACEABILITY",
++    "INCREMENT_1A2B_DEFERRED",
+     "INCREMENT_1A2B_EXCLUSIONS",
+     "INCREMENT_1A2B_PENDING",
+     "INCREMENT_1A2B_TRACEABILITY",
+@@ -205,6 +228,7 @@ __all__ = [
+     "NoPayload",
+     "ObjectAccessDecision",
+     "ObjectAccessDecisionId",
++    "ObjectAccessDecisionView",
+     "ObjectAdmissionDefinition",
+     "ObjectAdmissionDenied",
+     "ObjectAdmissionDescriptor",
+@@ -214,14 +238,18 @@ __all__ = [
+     "ObjectAdmissionReceipt",
+     "ObjectAdmissionRegistry",
+     "ObjectAdmissionRequest",
++    "ObjectAdmissionResult",
++    "ObjectAdmissionView",
+     "ObjectHydrationDenied",
+     "ObjectIntegrityError",
+     "ObjectLifecycleError",
+     "ObjectLifecycleEventType",
+-    "ObjectLimits",
+     "ObjectLimitError",
++    "ObjectLimits",
+     "ObjectLivenessSnapshot",
++    "ObjectOperationId",
+     "ObjectPolicyError",
++    "ObjectPreflightId",
+     "PayloadGoldenVector",
+     "PayloadId",
+     "PayloadMode",
+@@ -231,32 +259,34 @@ __all__ = [
+     "PayloadSchemaValidationError",
+     "ReadPolicyDenied",
+     "RecoveryPinId",
+-    "RecoveryPinReceipt",
++    "RecoveryPinState",
++    "RecoveryPinView",
+     "RightsDecision",
+     "RightsDecisionId",
+-    "RightsPreflight",
++    "RightsDecisionView",
++    "RightsPolicyContract",
++    "RightsPolicyRegistry",
+     "SUCCESSFUL_READ_AUDIT_STATUS",
+     "SemanticCommand",
+     "StaticAuthenticator",
+     "StaticAuthorizer",
+     "StaticPrincipal",
+-    "StaticRightsResolver",
+-    "StaticRightsRule",
+     "TemporalValue",
+     "TimePrecision",
+     "TrustScope",
+     "UnknownCausation",
+     "UnknownCommandDefinition",
++    "UnknownHydrationPolicyContract",
+     "UnknownObjectAdmissionDefinition",
+     "UnknownPayloadSchema",
++    "UnknownRightsPolicyContract",
+     "UnsupportedPayloadMode",
+     "UtcTimestamp",
+-    "activate_admission_with_event",
+-    "authorize_admission_preflight",
+     "canonical_json_bytes",
+     "digest_bytes",
+     "digest_canonical",
+     "open_authority_event_system",
++    "open_governed_object_authority_system",
+     "projector_service_read_policy",
+     "validate_sha256_digest",
+ ]
+diff --git a/newsroom/authority/_event_store_base.py b/newsroom/authority/_event_store_base.py
+index 20f6f4f4fde4bc153780513fae70e403d21b8224..cb3738eb086d30d2c36dc4651b0d590ed7340339 100644
+--- a/newsroom/authority/_event_store_base.py
++++ b/newsroom/authority/_event_store_base.py
+@@ -18,7 +18,7 @@ from .migrations import (
+     EXPECTED_MIGRATION_HISTORY,
+     EXPECTED_SCHEMA_FINGERPRINT,
+     SCHEMA_VERSION,
+-    apply_migration,
++    apply_pending_migrations,
+     schema_fingerprint,
+ )
+ from .models import CommittedCommandIdentity
+@@ -178,12 +178,14 @@ class _EventStoreBase:
+                 f"database schema {version} is newer than supported "
+                 f"{SCHEMA_VERSION}"
+             )
+-        if version == 0:
+-            if tables:
+-                raise AuthoritySchemaError(
+-                    "refusing to adopt a non-empty unversioned authority database"
+-                )
+-            apply_migration(conn, applied_at=self._clock().to_text())
++        if version == 0 and tables:
++            raise AuthoritySchemaError(
++                "refusing to adopt a non-empty unversioned authority database"
++            )
++        if version < SCHEMA_VERSION:
++            apply_pending_migrations(
++                conn, applied_at=self._clock().to_text()
++            )
+         self._validate_schema_and_integrity()
+ 
+     def _validate_schema_and_integrity(self) -> None:
+diff --git a/newsroom/authority/_event_store_commit.py b/newsroom/authority/_event_store_commit.py
+index 424e65c5f964abac610272bcabc185ce606ce999..91fa76d9a3f3c99ecbf67a8cb2abcbc29f25b261 100644
+--- a/newsroom/authority/_event_store_commit.py
++++ b/newsroom/authority/_event_store_commit.py
+@@ -1,8 +1,9 @@
+ from __future__ import annotations
+ 
++from contextlib import nullcontext
+ import json
+ import sqlite3
+-from typing import Any
++from typing import Any, ContextManager
+ 
+ from ._capability import _AuthorizedCommandGrant
+ from .canonical import canonical_json_bytes, digest_bytes, digest_canonical
+@@ -16,7 +17,7 @@ from .persistence import (
+     UnsupportedPayloadMode,
+ )
+ from .service import IdempotencyIdentityConflict
+-from .types import AuditId, CommandId, EventId
++from .types import AuditId, CommandId, EventId, PayloadMode
+ 
+ 
+ class _EventStoreCommitMixin:
+@@ -25,221 +26,279 @@ class _EventStoreCommitMixin:
+     def commit(self, grant: _AuthorizedCommandGrant) -> CommittedCommand:
+         self._issuer.verify(grant)
+         with self._lock, self._transaction() as conn:
+-            existing = conn.execute(
+-                "SELECT command_id,command_definition_version,"
+-                "command_definition_digest,stable_semantic_request_digest,"
+-                "result_digest,result_bytes FROM authority_commands "
+-                "WHERE idempotency_namespace=? AND idempotency_key=?",
+-                (grant.idempotency_namespace, grant.idempotency_key),
+-            ).fetchone()
+-            if existing is not None:
+-                return self._replay_existing(grant, existing)
+-            if grant.replay_of_command_id is not None:
+-                raise IdempotencyConflict(
+-                    "command boundary expected a replay but no row exists"
+-                )
+-            if grant.payload.kind not in {"INLINE", "NO_PAYLOAD"}:
+-                raise UnsupportedPayloadMode(
+-                    "object-admission payload persistence belongs to Increment 1A2b"
+-                )
++            guard: ContextManager[Any]
++            if grant.payload.kind == PayloadMode.OBJECT_ADMISSION.value:
++                guard = self._object_payload_commit_guard(conn, grant)
++            else:
++                guard = nullcontext(None)
++            with guard as pinned:
++                committed = self._commit_grant_in_transaction(conn, grant)
++                if pinned is not None:
++                    self._final_object_payload_commit_check(
++                        conn, grant, pinned
++                    )
++                return committed
+ 
+-            recorded_at = self._clock().to_text()
+-            self._persist_schema_contract(conn, grant, recorded_at=recorded_at)
+-            self._persist_definition(conn, grant, recorded_at=recorded_at)
+-            self._persist_security(conn, grant, recorded_at=recorded_at)
+-            self._validate_causation(conn, grant)
+-            current_version, new_version = self._resolve_version(conn, grant)
++    def _object_payload_commit_guard(
++        self, conn: sqlite3.Connection, grant: _AuthorizedCommandGrant
++    ) -> ContextManager[Any]:
++        raise UnsupportedPayloadMode(
++            "object-admission payload persistence requires the A2b object writer"
++        )
+ 
+-            payload_bytes = grant.payload.inline_bytes
+-            if payload_bytes is None:
+-                raise AuthorityPersistenceError("retained payload bytes are required")
+-            if digest_bytes(payload_bytes) != grant.payload.digest:
+-                raise AuthorityPersistenceError("retained payload digest mismatch")
++    def _final_object_payload_commit_check(
++        self, conn: sqlite3.Connection, grant: _AuthorizedCommandGrant, pinned: Any
++    ) -> None:
++        del conn, grant, pinned
+ 
+-            command_id = str(CommandId.new())
+-            event_id = str(EventId.new())
+-            audit_id = str(AuditId.new())
+-            payload_id = str(PayloadId.new())
+-            ledger_seq = int(
+-                conn.execute(
+-                    "SELECT COALESCE(MAX(ledger_seq),0)+1 FROM ledger_events"
+-                ).fetchone()[0]
+-            )
+-            result_bytes = canonical_json_bytes(
+-                {
+-                    "command_id": command_id,
+-                    "aggregate_type": grant.definition.aggregate_type,
+-                    "aggregate_id": grant.aggregate_id,
+-                    "aggregate_version": new_version,
+-                    "ledger_seq": ledger_seq,
+-                    "event_id": event_id,
+-                }
+-            )
+-            result_digest = digest_bytes(result_bytes)
++    def _commit_grant_in_transaction(
++        self,
++        conn: sqlite3.Connection,
++        grant: _AuthorizedCommandGrant,
++        *,
++        recorded_at: str | None = None,
++    ) -> CommittedCommand:
++        """Persist one verified grant in an already-open writer transaction."""
+ 
+-            conn.execute(
+-                "INSERT INTO authority_payloads("
+-                "payload_id,mode,schema_version,schema_contract_version,"
+-                "schema_contract_digest,canonicalizer_implementation_version,"
+-                "payload_digest,payload_bytes,object_admission_id,created_at) "
+-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+-                (
+-                    payload_id,
+-                    grant.payload.kind,
+-                    grant.payload.schema_version,
+-                    grant.payload.schema_contract_version,
+-                    grant.payload.schema_contract_digest,
+-                    grant.payload.canonicalizer_version,
+-                    grant.payload.digest,
+-                    payload_bytes,
+-                    None,
+-                    recorded_at,
+-                ),
+-            )
+-            conn.execute(
+-                "INSERT INTO authority_commands("
+-                "command_id,command_type,producer_version,"
+-                "command_definition_version,command_definition_digest,"
+-                "aggregate_type,aggregate_id,expected_aggregate_version,"
+-                "payload_id,idempotency_namespace,idempotency_key,"
+-                "stable_semantic_request_digest,authentication_context_id,"
+-                "authorization_request_digest,authorization_decision_id,"
+-                "result_digest,result_bytes,committed_at) "
+-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+-                (
+-                    command_id,
+-                    grant.command_type,
+-                    self._command_service_version,
+-                    grant.definition.definition_version,
+-                    grant.definition.digest,
+-                    grant.definition.aggregate_type,
+-                    grant.aggregate_id,
+-                    grant.expected_aggregate_version,
+-                    payload_id,
+-                    grant.idempotency_namespace,
+-                    grant.idempotency_key,
+-                    grant.stable_semantic_request_digest,
+-                    str(grant.authentication.authentication_context_id),
+-                    grant.authorization_request.request_digest,
+-                    str(grant.authorization.authorization_decision_id),
+-                    result_digest,
+-                    result_bytes,
+-                    recorded_at,
+-                ),
++        existing = conn.execute(
++            "SELECT command_id,command_definition_version,"
++            "command_definition_digest,stable_semantic_request_digest,"
++            "result_digest,result_bytes FROM authority_commands "
++            "WHERE idempotency_namespace=? AND idempotency_key=?",
++            (grant.idempotency_namespace, grant.idempotency_key),
++        ).fetchone()
++        if existing is not None:
++            return self._replay_existing(grant, existing)
++        if grant.replay_of_command_id is not None:
++            raise IdempotencyConflict(
++                "command boundary expected a replay but no row exists"
+             )
++        if grant.payload.kind not in {
++            PayloadMode.INLINE.value,
++            PayloadMode.NO_PAYLOAD.value,
++            PayloadMode.OBJECT_ADMISSION.value,
++        }:
++            raise UnsupportedPayloadMode("unsupported authority payload mode")
++
++        recorded_at = recorded_at or self._clock().to_text()
++        self._persist_schema_contract(conn, grant, recorded_at=recorded_at)
++        self._persist_definition(conn, grant, recorded_at=recorded_at)
++        self._persist_security(conn, grant, recorded_at=recorded_at)
++        self._validate_causation(conn, grant)
++        current_version, new_version = self._resolve_version(conn, grant)
+ 
+-            if current_version is None:
+-                conn.execute(
+-                    "INSERT INTO authority_aggregates("
+-                    "aggregate_type,aggregate_id,current_version,created_at,updated_at) "
+-                    "VALUES(?,?,?,?,?)",
+-                    (
+-                        grant.definition.aggregate_type,
+-                        grant.aggregate_id,
+-                        new_version,
+-                        recorded_at,
+-                        recorded_at,
+-                    ),
++        if grant.payload.kind in {
++            PayloadMode.INLINE.value,
++            PayloadMode.NO_PAYLOAD.value,
++        }:
++            payload_bytes = grant.payload.inline_bytes
++            if payload_bytes is None:
++                raise AuthorityPersistenceError("retained payload bytes are required")
++            if digest_bytes(payload_bytes) != grant.payload.digest:
++                raise AuthorityPersistenceError("retained payload digest mismatch")
++            object_admission_id = None
++        else:
++            payload_bytes = None
++            if grant.payload.object_admission_id is None:
++                raise AuthorityPersistenceError(
++                    "object payload requires exact admission identity"
+                 )
+-            else:
+-                conn.execute(
+-                    "UPDATE authority_aggregates SET current_version=?,updated_at=? "
+-                    "WHERE aggregate_type=? AND aggregate_id=?",
+-                    (
+-                        new_version,
+-                        recorded_at,
+-                        grant.definition.aggregate_type,
+-                        grant.aggregate_id,
+-                    ),
+-                )
+-            conn.execute(
+-                "INSERT INTO authority_aggregate_versions("
+-                "aggregate_type,aggregate_id,aggregate_version,command_id,"
+-                "payload_id,trust_scope,recorded_at) VALUES(?,?,?,?,?,?,?)",
+-                (
+-                    grant.definition.aggregate_type,
+-                    grant.aggregate_id,
+-                    new_version,
+-                    command_id,
+-                    payload_id,
+-                    grant.definition.trust_scope.value,
+-                    recorded_at,
+-                ),
+-            )
+-            conn.execute(
+-                "INSERT INTO authority_audit_events("
+-                "audit_id,command_id,authentication_context_id,"
+-                "authorization_request_digest,authorization_decision_id,"
+-                "event_type,detail_digest,recorded_at) VALUES(?,?,?,?,?,?,?,?)",
+-                (
+-                    audit_id,
+-                    command_id,
+-                    str(grant.authentication.authentication_context_id),
+-                    grant.authorization_request.request_digest,
+-                    str(grant.authorization.authorization_decision_id),
+-                    grant.definition.event_type,
+-                    digest_canonical(grant.unsigned_value()),
+-                    recorded_at,
+-                ),
+-            )
+-            conn.execute(
+-                "INSERT INTO ledger_events("
+-                "ledger_seq,event_id,event_type,event_schema_version,"
+-                "aggregate_type,aggregate_id,aggregate_version,recorded_at,"
+-                "command_id,producer_version,command_definition_version,"
+-                "command_definition_digest,payload_id,payload_mode,"
+-                "payload_schema_version,payload_schema_contract_version,"
+-                "payload_schema_contract_digest,payload_canonicalizer_version,"
+-                "payload_digest,object_admission_id,principal_id,"
+-                "authentication_context_id,authorization_request_digest,"
+-                "authorization_decision_id,correlation_id,causation_kind,"
+-                "causation_identifier,causation_external_system,security_scope,"
+-                "retention_scope,trust_scope) "
+-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+-                (
+-                    ledger_seq,
+-                    event_id,
+-                    grant.definition.event_type,
+-                    grant.definition.event_schema_version,
+-                    grant.definition.aggregate_type,
+-                    grant.aggregate_id,
+-                    new_version,
+-                    recorded_at,
+-                    command_id,
+-                    self._command_service_version,
+-                    grant.definition.definition_version,
+-                    grant.definition.digest,
+-                    payload_id,
+-                    grant.payload.kind,
+-                    grant.payload.schema_version,
+-                    grant.payload.schema_contract_version,
+-                    grant.payload.schema_contract_digest,
+-                    grant.payload.canonicalizer_version,
+-                    grant.payload.digest,
+-                    None,
+-                    grant.authentication.principal_id,
+-                    str(grant.authentication.authentication_context_id),
+-                    grant.authorization_request.request_digest,
+-                    str(grant.authorization.authorization_decision_id),
+-                    grant.correlation_id,
+-                    grant.causation_kind,
+-                    grant.causation_identifier,
+-                    grant.causation_external_system,
+-                    grant.definition.security_scope,
+-                    grant.definition.retention_scope,
+-                    grant.definition.trust_scope.value,
+-                ),
+-            )
+-            return CommittedCommand(
+-                command_id=command_id,
+-                aggregate_type=grant.definition.aggregate_type,
+-                aggregate_id=grant.aggregate_id,
+-                aggregate_version=new_version,
+-                ledger_seq=ledger_seq,
+-                event_id=event_id,
+-                result_digest=result_digest,
+-                replayed=False,
++            object_admission_id = str(grant.payload.object_admission_id)
++
++        command_id = str(CommandId.new())
++        event_id = str(EventId.new())
++        audit_id = str(AuditId.new())
++        payload_id = str(PayloadId.new())
++        ledger_seq = int(
++            conn.execute(
++                "SELECT COALESCE(MAX(ledger_seq),0)+1 FROM ledger_events"
++            ).fetchone()[0]
++        )
++        result_bytes = canonical_json_bytes(
++            {
++                "command_id": command_id,
++                "aggregate_type": grant.definition.aggregate_type,
++                "aggregate_id": grant.aggregate_id,
++                "aggregate_version": new_version,
++                "ledger_seq": ledger_seq,
++                "event_id": event_id,
++            }
++        )
++        result_digest = digest_bytes(result_bytes)
++
++        conn.execute(
++            "INSERT INTO authority_payloads("
++            "payload_id,mode,schema_version,schema_contract_version,"
++            "schema_contract_digest,canonicalizer_implementation_version,"
++            "payload_digest,payload_bytes,object_admission_id,created_at) "
++            "VALUES(?,?,?,?,?,?,?,?,?,?)",
++            (
++                payload_id,
++                grant.payload.kind,
++                grant.payload.schema_version,
++                grant.payload.schema_contract_version,
++                grant.payload.schema_contract_digest,
++                grant.payload.canonicalizer_version,
++                grant.payload.digest,
++                payload_bytes,
++                object_admission_id,
++                recorded_at,
++            ),
++        )
++        conn.execute(
++            "INSERT INTO authority_commands("
++            "command_id,command_type,producer_version,"
++            "command_definition_version,command_definition_digest,"
++            "aggregate_type,aggregate_id,expected_aggregate_version,"
++            "payload_id,idempotency_namespace,idempotency_key,"
++            "stable_semantic_request_digest,authentication_context_id,"
++            "authorization_request_digest,authorization_decision_id,"
++            "result_digest,result_bytes,committed_at) "
++            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++            (
++                command_id,
++                grant.command_type,
++                self._command_service_version,
++                grant.definition.definition_version,
++                grant.definition.digest,
++                grant.definition.aggregate_type,
++                grant.aggregate_id,
++                grant.expected_aggregate_version,
++                payload_id,
++                grant.idempotency_namespace,
++                grant.idempotency_key,
++                grant.stable_semantic_request_digest,
++                str(grant.authentication.authentication_context_id),
++                grant.authorization_request.request_digest,
++                str(grant.authorization.authorization_decision_id),
++                result_digest,
++                result_bytes,
++                recorded_at,
++            ),
++        )
++        if current_version is None:
++            conn.execute(
++                "INSERT INTO authority_aggregates("
++                "aggregate_type,aggregate_id,current_version,created_at,updated_at) "
++                "VALUES(?,?,?,?,?)",
++                (
++                    grant.definition.aggregate_type,
++                    grant.aggregate_id,
++                    new_version,
++                    recorded_at,
++                    recorded_at,
++                ),
++            )
++        else:
++            conn.execute(
++                "UPDATE authority_aggregates SET current_version=?,updated_at=? "
++                "WHERE aggregate_type=? AND aggregate_id=?",
++                (
++                    new_version,
++                    recorded_at,
++                    grant.definition.aggregate_type,
++                    grant.aggregate_id,
++                ),
++            )
++        conn.execute(
++            "INSERT INTO authority_aggregate_versions("
++            "aggregate_type,aggregate_id,aggregate_version,command_id,"
++            "payload_id,trust_scope,recorded_at) VALUES(?,?,?,?,?,?,?)",
++            (
++                grant.definition.aggregate_type,
++                grant.aggregate_id,
++                new_version,
++                command_id,
++                payload_id,
++                grant.definition.trust_scope.value,
++                recorded_at,
++            ),
++        )
++        conn.execute(
++            "INSERT INTO authority_audit_events("
++            "audit_id,command_id,authentication_context_id,"
++            "authorization_request_digest,authorization_decision_id,"
++            "event_type,detail_digest,recorded_at) VALUES(?,?,?,?,?,?,?,?)",
++            (
++                audit_id,
++                command_id,
++                str(grant.authentication.authentication_context_id),
++                grant.authorization_request.request_digest,
++                str(grant.authorization.authorization_decision_id),
++                grant.definition.event_type,
++                digest_canonical(grant.unsigned_value()),
++                recorded_at,
++            ),
++        )
++        conn.execute(
++            "INSERT INTO ledger_events("
++            "ledger_seq,event_id,event_type,event_schema_version,"
++            "aggregate_type,aggregate_id,aggregate_version,recorded_at,"
++            "command_id,producer_version,command_definition_version,"
++            "command_definition_digest,payload_id,payload_mode,"
++            "payload_schema_version,payload_schema_contract_version,"
++            "payload_schema_contract_digest,payload_canonicalizer_version,"
++            "payload_digest,object_admission_id,principal_id,"
++            "authentication_context_id,authorization_request_digest,"
++            "authorization_decision_id,correlation_id,causation_kind,"
++            "causation_identifier,causation_external_system,security_scope,"
++            "retention_scope,trust_scope) "
++            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++            (
++                ledger_seq,
++                event_id,
++                grant.definition.event_type,
++                grant.definition.event_schema_version,
++                grant.definition.aggregate_type,
++                grant.aggregate_id,
++                new_version,
++                recorded_at,
++                command_id,
++                self._command_service_version,
++                grant.definition.definition_version,
++                grant.definition.digest,
++                payload_id,
++                grant.payload.kind,
++                grant.payload.schema_version,
++                grant.payload.schema_contract_version,
++                grant.payload.schema_contract_digest,
++                grant.payload.canonicalizer_version,
++                grant.payload.digest,
++                object_admission_id,
++                grant.authentication.principal_id,
++                str(grant.authentication.authentication_context_id),
++                grant.authorization_request.request_digest,
++                str(grant.authorization.authorization_decision_id),
++                grant.correlation_id,
++                grant.causation_kind,
++                grant.causation_identifier,
++                grant.causation_external_system,
++                grant.definition.security_scope,
++                grant.definition.retention_scope,
++                grant.definition.trust_scope.value,
++            ),
++        )
++        return CommittedCommand(
++            command_id=command_id,
++            aggregate_type=grant.definition.aggregate_type,
++            aggregate_id=grant.aggregate_id,
++            aggregate_version=new_version,
++            ledger_seq=ledger_seq,
++            event_id=event_id,
++            result_digest=result_digest,
++            replayed=False,
++        )
+ 
+     def _persist_schema_contract(
+         self, conn: sqlite3.Connection, grant: _AuthorizedCommandGrant, *, recorded_at: str
