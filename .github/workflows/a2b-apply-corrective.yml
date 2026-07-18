@@ -32,21 +32,46 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Reconstruct and verify corrective patch
+      - name: Reconstruct compressed corrective patch
         id: reconstruct
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t parts < <(find .github/a2b-apply -maxdepth 1 -type f -name 'patch[0-9][0-9]' | sort)
-          if [[ ${#parts[@]} -ne 22 ]]; then
-            echo "expected 22 patch chunks, found ${#parts[@]}" >&2
-            exit 1
-          fi
-          cat "${parts[@]}" > /tmp/a2b-corrective.patch
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          import hashlib
+          import zlib
+
+          paths = [
+              Path('.github/a2b-apply/part00.b64'),
+              Path('.github/a2b-apply/part01.b64'),
+          ]
+          if not all(path.is_file() for path in paths):
+              raise SystemExit('compressed corrective patch parts are missing')
+          encoded = ''.join(path.read_text(encoding='ascii').split())
+          compressed = base64.b64decode(encoded, validate=True)
+          errors = []
+          patch = None
+          for wbits in (zlib.MAX_WBITS, zlib.MAX_WBITS | 16, -zlib.MAX_WBITS):
+              try:
+                  patch = zlib.decompress(compressed, wbits)
+                  break
+              except zlib.error as exc:
+                  errors.append(str(exc))
+          if patch is None:
+              raise SystemExit('cannot decompress corrective patch: ' + ' | '.join(errors))
+          if not patch.startswith(b'diff --git '):
+              raise SystemExit('decoded corrective payload is not a unified git patch')
+          output = Path('/tmp/a2b-corrective.patch')
+          output.write_bytes(patch)
+          print('decoded_bytes=' + str(len(patch)))
+          print('patch_sha256=' + hashlib.sha256(patch).hexdigest())
+          PY
           test -s /tmp/a2b-corrective.patch
-          grep -q '^diff --git ' /tmp/a2b-corrective.patch
           git apply --check /tmp/a2b-corrective.patch
           echo "patch_sha256=$(sha256sum /tmp/a2b-corrective.patch | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "changed_paths=$(grep -c '^diff --git ' /tmp/a2b-corrective.patch)" >> "$GITHUB_OUTPUT"
 
       - name: Apply source and remove transfer material
         shell: bash
@@ -63,11 +88,12 @@ jobs:
         shell: bash
         env:
           PATCH_SHA256: ${{ steps.reconstruct.outputs.patch_sha256 }}
+          CHANGED_PATHS: ${{ steps.reconstruct.outputs.changed_paths }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git diff --cached --quiet && { echo "patch produced no changes" >&2; exit 1; }
-          git commit -m "feat(authority): implement governed object lifecycle" -m "Apply reviewed corrective patch SHA-256: ${PATCH_SHA256}. Remove all temporary transfer chunks and the one-shot apply workflow in the same commit."
+          git commit -m "feat(authority): implement governed object lifecycle" -m "Apply corrective patch SHA-256: ${PATCH_SHA256} across ${CHANGED_PATHS} paths. Remove all temporary transfer chunks and the one-shot apply workflow in the same commit."
           git push origin HEAD:agent/increment-1a2b-object-lifecycle
