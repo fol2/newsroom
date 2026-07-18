@@ -57,6 +57,8 @@ jobs:
           )
           encoded = ''.join(encoded.split())
           print('encoded_chars=' + str(len(encoded)))
+          encoded += '=' * (-len(encoded) % 4)
+          print('padded_chars=' + str(len(encoded)))
           compressed = base64.b64decode(encoded, validate=True)
           print('compressed_bytes=' + str(len(compressed)))
           errors = []
