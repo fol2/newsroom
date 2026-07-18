@@ -37,7 +37,11 @@ jobs:
           test "$part_count" = 3
 
           echo "stage=reconstruct-archive" | tee /tmp/a2b-install-diagnostics/stage.txt
-          cat .github/a2b-clean-source/part-* | base64 -d > /tmp/a2b-clean-source.tar.gz
+          : > /tmp/a2b-clean-source.tar.gz
+          for part in .github/a2b-clean-source/part-*; do
+            echo "decoding_part=$part"
+            base64 -d "$part" >> /tmp/a2b-clean-source.tar.gz
+          done
           actual_archive_sha="$(sha256sum /tmp/a2b-clean-source.tar.gz | awk '{print $1}')"
           echo "actual_archive_sha=$actual_archive_sha" | tee /tmp/a2b-install-diagnostics/archive-sha.txt
           test "$actual_archive_sha" = "01e0efd66a1b8816e3f48d0d8020c952ba85c0d11a376fa9d0eec4d8d007ec80"
