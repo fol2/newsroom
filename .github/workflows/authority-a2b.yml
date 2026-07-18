@@ -7,6 +7,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: a2b-source-install
+  cancel-in-progress: false
+
 jobs:
   governed-object-authority:
     runs-on: ubuntu-latest
@@ -18,7 +22,7 @@ jobs:
           persist-credentials: true
 
       - name: Install exact reviewed A2b source tree
-        if: github.event_name == 'push' && github.ref == 'refs/heads/agent/increment-1a2b-object-lifecycle'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         run: |
           set -euo pipefail
           test "$(find .github/a2b-clean-source -maxdepth 1 -type f -name 'part-*' | wc -l)" = 3
