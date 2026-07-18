@@ -17,22 +17,35 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Restore exact verified A2b source from branch history
+      - name: Diagnose exact verified A2b source restore
+        id: restore
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
+          exec > >(tee /tmp/a2b-restore.log) 2>&1
           if [[ ! -f .github/workflows/a2b-restore-history.yml ]]; then
-            echo "one-shot restore marker absent; source already restored"
+            echo "restore_marker=absent"
             exit 0
           fi
+          echo "restore_marker=present"
           source_commit=b806e62802a67ddedfbc58f4e1ee8ad4a53a2ff2
+          git cat-file -e "$source_commit^{commit}"
+          echo "source_commit=$source_commit"
           for part in 000 001 002; do
-            git show "$source_commit:.github/a2b-clean-source/part-$part" > "/tmp/part-$part"
+            path=".github/a2b-clean-source/part-$part"
+            git show "$source_commit:$path" > "/tmp/part-$part"
+            echo "part=$part bytes=$(wc -c < /tmp/part-$part) sha256=$(sha256sum /tmp/part-$part | awk '{print $1}')"
           done
-          cat /tmp/part-000 /tmp/part-001 /tmp/part-002 | base64 -d > /tmp/a2b-source.tar.gz
-          echo "01e0efd66a1b8816e3f48d0d8020c952ba85c0d11a376fa9d0eec4d8d007ec80  /tmp/a2b-source.tar.gz" | sha256sum -c -
-          if tar -tzf /tmp/a2b-source.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))'; then
-            echo "unsafe archive path" >&2
+          cat /tmp/part-000 /tmp/part-001 /tmp/part-002 | tr -d '\r\n' | base64 -d > /tmp/a2b-source.tar.gz
+          actual_archive_sha="$(sha256sum /tmp/a2b-source.tar.gz | awk '{print $1}')"
+          echo "archive_bytes=$(wc -c < /tmp/a2b-source.tar.gz)"
+          echo "archive_sha256=$actual_archive_sha"
+          test "$actual_archive_sha" = "01e0efd66a1b8816e3f48d0d8020c952ba85c0d11a376fa9d0eec4d8d007ec80"
+          tar -tzf /tmp/a2b-source.tar.gz > /tmp/a2b-tar-list.txt
+          echo "archive_entries=$(wc -l < /tmp/a2b-tar-list.txt)"
+          if grep -E '(^/|(^|/)\.\.(/|$))' /tmp/a2b-tar-list.txt; then
+            echo "unsafe_archive_path=true"
             exit 1
           fi
           tar -xzf /tmp/a2b-source.tar.gz -C .
@@ -41,15 +54,30 @@ jobs:
           rm -f .github/workflows/a2b-apply-corrective.yml .github/workflows/a2b-install-exact-source.yml
           git add -A
           git diff --cached --check
-          test "$(git write-tree)" = "8600a71b096f50f052df35fbe64debf356a2c20d"
+          actual_tree="$(git write-tree)"
+          echo "actual_tree=$actual_tree"
+          echo "expected_tree=8600a71b096f50f052df35fbe64debf356a2c20d"
+          git status --short
+          test "$actual_tree" = "8600a71b096f50f052df35fbe64debf356a2c20d"
           test -f newsroom/authority/_object_system.py
           test -f newsroom/authority/_object_store.py
           test -f newsroom/authority/_object_cas.py
           test -f newsroom/tests/test_authority_a2b_fault_matrix.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "feat(authority): restore governed object lifecycle implementation"
-          git push origin HEAD:agent/increment-1a2b-object-lifecycle
+          echo "restore_diagnostic=passed"
+
+      - name: Upload restore diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a2b-restore-diagnostics
+          path: |
+            /tmp/a2b-restore.log
+            /tmp/a2b-tar-list.txt
+          if-no-files-found: warn
+
+      - name: Enforce restore diagnostic
+        if: steps.restore.outcome != 'success'
+        run: exit 1
 
       - uses: actions/setup-python@v5
         with:
