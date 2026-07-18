@@ -98,7 +98,7 @@ jobs:
           fi
           [[ $python_status -eq 0 && $apply_status -eq 0 ]]
 
-      - name: Upload reconstruction diagnostics
+      - name: Upload reconstruction diagnostics and exact transfer chunks
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -106,6 +106,7 @@ jobs:
           path: |
             /tmp/a2b-reconstruct.log
             /tmp/a2b-corrective.patch
+            .github/a2b-apply/
           if-no-files-found: warn
 
       - name: Enforce reconstruction gate
