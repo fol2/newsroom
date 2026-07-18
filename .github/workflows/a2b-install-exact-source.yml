@@ -1,0 +1,54 @@
+name: Install exact A2b source
+
+on:
+  push:
+    branches:
+      - agent/increment-1a2b-object-lifecycle
+    paths:
+      - .github/a2b-source-transfer/**
+      - .github/workflows/a2b-install-exact-source.yml
+
+permissions:
+  contents: write
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct and verify source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/a2b-source-transfer/part-* | base64 -d > /tmp/a2b-source.tar.gz
+          echo "84239738f8713ac39391e162cdea8b3c84683a05431560266778de5c8c222948  /tmp/a2b-source.tar.gz" | sha256sum -c -
+          if tar -tzf /tmp/a2b-source.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))'; then
+            echo "unsafe archive path" >&2
+            exit 1
+          fi
+          tar -xzf /tmp/a2b-source.tar.gz -C .
+          rm -rf .github/a2b-source-transfer .github/a2b-apply
+          rm -f .github/workflows/a2b-apply-corrective.yml
+          rm -f .github/workflows/a2b-install-exact-source.yml
+          git add -A
+          test "$(git write-tree)" = "0b4eaf973d861c38a1f0b6d7c998c190fc2509f5"
+          git diff --cached --check
+          test -f newsroom/authority/_object_system.py
+          test -f newsroom/authority/_object_store.py
+          test -f newsroom/authority/_object_cas.py
+          test -f newsroom/tests/test_authority_a2b_fault_matrix.py
+          test ! -e .github/a2b-apply
+          test ! -e .github/a2b-source-transfer
+          test ! -e .github/workflows/a2b-apply-corrective.yml
+
+      - name: Commit and push exact source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat(authority): implement governed object lifecycle"
+          git push origin HEAD:agent/increment-1a2b-object-lifecycle
