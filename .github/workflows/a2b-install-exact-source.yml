@@ -53,16 +53,19 @@ jobs:
           done
           echo "transfer_files=$(find .github/a2b-source-transfer -maxdepth 1 -type f | wc -l)" >> /tmp/a2b-transfer-history.txt
           find .github/a2b-source-transfer -maxdepth 1 -type f -printf '%f %s\n' | sort >> /tmp/a2b-transfer-history.txt
+          git archive --format=tar.gz --output=/tmp/a2b-donor-branch.tar.gz origin/agent/increment-1a2b-governed-object-lifecycle
+          echo "donor_sha256=$(sha256sum /tmp/a2b-donor-branch.tar.gz | awk '{print $1}')" >> /tmp/a2b-transfer-history.txt
           cat /tmp/a2b-transfer-history.txt
 
-      - name: Upload exact source-transfer parts and history diagnostics
+      - name: Upload transfer, history diagnostics and donor branch
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: a2b-source-transfer-parts
+          name: a2b-reconstruction-inputs
           path: |
             .github/a2b-source-transfer
             /tmp/a2b-transfer-history.txt
+            /tmp/a2b-donor-branch.tar.gz
           if-no-files-found: error
 
       - name: Reconstruct and verify source archive
