@@ -22,16 +22,33 @@ jobs:
           persist-credentials: true
 
       - name: Install exact reviewed A2b source tree
+        id: install
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        shell: bash
         run: |
-          set -euo pipefail
-          test "$(find .github/a2b-clean-source -maxdepth 1 -type f -name 'part-*' | wc -l)" = 3
+          mkdir -p /tmp/a2b-install-diagnostics
+          exec > >(tee -a /tmp/a2b-install-diagnostics/install.log) 2>&1
+          set -euxo pipefail
+          trap 'rc=$?; printf "exit_code=%s\n" "$rc" | tee /tmp/a2b-install-diagnostics/exit.txt; exit "$rc"' EXIT
+
+          echo "stage=count-parts" | tee /tmp/a2b-install-diagnostics/stage.txt
+          part_count="$(find .github/a2b-clean-source -maxdepth 1 -type f -name 'part-*' | wc -l)"
+          echo "part_count=$part_count"
+          test "$part_count" = 3
+
+          echo "stage=reconstruct-archive" | tee /tmp/a2b-install-diagnostics/stage.txt
           cat .github/a2b-clean-source/part-* | base64 -d > /tmp/a2b-clean-source.tar.gz
-          echo "01e0efd66a1b8816e3f48d0d8020c952ba85c0d11a376fa9d0eec4d8d007ec80  /tmp/a2b-clean-source.tar.gz" | sha256sum -c -
+          actual_archive_sha="$(sha256sum /tmp/a2b-clean-source.tar.gz | awk '{print $1}')"
+          echo "actual_archive_sha=$actual_archive_sha" | tee /tmp/a2b-install-diagnostics/archive-sha.txt
+          test "$actual_archive_sha" = "01e0efd66a1b8816e3f48d0d8020c952ba85c0d11a376fa9d0eec4d8d007ec80"
+
+          echo "stage=validate-paths" | tee /tmp/a2b-install-diagnostics/stage.txt
           if tar -tzf /tmp/a2b-clean-source.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))'; then
             echo "unsafe archive path" >&2
             exit 1
           fi
+
+          echo "stage=extract" | tee /tmp/a2b-install-diagnostics/stage.txt
           tar -xzf /tmp/a2b-clean-source.tar.gz -C .
           rm -rf .github/a2b-clean-source
           rm -rf .github/a2b-source-transfer
@@ -40,7 +57,11 @@ jobs:
           rm -f .github/workflows/a2b-install-exact-source.yml
           git add -A
           git diff --cached --check
-          test "$(git write-tree)" = "8600a71b096f50f052df35fbe64debf356a2c20d"
+
+          echo "stage=validate-tree" | tee /tmp/a2b-install-diagnostics/stage.txt
+          actual_tree="$(git write-tree)"
+          echo "actual_tree=$actual_tree" | tee /tmp/a2b-install-diagnostics/tree.txt
+          test "$actual_tree" = "8600a71b096f50f052df35fbe64debf356a2c20d"
           test -f newsroom/authority/_object_system.py
           test -f newsroom/authority/_object_store.py
           test -f newsroom/authority/_object_cas.py
@@ -50,10 +71,23 @@ jobs:
           test ! -e .github/a2b-apply
           test ! -e .github/workflows/a2b-apply-corrective.yml
           test ! -e .github/workflows/a2b-install-exact-source.yml
+
+          echo "stage=commit" | tee /tmp/a2b-install-diagnostics/stage.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "feat(authority): implement governed object lifecycle"
+
+          echo "stage=push" | tee /tmp/a2b-install-diagnostics/stage.txt
           git push origin HEAD:agent/increment-1a2b-object-lifecycle
+          echo "stage=complete" | tee /tmp/a2b-install-diagnostics/stage.txt
+
+      - name: Upload A2b install diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a2b-install-diagnostics
+          path: /tmp/a2b-install-diagnostics
+          if-no-files-found: warn
 
       - uses: actions/setup-python@v5
         with:
