@@ -26,7 +26,8 @@ jobs:
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         shell: bash
         run: |
-          mkdir -p /tmp/a2b-install-diagnostics
+          mkdir -p /tmp/a2b-install-diagnostics/clean-source
+          cp .github/a2b-clean-source/part-* /tmp/a2b-install-diagnostics/clean-source/
           exec > >(tee -a /tmp/a2b-install-diagnostics/install.log) 2>&1
           set -euxo pipefail
           trap 'rc=$?; printf "exit_code=%s\n" "$rc" | tee /tmp/a2b-install-diagnostics/exit.txt; exit "$rc"' EXIT
@@ -66,7 +67,6 @@ jobs:
               value += b"=" * ((-len(value)) % 4)
               return base64.b64decode(value, validate=False)
 
-          candidates: dict[str, bytes] = {}
           attempts = {
               "concatenated": lambda: decode_padded(b"".join(filtered_parts)),
               "per-part": lambda: b"".join(
@@ -81,7 +81,6 @@ jobs:
                   continue
               digest = hashlib.sha256(data).hexdigest()
               print(f"strategy={name} bytes={len(data)} sha256={digest}")
-              candidates[name] = data
               if digest == expected:
                   Path("/tmp/a2b-clean-source.tar.gz").write_bytes(data)
                   Path("/tmp/a2b-install-diagnostics/reconstruction.txt").write_text(
