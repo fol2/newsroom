@@ -41,15 +41,32 @@ jobs:
           from pathlib import Path
           import base64
 
-          encoded = ''.join(
-              ''.join(Path(f'/tmp/part-{part}').read_text(encoding='ascii').split())
-              for part in ('000', '001', '002')
-          )
-          encoded += '=' * (-len(encoded) % 4)
-          Path('/tmp/a2b-source.tar.gz').write_bytes(
-              base64.b64decode(encoded, validate=True)
-          )
-          print(f'encoded_chars={len(encoded)}')
+          standard = set(b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+          urlsafe = set(b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=')
+          pieces = []
+          for part in ('000', '001', '002'):
+              raw = Path(f'/tmp/part-{part}').read_bytes()
+              compact = b''.join(raw.split())
+              pieces.append(compact)
+              standard_bad = [(index, byte) for index, byte in enumerate(compact) if byte not in standard]
+              urlsafe_bad = [(index, byte) for index, byte in enumerate(compact) if byte not in urlsafe]
+              print(f'part={part} compact_chars={len(compact)} mod4={len(compact) % 4}')
+              print(f'part={part} standard_bad={standard_bad[:20]} count={len(standard_bad)}')
+              print(f'part={part} urlsafe_bad={urlsafe_bad[:20]} count={len(urlsafe_bad)}')
+              print(f'part={part} prefix={compact[:40]!r} suffix={compact[-40:]!r}')
+          encoded = b''.join(pieces)
+          print(f'combined_chars_before_padding={len(encoded)} mod4={len(encoded) % 4}')
+          encoded += b'=' * (-len(encoded) % 4)
+          print(f'combined_chars_after_padding={len(encoded)}')
+          if all(byte in standard for byte in encoded):
+              decoded = base64.b64decode(encoded, validate=True)
+              print('decoder=standard')
+          elif all(byte in urlsafe for byte in encoded):
+              decoded = base64.b64decode(encoded, altchars=b'-_', validate=True)
+              print('decoder=urlsafe')
+          else:
+              raise SystemExit('archive parts contain bytes outside standard and URL-safe base64 alphabets')
+          Path('/tmp/a2b-source.tar.gz').write_bytes(decoded)
           PY
           actual_archive_sha="$(sha256sum /tmp/a2b-source.tar.gz | awk '{print $1}')"
           echo "archive_bytes=$(wc -c < /tmp/a2b-source.tar.gz)"
@@ -86,6 +103,9 @@ jobs:
           path: |
             /tmp/a2b-restore.log
             /tmp/a2b-tar-list.txt
+            /tmp/part-000
+            /tmp/part-001
+            /tmp/part-002
           if-no-files-found: warn
 
       - name: Enforce restore diagnostic
