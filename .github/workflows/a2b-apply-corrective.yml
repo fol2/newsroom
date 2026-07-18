@@ -1,0 +1,64 @@
+name: Apply A2b corrective source
+
+on:
+  push:
+    branches:
+      - agent/increment-1a2b-object-lifecycle
+
+permissions:
+  contents: write
+
+concurrency:
+  group: a2b-corrective-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact branch head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Reconstruct and verify corrective patch
+        id: reconstruct
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t parts < <(find .github/a2b-apply -maxdepth 1 -type f -name 'patch[0-9][0-9]' | sort)
+          if [[ ${#parts[@]} -ne 22 ]]; then
+            echo "expected 22 patch chunks, found ${#parts[@]}" >&2
+            exit 1
+          fi
+          cat "${parts[@]}" > /tmp/a2b-corrective.patch
+          test -s /tmp/a2b-corrective.patch
+          grep -q '^diff --git ' /tmp/a2b-corrective.patch
+          git apply --check /tmp/a2b-corrective.patch
+          echo "patch_sha256=$(sha256sum /tmp/a2b-corrective.patch | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Apply source and remove transfer material
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --whitespace=nowarn /tmp/a2b-corrective.patch
+          rm -rf .github/a2b-apply
+          rm -f .github/workflows/a2b-apply-corrective.yml
+          test ! -e .github/a2b-apply
+          test ! -e .github/workflows/a2b-apply-corrective.yml
+          git diff --check
+
+      - name: Commit exact corrective implementation
+        shell: bash
+        env:
+          PATCH_SHA256: ${{ steps.reconstruct.outputs.patch_sha256 }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && { echo "patch produced no changes" >&2; exit 1; }
+          git commit -m "feat(authority): implement governed object lifecycle" -m "Apply reviewed corrective patch SHA-256: ${PATCH_SHA256}. Remove all temporary transfer chunks and the one-shot apply workflow in the same commit."
+          git push origin HEAD:agent/increment-1a2b-object-lifecycle
