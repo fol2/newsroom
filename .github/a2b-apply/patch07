@@ -1,0 +1,1487 @@
+hydration.  This is
++                    # deterministic cleanup after an interrupted physical unlink.
++                    self._cas.unlink(identity)
++
++    @staticmethod
++    def _latest_deletion_row(
++        conn: sqlite3.Connection, blob_digest: str
++    ) -> sqlite3.Row | None:
++        return conn.execute(
++            "SELECT d.deletion_id,d.reason_code,d.created_at,"
++            "h.current_version,v.state,v.event_id,v.recorded_at,v.error_code "
++            "FROM object_deletions d "
++            "JOIN object_deletion_heads h ON h.deletion_id=d.deletion_id "
++            "JOIN object_deletion_versions v "
++            "ON v.deletion_id=h.deletion_id "
++            "AND v.lifecycle_version=h.current_version "
++            "WHERE d.blob_digest=? ORDER BY d.created_at DESC LIMIT 1",
++            (blob_digest,),
++        ).fetchone()
++
++    def _current_admission_row(
++        self,
++        conn: sqlite3.Connection,
++        admission_id: str,
++        *,
++        now: UtcTimestamp,
++        require_active: bool = True,
++        require_bytes: bool = True,
++    ) -> sqlite3.Row:
++        row = conn.execute(
++            "SELECT a.*,h.current_version AS admission_lifecycle_version,"
++            "v.state AS admission_state,v.event_id AS admission_event_id,"
++            "r.canonical_digest AS rights_decision_digest,r.allowed AS rights_allowed,"
++            "r.reason_code AS rights_reason_code,r.decided_at AS rights_decided_at,"
++            "r.valid_from AS rights_valid_from,r.valid_until AS rights_valid_until,"
++            "bi.size_bytes AS size_bytes,bh.current_version AS blob_lifecycle_version,"
++            "bv.state AS blob_state,bv.integrity_state AS blob_integrity_state "
++            "FROM object_admissions a "
++            "JOIN object_admission_heads h ON h.admission_id=a.admission_id "
++            "JOIN object_admission_versions v "
++            "ON v.admission_id=h.admission_id "
++            "AND v.lifecycle_version=h.current_version "
++            "JOIN object_rights_decisions r "
++            "ON r.rights_decision_id=a.rights_decision_id "
++            "JOIN blob_identities bi ON bi.blob_digest=a.blob_digest "
++            "JOIN blob_lifecycle_heads bh ON bh.blob_digest=a.blob_digest "
++            "JOIN blob_lifecycle_versions bv "
++            "ON bv.blob_digest=bh.blob_digest "
++            "AND bv.lifecycle_version=bh.current_version "
++            "WHERE a.admission_id=?",
++            (admission_id,),
++        ).fetchone()
++        if row is None:
++            raise KeyError(admission_id)
++        if require_active and str(row["admission_state"]) != AdmissionState.ACTIVE.value:
++            raise ObjectAdmissionDenied("OBJECT_ADMISSION_NOT_ACTIVE")
++        decided_at = UtcTimestamp.parse(str(row["rights_decided_at"]))
++        valid_from = UtcTimestamp.parse(str(row["rights_valid_from"]))
++        valid_until = (
++            None
++            if row["rights_valid_until"] is None
++            else UtcTimestamp.parse(str(row["rights_valid_until"]))
++        )
++        if not bool(row["rights_allowed"]):
++            raise ObjectAdmissionDenied(str(row["rights_reason_code"]))
++        if now.value < decided_at.value:
++            raise ObjectAdmissionDenied("RIGHTS_DECISION_NOT_YET_EFFECTIVE")
++        if now.value < valid_from.value:
++            raise ObjectAdmissionDenied("RIGHTS_NOT_YET_VALID")
++        if valid_until is not None and now.value >= valid_until.value:
++            raise ObjectAdmissionDenied("RIGHTS_EXPIRED")
++        admission_valid_from = UtcTimestamp.parse(str(row["valid_from"]))
++        admission_valid_until = (
++            None
++            if row["valid_until"] is None
++            else UtcTimestamp.parse(str(row["valid_until"]))
++        )
++        if now.value < admission_valid_from.value:
++            raise ObjectAdmissionDenied("OBJECT_ADMISSION_NOT_YET_VALID")
++        if admission_valid_until is not None and now.value >= admission_valid_until.value:
++            raise ObjectAdmissionDenied("OBJECT_ADMISSION_EXPIRED")
++        deletion = self._latest_deletion_row(conn, str(row["blob_digest"]))
++        if deletion is not None and str(deletion["state"]) in {
++            DeletionState.TOMBSTONED.value,
++            DeletionState.PHYSICALLY_REMOVED.value,
++        }:
++            raise ObjectAdmissionDenied("OBJECT_TOMBSTONED")
++        if require_bytes:
++            if str(row["blob_state"]) != BlobLifecycleState.ACTIVE.value:
++                raise ObjectAdmissionDenied("BLOB_NOT_ACTIVE")
++            if (
++                str(row["blob_integrity_state"])
++                != BlobIntegrityState.VERIFIED.value
++            ):
++                raise ObjectIntegrityError("blob integrity is not verified")
++        return row
++
++    def resolve(self, admission_id: object) -> ObjectAdmissionDescriptor:
++        """Internal current-state lookup used by the A1 command boundary."""
++
++        if not isinstance(admission_id, ObjectAdmissionId):
++            raise TypeError("admission lookup requires ObjectAdmissionId")
++        now = self._clock()
++        with self._lock:
++            row = self._current_admission_row(
++                self._connection,
++                str(admission_id),
++                now=now,
++                require_active=True,
++                require_bytes=True,
++            )
++            identity = BlobIdentity(
++                str(row["blob_digest"]), int(row["size_bytes"])
++            )
++            with self._cas.pin(identity):
++                pass
++            return ObjectAdmissionDescriptor(
++                admission_id=admission_id,
++                blob_digest=identity.blob_digest,
++                object_class=str(row["object_class"]),
++                allowed_use=str(row["allowed_use"]),
++                security_scope=str(row["security_scope"]),
++                retention_scope=str(row["retention_scope"]),
++                active=True,
++            )
++
++    def admission_view(self, admission_id: ObjectAdmissionId) -> ObjectAdmissionView:
++        now = self._clock()
++        with self._lock:
++            row = self._current_admission_row(
++                self._connection,
++                str(admission_id),
++                now=now,
++                require_active=False,
++                require_bytes=False,
++            )
++            return self._admission_view_from_row(row)
++
++    @staticmethod
++    def _admission_view_from_row(row: sqlite3.Row) -> ObjectAdmissionView:
++        return ObjectAdmissionView(
++            admission_id=ObjectAdmissionId.parse(str(row["admission_id"])),
++            admission_type=str(row["admission_type"]),
++            definition_version=str(row["definition_version"]),
++            definition_digest=str(row["definition_digest"]),
++            blob=BlobIdentity(
++                str(row["blob_digest"]), int(row["size_bytes"])
++            ),
++            object_class=str(row["object_class"]),
++            allowed_use=str(row["allowed_use"]),
++            security_scope=str(row["security_scope"]),
++            retention_scope=str(row["retention_scope"]),
++            rights_decision_id=RightsDecisionId.parse(
++                str(row["rights_decision_id"])
++            ),
++            rights_decision_digest=str(row["rights_decision_digest"]),
++            valid_from=UtcTimestamp.parse(str(row["valid_from"])),
++            valid_until=(
++                None
++                if row["valid_until"] is None
++                else UtcTimestamp.parse(str(row["valid_until"]))
++            ),
++            lifecycle_version=int(row["admission_lifecycle_version"]),
++            state=AdmissionState(str(row["admission_state"])),
++            activation_event_id=(
++                None
++                if row["admission_event_id"] is None
++                else EventId.parse(str(row["admission_event_id"]))
++            ),
++        )
++
++    def rights_view(self, rights_decision_id: RightsDecisionId) -> RightsDecisionView:
++        with self._lock:
++            row = self._connection.execute(
++                "SELECT * FROM object_rights_decisions WHERE rights_decision_id=?",
++                (str(rights_decision_id),),
++            ).fetchone()
++            if row is None:
++                raise KeyError(str(rights_decision_id))
++            value = self._require_canonical_record(row)
++            if value.get("rights_decision_id") != str(rights_decision_id):
++                raise AuthorityPersistenceError(
++                    "rights decision canonical identity mismatch"
++                )
++            return RightsDecisionView(
++                rights_decision_id=rights_decision_id,
++                authentication_context_id=(
++                    __import__(
++                        "newsroom.authority.types",
++                        fromlist=["AuthenticationContextId"],
++                    ).AuthenticationContextId.parse(
++                        str(row["authentication_context_id"])
++                    )
++                ),
++                authorization_request_digest=str(
++                    row["authorization_request_digest"]
++                ),
++                authorization_decision_id=(
++                    __import__(
++                        "newsroom.authority.types",
++                        fromlist=["AuthorizationDecisionId"],
++                    ).AuthorizationDecisionId.parse(
++                        str(row["authorization_decision_id"])
++                    )
++                ),
++                rights_request_digest=str(row["rights_request_digest"]),
++                policy_contract_digest=str(row["policy_contract_digest"]),
++                admission_definition_digest=str(
++                    row["admission_definition_digest"]
++                ),
++                blob=BlobIdentity(
++                    str(row["blob_digest"]), int(row["size_bytes"])
++                ),
++                object_class=str(row["object_class"]),
++                allowed_use=str(row["allowed_use"]),
++                security_scope=str(row["security_scope"]),
++                retention_scope=str(row["retention_scope"]),
++                allowed=bool(row["allowed"]),
++                reason_code=str(row["reason_code"]),
++                decided_at=UtcTimestamp.parse(str(row["decided_at"])),
++                valid_from=UtcTimestamp.parse(str(row["valid_from"])),
++                valid_until=(
++                    None
++                    if row["valid_until"] is None
++                    else UtcTimestamp.parse(str(row["valid_until"]))
++                ),
++                canonical_digest=str(row["canonical_digest"]),
++            )
++
++    @contextmanager
++    def _object_payload_commit_guard(
++        self, conn: sqlite3.Connection, grant: _AuthorizedCommandGrant
++    ) -> Iterator[_PinnedBlob]:
++        payload = grant.payload
++        if payload.kind != PayloadMode.OBJECT_ADMISSION.value:
++            raise UnsupportedPayloadMode("object payload guard called for other mode")
++        if payload.object_admission_id is None:
++            raise AuthorityPersistenceError(
++                "object payload requires admission identity"
++            )
++        now = self._clock()
++        row = self._current_admission_row(
++            conn,
++            str(payload.object_admission_id),
++            now=now,
++            require_active=True,
++            require_bytes=True,
++        )
++        expected = (
++            str(row["blob_digest"]) == payload.digest
++            and str(row["object_class"]) == payload.object_class
++            and str(row["allowed_use"]) == payload.allowed_use
++            and str(row["security_scope"]) == grant.definition.security_scope
++            and str(row["retention_scope"])
++            == grant.definition.retention_scope
++            and str(row["object_class"])
++            == grant.definition.required_object_class
++            and str(row["allowed_use"])
++            == grant.definition.required_allowed_use
++        )
++        if not expected:
++            raise ObjectAdmissionDenied(
++                "object payload differs from current admitted use"
++            )
++        identity = BlobIdentity(
++            str(row["blob_digest"]), int(row["size_bytes"])
++        )
++        pinned = self._cas.pin(identity)
++        try:
++            yield pinned
++        finally:
++            pinned.close()
++
++    def _final_object_payload_commit_check(
++        self,
++        conn: sqlite3.Connection,
++        grant: _AuthorizedCommandGrant,
++        pinned: _PinnedBlob,
++    ) -> None:
++        if grant.payload.object_admission_id is None:
++            raise AuthorityPersistenceError("missing object admission identity")
++        self._current_admission_row(
++            conn,
++            str(grant.payload.object_admission_id),
++            now=self._clock(),
++            require_active=True,
++            require_bytes=True,
++        )
++        self._cas.verify_pinned(pinned)
++
++    def object_liveness(
++        self, conn: sqlite3.Connection, blob_digest: str
++    ) -> ObjectLivenessSnapshot:
++        active = int(
++            conn.execute(
++                "SELECT COUNT(*) FROM object_admissions a "
++                "JOIN object_admission_heads h ON h.admission_id=a.admission_id "
++                "JOIN object_admission_versions v "
++                "ON v.admission_id=h.admission_id "
++                "AND v.lifecycle_version=h.current_version "
++                "WHERE a.blob_digest=? AND v.state='ACTIVE'",
++                (blob_digest,),
++            ).fetchone()[0]
++        )
++        pending = int(
++            conn.execute(
++                "SELECT COUNT(*) FROM object_admissions a "
++                "JOIN object_admission_heads h ON h.admission_id=a.admission_id "
++                "JOIN object_admission_versions v "
++                "ON v.admission_id=h.admission_id "
++                "AND v.lifecycle_version=h.current_version "
++                "WHERE a.blob_digest=? AND v.state='PENDING'",
++                (blob_digest,),
++            ).fetchone()[0]
++        )
++        references = int(
++            conn.execute(
++                "SELECT COUNT(*) FROM authority_payloads p "
++                "JOIN object_admissions a "
++                "ON a.admission_id=p.object_admission_id "
++                "WHERE a.blob_digest=?",
++                (blob_digest,),
++            ).fetchone()[0]
++        )
++        pins = int(
++            conn.execute(
++                "SELECT COUNT(*) FROM object_recovery_pins p "
++                "JOIN object_recovery_pin_heads h ON h.pin_id=p.pin_id "
++                "JOIN object_recovery_pin_versions v "
++                "ON v.pin_id=h.pin_id AND v.lifecycle_version=h.current_version "
++                "WHERE p.blob_digest=? AND v.state='ACTIVE'",
++                (blob_digest,),
++            ).fetchone()[0]
++        )
++        deletion = self._latest_deletion_row(conn, blob_digest)
++        return ObjectLivenessSnapshot(
++            active_admissions=active,
++            pending_admissions=pending,
++            authority_references=references,
++            active_recovery_pins=pins,
++            deletion_state=(
++                None
++                if deletion is None
++                else DeletionState(str(deletion["state"]))
++            ),
++        )
++
++
++__all__ = ["_ObjectStoreBase"]
+diff --git a/newsroom/authority/_object_store_hydration.py b/newsroom/authority/_object_store_hydration.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec3ed68accfb57d33cadfe8b6d6cad8bcde5b523
+--- /dev/null
++++ b/newsroom/authority/_object_store_hydration.py
+@@ -0,0 +1,293 @@
++from __future__ import annotations
++
++import sqlite3
++
++from ._object_capability import _HydrationGrant
++from .canonical import canonical_json_bytes, digest_bytes, digest_canonical
++from .objects import (
++    BlobIdentity,
++    ObjectAccessDecisionId,
++    ObjectAccessDecisionView,
++    ObjectAdmissionDenied,
++    ObjectHydrationDenied,
++)
++from .persistence import AuthorityPersistenceError
++from .types import UtcTimestamp
++
++
++class _ObjectHydrationStoreMixin:
++    """Authenticated, purpose-bound hydration with exact current-state cutoff."""
++
++    def hydrate(
++        self, grant: _HydrationGrant
++    ) -> tuple[bytes, ObjectAccessDecisionView]:
++        now = self._clock()
++        self._object_issuer.verify_hydration(grant, now=now)
++        policy = self._hydration_policies.resolve_exact(
++            grant.policy.policy_id,
++            grant.policy.contract_version,
++            grant.policy.contract_digest,
++        )
++        with self._lock:
++            with self._transaction() as conn:
++                decided_at = self._clock()
++                self._object_issuer.verify_hydration(
++                    grant, now=decided_at
++                )
++                row = self._current_admission_row(
++                    conn,
++                    str(grant.request.admission_id),
++                    now=decided_at,
++                    require_active=True,
++                    require_bytes=True,
++                )
++                definition = self._admission_registry.resolve_exact(
++                    str(row["admission_type"]),
++                    str(row["definition_version"]),
++                    str(row["definition_digest"]),
++                )
++                if policy.contract_digest not in (
++                    definition.hydration_policy_contract_digests
++                ):
++                    raise ObjectHydrationDenied(
++                        "hydration policy is not admitted for this object use"
++                    )
++                authentication = grant.authentication
++                if (
++                    authentication.principal_id
++                    not in policy.allowed_principal_ids
++                    or authentication.authority_domain
++                    not in policy.allowed_authority_domains
++                ):
++                    raise ObjectHydrationDenied(
++                        "principal or authority domain is outside hydration policy"
++                    )
++                if str(row["object_class"]) not in policy.allowed_object_classes:
++                    raise ObjectHydrationDenied(
++                        "object class is outside hydration policy"
++                    )
++                if str(row["allowed_use"]) not in policy.allowed_uses:
++                    raise ObjectHydrationDenied(
++                        "object use is outside hydration policy"
++                    )
++                if (
++                    str(row["security_scope"])
++                    not in policy.allowed_security_scopes
++                ):
++                    raise ObjectHydrationDenied(
++                        "security scope is outside hydration policy"
++                    )
++                if (
++                    str(row["retention_scope"])
++                    not in policy.allowed_retention_scopes
++                ):
++                    raise ObjectHydrationDenied(
++                        "retention scope is outside hydration policy"
++                    )
++                blob = BlobIdentity(
++                    str(row["blob_digest"]), int(row["size_bytes"])
++                )
++                offset = grant.request.offset
++                length = (
++                    blob.size_bytes - offset
++                    if grant.request.length is None
++                    else grant.request.length
++                )
++                if offset != 0 and not policy.allow_ranges:
++                    raise ObjectHydrationDenied(
++                        "hydration policy does not permit ranges"
++                    )
++                if length > policy.max_bytes:
++                    raise ObjectHydrationDenied(
++                        "requested bytes exceed hydration policy"
++                    )
++                self._cas.limits.require_range(
++                    total_size=blob.size_bytes,
++                    offset=offset,
++                    length=length,
++                )
++                pinned = self._cas.pin(blob)
++                try:
++                    self._cas.verify_pinned(pinned)
++                    state_cutoff = digest_canonical(
++                        {
++                            "admission_id": str(grant.request.admission_id),
++                            "admission_lifecycle_version": int(
++                                row["admission_lifecycle_version"]
++                            ),
++                            "rights_decision_digest": str(
++                                row["rights_decision_digest"]
++                            ),
++                            "blob_digest": blob.blob_digest,
++                            "blob_lifecycle_version": int(
++                                row["blob_lifecycle_version"]
++                            ),
++                            "deletion_state": None,
++                            "offset": offset,
++                            "length": length,
++                        }
++                    )
++                    access_decision_id = ObjectAccessDecisionId.new()
++                    canonical_value = {
++                        "access_decision_id": str(access_decision_id),
++                        "policy_contract_digest": policy.contract_digest,
++                        "authentication_context_id": str(
++                            authentication.authentication_context_id
++                        ),
++                        "authorization_request_digest": (
++                            grant.authorization_request.request_digest
++                        ),
++                        "authorization_decision_id": str(
++                            grant.authorization.authorization_decision_id
++                        ),
++                        "principal_id": authentication.principal_id,
++                        "authority_domain": authentication.authority_domain,
++                        "purpose": policy.purpose,
++                        "admission_id": str(grant.request.admission_id),
++                        "object_class": str(row["object_class"]),
++                        "allowed_use": str(row["allowed_use"]),
++                        "security_scope": str(row["security_scope"]),
++                        "retention_scope": str(row["retention_scope"]),
++                        "range_offset": offset,
++                        "allowed_bytes": length,
++                        "state_cutoff_digest": state_cutoff,
++                        "allowed": True,
++                        "reason_code": "HYDRATION_ALLOWED",
++                        "decided_at": decided_at.to_text(),
++                    }
++                    canonical = canonical_json_bytes(canonical_value)
++                    canonical_digest = digest_bytes(canonical)
++                    self._persist_security_records(
++                        conn,
++                        authentication=grant.authentication,
++                        request=grant.authorization_request,
++                        decision=grant.authorization,
++                        recorded_at=decided_at.to_text(),
++                    )
++                    conn.execute(
++                        "INSERT INTO object_access_decisions("
++                        "access_decision_id,policy_contract_digest,"
++                        "authentication_context_id,authorization_request_digest,"
++                        "authorization_decision_id,principal_id,authority_domain,"
++                        "purpose,admission_id,object_class,allowed_use,"
++                        "security_scope,retention_scope,range_offset,allowed_bytes,"
++                        "state_cutoff_digest,allowed,reason_code,decided_at,"
++                        "canonical_bytes,canonical_digest) "
++                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++                        (
++                            str(access_decision_id),
++                            policy.contract_digest,
++                            str(authentication.authentication_context_id),
++                            grant.authorization_request.request_digest,
++                            str(grant.authorization.authorization_decision_id),
++                            authentication.principal_id,
++                            authentication.authority_domain,
++                            policy.purpose,
++                            str(grant.request.admission_id),
++                            str(row["object_class"]),
++                            str(row["allowed_use"]),
++                            str(row["security_scope"]),
++                            str(row["retention_scope"]),
++                            offset,
++                            length,
++                            state_cutoff,
++                            1,
++                            "HYDRATION_ALLOWED",
++                            decided_at.to_text(),
++                            canonical,
++                            canonical_digest,
++                        ),
++                    )
++                    # The state and pinned bytes are rechecked immediately before
++                    # leaving the authority transaction.
++                    self._current_admission_row(
++                        conn,
++                        str(grant.request.admission_id),
++                        now=self._clock(),
++                        require_active=True,
++                        require_bytes=True,
++                    )
++                    self._cas.verify_pinned(pinned)
++                    data = self._cas.read_range(
++                        pinned, offset=offset, length=length
++                    )
++                finally:
++                    pinned.close()
++            return data, self.access_decision_view(access_decision_id)
++
++    def access_decision_view(
++        self, access_decision_id: ObjectAccessDecisionId
++    ) -> ObjectAccessDecisionView:
++        with self._lock:
++            row = self._connection.execute(
++                "SELECT * FROM object_access_decisions WHERE access_decision_id=?",
++                (str(access_decision_id),),
++            ).fetchone()
++            if row is None:
++                raise KeyError(str(access_decision_id))
++            value = self._require_canonical_record(row)
++            if value.get("access_decision_id") != str(access_decision_id):
++                raise AuthorityPersistenceError(
++                    "access decision canonical identity mismatch"
++                )
++            return ObjectAccessDecisionView(
++                access_decision_id=access_decision_id,
++                policy_contract_digest=str(row["policy_contract_digest"]),
++                authentication_context_id=str(row["authentication_context_id"]),
++                authorization_request_digest=str(
++                    row["authorization_request_digest"]
++                ),
++                authorization_decision_id=str(row["authorization_decision_id"]),
++                principal_id=str(row["principal_id"]),
++                authority_domain=str(row["authority_domain"]),
++                purpose=str(row["purpose"]),
++                admission_id=str(row["admission_id"]),
++                object_class=str(row["object_class"]),
++                allowed_use=str(row["allowed_use"]),
++                security_scope=str(row["security_scope"]),
++                retention_scope=str(row["retention_scope"]),
++                range_offset=int(row["range_offset"]),
++                allowed_bytes=int(row["allowed_bytes"]),
++                state_cutoff_digest=str(row["state_cutoff_digest"]),
++                allowed=bool(row["allowed"]),
++                reason_code=str(row["reason_code"]),
++                decided_at=UtcTimestamp.parse(str(row["decided_at"])),
++                canonical_digest=str(row["canonical_digest"]),
++            )
++
++
++__all__ = ["_ObjectHydrationStoreMixin"]
+diff --git a/newsroom/authority/_object_store_lifecycle.py b/newsroom/authority/_object_store_lifecycle.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..31f0893fd0384245634dc602b753f8a8f197e491
+--- /dev/null
++++ b/newsroom/authority/_object_store_lifecycle.py
+@@ -0,0 +1,825 @@
++from __future__ import annotations
++
++from collections.abc import Callable
++import sqlite3
++
++from ._capability import _AuthorizedCommandGrant
++from ._object_capability import _MaintenanceGrant
++from .canonical import canonical_json_bytes, digest_bytes, digest_canonical
++from .objects import (
++    AdmissionState,
++    BlobIdentity,
++    BlobIntegrityState,
++    BlobLifecycleState,
++    DeletionState,
++    GovernedDeletionId,
++    GovernedDeletionView,
++    ObjectAdmissionId,
++    ObjectAdmissionView,
++    ObjectLifecycleError,
++    RecoveryPinId,
++    RecoveryPinState,
++    RecoveryPinView,
++)
++from .persistence import AuthorityPersistenceError, IdempotencyConflict
++from .types import EventId, UtcTimestamp
++
++
++_LifecycleGrantFactory = Callable[
++    [str, object, dict[str, object]], _AuthorizedCommandGrant
++]
++
++
++class _ObjectLifecycleStoreMixin:
++    """Ordered admission, deletion, GC, and recovery-pin mutations."""
++
++    @staticmethod
++    def _verify_lifecycle_command(
++        grant: _MaintenanceGrant,
++        lifecycle_grant: _AuthorizedCommandGrant,
++        *,
++        expected_command_type: str,
++        expected_payload: dict[str, object],
++    ) -> None:
++        if lifecycle_grant.definition.command_type != expected_command_type:
++            raise AuthorityPersistenceError(
++                "lifecycle command type does not match maintenance operation"
++            )
++        if lifecycle_grant.authentication.principal_id != grant.authentication.principal_id:
++            raise AuthorityPersistenceError(
++                "lifecycle command principal differs from maintenance authority"
++            )
++        if (
++            lifecycle_grant.authentication.authority_domain
++            != grant.authentication.authority_domain
++        ):
++            raise AuthorityPersistenceError(
++                "lifecycle command domain differs from maintenance authority"
++            )
++        if lifecycle_grant.payload.inline_bytes != canonical_json_bytes(
++            expected_payload
++        ):
++            raise AuthorityPersistenceError(
++                "lifecycle command payload differs from exact mutation"
++            )
++
++    @staticmethod
++    def _operation_namespace_key(grant: _MaintenanceGrant) -> tuple[str, str]:
++        return grant.idempotency_namespace, grant.idempotency_key
++
++    def _existing_operation(
++        self, grant: _MaintenanceGrant
++    ) -> sqlite3.Row | None:
++        return self._connection.execute(
++            "SELECT * FROM object_lifecycle_operations "
++            "WHERE idempotency_namespace=? AND idempotency_key=?",
++            self._operation_namespace_key(grant),
++        ).fetchone()
++
++    def _record_operation(
++        self,
++        conn: sqlite3.Connection,
++        *,
++        grant: _MaintenanceGrant,
++        committed: object,
++        result: dict[str, object],
++        recorded_at: str,
++    ) -> None:
++        result_bytes = canonical_json_bytes(result)
++        conn.execute(
++            "INSERT INTO object_lifecycle_operations("
++            "operation_id,operation_type,idempotency_namespace,idempotency_key,"
++            "stable_semantic_request_digest,authentication_context_id,"
++            "authorization_request_digest,authorization_decision_id,command_id,"
++            "event_id,result_bytes,result_digest,committed_at) "
++            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
++            (
++                str(grant.operation_id),
++                grant.operation_type,
++                grant.idempotency_namespace,
++                grant.idempotency_key,
++                grant.stable_semantic_request_digest,
++                str(grant.authentication.authentication_context_id),
++                grant.authorization_request.request_digest,
++                str(grant.authorization.authorization_decision_id),
++                getattr(committed, "command_id"),
++                getattr(committed, "event_id"),
++                result_bytes,
++                digest_bytes(result_bytes),
++                recorded_at,
++            ),
++        )
++
++    def revoke_admission(
++        self,
++        grant: _MaintenanceGrant,
++        *,
++        lifecycle_grant_factory: _LifecycleGrantFactory,
++    ) -> ObjectAdmissionView:
++        now = self._clock()
++        self._object_issuer.verify_maintenance(grant, now=now)
++        if grant.operation_type != "ADMISSION_REVOKE":
++            raise AuthorityPersistenceError("wrong revocation operation")
++        admission_id = ObjectAdmissionId.parse(grant.target_identity)
++        with self._lock:
++            existing = self._existing_operation(grant)
++            if existing is not None:
++                return self.admission_view(admission_id)
++            row = self._current_admission_row(
++                self._connection,
++                str(admission_id),
++                now=now,
++                require_active=True,
++                require_bytes=False,
++            )
++            payload = {
++                "operation_id": str(grant.operation_id),
++                "admission_id": str(admission_id),
++                "reason_code": grant.reason_code,
++                "previous_lifecycle_version": int(
++                    row["admission_lifecycle_version"]
++                ),
++            }
++            lifecycle_grant = lifecycle_grant_factory(
++                "object.admission.revoke", admission_id, payload
++            )
++            self._issuer.verify(lifecycle_grant)
++            self._verify_lifecycle_command(
++                grant,
++                lifecycle_grant,
++                expected_command_type="object.admission.revoke",
++                expected_payload=payload,
++            )
++            with self._transaction() as conn:
++                recorded = self._clock()
++                self._object_issuer.verify_maintenance(grant, now=recorded)
++                current = self._current_admission_row(
++                    conn,
++                    str(admission_id),
++                    now=recorded,
++                    require_active=True,
++                    require_bytes=False,
++                )
++                self._persist_security_records(
++                    conn,
++                    authentication=grant.authentication,
++                    request=grant.authorization_request,
++                    decision=grant.authorization,
++                    recorded_at=recorded.to_text(),
++                )
++                committed = self._commit_grant_in_transaction(
++                    conn, lifecycle_grant, recorded_at=recorded.to_text()
++                )
++                next_version = int(current["admission_lifecycle_version"]) + 1
++                conn.execute(
++                    "INSERT INTO object_admission_versions("
++                    "admission_id,lifecycle_version,state,operation_id,event_id,"
++                    "reason_code,recorded_at,detail_digest) VALUES(?,?,?,?,?,?,?,?)",
++                    (
++                        str(admission_id),
++                        next_version,
++                        AdmissionState.REVOKED.value,
++                        str(grant.operation_id),
++                        committed.event_id,
++                        grant.reason_code,
++                        recorded.to_text(),
++                        digest_canonical(payload),
++                    ),
++                )
++                conn.execute(
++                    "UPDATE object_admission_heads "
++                    "SET current_version=?,updated_at=? WHERE admission_id=?",
++                    (next_version, recorded.to_text(), str(admission_id)),
++                )
++                self._record_operation(
++                    conn,
++                    grant=grant,
++                    committed=committed,
++                    result={
++                        "admission_id": str(admission_id),
++                        "lifecycle_version": next_version,
++                        "state": AdmissionState.REVOKED.value,
++                    },
++                    recorded_at=recorded.to_text(),
++                )
++            return self.admission_view(admission_id)
++
++    def request_deletion(
++        self,
++        grant: _MaintenanceGrant,
++        *,
++        lifecycle_grant_factory: _LifecycleGrantFactory,
++    ) -> GovernedDeletionView:
++        now = self._clock()
++        self._object_issuer.verify_maintenance(grant, now=now)
++        if grant.operation_type != "DELETION_REQUEST":
++            raise AuthorityPersistenceError("wrong deletion-request operation")
++        blob_digest = grant.target_identity
++        with self._lock:
++            existing = self._existing_operation(grant)
++            if existing is not None:
++                deletion = self._latest_deletion_row(
++                    self._connection, blob_digest
++                )
++                if deletion is None:
++                    raise AuthorityPersistenceError(
++                        "deletion replay lacks authoritative deletion state"
++                    )
++                return self.deletion_view(
++                    GovernedDeletionId.parse(str(deletion["deletion_id"]))
++                )
++            size = self._blob_size(blob_digest)
++            blob = BlobIdentity(blob_digest, size)
++            lifecycle = self._blob_lifecycle_row(blob_digest)
++            if str(lifecycle["state"]) not in {
++                BlobLifecycleState.ACTIVE.value,
++                BlobLifecycleState.DELETION_PENDING.value,
++            }:
++                raise ObjectLifecycleError(
++                    "deletion request requires ACTIVE blob authority"
++                )
++            current_deletion = self._latest_deletion_row(
++                self._connection, blob_digest
++            )
++            if current_deletion is not None:
++                return self.deletion_view(
++                    GovernedDeletionId.parse(
++                        str(current_deletion["deletion_id"])
++                    )
++                )
++            deletion_id = GovernedDeletionId.new()
++            payload = {
++                "operation_id": str(grant.operation_id),
++                "deletion_id": str(deletion_id),
++                "blob_digest": blob_digest,
++                "reason_code": grant.reason_code,
++            }
++            lifecycle_grant = lifecycle_grant_factory(
++                "object.deletion.request", deletion_id, payload
++            )
++            self._issuer.verify(lifecycle_grant)
++            self._verify_lifecycle_command(
++                grant,
++                lifecycle_grant,
++                expected_command_type="object.deletion.request",
++                expected_payload=payload,
++            )
++            with self._transaction() as conn:
++                recorded = self._clock()
++                self._object_issuer.verify_maintenance(grant, now=recorded)
++                self._persist_security_records(
++                    conn,
++                    authentication=grant.authentication,
++                    request=grant.authorization_request,
++                    decision=grant.authorization,
++                    recorded_at=recorded.to_text(),
++                )
++                committed = self._commit_grant_in_transaction(
++                    conn, lifecycle_grant, recorded_at=recorded.to_text()
++                )
++                conn.execute(
++                    "INSERT INTO object_deletions("
++                    "deletion_id,blob_digest,reason_code,created_at) "
++                    "VALUES(?,?,?,?)",
++                    (
++                        str(deletion_id),
++                        blob_digest,
++                        grant.reason_code,
++                        recorded.to_text(),
++                    ),
++                )
++                conn.execute(
++                    "INSERT INTO object_deletion_versions("
++                    "deletion_id,lifecycle_version,state,operation_id,event_id,"
++                    "error_code,recorded_at,detail_digest) "
++                    "VALUES(?,?,?,?,?,NULL,?,?)",
++                    (
++                        str(deletion_id),
++                        1,
++                        DeletionState.REQUESTED.value,
++                        str(grant.operation_id),
++                        committed.event_id,
++                        recorded.to_text(),
++                        digest_canonical(payload),
++                    ),
++                )
++                conn.execute(
++                    "INSERT INTO object_deletion_heads("
++                    "deletion_id,current_version,updated_at) VALUES(?,?,?)",
++                    (str(deletion_id), 1, recorded.to_text()),
++                )
++                self._append_blob_lifecycle(
++                    conn,
++                    blob_digest=blob_digest,
++                    state=BlobLifecycleState.DELETION_PENDING,
++                    integrity=BlobIntegrityState.VERIFIED,
++                    operation_id=str(grant.operation_id),
++                    event_id=committed.event_id,
++                    recorded_at=recorded,
++                )
++                self._record_operation(
++                    conn,
++                    grant=grant,
++                    committed=committed,
++                    result={
++                        "deletion_id": str(deletion_id),
++                        "lifecycle_version": 1,
++                        "state": DeletionState.REQUESTED.value,
++                    },
++                    recorded_at=recorded.to_text(),
++                )
++            return self.deletion_view(deletion_id)
++
++    def tombstone_deletion(
++        self,
++        grant: _MaintenanceGrant,
++        *,
++        lifecycle_grant_factory: _LifecycleGrantFactory,
++    ) -> GovernedDeletionView:
++        now = self._clock()
++        self._object_issuer.verify_maintenance(grant, now=now)
++        if grant.operation_type != "DELETION_TOMBSTONE":
++            raise AuthorityPersistenceError("wrong tombstone operation")
++        deletion_id = GovernedDeletionId.parse(grant.target_identity)
++        with self._lock:
++            existing = self._existing_operation(grant)
++            if existing is not None:
++                return self.deletion_view(deletion_id)
++            row = self._deletion_row(deletion_id)
++            if DeletionState(str(row["state"])) is not DeletionState.REQUESTED:
++                raise ObjectLifecycleError(
++                    "tombstone requires REQUESTED deletion state"
++                )
++            payload = {
++                "operation_id": str(grant.operation_id),
++                "deletion_id": str(deletion_id),
++                "blob_digest": str(row["blob_digest"]),
++                "previous_lifecycle_version": int(row["current_version"]),
++            }
++            lifecycle_grant = lifecycle_grant_factory(
++                "object.deletion.tombstone", deletion_id, payload
++            )
++            self._issuer.verify(lifecycle_grant)
++            self._verify_lifecycle_command(
++                grant,
++                lifecycle_grant,
++                expected_command_type="object.deletion.tombstone",
++                expected_payload=payload,
++            )
++            with self._transaction() as conn:
++                recorded = self._clock()
++                self._object_issuer.verify_maintenance(grant, now=recorded)
++                current = self._deletion_row(deletion_id, conn=conn)
++                if DeletionState(str(current["state"])) is not DeletionState.REQUESTED:
++                    raise ObjectLifecycleError(
++                        "deletion state changed before tombstone commit"
++                    )
++                self._persist_security_records(
++                    conn,
++                    authentication=grant.authentication,
++                    request=grant.authorization_request,
++                    decision=grant.authorization,
++                    recorded_at=recorded.to_text(),
++                )
++                committed = self._commit_grant_in_transaction(
++                    conn, lifecycle_grant, recorded_at=recorded.to_text()
++                )
++                next_version = int(current["current_version"]) + 1
++                conn.execute(
++                    "INSERT INTO object_deletion_versions("
++                    "deletion_id,lifecycle_version,state,operation_id,event_id,"
++                    "error_code,recorded_at,detail_digest) "
++                    "VALUES(?,?,?,?,?,NULL,?,?)",
++                    (
++                        str(deletion_id),
++                        next_version,
++                        DeletionState.TOMBSTONED.value,
++                        str(grant.operation_id),
++                        committed.event_id,
++                        recorded.to_text(),
++                        digest_canonical(payload),
++                    ),
++                )
++                conn.execute(
++                    "UPDATE object_deletion_heads "
++                    "SET current_version=?,updated_at=? WHERE deletion_id=?",
++                    (next_version, recorded.to_text(), str(deletion_id)),
++                )
++                self._record_operation(
++                    conn,
++                    grant=grant,
++                    committed=committed,
++                    result={
++                        "deletion_id": str(deletion_id),
++                        "lifecycle_version": next_version,
++                        "state": DeletionState.TOMBSTONED.value,
++                    },
++                    recorded_at=recorded.to_text(),
++                )
++            return self.deletion_view(deletion_id)
++
++    def _deletion_row(
++        self,
++        deletion_id: GovernedDeletionId,
++        *,
++        conn: sqlite3.Connection | None = None,
++    ) -> sqlite3.Row:
++        selected = conn or self._connection
++        row = selected.execute(
++            "SELECT d.*,h.current_version,v.state,v.event_id,v.recorded_at,"
++            "v.error_code FROM object_deletions d "
++            "JOIN object_deletion_heads h ON h.deletion_id=d.deletion_id "
++            "JOIN object_deletion_versions v "
++            "ON v.deletion_id=h.deletion_id "
++            "AND v.lifecycle_version=h.current_version "
++            "WHERE d.deletion_id=?",
++            (str(deletion_id),),
++        ).fetchone()
++        if row is None:
++            raise KeyError(str(deletion_id))
++        return row
++
++    def deletion_view(
++        self, deletion_id: GovernedDeletionId
++    ) -> GovernedDeletionView:
++        with self._lock:
++            row = self._deletion_row(deletion_id)
++            return GovernedDeletionView(
++                deletion_id=deletion_id,
++                blob_digest=str(row["blob_digest"]),
++                reason_code=str(row["reason_code"]),
++                lifecycle_version=int(row["current_version"]),
++                state=DeletionState(str(row["state"])),
++                event_id=EventId.parse(str(row["event_id"])),
++                recorded_at=UtcTimestamp.parse(str(row["recorded_at"])),
++                error_code=(
++                    None
++                    if row["error_code"] is None
++                    else str(row["error_code"])
++                ),
++            )
++
++    def create_recovery_pin(
++        self,
++        grant: _MaintenanceGrant,
++        *,
++        lifecycle_grant_factory: _LifecycleGrantFactory,
++    ) -> RecoveryPinView:
++        now = self._clock()
++        self._object_issuer.verify_maintenance(grant, now=now)
++        if grant.operation_type != "RECOVERY_PIN_CREATE":
++            raise AuthorityPersistenceError("wrong recovery-pin operation")
++        blob_digest = grant.target_identity
++        with self._lock:
++            existing = self._existing_operation(grant)
++            if existing is not None:
++                result = self._decode_operation_result(existing)
++                return self.recovery_pin_view(
++                    RecoveryPinId.parse(str(result["pin_id"]))
++                )
++            self._blob_size(blob_digest)
++            pin_id = RecoveryPinId.new()
++            payload = {
++                "operation_id": str(grant.operation_id),
++                "pin_id": str(pin_id),
++                "blob_digest": blob_digest,
++                "reason_code": grant.reason_code,
++            }
++            lifecycle = lifecycle_grant_factory(
++                "object.recovery_pin.create", pin_id, payload
++            )
++            self._issuer.verify(lifecycle)
++            self._verify_lifecycle_command(
++                grant,
++                lifecycle,
++                expected_command_type="object.recovery_pin.create",
++                expected_payload=payload,
++            )
++            with self._transaction() as conn:
++                recorded = self._clock()
++                self._object_issuer.verify_maintenance(grant, now=recorded)
++                self._persist_security_records(
++                    conn,
++                    authentication=grant.authentication,
++                    request=grant.authorization_request,
++                    decision=grant.authorization,
++                    recorded_at=recorded.to_text(),
++                )
++                committed = self._commit_grant_in_transaction(
++                    conn, lifecycle, recorded_at=recorded.to_text()
++                )
++                conn.execute(
++                    "INSERT INTO object_recovery_pins("
++                    "pin_id,blob_digest,reason_code,created_at) VALUES(?,?,?,?)",
++                    (
++                        str(pin_id),
++                        blob_digest,
++                        grant.reason_code,
++                        recorded.to_text(),
++                    ),
++                )
++                conn.execute(
++                    "INSERT INTO object_recovery_pin_versions("
++                    "pin_id,lifecycle_version,state,operation_id,event_id,"
++                    "recorded_at,detail_digest) VALUES(?,?,?,?,?,?,?)",
++                    (
++                        str(pin_id),
++                        1,
++                        RecoveryPinState.ACTIVE.value,
++                        str(grant.operation_id),
++                        committed.event_id,
++                        recorded.to_text(),
++                        digest_canonical(payload),
++                    ),
++                )
++                conn.execute(
++                    "INSERT INTO object_recovery_pin_heads("
++                    "pin_id,current_version,updated_at) VALUES(?,?,?)",
++                    (str(pin_id), 1, recorded.to_text()),
++                )
++                self._record_operation(
++                    conn,
++                    grant=grant,
++                    committed=committed,
++                    result={
++                        "pin_id": str(pin_id),
++                        "lifecycle_version": 1,
++                        "state": RecoveryPinState.ACTIVE.value,
++                    },
++                    recorded_at=recorded.to_text(),
++                )
++            return self.recovery_pin_view(pin_id)
++
++    def release_recovery_pin(
++        self,
++        grant: _MaintenanceGrant,
++        *,
++        lifecycle_grant_factory: _LifecycleGrantFactory,
++    ) -> RecoveryPinView:
++        now = self._clock()
++        self._object_issuer.verify_maintenance(grant, now=now)
++        if grant.operation_type != "RECOVERY_PIN_RELEASE":
++            raise AuthorityPersistenceError("wrong recovery-pin release operation")
++        pin_id = RecoveryPinId.parse(grant.target_identity)
++        with self._lock:
++            existing = self._existing_operation(grant)
++            if existing is not None:
++                return self.recovery_pin_view(pin_id)
++            row = self._recovery_pin_row(pin_id)
++            if RecoveryPinState(str(row["state"])) is RecoveryPinState.RELEASED:
++                return self.recovery_pin_view(pin_id)
++            payload = {
++                "operation_id": str(grant.operation_id),
++                "pin_id": str(pin_id),
++                "blob_digest": str(row["blob_digest"]),
++                "previous_lifecycle_version": int(row["current_version"]),
++            }
++            lifecycle = lifecycle_grant_factory(
++                "object.recovery_pin.release", pin_id, payload
++            )
++            self._issuer.verify(lifecycle)
++            self._verify_lifecycle_command(
++                grant,
++                lifecycle,
++                expected_command_type="object.recovery_pin.release",
++                expected_payload=payload,
++            )
++            with self._transaction() as conn:
++                recorded = self._clock()
++                self._object_issuer.verify_maintenance(grant, now=recorded)
++                current = self._recovery_pin_row(pin_id, conn=conn)
++                if RecoveryPinState(str(current["state"])) is not RecoveryPinState.ACTIVE:
++                    raise ObjectLifecycleError(
++                        "recovery pin changed before release commit"
++                    )
++                self._persist_security_records(
++                    conn,
++                    authentication=grant.authentication,
++                    request=grant.authorization_request,
++                    decision=grant.authorization,
++                    recorded_at=recorded.to_text(),
++                )
++                committed = self._commit_grant_in_transaction(
++                    conn, lifecycle, recorded_at=recorded.to_text()
++                )
++                next_version = int(current["current_version"]) + 1
++                conn.execute(
++                    "INSERT INTO object_recovery_pin_versions("
++                    "pin_id,lifecycle_version,state,operation_id,event_id,"
++                    "recorded_at,detail_digest) VALUES(?,?,?,?,?,?,?)",
++                    (
++                        str(pin_id),
++                        next_version,
++                        RecoveryPinState.RELEASED.value,
++                        str(grant.operation_id),
++                        committed.event_id,
++                        recorded.to_text(),
++                        digest_canonical(payload),
++                    ),
++                )
++                conn.execute(
++                    "UPDATE object_recovery_pin_heads "
++                    "SET current_version=?,updated_at=? WHERE pin_id=?",
++                    (next_version, recorded.to_text(), str(pin_id)),
++                )
++                self._record_operation(
++                    conn,
++                    grant=grant,
++                    committed=committed,
++                    result={
++                        "pin_id": str(pin_id),
++                        "lifecycle_version": next_version,
++                        "state": RecoveryPinState.RELEASED.value,
++                    },
++                    recorded_at=recorded.to_text(),
++                )
++            return self.recovery_pin_view(pin_id)
++
++    def _recovery_pin_row(
++        self,
++        pin_id: RecoveryPinId,
++        *,
++        conn: sqlite3.Connection | None = None,
++    ) -> sqlite3.Row:
++        selected = conn or self._connection
++        row = selected.execute(
++            "SELECT p.*,h.current_version,v.state,v.event_id,v.recorded_at "
++            "FROM object_recovery_pins p "
++            "JOIN object_recovery_pin_heads h ON h.pin_id=p.pin_id "
++            "JOIN object_recovery_pin_versions v "
++            "ON v.pin_id=h.pin_id AND v.lifecycle_version=h.current_version "
++            "WHERE p.pin_id=?",
++            (str(pin_id),),
++        ).fetchone()
++        if row is None:
++            raise KeyError(str(pin_id))
++        return row
++
++    def recovery_pin_view(self, pin_id: RecoveryPinId) -> RecoveryPinView:
++        with self._lock:
++            row = self._recovery_pin_row(pin_id)
++            return RecoveryPinView(
++                pin_id=pin_id,
++                blob_digest=str(row["blob_digest"]),
++                reason_code=str(row["reason_code"]),
++                lifecycle_version=int(row["current_version"]),
++                state=RecoveryPinState(str(row["state"])),
++                event_id=EventId.parse(str(row["event_id"])),
++                recorded_at=UtcTimestamp.parse(str(row["recorded_at"])),
++            )
++
++    def complete_deletion(
++        self,
++        grant: _MaintenanceGrant,
++        *,
++        lifecycle_grant_factory: _LifecycleGrantFactory,
++        failure_grant_factory: _LifecycleGrantFactory,
++    ) -> GovernedDeletionView:
++        now = self._clock()
++        self._object_issuer.verify_maintenance(grant, now=now)
++        if grant.operation_type != "DELETION_COMPLETE":
++            raise AuthorityPersistenceError("wrong deletion operation")
++        deletion_id = GovernedDeletionId.parse(grant.target_identity)
++        with self._lock:
++            existing = self._existing_operation(grant)
++            if existing is not None:
++                return self.deletion_view(deletion_id)
++            row = self._deletion_row(deletion_id)
++            current_state = DeletionState(str(row["state"]))
++            if current_state is DeletionState.PHYSICALLY_REMOVED:
++                return self.deletion_view(deletion_id)
++            if current_state is not DeletionState.TOMBSTONED:
++                raise ObjectLifecycleError(
++                    "physical removal requires TOMBSTONED deletion"
++                )
++            blob = BlobIdentity(
++                str(row["blob_digest"]), self._blob_size(str(row["blob_digest"]))
++            )
++            liveness = self.object_liveness(self._connection, blob.blob_digest)
++            if not liveness.may_physically_remove:
++                raise ObjectLifecycleError(
++                    "recovery pin or deletion state blocks physical removal"
++                )
++            payload = {
++                "operation_id": str(grant.operation_id),
++                "deletion_id": str(deletion_id),
++                "blob_digest": blob.blob_digest,
++            }
++            lifecycle_grant = lifecycle_grant_factory(
++                "object.deletion.complete", deletion_id, payload
++            )
++            self._issuer.verify(lifecycle_grant)
++            self._verify_lifecycle_command(
++                grant,
++                lifecycle_grant,
++                expected_command_type="object.deletion.complete",
++                expected_payload=payload,
++            )
++            try:
++                # Hold the SQLite write transaction and the lifetime writer lock
++                # across the final liveness check, durable unlink and ordered
++                # lifecycle mutation.  Filesystem and SQLite cannot share one
++                # atomic primitive, so a post-unlink SQLite failure deliberately
++                # leaves TOMBSTONED authority for deterministic reconciliation.
++                with self._transaction() as conn:
++                    recorded = self._clock()
++                    self._object_issuer.verify_maintenance(grant, now=recorded)
++                    current = self._deletion_row(deletion_id, conn=conn)
++                    if (
++                        DeletionState(str(current["state"]))
++                        is not DeletionState.TOMBSTONED
++                    ):
++                        raise ObjectLifecycleError(
++                            "deletion state changed before completion"
++                        )
++                    if self.object_liveness(
++                        conn, blob.blob_digest
++                    ).active_recovery_pins:
++                        raise ObjectLifecycleError(
++                            "recovery pin appeared before completion commit"
++                        )
++                    self._cas.unlink(blob)
++                    # Unlink and parent-directory fsync can take long enough for
++                    # a short-lived maintenance authority to expire.  Recheck on
++                    # the post-filesystem server clock before recording the
++                    # terminal lifecycle event.  If this fails, TOMBSTONED
++                    # authority remains and deterministic reconciliation can
++                    # complete later without resurrecting hydration.
++                    recorded = self._clock()
++                    self._object_issuer.verify_maintenance(grant, now=recorded)
++                    self._persist_security_records(
++                        conn,
++                        authentication=grant.authentication,
++                        request=grant.authorization_request,
++                        decision=grant.authorization,
++                        recorded_at=recorded.to_text(),
++                    )
++                    committed = self._commit_grant_in_transaction(
++                        conn, lifecycle_grant, recorded_at=recorded.to_text()
++                    )
++                    next_version = int(current["current_version"]) + 1
++                    conn.execute(
++                        "INSERT INTO object_deletion_versions("
++                        "deletion_id,lifecycle_version,state,operation_id,event_id,"
++                        "error_code,recorded_at,detail_digest) "
++                        "VALUES(?,?,?,?,?,NULL,?,?)",
++                        (
++                            str(deletion_id),
++                            next_version,
++                            DeletionState.PHYSICALLY_REMOVED.value,
++                            str(grant.operation_id),
++                            committed.event_id,
++                            recorded.to_text(),
++                            digest_canonical(payload),
++                        ),
++                    )
++                    conn.execute(
++                        "UPDATE object_deletion_heads "
++                        "SET current_version=?,updated_at=? WHERE deletion_id=?",
++                        (next_version, recorded.to_text(), str(deletion_id)),
++                    )
++                    self._append_blob_lifecycle(
++                        conn,
++                        blob_digest=blob.blob_digest,
++                        state=BlobLifecycleState.DELETED,
++                        integrity=BlobIntegrityState.MISSING,
++                        operation_id=str(grant.operation_id),
++                        event_id=committed.event_id,
++                        recorded_at=recorded,
++                    )
++                    self._record_operation(
++                        conn,
++                        grant=grant,
++                        committed=committed,
++                        result={
++                            "deletion_id": str(deletion_id),
++                            "lifecycle_version": next_version,
++                            "state": DeletionState.PHYSICALLY_REMOVED.value,
++                        },
++                        recorded_at=recorded.to_text(),
++                    )
++            except Exception as exc:
++                # A pre-unlink failure leaves bytes present and is recorded as
++                # FAILED.  A post-unlink durability failure is indeterminate:
++                # preserve TOMBSTONED authority so a later authenticated retry
++                # can durably reconcile and commit PHYSICALLY_REMOVED.
++                if self._cas.object_path(blob).exists():
++                    self._record_deletion_failure(
++                        grant,
++                        deletion_id=deletion_id,
++                        blob=blob,
++                        error_code="UNLINK_FAILED",
++                        lifecycle_grant_factory=failure_grant_factory,
++                    )
++                raise ObjectLifecycleError("governed unlink failed") from exc
++            return self.deletion_view(deletion_id)
++
++    def _record_deletion_failure(
++        self,
++        grant: _MaintenanceGrant,
++        *,
++        deletion_id: GovernedDeletionId,
++        blob: BlobIdentity,
++        error_code: str,
++        lifecycle_grant_factory: _LifecycleGrantFactory,
++    ) -> None:
++        payload = {
++            "operation_id": str(grant.operation_id),
++            "deletion_id": str(deletion_id),
++            "blob_digest": blob.blob_digest,
++            "error_code": error_code,
++        }
++        lifecycle = lifecycle_grant_factory(
++            "object.deletion.fail", deletion_id, payload
++        )
++        self._issuer.verify(lifecycle)
++        self._verify_lifecycle_command(
++            grant,
++            lifecycle,
++            expected_command_type="object.deletion.fail",
++            expected_payload=payload,
++        )
++        with self._transaction() as conn:
++            recorded = self._clock()
++            self._object_issuer.verify_maintenance(grant, now=recorded)
++            current = self._deletion_row(deletion_id, conn=conn)
++            if DeletionState(str(current["state"])) is not DeletionState.TOMBSTONED:
++                return
++            self._persist_security_records(
++                conn,
++                authentication=grant.authentication,
++                request=grant.authorization_request,
++                decision=grant.authorization,
++                recorded_at=recorded.to_text(),
++            )
++            committed = self._commit_grant_in_transaction(
++                conn, lifecycle, recorded_at=recorded.to_text()
++            )
++            next_version = int(current["current_version"]) + 1
++            conn.execute(
++                "INSERT INTO object_deletion_versions("
++                "deletion_id,lifecycle_version,state,operation_id,event_id,"
++                "error_code,recorded_at,detail_digest) VALUES(?,?,?,?,?,?,?,?)",
++                (
++                    str(deletion_id),
++                    next_version,
++                    DeletionState.FAILED.value,
++                    str(gran
