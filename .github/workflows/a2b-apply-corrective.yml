@@ -51,7 +51,11 @@ jobs:
           ]
           if not all(path.is_file() for path in paths):
               raise SystemExit('compressed corrective patch parts are missing')
-          encoded = ''.join(path.read_text(encoding='ascii').split())
+          encoded = ''.join(
+              path.read_text(encoding='ascii').strip()
+              for path in paths
+          )
+          encoded = ''.join(encoded.split())
           print('encoded_chars=' + str(len(encoded)))
           compressed = base64.b64decode(encoded, validate=True)
           print('compressed_bytes=' + str(len(compressed)))
