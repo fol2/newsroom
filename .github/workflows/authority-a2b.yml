@@ -37,11 +37,61 @@ jobs:
           test "$part_count" = 3
 
           echo "stage=reconstruct-archive" | tee /tmp/a2b-install-diagnostics/stage.txt
-          : > /tmp/a2b-clean-source.tar.gz
-          for part in .github/a2b-clean-source/part-*; do
-            echo "decoding_part=$part"
-            base64 -d "$part" >> /tmp/a2b-clean-source.tar.gz
-          done
+          python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import hashlib
+          from pathlib import Path
+
+          expected = "01e0efd66a1b8816e3f48d0d8020c952ba85c0d11a376fa9d0eec4d8d007ec80"
+          paths = sorted(Path(".github/a2b-clean-source").glob("part-*"))
+          if len(paths) != 3:
+              raise SystemExit(f"expected 3 source parts, found {len(paths)}")
+
+          alphabet = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+          raw_parts = [path.read_bytes() for path in paths]
+          filtered_parts: list[bytes] = []
+          for path, raw in zip(paths, raw_parts, strict=True):
+              filtered = bytes(byte for byte in raw if byte in alphabet)
+              invalid = len(raw) - len(filtered)
+              print(
+                  f"part={path.name} raw_bytes={len(raw)} "
+                  f"base64_bytes={len(filtered)} ignored_bytes={invalid} "
+                  f"mod4={len(filtered) % 4}"
+              )
+              filtered_parts.append(filtered)
+
+          def decode_padded(value: bytes) -> bytes:
+              value += b"=" * ((-len(value)) % 4)
+              return base64.b64decode(value, validate=False)
+
+          candidates: dict[str, bytes] = {}
+          attempts = {
+              "concatenated": lambda: decode_padded(b"".join(filtered_parts)),
+              "per-part": lambda: b"".join(
+                  decode_padded(part) for part in filtered_parts
+              ),
+          }
+          for name, attempt in attempts.items():
+              try:
+                  data = attempt()
+              except Exception as exc:  # diagnostic only; exact SHA remains authority
+                  print(f"strategy={name} error={type(exc).__name__}:{exc}")
+                  continue
+              digest = hashlib.sha256(data).hexdigest()
+              print(f"strategy={name} bytes={len(data)} sha256={digest}")
+              candidates[name] = data
+              if digest == expected:
+                  Path("/tmp/a2b-clean-source.tar.gz").write_bytes(data)
+                  Path("/tmp/a2b-install-diagnostics/reconstruction.txt").write_text(
+                      f"strategy={name}\nsha256={digest}\nbytes={len(data)}\n",
+                      encoding="utf-8",
+                  )
+                  break
+          else:
+              raise SystemExit("no reconstruction strategy matched exact reviewed archive SHA")
+          PY
           actual_archive_sha="$(sha256sum /tmp/a2b-clean-source.tar.gz | awk '{print $1}')"
           echo "actual_archive_sha=$actual_archive_sha" | tee /tmp/a2b-install-diagnostics/archive-sha.txt
           test "$actual_archive_sha" = "01e0efd66a1b8816e3f48d0d8020c952ba85c0d11a376fa9d0eec4d8d007ec80"
