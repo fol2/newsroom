@@ -5,95 +5,57 @@ on:
     branches:
       - agent/increment-1a2b-object-lifecycle
     paths:
-      - .github/a2b-source-transfer/**
-      - .github/workflows/a2b-install-exact-source.yml
-  pull_request:
-    branches:
-      - main
-    paths:
-      - .github/a2b-source-transfer/**
+      - .github/a2b-clean-source/**
       - .github/workflows/a2b-install-exact-source.yml
 
 permissions:
   contents: write
 
+concurrency:
+  group: a2b-clean-source-install
+  cancel-in-progress: false
+
 jobs:
   install:
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.actor == github.repository_owner
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout exact PR branch
+        uses: actions/checkout@v4
         with:
           ref: agent/increment-1a2b-object-lifecycle
           fetch-depth: 0
+          persist-credentials: true
 
-      - name: Recover missing transfer chunks from Git history
-        id: recover
+      - name: Verify and install exact reviewed source
         shell: bash
         run: |
           set -euo pipefail
-          git fetch origin '+refs/heads/*:refs/remotes/origin/*'
-          : > /tmp/a2b-transfer-history.txt
-          for path in \
-            .github/a2b-source-transfer/part-006-03-00 \
-            .github/a2b-source-transfer/part-007-02-01
-          do
-            echo "path=$path" >> /tmp/a2b-transfer-history.txt
-            if [[ ! -f "$path" ]]; then
-              commit="$(git log --all --format='%H' -- "$path" | head -n 1 || true)"
-              echo "historical_commit=$commit" >> /tmp/a2b-transfer-history.txt
-              if [[ -n "$commit" ]]; then
-                mkdir -p "$(dirname "$path")"
-                git show "$commit:$path" > "$path"
-                echo "recovered_sha256=$(sha256sum "$path" | awk '{print $1}')" >> /tmp/a2b-transfer-history.txt
-              fi
-            else
-              echo "already_present_sha256=$(sha256sum "$path" | awk '{print $1}')" >> /tmp/a2b-transfer-history.txt
-            fi
-          done
-          echo "transfer_files=$(find .github/a2b-source-transfer -maxdepth 1 -type f | wc -l)" >> /tmp/a2b-transfer-history.txt
-          find .github/a2b-source-transfer -maxdepth 1 -type f -printf '%f %s\n' | sort >> /tmp/a2b-transfer-history.txt
-          git archive --format=tar.gz --output=/tmp/a2b-donor-branch.tar.gz origin/agent/increment-1a2b-governed-object-lifecycle
-          echo "donor_sha256=$(sha256sum /tmp/a2b-donor-branch.tar.gz | awk '{print $1}')" >> /tmp/a2b-transfer-history.txt
-          cat /tmp/a2b-transfer-history.txt
-
-      - name: Upload transfer, history diagnostics and donor branch
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: a2b-reconstruction-inputs
-          path: |
-            .github/a2b-source-transfer
-            /tmp/a2b-transfer-history.txt
-            /tmp/a2b-donor-branch.tar.gz
-          if-no-files-found: error
-
-      - name: Reconstruct and verify source archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f .github/a2b-source-transfer/part-006-03-00
-          test -f .github/a2b-source-transfer/part-007-02-01
-          cat .github/a2b-source-transfer/part-* | base64 -d > /tmp/a2b-source.tar.gz
-          echo "84239738f8713ac39391e162cdea8b3c84683a05431560266778de5c8c222948  /tmp/a2b-source.tar.gz" | sha256sum -c -
-          if tar -tzf /tmp/a2b-source.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))'; then
+          test "$(find .github/a2b-clean-source -maxdepth 1 -type f -name 'part-*' | wc -l)" = 3
+          cat .github/a2b-clean-source/part-* | base64 -d > /tmp/a2b-clean-source.tar.gz
+          echo "01e0efd66a1b8816e3f48d0d8020c952ba85c0d11a376fa9d0eec4d8d007ec80  /tmp/a2b-clean-source.tar.gz" | sha256sum -c -
+          if tar -tzf /tmp/a2b-clean-source.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))'; then
             echo "unsafe archive path" >&2
             exit 1
           fi
-          tar -xzf /tmp/a2b-source.tar.gz -C .
-          rm -rf .github/a2b-source-transfer .github/a2b-apply
+          tar -xzf /tmp/a2b-clean-source.tar.gz -C .
+          rm -rf .github/a2b-clean-source
+          rm -rf .github/a2b-source-transfer
+          rm -rf .github/a2b-apply
           rm -f .github/workflows/a2b-apply-corrective.yml
           rm -f .github/workflows/a2b-install-exact-source.yml
           git add -A
-          test "$(git write-tree)" = "0b4eaf973d861c38a1f0b6d7c998c190fc2509f5"
           git diff --cached --check
+          test "$(git write-tree)" = "8600a71b096f50f052df35fbe64debf356a2c20d"
           test -f newsroom/authority/_object_system.py
           test -f newsroom/authority/_object_store.py
           test -f newsroom/authority/_object_cas.py
           test -f newsroom/tests/test_authority_a2b_fault_matrix.py
-          test ! -e .github/a2b-apply
+          test ! -e .github/a2b-clean-source
           test ! -e .github/a2b-source-transfer
+          test ! -e .github/a2b-apply
           test ! -e .github/workflows/a2b-apply-corrective.yml
+          test ! -e .github/workflows/a2b-install-exact-source.yml
 
       - name: Commit and push exact source tree
         shell: bash
