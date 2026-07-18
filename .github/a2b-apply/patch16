@@ -1,0 +1,1298 @@
+hemaRegistry]:
++    """Return immutable A1 registries including exact lifecycle contracts."""
++
++    definitions = list(command_registry.definitions())
++    by_key = {
++        (item.command_type, item.definition_version): item for item in definitions
++    }
++    for definition in object_lifecycle_command_definitions():
++        key = (definition.command_type, definition.definition_version)
++        existing = by_key.get(key)
++        if existing is not None and existing.digest != definition.digest:
++            raise ObjectPolicyError(
++                f"lifecycle command identity conflict: {definition.command_type}"
++            )
++        if existing is None:
++            definitions.append(definition)
++            by_key[key] = definition
++    current_commands: dict[str, str] = {}
++    for command_type in {item.command_type for item in definitions}:
++        if command_type in LIFECYCLE_COMMAND_TYPES:
++            current_commands[command_type] = "object-lifecycle-command-v1"
++        else:
++            current_commands[command_type] = command_registry.resolve(
++                command_type
++            ).definition_version
++
++    contracts = list(payload_schemas.contracts())
++    schema_keys = {
++        (item.schema_version, item.payload_mode, item.contract_version): item
++        for item in contracts
++    }
++    for contract in object_lifecycle_payload_contracts():
++        key = (
++            contract.schema_version,
++            contract.payload_mode,
++            contract.contract_version,
++        )
++        existing = schema_keys.get(key)
++        if existing is not None and existing.contract_digest != contract.contract_digest:
++            raise ObjectPolicyError(
++                f"lifecycle payload-schema identity conflict: {contract.schema_version}"
++            )
++        if existing is None:
++            contracts.append(contract)
++            schema_keys[key] = contract
++    current_schemas: dict[tuple[str, PayloadMode], str] = {}
++    lifecycle_schema_versions = {
++        item.schema_version for item in object_lifecycle_payload_contracts()
++    }
++    for schema_version, mode in {
++        (item.schema_version, item.payload_mode) for item in contracts
++    }:
++        if schema_version in lifecycle_schema_versions:
++            current_schemas[(schema_version, mode)] = "object-lifecycle-schema-v1"
++        else:
++            current_schemas[(schema_version, mode)] = payload_schemas.resolve(
++                schema_version, mode
++            ).contract_version
++
++    return (
++        CommandRegistry(definitions, current_versions=current_commands),
++        PayloadSchemaRegistry(contracts, current_versions=current_schemas),
+     )
+ 
+ 
+-def activate_admission_contract(
+-    *,
+-    definition: ObjectAdmissionDefinition,
+-    blob: ImmutableBlobIdentity,
+-    rights: RightsDecision,
+-    now: UtcTimestamp,
+-) -> ObjectAdmissionReceipt:
+-    """Construct the immutable activation contract after authoritative commit.
+-
+-    SQLite/CAS mutation and the ordered activation event are intentionally not
+-    implemented by this initial Draft slice; the future store supplies the event
+-    identity when the atomic commit path lands.
+-    """
+-
+-    rights.require_current(now)
+-    if rights.admission_definition_digest != definition.digest:
+-        raise ObjectPolicyError("rights decision uses another admission definition")
+-    if rights.blob_digest != blob.blob_digest or rights.size_bytes != blob.size_bytes:
+-        raise ObjectPolicyError("rights decision uses another immutable blob")
+-    expected = (
+-        rights.object_class == definition.object_class
+-        and rights.allowed_use == definition.allowed_use
+-        and rights.security_scope == definition.security_scope
+-        and rights.retention_scope == definition.retention_scope
+-    )
+-    if not expected:
+-        raise ObjectPolicyError("rights decision use semantics do not match definition")
+-    return ObjectAdmissionReceipt(
+-        admission_id=ObjectAdmissionId.new(),
+-        admission_type=definition.admission_type,
+-        definition_version=definition.definition_version,
+-        definition_digest=definition.digest,
+-        blob=blob,
+-        object_class=definition.object_class,
+-        allowed_use=definition.allowed_use,
+-        security_scope=definition.security_scope,
+-        retention_scope=definition.retention_scope,
+-        rights_decision_id=rights.rights_decision_id,
+-        rights_decision_digest=rights.digest,
+-        valid_from=rights.valid_from,
+-        valid_until=rights.valid_until,
+-        state=AdmissionState.ACTIVE,
+-        activation_event_id=None,
+-    )
++__all__ = [
++    "HydrationPolicyRegistry",
++    "LIFECYCLE_COMMAND_TYPES",
++    "ObjectAdmissionRegistry",
++    "RightsPolicyRegistry",
++    "UnknownHydrationPolicyContract",
++    "UnknownObjectAdmissionDefinition",
++    "UnknownRightsPolicyContract",
++    "merge_authority_registries",
++    "object_lifecycle_command_definitions",
++    "object_lifecycle_payload_contracts",
++]
+diff --git a/newsroom/authority/object_system.py b/newsroom/authority/object_system.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..75d6ce011ae5a43c44149920fbd387c7fc2b5c3a
+--- /dev/null
++++ b/newsroom/authority/object_system.py
+@@ -0,0 +1,15 @@
++from ._object_system import (
++    GovernedObjectAuthoritySystem,
++    GovernedObjects,
++    HydratedObject,
++    ObjectAdmissionResult,
++    open_governed_object_authority_system,
++)
++
++__all__ = [
++    "GovernedObjectAuthoritySystem",
++    "GovernedObjects",
++    "HydratedObject",
++    "ObjectAdmissionResult",
++    "open_governed_object_authority_system",
++]
+diff --git a/newsroom/authority/object_traceability.py b/newsroom/authority/object_traceability.py
+index ddb7a96f243fdf51d0e459e009881d347cc0f432..9ee6bcf10d95df376ce2b6d3d85e337784d1e068 100644
+--- a/newsroom/authority/object_traceability.py
++++ b/newsroom/authority/object_traceability.py
+@@ -1,113 +1,60 @@
+ from __future__ import annotations
+ 
+ 
++_COMMON = (
++    "ADR-0001",
++    "ADR-0002",
++    "ADR-0004",
++    "DREC-006",
++    "DREC-016",
++    "DREC-070",
++    "DREC-073",
++    "DREC-074",
++    "DREC-076",
++    "DREC-077",
++    "GRAG-002",
++    "GRAG-003",
++    "GRAG-004",
++    "GRAG-005",
++    "GRAG-010",
++    "GRAG-030",
++    "GRPROD-005",
++    "GRPROD-020",
++)
++
+ INCREMENT_1A2B_TRACEABILITY: dict[str, tuple[str, ...]] = {
+-    "newsroom.authority.objects": (
+-        "ADR-0001",
+-        "ADR-0002",
+-        "DREC-006",
+-        "DREC-016",
+-        "DREC-070",
+-        "DREC-073",
+-        "DREC-074",
+-        "DREC-076",
+-        "DREC-077",
+-        "GRAG-002",
+-        "GRAG-003",
+-        "GRAG-005",
+-        "GRAG-010",
+-        "GRAG-030",
+-        "GRPROD-005",
+-        "GRPROD-020",
+-    ),
+-    "newsroom.authority.object_policy": (
+-        "ADR-0001",
+-        "ADR-0002",
+-        "DREC-016",
+-        "DREC-070",
+-        "DREC-073",
+-        "DREC-076",
+-        "DREC-077",
+-        "GRAG-002",
+-        "GRAG-005",
+-        "GRAG-010",
+-        "GRPROD-005",
+-    ),
+-    "newsroom.authority.object_boundary": (
+-        "ADR-0001",
+-        "ADR-0002",
+-        "DREC-016",
+-        "DREC-070",
+-        "DREC-073",
+-        "DREC-076",
+-        "DREC-077",
+-        "GRAG-002",
+-        "GRAG-005",
+-        "GRAG-010",
+-        "GRPROD-005",
+-    ),
+-    "newsroom.tests.test_authority_a2b_contracts": (
+-        "ADR-0001",
+-        "ADR-0002",
+-        "DREC-006",
+-        "DREC-016",
+-        "DREC-070",
+-        "DREC-074",
+-        "GRAG-002",
+-        "GRAG-003",
+-        "GRAG-005",
+-    ),
+-    "newsroom.tests.test_authority_a2b_policy": (
+-        "DREC-016",
+-        "DREC-070",
+-        "DREC-073",
+-        "DREC-076",
+-        "DREC-077",
+-        "GRAG-002",
+-        "GRAG-005",
+-        "GRAG-010",
+-        "GRPROD-005",
+-    ),
+-    "newsroom.tests.test_authority_a2b_traceability": (
+-        "ADR-0001",
+-        "ADR-0002",
+-        "GRPROD-020",
+-    ),
++    "newsroom.authority.objects": _COMMON,
++    "newsroom.authority.object_policy": _COMMON,
++    "newsroom.authority.object_boundary": _COMMON,
++    "newsroom.authority._object_capability": _COMMON,
++    "newsroom.authority.object_migrations": _COMMON,
++    "newsroom.authority._object_cas": _COMMON,
++    "newsroom.authority._object_store_base": _COMMON,
++    "newsroom.authority._object_store_admission": _COMMON,
++    "newsroom.authority._object_store_hydration": _COMMON,
++    "newsroom.authority._object_store_lifecycle": (*_COMMON, "GRAG-028"),
++    "newsroom.authority._object_system": _COMMON,
++    "newsroom.tests.test_authority_a2b_boundary": _COMMON,
++    "newsroom.tests.test_authority_a2b_admission_hydration": _COMMON,
++    "newsroom.tests.test_authority_a2b_lifecycle": (*_COMMON, "GRAG-028"),
++    "newsroom.tests.test_authority_a2b_integrity_faults": (*_COMMON, "GRAG-028"),
++    "newsroom.tests.test_authority_a2b_fault_matrix": (*_COMMON, "GRAG-028"),
++    "newsroom.tests.test_authority_a2b_sqlite": (*_COMMON, "GRAG-028"),
++    "newsroom.tests.test_authority_a2b_traceability": (*_COMMON, "GRAG-028"),
+ }
+ 
++# Empty only when the implementation and current-head evidence cover every
++# issue #86 deliverable. CI and substantive review remain separate merge gates.
++INCREMENT_1A2B_PENDING: tuple[str, ...] = ()
+ 
+-# This Draft starts with the exact immutable contracts and deterministic
+-# server-side policy seam. These items remain mandatory before A2b can leave
+-# Draft. In particular, GRAG-028 is not claimed until deletion/non-resurrection
+-# implementation and evidence exist.
+-INCREMENT_1A2B_PENDING: tuple[str, ...] = (
+-    "SQLITE_RIGHTS_AND_ADMISSION_MIGRATION",
+-    "HMAC_BOUND_ADMISSION_AND_MAINTENANCE_CAPABILITIES",
+-    "STREAMING_FILESYSTEM_CAS",
+-    "GLOBAL_AND_CLASS_SIZE_LIMIT_ENFORCEMENT",
+-    "DISK_HEADROOM_ENFORCEMENT",
+-    "FAIL_CLOSED_FILE_AND_DIRECTORY_FSYNC",
+-    "READ_ONLY_INSTALLED_BLOBS",
+-    "PINNED_FD_FINAL_REHASH",
+-    "OBJECT_BACKED_COMMAND_TRANSACTION_RECHECK",
+-    "AUTHENTICATED_BOUNDED_HYDRATION",
+-    "ACCESS_DECISION_PERSISTENCE_POLICY",
+-    "ORDERED_ADMISSION_EVENT",
+-    "ORDERED_REVOCATION_EVENT",
+-    "ORDERED_DELETION_REQUEST_EVENT",
+-    "ORDERED_TOMBSTONE_AND_COMPLETION_EVENTS",
+-    "LAWFUL_DELETION_OF_REFERENCED_BYTES",
+-    "DELETION_NON_RESURRECTION_REPLAY",
+-    "AUTHORITATIVE_GARBAGE_COLLECTION",
+-    "RECOVERY_PIN_PERSISTENCE",
+-    "STARTUP_RECONCILIATION",
+-    "REPLAY_WITHOUT_STAGING_LEAKS",
+-    "FSYNC_UNLINK_MUTATION_AND_GC_INTERLEAVING_FAULTS",
+-    "CONSTRUCTOR_FAILURE_LOCK_CLEANUP",
+-    "GRAG_028_COMPLETION_EVIDENCE",
++INCREMENT_1A2B_DEFERRED: tuple[str, ...] = (
++    "SUCCESSFUL_READ_AUDIT_RETENTION",
++    "DENIED_ATTEMPT_AUDIT_RETENTION",
++    "FILESYSTEM_TYPE_QUALIFICATION",
++    "PRODUCTION_OBJECT_LIMITS_AND_ALERTS",
++    "BACKUP_ENCRYPTION_KEYS_RPO_RTO",
+ )
+ 
+-
+ INCREMENT_1A2B_EXCLUSIONS: tuple[str, ...] = (
+     "NEO4J",
+     "GRAPHITI_EXECUTION",
+@@ -122,3 +69,10 @@ INCREMENT_1A2B_EXCLUSIONS: tuple[str, ...] = (
+     "PRODUCTION_ACTIVATION",
+     "SPENDING",
+ )
++
++__all__ = [
++    "INCREMENT_1A2B_DEFERRED",
++    "INCREMENT_1A2B_EXCLUSIONS",
++    "INCREMENT_1A2B_PENDING",
++    "INCREMENT_1A2B_TRACEABILITY",
++]
+diff --git a/newsroom/authority/objects.py b/newsroom/authority/objects.py
+index d9d7d207809cf8391c050f46a247e6145f05a740..c363c797874c9b2a7715d0230ad53a81deae789d 100644
+--- a/newsroom/authority/objects.py
++++ b/newsroom/authority/objects.py
+@@ -20,27 +20,37 @@ from .types import (
+ 
+ 
+ class ObjectPolicyError(ValueError):
+-    """A governed-object policy or request is malformed."""
++    """A governed-object contract or request is malformed."""
+ 
+ 
+ class ObjectAdmissionDenied(PermissionError):
+-    """Server-owned authorization or rights policy denies admission."""
++    """Current authentication, authorisation, or rights policy denies admission."""
+ 
+ 
+ class ObjectHydrationDenied(PermissionError):
+-    """Server-owned hydration policy denies byte access."""
++    """Current authority does not permit governed-byte hydration."""
+ 
+ 
+ class ObjectIntegrityError(RuntimeError):
+-    """Blob bytes do not match their immutable identity."""
++    """Object bytes do not match their immutable content identity."""
+ 
+ 
+ class ObjectLimitError(ValueError):
+-    """A hard staging, object-class, read, or disk limit was exceeded."""
++    """A hard staging, object-class, read, range, or disk limit was exceeded."""
+ 
+ 
+ class ObjectLifecycleError(RuntimeError):
+-    """A lifecycle transition is inconsistent with authoritative state."""
++    """A lifecycle transition is inconsistent with authoritative current state."""
++
++
++@dataclass(frozen=True, slots=True)
++class ObjectPreflightId(UUIDv4Id):
++    pass
++
++
++@dataclass(frozen=True, slots=True)
++class ObjectOperationId(UUIDv4Id):
++    pass
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -58,13 +68,27 @@ class RecoveryPinId(UUIDv4Id):
+     pass
+ 
+ 
+-class BlobState(StrEnum):
++class BlobLifecycleState(StrEnum):
++    STAGING = "STAGING"
++    INSTALLED = "INSTALLED"
+     ACTIVE = "ACTIVE"
+     DELETION_PENDING = "DELETION_PENDING"
+     DELETED = "DELETED"
+     FAILED = "FAILED"
+ 
+ 
++# Compatibility name retained for callers of the initial Draft contract.  State
++# no longer lives on BlobIdentity; it belongs to BlobLifecycleView/SQLite.
++BlobState = BlobLifecycleState
++
++
++class BlobIntegrityState(StrEnum):
++    UNVERIFIED = "UNVERIFIED"
++    VERIFIED = "VERIFIED"
++    MISSING = "MISSING"
++    CORRUPT = "CORRUPT"
++
++
+ class AdmissionState(StrEnum):
+     PENDING = "PENDING"
+     ACTIVE = "ACTIVE"
+@@ -79,20 +103,29 @@ class DeletionState(StrEnum):
+     FAILED = "FAILED"
+ 
+ 
++class RecoveryPinState(StrEnum):
++    ACTIVE = "ACTIVE"
++    RELEASED = "RELEASED"
++
++
+ class ObjectLifecycleEventType(StrEnum):
+     ADMISSION_ACTIVATED = "governed_object.admission.activated"
+     ADMISSION_REVOKED = "governed_object.admission.revoked"
+     DELETION_REQUESTED = "governed_blob.deletion.requested"
+     DELETION_TOMBSTONED = "governed_blob.deletion.tombstoned"
+     DELETION_COMPLETED = "governed_blob.deletion.completed"
++    DELETION_FAILED = "governed_blob.deletion.failed"
++    RECOVERY_PIN_CREATED = "governed_blob.recovery_pin.created"
++    RECOVERY_PIN_RELEASED = "governed_blob.recovery_pin.released"
++    ORPHAN_REMOVED = "governed_blob.orphan.removed"
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+ class ObjectLimits:
+-    """Hard limits used by the future streaming CAS implementation.
++    """Immutable hard limits for streaming CAS and hydration.
+ 
+-    ``class_max_bytes`` is defensively copied into a read-only mapping so a
+-    caller cannot widen a composed policy after system startup.
++    ``class_max_bytes`` is defensively copied into a read-only mapping.  These
++    values are technical safety limits, not rights authority.
+     """
+ 
+     global_max_bytes: int
+@@ -101,13 +134,10 @@ class ObjectLimits:
+     min_free_bytes: int = 0
+     io_chunk_bytes: int = 64 * 1024
+     max_staging_bytes: int | None = None
++    max_range_bytes: int | None = None
+ 
+     def __post_init__(self) -> None:
+-        for field_name in (
+-            "global_max_bytes",
+-            "max_read_bytes",
+-            "io_chunk_bytes",
+-        ):
++        for field_name in ("global_max_bytes", "max_read_bytes", "io_chunk_bytes"):
+             value = getattr(self, field_name)
+             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                 raise ObjectLimitError(f"{field_name} must be positive")
+@@ -123,6 +153,12 @@ class ObjectLimits:
+             or self.max_staging_bytes <= 0
+         ):
+             raise ObjectLimitError("max_staging_bytes must be positive when set")
++        if self.max_range_bytes is not None and (
++            isinstance(self.max_range_bytes, bool)
++            or not isinstance(self.max_range_bytes, int)
++            or self.max_range_bytes <= 0
++        ):
++            raise ObjectLimitError("max_range_bytes must be positive when set")
+         if not isinstance(self.class_max_bytes, Mapping):
+             raise ObjectLimitError("class_max_bytes must be a mapping")
+         copied: dict[str, int] = {}
+@@ -148,6 +184,10 @@ class ObjectLimits:
+                 "staging maximum cannot be below an object-class maximum"
+             )
+         object.__setattr__(self, "max_staging_bytes", staging_limit)
++        range_limit = self.max_range_bytes or self.max_read_bytes
++        if range_limit > self.max_read_bytes:
++            raise ObjectLimitError("range maximum cannot exceed read maximum")
++        object.__setattr__(self, "max_range_bytes", range_limit)
+ 
+     def maximum_for(self, object_class: str) -> int:
+         require_token(object_class, field="object_class")
+@@ -163,19 +203,23 @@ class ObjectLimits:
+             ) from exc
+ 
+     def require_object_size(self, object_class: str, size_bytes: int) -> None:
+-        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 0:
+-            raise ObjectLimitError("object size must be a non-negative integer")
+-        if size_bytes > self.maximum_for(object_class):
+-            raise ObjectLimitError("object exceeds its configured hard limit")
+-
+-    def require_read_size(self, size_bytes: int) -> None:
+         if (
+             isinstance(size_bytes, bool)
+             or not isinstance(size_bytes, int)
+             or size_bytes < 0
+-            or size_bytes > self.max_read_bytes
+         ):
+-            raise ObjectLimitError("read exceeds the configured hard limit")
++            raise ObjectLimitError("object size must be a non-negative integer")
++        if size_bytes > self.maximum_for(object_class):
++            raise ObjectLimitError("object exceeds its configured hard limit")
++
++    def require_range(self, *, total_size: int, offset: int, length: int) -> None:
++        for field_name, value in (("total_size", total_size), ("offset", offset), ("length", length)):
++            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
++                raise ObjectLimitError(f"{field_name} must be a non-negative integer")
++        if offset > total_size or length > total_size - offset:
++            raise ObjectLimitError("requested range exceeds object size")
++        if length > self.max_read_bytes or length > int(self.max_range_bytes):
++            raise ObjectLimitError("requested range exceeds configured read limits")
+ 
+     def canonical_value(self) -> dict[str, object]:
+         return {
+@@ -185,6 +229,7 @@ class ObjectLimits:
+             "min_free_bytes": self.min_free_bytes,
+             "io_chunk_bytes": self.io_chunk_bytes,
+             "max_staging_bytes": self.max_staging_bytes,
++            "max_range_bytes": self.max_range_bytes,
+         }
+ 
+     @property
+@@ -192,9 +237,144 @@ class ObjectLimits:
+         return digest_canonical(self.canonical_value())
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class RightsPolicyContract:
++    """Exact retained deterministic rights-policy identity for Increment 1A2b."""
++
++    policy_key: str
++    contract_version: str
++    implementation_version: str
++    preflight_allowed: bool
++    reason_code: str
++    valid_from_delay_seconds: int = 0
++    validity_seconds: int | None = None
++    preflight_ttl_seconds: int = 60
++
++    def __post_init__(self) -> None:
++        for field_name in (
++            "policy_key",
++            "contract_version",
++            "implementation_version",
++            "reason_code",
++        ):
++            require_token(getattr(self, field_name), field=field_name)
++        if not isinstance(self.preflight_allowed, bool):
++            raise ObjectPolicyError("rights preflight result must be boolean")
++        for field_name in ("valid_from_delay_seconds", "preflight_ttl_seconds"):
++            value = getattr(self, field_name)
++            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
++                raise ObjectPolicyError(f"{field_name} must be non-negative")
++        if self.preflight_ttl_seconds <= 0:
++            raise ObjectPolicyError("preflight_ttl_seconds must be positive")
++        if self.validity_seconds is not None and (
++            isinstance(self.validity_seconds, bool)
++            or not isinstance(self.validity_seconds, int)
++            or self.validity_seconds <= 0
++        ):
++            raise ObjectPolicyError(
++                "rights validity_seconds must be positive when set"
++            )
++
++    def canonical_value(self) -> dict[str, object]:
++        return {
++            "policy_key": self.policy_key,
++            "contract_version": self.contract_version,
++            "implementation_version": self.implementation_version,
++            "preflight_allowed": self.preflight_allowed,
++            "reason_code": self.reason_code,
++            "valid_from_delay_seconds": self.valid_from_delay_seconds,
++            "validity_seconds": self.validity_seconds,
++            "preflight_ttl_seconds": self.preflight_ttl_seconds,
++        }
++
++    @property
++    def contract_digest(self) -> str:
++        return digest_canonical(self.canonical_value())
++
++
++@dataclass(frozen=True, slots=True)
++class HydrationPolicyContract:
++    """Exact retained purpose-bound byte access policy."""
++
++    policy_id: str
++    contract_version: str
++    implementation_version: str
++    purpose: str
++    required_scope: str
++    allowed_principal_ids: frozenset[str]
++    allowed_authority_domains: frozenset[str]
++    allowed_object_classes: frozenset[str]
++    allowed_uses: frozenset[str]
++    allowed_security_scopes: frozenset[str]
++    allowed_retention_scopes: frozenset[str]
++    max_bytes: int
++    allow_ranges: bool = True
++
++    def __post_init__(self) -> None:
++        for field_name in (
++            "policy_id",
++            "contract_version",
++            "implementation_version",
++            "purpose",
++        ):
++            require_token(getattr(self, field_name), field=field_name)
++        require_scope(self.required_scope, field="hydration_required_scope")
++        token_sets = (
++            "allowed_principal_ids",
++            "allowed_authority_domains",
++            "allowed_object_classes",
++            "allowed_uses",
++        )
++        scope_sets = (
++            "allowed_security_scopes",
++            "allowed_retention_scopes",
++        )
++        for field_name in (*token_sets, *scope_sets):
++            values = getattr(self, field_name)
++            if not isinstance(values, frozenset) or not values:
++                raise ObjectPolicyError(f"{field_name} must be a non-empty frozenset")
++        for field_name in token_sets:
++            for value in getattr(self, field_name):
++                require_token(value, field=field_name)
++        for field_name in scope_sets:
++            for value in getattr(self, field_name):
++                require_scope(value, field=field_name)
++        if isinstance(self.max_bytes, bool) or not isinstance(self.max_bytes, int) or self.max_bytes <= 0:
++            raise ObjectPolicyError("hydration max_bytes must be positive")
++        if not isinstance(self.allow_ranges, bool):
++            raise ObjectPolicyError("allow_ranges must be boolean")
++
++    def canonical_value(self) -> dict[str, object]:
++        return {
++            "policy_id": self.policy_id,
++            "contract_version": self.contract_version,
++            "implementation_version": self.implementation_version,
++            "purpose": self.purpose,
++            "required_scope": self.required_scope,
++            "allowed_principal_ids": sorted(self.allowed_principal_ids),
++            "allowed_authority_domains": sorted(self.allowed_authority_domains),
++            "allowed_object_classes": sorted(self.allowed_object_classes),
++            "allowed_uses": sorted(self.allowed_uses),
++            "allowed_security_scopes": sorted(self.allowed_security_scopes),
++            "allowed_retention_scopes": sorted(self.allowed_retention_scopes),
++            "max_bytes": self.max_bytes,
++            "allow_ranges": self.allow_ranges,
++        }
++
++    @property
++    def contract_digest(self) -> str:
++        return digest_canonical(self.canonical_value())
++
++
+ @dataclass(frozen=True, slots=True)
+ class ObjectAdmissionDefinition:
+-    """Versioned server-side semantics for one governed object use."""
++    """Versioned server semantics bound to exact rights/hydration contracts."""
+ 
+     admission_type: str
+     definition_version: str
+@@ -207,7 +387,8 @@ class ObjectAdmissionDefinition:
+     required_write_scope: str
+     required_read_scope: str
+     required_manage_scope: str
+-    rights_policy_key: str
++    rights_policy_contract_digest: str
++    hydration_policy_contract_digests: frozenset[str]
+ 
+     def __post_init__(self) -> None:
+         for field_name in (
+@@ -215,7 +396,6 @@ class ObjectAdmissionDefinition:
+             "definition_version",
+             "object_class",
+             "allowed_use",
+-            "rights_policy_key",
+         ):
+             require_token(getattr(self, field_name), field=field_name)
+         for field_name in (
+@@ -226,6 +406,18 @@ class ObjectAdmissionDefinition:
+             "required_manage_scope",
+         ):
+             require_scope(getattr(self, field_name), field=field_name)
++        if validate_sha256_digest(
++            self.rights_policy_contract_digest,
++            field="rights_policy_contract_digest",
++        ) != self.rights_policy_contract_digest:
++            raise ObjectPolicyError("rights policy digest must be canonical lowercase")
++        if not isinstance(self.hydration_policy_contract_digests, frozenset) or not self.hydration_policy_contract_digests:
++            raise ObjectPolicyError("admission requires hydration policy contracts")
++        for digest in self.hydration_policy_contract_digests:
++            if validate_sha256_digest(
++                digest, field="hydration_policy_contract_digest"
++            ) != digest:
++                raise ObjectPolicyError("hydration policy digest must be canonical")
+ 
+-    def canonical_value(self) -> dict[str, str]:
++    def canonical_value(self) -> dict[str, object]:
+         return {
+             "admission_type": self.admission_type,
+             "definition_version": self.definition_version,
+@@ -238,7 +430,10 @@ class ObjectAdmissionDefinition:
+             "required_write_scope": self.required_write_scope,
+             "required_read_scope": self.required_read_scope,
+             "required_manage_scope": self.required_manage_scope,
+-            "rights_policy_key": self.rights_policy_key,
++            "rights_policy_contract_digest": (
++                self.rights_policy_contract_digest
++            ),
++            "hydration_policy_contract_digests": sorted(
++                self.hydration_policy_contract_digests
++            ),
+         }
+ 
+     @property
+@@ -261,130 +456,143 @@ class ObjectAdmissionRequest:
+             raise ObjectPolicyError("idempotency_key exceeds 256 UTF-8 bytes")
+ 
+ 
++# Preferred name: immutable identity contains no lifecycle state.
+ @dataclass(frozen=True, slots=True)
+-class ImmutableBlobIdentity:
++class BlobIdentity:
+     blob_digest: str
+     size_bytes: int
+-    state: BlobState = BlobState.ACTIVE
+ 
+     def __post_init__(self) -> None:
+         normalized = validate_sha256_digest(self.blob_digest, field="blob_digest")
+@@ -273,21 +481,56 @@ class ImmutableBlobIdentity:
+             raise ObjectIntegrityError("blob digest must be canonical lowercase")
+         if isinstance(self.size_bytes, bool) or not isinstance(self.size_bytes, int) or self.size_bytes < 0:
+             raise ObjectIntegrityError("blob size must be a non-negative integer")
+-        if not isinstance(self.state, BlobState):
+-            raise ObjectLifecycleError("blob state must be typed")
+ 
+     def canonical_value(self) -> dict[str, object]:
+         return {
+             "blob_digest": self.blob_digest,
+             "size_bytes": self.size_bytes,
+-            "state": self.state.value,
+         }
+ 
+ 
++# Backward-compatible alias, now correctly state-free.
++ImmutableBlobIdentity = BlobIdentity
++
++
+ @dataclass(frozen=True, slots=True)
+-class RightsDecision:
++class BlobLifecycleView:
++    """Non-authoritative snapshot; callers must re-resolve current state."""
++
++    blob: BlobIdentity
++    lifecycle_version: int
++    state: BlobLifecycleState
++    integrity_state: BlobIntegrityState
++    recorded_at: UtcTimestamp
++    event_id: EventId | None
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.blob, BlobIdentity):
++            raise ObjectLifecycleError("blob lifecycle view requires identity")
++        if isinstance(self.lifecycle_version, bool) or not isinstance(
++            self.lifecycle_version, int
++        ) or self.lifecycle_version <= 0:
++            raise ObjectLifecycleError("blob lifecycle version must be positive")
++        if not isinstance(self.state, BlobLifecycleState) or not isinstance(
++            self.integrity_state, BlobIntegrityState
++        ):
++            raise ObjectLifecycleError("blob lifecycle values must be typed")
++        if not isinstance(self.recorded_at, UtcTimestamp):
++            raise ObjectLifecycleError("blob lifecycle time must be typed")
++        if self.event_id is not None and not isinstance(self.event_id, EventId):
++            raise ObjectLifecycleError("blob lifecycle event must be typed")
++
++
++@dataclass(frozen=True, slots=True)
++class RightsDecisionView:
++    """Immutable persisted decision view; only SQLite allocates its identity."""
++
+     rights_decision_id: RightsDecisionId
+     authentication_context_id: AuthenticationContextId
+     authorization_request_digest: str
+     authorization_decision_id: AuthorizationDecisionId
+     rights_request_digest: str
+-    policy_version: str
++    policy_contract_digest: str
+     admission_definition_digest: str
+-    blob_digest: str
+-    size_bytes: int
++    blob: BlobIdentity
+     object_class: str
+     allowed_use: str
+     security_scope: str
+@@ -305,48 +543,24 @@ class RightsDecision:
+     valid_until: UtcTimestamp | None
+     decided_at: UtcTimestamp
++    canonical_digest: str
+ 
+     def __post_init__(self) -> None:
+-        if not isinstance(self.rights_decision_id, RightsDecisionId):
+-            raise ObjectPolicyError("rights decision identity must be typed")
+-        if not isinstance(self.authentication_context_id, AuthenticationContextId):
+-            raise ObjectPolicyError("authentication context identity must be typed")
+-        if not isinstance(self.authorization_decision_id, AuthorizationDecisionId):
+-            raise ObjectPolicyError("authorization decision identity must be typed")
+         for field_name in (
+             "authorization_request_digest",
+             "rights_request_digest",
++            "policy_contract_digest",
+             "admission_definition_digest",
+-            "blob_digest",
++            "canonical_digest",
+         ):
+             value = getattr(self, field_name)
+             normalized = validate_sha256_digest(value, field=field_name)
+             if normalized != value:
+                 raise ObjectPolicyError(f"{field_name} must be canonical lowercase")
+-        if isinstance(self.size_bytes, bool) or not isinstance(self.size_bytes, int) or self.size_bytes < 0:
+-            raise ObjectPolicyError("rights decision size must be non-negative")
+-        for field_name in (
+-            "policy_version",
+-            "object_class",
+-            "allowed_use",
+-            "reason_code",
+-        ):
++        if not isinstance(self.blob, BlobIdentity):
++            raise ObjectPolicyError("rights view requires blob identity")
++        for field_name in ("object_class", "allowed_use", "reason_code"):
+             require_token(getattr(self, field_name), field=field_name)
+         require_scope(self.security_scope, field="security_scope")
+         require_scope(self.retention_scope, field="retention_scope")
+         if not isinstance(self.allowed, bool):
+             raise ObjectPolicyError("rights decision must carry a boolean result")
+-        for field_name in ("valid_from", "decided_at"):
+-            if not isinstance(getattr(self, field_name), UtcTimestamp):
+-                raise ObjectPolicyError(f"{field_name} must be typed UTC")
+-        if self.valid_until is not None:
+-            if not isinstance(self.valid_until, UtcTimestamp):
+-                raise ObjectPolicyError("valid_until must be typed UTC")
+-            if self.valid_until.value <= self.valid_from.value:
+-                raise ObjectPolicyError("rights validity must end after it starts")
+-        if self.decided_at.value < self.valid_from.value:
+-            raise ObjectPolicyError("rights decision cannot predate its validity")
+-
+-    def canonical_value(self) -> dict[str, object]:
+-        return {
+-            "rights_decision_id": str(self.rights_decision_id),
+-            "authentication_context_id": str(self.authentication_context_id),
+-            "authorization_request_digest": self.authorization_request_digest,
+-            "authorization_decision_id": str(self.authorization_decision_id),
+-            "rights_request_digest": self.rights_request_digest,
+-            "policy_version": self.policy_version,
+-            "admission_definition_digest": self.admission_definition_digest,
+-            "blob_digest": self.blob_digest,
+-            "size_bytes": self.size_bytes,
+-            "object_class": self.object_class,
+-            "allowed_use": self.allowed_use,
+-            "security_scope": self.security_scope,
+-            "retention_scope": self.retention_scope,
+-            "allowed": self.allowed,
+-            "reason_code": self.reason_code,
+-            "valid_from": self.valid_from.to_text(),
+-            "valid_until": (
+-                None if self.valid_until is None else self.valid_until.to_text()
+-            ),
+-            "decided_at": self.decided_at.to_text(),
+-        }
+-
+-    @property
+-    def digest(self) -> str:
+-        return digest_canonical(self.canonical_value())
+-
+-    def require_current(self, now: UtcTimestamp) -> None:
+-        if not isinstance(now, UtcTimestamp):
+-            raise ObjectPolicyError("current rights time must be typed UTC")
+-        if not self.allowed:
+-            raise ObjectAdmissionDenied(self.reason_code)
+-        if now.value < self.valid_from.value:
+-            raise ObjectAdmissionDenied("RIGHTS_NOT_YET_VALID")
+-        if self.valid_until is not None and now.value >= self.valid_until.value:
+-            raise ObjectAdmissionDenied("RIGHTS_EXPIRED")
++        if self.decided_at.value > self.valid_from.value:
++            raise ObjectPolicyError("rights invariant requires decided_at <= valid_from")
++        if self.valid_until is not None and self.valid_until.value <= self.valid_from.value:
++            raise ObjectPolicyError("rights invariant requires valid_from < valid_until")
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+-class ObjectAdmissionReceipt:
++class ObjectAdmissionView:
++    """Non-authoritative admission snapshot allocated by the SQLite writer."""
++
+     admission_id: ObjectAdmissionId
+     admission_type: str
+     definition_version: str
+     definition_digest: str
+-    blob: ImmutableBlobIdentity
++    blob: BlobIdentity
+     object_class: str
+     allowed_use: str
+     security_scope: str
+@@ -355,39 +569,53 @@ class ObjectAdmissionReceipt:
+     rights_decision_digest: str
+     valid_from: UtcTimestamp
+     valid_until: UtcTimestamp | None
++    lifecycle_version: int
+     state: AdmissionState
+-    activation_event_id: EventId | None = None
++    activation_event_id: EventId | None
+ 
+     def __post_init__(self) -> None:
+-        if not isinstance(self.admission_id, ObjectAdmissionId):
+-            raise ObjectPolicyError("admission identity must be typed")
+-        if not isinstance(self.blob, ImmutableBlobIdentity):
++        if not isinstance(self.blob, BlobIdentity):
+             raise ObjectPolicyError("admission requires immutable blob identity")
+-        if not isinstance(self.rights_decision_id, RightsDecisionId):
+-            raise ObjectPolicyError("admission rights identity must be typed")
+-        for field_name in (
+-            "admission_type",
+-            "definition_version",
+-            "object_class",
+-            "allowed_use",
+-        ):
++        for field_name in ("admission_type", "definition_version", "object_class", "allowed_use"):
+             require_token(getattr(self, field_name), field=field_name)
+         for field_name in ("definition_digest", "rights_decision_digest"):
+             value = getattr(self, field_name)
+             if validate_sha256_digest(value, field=field_name) != value:
+                 raise ObjectPolicyError(f"{field_name} must be canonical lowercase")
+         require_scope(self.security_scope, field="security_scope")
+         require_scope(self.retention_scope, field="retention_scope")
+-        if not isinstance(self.valid_from, UtcTimestamp):
+-            raise ObjectPolicyError("admission valid_from must be typed UTC")
+-        if self.valid_until is not None and not isinstance(self.valid_until, UtcTimestamp):
+-            raise ObjectPolicyError("admission valid_until must be typed UTC")
+-        if not isinstance(self.state, AdmissionState):
+-            raise ObjectPolicyError("admission state must be typed")
+-        if self.activation_event_id is not None and not isinstance(
+-            self.activation_event_id, EventId
+-        ):
+-            raise ObjectPolicyError("activation event identity must be typed")
++        if self.valid_until is not None and self.valid_until.value <= self.valid_from.value:
++            raise ObjectPolicyError("admission validity must end after it starts")
++        if isinstance(self.lifecycle_version, bool) or not isinstance(
++            self.lifecycle_version, int
++        ) or self.lifecycle_version <= 0:
++            raise ObjectLifecycleError("admission lifecycle version must be positive")
++        if self.state is AdmissionState.ACTIVE and self.activation_event_id is None:
++            raise ObjectLifecycleError(
++                "ACTIVE admission requires committed activation-event identity"
++            )
+ 
+     @property
+     def active(self) -> bool:
+         return self.state is AdmissionState.ACTIVE
+ 
+-    def require_current(self, now: UtcTimestamp) -> None:
+-        if self.state is not AdmissionState.ACTIVE:
+-            raise ObjectHydrationDenied("object admission is not active")
+-        if now.value < self.valid_from.value:
+-            raise ObjectHydrationDenied("object admission is not yet valid")
+-        if self.valid_until is not None and now.value >= self.valid_until.value:
+-            raise ObjectHydrationDenied("object admission has expired")
+-        if self.blob.state is not BlobState.ACTIVE:
+-            raise ObjectHydrationDenied("governed blob is not hydratable")
++
++# Compatibility alias: still a non-authoritative view.
++ObjectAdmissionReceipt = ObjectAdmissionView
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+-class HydrationPolicy:
+-    policy_id: str
++class HydrationRequest:
++    admission_id: ObjectAdmissionId
+     purpose: str
+-    required_scope: str
+-    allowed_principal_ids: frozenset[str]
+-    allowed_object_classes: frozenset[str]
+-    allowed_uses: frozenset[str]
+-    allowed_security_scopes: frozenset[str]
+-    max_bytes: int
++    offset: int = 0
++    length: int | None = None
+ 
+     def __post_init__(self) -> None:
+-        require_token(self.policy_id, field="hydration_policy_id")
++        if not isinstance(self.admission_id, ObjectAdmissionId):
++            raise ObjectPolicyError("hydration request requires admission identity")
+         require_token(self.purpose, field="hydration_purpose")
+-        require_scope(self.required_scope, field="hydration_required_scope")
+-        for field_name in (
+-            "allowed_principal_ids",
+-            "allowed_object_classes",
+-            "allowed_uses",
+-            "allowed_security_scopes",
+-        ):
+-            values = getattr(self, field_name)
+-            if not isinstance(values, frozenset) or not values:
+-                raise ObjectPolicyError(f"{field_name} must be a non-empty frozenset")
+-        for principal in self.allowed_principal_ids:
+-            require_token(principal, field="hydration_principal")
+-        for object_class in self.allowed_object_classes:
+-            require_token(object_class, field="hydration_object_class")
+-        for allowed_use in self.allowed_uses:
+-            require_token(allowed_use, field="hydration_allowed_use")
+-        for scope in self.allowed_security_scopes:
+-            require_scope(scope, field="hydration_security_scope")
+-        if isinstance(self.max_bytes, bool) or not isinstance(self.max_bytes, int) or self.max_bytes <= 0:
+-            raise ObjectPolicyError("hydration max_bytes must be positive")
++        if isinstance(self.offset, bool) or not isinstance(self.offset, int) or self.offset < 0:
++            raise ObjectPolicyError("hydration offset must be non-negative")
++        if self.length is not None and (
++            isinstance(self.length, bool)
++            or not isinstance(self.length, int)
++            or self.length < 0
++        ):
++            raise ObjectPolicyError("hydration length must be non-negative")
+ 
+-    def canonical_value(self) -> dict[str, object]:
+-        return {
+-            "policy_id": self.policy_id,
+-            "purpose": self.purpose,
+-            "required_scope": self.required_scope,
+-            "allowed_principal_ids": sorted(self.allowed_principal_ids),
+-            "allowed_object_classes": sorted(self.allowed_object_classes),
+-            "allowed_uses": sorted(self.allowed_uses),
+-            "allowed_security_scopes": sorted(self.allowed_security_scopes),
+-            "max_bytes": self.max_bytes,
+-        }
+-
+-    @property
+-    def digest(self) -> str:
+-        return digest_canonical(self.canonical_value())
+-
+-    def authorize(
+-        self,
+-        *,
+-        principal_id: str,
+-        admission: ObjectAdmissionReceipt,
+-        requested_bytes: int,
+-        now: UtcTimestamp,
+-    ) -> ObjectAccessDecision:
+-        if principal_id not in self.allowed_principal_ids:
+-            raise ObjectHydrationDenied("principal is outside hydration policy")
+-        admission.require_current(now)
+-        if admission.object_class not in self.allowed_object_classes:
+-            raise ObjectHydrationDenied("object class is outside hydration policy")
+-        if admission.allowed_use not in self.allowed_uses:
+-            raise ObjectHydrationDenied("object use is outside hydration policy")
+-        if admission.security_scope not in self.allowed_security_scopes:
+-            raise ObjectHydrationDenied("security scope is outside hydration policy")
+-        if (
+-            isinstance(requested_bytes, bool)
+-            or not isinstance(requested_bytes, int)
+-            or requested_bytes < 0
+-            or requested_bytes > self.max_bytes
+-            or requested_bytes > admission.blob.size_bytes
+-        ):
+-            raise ObjectHydrationDenied("requested bytes exceed hydration policy")
+-        return ObjectAccessDecision(
+-            access_decision_id=ObjectAccessDecisionId.new(),
+-            policy_digest=self.digest,
+-            principal_id=principal_id,
+-            purpose=self.purpose,
+-            admission_id=admission.admission_id,
+-            allowed_use=admission.allowed_use,
+-            security_scope=admission.security_scope,
+-            allowed_bytes=requested_bytes,
+-            decided_at=now,
+-        )
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+-class ObjectAccessDecision:
++class ObjectAccessDecisionView:
+     access_decision_id: ObjectAccessDecisionId
+-    policy_digest: str
++    policy_contract_digest: str
++    authentication_context_id: AuthenticationContextId
++    authorization_request_digest: str
++    authorization_decision_id: AuthorizationDecisionId
+     principal_id: str
++    authority_domain: str
+     purpose: str
+     admission_id: ObjectAdmissionId
++    object_class: str
+     allowed_use: str
+     security_scope: str
++    retention_scope: str
++    offset: int
+     allowed_bytes: int
++    state_cutoff_digest: str
+     decided_at: UtcTimestamp
++    canonical_digest: str
+ 
+     def __post_init__(self) -> None:
+-        if not isinstance(self.access_decision_id, ObjectAccessDecisionId):
+-            raise ObjectPolicyError("access decision identity must be typed")
+-        if validate_sha256_digest(self.policy_digest, field="policy_digest") != self.policy_digest:
+-            raise ObjectPolicyError("policy digest must be canonical lowercase")
++        for field_name in (
++            "policy_contract_digest",
++            "authorization_request_digest",
++            "state_cutoff_digest",
++            "canonical_digest",
++        ):
++            if validate_sha256_digest(
++                getattr(self, field_name), field=field_name
++            ) != getattr(self, field_name):
++                raise ObjectPolicyError(f"{field_name} must be canonical")
+         require_token(self.principal_id, field="principal_id")
++        require_token(self.authority_domain, field="authority_domain")
+         require_token(self.purpose, field="purpose")
+-        if not isinstance(self.admission_id, ObjectAdmissionId):
+-            raise ObjectPolicyError("access decision admission identity must be typed")
++        require_token(self.object_class, field="object_class")
+         require_token(self.allowed_use, field="allowed_use")
+         require_scope(self.security_scope, field="security_scope")
+-        if isinstance(self.allowed_bytes, bool) or not isinstance(self.allowed_bytes, int) or self.allowed_bytes < 0:
+-            raise ObjectPolicyError("allowed bytes must be non-negative")
+-        if not isinstance(self.decided_at, UtcTimestamp):
+-            raise ObjectPolicyError("access decision time must be typed UTC")
++        require_scope(self.retention_scope, field="retention_scope")
++        for field_name in ("offset", "allowed_bytes"):
++            value = getattr(self, field_name)
++            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
++                raise ObjectPolicyError(f"{field_name} must be non-negative")
+ 
+ 
++# Compatibility alias for persisted non-authoritative view only.
++ObjectAccessDecision = ObjectAccessDecisionView
++
++
+ @dataclass(frozen=True, slots=True)
+-class AdmissionRevocationReceipt:
++class AdmissionRevocationView:
+     admission_id: ObjectAdmissionId
++    lifecycle_version: int
+     reason_code: str
+     revoked_at: UtcTimestamp
+     event_id: EventId
+ 
+     def __post_init__(self) -> None:
+-        if not isinstance(self.admission_id, ObjectAdmissionId):
+-            raise ObjectLifecycleError("revocation admission identity must be typed")
+         require_token(self.reason_code, field="revocation_reason")
+-        if not isinstance(self.revoked_at, UtcTimestamp):
+-            raise ObjectLifecycleError("revocation time must be typed UTC")
+-        if not isinstance(self.event_id, EventId):
+-            raise ObjectLifecycleError("revocation event identity must be typed")
++        if self.lifecycle_version <= 0:
++            raise ObjectLifecycleError("revocation lifecycle version must be positive")
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+-class GovernedDeletionReceipt:
++class GovernedDeletionView:
+     deletion_id: GovernedDeletionId
+-    blob_digest: str
++    blob: BlobIdentity
+     reason_code: str
++    lifecycle_version: int
+     state: DeletionState
+     requested_at: UtcTimestamp
+     updated_at: UtcTimestamp
+     event_id: EventId
+ 
+     def __post_init__(self) -> None:
+-        if not isinstance(self.deletion_id, GovernedDeletionId):
+-            raise ObjectLifecycleError("deletion identity must be typed")
+-        if validate_sha256_digest(self.blob_digest, field="blob_digest") != self.blob_digest:
+-            raise ObjectLifecycleError("blob digest must be canonical lowercase")
+         require_token(self.reason_code, field="deletion_reason")
+-        if not isinstance(self.state, DeletionState):
+-            raise ObjectLifecycleError("deletion state must be typed")
+-        if not isinstance(self.requested_at, UtcTimestamp) or not isinstance(
+-            self.updated_at, UtcTimestamp
+-        ):
+-            raise ObjectLifecycleError("deletion times must be typed UTC")
++        if self.lifecycle_version <= 0:
++            raise ObjectLifecycleError("deletion lifecycle version must be positive")
+         if self.updated_at.value < self.requested_at.value:
+             raise ObjectLifecycleError("deletion update cannot predate request")
+-        if not isinstance(self.event_id, EventId):
+-            raise ObjectLifecycleError("deletion event identity must be typed")
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+-class RecoveryPinReceipt:
++class RecoveryPinView:
+     pin_id: RecoveryPinId
+-    blob_digest: str
++    blob: BlobIdentity
+     reason_code: str
++    lifecycle_version: int
++    state: RecoveryPinState
+     created_at: UtcTimestamp
+-    released_at: UtcTimestamp | None = None
++    updated_at: UtcTimestamp
++    event_id: EventId
+ 
+     def __post_init__(self) -> None:
+-        if not isinstance(self.pin_id, RecoveryPinId):
+-            raise ObjectLifecycleError("recovery pin identity must be typed")
+-        if validate_sha256_digest(self.blob_digest, field="blob_digest") != self.blob_digest:
+-            raise ObjectLifecycleError("blob digest must be canonical lowercase")
+         require_token(self.reason_code, field="recovery_pin_reason")
+-        if not isinstance(self.created_at, UtcTimestamp):
+-            raise ObjectLifecycleError("pin created_at must be typed UTC")
+-        if self.released_at is not None:
+-            if not isinstance(self.released_at, UtcTimestamp):
+-                raise ObjectLifecycleError("pin released_at must be typed UTC")
+-            if self.released_at.value < self.created_at.value:
+-                raise ObjectLifecycleError("pin release cannot predate creation")
++        if self.lifecycle_version <= 0:
++            raise ObjectLifecycleError("pin lifecycle version must be positive")
++        if self.updated_at.value < self.created_at.value:
++            raise ObjectLifecycleError("pin update cannot predate creation")
+ 
+     @property
+     def active(self) -> bool:
+-        return self.released_at is None
++        return self.state is RecoveryPinState.ACTIVE
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -328,14 +697,18 @@ class ObjectLivenessSnapshot:
+     @property
+     def may_physically_remove(self) -> bool:
+         if self.active_recovery_pins:
+             return False
+-        if self.deletion_state in {
+-            DeletionState.TOMBSTONED,
+-            DeletionState.PHYSICALLY_REMOVED,
+-        }:
++        if self.deletion_state is DeletionState.TOMBSTONED:
+             return True
+-        return not (
+-            self.active_admissions
+-            or self.pending_admissions
+-            or self.authority_references
+-        )
++        if self.deletion_state is DeletionState.PHYSICALLY_REMOVED:
++            return True
++        if self.deletion_state in {
++            DeletionState.REQUESTED,
++            DeletionState.FAILED,
++        }:
++            return False
++        # Ordinary orphan GC is a separate no-deletion workflow.
++        return self.deletion_state is None and not (
++            self.active_admissions
++            or self.pending_admissions
++            or self.authority_references
++        )
++
++
++# Compatibility view names; none is current authority.
++RightsDecision = RightsDecisionView
++AdmissionRevocationReceipt = AdmissionRevocationView
++GovernedDeletionReceipt = GovernedDeletionView
++RecoveryPinReceipt = RecoveryPinView
++
++
++__all__ = [name for name in globals() if not name.startswith("_")]
+diff --git a/newsroom/authority/traceability.py b/newsroom/authority/traceability.py
+index 916fdb85f9d760002d6edf00a564ac5a39c32ac5..d290cf4ae280f0308c1970cc51890f1cd0bafc27 100644
+--- a/newsroom/authority/traceability.py
++++ b/newsroom/authority/traceability.py
+@@ -23,6 +23,14 @@ INCREMENT_1A_TRACEABILITY: dict[str, tuple[str, ...]] = {
+         "GRPROD-005",
+     ),
+     "newsroom.authority.service": (
++        "ADR-0001",
++        "ADR-0002",
++        "DREC-006",
++        "DREC-070",
++        "DREC-076",
++        "GRAG-005",
++        "GRAG-011",
++        "GRAG-012",
++        "GRPROD-005",
++        "GRPROD-020",
++    ),
++    "newsroom.authority.service": (
+         "ADR-0001",
+         "ADR-0002",
+         "DREC-006",
+@@ -168,6 +176,15 @@ INCREMENT_1A2A_TRACEABILITY: dict[str, tuple[str, ...]] = {
+         "GRAG-005",
+         "GRAG-030",
+     ),
++    "newsroom.authority._event_store_commit": (
++        "ADR-0001",
++        "ADR-0002",
++        "DREC-006",
++        "DREC-070",
++        "DREC-074",
++        "GRAG-002",
++        "GRAG-003",
++        "GRAG-005",
++        "GRAG-030",
++    ),
+     "newsroom.tests.test_authority_a2a_integrity": (
+         "ADR-0002",
+         "DREC-006",
