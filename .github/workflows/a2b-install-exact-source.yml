@@ -27,17 +27,50 @@ jobs:
           ref: agent/increment-1a2b-object-lifecycle
           fetch-depth: 0
 
-      - name: Upload exact source-transfer parts
+      - name: Recover missing transfer chunks from Git history
+        id: recover
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*'
+          : > /tmp/a2b-transfer-history.txt
+          for path in \
+            .github/a2b-source-transfer/part-006-03-00 \
+            .github/a2b-source-transfer/part-007-02-01
+          do
+            echo "path=$path" >> /tmp/a2b-transfer-history.txt
+            if [[ ! -f "$path" ]]; then
+              commit="$(git log --all --format='%H' -- "$path" | head -n 1 || true)"
+              echo "historical_commit=$commit" >> /tmp/a2b-transfer-history.txt
+              if [[ -n "$commit" ]]; then
+                mkdir -p "$(dirname "$path")"
+                git show "$commit:$path" > "$path"
+                echo "recovered_sha256=$(sha256sum "$path" | awk '{print $1}')" >> /tmp/a2b-transfer-history.txt
+              fi
+            else
+              echo "already_present_sha256=$(sha256sum "$path" | awk '{print $1}')" >> /tmp/a2b-transfer-history.txt
+            fi
+          done
+          echo "transfer_files=$(find .github/a2b-source-transfer -maxdepth 1 -type f | wc -l)" >> /tmp/a2b-transfer-history.txt
+          find .github/a2b-source-transfer -maxdepth 1 -type f -printf '%f %s\n' | sort >> /tmp/a2b-transfer-history.txt
+          cat /tmp/a2b-transfer-history.txt
+
+      - name: Upload exact source-transfer parts and history diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: a2b-source-transfer-parts
-          path: .github/a2b-source-transfer
+          path: |
+            .github/a2b-source-transfer
+            /tmp/a2b-transfer-history.txt
           if-no-files-found: error
 
       - name: Reconstruct and verify source archive
         shell: bash
         run: |
           set -euo pipefail
+          test -f .github/a2b-source-transfer/part-006-03-00
+          test -f .github/a2b-source-transfer/part-007-02-01
           cat .github/a2b-source-transfer/part-* | base64 -d > /tmp/a2b-source.tar.gz
           echo "84239738f8713ac39391e162cdea8b3c84683a05431560266778de5c8c222948  /tmp/a2b-source.tar.gz" | sha256sum -c -
           if tar -tzf /tmp/a2b-source.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))'; then
