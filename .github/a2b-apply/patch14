@@ -1,0 +1,455 @@
+hts BEGIN
++        SELECT RAISE(ABORT,'immutable object admission preflight'); END""",
++    """CREATE TRIGGER object_staging_transition_guard
++        BEFORE UPDATE ON object_staging_records
++        WHEN NEW.stage_id != OLD.stage_id
++          OR NEW.preflight_id != OLD.preflight_id
++          OR NEW.staged_name != OLD.staged_name
++          OR NEW.blob_digest != OLD.blob_digest
++          OR NEW.size_bytes != OLD.size_bytes
++          OR NEW.created_at != OLD.created_at
++          OR NOT (
++              (OLD.state='STAGED' AND NEW.state IN('INSTALLED','FAILED','CLEANED'))
++              OR (OLD.state='INSTALLED' AND NEW.state IN('COMMITTED','FAILED','CLEANED'))
++              OR (OLD.state='FAILED' AND NEW.state='CLEANED')
++              OR (OLD.state=NEW.state)
++          )
++        BEGIN SELECT RAISE(ABORT,'invalid object staging transition'); END""",
++    """CREATE TRIGGER object_staging_delete_guard
++        BEFORE DELETE ON object_staging_records BEGIN
++        SELECT RAISE(ABORT,'object staging history is retained'); END""",
++    """CREATE TRIGGER immutable_blob_identities_update
++        BEFORE UPDATE ON blob_identities BEGIN
++        SELECT RAISE(ABORT,'immutable blob identity'); END""",
++    """CREATE TRIGGER immutable_blob_identities_delete
++        BEFORE DELETE ON blob_identities BEGIN
++        SELECT RAISE(ABORT,'immutable blob identity'); END""",
++    """CREATE TRIGGER immutable_blob_lifecycle_versions_update
++        BEFORE UPDATE ON blob_lifecycle_versions BEGIN
++        SELECT RAISE(ABORT,'immutable blob lifecycle version'); END""",
++    """CREATE TRIGGER immutable_blob_lifecycle_versions_delete
++        BEFORE DELETE ON blob_lifecycle_versions BEGIN
++        SELECT RAISE(ABORT,'immutable blob lifecycle version'); END""",
++    """CREATE TRIGGER blob_lifecycle_head_update_guard
++        BEFORE UPDATE ON blob_lifecycle_heads
++        WHEN NEW.blob_digest != OLD.blob_digest
++          OR NEW.current_version != OLD.current_version + 1
++        BEGIN SELECT RAISE(ABORT,'invalid blob lifecycle head update'); END""",
++    """CREATE TRIGGER blob_lifecycle_head_delete_guard
++        BEFORE DELETE ON blob_lifecycle_heads BEGIN
++        SELECT RAISE(ABORT,'blob lifecycle heads are retained'); END""",
++    """CREATE TRIGGER immutable_object_rights_decisions_update
++        BEFORE UPDATE ON object_rights_decisions BEGIN
++        SELECT RAISE(ABORT,'immutable object rights decision'); END""",
++    """CREATE TRIGGER immutable_object_rights_decisions_delete
++        BEFORE DELETE ON object_rights_decisions BEGIN
++        SELECT RAISE(ABORT,'immutable object rights decision'); END""",
++    """CREATE TRIGGER immutable_object_admissions_update
++        BEFORE UPDATE ON object_admissions BEGIN
++        SELECT RAISE(ABORT,'immutable object admission'); END""",
++    """CREATE TRIGGER immutable_object_admissions_delete
++        BEFORE DELETE ON object_admissions BEGIN
++        SELECT RAISE(ABORT,'immutable object admission'); END""",
++    """CREATE TRIGGER immutable_object_admission_versions_update
++        BEFORE UPDATE ON object_admission_versions BEGIN
++        SELECT RAISE(ABORT,'immutable object admission version'); END""",
++    """CREATE TRIGGER immutable_object_admission_versions_delete
++        BEFORE DELETE ON object_admission_versions BEGIN
++        SELECT RAISE(ABORT,'immutable object admission version'); END""",
++    """CREATE TRIGGER object_admission_head_update_guard
++        BEFORE UPDATE ON object_admission_heads
++        WHEN NEW.admission_id != OLD.admission_id
++          OR NEW.current_version != OLD.current_version + 1
++        BEGIN SELECT RAISE(ABORT,'invalid object admission head update'); END""",
++    """CREATE TRIGGER object_admission_head_delete_guard
++        BEFORE DELETE ON object_admission_heads BEGIN
++        SELECT RAISE(ABORT,'object admission heads are retained'); END""",
++    """CREATE TRIGGER immutable_object_access_decisions_update
++        BEFORE UPDATE ON object_access_decisions BEGIN
++        SELECT RAISE(ABORT,'immutable object access decision'); END""",
++    """CREATE TRIGGER immutable_object_access_decisions_delete
++        BEFORE DELETE ON object_access_decisions BEGIN
++        SELECT RAISE(ABORT,'immutable object access decision'); END""",
++    """CREATE TRIGGER immutable_object_deletions_update
++        BEFORE UPDATE ON object_deletions BEGIN
++        SELECT RAISE(ABORT,'immutable governed deletion identity'); END""",
++    """CREATE TRIGGER immutable_object_deletions_delete
++        BEFORE DELETE ON object_deletions BEGIN
++        SELECT RAISE(ABORT,'governed deletion identity is retained'); END""",
++    """CREATE TRIGGER immutable_object_deletion_versions_update
++        BEFORE UPDATE ON object_deletion_versions BEGIN
++        SELECT RAISE(ABORT,'immutable governed deletion version'); END""",
++    """CREATE TRIGGER immutable_object_deletion_versions_delete
++        BEFORE DELETE ON object_deletion_versions BEGIN
++        SELECT RAISE(ABORT,'immutable governed deletion version'); END""",
++    """CREATE TRIGGER object_deletion_head_update_guard
++        BEFORE UPDATE ON object_deletion_heads
++        WHEN NEW.deletion_id != OLD.deletion_id
++          OR NEW.current_version != OLD.current_version + 1
++        BEGIN SELECT RAISE(ABORT,'invalid governed deletion head update'); END""",
++    """CREATE TRIGGER object_deletion_head_delete_guard
++        BEFORE DELETE ON object_deletion_heads BEGIN
++        SELECT RAISE(ABORT,'governed deletion heads are retained'); END""",
++    """CREATE TRIGGER immutable_object_recovery_pins_update
++        BEFORE UPDATE ON object_recovery_pins BEGIN
++        SELECT RAISE(ABORT,'immutable recovery pin identity'); END""",
++    """CREATE TRIGGER immutable_object_recovery_pins_delete
++        BEFORE DELETE ON object_recovery_pins BEGIN
++        SELECT RAISE(ABORT,'recovery pin identity is retained'); END""",
++    """CREATE TRIGGER immutable_object_recovery_pin_versions_update
++        BEFORE UPDATE ON object_recovery_pin_versions BEGIN
++        SELECT RAISE(ABORT,'immutable recovery pin version'); END""",
++    """CREATE TRIGGER immutable_object_recovery_pin_versions_delete
++        BEFORE DELETE ON object_recovery_pin_versions BEGIN
++        SELECT RAISE(ABORT,'immutable recovery pin version'); END""",
++    """CREATE TRIGGER object_recovery_pin_head_update_guard
++        BEFORE UPDATE ON object_recovery_pin_heads
++        WHEN NEW.pin_id != OLD.pin_id
++          OR NEW.current_version != OLD.current_version + 1
++        BEGIN SELECT RAISE(ABORT,'invalid recovery pin head update'); END""",
++    """CREATE TRIGGER object_recovery_pin_head_delete_guard
++        BEFORE DELETE ON object_recovery_pin_heads BEGIN
++        SELECT RAISE(ABORT,'recovery pin heads are retained'); END""",
++    """CREATE TRIGGER immutable_object_lifecycle_operations_update
++        BEFORE UPDATE ON object_lifecycle_operations BEGIN
++        SELECT RAISE(ABORT,'immutable object lifecycle operation'); END""",
++    """CREATE TRIGGER immutable_object_lifecycle_operations_delete
++        BEFORE DELETE ON object_lifecycle_operations BEGIN
++        SELECT RAISE(ABORT,'object lifecycle operations are retained'); END""",
++    """CREATE TRIGGER authority_payload_object_admission_guard
++        BEFORE INSERT ON authority_payloads
++        WHEN NEW.mode='OBJECT_ADMISSION'
++         AND NOT EXISTS(
++            SELECT 1 FROM object_admissions a
++            JOIN object_admission_heads h ON h.admission_id=a.admission_id
++            JOIN object_admission_versions v
++              ON v.admission_id=h.admission_id
++             AND v.lifecycle_version=h.current_version
++            WHERE a.admission_id=NEW.object_admission_id
++              AND v.state='ACTIVE'
++              AND a.blob_digest=NEW.payload_digest
++         )
++        BEGIN SELECT RAISE(ABORT,'object payload admission is not active'); END""",
++)
++
++
++OBJECT_MIGRATION_CHECKSUM = digest_canonical(
++    {
++        "version": OBJECT_SCHEMA_VERSION,
++        "name": OBJECT_MIGRATION_NAME,
++        "statements": list(OBJECT_MIGRATION_STATEMENTS),
++    }
++)
++OBJECT_MIGRATION = ObjectMigrationRecord(
++    version=OBJECT_SCHEMA_VERSION,
++    name=OBJECT_MIGRATION_NAME,
++    checksum=OBJECT_MIGRATION_CHECKSUM,
++)
++
++
++__all__ = [
++    "OBJECT_MIGRATION",
++    "OBJECT_MIGRATION_CHECKSUM",
++    "OBJECT_MIGRATION_NAME",
++    "OBJECT_MIGRATION_STATEMENTS",
++    "OBJECT_SCHEMA_VERSION",
++]
+diff --git a/newsroom/authority/object_policy.py b/newsroom/authority/object_policy.py
+index 3155ed13602900c5333ba9cfa2977291c60e2fee..bf629633324cee2e4bf3fe69b5b9bc72687b7d51 100644
+--- a/newsroom/authority/object_policy.py
++++ b/newsroom/authority/object_policy.py
+@@ -1,75 +1,334 @@
+ from __future__ import annotations
+ 
++from collections.abc import Iterable, Mapping
+ from dataclasses import dataclass
+-from datetime import timedelta
+ from types import MappingProxyType
+-from typing import Iterable, Mapping
++from typing import Any, Callable
+ 
+-from .canonical import digest_canonical
++from .canonical import canonical_json_bytes, digest_canonical
++from .models import CommandDefinition
+ from .objects import (
+-    AdmissionState,
+-    ImmutableBlobIdentity,
++    HydrationPolicyContract,
+     ObjectAdmissionDefinition,
+-    ObjectAdmissionDenied,
+-    ObjectAdmissionReceipt,
+-    ObjectAdmissionRequest,
+     ObjectPolicyError,
+-    RightsDecision,
++    RightsPolicyContract,
+ )
+-from .types import (
+-    AuthenticationContextId,
+-    AuthorizationDecisionId,
+-    ObjectAdmissionId,
+-    RightsDecisionId,
+-    UtcTimestamp,
+-    require_token,
++from .policy import (
++    CommandRegistry,
++    PayloadGoldenVector,
++    PayloadSchemaContract,
++    PayloadSchemaRegistry,
+ )
++from .types import PayloadMode, TrustScope, require_token
+ 
+ 
+ class UnknownObjectAdmissionDefinition(LookupError):
+     pass
+ 
+ 
++class UnknownRightsPolicyContract(LookupError):
++    pass
++
++
++class UnknownHydrationPolicyContract(LookupError):
++    pass
++
++
++@dataclass(frozen=True, slots=True)
++class RightsPolicyRegistry:
++    """Immutable retained rights-policy contracts with behaviour in the digest."""
++
++    _by_digest: Mapping[str, RightsPolicyContract]
++    _by_key: Mapping[tuple[str, str], RightsPolicyContract]
++    _current_versions: Mapping[str, str]
++
++    def __init__(
++        self,
++        contracts: Iterable[RightsPolicyContract],
++        *,
++        current_versions: Mapping[str, str] | None = None,
++    ) -> None:
++        by_digest: dict[str, RightsPolicyContract] = {}
++        by_key: dict[tuple[str, str], RightsPolicyContract] = {}
++        versions: dict[str, list[str]] = {}
++        for contract in contracts:
++            if not isinstance(contract, RightsPolicyContract):
++                raise ObjectPolicyError("rights registry accepts typed contracts only")
++            key = (contract.policy_key, contract.contract_version)
++            if key in by_key or contract.contract_digest in by_digest:
++                raise ObjectPolicyError(
++                    "duplicate rights-policy contract identity: "
++                    f"{contract.policy_key}/{contract.contract_version}"
++                )
++            by_key[key] = contract
++            by_digest[contract.contract_digest] = contract
++            versions.setdefault(contract.policy_key, []).append(
++                contract.contract_version
++            )
++        if not by_key:
++            raise ObjectPolicyError("rights-policy registry cannot be empty")
++        requested = dict(current_versions or {})
++        selected: dict[str, str] = {}
++        for policy_key, available in versions.items():
++            if policy_key in requested:
++                version = requested.pop(policy_key)
++            elif len(available) == 1:
++                version = available[0]
++            else:
++                raise ObjectPolicyError(
++                    "multiple rights-policy versions require an explicit current "
++                    f"version: {policy_key}"
++                )
++            if (policy_key, version) not in by_key:
++                raise ObjectPolicyError(
++                    f"unknown current rights-policy contract: {policy_key}/{version}"
++                )
++            selected[policy_key] = version
++        if requested:
++            raise ObjectPolicyError(
++                "current rights-policy version declared for unknown keys: "
++                f"{sorted(requested)}"
++            )
++        object.__setattr__(self, "_by_digest", MappingProxyType(dict(by_digest)))
++        object.__setattr__(self, "_by_key", MappingProxyType(dict(by_key)))
++        object.__setattr__(
++            self, "_current_versions", MappingProxyType(dict(selected))
++        )
++
++    def resolve(
++        self, policy_key: str, contract_version: str | None = None
++    ) -> RightsPolicyContract:
++        require_token(policy_key, field="rights_policy_key")
++        version = (
++            self._current_versions.get(policy_key)
++            if contract_version is None
++            else contract_version
++        )
++        if version is None:
++            raise UnknownRightsPolicyContract(policy_key)
++        try:
++            return self._by_key[(policy_key, version)]
++        except KeyError as exc:
++            raise UnknownRightsPolicyContract(
++                f"{policy_key}/{version}"
++            ) from exc
++
++    def resolve_digest(self, contract_digest: str) -> RightsPolicyContract:
++        try:
++            return self._by_digest[contract_digest]
++        except KeyError as exc:
++            raise UnknownRightsPolicyContract(contract_digest) from exc
++
++    def resolve_exact(
++        self,
++        policy_key: str,
++        contract_version: str,
++        contract_digest: str,
++    ) -> RightsPolicyContract:
++        contract = self.resolve(policy_key, contract_version)
++        if contract.contract_digest != contract_digest:
++            raise UnknownRightsPolicyContract(
++                "retained rights-policy contract digest mismatch"
++            )
++        return contract
++
++    def contracts(self) -> tuple[RightsPolicyContract, ...]:
++        return tuple(
++            self._by_key[key]
++            for key in sorted(self._by_key, key=lambda item: (item[0], item[1]))
++        )
++
++
++@dataclass(frozen=True, slots=True)
++class HydrationPolicyRegistry:
++    """Immutable purpose-to-policy registry with retained historical contracts."""
++
++    _by_digest: Mapping[str, HydrationPolicyContract]
++    _by_key: Mapping[tuple[str, str], HydrationPolicyContract]
++    _current_versions: Mapping[str, str]
++    _purpose_to_policy: Mapping[str, str]
++
++    def __init__(
++        self,
++        contracts: Iterable[HydrationPolicyContract],
++        *,
++        current_versions: Mapping[str, str] | None = None,
++        purpose_to_policy: Mapping[str, str] | None = None,
++    ) -> None:
++        by_digest: dict[str, HydrationPolicyContract] = {}
++        by_key: dict[tuple[str, str], HydrationPolicyContract] = {}
++        versions: dict[str, list[str]] = {}
++        purpose_map: dict[str, str] = dict(purpose_to_policy or {})
++        for contract in contracts:
++            if not isinstance(contract, HydrationPolicyContract):
++                raise ObjectPolicyError(
++                    "hydration registry accepts typed contracts only"
++                )
++            key = (contract.policy_id, contract.contract_version)
++            if key in by_key or contract.contract_digest in by_digest:
++                raise ObjectPolicyError(
++                    "duplicate hydration-policy contract identity: "
++                    f"{contract.policy_id}/{contract.contract_version}"
++                )
++            by_key[key] = contract
++            by_digest[contract.contract_digest] = contract
++            versions.setdefault(contract.policy_id, []).append(
++                contract.contract_version
++            )
++            purpose_map.setdefault(contract.purpose, contract.policy_id)
++        if not by_key:
++            raise ObjectPolicyError("hydration-policy registry cannot be empty")
++        requested = dict(current_versions or {})
++        selected: dict[str, str] = {}
++        for policy_id, available in versions.items():
++            if policy_id in requested:
++                version = requested.pop(policy_id)
++            elif len(available) == 1:
++                version = available[0]
++            else:
++                raise ObjectPolicyError(
++                    "multiple hydration-policy versions require an explicit "
++                    f"current version: {policy_id}"
++                )
++            if (policy_id, version) not in by_key:
++                raise ObjectPolicyError(
++                    f"unknown current hydration policy: {policy_id}/{version}"
++                )
++            selected[policy_id] = version
++        if requested:
++            raise ObjectPolicyError(
++                "current hydration-policy version declared for unknown IDs: "
++                f"{sorted(requested)}"
++            )
++        for purpose, policy_id in purpose_map.items():
++            require_token(purpose, field="hydration_purpose")
++            if policy_id not in selected:
++                raise ObjectPolicyError(
++                    f"purpose {purpose} names unknown hydration policy {policy_id}"
++                )
++            current = by_key[(policy_id, selected[policy_id])]
++            if current.purpose != purpose:
++                raise ObjectPolicyError(
++                    "hydration purpose mapping differs from retained policy contract"
++                )
++        object.__setattr__(self, "_by_digest", MappingProxyType(dict(by_digest)))
++        object.__setattr__(self, "_by_key", MappingProxyType(dict(by_key)))
++        object.__setattr__(
++            self, "_current_versions", MappingProxyType(dict(selected))
++        )
++        object.__setattr__(
++            self, "_purpose_to_policy", MappingProxyType(dict(purpose_map))
++        )
++
++    def resolve(
++        self, policy_id: str, contract_version: str | None = None
++    ) -> HydrationPolicyContract:
++        require_token(policy_id, field="hydration_policy_id")
++        version = (
++            self._current_versions.get(policy_id)
++            if contract_version is None
++            else contract_version
++        )
++        if version is None:
++            raise UnknownHydrationPolicyContract(policy_id)
++        try:
++            return self._by_key[(policy_id, version)]
++        except KeyError as exc:
++            raise UnknownHydrationPolicyContract(
++                f"{policy_id}/{version}"
++            ) from exc
++
++    def resolve_for_purpose(self, purpose: str) -> HydrationPolicyContract:
++        require_token(purpose, field="hydration_purpose")
++        try:
++            policy_id = self._purpose_to_policy[purpose]
++        except KeyError as exc:
++            raise UnknownHydrationPolicyContract(
++                f"no hydration policy for purpose {purpose}"
++            ) from exc
++        return self.resolve(policy_id)
++
++    def resolve_digest(self, digest: str) -> HydrationPolicyContract:
++        try:
++            return self._by_digest[digest]
++        except KeyError as exc:
++            raise UnknownHydrationPolicyContract(digest) from exc
++
++    def resolve_exact(
++        self,
++        policy_id: str,
++        contract_version: str,
++        contract_digest: str,
++    ) -> HydrationPolicyContract:
++        contract = self.resolve(policy_id, contract_version)
++        if contract.contract_digest != contract_digest:
++            raise UnknownHydrationPolicyContract(
++                "retained hydration-policy contract digest mismatch"
++            )
++        return contract
++
++    def contracts(self) -> tuple[HydrationPolicyContract, ...]:
++        return tuple(
++            self._by_key[key]
++            for key in sorted(self._by_key, key=lambda item: (item[0], item[1]))
++        )
++
++
+ @dataclass(frozen=True, slots=True)
+ clas
