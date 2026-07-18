@@ -7,16 +7,24 @@ on:
     paths:
       - .github/a2b-source-transfer/**
       - .github/workflows/a2b-install-exact-source.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/a2b-source-transfer/**
+      - .github/workflows/a2b-install-exact-source.yml
 
 permissions:
   contents: write
 
 jobs:
   install:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: agent/increment-1a2b-object-lifecycle
           fetch-depth: 0
 
       - name: Reconstruct and verify source archive
