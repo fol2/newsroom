@@ -1,0 +1,520 @@
+  admission: ObjectAdmissionView
++    replayed: bool
++
++
++@dataclass(frozen=True, slots=True)
++class HydratedObject:
++    data: bytes
++    decision: ObjectAccessDecisionView
++
++
++class GovernedObjects:
++    """Authenticated governed-object facade; no direct writer is exposed."""
++
++    __slots__ = (
++        "__admit",
++        "__hydrate",
++        "__revoke",
++        "__request_deletion",
++        "__tombstone",
++        "__complete_deletion",
++        "__create_pin",
++        "__release_pin",
++        "__collect_orphans",
++    )
++
++    def __init__(
++        self,
++        *,
++        admit: Callable[[ObjectAdmissionRequest, _Source, AuthenticationProof], ObjectAdmissionResult],
++        hydrate: Callable[[HydrationRequest, AuthenticationProof], HydratedObject],
++        revoke: Callable[[ObjectAdmissionId, str, str, AuthenticationProof], AdmissionRevocationView],
++        request_deletion: Callable[[str, str, str, AuthenticationProof], GovernedDeletionView],
++        tombstone: Callable[[GovernedDeletionId, str, str, AuthenticationProof], GovernedDeletionView],
++        complete_deletion: Callable[[GovernedDeletionId, str, AuthenticationProof], GovernedDeletionView],
++        create_pin: Callable[[str, str, str, AuthenticationProof], RecoveryPinView],
++        release_pin: Callable[[RecoveryPinId, str, str, AuthenticationProof], RecoveryPinView],
++        collect_orphans: Callable[[AuthenticationProof], tuple[BlobIdentity, ...]],
++    ) -> None:
++        self.__admit = admit
++        self.__hydrate = hydrate
++        self.__revoke = revoke
++        self.__request_deletion = request_deletion
++        self.__tombstone = tombstone
++        self.__complete_deletion = complete_deletion
++        self.__create_pin = create_pin
++        self.__release_pin = release_pin
++        self.__collect_orphans = collect_orphans
++
++    def admit(
++        self,
++        request: ObjectAdmissionRequest,
++        source: _Source,
++        *,
++        proof: AuthenticationProof,
++    ) -> ObjectAdmissionResult:
++        return self.__admit(request, source, proof)
++
++    def hydrate(
++        self, request: HydrationRequest, *, proof: AuthenticationProof
++    ) -> HydratedObject:
++        return self.__hydrate(request, proof)
++
++    def revoke(
++        self,
++        admission_id: ObjectAdmissionId,
++        *,
++        reason_code: str,
++        idempotency_key: str,
++        proof: AuthenticationProof,
++    ) -> AdmissionRevocationView:
++        return self.__revoke(
++            admission_id, reason_code, idempotency_key, proof
++        )
++
++    def request_deletion(
++        self,
++        blob_digest: str,
++        *,
++        reason_code: str,
++        idempotency_key: str,
++        proof: AuthenticationProof,
++    ) -> GovernedDeletionView:
++        return self.__request_deletion(
++            blob_digest, reason_code, idempotency_key, proof
++        )
++
++    def tombstone(
++        self,
++        deletion_id: GovernedDeletionId,
++        *,
++        reason_code: str,
++        idempotency_key: str,
++        proof: AuthenticationProof,
++    ) -> GovernedDeletionView:
++        return self.__tombstone(
++            deletion_id, reason_code, idempotency_key, proof
++        )
++
++    def complete_deletion(
++        self,
++        deletion_id: GovernedDeletionId,
++        *,
++        idempotency_key: str,
++        proof: AuthenticationProof,
++    ) -> GovernedDeletionView:
++        return self.__complete_deletion(deletion_id, idempotency_key, proof)
++
++    def create_recovery_pin(
++        self,
++        blob_digest: str,
++        *,
++        reason_code: str,
++        idempotency_key: str,
++        proof: AuthenticationProof,
++    ) -> RecoveryPinView:
++        return self.__create_pin(
++            blob_digest, reason_code, idempotency_key, proof
++        )
++
++    def release_recovery_pin(
++        self,
++        pin_id: RecoveryPinId,
++        *,
++        reason_code: str,
++        idempotency_key: str,
++        proof: AuthenticationProof,
++    ) -> RecoveryPinView:
++        return self.__release_pin(
++            pin_id, reason_code, idempotency_key, proof
++        )
++
++    def collect_orphans(
++        self, *, proof: AuthenticationProof
++    ) -> tuple[BlobIdentity, ...]:
++        return self.__collect_orphans(proof)
++
++
++class GovernedObjectAuthoritySystem:
++    """Composed A1/A2a/A2b facades; stores and capabilities remain internal."""
++
++    __slots__ = ("commands", "events", "objects", "__close")
++
++    def __init__(
++        self,
++        *,
++        commands: AuthorityCommands,
++        events: AuthorityEvents,
++        objects: GovernedObjects,
++        close: Callable[[], None],
++    ) -> None:
++        self.commands = commands
++        self.events = events
++        self.objects = objects
++        self.__close = close
++
++    def close(self) -> None:
++        self.__close()
++
++    def __enter__(self) -> GovernedObjectAuthoritySystem:
++        return self
++
++    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
++        self.close()
++
++
++class _ObjectBoundary:
++    def __init__(
++        self,
++        *,
++        store: _GovernedObjectAuthorityStore,
++        cas: _GovernedCAS,
++        object_issuer: _ObjectCapabilityIssuer,
++        admission_registry: ObjectAdmissionRegistry,
++        rights_policies: RightsPolicyRegistry,
++        hydration_policies: HydrationPolicyRegistry,
++        authenticator: Any,
++        authorizer: Any,
++        command_service: CommandService,
++        command_registry: CommandRegistry,
++        clock: Callable[[], UtcTimestamp],
++    ) -> None:
++        self._store = store
++        self._cas = cas
++        self._object_issuer = object_issuer
++        self._admission_registry = admission_registry
++        self._rights_policies = rights_policies
++        self._hydration_policies = hydration_policies
++        self._authenticator = authenticator
++        self._authorizer = authorizer
++        self._command_service = command_service
++        self._command_registry = command_registry
++        self._clock = clock
++
++    def _authenticate(self, proof: AuthenticationProof) -> tuple[Any, UtcTimestamp]:
++        now = self._clock()
++        authentication = self._authenticator.authenticate(proof, now=now)
++        authentication.require_current(now)
++        return authentication, now
++
++    def _authorize(
++        self,
++        *,
++        authentication: Any,
++        now: UtcTimestamp,
++        operation_type: str,
++        required_scope: str,
++        stable_digest: str,
++        definition_digest: str,
++        aggregate_type: str,
++        aggregate_id: str,
++        object_class: str | None,
++        allowed_use: str | None,
++        security_scope: str,
++        retention_scope: str,
++    ) -> tuple[Any, Any]:
++        schema_contract_digest = digest_canonical(
++            {
++                "operation_type": operation_type,
++                "definition_digest": definition_digest,
++                "contract": "governed-object-authorization-request-v1",
++            }
++        )
++        unsigned = {
++            "authentication_context_id": str(
++                authentication.authentication_context_id
++            ),
++            "principal_id": authentication.principal_id,
++            "authority_domain": authentication.authority_domain,
++            "operation_type": operation_type,
++            "required_scope": required_scope,
++            "stable_semantic_request_digest": stable_digest,
++            "command_definition_digest": definition_digest,
++            "aggregate_type": aggregate_type,
++            "aggregate_id": aggregate_id,
++            "event_type": "governed_object.authorization.evaluated",
++            "event_schema_version": 1,
++            "payload_mode": "NO_PAYLOAD",
++            "payload_schema_version": "governed_object_authorization_v1",
++            "payload_schema_contract_version": (
++                "governed-object-authorization-contract-v1"
++            ),
++            "payload_schema_contract_digest": schema_contract_digest,
++            "payload_canonicalizer_version": (
++                "governed-object-authorization-none-v1"
++            ),
++            "trust_scope": "ADMITTED",
++            "security_scope": security_scope,
++            "retention_scope": retention_scope,
++            "object_class": object_class,
++            "allowed_use": allowed_use,
++        }
++        request = _AuthorizationRequest(
++            authentication_context_id=authentication.authentication_context_id,
++            principal_id=authentication.principal_id,
++            authority_domain=authentication.authority_domain,
++            operation_type=operation_type,
++            required_scope=required_scope,
++            stable_semantic_request_digest=stable_digest,
++            command_definition_digest=definition_digest,
++            aggregate_type=aggregate_type,
++            aggregate_id=aggregate_id,
++            event_type="governed_object.authorization.evaluated",
++            event_schema_version=1,
++            payload_mode="NO_PAYLOAD",
++            payload_schema_version="governed_object_authorization_v1",
++            payload_schema_contract_version=(
++                "governed-object-authorization-contract-v1"
++            ),
++            payload_schema_contract_digest=schema_contract_digest,
++            payload_canonicalizer_version=(
++                "governed-object-authorization-none-v1"
++            ),
++            trust_scope="ADMITTED",
++            security_scope=security_scope,
++            retention_scope=retention_scope,
++            object_class=object_class,
++            allowed_use=allowed_use,
++            request_digest=digest_canonical(unsigned),
++        )
++        decision = self._authorizer.authorize(
++            authentication, request, now=now
++        )
++        if (
++            decision.authentication_context_id
++            != authentication.authentication_context_id
++            or decision.authorization_request_digest != request.request_digest
++        ):
++            raise PermissionError(
++                "object authorizer returned mismatched provenance"
++            )
++        decision.require_allowed()
++        return request, decision
++
++    def _lifecycle_command_grant(
++        self,
++        command_type: str,
++        target: UUIDv4Id,
++        payload: dict[str, object],
++        *,
++        proof: AuthenticationProof,
++        idempotency_key: str,
++    ) -> _AuthorizedCommandGrant:
++        definition = self._command_registry.resolve(command_type)
++        with self._store._lock:
++            row = self._store._connection.execute(
++                "SELECT current_version FROM authority_aggregates "
++                "WHERE aggregate_type=? AND aggregate_id=?",
++                (definition.aggregate_type, str(AggregateId(target.value))),
++            ).fetchone()
++            expected_version = 0 if row is None else int(row["current_version"])
++        return self._command_service._authorize_for_commit(
++            SemanticCommand(
++                command_type=command_type,
++                aggregate_id=AggregateId(target.value),
++                expected_aggregate_version=expected_version,
++                payload=InlinePayload(payload),
++                idempotency_key=idempotency_key,
++            ),
++            proof=proof,
++        )
++
++    def admit(
++        self,
++        request: ObjectAdmissionRequest,
++        source: _Source,
++        proof: AuthenticationProof,
++    ) -> ObjectAdmissionResult:
++        if not isinstance(request, ObjectAdmissionRequest):
++            raise TypeError("request must be ObjectAdmissionRequest")
++        authentication, checked_at = self._authenticate(proof)
++        definition = self._admission_registry.resolve(request.admission_type)
++        rights_policy = self._rights_policies.resolve_digest(
++            definition.rights_policy_contract_digest
++        )
++        namespace = digest_canonical(
++            {
++                "authority_domain": authentication.authority_domain,
++                "principal_id": authentication.principal_id,
++                "operation": "object_admission",
++                "admission_type": definition.admission_type,
++            }
++        )
++        semantic = digest_canonical(
++            {
++                "admission_type": request.admission_type,
++                "definition_digest": definition.digest,
++                "rights_policy_contract_digest": (
++                    rights_policy.contract_digest
++                ),
++                "idempotency_key": request.idempotency_key,
++            }
++        )
++        preflight_id = ObjectPreflightId.new()
++        authz_request, authz = self._authorize(
++            authentication=authentication,
++            now=checked_at,
++            operation_type=(
++                f"object:admission:preflight:{definition.admission_type}"
++            ),
++            required_scope=definition.required_write_scope,
++            stable_digest=semantic,
++            definition_digest=definition.digest,
++            aggregate_type="governed_object_admission",
++            aggregate_id=str(preflight_id),
++            object_class=definition.object_class,
++            allowed_use=definition.allowed_use,
++            security_scope=definition.security_scope,
++            retention_scope=definition.retention_scope,
++        )
++        # Known rights denial happens only after current authn/authz, but before
++        # the input source is touched.
++        if not rights_policy.preflight_allowed:
++            raise ObjectAdmissionDenied(rights_policy.reason_code)
++        preflight = self._object_issuer.issue_preflight(
++            preflight_id=preflight_id,
++            request=request,
++            definition=definition,
++            rights_policy=rights_policy,
++            authentication=authentication,
++            authorization_request=authz_request,
++            authorization=authz,
++            idempotency_namespace=namespace,
++            stable_semantic_request_digest=semantic,
++            checked_at=checked_at,
++            expires_at=UtcTimestamp(
++                checked_at.value
++                + timedelta(seconds=rights_policy.preflight_ttl_seconds)
++            ),
++        )
++        existing = self._store.find_admission_replay(preflight)
++        if existing is not None:
++            return ObjectAdmissionResult(existing, replayed=True)
++
++        staged = self._cas.stage(
++            source, object_class=definition.object_class
++        )
++        try:
++            self._store.record_stage(preflight, staged)
++            final_authentication, final_now = self._authenticate(proof)
++            final_semantic = digest_canonical(
++                {
++                    "preflight_digest": preflight.digest,
++                    "blob": staged.identity.canonical_value(),
++                    "stage_id": staged.stage_id,
++                    "staged_name": staged.staged_name,
++                }
++            )
++            final_request, final_authz = self._authorize(
++                authentication=final_authentication,
++                now=final_now,
++                operation_type=(
++                    f"object:admission:commit:{definition.admission_type}"
++                ),
++                required_scope=definition.required_write_scope,
++                stable_digest=final_semantic,
++                definition_digest=definition.digest,
++                aggregate_type="governed_object_admission",
++                aggregate_id=str(preflight.preflight_id),
++                object_class=definition.object_class,
++                allowed_use=definition.allowed_use,
++                security_scope=definition.security_scope,
++                retention_scope=definition.retention_scope,
++            )
++            valid_from = UtcTimestamp(
++                final_now.value
++                + timedelta(
++                    seconds=rights_policy.valid_from_delay_seconds
++                )
++            )
++            valid_until = (
++                None
++                if rights_policy.validity_seconds is None
++                else UtcTimestamp(
++                    valid_from.value
++                    + timedelta(seconds=rights_policy.validity_seconds)
++                )
++            )
++            rights_request_digest = digest_canonical(
++                {
++                    "preflight_digest": preflight.digest,
++                    "blob": staged.identity.canonical_value(),
++                    "final_authentication_context_digest": (
++                        final_authentication.digest
++                    ),
++                    "final_authorization_request_digest": (
++                        final_request.request_digest
++                    ),
++                    "final_authorization_decision_digest": final_authz.digest,
++                    "rights_policy_contract_digest": (
++                        rights_policy.contract_digest
++                    ),
++                }
++            )
++            rights = _RightsProposal(
++                policy_contract_digest=rights_policy.contract_digest,
++                admission_definition_digest=definition.digest,
++                blob=staged.identity,
++                object_class=definition.object_class,
++                allowed_use=definition.allowed_use,
++                security_scope=definition.security_scope,
++                retention_scope=definition.retention_scope,
++                allowed=rights_policy.preflight_allowed,
++                reason_code=rights_policy.reason_code,
++                decided_at=final_now,
++                valid_from=valid_from,
++                valid_until=valid_until,
++                rights_request_digest=rights_request_digest,
++            )
++            grant = self._object_issuer.issue_admission(
++                operation_id=ObjectOperationId.new(),
++                preflight=preflight,
++                blob=staged.identity,
++                stage_id=staged.stage_id,
++                staged_name=staged.staged_name,
++                authentication=final_authentication,
++                authorization_request=final_request,
++                authorization=final_authz,
++                rights=rights,
++                stable_semantic_request_digest=final_semantic,
++            )
++
++            def lifecycle_factory(
++                admission_id: ObjectAdmissionId,
++                _rights_id: RightsDecisionId,
++                payload: dict[str, object],
++            ) -> _AuthorizedCommandGrant:
++                return self._lifecycle_command_grant(
++                    "object.admission.activate",
++                    admission_id,
++                    payload,
++                    proof=proof,
++                    idempotency_key=(
++                        f"lifecycle-activate:{request.idempotency_key}"
++                    ),
++                )
++
++            committed = self._store.commit_admission(
++                grant, lifecycle_grant_factory=lifecycle_factory
++            )
++            return ObjectAdmissionResult(
++                committed.admission, replayed=committed.replayed
++            )
++        except Exception:
++            try:
++                self._store.fail_stage(
++                    staged.stage_id, failure_code="ADMISSION_FAILED"
++                )
++            finally:
++                # A failure before the staging row is committed must not leak
++                # bytes.  ``discard_stage`` is idempotent and removes only the
++                # temporary path, never the installed content-addressed blob.
++                if staged.path.exists():
++                    self._cas.discard_stage(staged)
++            raise
++
++    def hydrate(
++        self, request: HydrationRequest, proof: AuthenticationProof
++    ) -> HydratedObject:
++        if not isinstance(request, HydrationRequest):
++            raise TypeError("request must be HydrationRequest")
