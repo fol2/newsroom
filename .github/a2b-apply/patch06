@@ -1,0 +1,451 @@
+ self._object_issuer = object_issuer
++        self._admission_registry = admission_registry
++        self._rights_policies = rights_policies
++        self._hydration_policies = hydration_policies
++        self._cas = cas
++        try:
++            with self._lock, self._transaction() as conn:
++                self._persist_object_contracts(
++                    conn, recorded_at=self._clock().to_text()
++                )
++            self._validate_object_authority()
++            self._reconcile_object_files()
++        except Exception:
++            self.close()
++            raise
++
++    @staticmethod
++    def _decode_canonical_object(data: bytes) -> Any:
++        try:
++            value = json.loads(data.decode("utf-8", errors="strict"))
++        except (UnicodeError, json.JSONDecodeError) as exc:
++            raise AuthorityPersistenceError(
++                "stored governed-object canonical JSON is invalid"
++            ) from exc
++        if canonical_json_bytes(value) != data:
++            raise AuthorityPersistenceError(
++                "stored governed-object JSON is not canonical"
++            )
++        return value
++
++    @staticmethod
++    def _require_canonical_record(
++        row: sqlite3.Row,
++        *,
++        bytes_column: str = "canonical_bytes",
++        digest_column: str = "canonical_digest",
++    ) -> dict[str, Any]:
++        data = bytes(row[bytes_column])
++        value = _ObjectStoreBase._decode_canonical_object(data)
++        if not isinstance(value, dict):
++            raise AuthorityPersistenceError(
++                "governed-object canonical record must be an object"
++            )
++        expected = str(row[digest_column])
++        if digest_bytes(data) != expected:
++            raise AuthorityPersistenceError(
++                "governed-object canonical record digest mismatch"
++            )
++        return value
++
++    def _persist_object_contracts(
++        self, conn: sqlite3.Connection, *, recorded_at: str
++    ) -> None:
++        for contract in self._rights_policies.contracts():
++            canonical = canonical_json_bytes(contract.canonical_value())
++            if digest_bytes(canonical) != contract.contract_digest:
++                raise AuthorityPersistenceError(
++                    "rights-policy contract digest mismatch"
++                )
++            conn.execute(
++                "INSERT OR IGNORE INTO rights_policy_contracts("
++                "contract_digest,policy_key,contract_version,"
++                "implementation_version,canonical_bytes,registered_at) "
++                "VALUES(?,?,?,?,?,?)",
++                (
++                    contract.contract_digest,
++                    contract.policy_key,
++                    contract.contract_version,
++                    contract.implementation_version,
++                    canonical,
++                    recorded_at,
++                ),
++            )
++            row = conn.execute(
++                "SELECT * FROM rights_policy_contracts WHERE contract_digest=?",
++                (contract.contract_digest,),
++            ).fetchone()
++            if row is None or bytes(row["canonical_bytes"]) != canonical:
++                raise AuthorityPersistenceError(
++                    "rights-policy identity already belongs to another contract"
++                )
++
++        for contract in self._hydration_policies.contracts():
++            canonical = canonical_json_bytes(contract.canonical_value())
++            if digest_bytes(canonical) != contract.contract_digest:
++                raise AuthorityPersistenceError(
++                    "hydration-policy contract digest mismatch"
++                )
++            conn.execute(
++                "INSERT OR IGNORE INTO hydration_policy_contracts("
++                "contract_digest,policy_id,contract_version,"
++                "implementation_version,purpose,canonical_bytes,registered_at) "
++                "VALUES(?,?,?,?,?,?,?)",
++                (
++                    contract.contract_digest,
++                    contract.policy_id,
++                    contract.contract_version,
++                    contract.implementation_version,
++                    contract.purpose,
++                    canonical,
++                    recorded_at,
++                ),
++            )
++            row = conn.execute(
++                "SELECT * FROM hydration_policy_contracts WHERE contract_digest=?",
++                (contract.contract_digest,),
++            ).fetchone()
++            if row is None or bytes(row["canonical_bytes"]) != canonical:
++                raise AuthorityPersistenceError(
++                    "hydration-policy identity already belongs to another contract"
++                )
++
++        for definition in self._admission_registry.definitions():
++            canonical = canonical_json_bytes(definition.canonical_value())
++            if digest_bytes(canonical) != definition.digest:
++                raise AuthorityPersistenceError(
++                    "object admission definition digest mismatch"
++                )
++            hydration_digests = canonical_json_bytes(
++                sorted(definition.hydration_policy_contract_digests)
++            )
++            conn.execute(
++                "INSERT OR IGNORE INTO object_admission_definitions("
++                "definition_digest,admission_type,definition_version,"
++                "object_class,allowed_use,security_scope,retention_scope,"
++                "required_write_scope,required_read_scope,required_manage_scope,"
++                "rights_policy_contract_digest,hydration_policy_contract_digests,"
++                "canonical_bytes,registered_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++                (
++                    definition.digest,
++                    definition.admission_type,
++                    definition.definition_version,
++                    definition.object_class,
++                    definition.allowed_use,
++                    definition.security_scope,
++                    definition.retention_scope,
++                    definition.required_write_scope,
++                    definition.required_read_scope,
++                    definition.required_manage_scope,
++                    definition.rights_policy_contract_digest,
++                    hydration_digests,
++                    canonical,
++                    recorded_at,
++                ),
++            )
++            row = conn.execute(
++                "SELECT * FROM object_admission_definitions "
++                "WHERE definition_digest=?",
++                (definition.digest,),
++            ).fetchone()
++            if (
++                row is None
++                or bytes(row["canonical_bytes"]) != canonical
++                or bytes(row["hydration_policy_contract_digests"])
++                != hydration_digests
++            ):
++                raise AuthorityPersistenceError(
++                    "object admission definition identity conflict"
++                )
++
++    @staticmethod
++    def _validate_object_admission_payload_record(
++        conn: sqlite3.Connection, row: sqlite3.Row
++    ) -> None:
++        if row["payload_bytes"] is not None:
++            raise AuthorityPersistenceError(
++                "object-admission payload cannot retain inline bytes"
++            )
++        admission_id = row["object_admission_id"]
++        if admission_id is None:
++            raise AuthorityPersistenceError(
++                "object-admission payload requires admission identity"
++            )
++        admission = conn.execute(
++            "SELECT a.blob_digest,a.definition_digest,a.object_class,"
++            "a.allowed_use,a.security_scope,a.retention_scope "
++            "FROM object_admissions a WHERE a.admission_id=?",
++            (str(admission_id),),
++        ).fetchone()
++        if admission is None:
++            raise AuthorityPersistenceError(
++                "object-admission payload references unknown admission"
++            )
++        expected_digest = str(row["payload_digest"])
++        validate_sha256_digest(expected_digest, field="payload_digest")
++        if expected_digest != str(admission["blob_digest"]):
++            raise AuthorityPersistenceError(
++                "object-admission payload digest differs from immutable blob"
++            )
++        contract = conn.execute(
++            "SELECT * FROM payload_schema_contracts WHERE contract_digest=?",
++            (str(row["schema_contract_digest"]),),
++        ).fetchone()
++        if contract is None:
++            raise AuthorityPersistenceError(
++                "object-admission payload schema contract is missing"
++            )
++        if (
++            str(contract["schema_version"]) != str(row["schema_version"])
++            or str(contract["payload_mode"]) != PayloadMode.OBJECT_ADMISSION.value
++            or str(contract["contract_version"])
++            != str(row["schema_contract_version"])
++            or str(contract["canonicalizer_implementation_version"])
++            != str(row["canonicalizer_implementation_version"])
++        ):
++            raise AuthorityPersistenceError(
++                "object-admission payload differs from retained schema contract"
++            )
++
++    def _validate_object_authority(self) -> None:
++        with self._lock:
++            conn = self._connection
++            self._validate_object_contract_records(conn)
++            self._validate_object_relational_invariants(conn)
++            self._validate_object_record_digests(conn)
++
++    def _validate_object_contract_records(
++        self, conn: sqlite3.Connection
++    ) -> None:
++        for row in conn.execute(
++            "SELECT * FROM rights_policy_contracts"
++        ).fetchall():
++            contract = self._rights_policies.resolve_exact(
++                str(row["policy_key"]),
++                str(row["contract_version"]),
++                str(row["contract_digest"]),
++            )
++            canonical = canonical_json_bytes(contract.canonical_value())
++            if bytes(row["canonical_bytes"]) != canonical:
++                raise AuthorityPersistenceError(
++                    "stored rights-policy contract differs from retained registry"
++                )
++        for row in conn.execute(
++            "SELECT * FROM hydration_policy_contracts"
++        ).fetchall():
++            contract = self._hydration_policies.resolve_exact(
++                str(row["policy_id"]),
++                str(row["contract_version"]),
++                str(row["contract_digest"]),
++            )
++            canonical = canonical_json_bytes(contract.canonical_value())
++            if bytes(row["canonical_bytes"]) != canonical:
++                raise AuthorityPersistenceError(
++                    "stored hydration policy differs from retained registry"
++                )
++        for row in conn.execute(
++            "SELECT * FROM object_admission_definitions"
++        ).fetchall():
++            definition = self._admission_registry.resolve_exact(
++                str(row["admission_type"]),
++                str(row["definition_version"]),
++                str(row["definition_digest"]),
++            )
++            canonical = canonical_json_bytes(definition.canonical_value())
++            if bytes(row["canonical_bytes"]) != canonical:
++                raise AuthorityPersistenceError(
++                    "stored admission definition differs from retained registry"
++                )
++
++    @staticmethod
++    def _validate_object_relational_invariants(
++        conn: sqlite3.Connection,
++    ) -> None:
++        checks = (
++            (
++                "blob lifecycle head",
++                "SELECT h.blob_digest FROM blob_lifecycle_heads h "
++                "LEFT JOIN blob_lifecycle_versions v "
++                "ON v.blob_digest=h.blob_digest "
++                "AND v.lifecycle_version=h.current_version "
++                "WHERE v.lifecycle_version IS NULL LIMIT 1",
++            ),
++            (
++                "object admission head",
++                "SELECT h.admission_id FROM object_admission_heads h "
++                "LEFT JOIN object_admission_versions v "
++                "ON v.admission_id=h.admission_id "
++                "AND v.lifecycle_version=h.current_version "
++                "WHERE v.lifecycle_version IS NULL LIMIT 1",
++            ),
++            (
++                "governed deletion head",
++                "SELECT h.deletion_id FROM object_deletion_heads h "
++                "LEFT JOIN object_deletion_versions v "
++                "ON v.deletion_id=h.deletion_id "
++                "AND v.lifecycle_version=h.current_version "
++                "WHERE v.lifecycle_version IS NULL LIMIT 1",
++            ),
++            (
++                "recovery pin head",
++                "SELECT h.pin_id FROM object_recovery_pin_heads h "
++                "LEFT JOIN object_recovery_pin_versions v "
++                "ON v.pin_id=h.pin_id "
++                "AND v.lifecycle_version=h.current_version "
++                "WHERE v.lifecycle_version IS NULL LIMIT 1",
++            ),
++        )
++        for label, sql in checks:
++            if conn.execute(sql).fetchone() is not None:
++                raise AuthorityPersistenceError(
++                    f"{label} does not reference an exact version"
++                )
++        reservation_mismatch = conn.execute(
++            "SELECT p.preflight_id FROM object_admission_preflights p "
++            "JOIN object_admission_idempotency i "
++            "ON i.idempotency_namespace=p.idempotency_namespace "
++            "AND i.idempotency_key=p.idempotency_key "
++            "WHERE p.stable_semantic_request_digest "
++            "!= i.stable_semantic_request_digest "
++            "OR p.admission_type != i.admission_type "
++            "OR p.admission_definition_digest "
++            "!= i.admission_definition_digest "
++            "OR p.rights_policy_contract_digest "
++            "!= i.rights_policy_contract_digest LIMIT 1"
++        ).fetchone()
++        if reservation_mismatch is not None:
++            raise AuthorityPersistenceError(
++                "admission preflight differs from its idempotency reservation"
++            )
++
++        mismatch = conn.execute(
++            "SELECT a.admission_id FROM object_admissions a "
++            "JOIN object_rights_decisions r "
++            "ON r.rights_decision_id=a.rights_decision_id "
++            "WHERE r.blob_digest != a.blob_digest "
++            "OR r.admission_definition_digest != a.definition_digest "
++            "OR r.object_class != a.object_class "
++            "OR r.allowed_use != a.allowed_use "
++            "OR r.security_scope != a.security_scope "
++            "OR r.retention_scope != a.retention_scope LIMIT 1"
++        ).fetchone()
++        if mismatch is not None:
++            raise AuthorityPersistenceError(
++                "object admission differs from exact rights decision"
++            )
++
++    def _validate_object_record_digests(
++        self, conn: sqlite3.Connection
++    ) -> None:
++        canonical_tables = (
++            (
++                "object_admission_preflights",
++                "canonical_bytes",
++                "canonical_digest",
++            ),
++            (
++                "object_rights_decisions",
++                "canonical_bytes",
++                "canonical_digest",
++            ),
++            (
++                "object_access_decisions",
++                "canonical_bytes",
++                "canonical_digest",
++            ),
++        )
++        for table, bytes_column, digest_column in canonical_tables:
++            for row in conn.execute(f"SELECT * FROM {table}").fetchall():
++                self._require_canonical_record(
++                    row,
++                    bytes_column=bytes_column,
++                    digest_column=digest_column,
++                )
++        for row in conn.execute("SELECT * FROM blob_identities").fetchall():
++            BlobIdentity(
++                blob_digest=str(row["blob_digest"]),
++                size_bytes=int(row["size_bytes"]),
++            )
++
++    def _reconcile_object_files(self) -> None:
++        """Clean uncommitted staging and fail closed on active corruption."""
++
++        with self._lock:
++            conn = self._connection
++            pending_rows = conn.execute(
++                "SELECT stage_id,staged_name,state FROM object_staging_records "
++                "WHERE state IN('STAGED','INSTALLED')"
++            ).fetchall()
++            # A restart never activates an unfinished admission.  Pending files
++            # become failed operational history and are cleaned deterministically.
++            if pending_rows:
++                with self._transaction() as tx:
++                    now = self._clock().to_text()
++                    for row in pending_rows:
++                        tx.execute(
++                            "UPDATE object_staging_records "
++                            "SET state='FAILED',failure_code='RESTART_UNFINISHED',"
++                            "updated_at=? WHERE stage_id=?",
++                            (now, str(row["stage_id"])),
++                        )
++                self._cas.cleanup_staging(keep_names=frozenset())
++                with self._transaction() as tx:
++                    now = self._clock().to_text()
++                    tx.execute(
++                        "UPDATE object_staging_records SET state='CLEANED',updated_at=? "
++                        "WHERE state='FAILED'",
++                        (now,),
++                    )
++            else:
++                self._cas.cleanup_staging(keep_names=frozenset())
++
++            known_digests = frozenset(
++                str(row["blob_digest"])
++                for row in conn.execute(
++                    "SELECT blob_digest FROM blob_identities"
++                ).fetchall()
++            )
++            self._cas.cleanup_unreferenced_installed(
++                known_digests=known_digests
++            )
++
++            active_rows = conn.execute(
++                "SELECT b.blob_digest,b.size_bytes,v.state,v.integrity_state "
++                "FROM blob_identities b "
++                "JOIN blob_lifecycle_heads h ON h.blob_digest=b.blob_digest "
++                "JOIN blob_lifecycle_versions v "
++                "ON v.blob_digest=h.blob_digest "
++                "AND v.lifecycle_version=h.current_version "
++                "WHERE v.state='ACTIVE'"
++            ).fetchall()
++            for row in active_rows:
++                identity = BlobIdentity(
++                    str(row["blob_digest"]), int(row["size_bytes"])
++                )
++                if str(row["integrity_state"]) != BlobIntegrityState.VERIFIED.value:
++                    raise ObjectIntegrityError(
++                        "active governed blob is not integrity-verified"
++                    )
++                with self._cas.pin(identity):
++                    pass
++
++            deleted_rows = conn.execute(
++                "SELECT b.blob_digest,b.size_bytes "
++                "FROM blob_identities b "
++                "JOIN blob_lifecycle_heads h ON h.blob_digest=b.blob_digest "
++                "JOIN blob_lifecycle_versions v "
++                "ON v.blob_digest=h.blob_digest "
++                "AND v.lifecycle_version=h.current_version "
++                "WHERE v.state='DELETED'"
++            ).fetchall()
++            for row in deleted_rows:
++                identity = BlobIdentity(
++                    str(row["blob_digest"]), int(row["size_bytes"])
++                )
++                if self._cas.object_path(identity).exists():
++                    liveness = self.object_liveness(conn, identity.blob_digest)
++                    if liveness.active_recovery_pins:
++                        raise AuthorityPersistenceError(
++                            "deleted blob cannot retain an active recovery pin"
++                        )
++                    # The authoritative state already blocks 
