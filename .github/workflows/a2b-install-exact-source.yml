@@ -27,6 +27,13 @@ jobs:
           ref: agent/increment-1a2b-object-lifecycle
           fetch-depth: 0
 
+      - name: Upload exact source-transfer parts
+        uses: actions/upload-artifact@v4
+        with:
+          name: a2b-source-transfer-parts
+          path: .github/a2b-source-transfer
+          if-no-files-found: error
+
       - name: Reconstruct and verify source archive
         shell: bash
         run: |
