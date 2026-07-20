@@ -40,9 +40,15 @@ jobs:
           persist-credentials: true
 
       - name: Reconstruct and stage exact source
+        id: install
         shell: bash
         run: |
           set -euo pipefail
+          if [[ ! -d .github/a2b-upload ]]; then
+            echo 'Source chunks already replaced by implementation.'
+            echo 'installed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           python - <<'PY'
           from pathlib import Path
           import base64
@@ -81,19 +87,26 @@ jobs:
           fi
           xz -dc /tmp/a2b-final-source.tar.xz | tar -xf - -C .
           rm -rf .github/a2b-upload
-          rm -f .github/workflows/a2b-install-final.yml
           git add -A
           git diff --cached --check
+
+          # The bot token may update source/content but cannot remove a workflow file.
+          # Remove the unchanged installer from the temporary index only, verify the
+          # exact source-only tree, then put it back in the index for the bot commit.
+          git rm --cached --force .github/workflows/a2b-install-final.yml
           actual_tree="$(git write-tree)"
           echo "actual_tree=$actual_tree"
           echo 'expected_tree=2cadaef351ac4631ceee4c0aab894ba762cacf34'
           test "$actual_tree" = '2cadaef351ac4631ceee4c0aab894ba762cacf34'
+          git add .github/workflows/a2b-install-final.yml
+
           test -f newsroom/authority/_object_system.py
           test -f newsroom/authority/_object_store.py
           test -f newsroom/authority/_object_cas.py
           test -f newsroom/tests/test_authority_a2b_fault_matrix.py
           test ! -e .github/a2b-upload
-          test ! -e .github/workflows/a2b-install-final.yml
+          test -e .github/workflows/a2b-install-final.yml
+          echo 'installed=true' >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         with:
@@ -144,6 +157,7 @@ jobs:
             --fail-on-regression
 
       - name: Commit and push source-only implementation
+        if: steps.install.outputs.installed == 'true'
         shell: bash
         run: |
           set -euo pipefail
