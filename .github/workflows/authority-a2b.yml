@@ -30,13 +30,7 @@ jobs:
         continue-on-error: true
         run: |
           uv run python -m pytest -q \
-            newsroom/tests/test_authority_a2b_boundary.py \
-            newsroom/tests/test_authority_a2b_contracts.py \
-            newsroom/tests/test_authority_a2b_policy.py \
-            newsroom/tests/test_authority_a2b_admission_hydration.py \
-            newsroom/tests/test_authority_a2b_lifecycle.py \
-            newsroom/tests/test_authority_a2b_sqlite.py \
-            newsroom/tests/test_authority_a2b_traceability.py \
+            newsroom/tests/test_authority_a2b_*.py \
             --junitxml=a2b-focused-results.xml
 
       - name: Upload Focused A2b Evidence
