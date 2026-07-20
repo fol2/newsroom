@@ -7,6 +7,12 @@ on:
     paths:
       - .github/a2b-upload/**
       - .github/workflows/a2b-partial-recover.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/a2b-upload/**
+      - .github/workflows/a2b-partial-recover.yml
 
 jobs:
   recover:
