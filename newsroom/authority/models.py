@@ -206,6 +206,9 @@ class CommittedCommandIdentity:
     command_definition_version: str
     command_definition_digest: str
     stable_semantic_request_digest: str
+    payload_mode: str
+    payload_digest: str
+    object_admission_id: ObjectAdmissionId | None
 
     def __post_init__(self) -> None:
         CommandId.parse(self.command_id)
@@ -227,6 +230,24 @@ class CommittedCommandIdentity:
             self.stable_semantic_request_digest,
             field="stable_semantic_request_digest",
         )
+        try:
+            mode = PayloadMode(self.payload_mode)
+        except ValueError as exc:
+            raise CommandValidationError(
+                "committed payload mode is invalid"
+            ) from exc
+        validate_sha256_digest(
+            self.payload_digest, field="committed_payload_digest"
+        )
+        if mode is PayloadMode.OBJECT_ADMISSION:
+            if not isinstance(self.object_admission_id, ObjectAdmissionId):
+                raise CommandValidationError(
+                    "committed object payload requires admission identity"
+                )
+        elif self.object_admission_id is not None:
+            raise CommandValidationError(
+                "non-object committed payload cannot name an admission"
+            )
 
 
 @dataclass(frozen=True, slots=True)

@@ -28,7 +28,7 @@ from .persistence import (
     AuthorityWriterBusy,
 )
 from .policy import CommandRegistry, PayloadSchemaRegistry
-from .types import PayloadMode, UtcTimestamp, require_token
+from .types import ObjectAdmissionId, PayloadMode, UtcTimestamp, require_token
 
 
 class _EventStoreBase:
@@ -416,8 +416,11 @@ class _EventStoreBase:
                 "c.command_definition_digest,"
                 "c.idempotency_namespace,c.idempotency_key,"
                 "c.stable_semantic_request_digest,"
+                "p.mode AS payload_mode,p.payload_digest,"
+                "p.object_admission_id,"
                 "a.principal_id,a.authority_domain "
                 "FROM authority_commands c "
+                "JOIN authority_payloads p ON p.payload_id=c.payload_id "
                 "JOIN authentication_contexts a "
                 "ON a.authentication_context_id="
                 "c.authentication_context_id "
@@ -444,5 +447,14 @@ class _EventStoreBase:
                 ),
                 stable_semantic_request_digest=str(
                     row["stable_semantic_request_digest"]
+                ),
+                payload_mode=str(row["payload_mode"]),
+                payload_digest=str(row["payload_digest"]),
+                object_admission_id=(
+                    None
+                    if row["object_admission_id"] is None
+                    else ObjectAdmissionId.parse(
+                        str(row["object_admission_id"])
+                    )
                 ),
             )

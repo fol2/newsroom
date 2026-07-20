@@ -11,6 +11,8 @@ from newsroom.authority import (
 
 def test_a2b_traceability_covers_implementation_and_fault_evidence() -> None:
     required = {
+        "newsroom.authority._event_store_commit",
+        "newsroom.authority.service",
         "newsroom.authority._object_capability",
         "newsroom.authority._object_cas",
         "newsroom.authority._object_store_base",
@@ -18,6 +20,7 @@ def test_a2b_traceability_covers_implementation_and_fault_evidence() -> None:
         "newsroom.authority._object_store_hydration",
         "newsroom.authority._object_store_lifecycle",
         "newsroom.authority._object_system",
+        "newsroom.tests.test_authority_a2b_object_commands",
         "newsroom.tests.test_authority_a2b_integrity_faults",
         "newsroom.tests.test_authority_a2b_fault_matrix",
     }

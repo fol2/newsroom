@@ -260,7 +260,11 @@ class _ObjectStoreBase:
         return row
 
     def _admission_activation_row(
-        self, admission_id: str, *, conn: sqlite3.Connection | None = None
+        self,
+        admission_id: str,
+        *,
+        event_id: str | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> sqlite3.Row:
         """Return the immutable admission result committed at activation.
 
@@ -271,6 +275,10 @@ class _ObjectStoreBase:
         """
 
         selected = conn or self._connection
+        event_clause = "" if event_id is None else " AND v.event_id=?"
+        parameters: tuple[str, ...] = (
+            (admission_id,) if event_id is None else (admission_id, event_id)
+        )
         row = selected.execute(
             "SELECT a.*,1 AS current_version,"
             "1 AS admission_lifecycle_version,v.state,v.event_id,v.recorded_at,"
@@ -287,8 +295,8 @@ class _ObjectStoreBase:
             "JOIN blob_identities b ON b.blob_digest=a.blob_digest "
             "JOIN object_rights_decisions r "
             "ON r.rights_decision_id=a.rights_decision_id "
-            "WHERE a.admission_id=?",
-            (admission_id,),
+            "WHERE a.admission_id=?" + event_clause,
+            parameters,
         ).fetchone()
         if row is None:
             raise AuthorityPersistenceError(
@@ -376,6 +384,13 @@ class _ObjectStoreBase:
             raise ObjectAdmissionDenied("blob bytes are not ACTIVE and verified")
         return row
 
+    def resolve(self, admission_id: object) -> ObjectAdmissionDescriptor:
+        """Private CommandService lookup adapter; returned data is non-authoritative."""
+
+        if not isinstance(admission_id, ObjectAdmissionId):
+            raise TypeError("admission lookup requires ObjectAdmissionId")
+        return self.resolve_admission(admission_id)
+
     def resolve_admission(
         self, admission_id: ObjectAdmissionId
     ) -> ObjectAdmissionDescriptor:
@@ -383,18 +398,20 @@ class _ObjectStoreBase:
             raise TypeError("admission lookup requires ObjectAdmissionId")
         now = self._clock()
         with self._lock:
+            # This lookup happens before the exact command authorization
+            # decision.  Resolve only SQLite policy metadata here; do not hash or
+            # read governed bytes until the authorized store commit guard pins
+            # and revalidates the exact object.
             row = self._current_admission_row(
                 self._connection,
                 str(admission_id),
                 now=now,
                 require_active=True,
-                require_bytes=True,
+                require_bytes=False,
             )
             identity = BlobIdentity(
                 str(row["blob_digest"]), int(row["size_bytes"])
             )
-            with self._cas.pin(identity):
-                pass
             return ObjectAdmissionDescriptor(
                 admission_id=admission_id,
                 blob_digest=identity.blob_digest,
@@ -474,6 +491,37 @@ class _ObjectStoreBase:
                 "object authority changed while command was committing"
             )
         self._cas.verify_pinned(pinned)
+        # Authentication is also time-bounded authority.  A large governed
+        # object can take long enough to hash that the context expires between
+        # authorization and the final exact-byte check.  Revalidate it after
+        # the potentially expensive rehash, inside the same write transaction.
+        final_now = self._clock()
+        grant.authentication.require_current(final_now)
+        # Recheck time-bounded rights after the potentially expensive final
+        # rehash.  The admission can expire while bytes are being verified; no
+        # event/reference may commit from a pre-expiry snapshot.
+        final_row = self._current_admission_row(
+            conn,
+            str(grant.payload.object_admission_id),
+            now=final_now,
+            require_active=True,
+            require_bytes=True,
+        )
+        if (
+            str(final_row["blob_digest"]) != pinned.identity.blob_digest
+            or int(final_row["size_bytes"]) != pinned.identity.size_bytes
+            or str(final_row["object_class"])
+            != grant.definition.required_object_class
+            or str(final_row["allowed_use"])
+            != grant.definition.required_allowed_use
+            or str(final_row["security_scope"])
+            != grant.definition.security_scope
+            or str(final_row["retention_scope"])
+            != grant.definition.retention_scope
+        ):
+            raise ObjectAdmissionDenied(
+                "object admission changed during final command verification"
+            )
 
     @staticmethod
     def _validate_object_admission_payload_record(
@@ -487,9 +535,15 @@ class _ObjectStoreBase:
             raise AuthorityPersistenceError(
                 "object admission payload lacks admission identity"
             )
+        admission_id = ObjectAdmissionId.parse(
+            str(row["object_admission_id"])
+        )
+        validate_sha256_digest(
+            str(row["payload_digest"]), field="object_payload_digest"
+        )
         admission = conn.execute(
             "SELECT blob_digest FROM object_admissions WHERE admission_id=?",
-            (str(row["object_admission_id"]),),
+            (str(admission_id),),
         ).fetchone()
         if admission is None:
             raise AuthorityPersistenceError(
@@ -498,6 +552,28 @@ class _ObjectStoreBase:
         if str(admission["blob_digest"]) != str(row["payload_digest"]):
             raise AuthorityPersistenceError(
                 "object payload digest differs from admitted blob"
+            )
+        contract = conn.execute(
+            "SELECT schema_version,payload_mode,contract_version,"
+            "canonicalizer_implementation_version "
+            "FROM payload_schema_contracts WHERE contract_digest=?",
+            (str(row["schema_contract_digest"]),),
+        ).fetchone()
+        if contract is None:
+            raise AuthorityPersistenceError(
+                "object payload schema contract is missing"
+            )
+        if (
+            str(contract["schema_version"]) != str(row["schema_version"])
+            or str(contract["payload_mode"])
+            != PayloadMode.OBJECT_ADMISSION.value
+            or str(contract["contract_version"])
+            != str(row["schema_contract_version"])
+            or str(contract["canonicalizer_implementation_version"])
+            != str(row["canonicalizer_implementation_version"])
+        ):
+            raise AuthorityPersistenceError(
+                "object payload does not match its immutable schema contract"
             )
 
     def _active_deletion_for_blob(
@@ -802,6 +878,38 @@ class _ObjectStoreBase:
 
     def _validate_registry_coverage(self, conn: sqlite3.Connection) -> None:
         super()._validate_registry_coverage(conn)
+        # Every historical contract retained by SQLite must remain resolvable by
+        # the runtime registries for the full idempotency/audit horizon.  Merely
+        # persisting canonical bytes is not enough: replay and provenance paths
+        # execute the exact versioned policy/definition contract.
+        for row in conn.execute(
+            "SELECT admission_type,definition_version,definition_digest "
+            "FROM object_admission_definitions"
+        ).fetchall():
+            self._admission_registry.resolve_exact(
+                str(row["admission_type"]),
+                str(row["definition_version"]),
+                str(row["definition_digest"]),
+            )
+        for row in conn.execute(
+            "SELECT policy_key,contract_version,contract_digest "
+            "FROM rights_policy_contracts"
+        ).fetchall():
+            self._rights_policies.resolve_exact(
+                str(row["policy_key"]),
+                str(row["contract_version"]),
+                str(row["contract_digest"]),
+            )
+        for row in conn.execute(
+            "SELECT policy_id,contract_version,contract_digest "
+            "FROM hydration_policy_contracts"
+        ).fetchall():
+            self._hydration_policies.resolve_exact(
+                str(row["policy_id"]),
+                str(row["contract_version"]),
+                str(row["contract_digest"]),
+            )
+
         for definition in self._admission_registry.definitions():
             row = conn.execute(
                 "SELECT canonical_bytes FROM object_admission_definitions "
@@ -944,23 +1052,44 @@ class _ObjectStoreBase:
 
     def _reconcile_expired_rights(self) -> None:
         now = self._clock().to_text()
-        rows = self._connection.execute(
-            "SELECT a.admission_id,h.current_version,v.state "
-            "FROM object_admissions a "
+        invalid_active = self._connection.execute(
+            "SELECT a.admission_id FROM object_admissions a "
             "JOIN object_admission_heads h ON h.admission_id=a.admission_id "
             "JOIN object_admission_versions v "
             "ON v.admission_id=h.admission_id "
             "AND v.lifecycle_version=h.current_version "
             "JOIN object_rights_decisions r "
             "ON r.rights_decision_id=a.rights_decision_id "
-            "WHERE v.state IN ('PENDING','ACTIVE') "
-            "AND (r.allowed=0 OR r.valid_until IS NOT NULL AND r.valid_until<=?)",
-            (now,),
-        ).fetchall()
-        if rows:
+            "WHERE v.state='ACTIVE' AND r.allowed=0 LIMIT 1"
+        ).fetchone()
+        if invalid_active is not None:
             raise AuthorityPersistenceError(
-                "expired or denied rights require an authenticated lifecycle event"
+                "ACTIVE admission references a denying rights decision"
             )
+
+        pending = self._connection.execute(
+            "SELECT a.admission_id FROM object_admissions a "
+            "JOIN object_admission_heads h ON h.admission_id=a.admission_id "
+            "JOIN object_admission_versions v "
+            "ON v.admission_id=h.admission_id "
+            "AND v.lifecycle_version=h.current_version "
+            "JOIN object_rights_decisions r "
+            "ON r.rights_decision_id=a.rights_decision_id "
+            "WHERE v.state='PENDING' "
+            "AND (r.allowed=0 OR r.valid_until IS NOT NULL AND r.valid_until<=?) "
+            "LIMIT 1",
+            (now,),
+        ).fetchone()
+        if pending is not None:
+            raise AuthorityPersistenceError(
+                "pending admission has denied or expired rights"
+            )
+        # An admission that was validly activated can naturally pass its
+        # rights/admission validity deadline while the process is offline.  The
+        # immutable activation remains history, while every current-use path
+        # (_current_admission_row) rejects the expired authority.  Refusing to
+        # start the whole ledger would turn a normal expiry into an operational
+        # outage without adding any safety.
 
     def _reconcile_deletions(self) -> None:
         rows = self._connection.execute(

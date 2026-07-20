@@ -860,15 +860,13 @@ class _ObjectBoundary:
         self, proof: AuthenticationProof
     ) -> tuple[BlobIdentity, ...]:
         removed: list[BlobIdentity] = []
-        for index, blob in enumerate(self._store.orphan_candidates()):
+        for blob in self._store.orphan_candidates():
             grant, factory = self._maintenance(
                 operation_type="ORPHAN_REMOVE",
                 command_type="object.orphan.remove",
                 target_identity=blob.blob_digest,
                 reason_code="UNREFERENCED_ORPHAN",
-                idempotency_key=(
-                    f"orphan:{blob.blob_digest}:{index}"
-                ),
+                idempotency_key=f"orphan:{blob.blob_digest}",
                 proof=proof,
             )
             self._store.remove_orphan(

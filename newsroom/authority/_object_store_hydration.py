@@ -248,6 +248,22 @@ class _ObjectHydrationStoreMixin:
                     data = self._cas.read_range(
                         pinned, offset=offset, length=length
                     )
+                    # The read can cross a rights-expiry boundary even though
+                    # SQLite prevents concurrent lifecycle mutation.  Recheck
+                    # current rights and admission time after the exact bytes
+                    # have been read, before the access decision commits or any
+                    # bytes can leave the authority boundary.
+                    final_now = self._clock()
+                    self._current_admission_row(
+                        conn,
+                        str(grant.request.admission_id),
+                        now=final_now,
+                        require_active=True,
+                        require_bytes=True,
+                    )
+                    self._object_issuer.verify_hydration(
+                        grant, now=final_now
+                    )
                 finally:
                     pinned.close()
             return data, self.access_decision_view(access_decision_id)

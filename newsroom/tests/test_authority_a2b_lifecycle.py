@@ -17,6 +17,11 @@ from .authority_a2b_helpers import admit, open_object_system
 from .authority_helpers import proof
 
 
+def installed_path(root: Path, blob_digest: str) -> Path:
+    hex_digest = blob_digest.split(":", 1)[1]
+    return root / "objects" / hex_digest[:2] / hex_digest
+
+
 def test_ordered_lifecycle_events_and_deletion_non_resurrection(
     tmp_path: Path,
 ) -> None:
@@ -67,6 +72,13 @@ def test_ordered_lifecycle_events_and_deletion_non_resurrection(
     assert requested_event in {event.event_id for event in events}
     system.close()
 
+    # A filesystem restore or manual mutation must not override the SQLite
+    # tombstone.  Reintroduced bytes are deterministically removed on startup.
+    deleted_path = installed_path(object_root, admission.blob.blob_digest)
+    deleted_path.parent.mkdir(parents=True, exist_ok=True)
+    deleted_path.write_bytes(b"resurrected bytes")
+    deleted_path.chmod(0o400)
+
     # Authority reopens without bytes and without resurrecting hydratable state.
     reopened = open_object_system(database, object_root=object_root)
     try:
@@ -89,6 +101,7 @@ def test_ordered_lifecycle_events_and_deletion_non_resurrection(
         # The idempotent result is the immutable activation result.  It does
         # not restore current authority after revocation/deletion.
         assert replay.admission.active
+        assert not deleted_path.exists()
         with pytest.raises((ObjectHydrationDenied, Exception)):
             reopened.objects.hydrate(
                 HydrationRequest(admission.admission_id, "project.discovery"),
@@ -100,6 +113,21 @@ def test_ordered_lifecycle_events_and_deletion_non_resurrection(
             idempotency_key="delete-request",
             proof=proof(),
         ).state is DeletionState.PHYSICALLY_REMOVED
+        with pytest.raises(ObjectLifecycleError, match="deletion history"):
+            reopened.objects.request_deletion(
+                admission.blob.blob_digest,
+                reason_code="DELETE_AGAIN",
+                idempotency_key="delete-again",
+                proof=proof(),
+            )
+        with pytest.raises(ObjectLifecycleError, match="integrity-verified"):
+            reopened.objects.create_recovery_pin(
+                admission.blob.blob_digest,
+                reason_code="PIN_DELETED",
+                idempotency_key="pin-deleted",
+                proof=proof(),
+            )
+        assert reopened.objects.collect_orphans(proof=proof()) == ()
     finally:
         reopened.close()
 
@@ -200,6 +228,58 @@ def test_recovery_pin_blocks_physical_removal_without_restoring_hydration(
         completed = system.objects.complete_deletion(
             deletion.deletion_id,
             idempotency_key="complete",
+            proof=proof(),
+        )
+        assert completed.state is DeletionState.PHYSICALLY_REMOVED
+    finally:
+        system.close()
+
+
+def test_recovery_pin_can_be_created_after_tombstone_while_bytes_exist(
+    tmp_path: Path,
+) -> None:
+    system = open_object_system(tmp_path / "authority.sqlite3")
+    try:
+        admission = admit(system, data=b"pinned tombstone").admission
+        system.objects.revoke(
+            admission.admission_id,
+            reason_code="REVOKED",
+            idempotency_key="late-pin-revoke",
+            proof=proof(),
+        )
+        deletion = system.objects.request_deletion(
+            admission.blob.blob_digest,
+            reason_code="DELETE",
+            idempotency_key="late-pin-request",
+            proof=proof(),
+        )
+        system.objects.tombstone(
+            deletion.deletion_id,
+            reason_code="TOMBSTONE",
+            idempotency_key="late-pin-tombstone",
+            proof=proof(),
+        )
+        pin = system.objects.create_recovery_pin(
+            admission.blob.blob_digest,
+            reason_code="BACKUP_AFTER_TOMBSTONE",
+            idempotency_key="late-pin",
+            proof=proof(),
+        )
+        with pytest.raises(ObjectLifecycleError, match="pin"):
+            system.objects.complete_deletion(
+                deletion.deletion_id,
+                idempotency_key="late-pin-complete-blocked",
+                proof=proof(),
+            )
+        system.objects.release_recovery_pin(
+            pin.pin_id,
+            reason_code="BACKUP_COMPLETE",
+            idempotency_key="late-pin-release",
+            proof=proof(),
+        )
+        completed = system.objects.complete_deletion(
+            deletion.deletion_id,
+            idempotency_key="late-pin-complete",
             proof=proof(),
         )
         assert completed.state is DeletionState.PHYSICALLY_REMOVED

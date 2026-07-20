@@ -370,6 +370,13 @@ class _ObjectCapabilityIssuer:
             raise InvalidObjectCapability("object policy identity differs from request")
         if decision.decided_at.value > now.value:
             raise InvalidObjectCapability("authorization decision is future-dated")
+        if (
+            decision.decided_at.value < authentication.authenticated_at.value
+            or decision.decided_at.value >= authentication.expires_at.value
+        ):
+            raise InvalidObjectCapability(
+                "authorization decision falls outside authentication validity"
+            )
 
     def verify_preflight(self, grant: _AdmissionPreflightGrant, *, now: UtcTimestamp) -> None:
         if not isinstance(grant, _AdmissionPreflightGrant):
@@ -456,6 +463,15 @@ class _ObjectCapabilityIssuer:
         self.verify_preflight(grant.preflight, now=now)
         definition = grant.preflight.definition
         policy = grant.preflight.rights_policy
+        if (
+            grant.authentication.principal_id
+            != grant.preflight.authentication.principal_id
+            or grant.authentication.authority_domain
+            != grant.preflight.authentication.authority_domain
+        ):
+            raise InvalidObjectCapability(
+                "final admission authority differs from preflight authority"
+            )
         expected_semantic = digest_canonical(
             {
                 "preflight_digest": grant.preflight.digest,

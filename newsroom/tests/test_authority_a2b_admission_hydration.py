@@ -21,6 +21,10 @@ from newsroom.authority import (
     ObjectHydrationDenied,
     RightsPolicyContract,
     RightsPolicyRegistry,
+    StaticAuthenticator,
+    StaticAuthorizer,
+    StaticPrincipal,
+    UnknownObjectAdmissionDefinition,
     UtcTimestamp,
     digest_bytes,
 )
@@ -85,6 +89,111 @@ def test_authentication_and_authorization_happen_before_source_read(
         with pytest.raises(Exception):
             system.objects.admit(
                 ObjectAdmissionRequest("source.capture", "denied"),
+                source,
+                proof=proof(),
+            )
+        assert source.touched is False
+    finally:
+        system.close()
+
+
+def test_admission_rejects_final_principal_change_after_preflight(
+    tmp_path: Path,
+) -> None:
+    class AlternatingAuthenticator:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.alpha = StaticAuthenticator(
+                credentials={
+                    "token-1": StaticPrincipal("principal.alpha")
+                },
+                authority_domain="newsroom.authority",
+            )
+            self.beta = StaticAuthenticator(
+                credentials={
+                    "token-1": StaticPrincipal("principal.beta")
+                },
+                authority_domain="newsroom.authority",
+            )
+
+        def authenticate(
+            self, authentication_proof: object, *, now: UtcTimestamp
+        ) -> object:
+            self.calls += 1
+            selected = self.alpha if self.calls == 1 else self.beta
+            return selected.authenticate(authentication_proof, now=now)
+
+    scopes = frozenset(
+        {
+            "authority.objects.admit",
+            "authority.objects.lifecycle.write",
+        }
+    )
+    object_root = tmp_path / "objects"
+    system = open_object_system(
+        tmp_path / "authority.sqlite3",
+        object_root=object_root,
+        authenticator=AlternatingAuthenticator(),
+        authorizer=StaticAuthorizer(
+            policy_version="authz-v1",
+            grants_by_principal={
+                "principal.alpha": scopes,
+                "principal.beta": scopes,
+            },
+        ),
+    )
+    try:
+        with pytest.raises(Exception, match="differs from preflight authority"):
+            admit(system, data=b"principal-bound", key="principal-switch")
+        assert list((object_root / "staging").iterdir()) == []
+        installed = object_root / "objects"
+        assert not installed.exists() or not any(installed.rglob("*"))
+    finally:
+        system.close()
+
+
+def test_preflight_authorization_decision_must_fall_inside_authentication_validity(
+    tmp_path: Path,
+) -> None:
+    class OutOfWindowAuthorizer:
+        def __init__(self) -> None:
+            self.base = StaticAuthorizer(
+                policy_version="authz-v1",
+                grants_by_principal={
+                    "principal.alpha": frozenset(
+                        {"authority.objects.admit"}
+                    )
+                },
+            )
+
+        def authorize(
+            self, context: object, request: object, *, now: UtcTimestamp
+        ) -> object:
+            decision = self.base.authorize(context, request, now=now)
+            return dataclasses.replace(
+                decision,
+                decided_at=UtcTimestamp(
+                    context.authenticated_at.value
+                    - timedelta(microseconds=1)
+                ),
+            )
+
+    class ExplodingSource:
+        touched = False
+
+        def read(self, _size: int) -> bytes:
+            self.touched = True
+            raise AssertionError("invalid authority must fail before staging")
+
+    source = ExplodingSource()
+    system = open_object_system(
+        tmp_path / "authority.sqlite3",
+        authorizer=OutOfWindowAuthorizer(),
+    )
+    try:
+        with pytest.raises(Exception, match="outside authentication validity"):
+            system.objects.admit(
+                ObjectAdmissionRequest("source.capture", "invalid-time"),
                 source,
                 proof=proof(),
             )
@@ -381,6 +490,180 @@ def test_rights_time_invariant_and_transaction_time_expiry(tmp_path: Path) -> No
         system.close()
 
 
+def test_hydration_expiry_during_byte_read_fails_closed(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(FIXED_NOW)
+    armed = False
+
+    def fault(checkpoint: str) -> None:
+        nonlocal armed
+        if armed and checkpoint == "after_range_read_before_rehash":
+            clock.current = UtcTimestamp(
+                FIXED_NOW.value + timedelta(seconds=30)
+            )
+
+    database = tmp_path / "authority.sqlite3"
+    system = open_object_system(
+        database, clock=clock, fault_hook=fault
+    )
+    try:
+        admitted = admit(
+            system,
+            data=b"short-lived",
+            key="short-read-expiry",
+            admission_type="source.short",
+        ).admission
+        armed = True
+        with pytest.raises(
+            (ObjectHydrationDenied, ObjectAdmissionDenied),
+            match="EXPIRED|expired|RIGHTS",
+        ):
+            system.objects.hydrate(
+                HydrationRequest(
+                    admitted.admission_id, "project.discovery"
+                ),
+                proof=proof(),
+            )
+    finally:
+        system.close()
+
+    import sqlite3
+
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM object_access_decisions"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
 def test_blob_identity_contains_no_lifecycle_state() -> None:
     identity = BlobIdentity("sha256:" + "a" * 64, 10)
     assert set(identity.__dataclass_fields__) == {"blob_digest", "size_bytes"}
+
+
+
+def test_final_authorization_decision_must_be_inside_authentication_window(
+    tmp_path: Path,
+) -> None:
+    delegate = StaticAuthorizer(
+        policy_version="authz-v1",
+        grants_by_principal={
+            "principal.alpha": frozenset(
+                {
+                    "authority.observed.write",
+                    "authority.admitted.write",
+                    "authority.events.read",
+                    "authority.objects.admit",
+                    "authority.objects.read",
+                    "authority.objects.manage",
+                    "authority.objects.lifecycle.write",
+                }
+            )
+        },
+    )
+
+    class BackdatedFinalDecision:
+        calls = 0
+
+        def authorize(self, context, request, *, now):
+            self.calls += 1
+            decision = delegate.authorize(context, request, now=now)
+            if self.calls == 2:
+                return dataclasses.replace(
+                    decision,
+                    decided_at=UtcTimestamp(
+                        context.authenticated_at.value - timedelta(seconds=1)
+                    ),
+                )
+            return decision
+
+    system = open_object_system(
+        tmp_path / "authority.sqlite3",
+        authorizer=BackdatedFinalDecision(),
+    )
+    try:
+        with pytest.raises(PermissionError, match="authentication validity"):
+            admit(system, data=b"backdated authz")
+    finally:
+        system.close()
+
+
+
+def test_expired_active_rights_do_not_brick_restart_but_remain_unusable(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    object_root = tmp_path / "objects"
+    clock = MutableClock(FIXED_NOW)
+    system = open_object_system(
+        database, object_root=object_root, clock=clock
+    )
+    try:
+        admission = admit(
+            system,
+            data=b"expires while offline",
+            key="offline-expiry",
+            admission_type="source.short",
+        ).admission
+    finally:
+        system.close()
+
+    clock.current = UtcTimestamp(
+        FIXED_NOW.value + timedelta(seconds=31)
+    )
+    reopened = open_object_system(
+        database, object_root=object_root, clock=clock
+    )
+    try:
+        with pytest.raises(
+            (ObjectHydrationDenied, ObjectAdmissionDenied),
+            match="EXPIRED|expired|RIGHTS",
+        ):
+            reopened.objects.hydrate(
+                HydrationRequest(
+                    admission.admission_id, "project.discovery"
+                ),
+                proof=proof(),
+            )
+    finally:
+        reopened.close()
+
+
+def test_startup_requires_all_retained_object_contract_versions(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    initial = open_object_system(database)
+    initial.close()
+
+    old_rights, hydration, old_admissions = _policy_registries()
+    old_permitted = old_rights.resolve("source-permitted")
+    permitted_v2 = dataclasses.replace(
+        old_permitted,
+        contract_version="rights-v2-only",
+        implementation_version="rights-static-v2-only",
+        reason_code="PERMITTED_V2_ONLY",
+    )
+    rights = RightsPolicyRegistry((permitted_v2,))
+    capture_v2 = dataclasses.replace(
+        old_admissions.resolve("source.capture"),
+        definition_version="admission-v2-only",
+        rights_policy_contract_digest=permitted_v2.contract_digest,
+    )
+    admissions = ObjectAdmissionRegistry(
+        (capture_v2,),
+        rights_policies=rights,
+        hydration_policies=hydration,
+    )
+
+    with pytest.raises(
+        UnknownObjectAdmissionDefinition,
+        match="source.capture/admission-v1",
+    ):
+        open_object_system(
+            database,
+            policy_registries=(rights, hydration, admissions),
+        )

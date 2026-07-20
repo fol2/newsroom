@@ -149,9 +149,13 @@ def open_object_system(
     ]
     | None = None,
     object_limits: ObjectLimits | None = None,
+    authenticator: object | None = None,
+    authorizer: object | None = None,
     clock: Callable[[], UtcTimestamp] | None = None,
     fault_hook: Callable[[str], None] | None = None,
     disk_usage: Callable[[Path], object] | None = None,
+    command_registry: object | None = None,
+    payload_schema_registry: object | None = None,
 ):
     rights, hydration, admissions = (
         _policy_registries()
@@ -175,32 +179,45 @@ def open_object_system(
         max_results=1000,
     )
     selected_scopes = (
-        scopes if scopes is not None else frozenset(
-        {
-            "authority.observed.write",
-            "authority.admitted.write",
-            event_policy.required_scope,
-            "authority.objects.admit",
-            "authority.objects.read",
-            "authority.objects.manage",
-            "authority.objects.lifecycle.write",
-        })
+        scopes
+        if scopes is not None
+        else frozenset(
+            {
+                "authority.observed.write",
+                "authority.admitted.write",
+                event_policy.required_scope,
+                "authority.objects.admit",
+                "authority.objects.read",
+                "authority.objects.manage",
+                "authority.objects.lifecycle.write",
+            }
+        )
     )
     kwargs = {
         "path": Path(database),
         "object_root": Path(object_root or database.with_suffix(".objects")),
-        "registry": registry_v1(),
-        "payload_schemas": payload_schemas(),
+        "registry": command_registry or registry_v1(),
+        "payload_schemas": payload_schema_registry or payload_schemas(),
         "admission_registry": admissions,
         "rights_policies": rights,
         "hydration_policies": hydration,
-        "authenticator": StaticAuthenticator(
-            credentials={"token-1": StaticPrincipal("principal.alpha")},
-            authority_domain="newsroom.authority",
+        "authenticator": (
+            authenticator
+            if authenticator is not None
+            else StaticAuthenticator(
+                credentials={
+                    "token-1": StaticPrincipal("principal.alpha")
+                },
+                authority_domain="newsroom.authority",
+            )
         ),
-        "authorizer": StaticAuthorizer(
-            policy_version="authz-v1",
-            grants_by_principal={"principal.alpha": selected_scopes},
+        "authorizer": (
+            authorizer
+            if authorizer is not None
+            else StaticAuthorizer(
+                policy_version="authz-v1",
+                grants_by_principal={"principal.alpha": selected_scopes},
+            )
         ),
         "event_read_policy": event_policy,
         "object_limits": object_limits

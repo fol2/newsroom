@@ -213,7 +213,7 @@ class _ObjectAdmissionStoreMixin:
                 )
 
             row = self._connection.execute(
-                "SELECT o.result_bytes,o.result_digest "
+                "SELECT o.result_bytes,o.result_digest,o.event_id "
                 "FROM object_lifecycle_operations o "
                 "WHERE o.operation_type='ADMISSION_ACTIVATE' "
                 "AND o.idempotency_namespace=? AND o.idempotency_key=?",
@@ -244,7 +244,9 @@ class _ObjectAdmissionStoreMixin:
                 )
             admission_id = ObjectAdmissionId.parse(str(value["admission_id"]))
             activation = self._admission_activation_row(
-                str(admission_id), conn=self._connection
+                str(admission_id),
+                event_id=str(row["event_id"]),
+                conn=self._connection,
             )
             if (
                 str(activation["blob_digest"])
@@ -491,6 +493,12 @@ class _ObjectAdmissionStoreMixin:
                     # Last check before SQLite commit: exact pinned bytes, path,
                     # link count and read-only mode must still match authority.
                     self._cas.verify_pinned(pinned)
+                    # Hashing can outlive a short authentication/rights window.
+                    # Revalidate the exact final grant after the last byte check,
+                    # while the same SQLite write transaction is still open.
+                    self._object_issuer.verify_admission(
+                        grant, now=self._clock()
+                    )
                 sqlite_committed = True
                 # Staging cleanup occurs only after authority commit.  If it fails,
                 # preserve the committed installed blob and surface an operational

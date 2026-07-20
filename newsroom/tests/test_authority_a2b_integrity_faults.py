@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 import sqlite3
 
@@ -8,15 +9,19 @@ import pytest
 from newsroom.authority import (
     AuthorityPersistenceError,
     AuthorityWriterBusy,
+    DeletionState,
     HydrationRequest,
     ObjectAdmissionRequest,
     ObjectIntegrityError,
     ObjectLifecycleError,
     ObjectLimits,
+    StaticAuthenticator,
+    StaticPrincipal,
+    UtcTimestamp,
 )
 
-from .authority_a2b_helpers import admit, open_object_system
-from .authority_helpers import proof
+from .authority_a2b_helpers import MutableClock, admit, open_object_system
+from .authority_helpers import FIXED_NOW, proof
 
 
 def installed_path(root: Path, blob_digest: str) -> Path:
@@ -248,7 +253,7 @@ def test_restart_cleans_failed_staging_files(tmp_path: Path) -> None:
         reopened.close()
 
 
-def test_unlink_failure_is_recorded_failed_and_does_not_remove_authority(
+def test_unlink_failure_preserves_tombstone_and_allows_authenticated_retry(
     tmp_path: Path,
 ) -> None:
     seen = False
@@ -288,15 +293,112 @@ def test_unlink_failure_is_recorded_failed_and_does_not_remove_authority(
                 idempotency_key="complete",
                 proof=proof(),
             )
+        failure_events = [
+            item
+            for item in system.events.after(0, limit=1000, proof=proof())
+            if item.event_type == "governed_blob.deletion.failed"
+        ]
+        assert len(failure_events) == 1
+        with pytest.raises(ObjectLifecycleError, match="previously failed"):
+            system.objects.complete_deletion(
+                deletion.deletion_id,
+                idempotency_key="complete",
+                proof=proof(),
+            )
+        assert len(
+            [
+                item
+                for item in system.events.after(0, limit=1000, proof=proof())
+                if item.event_type == "governed_blob.deletion.failed"
+            ]
+        ) == 1
         assert system.objects.request_deletion(
             admission.blob.blob_digest,
             reason_code="DELETE",
             idempotency_key="request",
             proof=proof(),
-        ).state.value in {"FAILED", "TOMBSTONED"}
+        ).state.value == "TOMBSTONED"
+        completed = system.objects.complete_deletion(
+            deletion.deletion_id,
+            idempotency_key="complete-retry",
+            proof=proof(),
+        )
+        assert completed.state.value == "PHYSICALLY_REMOVED"
     finally:
         system.close()
 
+
+
+def test_post_unlink_authorization_expiry_is_not_mislabeled_as_unlink_failure(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(FIXED_NOW)
+    armed = False
+
+    def fault(checkpoint: str) -> None:
+        nonlocal armed
+        if armed and checkpoint == "after_blob_unlink":
+            clock.current = UtcTimestamp(
+                FIXED_NOW.value + timedelta(seconds=2)
+            )
+            armed = False
+
+    authenticator = StaticAuthenticator(
+        credentials={"token-1": StaticPrincipal("principal.alpha")},
+        authority_domain="newsroom.authority",
+        ttl_seconds=1,
+    )
+    system = open_object_system(
+        tmp_path / "authority.sqlite3",
+        authenticator=authenticator,
+        clock=clock,
+        fault_hook=fault,
+    )
+    try:
+        admission = admit(system, data=b"expire after unlink").admission
+        system.objects.revoke(
+            admission.admission_id,
+            reason_code="DELETE",
+            idempotency_key="post-unlink-revoke",
+            proof=proof(),
+        )
+        deletion = system.objects.request_deletion(
+            admission.blob.blob_digest,
+            reason_code="DELETE",
+            idempotency_key="post-unlink-request",
+            proof=proof(),
+        )
+        system.objects.tombstone(
+            deletion.deletion_id,
+            reason_code="DELETE",
+            idempotency_key="post-unlink-tombstone",
+            proof=proof(),
+        )
+        armed = True
+        with pytest.raises(PermissionError):
+            system.objects.complete_deletion(
+                deletion.deletion_id,
+                idempotency_key="post-unlink-expired",
+                proof=proof(),
+            )
+        assert system.objects.request_deletion(
+            admission.blob.blob_digest,
+            reason_code="DELETE",
+            idempotency_key="post-unlink-request",
+            proof=proof(),
+        ).state is DeletionState.TOMBSTONED
+        assert all(
+            event.event_type != "governed_blob.deletion.failed"
+            for event in system.events.after(0, limit=1000, proof=proof())
+        )
+        completed = system.objects.complete_deletion(
+            deletion.deletion_id,
+            idempotency_key="post-unlink-retry",
+            proof=proof(),
+        )
+        assert completed.state is DeletionState.PHYSICALLY_REMOVED
+    finally:
+        system.close()
 
 def test_raw_sql_cannot_mutate_a2b_immutable_records(tmp_path: Path) -> None:
     database = tmp_path / "authority.sqlite3"
@@ -336,3 +438,128 @@ def test_second_writer_and_symlink_object_root_fail_closed(tmp_path: Path) -> No
     alias.symlink_to(object_root, target_is_directory=True)
     with pytest.raises(ObjectIntegrityError, match="symlink"):
         open_object_system(database, object_root=alias)
+
+
+def test_deletion_request_rechecks_exact_pinned_bytes_before_commit(
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "objects"
+    armed = False
+
+    def fault(checkpoint: str) -> None:
+        if checkpoint != "before_pinned_rehash" or not armed:
+            return
+        paths = [
+            path
+            for path in (object_root / "objects").rglob("*")
+            if path.is_file()
+        ]
+        assert len(paths) == 1
+        path = paths[0]
+        path.chmod(0o600)
+        path.write_bytes(b"changed before deletion request")
+
+    system = open_object_system(
+        tmp_path / "authority.sqlite3",
+        object_root=object_root,
+        fault_hook=fault,
+    )
+    try:
+        admission = admit(system, data=b"original deletion bytes").admission
+        armed = True
+        with pytest.raises(ObjectIntegrityError):
+            system.objects.request_deletion(
+                admission.blob.blob_digest,
+                reason_code="DELETE",
+                idempotency_key="mutated-delete-request",
+                proof=proof(),
+            )
+    finally:
+        system.close()
+
+
+
+def test_tombstone_rechecks_exact_pinned_bytes_before_commit(
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "objects"
+    armed = False
+    rehashes = 0
+
+    def fault(checkpoint: str) -> None:
+        nonlocal rehashes
+        if checkpoint != "before_pinned_rehash" or not armed:
+            return
+        rehashes += 1
+        # tombstone pin() performs one verification.  Mutate the same inode at
+        # the transaction-time second verification to prove the lifecycle and
+        # ordered event cannot commit after a verify-then-use race.
+        if rehashes != 2:
+            return
+        paths = [
+            path
+            for path in (object_root / "objects").rglob("*")
+            if path.is_file()
+        ]
+        assert len(paths) == 1
+        path = paths[0]
+        original = path.read_bytes()
+        path.chmod(0o600)
+        path.write_bytes(b"T" * len(original))
+
+    system = open_object_system(
+        tmp_path / "authority.sqlite3",
+        object_root=object_root,
+        fault_hook=fault,
+    )
+    try:
+        admission = admit(system, data=b"original tombstone bytes").admission
+        deletion = system.objects.request_deletion(
+            admission.blob.blob_digest,
+            reason_code="DELETE",
+            idempotency_key="tombstone-race-request",
+            proof=proof(),
+        )
+        armed = True
+        with pytest.raises(ObjectIntegrityError):
+            system.objects.tombstone(
+                deletion.deletion_id,
+                reason_code="TOMBSTONE",
+                idempotency_key="tombstone-race",
+                proof=proof(),
+            )
+        assert rehashes >= 2
+        current = system.objects.request_deletion(
+            admission.blob.blob_digest,
+            reason_code="DELETE",
+            idempotency_key="tombstone-race-request",
+            proof=proof(),
+        )
+        assert current.state.value == "REQUESTED"
+        assert all(
+            item.event_type != "governed_blob.deletion.tombstoned"
+            for item in system.events.after(0, limit=1000, proof=proof())
+        )
+    finally:
+        system.close()
+
+
+def test_iterable_empty_chunks_fail_without_unbounded_staging(
+    tmp_path: Path,
+) -> None:
+    system = open_object_system(tmp_path / "authority.sqlite3")
+
+    def empty_chunks():
+        while True:
+            yield b""
+
+    try:
+        with pytest.raises(ObjectIntegrityError, match="empty chunk"):
+            system.objects.admit(
+                ObjectAdmissionRequest("source.capture", "empty-chunks"),
+                empty_chunks(),
+                proof=proof(),
+            )
+        assert not tuple((tmp_path / "authority.objects" / "staging").iterdir())
+    finally:
+        system.close()

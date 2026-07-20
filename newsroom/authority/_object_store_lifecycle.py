@@ -31,6 +31,10 @@ _LifecycleGrantFactory = Callable[
 ]
 
 
+class _PhysicalUnlinkFailure(RuntimeError):
+    """A durable CAS unlink failed while tombstone authority remained current."""
+
+
 class _ObjectLifecycleStoreMixin:
     """Atomic revocation, deletion/tombstone, recovery pin, and orphan state."""
 
@@ -60,6 +64,20 @@ class _ObjectLifecycleStoreMixin:
         ):
             raise AuthorityPersistenceError(
                 "lifecycle command payload differs from exact mutation"
+            )
+
+    @staticmethod
+    def _require_blob_manageable(
+        row: sqlite3.Row,
+        *,
+        allowed_states: frozenset[BlobLifecycleState],
+    ) -> None:
+        state = BlobLifecycleState(str(row["state"]))
+        integrity = BlobIntegrityState(str(row["integrity_state"]))
+        if state not in allowed_states or integrity is not BlobIntegrityState.VERIFIED:
+            allowed = ", ".join(sorted(item.value for item in allowed_states))
+            raise ObjectLifecycleError(
+                f"blob must be integrity-verified in one of: {allowed}"
             )
 
     def _existing_operation(
@@ -286,80 +304,107 @@ class _ObjectLifecycleStoreMixin:
                 return self.deletion_view(
                     GovernedDeletionId.parse(str(existing["deletion_id"]))
                 )
-            current_deletion = self._latest_deletion_row(
+            if self._latest_deletion_row(
                 self._connection, identity.blob_digest
-            )
-            if current_deletion is not None and str(current_deletion["state"]) != DeletionState.PHYSICALLY_REMOVED.value:
+            ) is not None:
                 raise ObjectLifecycleError(
-                    "blob already has an unfinished governed deletion"
+                    "blob already has governed deletion history"
                 )
-            deletion_id = GovernedDeletionId.new()
-            payload = {
-                "operation_id": str(grant.operation_id),
-                "deletion_id": str(deletion_id),
-                "blob_digest": identity.blob_digest,
-                "reason_code": grant.reason_code,
-            }
-            lifecycle_grant = lifecycle_grant_factory(
-                "object.deletion.request", deletion_id, payload
+            self._require_blob_manageable(
+                self._blob_lifecycle_row(identity.blob_digest),
+                allowed_states=frozenset({BlobLifecycleState.ACTIVE}),
             )
-            self._issuer.verify(lifecycle_grant)
-            self._verify_lifecycle_command(
-                grant,
-                lifecycle_grant,
-                expected_command_type="object.deletion.request",
-                expected_payload=payload,
-            )
-            with self._transaction() as conn:
-                recorded = self._clock()
-                self._object_issuer.verify_maintenance(grant, now=recorded)
-                self._persist_security_records(
-                    conn,
-                    authentication=grant.authentication,
-                    request=grant.authorization_request,
-                    decision=grant.authorization,
-                    recorded_at=recorded.to_text(),
+            pinned = self._cas.pin(identity)
+            try:
+                deletion_id = GovernedDeletionId.new()
+                payload = {
+                    "operation_id": str(grant.operation_id),
+                    "deletion_id": str(deletion_id),
+                    "blob_digest": identity.blob_digest,
+                    "reason_code": grant.reason_code,
+                }
+                lifecycle_grant = lifecycle_grant_factory(
+                    "object.deletion.request", deletion_id, payload
                 )
-                committed = self._commit_grant_in_transaction(
-                    conn, lifecycle_grant, recorded_at=recorded.to_text()
+                self._issuer.verify(lifecycle_grant)
+                self._verify_lifecycle_command(
+                    grant,
+                    lifecycle_grant,
+                    expected_command_type="object.deletion.request",
+                    expected_payload=payload,
                 )
-                conn.execute(
-                    "INSERT INTO object_deletions("
-                    "deletion_id,blob_digest,reason_code,created_at) VALUES(?,?,?,?)",
-                    (
-                        str(deletion_id),
-                        identity.blob_digest,
-                        grant.reason_code,
-                        recorded.to_text(),
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO object_deletion_versions("
-                    "deletion_id,lifecycle_version,state,operation_id,event_id,"
-                    "error_code,recorded_at,detail_digest) VALUES(?,?,?,?,?,NULL,?,?)",
-                    (
-                        str(deletion_id),
-                        1,
-                        DeletionState.REQUESTED.value,
-                        str(grant.operation_id),
-                        committed.event_id,
-                        recorded.to_text(),
-                        digest_canonical(payload),
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO object_deletion_heads("
-                    "deletion_id,current_version,updated_at) VALUES(?,?,?)",
-                    (str(deletion_id), 1, recorded.to_text()),
-                )
-                self._record_operation(
-                    conn,
-                    grant=grant,
-                    committed=committed,
-                    result={"deletion_id": str(deletion_id)},
-                    recorded_at=recorded.to_text(),
-                )
-            return self.deletion_view(deletion_id)
+                with self._transaction() as conn:
+                    recorded = self._clock()
+                    self._object_issuer.verify_maintenance(grant, now=recorded)
+                    if self._latest_deletion_row(
+                        conn, identity.blob_digest
+                    ) is not None:
+                        raise ObjectLifecycleError(
+                            "governed deletion appeared before commit"
+                        )
+                    self._require_blob_manageable(
+                        self._blob_lifecycle_row(
+                            identity.blob_digest, conn=conn
+                        ),
+                        allowed_states=frozenset(
+                            {BlobLifecycleState.ACTIVE}
+                        ),
+                    )
+                    self._cas.verify_pinned(pinned)
+                    self._object_issuer.verify_maintenance(
+                        grant, now=self._clock()
+                    )
+                    self._persist_security_records(
+                        conn,
+                        authentication=grant.authentication,
+                        request=grant.authorization_request,
+                        decision=grant.authorization,
+                        recorded_at=recorded.to_text(),
+                    )
+                    committed = self._commit_grant_in_transaction(
+                        conn, lifecycle_grant, recorded_at=recorded.to_text()
+                    )
+                    conn.execute(
+                        "INSERT INTO object_deletions("
+                        "deletion_id,blob_digest,reason_code,created_at) "
+                        "VALUES(?,?,?,?)",
+                        (
+                            str(deletion_id),
+                            identity.blob_digest,
+                            grant.reason_code,
+                            recorded.to_text(),
+                        ),
+                    )
+                    conn.execute(
+                        "INSERT INTO object_deletion_versions("
+                        "deletion_id,lifecycle_version,state,operation_id,"
+                        "event_id,error_code,recorded_at,detail_digest) "
+                        "VALUES(?,?,?,?,?,NULL,?,?)",
+                        (
+                            str(deletion_id),
+                            1,
+                            DeletionState.REQUESTED.value,
+                            str(grant.operation_id),
+                            committed.event_id,
+                            recorded.to_text(),
+                            digest_canonical(payload),
+                        ),
+                    )
+                    conn.execute(
+                        "INSERT INTO object_deletion_heads("
+                        "deletion_id,current_version,updated_at) VALUES(?,?,?)",
+                        (str(deletion_id), 1, recorded.to_text()),
+                    )
+                    self._record_operation(
+                        conn,
+                        grant=grant,
+                        committed=committed,
+                        result={"deletion_id": str(deletion_id)},
+                        recorded_at=recorded.to_text(),
+                    )
+                return self.deletion_view(deletion_id)
+            finally:
+                pinned.close()
 
     def tombstone_deletion(
         self,
@@ -397,6 +442,11 @@ class _ObjectLifecycleStoreMixin:
         with self._lock:
             existing = self._existing_operation(grant)
             if existing is not None:
+                error_code = existing.get("error_code")
+                if error_code is not None:
+                    raise ObjectLifecycleError(
+                        f"governed unlink previously failed: {error_code}"
+                    )
                 return self.deletion_view(deletion_id)
             row = self._deletion_row(deletion_id)
             if DeletionState(str(row["state"])) is not expected_current:
@@ -404,94 +454,111 @@ class _ObjectLifecycleStoreMixin:
                     f"deletion must be {expected_current.value}"
                 )
             blob_digest = str(row["blob_digest"])
-            payload: dict[str, object] = {
-                "operation_id": str(grant.operation_id),
-                "deletion_id": str(deletion_id),
-                "blob_digest": blob_digest,
-            }
-            if command_type in {
-                "object.deletion.tombstone",
-                "object.deletion.request",
-            }:
-                payload["reason_code"] = str(row["reason_code"])
-            if command_type == "object.deletion.fail":
-                payload["error_code"] = error_code or grant.reason_code
-            lifecycle_grant = lifecycle_grant_factory(
-                command_type, deletion_id, payload
+            blob = BlobIdentity(blob_digest, self._blob_size(blob_digest))
+            self._require_blob_manageable(
+                self._blob_lifecycle_row(blob_digest),
+                allowed_states=frozenset({BlobLifecycleState.ACTIVE}),
             )
-            self._issuer.verify(lifecycle_grant)
-            self._verify_lifecycle_command(
-                grant,
-                lifecycle_grant,
-                expected_command_type=command_type,
-                expected_payload=payload,
-            )
-            with self._transaction() as conn:
-                recorded = self._clock()
-                self._object_issuer.verify_maintenance(grant, now=recorded)
-                current = self._deletion_row(deletion_id, conn=conn)
-                if DeletionState(str(current["state"])) is not expected_current:
-                    raise ObjectLifecycleError(
-                        "deletion state changed before commit"
+            pinned = self._cas.pin(blob)
+            try:
+                payload: dict[str, object] = {
+                    "operation_id": str(grant.operation_id),
+                    "deletion_id": str(deletion_id),
+                    "blob_digest": blob_digest,
+                }
+                if command_type in {
+                    "object.deletion.tombstone",
+                    "object.deletion.request",
+                }:
+                    payload["reason_code"] = str(row["reason_code"])
+                if command_type == "object.deletion.fail":
+                    payload["error_code"] = error_code or grant.reason_code
+                lifecycle_grant = lifecycle_grant_factory(
+                    command_type, deletion_id, payload
+                )
+                self._issuer.verify(lifecycle_grant)
+                self._verify_lifecycle_command(
+                    grant,
+                    lifecycle_grant,
+                    expected_command_type=command_type,
+                    expected_payload=payload,
+                )
+                with self._transaction() as conn:
+                    recorded = self._clock()
+                    self._object_issuer.verify_maintenance(grant, now=recorded)
+                    current = self._deletion_row(deletion_id, conn=conn)
+                    if DeletionState(str(current["state"])) is not expected_current:
+                        raise ObjectLifecycleError(
+                            "deletion state changed before commit"
+                        )
+                    self._require_blob_manageable(
+                        self._blob_lifecycle_row(blob_digest, conn=conn),
+                        allowed_states=frozenset({BlobLifecycleState.ACTIVE}),
                     )
-                self._persist_security_records(
-                    conn,
-                    authentication=grant.authentication,
-                    request=grant.authorization_request,
-                    decision=grant.authorization,
-                    recorded_at=recorded.to_text(),
-                )
-                committed = self._commit_grant_in_transaction(
-                    conn, lifecycle_grant, recorded_at=recorded.to_text()
-                )
-                next_version = int(current["current_version"]) + 1
-                conn.execute(
-                    "INSERT INTO object_deletion_versions("
-                    "deletion_id,lifecycle_version,state,operation_id,event_id,"
-                    "error_code,recorded_at,detail_digest) VALUES(?,?,?,?,?,?,?,?)",
-                    (
-                        str(deletion_id),
-                        next_version,
-                        new_state.value,
-                        str(grant.operation_id),
-                        committed.event_id,
-                        error_code,
-                        recorded.to_text(),
-                        digest_canonical(payload),
-                    ),
-                )
-                conn.execute(
-                    "UPDATE object_deletion_heads SET current_version=?,updated_at=? "
-                    "WHERE deletion_id=?",
-                    (next_version, recorded.to_text(), str(deletion_id)),
-                )
-                if update_blob_state is not None:
-                    self._append_blob_lifecycle(
+                    self._cas.verify_pinned(pinned)
+                    self._object_issuer.verify_maintenance(
+                        grant, now=self._clock()
+                    )
+                    self._persist_security_records(
                         conn,
-                        blob_digest=blob_digest,
-                        state=update_blob_state,
-                        integrity=(
-                            BlobIntegrityState.VERIFIED
-                            if update_blob_state
-                            is BlobLifecycleState.DELETION_PENDING
-                            else BlobIntegrityState.MISSING
-                        ),
-                        operation_id=str(grant.operation_id),
-                        event_id=committed.event_id,
-                        recorded_at=recorded,
+                        authentication=grant.authentication,
+                        request=grant.authorization_request,
+                        decision=grant.authorization,
+                        recorded_at=recorded.to_text(),
                     )
-                self._record_operation(
-                    conn,
-                    grant=grant,
-                    committed=committed,
-                    result={
-                        "deletion_id": str(deletion_id),
-                        "lifecycle_version": next_version,
-                        "state": new_state.value,
-                    },
-                    recorded_at=recorded.to_text(),
-                )
-            return self.deletion_view(deletion_id)
+                    committed = self._commit_grant_in_transaction(
+                        conn, lifecycle_grant, recorded_at=recorded.to_text()
+                    )
+                    next_version = int(current["current_version"]) + 1
+                    conn.execute(
+                        "INSERT INTO object_deletion_versions("
+                        "deletion_id,lifecycle_version,state,operation_id,event_id,"
+                        "error_code,recorded_at,detail_digest) VALUES(?,?,?,?,?,?,?,?)",
+                        (
+                            str(deletion_id),
+                            next_version,
+                            new_state.value,
+                            str(grant.operation_id),
+                            committed.event_id,
+                            error_code,
+                            recorded.to_text(),
+                            digest_canonical(payload),
+                        ),
+                    )
+                    conn.execute(
+                        "UPDATE object_deletion_heads SET current_version=?,updated_at=? "
+                        "WHERE deletion_id=?",
+                        (next_version, recorded.to_text(), str(deletion_id)),
+                    )
+                    if update_blob_state is not None:
+                        self._append_blob_lifecycle(
+                            conn,
+                            blob_digest=blob_digest,
+                            state=update_blob_state,
+                            integrity=(
+                                BlobIntegrityState.VERIFIED
+                                if update_blob_state
+                                is BlobLifecycleState.DELETION_PENDING
+                                else BlobIntegrityState.MISSING
+                            ),
+                            operation_id=str(grant.operation_id),
+                            event_id=committed.event_id,
+                            recorded_at=recorded,
+                        )
+                    self._record_operation(
+                        conn,
+                        grant=grant,
+                        committed=committed,
+                        result={
+                            "deletion_id": str(deletion_id),
+                            "lifecycle_version": next_version,
+                            "state": new_state.value,
+                        },
+                        recorded_at=recorded.to_text(),
+                    )
+                return self.deletion_view(deletion_id)
+            finally:
+                pinned.close()
 
     def complete_deletion(
         self,
@@ -508,6 +575,11 @@ class _ObjectLifecycleStoreMixin:
         with self._lock:
             existing = self._existing_operation(grant)
             if existing is not None:
+                error_code = existing.get("error_code")
+                if error_code is not None:
+                    raise ObjectLifecycleError(
+                        f"governed unlink previously failed: {error_code}"
+                    )
                 return self.deletion_view(deletion_id)
             row = self._deletion_row(deletion_id)
             current_state = DeletionState(str(row["state"]))
@@ -563,7 +635,12 @@ class _ObjectLifecycleStoreMixin:
                         raise ObjectLifecycleError(
                             "recovery pin appeared before completion commit"
                         )
-                    self._cas.unlink(blob)
+                    try:
+                        self._cas.unlink(blob)
+                    except Exception as exc:
+                        raise _PhysicalUnlinkFailure(
+                            "durable governed unlink failed"
+                        ) from exc
                     # Unlink and parent-directory fsync can take long enough for
                     # a short-lived maintenance authority to expire.  Recheck on
                     # the post-filesystem server clock before recording the
@@ -623,19 +700,25 @@ class _ObjectLifecycleStoreMixin:
                         },
                         recorded_at=recorded.to_text(),
                     )
-            except Exception as exc:
-                # A pre-unlink failure leaves bytes present and is recorded as
-                # FAILED.  A post-unlink durability failure is indeterminate:
-                # preserve TOMBSTONED authority so a later authenticated retry
-                # can durably reconcile and commit PHYSICALLY_REMOVED.
+            except _PhysicalUnlinkFailure as exc:
+                # Only a CAS unlink/durability failure creates a deletion-failure
+                # event.  Authentication, policy, liveness, or SQLite failures
+                # retain their original semantics and are never mislabeled as an
+                # unlink incident.
                 if self._cas.object_path(blob).exists():
-                    self._record_deletion_failure(
-                        grant,
-                        deletion_id=deletion_id,
-                        blob=blob,
-                        error_code="UNLINK_FAILED",
-                        lifecycle_grant_factory=failure_grant_factory,
-                    )
+                    try:
+                        self._record_deletion_failure(
+                            grant,
+                            deletion_id=deletion_id,
+                            blob=blob,
+                            error_code="UNLINK_FAILED",
+                            lifecycle_grant_factory=failure_grant_factory,
+                        )
+                    except Exception as record_exc:
+                        exc.add_note(
+                            "deletion failure event could not be recorded: "
+                            f"{record_exc!r}"
+                        )
                 raise ObjectLifecycleError("governed unlink failed") from exc
             return self.deletion_view(deletion_id)
 
@@ -688,7 +771,7 @@ class _ObjectLifecycleStoreMixin:
                 (
                     str(deletion_id),
                     next_version,
-                    DeletionState.FAILED.value,
+                    DeletionState.TOMBSTONED.value,
                     str(grant.operation_id),
                     committed.event_id,
                     error_code,
@@ -701,6 +784,18 @@ class _ObjectLifecycleStoreMixin:
                 "WHERE deletion_id=?",
                 (next_version, recorded.to_text(), str(deletion_id)),
             )
+            self._record_operation(
+                conn,
+                grant=grant,
+                committed=committed,
+                result={
+                    "deletion_id": str(deletion_id),
+                    "lifecycle_version": next_version,
+                    "state": DeletionState.TOMBSTONED.value,
+                    "error_code": error_code,
+                },
+                recorded_at=recorded.to_text(),
+            )
 
     def create_recovery_pin(
         self,
@@ -712,80 +807,110 @@ class _ObjectLifecycleStoreMixin:
         self._object_issuer.verify_maintenance(grant, now=now)
         if grant.operation_type != "RECOVERY_PIN_CREATE":
             raise AuthorityPersistenceError("wrong recovery pin operation")
-        blob = BlobIdentity(grant.target_identity, self._blob_size(grant.target_identity))
+        blob = BlobIdentity(
+            grant.target_identity, self._blob_size(grant.target_identity)
+        )
+        allowed_states = frozenset(
+            {
+                BlobLifecycleState.ACTIVE,
+                BlobLifecycleState.DELETION_PENDING,
+            }
+        )
         with self._lock:
             existing = self._existing_operation(grant)
             if existing is not None:
                 return self.recovery_pin_view(
                     RecoveryPinId.parse(str(existing["pin_id"]))
                 )
-            pin_id = RecoveryPinId.new()
-            payload = {
-                "operation_id": str(grant.operation_id),
-                "pin_id": str(pin_id),
-                "blob_digest": blob.blob_digest,
-                "reason_code": grant.reason_code,
-            }
-            lifecycle = lifecycle_grant_factory(
-                "object.recovery_pin.create", pin_id, payload
+            self._require_blob_manageable(
+                self._blob_lifecycle_row(blob.blob_digest),
+                allowed_states=allowed_states,
             )
-            self._issuer.verify(lifecycle)
-            self._verify_lifecycle_command(
-                grant,
-                lifecycle,
-                expected_command_type="object.recovery_pin.create",
-                expected_payload=payload,
-            )
-            with self._transaction() as conn:
-                recorded = self._clock()
-                self._object_issuer.verify_maintenance(grant, now=recorded)
-                self._persist_security_records(
-                    conn,
-                    authentication=grant.authentication,
-                    request=grant.authorization_request,
-                    decision=grant.authorization,
-                    recorded_at=recorded.to_text(),
+            pinned = self._cas.pin(blob)
+            try:
+                pin_id = RecoveryPinId.new()
+                payload = {
+                    "operation_id": str(grant.operation_id),
+                    "pin_id": str(pin_id),
+                    "blob_digest": blob.blob_digest,
+                    "reason_code": grant.reason_code,
+                }
+                lifecycle = lifecycle_grant_factory(
+                    "object.recovery_pin.create", pin_id, payload
                 )
-                committed = self._commit_grant_in_transaction(
-                    conn, lifecycle, recorded_at=recorded.to_text()
+                self._issuer.verify(lifecycle)
+                self._verify_lifecycle_command(
+                    grant,
+                    lifecycle,
+                    expected_command_type="object.recovery_pin.create",
+                    expected_payload=payload,
                 )
-                conn.execute(
-                    "INSERT INTO object_recovery_pins("
-                    "pin_id,blob_digest,reason_code,created_at) VALUES(?,?,?,?)",
-                    (
-                        str(pin_id),
-                        blob.blob_digest,
-                        grant.reason_code,
-                        recorded.to_text(),
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO object_recovery_pin_versions("
-                    "pin_id,lifecycle_version,state,operation_id,event_id,"
-                    "recorded_at,detail_digest) VALUES(?,?,?,?,?,?,?)",
-                    (
-                        str(pin_id),
-                        1,
-                        RecoveryPinState.ACTIVE.value,
-                        str(grant.operation_id),
-                        committed.event_id,
-                        recorded.to_text(),
-                        digest_canonical(payload),
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO object_recovery_pin_heads("
-                    "pin_id,current_version,updated_at) VALUES(?,?,?)",
-                    (str(pin_id), 1, recorded.to_text()),
-                )
-                self._record_operation(
-                    conn,
-                    grant=grant,
-                    committed=committed,
-                    result={"pin_id": str(pin_id)},
-                    recorded_at=recorded.to_text(),
-                )
-            return self.recovery_pin_view(pin_id)
+                with self._transaction() as conn:
+                    recorded = self._clock()
+                    self._object_issuer.verify_maintenance(grant, now=recorded)
+                    self._require_blob_manageable(
+                        self._blob_lifecycle_row(
+                            blob.blob_digest, conn=conn
+                        ),
+                        allowed_states=allowed_states,
+                    )
+                    self._cas.verify_pinned(pinned)
+                    self._object_issuer.verify_maintenance(
+                        grant, now=self._clock()
+                    )
+                    self._persist_security_records(
+                        conn,
+                        authentication=grant.authentication,
+                        request=grant.authorization_request,
+                        decision=grant.authorization,
+                        recorded_at=recorded.to_text(),
+                    )
+                    committed = self._commit_grant_in_transaction(
+                        conn, lifecycle, recorded_at=recorded.to_text()
+                    )
+                    conn.execute(
+                        "INSERT INTO object_recovery_pins("
+                        "pin_id,blob_digest,reason_code,created_at) "
+                        "VALUES(?,?,?,?)",
+                        (
+                            str(pin_id),
+                            blob.blob_digest,
+                            grant.reason_code,
+                            recorded.to_text(),
+                        ),
+                    )
+                    conn.execute(
+                        "INSERT INTO object_recovery_pin_versions("
+                        "pin_id,lifecycle_version,state,operation_id,event_id,"
+                        "recorded_at,detail_digest) VALUES(?,?,?,?,?,?,?)",
+                        (
+                            str(pin_id),
+                            1,
+                            RecoveryPinState.ACTIVE.value,
+                            str(grant.operation_id),
+                            committed.event_id,
+                            recorded.to_text(),
+                            digest_canonical(payload),
+                        ),
+                    )
+                    conn.execute(
+                        "INSERT INTO object_recovery_pin_heads("
+                        "pin_id,current_version,updated_at) VALUES(?,?,?)",
+                        (str(pin_id), 1, recorded.to_text()),
+                    )
+                    self._record_operation(
+                        conn,
+                        grant=grant,
+                        committed=committed,
+                        result={
+                            "pin_id": str(pin_id),
+                            "lifecycle_version": 1,
+                        },
+                        recorded_at=recorded.to_text(),
+                    )
+                return self.recovery_pin_view(pin_id)
+            finally:
+                pinned.close()
 
     def release_recovery_pin(
         self,
@@ -882,12 +1007,15 @@ class _ObjectLifecycleStoreMixin:
         blob = BlobIdentity(
             grant.target_identity, self._blob_size(grant.target_identity)
         )
+        allowed_states = frozenset(
+            {BlobLifecycleState.INSTALLED, BlobLifecycleState.ACTIVE}
+        )
         with self._lock:
             existing = self._existing_operation(grant)
             if existing is not None:
-                # A committed orphan-removal decision is authoritative even if a
-                # previous physical unlink was interrupted.  Reconcile the
-                # idempotent byte removal before returning the old result.
+                # A committed removal is authoritative.  If bytes reappear,
+                # complete the idempotent filesystem cleanup without creating a
+                # second semantic transition.
                 if self._cas.object_path(blob).exists():
                     try:
                         self._cas.unlink(blob)
@@ -896,7 +1024,13 @@ class _ObjectLifecycleStoreMixin:
                             "orphan unlink remains pending reconciliation"
                         ) from exc
                 return blob
-            liveness = self.object_liveness(self._connection, blob.blob_digest)
+            self._require_blob_manageable(
+                self._blob_lifecycle_row(blob.blob_digest),
+                allowed_states=allowed_states,
+            )
+            liveness = self.object_liveness(
+                self._connection, blob.blob_digest
+            )
             if (
                 liveness.deletion_state is not None
                 or not liveness.may_physically_remove
@@ -904,82 +1038,118 @@ class _ObjectLifecycleStoreMixin:
                 raise ObjectLifecycleError(
                     "blob is not an ordinary removable orphan"
                 )
-            payload = {
-                "operation_id": str(grant.operation_id),
-                "blob_digest": blob.blob_digest,
-                "size_bytes": blob.size_bytes,
-            }
-            lifecycle = lifecycle_grant_factory(
-                "object.orphan.remove", grant.operation_id, payload
-            )
-            self._issuer.verify(lifecycle)
-            self._verify_lifecycle_command(
-                grant,
-                lifecycle,
-                expected_command_type="object.orphan.remove",
-                expected_payload=payload,
-            )
-            # Commit the authoritative zero-liveness removal decision first.
-            # If physical unlink then fails, current DELETED state blocks all
-            # hydration and startup/idempotent replay safely completes cleanup.
-            with self._transaction() as conn:
-                recorded = self._clock()
-                self._object_issuer.verify_maintenance(grant, now=recorded)
-                current_liveness = self.object_liveness(
-                    conn, blob.blob_digest
-                )
-                if (
-                    current_liveness.deletion_state is not None
-                    or not current_liveness.may_physically_remove
-                ):
-                    raise ObjectLifecycleError(
-                        "orphan liveness changed before commit"
-                    )
-                self._persist_security_records(
-                    conn,
-                    authentication=grant.authentication,
-                    request=grant.authorization_request,
-                    decision=grant.authorization,
-                    recorded_at=recorded.to_text(),
-                )
-                committed = self._commit_grant_in_transaction(
-                    conn, lifecycle, recorded_at=recorded.to_text()
-                )
-                self._append_blob_lifecycle(
-                    conn,
-                    blob_digest=blob.blob_digest,
-                    state=BlobLifecycleState.DELETED,
-                    integrity=BlobIntegrityState.MISSING,
-                    operation_id=str(grant.operation_id),
-                    event_id=committed.event_id,
-                    recorded_at=recorded,
-                )
-                self._record_operation(
-                    conn,
-                    grant=grant,
-                    committed=committed,
-                    result={"blob_digest": blob.blob_digest},
-                    recorded_at=recorded.to_text(),
-                )
+            pinned = self._cas.pin(blob)
             try:
-                self._cas.unlink(blob)
-            except Exception as exc:
-                raise ObjectLifecycleError(
-                    "orphan unlink pending reconciliation"
-                ) from exc
-            return blob
+                payload = {
+                    "operation_id": str(grant.operation_id),
+                    "blob_digest": blob.blob_digest,
+                    "size_bytes": blob.size_bytes,
+                }
+                lifecycle = lifecycle_grant_factory(
+                    "object.orphan.remove", grant.operation_id, payload
+                )
+                self._issuer.verify(lifecycle)
+                self._verify_lifecycle_command(
+                    grant,
+                    lifecycle,
+                    expected_command_type="object.orphan.remove",
+                    expected_payload=payload,
+                )
+                with self._transaction() as conn:
+                    recorded = self._clock()
+                    self._object_issuer.verify_maintenance(grant, now=recorded)
+                    self._require_blob_manageable(
+                        self._blob_lifecycle_row(
+                            blob.blob_digest, conn=conn
+                        ),
+                        allowed_states=allowed_states,
+                    )
+                    current_liveness = self.object_liveness(
+                        conn, blob.blob_digest
+                    )
+                    if (
+                        current_liveness.deletion_state is not None
+                        or not current_liveness.may_physically_remove
+                    ):
+                        raise ObjectLifecycleError(
+                            "orphan liveness changed before commit"
+                        )
+                    self._cas.verify_pinned(pinned)
+                    self._object_issuer.verify_maintenance(
+                        grant, now=self._clock()
+                    )
+                    self._persist_security_records(
+                        conn,
+                        authentication=grant.authentication,
+                        request=grant.authorization_request,
+                        decision=grant.authorization,
+                        recorded_at=recorded.to_text(),
+                    )
+                    committed = self._commit_grant_in_transaction(
+                        conn, lifecycle, recorded_at=recorded.to_text()
+                    )
+                    self._append_blob_lifecycle(
+                        conn,
+                        blob_digest=blob.blob_digest,
+                        state=BlobLifecycleState.DELETED,
+                        integrity=BlobIntegrityState.MISSING,
+                        operation_id=str(grant.operation_id),
+                        event_id=committed.event_id,
+                        recorded_at=recorded,
+                    )
+                    self._record_operation(
+                        conn,
+                        grant=grant,
+                        committed=committed,
+                        result={"blob_digest": blob.blob_digest},
+                        recorded_at=recorded.to_text(),
+                    )
+                try:
+                    self._cas.unlink(blob)
+                except Exception as exc:
+                    raise ObjectLifecycleError(
+                        "orphan unlink pending reconciliation"
+                    ) from exc
+                return blob
+            finally:
+                pinned.close()
 
     def orphan_candidates(self) -> tuple[BlobIdentity, ...]:
+        allowed_states = {
+            BlobLifecycleState.INSTALLED.value,
+            BlobLifecycleState.ACTIVE.value,
+        }
         with self._lock:
             rows = self._connection.execute(
-                "SELECT blob_digest,size_bytes FROM blob_identities"
+                "SELECT b.blob_digest,b.size_bytes,v.state,v.integrity_state "
+                "FROM blob_identities b "
+                "JOIN blob_lifecycle_heads h "
+                "ON h.blob_digest=b.blob_digest "
+                "JOIN blob_lifecycle_versions v "
+                "ON v.blob_digest=h.blob_digest "
+                "AND v.lifecycle_version=h.current_version"
             ).fetchall()
             candidates: list[BlobIdentity] = []
             for row in rows:
-                digest = str(row["blob_digest"])
-                liveness = self.object_liveness(self._connection, digest)
-                if liveness.deletion_state is None and liveness.may_physically_remove:
-                    candidates.append(BlobIdentity(digest, int(row["size_bytes"])))
+                if (
+                    str(row["state"]) not in allowed_states
+                    or str(row["integrity_state"])
+                    != BlobIntegrityState.VERIFIED.value
+                ):
+                    continue
+                identity = BlobIdentity(
+                    str(row["blob_digest"]), int(row["size_bytes"])
+                )
+                if not self._cas.object_path(identity).exists():
+                    continue
+                liveness = self.object_liveness(
+                    self._connection, identity.blob_digest
+                )
+                if (
+                    liveness.deletion_state is None
+                    and liveness.may_physically_remove
+                ):
+                    candidates.append(identity)
             return tuple(candidates)
 
     def _append_blob_lifecycle(

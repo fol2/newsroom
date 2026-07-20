@@ -191,6 +191,13 @@ class _GovernedCAS:
         for chunk in source:
             if not isinstance(chunk, (bytes, bytearray, memoryview)):
                 raise TypeError("object source chunks must be bytes")
+            if len(chunk) == 0:
+                # An empty byte string is EOF only for BinaryIO.read().  For an
+                # arbitrary iterable it can otherwise create an unbounded loop
+                # that consumes CPU without advancing the enforced byte limit.
+                raise ObjectIntegrityError(
+                    "object source iterable emitted an empty chunk"
+                )
             yield from cls._bounded_slices(chunk, chunk_size)
 
     def stage(
