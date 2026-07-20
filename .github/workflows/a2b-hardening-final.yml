@@ -41,9 +41,12 @@ jobs:
 
       - name: Reconstruct and apply exact hardening patch
         id: hardening
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
+          exec > >(tee /tmp/a2b-hardening.log) 2>&1
+          echo "head=$(git rev-parse HEAD)"
           if [[ ! -d .github/a2b-hardening ]]; then
             echo 'Hardening patch already applied.'
             echo 'applied=false' >> "$GITHUB_OUTPUT"
@@ -57,21 +60,23 @@ jobs:
           root = Path('.github/a2b-hardening')
           expected = [f'part-{index:02d}' for index in range(4)]
           actual = sorted(path.name for path in root.glob('part-*'))
+          print(f'actual_parts={actual!r}')
           if actual != expected:
               raise SystemExit(f'part manifest mismatch: {actual!r}')
           encoded = ''.join(
               ''.join((root / name).read_text(encoding='ascii').split())
               for name in expected
           )
+          print(f'encoded_chars={len(encoded)}')
           if len(encoded) != 11272:
               raise SystemExit(f'encoded length mismatch: {len(encoded)}')
           archive = base64.b64decode(encoded, validate=True)
           digest = hashlib.sha256(archive).hexdigest()
+          print(f'archive_bytes={len(archive)} sha256={digest}')
           expected_digest = '325d18c7f32b3f059726b7a6ff60b5045c5463fe0bb3cae6e3e0a0c443ea6060'
           if digest != expected_digest:
               raise SystemExit(f'patch archive digest mismatch: {digest}')
           Path('/tmp/a2b-hardening.patch.xz').write_bytes(archive)
-          print(f'parts={len(expected)} encoded_chars={len(encoded)} archive_bytes={len(archive)} sha256={digest}')
           PY
           xz -dc /tmp/a2b-hardening.patch.xz > /tmp/a2b-hardening.patch
           git apply --check /tmp/a2b-hardening.patch
@@ -79,17 +84,29 @@ jobs:
           rm -rf .github/a2b-hardening
           git add -A
           git diff --cached --check
-
-          # Keep the one-shot workflow out of the bot commit. The connector will
-          # delete it after the source hardening commit lands.
           git rm --cached --force .github/workflows/a2b-hardening-final.yml
           actual_tree="$(git write-tree)"
           echo "actual_tree=$actual_tree"
           echo 'expected_tree=1d37bfec8aa97171d3b189268df949a24066ff5f'
+          git status --short
           test "$actual_tree" = '1d37bfec8aa97171d3b189268df949a24066ff5f'
           git add .github/workflows/a2b-hardening-final.yml
           test ! -e .github/a2b-hardening
           echo 'applied=true' >> "$GITHUB_OUTPUT"
+
+      - name: Upload hardening diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a2b-hardening-diagnostics
+          path: |
+            /tmp/a2b-hardening.log
+            /tmp/a2b-hardening.patch
+          if-no-files-found: warn
+
+      - name: Enforce hardening apply gate
+        if: steps.hardening.outcome != 'success'
+        run: exit 1
 
       - uses: actions/setup-python@v5
         with:
