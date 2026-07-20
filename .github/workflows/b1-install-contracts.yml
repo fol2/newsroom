@@ -39,16 +39,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Reconstruct and stage exact B1 contracts
+      - name: Diagnose and stage exact B1 contracts
         id: install
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
+          exec > >(tee /tmp/b1-install.log) 2>&1
+          echo "head=$(git rev-parse HEAD)"
           if [[ ! -d .github/b1-contract-source ]]; then
             echo 'B1 contracts already installed.'
             echo 'installed=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          find .github/b1-contract-source -maxdepth 1 -type f -name 'part-*' -printf '%f %s\n' | sort
           python - <<'PY'
           from pathlib import Path
           import base64
@@ -57,23 +61,26 @@ jobs:
           root = Path('.github/b1-contract-source')
           expected = [f'part-{index:02d}' for index in range(3)]
           actual = sorted(path.name for path in root.glob('part-*'))
+          print(f'actual_parts={actual!r}')
           if actual != expected:
               raise SystemExit(f'part manifest mismatch: {actual!r}')
           encoded = ''.join(
               ''.join((root / name).read_text(encoding='ascii').split())
               for name in expected
           )
+          print(f'encoded_chars={len(encoded)}')
           if len(encoded) != 8056:
               raise SystemExit(f'encoded length mismatch: {len(encoded)}')
           archive = base64.b64decode(encoded, validate=True)
           digest = hashlib.sha256(archive).hexdigest()
+          print(f'archive_bytes={len(archive)} sha256={digest}')
           expected_digest = 'd7766a56ed227fa0989b5c7ba8a57894a34ff0b616e32c99cc400422a2fe9803'
           if digest != expected_digest:
               raise SystemExit(f'archive digest mismatch: {digest}')
           Path('/tmp/b1-contracts.tar.xz').write_bytes(archive)
-          print(f'parts={len(expected)} encoded_chars={len(encoded)} archive_bytes={len(archive)} sha256={digest}')
           PY
           xz -dc /tmp/b1-contracts.tar.xz | tar -tf - > /tmp/b1-contracts.list
+          echo "archive_entries=$(wc -l < /tmp/b1-contracts.list)"
           if grep -E '(^/|(^|/)\.\.(/|$))' /tmp/b1-contracts.list; then
             echo 'unsafe archive path' >&2
             exit 1
@@ -90,6 +97,7 @@ jobs:
           actual_tree="$(git write-tree)"
           echo "actual_tree=$actual_tree"
           echo 'expected_tree=f3021aec2e59c7e649adc8995d875cb287be2297'
+          git status --short
           test "$actual_tree" = 'f3021aec2e59c7e649adc8995d875cb287be2297'
           git add .github/workflows/b1-install-contracts.yml
 
@@ -98,6 +106,21 @@ jobs:
           test -f newsroom/tests/test_projection_b1_contracts.py
           test ! -e .github/b1-contract-source
           echo 'installed=true' >> "$GITHUB_OUTPUT"
+
+      - name: Upload B1 install diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b1-contract-install-diagnostics
+          path: |
+            /tmp/b1-install.log
+            /tmp/b1-contracts.list
+            .github/b1-contract-source
+          if-no-files-found: warn
+
+      - name: Enforce B1 install gate
+        if: steps.install.outcome != 'success'
+        run: exit 1
 
       - uses: actions/setup-python@v5
         with:
