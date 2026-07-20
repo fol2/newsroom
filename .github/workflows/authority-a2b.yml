@@ -1,0 +1,96 @@
+name: Authority A2b
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  governed-object-authority:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Lockfile Check
+        run: uv lock --check
+
+      - name: Sync (Dev)
+        run: uv sync --dev --locked
+
+      - name: Focused A2b Tests
+        id: focused
+        continue-on-error: true
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_authority_a2b_boundary.py \
+            newsroom/tests/test_authority_a2b_contracts.py \
+            newsroom/tests/test_authority_a2b_policy.py \
+            newsroom/tests/test_authority_a2b_admission_hydration.py \
+            newsroom/tests/test_authority_a2b_lifecycle.py \
+            newsroom/tests/test_authority_a2b_sqlite.py \
+            newsroom/tests/test_authority_a2b_traceability.py \
+            --junitxml=a2b-focused-results.xml
+
+      - name: Upload Focused A2b Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authority-a2b-focused-evidence
+          path: a2b-focused-results.xml
+          if-no-files-found: error
+
+      - name: A1 and A2a Regression Tests
+        id: regression
+        continue-on-error: true
+        shell: bash
+        run: |
+          mapfile -t files < <(
+            find newsroom/tests -maxdepth 1 -name 'test_authority_*.py' \
+              ! -name 'test_authority_a2b_*' | sort
+          )
+          uv run python -m pytest -q "${files[@]}" \
+            --junitxml=a2b-regression-results.xml
+
+      - name: Upload A1 and A2a Regression Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authority-a2b-regression-evidence
+          path: a2b-regression-results.xml
+          if-no-files-found: error
+
+      - name: Independent A2b Fault Matrix
+        id: faults
+        continue-on-error: true
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_authority_a2b_integrity_faults.py \
+            newsroom/tests/test_authority_a2b_fault_matrix.py \
+            --junitxml=a2b-fault-matrix-results.xml
+
+      - name: Upload A2b Fault Matrix Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authority-a2b-fault-matrix-evidence
+          path: a2b-fault-matrix-results.xml
+          if-no-files-found: error
+
+      - name: Enforce A2b Gates
+        if: always()
+        env:
+          FOCUSED_OUTCOME: ${{ steps.focused.outcome }}
+          REGRESSION_OUTCOME: ${{ steps.regression.outcome }}
+          FAULT_OUTCOME: ${{ steps.faults.outcome }}
+        run: |
+          test "$FOCUSED_OUTCOME" = success
+          test "$REGRESSION_OUTCOME" = success
+          test "$FAULT_OUTCOME" = success
