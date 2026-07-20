@@ -1,0 +1,158 @@
+name: Apply final A2b hardening
+
+on:
+  push:
+    branches:
+      - agent/increment-1a2b-final
+    paths:
+      - .github/a2b-final-hardening/**
+      - .github/a2b-round2/**
+      - .github/workflows/a2b-apply-final-hardening.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/a2b-final-hardening/**
+      - .github/a2b-round2/**
+      - .github/workflows/a2b-apply-final-hardening.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: a2b-apply-final-hardening
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    if: >-
+      github.event_name == 'push' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.head_ref == 'agent/increment-1a2b-final'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact branch head
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1a2b-final
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Reconstruct and apply exact hardening patch
+        id: hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -d .github/a2b-final-hardening ]]; then
+            echo 'Final hardening already applied.'
+            echo 'applied=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          import hashlib
+
+          root = Path('.github/a2b-final-hardening')
+          expected = [f'part-{index:02d}' for index in range(9)]
+          actual = sorted(path.name for path in root.glob('part-*'))
+          if actual != expected:
+              raise SystemExit(f'part manifest mismatch: {actual!r}')
+          encoded = ''.join(
+              ''.join((root / name).read_text(encoding='ascii').split())
+              for name in expected
+          )
+          if len(encoded) != 25596:
+              raise SystemExit(f'encoded length mismatch: {len(encoded)}')
+          archive = base64.b64decode(encoded, validate=True)
+          digest = hashlib.sha256(archive).hexdigest()
+          expected_digest = 'c4685841d9bd5daf2324e8c326073b1d757f45568b4533ff9e8670d7730b2918'
+          if digest != expected_digest:
+              raise SystemExit(f'archive digest mismatch: {digest}')
+          Path('/tmp/a2b-final-hardening.patch.xz').write_bytes(archive)
+          print(f'parts={len(expected)} encoded_chars={len(encoded)} archive_bytes={len(archive)} sha256={digest}')
+          PY
+          xz -dc /tmp/a2b-final-hardening.patch.xz > /tmp/a2b-final-hardening.patch
+          echo '46ab304d61c071f3f1934c09adff9a3ab915ea4125b32c3942f123b8f8487df7  /tmp/a2b-final-hardening.patch' | sha256sum -c -
+          git apply --check /tmp/a2b-final-hardening.patch
+          git apply /tmp/a2b-final-hardening.patch
+          rm -rf .github/a2b-final-hardening .github/a2b-round2
+          git add -A
+          git diff --cached --check
+
+          # GITHUB_TOKEN cannot create/delete workflow files. Exclude the
+          # one-shot workflow while verifying the exact reviewed source tree;
+          # the connected GitHub app removes it after the source commit lands.
+          git rm --cached --force .github/workflows/a2b-apply-final-hardening.yml
+          actual_tree="$(git write-tree)"
+          echo "actual_tree=$actual_tree"
+          echo 'expected_tree=084bfb1d829193019ae4bdf95095ab64e154a7fa'
+          test "$actual_tree" = '084bfb1d829193019ae4bdf95095ab64e154a7fa'
+          git add .github/workflows/a2b-apply-final-hardening.yml
+
+          test -f newsroom/authority/_object_system.py
+          test -f newsroom/tests/test_authority_a2b_object_commands.py
+          test ! -e .github/a2b-final-hardening
+          test ! -e .github/a2b-round2
+          echo 'applied=true' >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Lockfile check
+        run: uv lock --check
+
+      - name: Sync locked development environment
+        run: uv sync --dev --locked
+
+      - name: Focused A2b tests
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_authority_a2b_*.py \
+            --junitxml=/tmp/a2b-focused.xml
+
+      - name: A1 and A2a regression tests
+        shell: bash
+        run: |
+          mapfile -t files < <(
+            find newsroom/tests -maxdepth 1 -name 'test_authority_*.py' \
+              ! -name 'test_authority_a2b_*' | sort
+          )
+          uv run python -m pytest -q "${files[@]}" \
+            --junitxml=/tmp/a2b-regression.xml
+
+      - name: Independent A2b fault matrix
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_authority_a2b_integrity_faults.py \
+            newsroom/tests/test_authority_a2b_fault_matrix.py \
+            --junitxml=/tmp/a2b-faults.xml
+
+      - name: Complete repository tests
+        run: uv run python -m pytest -q
+
+      - name: Clustering evaluation gate
+        run: |
+          uv run python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+      - name: Commit and push verified hardening
+        if: steps.hardening.outputs.applied == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(authority): complete A2b hardening'
+          git push origin HEAD:agent/increment-1a2b-final
