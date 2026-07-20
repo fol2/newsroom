@@ -208,7 +208,15 @@ class CommandService:
                     "retained definition changed the durable idempotency namespace"
                 )
 
-        payload = self._resolve_payload(command, definition)
+        if (
+            existing is not None
+            and definition.payload_mode is PayloadMode.OBJECT_ADMISSION
+        ):
+            payload = self._resolve_committed_object_payload(
+                command, definition, existing
+            )
+        else:
+            payload = self._resolve_payload(command, definition)
         stable_semantic_request_digest = (
             _derive_stable_semantic_request_digest(
                 definition=definition,
@@ -382,6 +390,58 @@ class CommandService:
             raise IdempotencyIdentityConflict(
                 "existing idempotency key differs"
             )
+
+    def _resolve_committed_object_payload(
+        self,
+        command: SemanticCommand,
+        definition: CommandDefinition,
+        existing: CommittedCommandIdentity,
+    ) -> _ResolvedPayload:
+        """Rebuild immutable object payload identity for lost-response replay.
+
+        Current authentication and authorization still run for every retry, but
+        a later revocation or lawful deletion must not strand the exact result
+        of a command that already committed.  No governed bytes are hydrated or
+        re-authorised on this path.
+        """
+
+        if existing.payload_mode != PayloadMode.OBJECT_ADMISSION.value:
+            raise IdempotencyIdentityConflict(
+                "retained command payload mode differs from definition"
+            )
+        if not isinstance(command.payload, ObjectAdmissionPayload):
+            raise IdempotencyIdentityConflict(
+                "retry payload is not the retained object admission"
+            )
+        if (
+            existing.object_admission_id is None
+            or command.payload.admission_id != existing.object_admission_id
+        ):
+            raise IdempotencyIdentityConflict(
+                "idempotency identity belongs to another object admission"
+            )
+        schema = self._payload_schemas.resolve_exact(
+            definition.payload_schema_version,
+            definition.payload_mode,
+            definition.payload_schema_contract_version,
+            definition.payload_schema_contract_digest,
+            definition.payload_canonicalizer_version,
+        )
+        return _ResolvedPayload(
+            kind=PayloadMode.OBJECT_ADMISSION.value,
+            schema_version=definition.payload_schema_version,
+            schema_contract_version=schema.contract_version,
+            schema_contract_digest=schema.contract_digest,
+            canonicalizer_version=(
+                schema.canonicalizer_implementation_version
+            ),
+            digest=existing.payload_digest,
+            inline_bytes=None,
+            object_admission_id=existing.object_admission_id,
+            blob_digest=existing.payload_digest,
+            object_class=definition.required_object_class,
+            allowed_use=definition.required_allowed_use,
+        )
 
     def _resolve_payload(
         self, command: SemanticCommand, definition: CommandDefinition

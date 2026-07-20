@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 import sqlite3
 from typing import Any
@@ -16,7 +17,7 @@ from .persistence import (
     UnsupportedPayloadMode,
 )
 from .service import IdempotencyIdentityConflict
-from .types import AuditId, CommandId, EventId
+from .types import AuditId, CommandId, EventId, PayloadMode
 
 
 class _EventStoreCommitMixin:
@@ -25,36 +26,92 @@ class _EventStoreCommitMixin:
     def commit(self, grant: _AuthorizedCommandGrant) -> CommittedCommand:
         self._issuer.verify(grant)
         with self._lock, self._transaction() as conn:
-            existing = conn.execute(
-                "SELECT command_id,command_definition_version,"
-                "command_definition_digest,stable_semantic_request_digest,"
-                "result_digest,result_bytes FROM authority_commands "
-                "WHERE idempotency_namespace=? AND idempotency_key=?",
-                (grant.idempotency_namespace, grant.idempotency_key),
-            ).fetchone()
-            if existing is not None:
-                return self._replay_existing(grant, existing)
-            if grant.replay_of_command_id is not None:
-                raise IdempotencyConflict(
-                    "command boundary expected a replay but no row exists"
-                )
-            if grant.payload.kind not in {"INLINE", "NO_PAYLOAD"}:
-                raise UnsupportedPayloadMode(
-                    "object-admission payload persistence belongs to Increment 1A2b"
-                )
+            return self._commit_grant_in_transaction(
+                conn, grant, recorded_at=self._clock().to_text()
+            )
 
-            recorded_at = self._clock().to_text()
+    def _object_payload_commit_guard(
+        self, conn: sqlite3.Connection, grant: _AuthorizedCommandGrant
+    ) -> Any:
+        del conn
+        if grant.payload.kind == PayloadMode.OBJECT_ADMISSION.value:
+            raise UnsupportedPayloadMode(
+                "object-admission payload persistence requires the A2b authority store"
+            )
+        return nullcontext(None)
+
+    def _final_object_payload_commit_check(
+        self,
+        conn: sqlite3.Connection,
+        grant: _AuthorizedCommandGrant,
+        pinned: Any,
+    ) -> None:
+        del conn, grant, pinned
+
+    def _commit_grant_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        grant: _AuthorizedCommandGrant,
+        *,
+        recorded_at: str,
+    ) -> CommittedCommand:
+        """Commit an authorised command into an already-open authority transaction."""
+
+        self._issuer.verify(grant)
+        existing = conn.execute(
+            "SELECT command_id,command_definition_version,"
+            "command_definition_digest,stable_semantic_request_digest,"
+            "result_digest,result_bytes FROM authority_commands "
+            "WHERE idempotency_namespace=? AND idempotency_key=?",
+            (grant.idempotency_namespace, grant.idempotency_key),
+        ).fetchone()
+        if existing is not None:
+            return self._replay_existing(grant, existing)
+        if grant.replay_of_command_id is not None:
+            raise IdempotencyConflict(
+                "command boundary expected a replay but no row exists"
+            )
+
+        try:
+            payload_mode = PayloadMode(grant.payload.kind)
+        except ValueError as exc:
+            raise UnsupportedPayloadMode(
+                f"unsupported authority payload mode: {grant.payload.kind}"
+            ) from exc
+
+        with self._object_payload_commit_guard(conn, grant) as pinned:
             self._persist_schema_contract(conn, grant, recorded_at=recorded_at)
             self._persist_definition(conn, grant, recorded_at=recorded_at)
             self._persist_security(conn, grant, recorded_at=recorded_at)
             self._validate_causation(conn, grant)
             current_version, new_version = self._resolve_version(conn, grant)
 
+            object_admission_id: str | None = None
             payload_bytes = grant.payload.inline_bytes
-            if payload_bytes is None:
-                raise AuthorityPersistenceError("retained payload bytes are required")
-            if digest_bytes(payload_bytes) != grant.payload.digest:
-                raise AuthorityPersistenceError("retained payload digest mismatch")
+            if payload_mode is PayloadMode.OBJECT_ADMISSION:
+                if (
+                    payload_bytes is not None
+                    or grant.payload.object_admission_id is None
+                    or grant.payload.blob_digest is None
+                    or grant.payload.digest != grant.payload.blob_digest
+                ):
+                    raise AuthorityPersistenceError(
+                        "object-admission payload is not a closed retained reference"
+                    )
+                object_admission_id = str(grant.payload.object_admission_id)
+                if pinned is None:
+                    raise AuthorityPersistenceError(
+                        "object-admission payload lacks a pinned authority guard"
+                    )
+            else:
+                if payload_bytes is None:
+                    raise AuthorityPersistenceError(
+                        "retained payload bytes are required"
+                    )
+                if digest_bytes(payload_bytes) != grant.payload.digest:
+                    raise AuthorityPersistenceError(
+                        "retained payload digest mismatch"
+                    )
 
             command_id = str(CommandId.new())
             event_id = str(EventId.new())
@@ -92,7 +149,7 @@ class _EventStoreCommitMixin:
                     grant.payload.canonicalizer_version,
                     grant.payload.digest,
                     payload_bytes,
-                    None,
+                    object_admission_id,
                     recorded_at,
                 ),
             )
@@ -216,7 +273,7 @@ class _EventStoreCommitMixin:
                     grant.payload.schema_contract_digest,
                     grant.payload.canonicalizer_version,
                     grant.payload.digest,
-                    None,
+                    object_admission_id,
                     grant.authentication.principal_id,
                     str(grant.authentication.authentication_context_id),
                     grant.authorization_request.request_digest,
@@ -230,6 +287,10 @@ class _EventStoreCommitMixin:
                     grant.definition.trust_scope.value,
                 ),
             )
+            if payload_mode is PayloadMode.OBJECT_ADMISSION:
+                self._final_object_payload_commit_check(
+                    conn, grant, pinned
+                )
             return CommittedCommand(
                 command_id=command_id,
                 aggregate_type=grant.definition.aggregate_type,
@@ -325,9 +386,23 @@ class _EventStoreCommitMixin:
         *,
         recorded_at: str,
     ) -> None:
-        authentication = grant.authentication
-        request = grant.authorization_request
-        decision = grant.authorization
+        self._persist_security_records(
+            conn,
+            authentication=grant.authentication,
+            request=grant.authorization_request,
+            decision=grant.authorization,
+            recorded_at=recorded_at,
+        )
+
+    def _persist_security_records(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        authentication: Any,
+        request: Any,
+        decision: Any,
+        recorded_at: str,
+    ) -> None:
         auth_bytes = canonical_json_bytes(authentication.canonical_value())
         request_bytes = canonical_json_bytes(request.canonical_value())
         decision_bytes = canonical_json_bytes(decision.canonical_value())

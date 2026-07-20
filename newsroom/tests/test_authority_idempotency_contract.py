@@ -147,6 +147,9 @@ def _existing_identity(
         command_definition_version=first.command_definition_version,  # type: ignore[attr-defined]
         command_definition_digest=first.command_definition_digest,  # type: ignore[attr-defined]
         stable_semantic_request_digest=first.stable_semantic_request_digest,  # type: ignore[attr-defined]
+        payload_mode=first.payload_mode,  # type: ignore[attr-defined]
+        payload_digest=first.payload_digest,  # type: ignore[attr-defined]
+        object_admission_id=None,
     )
 
 

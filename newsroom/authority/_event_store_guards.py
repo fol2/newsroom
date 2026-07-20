@@ -46,42 +46,45 @@ class _ExactAuthorityGuards:
             canonical_bytes=data,
         )
 
-    def _persist_security(
+    def _persist_security_records(
         self,
         conn: sqlite3.Connection,
-        grant: _AuthorizedCommandGrant,
         *,
+        authentication: object,
+        request: object,
+        decision: object,
         recorded_at: str,
     ) -> None:
-        super()._persist_security(  # type: ignore[misc]
-            conn, grant, recorded_at=recorded_at
+        super()._persist_security_records(  # type: ignore[misc]
+            conn,
+            authentication=authentication,
+            request=request,
+            decision=decision,
+            recorded_at=recorded_at,
         )
-        authentication = grant.authentication
-        request = grant.authorization_request
-        decision = grant.authorization
         expected = (
             (
                 "authentication_contexts",
                 "authentication_context_id",
-                str(authentication.authentication_context_id),
-                canonical_json_bytes(authentication.canonical_value()),
-                authentication.digest,
+                str(authentication.authentication_context_id),  # type: ignore[attr-defined]
+                canonical_json_bytes(authentication.canonical_value()),  # type: ignore[attr-defined]
+                authentication.digest,  # type: ignore[attr-defined]
                 "canonical_digest",
             ),
             (
                 "authorization_requests",
                 "request_digest",
-                request.request_digest,
-                canonical_json_bytes(request.canonical_value()),
-                request.digest,
+                request.request_digest,  # type: ignore[attr-defined]
+                canonical_json_bytes(request.canonical_value()),  # type: ignore[attr-defined]
+                request.digest,  # type: ignore[attr-defined]
                 "canonical_record_digest",
             ),
             (
                 "authorization_decisions",
                 "authorization_decision_id",
-                str(decision.authorization_decision_id),
-                canonical_json_bytes(decision.canonical_value()),
-                decision.digest,
+                str(decision.authorization_decision_id),  # type: ignore[attr-defined]
+                canonical_json_bytes(decision.canonical_value()),  # type: ignore[attr-defined]
+                decision.digest,  # type: ignore[attr-defined]
                 "canonical_digest",
             ),
         )
