@@ -1,0 +1,43 @@
+name: Recover partial A2b source archive
+
+on:
+  push:
+    branches:
+      - agent/increment-1a2b-clean
+    paths:
+      - .github/a2b-upload/**
+      - .github/workflows/a2b-partial-recover.yml
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1a2b-clean
+      - name: Reconstruct partial archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          parts = sorted(Path('.github/a2b-upload').glob('part-*'))
+          assert [p.name for p in parts] == [f'part-{i:02d}' for i in range(17)]
+          encoded = ''.join(''.join(p.read_text(encoding='ascii').split()) for p in parts)
+          encoded += '=' * (-len(encoded) % 4)
+          Path('/tmp/a2b-partial.tar.xz').write_bytes(base64.b64decode(encoded, validate=True))
+          Path('/tmp/a2b-partial-meta.txt').write_text(
+              f'parts={len(parts)}\nencoded_chars={len(encoded)}\narchive_bytes={Path("/tmp/a2b-partial.tar.xz").stat().st_size}\n',
+              encoding='utf-8',
+          )
+          PY
+          sha256sum /tmp/a2b-partial.tar.xz >> /tmp/a2b-partial-meta.txt
+          xz --list --verbose /tmp/a2b-partial.tar.xz >> /tmp/a2b-partial-meta.txt 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a2b-partial-source-archive
+          path: |
+            /tmp/a2b-partial.tar.xz
+            /tmp/a2b-partial-meta.txt
+          if-no-files-found: error
