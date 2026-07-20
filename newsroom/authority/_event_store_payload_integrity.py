@@ -38,9 +38,8 @@ class _PayloadAndEnvelopeIntegrity:
             PayloadId.parse(str(row["payload_id"]))
             mode = PayloadMode(str(row["mode"]))
             if mode is PayloadMode.OBJECT_ADMISSION:
-                raise UnsupportedPayloadMode(
-                    "object-admission authority belongs to Increment 1A2b"
-                )
+                self._validate_object_admission_payload_record(conn, row)
+                continue
             if row["payload_bytes"] is None:
                 raise AuthorityPersistenceError(
                     "A2a retained payload bytes are missing"
@@ -90,6 +89,16 @@ class _PayloadAndEnvelopeIntegrity:
             "SELECT * FROM ledger_events ORDER BY ledger_seq"
         ).fetchall():
             self._validate_event_types(row)
+
+
+    @staticmethod
+    def _validate_object_admission_payload_record(
+        conn: sqlite3.Connection, row: sqlite3.Row
+    ) -> None:
+        del conn, row
+        raise UnsupportedPayloadMode(
+            "object-admission authority belongs to Increment 1A2b"
+        )
 
     @staticmethod
     def _validate_event_types(row: sqlite3.Row) -> None:

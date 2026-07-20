@@ -5,8 +5,16 @@ import sqlite3
 from typing import Iterable
 
 from .canonical import digest_canonical
+from .object_migrations import (
+    OBJECT_MIGRATION,
+    OBJECT_MIGRATION_CHECKSUM,
+    OBJECT_MIGRATION_NAME,
+    OBJECT_MIGRATION_STATEMENTS,
+    OBJECT_SCHEMA_VERSION,
+)
 
-SCHEMA_VERSION = 1
+BASE_SCHEMA_VERSION = 1
+SCHEMA_VERSION = OBJECT_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -417,13 +425,13 @@ MIGRATION_STATEMENTS: tuple[str, ...] = (
 
 MIGRATION_CHECKSUM = digest_canonical(
     {
-        "version": SCHEMA_VERSION,
+        "version": BASE_SCHEMA_VERSION,
         "name": MIGRATION_NAME,
         "statements": list(MIGRATION_STATEMENTS),
     }
 )
 MIGRATION = MigrationRecord(
-    version=SCHEMA_VERSION,
+    version=BASE_SCHEMA_VERSION,
     name=MIGRATION_NAME,
     checksum=MIGRATION_CHECKSUM,
 )
@@ -459,9 +467,9 @@ def apply_migration(
         conn.execute(
             "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
             "VALUES(?,?,?,?)",
-            (SCHEMA_VERSION, MIGRATION_NAME, MIGRATION_CHECKSUM, applied_at),
+            (BASE_SCHEMA_VERSION, MIGRATION_NAME, MIGRATION_CHECKSUM, applied_at),
         )
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute(f"PRAGMA user_version={BASE_SCHEMA_VERSION}")
         conn.execute("COMMIT")
     except Exception:
         if conn.in_transaction:
@@ -469,11 +477,62 @@ def apply_migration(
         raise
 
 
+def apply_pending_migrations(
+    conn: sqlite3.Connection, *, applied_at: str
+) -> None:
+    """Apply every pending checked migration in one exclusive transaction.
+
+    Fresh schema creation is all-or-nothing across the A2a and A2b migration
+    records.  Upgrading an A2a schema applies only v2.
+    """
+
+    current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if current > SCHEMA_VERSION:
+        raise sqlite3.DatabaseError(
+            f"database schema {current} is newer than supported {SCHEMA_VERSION}"
+        )
+    if current == SCHEMA_VERSION:
+        return
+    try:
+        conn.execute("BEGIN EXCLUSIVE")
+        if current == 0:
+            for statement in MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (BASE_SCHEMA_VERSION, MIGRATION_NAME, MIGRATION_CHECKSUM, applied_at),
+            )
+            current = BASE_SCHEMA_VERSION
+        if current == BASE_SCHEMA_VERSION:
+            for statement in OBJECT_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    OBJECT_SCHEMA_VERSION,
+                    OBJECT_MIGRATION_NAME,
+                    OBJECT_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = OBJECT_SCHEMA_VERSION
+        conn.execute(f"PRAGMA user_version={current}")
+        conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
+MIGRATIONS: tuple[MigrationRecord | object, ...] = (MIGRATION, OBJECT_MIGRATION)
+
 def _expected_fingerprint() -> str:
     conn = sqlite3.connect(":memory:", isolation_level=None)
     try:
         conn.execute("PRAGMA foreign_keys=ON")
-        apply_migration(
+        apply_pending_migrations(
             conn, applied_at="1970-01-01T00:00:00.000000Z"
         )
         return schema_fingerprint(conn)
@@ -483,5 +542,6 @@ def _expected_fingerprint() -> str:
 
 EXPECTED_SCHEMA_FINGERPRINT = _expected_fingerprint()
 EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
-    (SCHEMA_VERSION, MIGRATION_NAME, MIGRATION_CHECKSUM),
+    (BASE_SCHEMA_VERSION, MIGRATION_NAME, MIGRATION_CHECKSUM),
+    (OBJECT_SCHEMA_VERSION, OBJECT_MIGRATION_NAME, OBJECT_MIGRATION_CHECKSUM),
 )

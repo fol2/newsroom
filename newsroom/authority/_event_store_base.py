@@ -18,7 +18,7 @@ from .migrations import (
     EXPECTED_MIGRATION_HISTORY,
     EXPECTED_SCHEMA_FINGERPRINT,
     SCHEMA_VERSION,
-    apply_migration,
+    apply_pending_migrations,
     schema_fingerprint,
 )
 from .models import CommittedCommandIdentity
@@ -178,12 +178,14 @@ class _EventStoreBase:
                 f"database schema {version} is newer than supported "
                 f"{SCHEMA_VERSION}"
             )
-        if version == 0:
-            if tables:
-                raise AuthoritySchemaError(
-                    "refusing to adopt a non-empty unversioned authority database"
-                )
-            apply_migration(conn, applied_at=self._clock().to_text())
+        if version == 0 and tables:
+            raise AuthoritySchemaError(
+                "refusing to adopt a non-empty unversioned authority database"
+            )
+        if version < SCHEMA_VERSION:
+            apply_pending_migrations(
+                conn, applied_at=self._clock().to_text()
+            )
         self._validate_schema_and_integrity()
 
     def _validate_schema_and_integrity(self) -> None:
