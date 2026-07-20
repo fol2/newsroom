@@ -252,6 +252,7 @@ OBJECT_MIGRATION_STATEMENTS: tuple[str, ...] = (
         retention_scope TEXT NOT NULL,
         byte_offset INTEGER NOT NULL CHECK(byte_offset >= 0),
         allowed_bytes INTEGER NOT NULL CHECK(allowed_bytes >= 0),
+        state_cutoff_bytes BLOB NOT NULL,
         state_cutoff_digest TEXT NOT NULL,
         decided_at TEXT NOT NULL,
         canonical_bytes BLOB NOT NULL,
@@ -269,6 +270,7 @@ OBJECT_MIGRATION_STATEMENTS: tuple[str, ...] = (
             authentication_context_id,
             authorization_request_digest
         ),
+        CHECK(length(state_cutoff_bytes) > 0),
         CHECK(length(canonical_bytes) > 0)
     ) STRICT""",
     """CREATE TABLE object_deletions(

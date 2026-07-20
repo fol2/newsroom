@@ -98,9 +98,11 @@ class _ObjectHydrationStoreMixin:
                     if grant.request.length is None
                     else grant.request.length
                 )
-                if offset != 0 and not policy.allow_ranges:
+                if not policy.allow_ranges and (
+                    offset != 0 or length != blob.size_bytes
+                ):
                     raise ObjectHydrationDenied(
-                        "hydration policy does not permit ranges"
+                        "hydration policy permits only a complete object read"
                     )
                 if length > policy.max_bytes:
                     raise ObjectHydrationDenied(
@@ -114,24 +116,56 @@ class _ObjectHydrationStoreMixin:
                 pinned = self._cas.pin(blob)
                 try:
                     self._cas.verify_pinned(pinned)
-                    state_cutoff = digest_canonical(
-                        {
-                            "admission_id": str(grant.request.admission_id),
-                            "admission_lifecycle_version": int(
-                                row["admission_lifecycle_version"]
-                            ),
-                            "rights_decision_digest": str(
-                                row["rights_decision_digest"]
-                            ),
-                            "blob_digest": blob.blob_digest,
-                            "blob_lifecycle_version": int(
-                                row["blob_lifecycle_version"]
-                            ),
-                            "deletion_state": None,
-                            "offset": offset,
-                            "length": length,
-                        }
+                    blob_lifecycle = self._blob_lifecycle_row(
+                        blob.blob_digest, conn=conn
                     )
+                    deletion = self._active_deletion_for_blob(
+                        conn, blob.blob_digest
+                    )
+                    state_cutoff_value = {
+                        "admission_id": str(grant.request.admission_id),
+                        "admission_lifecycle_version": int(
+                            row["admission_lifecycle_version"]
+                        ),
+                        "admission_state": str(row["state"]),
+                        "rights_decision_id": str(row["rights_decision_id"]),
+                        "rights_decision_digest": str(
+                            row["rights_decision_digest"]
+                        ),
+                        "rights_valid_from": str(row["rights_valid_from"]),
+                        "rights_valid_until": (
+                            None
+                            if row["rights_valid_until"] is None
+                            else str(row["rights_valid_until"])
+                        ),
+                        "blob_digest": blob.blob_digest,
+                        "blob_lifecycle_version": int(
+                            blob_lifecycle["current_version"]
+                        ),
+                        "blob_state": str(blob_lifecycle["state"]),
+                        "blob_integrity_state": str(
+                            blob_lifecycle["integrity_state"]
+                        ),
+                        "deletion_id": (
+                            None
+                            if deletion is None
+                            else str(deletion["deletion_id"])
+                        ),
+                        "deletion_lifecycle_version": (
+                            None
+                            if deletion is None
+                            else int(deletion["current_version"])
+                        ),
+                        "deletion_state": (
+                            None if deletion is None else str(deletion["state"])
+                        ),
+                        "offset": offset,
+                        "length": length,
+                    }
+                    state_cutoff_bytes = canonical_json_bytes(
+                        state_cutoff_value
+                    )
+                    state_cutoff = digest_bytes(state_cutoff_bytes)
                     access_decision_id = ObjectAccessDecisionId.new()
                     canonical_value = {
                         "access_decision_id": str(access_decision_id),
@@ -155,6 +189,7 @@ class _ObjectHydrationStoreMixin:
                         "retention_scope": str(row["retention_scope"]),
                         "offset": offset,
                         "allowed_bytes": length,
+                        "state_cutoff": state_cutoff_value,
                         "state_cutoff_digest": state_cutoff,
                         "decided_at": decided_at.to_text(),
                     }
@@ -174,8 +209,9 @@ class _ObjectHydrationStoreMixin:
                         "authorization_decision_id,principal_id,authority_domain,"
                         "purpose,admission_id,object_class,allowed_use,"
                         "security_scope,retention_scope,byte_offset,allowed_bytes,"
-                        "state_cutoff_digest,decided_at,canonical_bytes,canonical_digest) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "state_cutoff_bytes,state_cutoff_digest,decided_at,"
+                        "canonical_bytes,canonical_digest) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             str(access_decision_id),
                             policy.contract_digest,
@@ -192,6 +228,7 @@ class _ObjectHydrationStoreMixin:
                             str(row["retention_scope"]),
                             offset,
                             length,
+                            state_cutoff_bytes,
                             state_cutoff,
                             decided_at.to_text(),
                             canonical,
@@ -230,6 +267,20 @@ class _ObjectHydrationStoreMixin:
                 raise AuthorityPersistenceError(
                     "access decision canonical identity mismatch"
                 )
+            cutoff_bytes = bytes(row["state_cutoff_bytes"])
+            cutoff_digest = str(row["state_cutoff_digest"])
+            cutoff_value = self._decode_canonical_object(cutoff_bytes)
+            if digest_bytes(cutoff_bytes) != cutoff_digest:
+                raise AuthorityPersistenceError(
+                    "access decision state cutoff digest mismatch"
+                )
+            if (
+                value.get("state_cutoff") != cutoff_value
+                or value.get("state_cutoff_digest") != cutoff_digest
+            ):
+                raise AuthorityPersistenceError(
+                    "access decision canonical cutoff differs from indexed record"
+                )
             return ObjectAccessDecisionView(
                 access_decision_id=access_decision_id,
                 policy_contract_digest=str(
@@ -254,7 +305,8 @@ class _ObjectHydrationStoreMixin:
                 retention_scope=str(row["retention_scope"]),
                 offset=int(row["byte_offset"]),
                 allowed_bytes=int(row["allowed_bytes"]),
-                state_cutoff_digest=str(row["state_cutoff_digest"]),
+                state_cutoff_bytes=cutoff_bytes,
+                state_cutoff_digest=cutoff_digest,
                 decided_at=UtcTimestamp.parse(str(row["decided_at"])),
                 canonical_digest=str(row["canonical_digest"]),
             )

@@ -153,11 +153,24 @@ class _GovernedCAS:
             raise ObjectLimitError("CAS disk-headroom requirement is not met")
 
     @staticmethod
-    def _chunks(source: bytes | bytearray | memoryview | BinaryIO | Iterable[bytes], chunk_size: int) -> Iterator[bytes]:
+    def _bounded_slices(
+        chunk: bytes | bytearray | memoryview, chunk_size: int
+    ) -> Iterator[bytes]:
+        view = memoryview(chunk)
+        for offset in range(0, len(view), chunk_size):
+            # Materialise only one configured I/O unit at a time.  This avoids
+            # copying an entire untrusted producer chunk before enforcing the
+            # bound.
+            yield bytes(view[offset : offset + chunk_size])
+
+    @classmethod
+    def _chunks(
+        cls,
+        source: bytes | bytearray | memoryview | BinaryIO | Iterable[bytes],
+        chunk_size: int,
+    ) -> Iterator[bytes]:
         if isinstance(source, (bytes, bytearray, memoryview)):
-            data = bytes(source)
-            for offset in range(0, len(data), chunk_size):
-                yield data[offset : offset + chunk_size]
+            yield from cls._bounded_slices(source, chunk_size)
             return
         read = getattr(source, "read", None)
         if callable(read):
@@ -167,16 +180,18 @@ class _GovernedCAS:
                     break
                 if not isinstance(chunk, (bytes, bytearray, memoryview)):
                     raise TypeError("object stream read() must return bytes")
-                yield bytes(chunk)
+                # A custom BinaryIO implementation may ignore the requested
+                # size.  Apply the same hard bound to every returned block.
+                yield from cls._bounded_slices(chunk, chunk_size)
             return
         if not isinstance(source, Iterable):
-            raise TypeError("object source must be bytes, a binary stream, or byte chunks")
+            raise TypeError(
+                "object source must be bytes, a binary stream, or byte chunks"
+            )
         for chunk in source:
             if not isinstance(chunk, (bytes, bytearray, memoryview)):
                 raise TypeError("object source chunks must be bytes")
-            data = bytes(chunk)
-            if data:
-                yield data
+            yield from cls._bounded_slices(chunk, chunk_size)
 
     def stage(
         self,
@@ -370,7 +385,14 @@ class _GovernedCAS:
             pieces.append(chunk)
             position += len(chunk)
             remaining -= len(chunk)
-        return b"".join(pieces)
+        data = b"".join(pieces)
+        # Recheck the exact same open file descriptor after the read.  The CAS
+        # path is read-only, but a same-UID bug or operator action can still
+        # chmod and mutate it.  Returning bytes without a final rehash would
+        # leave a verify-then-read race.
+        self._fault("after_range_read_before_rehash")
+        self.verify_pinned(pinned)
+        return data
 
     def finish_stage(self, staged: _StagedBlob) -> None:
         self._fault("before_stage_cleanup_unlink")

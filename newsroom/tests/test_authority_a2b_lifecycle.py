@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from newsroom.authority import (
     DeletionState,
     HydrationRequest,
+    ObjectAdmissionRequest,
     ObjectHydrationDenied,
     ObjectLifecycleError,
 )
@@ -68,6 +70,25 @@ def test_ordered_lifecycle_events_and_deletion_non_resurrection(
     # Authority reopens without bytes and without resurrecting hydratable state.
     reopened = open_object_system(database, object_root=object_root)
     try:
+        class ExplodingSource:
+            touched = False
+
+            def read(self, _size: int) -> bytes:
+                self.touched = True
+                raise AssertionError("committed replay must not touch source")
+
+        source = ExplodingSource()
+        replay = reopened.objects.admit(
+            ObjectAdmissionRequest("source.capture", "admit-1"),
+            source,
+            proof=proof(),
+        )
+        assert replay.replayed is True
+        assert source.touched is False
+        assert replay.admission.admission_id == admission.admission_id
+        # The idempotent result is the immutable activation result.  It does
+        # not restore current authority after revocation/deletion.
+        assert replay.admission.active
         with pytest.raises((ObjectHydrationDenied, Exception)):
             reopened.objects.hydrate(
                 HydrationRequest(admission.admission_id, "project.discovery"),
@@ -100,6 +121,30 @@ def test_requested_and_failed_never_allow_unlink(tmp_path: Path) -> None:
                 idempotency_key="too-early",
                 proof=proof(),
             )
+    finally:
+        system.close()
+
+
+def test_hydration_cutoff_records_a_pending_deletion(tmp_path: Path) -> None:
+    system = open_object_system(tmp_path / "authority.sqlite3")
+    try:
+        admission = admit(system, data=b"read until tombstone").admission
+        deletion = system.objects.request_deletion(
+            admission.blob.blob_digest,
+            reason_code="DELETE_REQUESTED",
+            idempotency_key="cutoff-delete",
+            proof=proof(),
+        )
+        hydrated = system.objects.hydrate(
+            HydrationRequest(admission.admission_id, "project.discovery"),
+            proof=proof(),
+        )
+        cutoff = json.loads(
+            hydrated.decision.state_cutoff_bytes.decode("utf-8")
+        )
+        assert cutoff["deletion_id"] == str(deletion.deletion_id)
+        assert cutoff["deletion_lifecycle_version"] == 1
+        assert cutoff["deletion_state"] == "REQUESTED"
     finally:
         system.close()
 

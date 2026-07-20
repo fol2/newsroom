@@ -9,8 +9,10 @@ from newsroom.authority import (
     AuthorityPersistenceError,
     AuthorityWriterBusy,
     HydrationRequest,
+    ObjectAdmissionRequest,
     ObjectIntegrityError,
     ObjectLifecycleError,
+    ObjectLimits,
 )
 
 from .authority_a2b_helpers import admit, open_object_system
@@ -74,6 +76,126 @@ def test_post_hash_mutation_is_detected_before_authority_commit(
             admit(system, data=b"original bytes")
     finally:
         system.close()
+
+
+def test_iterable_source_is_rechunked_to_the_configured_io_bound(
+    tmp_path: Path,
+) -> None:
+    staged_chunks = 0
+
+    def fault(checkpoint: str) -> None:
+        nonlocal staged_chunks
+        if checkpoint == "after_stage_chunk":
+            staged_chunks += 1
+
+    limits = ObjectLimits(
+        global_max_bytes=1024,
+        class_max_bytes={"source_capture": 1024},
+        max_read_bytes=1024,
+        io_chunk_bytes=4,
+        max_staging_bytes=1024,
+        max_range_bytes=1024,
+    )
+    system = open_object_system(
+        tmp_path / "authority.sqlite3",
+        object_limits=limits,
+        fault_hook=fault,
+    )
+    try:
+        result = system.objects.admit(
+            ObjectAdmissionRequest("source.capture", "rechunk"),
+            [b"abcdefghij"],
+            proof=proof(),
+        )
+        assert result.admission.blob.size_bytes == 10
+        assert staged_chunks == 3
+    finally:
+        system.close()
+
+
+def test_binary_stream_cannot_ignore_the_configured_read_bound(
+    tmp_path: Path,
+) -> None:
+    staged_chunks = 0
+
+    def fault(checkpoint: str) -> None:
+        nonlocal staged_chunks
+        if checkpoint == "after_stage_chunk":
+            staged_chunks += 1
+
+    class OversizedRead:
+        returned = False
+
+        def read(self, _size: int) -> bytes:
+            if self.returned:
+                return b""
+            self.returned = True
+            return b"abcdefghij"
+
+    limits = ObjectLimits(
+        global_max_bytes=1024,
+        class_max_bytes={"source_capture": 1024},
+        max_read_bytes=1024,
+        io_chunk_bytes=4,
+        max_staging_bytes=1024,
+        max_range_bytes=1024,
+    )
+    system = open_object_system(
+        tmp_path / "authority.sqlite3",
+        object_limits=limits,
+        fault_hook=fault,
+    )
+    try:
+        result = system.objects.admit(
+            ObjectAdmissionRequest("source.capture", "bounded-read"),
+            OversizedRead(),
+            proof=proof(),
+        )
+        assert result.admission.blob.size_bytes == 10
+        assert staged_chunks == 3
+    finally:
+        system.close()
+
+
+def test_hydration_rehashes_the_pinned_file_after_read(tmp_path: Path) -> None:
+    object_root = tmp_path / "objects"
+
+    def fault(checkpoint: str) -> None:
+        if checkpoint == "after_range_read_before_rehash":
+            paths = [
+                path
+                for path in (object_root / "objects").rglob("*")
+                if path.is_file()
+            ]
+            assert len(paths) == 1
+            path = paths[0]
+            path.chmod(0o600)
+            path.write_bytes(b"changed-during-read")
+            path.chmod(0o400)
+
+    database = tmp_path / "authority.sqlite3"
+    system = open_object_system(
+        database,
+        object_root=object_root,
+        fault_hook=fault,
+    )
+    try:
+        admission = admit(system, data=b"original-readable-bytes").admission
+        with pytest.raises(ObjectIntegrityError):
+            system.objects.hydrate(
+                HydrationRequest(admission.admission_id, "project.discovery"),
+                proof=proof(),
+            )
+    finally:
+        system.close()
+
+    conn = sqlite3.connect(database)
+    try:
+        assert conn.execute(
+            "SELECT count(*) FROM object_access_decisions"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 def test_missing_or_corrupt_active_bytes_fail_on_reopen(tmp_path: Path) -> None:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
 from datetime import timedelta
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -9,14 +11,26 @@ import pytest
 from newsroom.authority import (
     AuthenticationProof,
     BlobIdentity,
+    HydrationPolicyContract,
+    HydrationPolicyRegistry,
     HydrationRequest,
+    ObjectAdmissionDefinition,
     ObjectAdmissionDenied,
+    ObjectAdmissionRegistry,
     ObjectAdmissionRequest,
     ObjectHydrationDenied,
+    RightsPolicyContract,
+    RightsPolicyRegistry,
     UtcTimestamp,
+    digest_bytes,
 )
 
-from .authority_a2b_helpers import MutableClock, admit, open_object_system
+from .authority_a2b_helpers import (
+    MutableClock,
+    _policy_registries,
+    admit,
+    open_object_system,
+)
 from .authority_helpers import FIXED_NOW, proof
 
 
@@ -173,6 +187,18 @@ def test_hydration_reauthenticates_enforces_scope_and_persists_decision(
         assert hydrated.decision.authority_domain == "newsroom.authority"
         assert hydrated.decision.retention_scope == admitted.retention_scope
         assert hydrated.decision.allowed_bytes == 4
+        assert digest_bytes(hydrated.decision.state_cutoff_bytes) == (
+            hydrated.decision.state_cutoff_digest
+        )
+        cutoff = json.loads(
+            hydrated.decision.state_cutoff_bytes.decode("utf-8")
+        )
+        assert cutoff["admission_id"] == str(admitted.admission_id)
+        assert cutoff["admission_state"] == "ACTIVE"
+        assert cutoff["blob_state"] == "ACTIVE"
+        assert cutoff["blob_integrity_state"] == "VERIFIED"
+        assert cutoff["offset"] == 2
+        assert cutoff["length"] == 4
 
         denied = AuthenticationProof(method="STATIC_TOKEN", credential="wrong")
         with pytest.raises(Exception):
@@ -182,6 +208,146 @@ def test_hydration_reauthenticates_enforces_scope_and_persists_decision(
             )
     finally:
         system.close()
+
+
+def test_non_range_hydration_policy_requires_the_complete_object(
+    tmp_path: Path,
+) -> None:
+    rights, existing_hydration, existing_admissions = _policy_registries()
+    old_contract = existing_hydration.contracts()[0]
+    full_read_only = dataclasses.replace(
+        old_contract,
+        contract_version="hydration-full-read-v1",
+        implementation_version="hydration-full-read-static-v1",
+        allow_ranges=False,
+    )
+    hydration = HydrationPolicyRegistry((full_read_only,))
+    definitions = tuple(
+        dataclasses.replace(
+            definition,
+            hydration_policy_contract_digests=frozenset(
+                {full_read_only.contract_digest}
+            ),
+        )
+        for definition in existing_admissions.definitions()
+    )
+    admissions = ObjectAdmissionRegistry(
+        definitions,
+        rights_policies=rights,
+        hydration_policies=hydration,
+    )
+    system = open_object_system(
+        tmp_path / "authority.sqlite3",
+        policy_registries=(rights, hydration, admissions),
+    )
+    try:
+        admitted = admit(system, data=b"0123456789").admission
+        with pytest.raises(ObjectHydrationDenied, match="complete object"):
+            system.objects.hydrate(
+                HydrationRequest(
+                    admitted.admission_id,
+                    "project.discovery",
+                    offset=0,
+                    length=4,
+                ),
+                proof=proof(),
+            )
+        hydrated = system.objects.hydrate(
+            HydrationRequest(admitted.admission_id, "project.discovery"),
+            proof=proof(),
+        )
+        assert hydrated.data == b"0123456789"
+    finally:
+        system.close()
+
+
+def test_committed_admission_replay_survives_policy_rollout_without_source_read(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    v1 = _policy_registries()
+    system = open_object_system(database, policy_registries=v1)
+    first = admit(system, data=b"historical", key="rollout")
+    system.close()
+
+    old_rights, hydration, old_admissions = v1
+    old_permitted = old_rights.resolve("source-permitted")
+    permitted_v2 = dataclasses.replace(
+        old_permitted,
+        contract_version="rights-v2",
+        implementation_version="rights-static-v2",
+        reason_code="PERMITTED_V2",
+    )
+    rights = RightsPolicyRegistry(
+        (*old_rights.contracts(), permitted_v2),
+        current_versions={"source-permitted": "rights-v2"},
+    )
+    capture_v1 = old_admissions.resolve("source.capture")
+    capture_v2 = dataclasses.replace(
+        capture_v1,
+        definition_version="admission-v2",
+        rights_policy_contract_digest=permitted_v2.contract_digest,
+    )
+    admissions = ObjectAdmissionRegistry(
+        (*old_admissions.definitions(), capture_v2),
+        rights_policies=rights,
+        hydration_policies=hydration,
+        current_versions={"source.capture": "admission-v2"},
+    )
+
+    class ExplodingSource:
+        touched = False
+
+        def read(self, _size: int) -> bytes:
+            self.touched = True
+            raise AssertionError("committed replay must not touch source")
+
+    source = ExplodingSource()
+    reopened = open_object_system(
+        database,
+        policy_registries=(rights, hydration, admissions),
+    )
+    try:
+        replay = reopened.objects.admit(
+            ObjectAdmissionRequest("source.capture", "rollout"),
+            source,
+            proof=proof(),
+        )
+        assert replay.replayed is True
+        assert source.touched is False
+        assert replay.admission.admission_id == first.admission.admission_id
+        assert replay.admission.definition_version == "admission-v1"
+    finally:
+        reopened.close()
+
+
+def test_committed_admission_replay_still_requires_current_authorization(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    system = open_object_system(database)
+    admit(system, data=b"already committed", key="current-denial")
+    system.close()
+
+    class ExplodingSource:
+        touched = False
+
+        def read(self, _size: int) -> bytes:
+            self.touched = True
+            raise AssertionError("denied replay must not touch source")
+
+    source = ExplodingSource()
+    denied = open_object_system(database, scopes=frozenset())
+    try:
+        with pytest.raises(Exception):
+            denied.objects.admit(
+                ObjectAdmissionRequest("source.capture", "current-denial"),
+                source,
+                proof=proof(),
+            )
+        assert source.touched is False
+    finally:
+        denied.close()
 
 
 def test_rights_time_invariant_and_transaction_time_expiry(tmp_path: Path) -> None:

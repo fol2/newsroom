@@ -142,11 +142,22 @@ def open_object_system(
     *,
     object_root: Path | None = None,
     scopes: frozenset[str] | None = None,
+    policy_registries: tuple[
+        RightsPolicyRegistry,
+        HydrationPolicyRegistry,
+        ObjectAdmissionRegistry,
+    ]
+    | None = None,
+    object_limits: ObjectLimits | None = None,
     clock: Callable[[], UtcTimestamp] | None = None,
     fault_hook: Callable[[str], None] | None = None,
     disk_usage: Callable[[Path], object] | None = None,
 ):
-    rights, hydration, admissions = _policy_registries()
+    rights, hydration, admissions = (
+        _policy_registries()
+        if policy_registries is None
+        else policy_registries
+    )
     event_policy = fixture_read_policy(
         allowed_security_scopes=frozenset(
             {"authority.internal", "authority.object_lifecycle"}
@@ -192,7 +203,8 @@ def open_object_system(
             grants_by_principal={"principal.alpha": selected_scopes},
         ),
         "event_read_policy": event_policy,
-        "object_limits": ObjectLimits(
+        "object_limits": object_limits
+        or ObjectLimits(
             global_max_bytes=1024 * 1024,
             class_max_bytes={"source_capture": 1024 * 1024},
             max_read_bytes=1024 * 1024,

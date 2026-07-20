@@ -51,6 +51,7 @@ from .persistence import (
     AuthorityEvents,
     CommittedCommand,
     EventReadPolicy,
+    IdempotencyConflict,
 )
 from .policy import CommandRegistry, PayloadSchemaRegistry
 from .service import CommandService
@@ -392,18 +393,36 @@ class _ObjectBoundary:
         if not isinstance(request, ObjectAdmissionRequest):
             raise TypeError("request must be ObjectAdmissionRequest")
         authentication, checked_at = self._authenticate(proof)
-        definition = self._admission_registry.resolve(request.admission_type)
-        rights_policy = self._rights_policies.resolve_digest(
-            definition.rights_policy_contract_digest
-        )
         namespace = digest_canonical(
             {
                 "authority_domain": authentication.authority_domain,
                 "principal_id": authentication.principal_id,
                 "operation": "object_admission",
-                "admission_type": definition.admission_type,
+                "admission_type": request.admission_type,
             }
         )
+        replay_contract = self._store.committed_admission_replay_contract(
+            idempotency_namespace=namespace,
+            idempotency_key=request.idempotency_key,
+        )
+        if replay_contract is None:
+            definition = self._admission_registry.resolve(
+                request.admission_type
+            )
+            rights_policy = self._rights_policies.resolve_digest(
+                definition.rights_policy_contract_digest
+            )
+        else:
+            if replay_contract.admission_type != request.admission_type:
+                raise IdempotencyConflict(
+                    "admission idempotency identity belongs to another type"
+                )
+            definition = self._admission_registry.resolve_digest(
+                replay_contract.admission_definition_digest
+            )
+            rights_policy = self._rights_policies.resolve_digest(
+                replay_contract.rights_policy_contract_digest
+            )
         semantic = digest_canonical(
             {
                 "admission_type": request.admission_type,
@@ -414,6 +433,14 @@ class _ObjectBoundary:
                 "idempotency_key": request.idempotency_key,
             }
         )
+        if (
+            replay_contract is not None
+            and semantic
+            != replay_contract.stable_semantic_request_digest
+        ):
+            raise IdempotencyConflict(
+                "retained admission semantics cannot be reconstructed"
+            )
         preflight_id = ObjectPreflightId.new()
         authz_request, authz = self._authorize(
             authentication=authentication,
@@ -454,6 +481,10 @@ class _ObjectBoundary:
         existing = self._store.find_admission_replay(preflight)
         if existing is not None:
             return ObjectAdmissionResult(existing, replayed=True)
+        if replay_contract is not None:
+            raise IdempotencyConflict(
+                "committed admission replay contract has no exact result"
+            )
 
         staged = self._cas.stage(
             source, object_class=definition.object_class

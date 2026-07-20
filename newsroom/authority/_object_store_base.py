@@ -259,6 +259,43 @@ class _ObjectStoreBase:
             raise KeyError(admission_id)
         return row
 
+    def _admission_activation_row(
+        self, admission_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> sqlite3.Row:
+        """Return the immutable admission result committed at activation.
+
+        Idempotent command replay returns the original committed result, not a
+        projection of later revocation, expiry, deletion, or blob lifecycle
+        state.  This row is metadata only and therefore deliberately does not
+        require current rights or bytes.
+        """
+
+        selected = conn or self._connection
+        row = selected.execute(
+            "SELECT a.*,1 AS current_version,"
+            "1 AS admission_lifecycle_version,v.state,v.event_id,v.recorded_at,"
+            "b.size_bytes,1 AS blob_lifecycle_version,"
+            "r.allowed AS rights_allowed,r.reason_code,r.decided_at,"
+            "r.valid_from AS rights_valid_from,"
+            "r.valid_until AS rights_valid_until,"
+            "r.canonical_digest AS rights_digest,"
+            "r.canonical_digest AS rights_decision_digest "
+            "FROM object_admissions a "
+            "JOIN object_admission_versions v "
+            "ON v.admission_id=a.admission_id "
+            "AND v.lifecycle_version=1 AND v.state='ACTIVE' "
+            "JOIN blob_identities b ON b.blob_digest=a.blob_digest "
+            "JOIN object_rights_decisions r "
+            "ON r.rights_decision_id=a.rights_decision_id "
+            "WHERE a.admission_id=?",
+            (admission_id,),
+        ).fetchone()
+        if row is None:
+            raise AuthorityPersistenceError(
+                "committed admission lacks its immutable activation result"
+            )
+        return row
+
     def _blob_lifecycle_row(
         self, blob_digest: str, *, conn: sqlite3.Connection | None = None
     ) -> sqlite3.Row:
@@ -895,9 +932,15 @@ class _ObjectStoreBase:
             if state is BlobLifecycleState.DELETED and self._cas.object_path(
                 identity
             ).exists():
-                raise AuthorityPersistenceError(
-                    "deleted blob state still has physical bytes"
-                )
+                # SQLite tombstone authority wins.  Bytes can reappear after a
+                # crash, restore, or manual filesystem mutation; remove them
+                # deterministically instead of allowing content resurrection.
+                try:
+                    self._cas.unlink(identity)
+                except Exception as exc:
+                    raise AuthorityPersistenceError(
+                        "deleted blob bytes could not be reconciled"
+                    ) from exc
 
     def _reconcile_expired_rights(self) -> None:
         now = self._clock().to_text()

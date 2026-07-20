@@ -31,6 +31,14 @@ class _AdmissionCommitResult:
     replayed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _AdmissionReplayContract:
+    stable_semantic_request_digest: str
+    admission_type: str
+    admission_definition_digest: str
+    rights_policy_contract_digest: str
+
+
 class _ObjectAdmissionStoreMixin:
     """Two-phase admission persistence and atomic activation event commit."""
 
@@ -235,19 +243,59 @@ class _ObjectAdmissionStoreMixin:
                     "stored admission replay result shape is invalid"
                 )
             admission_id = ObjectAdmissionId.parse(str(value["admission_id"]))
-            current = self._current_admission_row(
-                self._connection,
-                str(admission_id),
-                now=self._clock(),
-                require_active=True,
-                require_bytes=True,
+            activation = self._admission_activation_row(
+                str(admission_id), conn=self._connection
             )
-            identity = BlobIdentity(
-                str(current["blob_digest"]), int(current["size_bytes"])
+            if (
+                str(activation["blob_digest"])
+                != str(value["blob_digest"])
+                or str(activation["rights_decision_id"])
+                != str(value["rights_decision_id"])
+            ):
+                raise AuthorityPersistenceError(
+                    "stored admission replay result differs from activation records"
+                )
+            return self._admission_view_from_row(activation)
+
+    def committed_admission_replay_contract(
+        self,
+        *,
+        idempotency_namespace: str,
+        idempotency_key: str,
+    ) -> _AdmissionReplayContract | None:
+        """Resolve retained semantics only for an already committed admission.
+
+        An unfinished preflight or staging reservation must not pin an obsolete
+        policy after a rollout.  Historical contracts are selected only when a
+        committed result exists and the retry is therefore result recovery.
+        """
+
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT i.stable_semantic_request_digest,i.admission_type,"
+                "i.admission_definition_digest,i.rights_policy_contract_digest "
+                "FROM object_admission_idempotency i "
+                "JOIN object_lifecycle_operations o "
+                "ON o.operation_type='ADMISSION_ACTIVATE' "
+                "AND o.idempotency_namespace=i.idempotency_namespace "
+                "AND o.idempotency_key=i.idempotency_key "
+                "WHERE i.idempotency_namespace=? AND i.idempotency_key=?",
+                (idempotency_namespace, idempotency_key),
+            ).fetchone()
+            if row is None:
+                return None
+            return _AdmissionReplayContract(
+                stable_semantic_request_digest=str(
+                    row["stable_semantic_request_digest"]
+                ),
+                admission_type=str(row["admission_type"]),
+                admission_definition_digest=str(
+                    row["admission_definition_digest"]
+                ),
+                rights_policy_contract_digest=str(
+                    row["rights_policy_contract_digest"]
+                ),
             )
-            with self._cas.pin(identity):
-                pass
-            return self._admission_view_from_row(current)
 
     @staticmethod
     def _verify_lifecycle_grant(
@@ -657,4 +705,8 @@ class _ObjectAdmissionStoreMixin:
         )
 
 
-__all__ = ["_AdmissionCommitResult", "_ObjectAdmissionStoreMixin"]
+__all__ = [
+    "_AdmissionCommitResult",
+    "_AdmissionReplayContract",
+    "_ObjectAdmissionStoreMixin",
+]

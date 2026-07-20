@@ -5,7 +5,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Mapping
 
-from .canonical import digest_canonical, validate_sha256_digest
+from .canonical import digest_bytes, digest_canonical, validate_sha256_digest
 from .types import (
     AuthenticationContextId,
     AuthorizationDecisionId,
@@ -642,6 +642,7 @@ class ObjectAccessDecisionView:
     retention_scope: str
     offset: int
     allowed_bytes: int
+    state_cutoff_bytes: bytes
     state_cutoff_digest: str
     decided_at: UtcTimestamp
     canonical_digest: str
@@ -650,13 +651,16 @@ class ObjectAccessDecisionView:
         for field_name in (
             "policy_contract_digest",
             "authorization_request_digest",
-            "state_cutoff_digest",
             "canonical_digest",
         ):
             if validate_sha256_digest(
                 getattr(self, field_name), field=field_name
             ) != getattr(self, field_name):
                 raise ObjectPolicyError(f"{field_name} must be canonical")
+        if not isinstance(self.state_cutoff_bytes, bytes) or not self.state_cutoff_bytes:
+            raise ObjectPolicyError("state cutoff must retain canonical bytes")
+        if digest_bytes(self.state_cutoff_bytes) != self.state_cutoff_digest:
+            raise ObjectPolicyError("state cutoff bytes and digest differ")
         require_token(self.principal_id, field="principal_id")
         require_token(self.authority_domain, field="authority_domain")
         require_token(self.purpose, field="purpose")
