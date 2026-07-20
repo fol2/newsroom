@@ -90,20 +90,22 @@ jobs:
           git add -A
           git diff --cached --check
 
-          # The bot token may update source/content but cannot remove a workflow file.
-          # Remove the unchanged installer from the temporary index only, verify the
-          # exact source-only tree, then put it back in the index for the bot commit.
+          # GITHUB_TOKEN cannot create or delete workflow files. Exclude both
+          # workflows from the bot commit, verify the exact source/test tree,
+          # then let the connected GitHub app add/delete workflows separately.
           git rm --cached --force .github/workflows/a2b-install-final.yml
+          git rm --cached --force .github/workflows/authority-a2b.yml
           actual_tree="$(git write-tree)"
           echo "actual_tree=$actual_tree"
-          echo 'expected_tree=2cadaef351ac4631ceee4c0aab894ba762cacf34'
-          test "$actual_tree" = '2cadaef351ac4631ceee4c0aab894ba762cacf34'
+          echo 'expected_tree=e29f181ce06f17b71b47ca466fc7ba080971e8b5'
+          test "$actual_tree" = 'e29f181ce06f17b71b47ca466fc7ba080971e8b5'
           git add .github/workflows/a2b-install-final.yml
 
           test -f newsroom/authority/_object_system.py
           test -f newsroom/authority/_object_store.py
           test -f newsroom/authority/_object_cas.py
           test -f newsroom/tests/test_authority_a2b_fault_matrix.py
+          test -f .github/workflows/authority-a2b.yml
           test ! -e .github/a2b-upload
           test -e .github/workflows/a2b-install-final.yml
           echo 'installed=true' >> "$GITHUB_OUTPUT"
