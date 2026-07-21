@@ -1,9 +1,10 @@
 schema_version = "newsroom.sdlc.gates.v1"
 contract_version = "sdlc-v2.2"
-status = "proposed"
+status = "accepted"
 owner = "fol2"
 canonical_language = "English"
 specification = "docs/specs/sdlc/high-performance-evidence-sdlc.md"
+acceptance_record = "docs/specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md"
 issue = 98
 
 [global]
@@ -306,3 +307,17 @@ allowed = [
   "EVIDENCE_MISMATCH",
   "UNAUTHORISED_EFFECT",
 ]
+
+[owner_decisions]
+accepted_at = "2026-07-22"
+review_net_executable_lines_trigger = 400
+review_changed_files_trigger = 12
+selector_shadow_calendar_days = 30
+selector_shadow_minimum_changes = 500
+selector_known_failure_miss_limit = 0
+selector_mutation_recall_minimum = 0.995
+prewarmed_runner_evaluation_permitted_after_measured_slo_failure = true
+critical_main_failure_pauses_merges = true
+pr_evidence_retention_days = 30
+main_evidence_retention_days = 180
+release_evidence_retention_years = 7
