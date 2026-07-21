@@ -376,6 +376,29 @@ class _ProjectionBoundary:
             reason_code=request.reason_code,
         )
 
+    def _begin_rebuild(
+        self,
+        request: Any,
+        proof: AuthenticationProof,
+    ):
+        grant = self._grant(
+            command_type="projection.generation.rebuild",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "through_ledger_seq": request.through_ledger_seq,
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
+        return self._store.begin_projection_rebuild(
+            grant,
+            generation_id=request.generation_id,
+            through_ledger_seq=request.through_ledger_seq,
+        )
+
     def _authorize_delivery(
         self,
         request: ProjectionDeliveryRequest,

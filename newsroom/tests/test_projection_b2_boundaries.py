@@ -18,6 +18,8 @@ from newsroom.projection.neo4j import (
     StructuralGraphNodeView,
     StructuralGraphRelationView,
     StructuralNode,
+    StructuralRebuildRequest,
+    StructuralRebuildResult,
     StructuralReadMetadata,
     StructuralReadRequest,
     StructuralReadResponse,
@@ -55,16 +57,17 @@ def _relative(path: Path) -> Path:
     return path.relative_to(_REPOSITORY_ROOT)
 
 
-def test_public_projector_exposes_only_delivery_and_bounded_read() -> None:
+def test_public_projector_exposes_only_delivery_read_and_rebuild() -> None:
     methods = {
         name
         for name, value in vars(Neo4jStructuralProjector).items()
         if not name.startswith("_") and callable(value)
     }
-    assert methods == {"deliver", "read"}
+    assert methods == {"deliver", "read", "rebuild"}
     assert set(Neo4jStructuralProjector.__slots__) == {
         "__deliver",
         "__read",
+        "__rebuild",
     }
     assert "adapter" not in Neo4jProjectionAuthoritySystem.__slots__
     assert "driver" not in Neo4jProjectionAuthoritySystem.__slots__
@@ -103,6 +106,8 @@ def test_public_typed_contracts_contain_no_internal_identity_or_property_maps() 
         StructuralGraphNodeView,
         StructuralGraphRelationView,
         StructuralNode,
+        StructuralRebuildRequest,
+        StructuralRebuildResult,
         StructuralReadMetadata,
         StructuralReadRequest,
         StructuralReadResponse,

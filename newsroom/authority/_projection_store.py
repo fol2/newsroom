@@ -55,6 +55,24 @@ class _ProjectionDeliverySource:
 
 
 @dataclass(frozen=True, slots=True)
+class _ProjectionRebuildReceipt:
+    generation: ProjectionGenerationView
+    through_ledger_seq: int
+    authority_event_id: EventId
+    replayed: bool
+    recorded_at: UtcTimestamp
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectionRebuildDeliveryState:
+    outcome: ProjectionDeliveryOutcome
+    finalized: bool
+    attempt_count: int
+    source_event_id: EventId
+    source_event_digest: str
+
+
+@dataclass(frozen=True, slots=True)
 class _ProjectionGenerationMetadata:
     generation: ProjectionGenerationView
     family: ProjectionFamilyDefinition
@@ -1426,6 +1444,57 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 recorded_at=UtcTimestamp.parse(recorded_at),
             )
 
+    def begin_projection_rebuild(
+        self,
+        grant: _AuthorizedCommandGrant,
+        *,
+        generation_id: ProjectionGenerationId,
+        through_ledger_seq: int,
+    ) -> _ProjectionRebuildReceipt:
+        with self._lock, self._transaction() as conn:
+            result = self._commit_grant_in_transaction(
+                conn, grant, recorded_at=self._clock().to_text()
+            )
+            current = self._generation_row(conn, str(generation_id))
+            state = ProjectionGenerationState(str(current["state"]))
+            if state is not ProjectionGenerationState.BUILDING:
+                raise ProjectionStateError(
+                    "only a building generation can be destructively rebuilt"
+                )
+            checkpoint = self._checkpoint_seq(conn, str(generation_id))
+            if not result.replayed and through_ledger_seq < checkpoint:
+                raise ProjectionStateError(
+                    "rebuild target cannot precede the authoritative checkpoint"
+                )
+            maximum_before_rebuild = result.ledger_seq - 1
+            if through_ledger_seq > maximum_before_rebuild:
+                raise ProjectionStateError(
+                    "rebuild target exceeds retained authority at command commit"
+                )
+            recorded_at = self._source_event(conn, result.ledger_seq).recorded_at
+            if not result.replayed:
+                self._update_generation_authority_version(
+                    conn,
+                    generation_id=str(generation_id),
+                    authority_version=result.aggregate_version,
+                    authority_event_id=result.event_id,
+                    recorded_at=recorded_at,
+                )
+                self._advance_checkpoint(
+                    conn,
+                    generation_id=str(generation_id),
+                    authority_version=result.aggregate_version,
+                    authority_event_id=result.event_id,
+                    recorded_at=recorded_at,
+                )
+            return _ProjectionRebuildReceipt(
+                generation=self._generation_view(conn, str(generation_id)),
+                through_ledger_seq=through_ledger_seq,
+                authority_event_id=EventId.parse(str(result.event_id)),
+                replayed=result.replayed,
+                recorded_at=UtcTimestamp.parse(recorded_at),
+            )
+
     def record_delivery(
         self,
         grant: _AuthorizedCommandGrant,
@@ -2221,6 +2290,28 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
             ),
             recorded_at=UtcTimestamp.parse(str(row["updated_at"])),
         )
+
+    def projection_rebuild_delivery_state(
+        self,
+        generation_id: ProjectionGenerationId,
+        ledger_seq: int,
+    ) -> _ProjectionRebuildDeliveryState | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM projection_delivery_states "
+                "WHERE generation_id=? AND ledger_seq=?",
+                (str(generation_id), ledger_seq),
+            ).fetchone()
+            if row is None:
+                return None
+            self._require_delivery_source_integrity(self._connection, row)
+            return _ProjectionRebuildDeliveryState(
+                outcome=ProjectionDeliveryOutcome(str(row["current_outcome"])),
+                finalized=bool(row["finalized"]),
+                attempt_count=int(row["attempt_count"]),
+                source_event_id=EventId.parse(str(row["source_event_id"])),
+                source_event_digest=str(row["source_event_digest"]),
+            )
 
     def projection_delivery_source(
         self,

@@ -51,6 +51,8 @@ from newsroom.projection.neo4j.models import (
     StructuralBatch,
     StructuralDeliveryRequest,
     StructuralNode,
+    StructuralRebuildRequest,
+    StructuralRebuildResult,
     StructuralReadMetadata,
     StructuralReadRequest,
     StructuralReadResponse,
@@ -83,6 +85,9 @@ class _StructuralGraphAdapter(Protocol):
     ) -> Neo4jStructuralRead:
         ...
 
+    def cleanup_generation(self, generation_id: str) -> int:
+        ...
+
     def close(self) -> None:
         ...
 
@@ -90,7 +95,7 @@ class _StructuralGraphAdapter(Protocol):
 class Neo4jStructuralProjector:
     """Public B2 facade: exact delivery plus bounded non-authoritative read."""
 
-    __slots__ = ("__deliver", "__read")
+    __slots__ = ("__deliver", "__read", "__rebuild")
 
     def __init__(
         self,
@@ -103,9 +108,14 @@ class Neo4jStructuralProjector:
             [StructuralReadRequest, AuthenticationProof],
             StructuralReadResponse,
         ],
+        rebuild: Callable[
+            [StructuralRebuildRequest, AuthenticationProof],
+            StructuralRebuildResult,
+        ],
     ) -> None:
         self.__deliver = deliver
         self.__read = read
+        self.__rebuild = rebuild
 
     def deliver(
         self,
@@ -122,6 +132,14 @@ class Neo4jStructuralProjector:
         proof: AuthenticationProof,
     ) -> StructuralReadResponse:
         return self.__read(request, proof)
+
+    def rebuild(
+        self,
+        request: StructuralRebuildRequest,
+        *,
+        proof: AuthenticationProof,
+    ) -> StructuralRebuildResult:
+        return self.__rebuild(request, proof)
 
 
 class Neo4jProjectionAuthoritySystem:
@@ -277,6 +295,96 @@ class _Neo4jProjectionBoundary:
             raise Neo4jAuthorityCommitPending(
                 "Neo4j delivery committed but B1 authority transition is pending"
             ) from None
+
+    def rebuild(
+        self,
+        request: StructuralRebuildRequest,
+        proof: AuthenticationProof,
+    ) -> StructuralRebuildResult:
+        if not isinstance(request, StructuralRebuildRequest):
+            raise TypeError("structural rebuild requires a typed request")
+        receipt = self._projection_boundary._begin_rebuild(request, proof)
+        if receipt.generation.state is not ProjectionGenerationState.BUILDING:
+            raise ProjectionStateError(
+                "only a building generation can be destructively rebuilt"
+            )
+
+        deleted = self._adapter.cleanup_generation(str(request.generation_id))
+        reapplied = 0
+        recorded = 0
+        ignored = 0
+        blocked = 0
+        for ledger_seq in range(1, request.through_ledger_seq + 1):
+            source = self._store.projection_delivery_source(
+                request.generation_id, ledger_seq
+            )
+            state = self._store.projection_rebuild_delivery_state(
+                request.generation_id, ledger_seq
+            )
+            if source.mapping is None:
+                ignored += 1
+                continue
+            if state is not None:
+                if (
+                    state.finalized
+                    and state.outcome is ProjectionDeliveryOutcome.APPLIED
+                ):
+                    self._adapter.apply(_build_structural_batch(source))
+                    reapplied += 1
+                    continue
+                if state.outcome is ProjectionDeliveryOutcome.IGNORED_OPTIONAL:
+                    ignored += 1
+                    continue
+                if state.finalized:
+                    blocked += 1
+                    continue
+                attempt_number = state.attempt_count + 1
+            else:
+                attempt_number = 1
+
+            current = self._store.projection_generation(request.generation_id)
+            delivery_key = "rebuild-delivery:" + digest_canonical(
+                {
+                    "rebuild_idempotency_key": request.idempotency_key,
+                    "generation_id": str(request.generation_id),
+                    "ledger_seq": ledger_seq,
+                    "attempt_number": attempt_number,
+                }
+            )
+            result = self.deliver(
+                StructuralDeliveryRequest(
+                    generation_id=request.generation_id,
+                    expected_authority_version=(
+                        current.authority_aggregate_version
+                    ),
+                    ledger_seq=ledger_seq,
+                    idempotency_key=delivery_key,
+                ),
+                proof,
+            )
+            if result.outcome is ProjectionDeliveryOutcome.APPLIED:
+                recorded += 1
+            elif result.outcome is ProjectionDeliveryOutcome.IGNORED_OPTIONAL:
+                ignored += 1
+            else:
+                blocked += 1
+
+        metadata = self._store.projection_generation_metadata(
+            request.generation_id
+        )
+        return StructuralRebuildResult(
+            generation_id=request.generation_id,
+            through_ledger_seq=request.through_ledger_seq,
+            checkpoint_ledger_seq=metadata.contiguous_ledger_seq,
+            rebuild_authority_event_id=receipt.authority_event_id,
+            authority_command_replayed=receipt.replayed,
+            deleted_graph_record_count=deleted,
+            reapplied_delivery_count=reapplied,
+            recorded_delivery_count=recorded,
+            ignored_optional_count=ignored,
+            blocked_delivery_count=blocked,
+            serving_time=metadata.serving_time,
+        )
 
     def read(
         self,
@@ -591,6 +699,7 @@ def _open_with_adapter(
             structural=Neo4jStructuralProjector(
                 deliver=graph_boundary.deliver,
                 read=graph_boundary.read,
+                rebuild=graph_boundary.rebuild,
             ),
             compatibility=compatibility,
             close=close,

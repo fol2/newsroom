@@ -52,6 +52,7 @@ class MemoryNeo4jAdapter:
         self.deliveries: dict[tuple[str, int], StructuralBatch] = {}
         self.bootstrap_count = 0
         self.apply_count = 0
+        self.cleanup_count = 0
         self.closed = False
 
     def verify_compatibility(self) -> Neo4jCompatibility:
@@ -162,6 +163,15 @@ class MemoryNeo4jAdapter:
             nodes=tuple(nodes[key] for key in sorted(nodes))[:limit],
             relations=tuple(relations[:limit]),
         )
+
+    def cleanup_generation(self, generation_id: str) -> int:
+        self.cleanup_count += 1
+        selected = [
+            key for key in self.deliveries if key[0] == generation_id
+        ]
+        for key in selected:
+            del self.deliveries[key]
+        return len(selected)
 
     def corrupt_delivery_digest(
         self, generation_id: ProjectionGenerationId, ledger_seq: int

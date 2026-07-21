@@ -8,7 +8,7 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from newsroom.authority.canonical import digest_canonical, validate_sha256_digest
-from newsroom.authority.types import TrustScope, UtcTimestamp, require_token
+from newsroom.authority.types import EventId, TrustScope, UtcTimestamp, require_token
 from newsroom.projection.models import (
     ProjectionContractError,
     ProjectionGenerationId,
@@ -407,6 +407,81 @@ class StructuralDeliveryRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class StructuralRebuildRequest:
+    generation_id: ProjectionGenerationId
+    expected_authority_version: int
+    through_ledger_seq: int
+    reason_code: str
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_id, ProjectionGenerationId):
+            raise ProjectionContractError(
+                "structural rebuild generation identity must be typed"
+            )
+        _require_positive_int(
+            self.expected_authority_version,
+            field="expected_authority_version",
+        )
+        _require_non_negative_int(
+            self.through_ledger_seq,
+            field="through_ledger_seq",
+        )
+        require_token(self.reason_code, field="structural_rebuild_reason_code")
+        if (
+            not isinstance(self.idempotency_key, str)
+            or not self.idempotency_key.strip()
+            or len(self.idempotency_key.encode("utf-8")) > 256
+        ):
+            raise ProjectionContractError(
+                "structural rebuild idempotency key is invalid"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralRebuildResult:
+    generation_id: ProjectionGenerationId
+    through_ledger_seq: int
+    checkpoint_ledger_seq: int
+    rebuild_authority_event_id: EventId
+    authority_command_replayed: bool
+    deleted_graph_record_count: int
+    reapplied_delivery_count: int
+    recorded_delivery_count: int
+    ignored_optional_count: int
+    blocked_delivery_count: int
+    serving_time: UtcTimestamp
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_id, ProjectionGenerationId):
+            raise ProjectionContractError(
+                "structural rebuild result generation identity must be typed"
+            )
+        for field, value in (
+            ("through_ledger_seq", self.through_ledger_seq),
+            ("checkpoint_ledger_seq", self.checkpoint_ledger_seq),
+            ("deleted_graph_record_count", self.deleted_graph_record_count),
+            ("reapplied_delivery_count", self.reapplied_delivery_count),
+            ("recorded_delivery_count", self.recorded_delivery_count),
+            ("ignored_optional_count", self.ignored_optional_count),
+            ("blocked_delivery_count", self.blocked_delivery_count),
+        ):
+            _require_non_negative_int(value, field=field)
+        if not isinstance(self.rebuild_authority_event_id, EventId):
+            raise ProjectionContractError(
+                "structural rebuild authority event identity must be typed"
+            )
+        if not isinstance(self.authority_command_replayed, bool):
+            raise ProjectionContractError(
+                "structural rebuild replay flag must be boolean"
+            )
+        if not isinstance(self.serving_time, UtcTimestamp):
+            raise ProjectionContractError(
+                "structural rebuild serving time must be UtcTimestamp"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class StructuralReadRequest:
     generation_id: ProjectionGenerationId
     canonical_ids: tuple[str, ...]
@@ -491,6 +566,12 @@ def _require_text(value: str, *, field: str) -> str:
     return value
 
 
+def _require_non_negative_int(value: int, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ProjectionContractError(f"{field} must be a non-negative integer")
+    return value
+
+
 def _require_positive_int(value: int, *, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ProjectionContractError(f"{field} must be a positive integer")
@@ -519,6 +600,8 @@ __all__ = [
     "StructuralGraphNodeView",
     "StructuralGraphRelationView",
     "StructuralNode",
+    "StructuralRebuildRequest",
+    "StructuralRebuildResult",
     "StructuralReadMetadata",
     "StructuralReadRequest",
     "StructuralReadResponse",

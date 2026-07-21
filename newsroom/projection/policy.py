@@ -32,6 +32,7 @@ PROJECTION_COMMAND_TYPES = frozenset(
         "projection.generation.transition",
         "projection.generation.validate",
         "projection.generation.promote",
+        "projection.generation.rebuild",
         "projection.delivery.record",
         "projection.gap.resolve",
     }
@@ -83,6 +84,16 @@ _PAYLOAD_SPECS: tuple[tuple[str, frozenset[str]], ...] = (
         ),
     ),
     (
+        "projection_generation_rebuild_v1",
+        frozenset(
+            {
+                "generation_id",
+                "through_ledger_seq",
+                "reason_code",
+            }
+        ),
+    ),
+    (
         "projection_delivery_record_v1",
         frozenset(
             {
@@ -129,6 +140,12 @@ _COMMAND_SPECS: tuple[tuple[str, str, str, str], ...] = (
         "projection.generation.promote",
         "projection.generation.promoted",
         "projection_generation_promote_v1",
+        "authority.projection.manage",
+    ),
+    (
+        "projection.generation.rebuild",
+        "projection.generation.rebuild.started",
+        "projection_generation_rebuild_v1",
         "authority.projection.manage",
     ),
     (
