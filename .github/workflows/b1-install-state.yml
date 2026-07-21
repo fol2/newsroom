@@ -80,6 +80,7 @@ jobs:
           rm -rf .github/b1-state
           git add -A
           git diff --cached --check
+          git status --short
 
           # Temporary workflows are retained in this bot commit because the
           # workflow token cannot create/delete workflow files. Exclude them
@@ -90,8 +91,8 @@ jobs:
           git rm --cached --force .github/workflows/b1-install-state.yml
           actual_tree="$(git write-tree)"
           echo "actual_tree=$actual_tree"
-          echo 'expected_tree=37a624f86808c5dd87b9aa1e9b7e130e179442d7'
-          test "$actual_tree" = '37a624f86808c5dd87b9aa1e9b7e130e179442d7'
+          echo 'expected_tree=85725679e0f0bebb18214c280b852e539b585335'
+          test "$actual_tree" = '85725679e0f0bebb18214c280b852e539b585335'
           git add .github/workflows/b1-export-checkout.yml \
                   .github/workflows/b1-install-checkpoint.yml \
                   .github/workflows/b1-install-state.yml
