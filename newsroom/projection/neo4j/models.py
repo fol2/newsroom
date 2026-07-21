@@ -76,8 +76,20 @@ class Neo4jProjectorConfig:
             raise Neo4jConfigurationError("Neo4j URI must use an authenticated Bolt-compatible scheme")
         if parsed.username is not None or parsed.password is not None:
             raise Neo4jConfigurationError("Neo4j credentials must not be embedded in the URI")
+        if parsed.query or parsed.fragment:
+            raise Neo4jConfigurationError(
+                "Neo4j URI must not contain query or fragment data"
+            )
+        if parsed.path not in {"", "/"}:
+            raise Neo4jConfigurationError(
+                "Neo4j URI must not contain a database path"
+            )
         if not parsed.hostname:
             raise Neo4jConfigurationError("Neo4j URI requires a host")
+        try:
+            parsed.port
+        except ValueError:
+            raise Neo4jConfigurationError("Neo4j URI port is invalid") from None
         require_token(self.database, field="neo4j_database")
         require_token(self.username, field="neo4j_projector_username")
         if not isinstance(self.password, str) or not self.password:

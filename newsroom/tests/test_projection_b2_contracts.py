@@ -47,6 +47,19 @@ def test_projector_config_is_explicit_authenticated_and_redacted() -> None:
             username="projector",
             password="none",
         )
+    for unsafe_uri in (
+        "bolt://localhost:7687/neo4j",
+        "bolt://localhost:7687?token=secret",
+        "bolt://localhost:7687#secret",
+        "bolt://localhost:not-a-port",
+    ):
+        with pytest.raises(Neo4jConfigurationError):
+            Neo4jProjectorConfig(
+                uri=unsafe_uri,
+                database="neo4j",
+                username="projector",
+                password="secret",
+            )
 
 
 def test_environment_config_has_no_unauthenticated_fallback() -> None:

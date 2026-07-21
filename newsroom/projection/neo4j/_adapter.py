@@ -145,6 +145,9 @@ LIMIT $limit
 _CLEANUP_GENERATION_QUERY = """
 MATCH (value)
 WHERE value.generation_id = $generation_id
+  AND (value:NewsroomProjectionNode
+       OR value:NewsroomProjectionDelivery
+       OR value:NewsroomProjectionRelationIdentity)
 DETACH DELETE value
 RETURN count(value) AS deleted_count
 """
@@ -409,8 +412,11 @@ class _Neo4jAdapter:
                 raise Neo4jIdentityConflict("Neo4j node upsert returned no exact state")
             current = _record_mapping(record, "properties")
             _require_node_identity(current, expected)
+            _require_node_properties(current)
             current_first = int(current["first_ledger_seq"])
-            if node.first_ledger_seq < current_first:
+            if node.first_ledger_seq == current_first:
+                _require_same_sequence_node_provenance(current, expected)
+            elif node.first_ledger_seq < current_first:
                 updated = transaction.run(
                     _UPDATE_NODE_FIRST_PROVENANCE_QUERY,
                     {
@@ -424,7 +430,8 @@ class _Neo4jAdapter:
                 if updated is None:
                     raise Neo4jIdentityConflict("Neo4j node provenance update returned no exact state")
                 current = _record_mapping(updated, "properties")
-            _require_node_properties(current)
+                _require_node_properties(current)
+                _require_same_sequence_node_provenance(current, expected)
 
         for relation in sorted(batch.relations, key=lambda value: value.relation_key):
             identity_properties = _relation_identity_properties(batch, relation)
@@ -539,7 +546,7 @@ def _relation_properties(batch: StructuralBatch, relation: Any) -> dict[str, obj
         "aggregate_version": relation.aggregate_version,
         "payload_id": relation.payload_id,
         "payload_digest": relation.payload_digest,
-        "object_admission_id": relation.object_admission_id,
+        "object_admission_id": relation.object_admission_id or "",
         "principal_id": relation.principal_id,
         "trust_scope": relation.trust_scope.value,
         "security_scope": relation.security_scope,
@@ -600,6 +607,20 @@ def _require_node_identity(actual: Mapping[str, object], expected: Mapping[str, 
         raise Neo4jIdentityConflict("Neo4j canonical node belongs to another exact identity")
 
 
+def _require_same_sequence_node_provenance(
+    actual: Mapping[str, object], expected: Mapping[str, object]
+) -> None:
+    provenance_keys = {
+        "first_ledger_seq",
+        "first_source_event_id",
+        "first_source_event_digest",
+    }
+    if any(actual.get(key) != expected.get(key) for key in provenance_keys):
+        raise Neo4jIdentityConflict(
+            "Neo4j canonical node has conflicting provenance at the same sequence"
+        )
+
+
 def _require_node_properties(actual: Mapping[str, object]) -> None:
     if set(actual) != set(_NODE_PROPERTY_KEYS):
         raise Neo4jIdentityConflict("Neo4j node contains properties outside the fixed contract")
@@ -649,7 +670,7 @@ def _relation_view(
         payload_digest=str(properties["payload_digest"]),
         object_admission_id=(
             None
-            if properties["object_admission_id"] is None
+            if properties["object_admission_id"] == ""
             else str(properties["object_admission_id"])
         ),
         principal_id=str(properties["principal_id"]),

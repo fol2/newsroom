@@ -220,3 +220,92 @@ def source_command(*, key: str, aggregate_id: AggregateId | None = None) -> Sema
         payload=InlinePayload({"headline": "B2 fixture", "count": 1}),
         idempotency_key=key,
     )
+
+
+def structural_batch(
+    *,
+    generation_id: ProjectionGenerationId | None = None,
+    ledger_seq: int = 1,
+    object_admission_id: str | None = None,
+) -> StructuralBatch:
+    """Build a deterministic typed batch for private adapter tests."""
+
+    from newsroom.authority import TrustScope, digest_canonical
+    from newsroom.projection import ProjectionNodeType, ProjectionRelationType
+    from newsroom.projection.neo4j import StructuralNode, StructuralRelation
+
+    selected_generation = generation_id or ProjectionGenerationId.new()
+    source_event_id = "event-b2-adapter-fixture"
+    source_event_digest = digest_canonical(
+        {
+            "fixture": "projection-b2-adapter",
+            "ledger_seq": ledger_seq,
+        }
+    )
+    source_id = "npid:v1:source-item:adapter-fixture"
+    event_id = "npid:v1:ledger-event:adapter-fixture"
+    nodes = (
+        StructuralNode(
+            canonical_id=source_id,
+            node_type=ProjectionNodeType.SOURCE_ITEM,
+            identity_source="AGGREGATE_ID",
+            identity_reference_digest=digest_canonical(
+                {"canonical_id": source_id, "type": "SOURCE_ITEM"}
+            ),
+            first_ledger_seq=ledger_seq,
+            first_source_event_id=source_event_id,
+            first_source_event_digest=source_event_digest,
+        ),
+        StructuralNode(
+            canonical_id=event_id,
+            node_type=ProjectionNodeType.LEDGER_EVENT,
+            identity_source="EVENT_ID",
+            identity_reference_digest=digest_canonical(
+                {"canonical_id": event_id, "type": "LEDGER_EVENT"}
+            ),
+            first_ledger_seq=ledger_seq,
+            first_source_event_id=source_event_id,
+            first_source_event_digest=source_event_digest,
+        ),
+    )
+    relation = StructuralRelation(
+        relation_key=digest_canonical(
+            {
+                "source": source_id,
+                "target": event_id,
+                "ledger_seq": ledger_seq,
+            }
+        ),
+        relation_type=ProjectionRelationType.PROJECTED_FROM_EVENT,
+        source_canonical_id=source_id,
+        target_canonical_id=event_id,
+        ledger_seq=ledger_seq,
+        source_event_id=source_event_id,
+        source_event_type="source.item.written",
+        source_event_digest=source_event_digest,
+        aggregate_type="source_item",
+        aggregate_id="aggregate-b2-adapter-fixture",
+        aggregate_version=1,
+        payload_id="payload-b2-adapter-fixture",
+        payload_digest=digest_canonical({"payload": "adapter-fixture"}),
+        object_admission_id=object_admission_id,
+        principal_id="principal.alpha",
+        trust_scope=TrustScope.OBSERVED,
+        security_scope="newsroom.internal",
+        retention_scope="newsroom.standard",
+        recorded_at=FIXED_NOW,
+    )
+    return StructuralBatch(
+        generation_id=selected_generation,
+        family_id="native-structural-v1",
+        family_definition_version="projection-family-v1",
+        projector_version="native-projector-v1",
+        ontology_contract_digest=digest_canonical({"ontology": "v1"}),
+        mapping_contract_digest=digest_canonical({"mapping": "v1"}),
+        ledger_seq=ledger_seq,
+        source_event_id=source_event_id,
+        source_event_type="source.item.written",
+        source_event_digest=source_event_digest,
+        nodes=nodes,
+        relations=(relation,),
+    )
