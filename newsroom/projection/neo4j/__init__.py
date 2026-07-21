@@ -29,6 +29,17 @@ from .models import (
     StructuralReadResponse,
     StructuralRelation,
 )
+from .qualification import (
+    GraphRAGQualificationError,
+    GraphRAGQualificationEvidence,
+    GraphRAGQualificationReceipt,
+    GraphRAGRuntimeConfig,
+    GraphRuntimeKind,
+    QUALIFYING_PROFILES,
+    RuntimeProfile,
+    neo4j_compatibility_digest,
+    require_qualified_graphrag,
+)
 from .traceability import (
     INCREMENT_1B2_DEFERRED,
     INCREMENT_1B2_EXCLUSIONS,
@@ -49,6 +60,15 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "require_qualified_graphrag",
+    "neo4j_compatibility_digest",
+    "RuntimeProfile",
+    "QUALIFYING_PROFILES",
+    "GraphRuntimeKind",
+    "GraphRAGRuntimeConfig",
+    "GraphRAGQualificationReceipt",
+    "GraphRAGQualificationEvidence",
+    "GraphRAGQualificationError",
     "INCREMENT_1B2_DEFERRED",
     "INCREMENT_1B2_EXCLUSIONS",
     "INCREMENT_1B2_TRACEABILITY",
