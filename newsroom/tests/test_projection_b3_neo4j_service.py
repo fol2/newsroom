@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+from newsroom.projection import (
+    ProjectionFamilyRegistrationRequest,
+    ProjectionGenerationCreateRequest,
+    ProjectionGenerationId,
+    StructuralIdentityContext,
+    canonical_node_id,
+)
+from newsroom.projection.neo4j import (
+    Neo4jProjectorConfig,
+    StructuralReadRequest,
+    StructuralRebuildRequest,
+)
+from newsroom.projection.neo4j._adapter import _open_neo4j_adapter
+
+from .authority_helpers import FIXED_NOW
+from .projection_b1_helpers import FAMILY_ID, projection_contracts
+from .projection_b2_helpers import (
+    open_b2_service_system,
+    proof,
+    source_command,
+)
+
+
+_REQUIRED_FLAG = "NEWSROOM_NEO4J_SERVICE_REQUIRED"
+
+
+def _service_config() -> Neo4jProjectorConfig:
+    if os.environ.get(_REQUIRED_FLAG) != "1":
+        pytest.skip("actual Neo4j service is required only by the permanent graph gate")
+    return Neo4jProjectorConfig.from_environment()
+
+
+def _register(system) -> None:
+    system.projections.register_family(
+        ProjectionFamilyRegistrationRequest(
+            FAMILY_ID,
+            "b3-service-family-register",
+        ),
+        proof=proof(),
+    )
+
+
+def _create_generation(system, *, suffix: str):
+    return system.projections.create_generation(
+        ProjectionGenerationCreateRequest(
+            ProjectionGenerationId.new(),
+            FAMILY_ID,
+            "B3_ACTUAL_SERVICE_REBUILD",
+            f"b3-service-generation-{suffix}",
+        ),
+        proof=proof(),
+    )
+
+
+def _source_event(system, *, key: str):
+    command = system.commands.execute(source_command(key=key), proof=proof())
+    return next(
+        event
+        for event in system.events.after(0, limit=1000, proof=proof())
+        if event.command_id == str(command.command_id)
+    )
+
+
+def _canonical_ids_for_source_event(event) -> tuple[str, ...]:
+    contracts = projection_contracts()
+    family = contracts.family(FAMILY_ID)
+    mapping_contract = contracts.mappings.resolve_digest(
+        family.mapping_contract_digest
+    )
+    mapping = mapping_contract.resolve(event.event_type)
+    assert mapping is not None
+    context = StructuralIdentityContext(
+        aggregate_type=event.aggregate_type,
+        aggregate_id=event.aggregate_id,
+        aggregate_version=event.aggregate_version,
+        event_id=event.event_id,
+        payload_id=event.payload_id,
+        payload={"headline": "B2 fixture", "count": 1},
+    )
+    return tuple(canonical_node_id(binding, context) for binding in mapping.nodes)
+
+
+def _rebuild_request(system, generation, *, key: str) -> StructuralRebuildRequest:
+    through = system.events.after(0, limit=1000, proof=proof())[-1].ledger_seq
+    current = next(
+        item
+        for item in system.projections.generations(FAMILY_ID, proof=proof())
+        if item.generation_id == generation.generation_id
+    )
+    return StructuralRebuildRequest(
+        generation_id=generation.generation_id,
+        expected_authority_version=current.authority_aggregate_version,
+        through_ledger_seq=through,
+        reason_code="B3_ACTUAL_SERVICE_GRAPH_LOSS",
+        idempotency_key=key,
+    )
+
+
+def _read(system, generation_id, canonical_ids):
+    return system.structural.read(
+        StructuralReadRequest(
+            generation_id,
+            canonical_ids,
+            FIXED_NOW,
+            limit=100,
+        ),
+        proof=proof(),
+    )
+
+
+def _cleanup(config: Neo4jProjectorConfig, *generation_ids: ProjectionGenerationId) -> None:
+    adapter = _open_neo4j_adapter(config)
+    try:
+        adapter.verify_compatibility()
+        for generation_id in generation_ids:
+            adapter.cleanup_generation(str(generation_id))
+    finally:
+        adapter.close()
+
+
+def test_actual_service_graph_loss_and_process_restart_rebuild_from_authority(
+    tmp_path: Path,
+) -> None:
+    config = _service_config()
+    authority_path = tmp_path / "authority.sqlite3"
+    generation_id: ProjectionGenerationId | None = None
+    request: StructuralRebuildRequest | None = None
+    canonical_ids: tuple[str, ...] = ()
+    before_events = ()
+
+    system = open_b2_service_system(authority_path, config)
+    try:
+        source = _source_event(system, key="b3-service-loss-source")
+        canonical_ids = _canonical_ids_for_source_event(source)
+        _register(system)
+        generation = _create_generation(system, suffix="loss")
+        generation_id = generation.generation_id
+        request = _rebuild_request(
+            system,
+            generation,
+            key="b3-service-loss-rebuild",
+        )
+        first = system.structural.rebuild(request, proof=proof())
+        assert first.recorded_delivery_count == 1
+        initial = _read(system, generation_id, canonical_ids)
+        assert initial.nodes
+        assert initial.relations
+        before_events = system.events.after(0, limit=1000, proof=proof())
+    finally:
+        system.close()
+
+    assert generation_id is not None
+    assert request is not None
+    try:
+        _cleanup(config, generation_id)
+        restarted = open_b2_service_system(authority_path, config)
+        try:
+            missing = _read(restarted, generation_id, canonical_ids)
+            assert missing.nodes == ()
+            assert missing.relations == ()
+
+            replay = restarted.structural.rebuild(request, proof=proof())
+            assert replay.authority_command_replayed is True
+            assert replay.recorded_delivery_count == 0
+            assert replay.reapplied_delivery_count == 1
+            assert restarted.events.after(0, limit=1000, proof=proof()) == before_events
+
+            restored = _read(restarted, generation_id, canonical_ids)
+            assert restored.nodes == initial.nodes
+            assert restored.relations == initial.relations
+        finally:
+            restarted.close()
+    finally:
+        _cleanup(config, generation_id)
+
+
+def test_actual_service_rebuild_cleanup_cannot_cross_generation_namespace(
+    tmp_path: Path,
+) -> None:
+    config = _service_config()
+    authority_path = tmp_path / "authority.sqlite3"
+    generations: list[ProjectionGenerationId] = []
+    system = open_b2_service_system(authority_path, config)
+    try:
+        source = _source_event(system, key="b3-service-isolation-source")
+        canonical_ids = _canonical_ids_for_source_event(source)
+        _register(system)
+        first = _create_generation(system, suffix="isolation-first")
+        second = _create_generation(system, suffix="isolation-second")
+        generations.extend((first.generation_id, second.generation_id))
+        first_request = _rebuild_request(
+            system,
+            first,
+            key="b3-service-isolation-first-rebuild",
+        )
+        second_request = _rebuild_request(
+            system,
+            second,
+            key="b3-service-isolation-second-rebuild",
+        )
+        system.structural.rebuild(first_request, proof=proof())
+        system.structural.rebuild(second_request, proof=proof())
+        second_before = _read(system, second.generation_id, canonical_ids)
+        assert second_before.nodes
+        assert second_before.relations
+    finally:
+        system.close()
+
+    try:
+        _cleanup(config, first.generation_id)
+        restarted = open_b2_service_system(authority_path, config)
+        try:
+            first_missing = _read(restarted, first.generation_id, canonical_ids)
+            assert first_missing.nodes == ()
+            assert first_missing.relations == ()
+            second_after_loss = _read(restarted, second.generation_id, canonical_ids)
+            assert second_after_loss == second_before
+
+            replay = restarted.structural.rebuild(first_request, proof=proof())
+            assert replay.authority_command_replayed is True
+            assert replay.reapplied_delivery_count == 1
+            assert _read(restarted, second.generation_id, canonical_ids) == second_before
+        finally:
+            restarted.close()
+    finally:
+        _cleanup(config, *generations)
