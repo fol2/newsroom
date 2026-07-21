@@ -1,0 +1,46 @@
+name: B2 Fresh Checkout Export
+
+on:
+  push:
+    branches:
+      - agent/increment-1b2-neo4j-structural
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Verify exact tracked checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain=v1)"
+
+      - name: Export exact tracked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --output=b2-fresh-checkout.tar.gz HEAD
+          git rev-parse HEAD > b2-fresh-checkout-head.txt
+          sha256sum b2-fresh-checkout.tar.gz > b2-fresh-checkout.tar.gz.sha256
+
+      - name: Upload exact source
+        uses: actions/upload-artifact@v4
+        with:
+          name: b2-fresh-checkout-${{ github.sha }}
+          path: |
+            b2-fresh-checkout.tar.gz
+            b2-fresh-checkout.tar.gz.sha256
+            b2-fresh-checkout-head.txt
+          if-no-files-found: error
+          retention-days: 1
