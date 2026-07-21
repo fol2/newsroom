@@ -1,0 +1,300 @@
+schema_version = "newsroom.sdlc.gates.v1"
+contract_version = "sdlc-v2.1"
+status = "proposed"
+owner = "fol2"
+canonical_language = "English"
+specification = "docs/specs/sdlc/high-performance-evidence-sdlc.md"
+issue = 98
+
+[global]
+gate_command_timeout_seconds = 55
+lane_hard_timeout_seconds = 60
+pr_feedback_p50_target_seconds = 30
+pr_feedback_p95_target_seconds = 60
+runner_queue_p95_target_seconds = 5
+warm_bootstrap_p95_target_seconds = 10
+cold_bootstrap_migration_p95_target_seconds = 30
+obsolete_head_cancellation_target_seconds = 5
+unknown_path_risk = "R3_EXTERNAL_SERVICE_SECURITY"
+classifier_error_risk = "R3_EXTERNAL_SERVICE_SECURITY"
+full_suite_is_default = true
+required_decision_always_reports = true
+rerun_can_overwrite_required_result = false
+
+[gate.route]
+id = "route"
+p50_target_seconds = 1
+p95_target_seconds = 2
+hard_timeout_seconds = 5
+blocking = true
+lane = "core"
+
+[gate.source-integrity]
+id = "source-integrity"
+p50_target_seconds = 3
+p95_target_seconds = 8
+hard_timeout_seconds = 15
+blocking = true
+lane = "core"
+
+[gate.core-deterministic]
+id = "core-deterministic"
+p50_target_seconds = 15
+p95_target_seconds = 35
+hard_timeout_seconds = 55
+blocking = true
+lane = "core"
+
+[gate.service-neo4j]
+id = "service-neo4j"
+p50_target_seconds = 25
+p95_target_seconds = 50
+hard_timeout_seconds = 55
+blocking = true
+risk_triggered = true
+lane = "service"
+
+[gate.merge-exact]
+id = "merge-exact"
+p50_target_seconds = 20
+p95_target_seconds = 50
+hard_timeout_seconds = 55
+blocking = true
+lane = "merge-group"
+activation = "after_merge_queue_adoption"
+
+[gate.science-shard]
+id = "science-*"
+p50_target_seconds = 20
+p95_target_seconds = 50
+hard_timeout_seconds = 55
+blocking = false
+lane = "science"
+
+[gate.evidence-finalize]
+id = "evidence-finalize"
+p50_target_seconds = 1
+p95_target_seconds = 3
+hard_timeout_seconds = 5
+blocking = true
+lane = "decision"
+
+[risk.R0_DOCUMENTATION]
+rank = 0
+core = true
+service = false
+description = "Non-executable documentation only."
+
+[risk.R1_LOCAL_CODE]
+rank = 1
+core = true
+service = false
+description = "Hermetic deterministic code with no state, credential, service or qualifying-profile effect."
+
+[risk.R2_STATEFUL_CONTRACT]
+rank = 2
+core = true
+service = false
+description = "Authority, persistence, transaction, migration, schema, replay, deletion or public contract change."
+
+[risk.R3_EXTERNAL_SERVICE_SECURITY]
+rank = 3
+core = true
+service = true
+description = "External service, credential, workflow, dependency, network or qualifying-profile change."
+
+[risk.R4_RELEASE_OPERATIONAL]
+rank = 4
+core = true
+service = true
+owner_authority_required = true
+description = "Release, deployment, operational admission, canary, shadow or public-effect change."
+
+[classification]
+strategy = "maximum_triggered_risk"
+unknown_path = "R3_EXTERNAL_SERVICE_SECURITY"
+unknown_dependency_edge = "R3_EXTERNAL_SERVICE_SECURITY"
+classifier_error = "R3_EXTERNAL_SERVICE_SECURITY"
+changed_gate_contract = "R3_EXTERNAL_SERVICE_SECURITY"
+changed_workflow = "R3_EXTERNAL_SERVICE_SECURITY"
+changed_dependency_or_lock = "R3_EXTERNAL_SERVICE_SECURITY"
+changed_release_or_deployment = "R4_RELEASE_OPERATIONAL"
+
+[classification.paths]
+documentation = [
+  "docs/**",
+  "README.md",
+  "CONTRIBUTING.md",
+  "PROMPTS.md",
+]
+contract_control = [
+  ".sdlc/**",
+  "docs/specs/sdlc/**",
+  "docs/plans/*sdlc*",
+  ".github/workflows/**",
+]
+stateful_contract = [
+  "newsroom/authority/**",
+  "newsroom/projection/models.py",
+  "newsroom/projection/policy.py",
+  "newsroom/**/migrations.py",
+  "newsroom/**/*_migrations.py",
+  "newsroom/schemas/**",
+  "newsroom/tests/test_authority_*.py",
+  "newsroom/tests/test_projection_b1_*.py",
+  "newsroom/tests/test_projection_b3_authority.py",
+]
+external_service_security = [
+  "newsroom/projection/neo4j/**",
+  "newsroom/tests/test_projection_b2_neo4j_service.py",
+  "newsroom/tests/test_projection_b3_neo4j_service.py",
+  ".github/workflows/**",
+  "pyproject.toml",
+  "uv.lock",
+]
+release_operational = [
+  "deploy/**",
+  "release/**",
+  ".github/workflows/release*.yml",
+  ".github/workflows/deploy*.yml",
+]
+clustering = [
+  "newsroom/event_manager.py",
+  "newsroom/clustering.py",
+  "newsroom/evals/clustering_*",
+  "scripts/eval_clustering_metrics.py",
+  "scripts/newsroom_clustering_decisions.py",
+]
+
+[lanes.core]
+bootstrap_once = true
+run_full_suite_when_p95_below_seconds = 35
+hard_timeout_seconds = 55
+required = true
+
+[lanes.service]
+bootstrap_once = true
+parallel_with = "core"
+condition = "risk.service == true"
+actual_service_required = true
+fake_or_noop_satisfies = false
+hard_timeout_seconds = 55
+
+[lanes.merge_group]
+exact_tree_required = true
+reuse_requires_exact_evidence_identity = true
+hard_timeout_seconds = 55
+
+[lanes.science]
+parallel_shards = true
+per_shard_hard_timeout_seconds = 55
+pr_blocking = false
+
+[test_strategy]
+full_suite_blocking_default = true
+full_suite_p95_threshold_seconds = 35
+warm_bootstrap_p95_threshold_seconds = 10
+selector_initial_mode = "observe"
+selector_blocking_earliest_mode = "after_shadow_acceptance"
+selector_shadow_calendar_days = 30
+selector_shadow_minimum_changes = 500
+selector_known_failure_miss_limit = 0
+selector_mutation_recall_minimum = 0.995
+selector_dependency_graph_coverage_minimum = 0.99
+unselected_deterministic_sample_fraction = 0.05
+nightly_full_suite = true
+selection_seed = "head_sha"
+
+[test_sizes.micro]
+individual_test_p95_seconds = 0.1
+
+[test_sizes.small]
+individual_test_or_file_p95_seconds = 1.0
+
+[test_sizes.service]
+individual_test_p95_seconds = 5.0
+
+[test_sizes.science]
+shard_hard_timeout_seconds = 55
+
+[sentinels]
+execution_p95_target_seconds = 5
+current = [
+  "authority_authentication_before_lookup",
+  "authority_command_event_idempotency_rollback",
+  "migration_open_reopen_integrity",
+  "graph_writer_import_boundary",
+  "credential_redaction_default_admin_rejection",
+  "required_gap_checkpoint_blocking",
+  "workflow_gate_contract_integrity",
+]
+future_required = [
+  "deletion_non_resurrection",
+  "qualifying_profile_requires_current_graphrag",
+]
+
+[flake]
+target_rate = 0.001
+nonconformant_rate = 0.005
+window_days = 7
+diagnostic_rerun_allowed = true
+diagnostic_rerun_changes_required_result = false
+quarantine_expiry_days = 7
+critical_quarantine_requires_owner = true
+critical_categories = [
+  "authority",
+  "security",
+  "migration",
+  "deletion_non_resurrection",
+]
+
+[cache]
+key_inputs = [
+  "runner_os",
+  "runner_arch",
+  "python_version",
+  "uv_version",
+  "uv_lock_digest",
+  "toolchain_contract_digest",
+]
+secrets_allowed = false
+pr_cache_can_write_privileged_namespace = false
+cache_is_authority = false
+exact_provenance_required = true
+
+[evidence]
+schema = ".sdlc/evidence.schema.json"
+route_schema = ".sdlc/route.schema.json"
+baseline = ".sdlc/baselines/2026-07-21-b3.json"
+content_addressed = true
+exact_tree_required = true
+exact_lock_required = true
+exact_toolchain_required = true
+first_required_result_immutable = true
+
+[change_review]
+net_executable_lines_trigger = 400
+changed_files_trigger = 12
+branch_lifetime_target_working_days = 1
+triggers_are_advisory = true
+decomposition_note_required_above_trigger = true
+
+[slo_error_budget]
+window_days = 7
+execution_p95_max_seconds = 55
+budget_exceeded_fraction_max = 0.01
+flake_fraction_max = 0.005
+evidence_mismatch_fraction_max = 0.001
+known_regression_miss_limit = 0
+freeze_scope_on_nonconformance = true
+
+[results]
+allowed = [
+  "PASS",
+  "FAIL",
+  "BUDGET_EXCEEDED",
+  "CLASSIFIER_ERROR",
+  "ENVIRONMENT_ERROR",
+  "EVIDENCE_MISMATCH",
+  "UNAUTHORISED_EFFECT",
+]
