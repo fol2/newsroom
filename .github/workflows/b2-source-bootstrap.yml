@@ -1,0 +1,40 @@
+name: B2 Source Bootstrap
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  export-source:
+    if: github.head_ref == 'agent/increment-1b2-neo4j-structural'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact checkout
+        run: |
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain=v1)"
+
+      - name: Export tracked source
+        run: |
+          git archive --format=tar.gz --output=newsroom-source.tar.gz HEAD
+          git rev-parse HEAD > source-head.txt
+          sha256sum newsroom-source.tar.gz > newsroom-source.tar.gz.sha256
+
+      - name: Upload source bootstrap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: b2-source-bootstrap-${{ github.sha }}
+          path: |
+            newsroom-source.tar.gz
+            newsroom-source.tar.gz.sha256
+            source-head.txt
+          if-no-files-found: error
+          retention-days: 1
