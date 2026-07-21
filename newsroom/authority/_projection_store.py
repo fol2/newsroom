@@ -945,6 +945,10 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
             )
             if result.replayed:
                 return self._generation_version_for_event(conn, result.event_id)
+            if target_state is ProjectionGenerationState.ACTIVE:
+                raise ProjectionStateError(
+                    "ACTIVE generation requires authority promotion"
+                )
             current = self._generation_row(conn, str(generation_id))
             state = ProjectionGenerationState(str(current["state"]))
             if target_state not in _ALLOWED_TRANSITIONS[state]:

@@ -14,6 +14,7 @@ from newsroom.projection import (
     ProjectionGenerationId,
     ProjectionGenerationPromotionRequest,
     ProjectionGenerationState,
+    ProjectionGenerationTransitionRequest,
     ProjectionGenerationValidationRequest,
     ProjectionStateError,
 )
@@ -90,6 +91,71 @@ def _promote(
         ),
         proof=proof(),
     )
+
+
+def test_direct_active_transition_cannot_bypass_authority_promotion(
+    tmp_path: Path,
+) -> None:
+    system = open_projection_system(tmp_path / "authority.sqlite3")
+    try:
+        _register(system)
+        created = _create(system, "generation-create-direct-active")
+        validating = system.projections.transition_generation(
+            ProjectionGenerationTransitionRequest(
+                created.generation_id,
+                created.authority_aggregate_version,
+                ProjectionGenerationState.VALIDATING,
+                "LEGACY_VALIDATING",
+                "generation-legacy-validating",
+                validated_through_ledger_seq=0,
+            ),
+            proof=proof(),
+        )
+        before_events = system.events.after(0, limit=100, proof=proof())
+
+        with pytest.raises(ProjectionStateError, match="authority promotion"):
+            system.projections.transition_generation(
+                ProjectionGenerationTransitionRequest(
+                    validating.generation_id,
+                    validating.authority_aggregate_version,
+                    ProjectionGenerationState.ACTIVE,
+                    "DIRECT_ACTIVE_FORBIDDEN",
+                    "generation-direct-active-forbidden",
+                    validated_through_ledger_seq=0,
+                ),
+                proof=proof(),
+            )
+
+        assert system.events.after(0, limit=100, proof=proof()) == before_events
+        after_rejection = next(
+            item
+            for item in system.projections.generations(FAMILY_ID, proof=proof())
+            if item.generation_id == created.generation_id
+        )
+        assert after_rejection.state is ProjectionGenerationState.VALIDATING
+        assert after_rejection.authority_aggregate_version == (
+            validating.authority_aggregate_version
+        )
+
+        validation = _validate(
+            system,
+            after_rejection,
+            "generation-validate-after-direct-active",
+        )
+        validated = next(
+            item
+            for item in system.projections.generations(FAMILY_ID, proof=proof())
+            if item.generation_id == created.generation_id
+        )
+        promotion = _promote(
+            system,
+            validated,
+            validation,
+            "generation-promote-after-direct-active",
+        )
+        assert promotion.generation.state is ProjectionGenerationState.ACTIVE
+    finally:
+        system.close()
 
 
 def test_validation_evidence_is_exact_typed_and_replayable(tmp_path: Path) -> None:
@@ -217,6 +283,97 @@ def test_atomic_promotion_retires_prior_active_generation(tmp_path: Path) -> Non
         assert system.projections.status(FAMILY_ID, proof=proof()).generation_id == (
             second_created.generation_id
         )
+    finally:
+        system.close()
+
+
+def test_validation_and_promotion_require_exact_current_checkpoint(
+    tmp_path: Path,
+) -> None:
+    system = open_projection_system(tmp_path / "authority.sqlite3")
+    try:
+        _register(system)
+        created = _create(system, "generation-create-current-checkpoint")
+        source_result = system.commands.execute(
+            SemanticCommand(
+                command_type="source.item.write",
+                aggregate_id=AggregateId.new(),
+                expected_aggregate_version=0,
+                payload=InlinePayload({"headline": "B3 checkpoint", "count": 1}),
+                idempotency_key="b3-current-checkpoint-source",
+            ),
+            proof=proof(),
+        )
+        source = next(
+            event
+            for event in system.events.after(0, limit=100, proof=proof())
+            if event.command_id == source_result.command_id
+        )
+        current = next(
+            item
+            for item in system.projections.generations(FAMILY_ID, proof=proof())
+            if item.generation_id == created.generation_id
+        )
+        system.projections.record_delivery(
+            ProjectionDeliveryRequest(
+                created.generation_id,
+                current.authority_aggregate_version,
+                source.ledger_seq,
+                ProjectionDeliveryOutcome.APPLIED,
+                "b3-current-checkpoint-delivery",
+            ),
+            proof=proof(),
+        )
+        checkpoint = system.projections.status(
+            FAMILY_ID, proof=proof()
+        ).contiguous_ledger_seq
+        assert checkpoint > 0
+        current = next(
+            item
+            for item in system.projections.generations(FAMILY_ID, proof=proof())
+            if item.generation_id == created.generation_id
+        )
+        before = system.events.after(0, limit=1000, proof=proof())
+        with pytest.raises(ProjectionStateError, match="exact current contiguous checkpoint"):
+            system.projections.validate_generation(
+                ProjectionGenerationValidationRequest(
+                    current.generation_id,
+                    current.authority_aggregate_version,
+                    checkpoint - 1,
+                    SERVICE_DIGEST,
+                    GRAPH_DIGEST,
+                    "B3_PARTIAL_VALIDATE",
+                    "generation-partial-validation",
+                ),
+                proof=proof(),
+            )
+        assert system.events.after(0, limit=1000, proof=proof()) == before
+
+        validation = system.projections.validate_generation(
+            ProjectionGenerationValidationRequest(
+                current.generation_id,
+                current.authority_aggregate_version,
+                checkpoint,
+                SERVICE_DIGEST,
+                GRAPH_DIGEST,
+                "B3_COMPLETE_VALIDATE",
+                "generation-complete-validation",
+            ),
+            proof=proof(),
+        )
+        validating = next(
+            item
+            for item in system.projections.generations(FAMILY_ID, proof=proof())
+            if item.generation_id == created.generation_id
+        )
+        promotion = _promote(
+            system,
+            validating,
+            validation,
+            "generation-promote-current-checkpoint",
+        )
+        assert promotion.generation.state is ProjectionGenerationState.ACTIVE
+        assert promotion.generation.validated_through_ledger_seq == checkpoint
     finally:
         system.close()
 
