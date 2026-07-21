@@ -9,6 +9,8 @@
     "contract_version",
     "base_sha",
     "head_sha",
+    "base_tree_sha",
+    "head_tree_sha",
     "risk_tier",
     "reasons",
     "core_required",
@@ -20,10 +22,19 @@
     "selected_test_manifest_digest"
   ],
   "properties": {
-    "schema_version": {"const": "newsroom.sdlc.route.v1"},
-    "contract_version": {"type": "string", "minLength": 1},
-    "base_sha": {"$ref": "#/$defs/gitSha"},
-    "head_sha": {"$ref": "#/$defs/gitSha"},
+    "schema_version": {
+      "const": "newsroom.sdlc.route.v1"
+    },
+    "contract_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "base_sha": {
+      "$ref": "#/$defs/gitSha"
+    },
+    "head_sha": {
+      "$ref": "#/$defs/gitSha"
+    },
     "risk_tier": {
       "enum": [
         "R0_DOCUMENTATION",
@@ -35,56 +46,136 @@
     },
     "reasons": {
       "type": "array",
-      "items": {"type": "string", "minLength": 1},
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
       "minItems": 1,
       "uniqueItems": true
     },
-    "core_required": {"type": "boolean"},
-    "service_required": {"type": "boolean"},
-    "clustering_required": {"type": "boolean"},
-    "owner_authority_required": {"type": "boolean"},
+    "core_required": {
+      "const": true
+    },
+    "service_required": {
+      "type": "boolean"
+    },
+    "clustering_required": {
+      "type": "boolean"
+    },
+    "owner_authority_required": {
+      "type": "boolean"
+    },
     "core_tests": {
       "type": "array",
-      "items": {"type": "string", "minLength": 1},
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
       "uniqueItems": true
     },
     "service_tests": {
       "type": "array",
-      "items": {"type": "string", "minLength": 1},
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
       "uniqueItems": true
     },
     "sentinels": {
       "type": "array",
-      "items": {"type": "string", "minLength": 1},
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
       "uniqueItems": true
     },
-    "selected_test_manifest_digest": {"$ref": "#/$defs/sha256"}
+    "selected_test_manifest_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "base_tree_sha": {
+      "$ref": "#/$defs/gitSha"
+    },
+    "head_tree_sha": {
+      "$ref": "#/$defs/gitSha"
+    }
   },
   "allOf": [
     {
       "if": {
         "properties": {
           "risk_tier": {
-            "enum": ["R3_EXTERNAL_SERVICE_SECURITY", "R4_RELEASE_OPERATIONAL"]
+            "enum": [
+              "R0_DOCUMENTATION",
+              "R1_LOCAL_CODE",
+              "R2_STATEFUL_CONTRACT"
+            ]
           }
         },
-        "required": ["risk_tier"]
+        "required": [
+          "risk_tier"
+        ]
       },
-      "then": {"properties": {"service_required": {"const": true}}}
+      "then": {
+        "properties": {
+          "service_required": {
+            "const": false
+          }
+        }
+      }
     },
     {
       "if": {
-        "properties": {"risk_tier": {"const": "R4_RELEASE_OPERATIONAL"}},
-        "required": ["risk_tier"]
+        "properties": {
+          "risk_tier": {
+            "enum": [
+              "R3_EXTERNAL_SERVICE_SECURITY",
+              "R4_RELEASE_OPERATIONAL"
+            ]
+          }
+        },
+        "required": [
+          "risk_tier"
+        ]
       },
       "then": {
-        "required": ["owner_authority_required"],
-        "properties": {"owner_authority_required": {"const": true}}
+        "properties": {
+          "service_required": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "risk_tier": {
+            "const": "R4_RELEASE_OPERATIONAL"
+          }
+        },
+        "required": [
+          "risk_tier"
+        ]
+      },
+      "then": {
+        "required": [
+          "owner_authority_required"
+        ],
+        "properties": {
+          "owner_authority_required": {
+            "const": true
+          }
+        }
       }
     }
   ],
   "$defs": {
-    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
   }
 }
