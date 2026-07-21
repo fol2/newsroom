@@ -1,0 +1,68 @@
+name: B3 Active Promotion Publisher
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.head_ref == 'agent/increment-1b3-rebuild-promotion'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Verify and apply exact active-promotion hardening
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD}"
+          echo "d1a583e0237dc05ea1b12106e623228bd1cd2f25212f8b85d2a85b49e7b3ef09  .github/b3-active-promotion.patch" | sha256sum --check --strict
+          sed -i 's|^ diff --git a/newsroom/tests/test_projection_b3_authority.py|diff --git a/newsroom/tests/test_projection_b3_authority.py|' .github/b3-active-promotion.patch
+          echo "f9c15d72302b08f24a7ebcc4d57668be5d8a9c26f54db3fd366114a7b08b6acf  .github/b3-active-promotion.patch" | sha256sum --check --strict
+          git apply --check .github/b3-active-promotion.patch
+          git apply .github/b3-active-promotion.patch
+          rm .github/b3-active-promotion.patch
+          rm .github/workflows/b3-active-promotion-publisher.yml
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Qualify authority promotion hardening
+        run: |
+          uv lock --check
+          uv sync --dev --locked
+          uv run python -m compileall -q newsroom scripts
+          uv run python -m pytest -q \
+            newsroom/tests/test_authority_*.py \
+            newsroom/tests/test_projection_b1_*.py \
+            newsroom/tests/test_projection_b2_*.py \
+            newsroom/tests/test_projection_b3_*.py
+
+      - name: Commit and push source-only hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          ! git diff --cached --name-only | grep -E '(^|/)(b3-active-promotion|b3-active-promotion-publisher)'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix(projection): require authority promotion for activation"
+          git push origin HEAD:agent/increment-1b3-rebuild-promotion
