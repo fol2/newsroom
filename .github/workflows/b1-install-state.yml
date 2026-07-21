@@ -6,12 +6,14 @@ on:
       - agent/increment-1b1-graph-contracts
     paths:
       - .github/b1-state/**
+      - .github/b1-fix/**
       - .github/workflows/b1-install-state.yml
   pull_request:
     branches:
       - main
     paths:
       - .github/b1-state/**
+      - .github/b1-fix/**
       - .github/workflows/b1-install-state.yml
 
 permissions:
@@ -37,7 +39,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Reconstruct and stage exact B1 authority source
+      - name: Reconstruct, harden and stage exact B1 authority source
         id: install
         shell: bash
         run: |
@@ -52,24 +54,39 @@ jobs:
           import base64
           import hashlib
 
-          root = Path('.github/b1-state')
-          expected = [f'part-{index:02d}' for index in range(6)]
-          actual = sorted(path.name for path in root.glob('part-*'))
-          if actual != expected:
-              raise SystemExit(f'part manifest mismatch: {actual!r}')
-          encoded = ''.join(
-              ''.join((root / name).read_text(encoding='ascii').split())
-              for name in expected
+          def reconstruct(root_name: str, count: int, encoded_length: int, expected_digest: str, output: str) -> None:
+              root = Path(root_name)
+              expected = [f'part-{index:02d}' for index in range(count)]
+              actual = sorted(path.name for path in root.glob('part-*'))
+              if actual != expected:
+                  raise SystemExit(f'{root_name} manifest mismatch: {actual!r}')
+              encoded = ''.join(
+                  ''.join((root / name).read_text(encoding='ascii').split())
+                  for name in expected
+              )
+              if len(encoded) != encoded_length:
+                  raise SystemExit(f'{root_name} encoded length mismatch: {len(encoded)}')
+              data = base64.b64decode(encoded, validate=True)
+              digest = hashlib.sha256(data).hexdigest()
+              if digest != expected_digest:
+                  raise SystemExit(f'{root_name} digest mismatch: {digest}')
+              Path(output).write_bytes(data)
+              print(f'{root_name}: parts={count} encoded_chars={len(encoded)} bytes={len(data)} sha256={digest}')
+
+          reconstruct(
+              '.github/b1-state',
+              6,
+              29752,
+              '0c3450d33d11e88343b9b970e5707cfa71dafa061a005a7fa5568e2316b5c05c',
+              '/tmp/b1-projection-authority.tar.xz',
           )
-          if len(encoded) != 29752:
-              raise SystemExit(f'encoded length mismatch: {len(encoded)}')
-          archive = base64.b64decode(encoded, validate=True)
-          digest = hashlib.sha256(archive).hexdigest()
-          expected_digest = '0c3450d33d11e88343b9b970e5707cfa71dafa061a005a7fa5568e2316b5c05c'
-          if digest != expected_digest:
-              raise SystemExit(f'archive digest mismatch: {digest}')
-          Path('/tmp/b1-projection-authority.tar.xz').write_bytes(archive)
-          print(f'parts={len(expected)} encoded_chars={len(encoded)} archive_bytes={len(archive)} sha256={digest}')
+          reconstruct(
+              '.github/b1-fix',
+              5,
+              13436,
+              '204d5bd138ac9812c4c16996aed54af9e255a6cfb78e0387a5e17ab2a77bf659',
+              '/tmp/b1-review-fixes.patch.xz',
+          )
           PY
           xz -dc /tmp/b1-projection-authority.tar.xz | tar -tf - > /tmp/b1-projection-authority.list
           if grep -E '(^/|(^|/)\.\.(/|$))' /tmp/b1-projection-authority.list; then
@@ -77,7 +94,11 @@ jobs:
             exit 1
           fi
           xz -dc /tmp/b1-projection-authority.tar.xz | tar -xf - -C .
-          rm -rf .github/b1-state
+          xz -dc /tmp/b1-review-fixes.patch.xz > /tmp/b1-review-fixes.patch
+          echo '1997db4ea834a0d4e207198015a181b8eeb673f939f0250deece782d27c8d677  /tmp/b1-review-fixes.patch' | sha256sum -c -
+          git apply --check /tmp/b1-review-fixes.patch
+          git apply /tmp/b1-review-fixes.patch
+          rm -rf .github/b1-state .github/b1-fix
           git add -A
           git diff --cached --check
           git status --short
@@ -91,8 +112,8 @@ jobs:
           git rm --cached --force .github/workflows/b1-install-state.yml
           actual_tree="$(git write-tree)"
           echo "actual_tree=$actual_tree"
-          echo 'expected_tree=85725679e0f0bebb18214c280b852e539b585335'
-          test "$actual_tree" = '85725679e0f0bebb18214c280b852e539b585335'
+          echo 'expected_tree=02293369b4d95c440ef5ae014179612f23ee932c'
+          test "$actual_tree" = '02293369b4d95c440ef5ae014179612f23ee932c'
           git add .github/workflows/b1-export-checkout.yml \
                   .github/workflows/b1-install-checkpoint.yml \
                   .github/workflows/b1-install-state.yml
@@ -106,6 +127,7 @@ jobs:
           test -f newsroom/tests/test_projection_b1_boundaries.py
           test -f newsroom/tests/test_projection_b1_migrations.py
           test ! -e .github/b1-state
+          test ! -e .github/b1-fix
           echo 'installed=true' >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
@@ -142,12 +164,12 @@ jobs:
             --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
             --fail-on-regression
 
-      - name: Commit and push source checkpoint
+      - name: Commit and push reviewed source
         if: steps.install.outputs.installed == 'true'
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'feat(projection): add B1 projection authority state machine'
+          git commit -m 'feat(projection): complete B1 projection authority'
           git push origin HEAD:agent/increment-1b1-graph-contracts
