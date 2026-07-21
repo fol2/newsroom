@@ -32,7 +32,9 @@ from newsroom.projection.models import (
     ProjectionGapState,
     ProjectionGapView,
     ProjectionGenerationId,
+    ProjectionGenerationPromotionView,
     ProjectionGenerationState,
+    ProjectionGenerationValidationView,
     ProjectionGenerationView,
     ProjectionStateError,
     ProjectionStatusMetadata,
@@ -319,6 +321,214 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     conn, str(family_row["family_id"])
                 )
             self._validate_projection_delivery_integrity(conn)
+            self._validate_projection_promotion_integrity(conn)
+
+    @staticmethod
+    def _validation_canonical_value(row: sqlite3.Row) -> dict[str, object]:
+        return {
+            "generation_id": str(row["generation_id"]),
+            "validation_version": int(row["validation_version"]),
+            "lifecycle_version": int(row["lifecycle_version"]),
+            "checkpoint_ledger_seq": int(row["checkpoint_ledger_seq"]),
+            "definition_digest": str(row["definition_digest"]),
+            "ontology_contract_digest": str(row["ontology_contract_digest"]),
+            "mapping_contract_digest": str(row["mapping_contract_digest"]),
+            "projector_version": str(row["projector_version"]),
+            "service_compatibility_digest": str(
+                row["service_compatibility_digest"]
+            ),
+            "projection_state_digest": str(row["projection_state_digest"]),
+            "authority_aggregate_version": int(
+                row["authority_aggregate_version"]
+            ),
+            "authority_event_id": str(row["authority_event_id"]),
+        }
+
+    @staticmethod
+    def _promotion_canonical_value(row: sqlite3.Row) -> dict[str, object]:
+        return {
+            "family_id": str(row["family_id"]),
+            "generation_id": str(row["generation_id"]),
+            "prior_generation_id": (
+                None
+                if row["prior_generation_id"] is None
+                else str(row["prior_generation_id"])
+            ),
+            "checkpoint_ledger_seq": int(row["checkpoint_ledger_seq"]),
+            "validation_digest": str(row["validation_digest"]),
+            "target_authority_aggregate_version": int(
+                row["target_authority_aggregate_version"]
+            ),
+            "target_authority_event_id": str(row["target_authority_event_id"]),
+            "prior_authority_aggregate_version": (
+                None
+                if row["prior_authority_aggregate_version"] is None
+                else int(row["prior_authority_aggregate_version"])
+            ),
+            "prior_authority_event_id": (
+                None
+                if row["prior_authority_event_id"] is None
+                else str(row["prior_authority_event_id"])
+            ),
+        }
+
+    def _validate_projection_promotion_integrity(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        for row in conn.execute(
+            "SELECT * FROM projection_generation_validations"
+        ).fetchall():
+            canonical = canonical_json_bytes(
+                self._validation_canonical_value(row)
+            )
+            if (
+                bytes(row["canonical_bytes"]) != canonical
+                or digest_bytes(canonical) != str(row["validation_digest"])
+            ):
+                raise AuthorityPersistenceError(
+                    "projection generation validation digest is inconsistent"
+                )
+            generation = self._generation_row(
+                conn, str(row["generation_id"])
+            )
+            family = self._registered_family_definition(
+                conn, str(generation["family_id"])
+            )
+            if (
+                str(row["definition_digest"]) != family.digest
+                or str(row["ontology_contract_digest"])
+                != family.ontology_contract_digest
+                or str(row["mapping_contract_digest"])
+                != family.mapping_contract_digest
+                or str(row["projector_version"]) != family.projector_version
+            ):
+                raise AuthorityPersistenceError(
+                    "projection generation validation contract identity is inconsistent"
+                )
+            version = conn.execute(
+                "SELECT * FROM projection_generation_versions "
+                "WHERE generation_id=? AND lifecycle_version=?",
+                (
+                    str(row["generation_id"]),
+                    int(row["lifecycle_version"]),
+                ),
+            ).fetchone()
+            event = conn.execute(
+                "SELECT * FROM ledger_events WHERE event_id=? "
+                "AND aggregate_type='projection_generation' "
+                "AND aggregate_id=? AND aggregate_version=?",
+                (
+                    str(row["authority_event_id"]),
+                    str(row["generation_id"]),
+                    int(row["authority_aggregate_version"]),
+                ),
+            ).fetchone()
+            if (
+                version is None
+                or event is None
+                or str(version["state"])
+                != ProjectionGenerationState.VALIDATING.value
+                or int(version["authority_aggregate_version"])
+                != int(row["authority_aggregate_version"])
+                or int(version["validated_through_ledger_seq"])
+                != int(row["checkpoint_ledger_seq"])
+                or str(version["authority_event_id"])
+                != str(row["authority_event_id"])
+            ):
+                raise AuthorityPersistenceError(
+                    "projection generation validation lacks exact authority version"
+                )
+
+        for row in conn.execute(
+            "SELECT * FROM projection_generation_promotions"
+        ).fetchall():
+            canonical = canonical_json_bytes(
+                self._promotion_canonical_value(row)
+            )
+            if (
+                bytes(row["canonical_bytes"]) != canonical
+                or digest_bytes(canonical) != str(row["promotion_digest"])
+            ):
+                raise AuthorityPersistenceError(
+                    "projection generation promotion digest is inconsistent"
+                )
+            target = self._generation_row(conn, str(row["generation_id"]))
+            if str(target["family_id"]) != str(row["family_id"]):
+                raise AuthorityPersistenceError(
+                    "projection generation promotion family is inconsistent"
+                )
+            validation = conn.execute(
+                "SELECT * FROM projection_generation_validations "
+                "WHERE validation_digest=? AND generation_id=?",
+                (
+                    str(row["validation_digest"]),
+                    str(row["generation_id"]),
+                ),
+            ).fetchone()
+            target_version = conn.execute(
+                "SELECT * FROM projection_generation_versions "
+                "WHERE authority_event_id=? AND generation_id=?",
+                (
+                    str(row["target_authority_event_id"]),
+                    str(row["generation_id"]),
+                ),
+            ).fetchone()
+            target_event = conn.execute(
+                "SELECT 1 FROM ledger_events WHERE event_id=? "
+                "AND aggregate_type='projection_generation' "
+                "AND aggregate_id=? AND aggregate_version=?",
+                (
+                    str(row["target_authority_event_id"]),
+                    str(row["generation_id"]),
+                    int(row["target_authority_aggregate_version"]),
+                ),
+            ).fetchone()
+            if (
+                validation is None
+                or int(validation["checkpoint_ledger_seq"])
+                != int(row["checkpoint_ledger_seq"])
+                or target_version is None
+                or target_event is None
+                or str(target_version["state"])
+                != ProjectionGenerationState.ACTIVE.value
+                or int(target_version["authority_aggregate_version"])
+                != int(row["target_authority_aggregate_version"])
+                or int(target_version["validated_through_ledger_seq"])
+                != int(row["checkpoint_ledger_seq"])
+            ):
+                raise AuthorityPersistenceError(
+                    "projection generation promotion lacks exact target authority"
+                )
+            prior_id = row["prior_generation_id"]
+            if prior_id is not None:
+                prior = self._generation_row(conn, str(prior_id))
+                prior_version = conn.execute(
+                    "SELECT * FROM projection_generation_versions "
+                    "WHERE authority_event_id=? AND generation_id=?",
+                    (str(row["prior_authority_event_id"]), str(prior_id)),
+                ).fetchone()
+                prior_event = conn.execute(
+                    "SELECT 1 FROM ledger_events WHERE event_id=? "
+                    "AND aggregate_type='projection_generation' "
+                    "AND aggregate_id=? AND aggregate_version=?",
+                    (
+                        str(row["prior_authority_event_id"]),
+                        str(prior_id),
+                        int(row["prior_authority_aggregate_version"]),
+                    ),
+                ).fetchone()
+                if (
+                    str(prior["family_id"]) != str(row["family_id"])
+                    or prior_version is None
+                    or prior_event is None
+                    or str(prior_version["state"])
+                    != ProjectionGenerationState.RETIRED.value
+                    or int(prior_version["authority_aggregate_version"])
+                    != int(row["prior_authority_aggregate_version"])
+                ):
+                    raise AuthorityPersistenceError(
+                        "projection generation promotion lacks exact prior authority"
+                    )
 
     def _registered_family_definition(
         self, conn: sqlite3.Connection, family_id: str
@@ -832,6 +1042,385 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 ),
             )
             return self._generation_view(conn, str(generation_id))
+
+    def validate_generation(
+        self,
+        grant: _AuthorizedCommandGrant,
+        *,
+        generation_id: ProjectionGenerationId,
+        checkpoint_ledger_seq: int,
+        service_compatibility_digest: str,
+        projection_state_digest: str,
+        reason_code: str,
+    ) -> ProjectionGenerationValidationView:
+        with self._lock, self._transaction() as conn:
+            result = self._commit_grant_in_transaction(
+                conn, grant, recorded_at=self._clock().to_text()
+            )
+            if result.replayed:
+                return self._validation_for_authority_event(conn, result.event_id)
+            current = self._generation_row(conn, str(generation_id))
+            state = ProjectionGenerationState(str(current["state"]))
+            if state not in {
+                ProjectionGenerationState.BUILDING,
+                ProjectionGenerationState.VALIDATING,
+            }:
+                raise ProjectionStateError(
+                    "only building or validating generations can be validated"
+                )
+            checkpoint = self._checkpoint_seq(conn, str(generation_id))
+            if checkpoint_ledger_seq != checkpoint:
+                raise ProjectionStateError(
+                    "generation validation must bind the exact current contiguous checkpoint"
+                )
+            open_required = conn.execute(
+                "SELECT 1 FROM projection_gaps WHERE generation_id=? "
+                "AND state='OPEN' AND required=1 AND ledger_seq_start<=? LIMIT 1",
+                (str(generation_id), checkpoint_ledger_seq),
+            ).fetchone()
+            if open_required is not None:
+                raise ProjectionStateError(
+                    "generation cannot validate across a required gap"
+                )
+            family = self._registered_family_definition(
+                conn, str(current["family_id"])
+            )
+            validation_version = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(validation_version),0)+1 "
+                    "FROM projection_generation_validations WHERE generation_id=?",
+                    (str(generation_id),),
+                ).fetchone()[0]
+            )
+            lifecycle_version = int(current["lifecycle_version"]) + 1
+            recorded_at = self._clock().to_text()
+            canonical_value: dict[str, object] = {
+                "generation_id": str(generation_id),
+                "validation_version": validation_version,
+                "lifecycle_version": lifecycle_version,
+                "checkpoint_ledger_seq": checkpoint_ledger_seq,
+                "definition_digest": family.digest,
+                "ontology_contract_digest": family.ontology_contract_digest,
+                "mapping_contract_digest": family.mapping_contract_digest,
+                "projector_version": family.projector_version,
+                "service_compatibility_digest": service_compatibility_digest,
+                "projection_state_digest": projection_state_digest,
+                "authority_aggregate_version": result.aggregate_version,
+                "authority_event_id": str(result.event_id),
+            }
+            canonical = canonical_json_bytes(canonical_value)
+            validation_digest = digest_bytes(canonical)
+            conn.execute(
+                "UPDATE projection_generations SET state=?,lifecycle_version=?,"
+                "authority_aggregate_version=?,validated_through_ledger_seq=?,"
+                "updated_event_id=?,updated_at=? WHERE generation_id=?",
+                (
+                    ProjectionGenerationState.VALIDATING.value,
+                    lifecycle_version,
+                    result.aggregate_version,
+                    checkpoint_ledger_seq,
+                    result.event_id,
+                    recorded_at,
+                    str(generation_id),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO projection_generation_versions("
+                "generation_id,lifecycle_version,state,authority_aggregate_version,"
+                "validated_through_ledger_seq,reason_code,authority_event_id,recorded_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    str(generation_id),
+                    lifecycle_version,
+                    ProjectionGenerationState.VALIDATING.value,
+                    result.aggregate_version,
+                    checkpoint_ledger_seq,
+                    reason_code,
+                    result.event_id,
+                    recorded_at,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO projection_generation_validations("
+                "validation_digest,generation_id,validation_version,lifecycle_version,"
+                "checkpoint_ledger_seq,definition_digest,ontology_contract_digest,"
+                "mapping_contract_digest,projector_version,"
+                "service_compatibility_digest,projection_state_digest,canonical_bytes,"
+                "authority_aggregate_version,authority_event_id,recorded_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    validation_digest,
+                    str(generation_id),
+                    validation_version,
+                    lifecycle_version,
+                    checkpoint_ledger_seq,
+                    family.digest,
+                    family.ontology_contract_digest,
+                    family.mapping_contract_digest,
+                    family.projector_version,
+                    service_compatibility_digest,
+                    projection_state_digest,
+                    canonical,
+                    result.aggregate_version,
+                    result.event_id,
+                    recorded_at,
+                ),
+            )
+            return self._validation_view_from_row(
+                conn.execute(
+                    "SELECT * FROM projection_generation_validations "
+                    "WHERE validation_digest=?",
+                    (validation_digest,),
+                ).fetchone()
+            )
+
+    def promote_generation(
+        self,
+        target_grant: _AuthorizedCommandGrant,
+        prior_grant: _AuthorizedCommandGrant | None,
+        *,
+        generation_id: ProjectionGenerationId,
+        checkpoint_ledger_seq: int,
+        validation_digest: str,
+        prior_generation_id: ProjectionGenerationId | None,
+        reason_code: str,
+    ) -> ProjectionGenerationPromotionView:
+        with self._lock, self._transaction() as conn:
+            recorded_at = self._clock().to_text()
+            prior_result = None
+            if prior_grant is not None:
+                prior_result = self._commit_grant_in_transaction(
+                    conn, prior_grant, recorded_at=recorded_at
+                )
+            target_result = self._commit_grant_in_transaction(
+                conn, target_grant, recorded_at=recorded_at
+            )
+            if target_result.replayed:
+                if prior_result is not None and not prior_result.replayed:
+                    raise AuthorityPersistenceError(
+                        "projection promotion replay is only partially retained"
+                    )
+                return self._promotion_for_authority_event(
+                    conn, target_result.event_id
+                )
+            if prior_result is not None and prior_result.replayed:
+                raise ProjectionStateError(
+                    "projection promotion cannot reuse a prior retirement command"
+                )
+
+            current = self._generation_row(conn, str(generation_id))
+            if ProjectionGenerationState(str(current["state"])) is not (
+                ProjectionGenerationState.VALIDATING
+            ):
+                raise ProjectionStateError(
+                    "only a validating generation can be promoted"
+                )
+            family_id = str(current["family_id"])
+            checkpoint = self._checkpoint_seq(conn, str(generation_id))
+            if checkpoint_ledger_seq != checkpoint:
+                raise ProjectionStateError(
+                    "promotion checkpoint is stale"
+                )
+            current_validated = current["validated_through_ledger_seq"]
+            if (
+                current_validated is None
+                or int(current_validated) != checkpoint_ledger_seq
+            ):
+                raise ProjectionStateError(
+                    "promotion requires validation through the exact current checkpoint"
+                )
+            validation = conn.execute(
+                "SELECT * FROM projection_generation_validations "
+                "WHERE validation_digest=? AND generation_id=?",
+                (validation_digest, str(generation_id)),
+            ).fetchone()
+            if validation is None:
+                raise ProjectionStateError(
+                    "promotion requires retained validation evidence"
+                )
+            if (
+                int(validation["checkpoint_ledger_seq"]) != checkpoint_ledger_seq
+                or int(validation["lifecycle_version"])
+                != int(current["lifecycle_version"])
+                or int(validation["authority_aggregate_version"])
+                != int(current["authority_aggregate_version"])
+                or str(validation["authority_event_id"])
+                != str(current["updated_event_id"])
+            ):
+                raise ProjectionStateError(
+                    "promotion validation evidence is stale"
+                )
+            family = self._registered_family_definition(conn, family_id)
+            if (
+                str(validation["definition_digest"]) != family.digest
+                or str(validation["ontology_contract_digest"])
+                != family.ontology_contract_digest
+                or str(validation["mapping_contract_digest"])
+                != family.mapping_contract_digest
+                or str(validation["projector_version"]) != family.projector_version
+            ):
+                raise AuthorityPersistenceError(
+                    "promotion validation differs from retained family contracts"
+                )
+            open_required = conn.execute(
+                "SELECT 1 FROM projection_gaps WHERE generation_id=? "
+                "AND state='OPEN' AND required=1 AND ledger_seq_start<=? LIMIT 1",
+                (str(generation_id), checkpoint_ledger_seq),
+            ).fetchone()
+            if open_required is not None:
+                raise ProjectionStateError(
+                    "generation cannot promote across a required gap"
+                )
+
+            active = conn.execute(
+                "SELECT * FROM projection_generations WHERE family_id=? "
+                "AND state='ACTIVE' LIMIT 1",
+                (family_id,),
+            ).fetchone()
+            expected_prior_id = (
+                None if prior_generation_id is None else str(prior_generation_id)
+            )
+            actual_prior_id = (
+                None if active is None else str(active["generation_id"])
+            )
+            if actual_prior_id != expected_prior_id:
+                raise ProjectionStateError(
+                    "promotion prior active generation changed"
+                )
+            if (active is None) != (prior_result is None):
+                raise ProjectionStateError(
+                    "promotion prior retirement authority is incomplete"
+                )
+
+            prior_view = None
+            if active is not None:
+                assert prior_result is not None
+                prior_lifecycle_version = int(active["lifecycle_version"]) + 1
+                prior_validated = (
+                    None
+                    if active["validated_through_ledger_seq"] is None
+                    else int(active["validated_through_ledger_seq"])
+                )
+                conn.execute(
+                    "UPDATE projection_generations SET state=?,lifecycle_version=?,"
+                    "authority_aggregate_version=?,validated_through_ledger_seq=?,"
+                    "updated_event_id=?,updated_at=? WHERE generation_id=?",
+                    (
+                        ProjectionGenerationState.RETIRED.value,
+                        prior_lifecycle_version,
+                        prior_result.aggregate_version,
+                        prior_validated,
+                        prior_result.event_id,
+                        recorded_at,
+                        actual_prior_id,
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO projection_generation_versions("
+                    "generation_id,lifecycle_version,state,authority_aggregate_version,"
+                    "validated_through_ledger_seq,reason_code,authority_event_id,recorded_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        actual_prior_id,
+                        prior_lifecycle_version,
+                        ProjectionGenerationState.RETIRED.value,
+                        prior_result.aggregate_version,
+                        prior_validated,
+                        reason_code,
+                        prior_result.event_id,
+                        recorded_at,
+                    ),
+                )
+                prior_view = self._generation_view(conn, actual_prior_id)
+
+            target_lifecycle_version = int(current["lifecycle_version"]) + 1
+            conn.execute(
+                "UPDATE projection_generations SET state=?,lifecycle_version=?,"
+                "authority_aggregate_version=?,validated_through_ledger_seq=?,"
+                "updated_event_id=?,updated_at=? WHERE generation_id=?",
+                (
+                    ProjectionGenerationState.ACTIVE.value,
+                    target_lifecycle_version,
+                    target_result.aggregate_version,
+                    checkpoint_ledger_seq,
+                    target_result.event_id,
+                    recorded_at,
+                    str(generation_id),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO projection_generation_versions("
+                "generation_id,lifecycle_version,state,authority_aggregate_version,"
+                "validated_through_ledger_seq,reason_code,authority_event_id,recorded_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    str(generation_id),
+                    target_lifecycle_version,
+                    ProjectionGenerationState.ACTIVE.value,
+                    target_result.aggregate_version,
+                    checkpoint_ledger_seq,
+                    reason_code,
+                    target_result.event_id,
+                    recorded_at,
+                ),
+            )
+            canonical_value: dict[str, object] = {
+                "family_id": family_id,
+                "generation_id": str(generation_id),
+                "prior_generation_id": actual_prior_id,
+                "checkpoint_ledger_seq": checkpoint_ledger_seq,
+                "validation_digest": validation_digest,
+                "target_authority_aggregate_version": target_result.aggregate_version,
+                "target_authority_event_id": str(target_result.event_id),
+                "prior_authority_aggregate_version": (
+                    None if prior_result is None else prior_result.aggregate_version
+                ),
+                "prior_authority_event_id": (
+                    None if prior_result is None else str(prior_result.event_id)
+                ),
+            }
+            canonical = canonical_json_bytes(canonical_value)
+            promotion_digest = digest_bytes(canonical)
+            conn.execute(
+                "INSERT INTO projection_generation_promotions("
+                "promotion_digest,family_id,generation_id,prior_generation_id,"
+                "checkpoint_ledger_seq,validation_digest,"
+                "target_authority_aggregate_version,target_authority_event_id,"
+                "prior_authority_aggregate_version,prior_authority_event_id,"
+                "canonical_bytes,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    promotion_digest,
+                    family_id,
+                    str(generation_id),
+                    actual_prior_id,
+                    checkpoint_ledger_seq,
+                    validation_digest,
+                    target_result.aggregate_version,
+                    target_result.event_id,
+                    None if prior_result is None else prior_result.aggregate_version,
+                    None if prior_result is None else prior_result.event_id,
+                    canonical,
+                    recorded_at,
+                ),
+            )
+            target_view = self._generation_view(conn, str(generation_id))
+            return ProjectionGenerationPromotionView(
+                promotion_digest=promotion_digest,
+                family_id=family_id,
+                generation=target_view,
+                prior_generation=prior_view,
+                checkpoint_ledger_seq=checkpoint_ledger_seq,
+                validation_digest=validation_digest,
+                target_authority_event_id=EventId.parse(
+                    str(target_result.event_id)
+                ),
+                prior_authority_event_id=(
+                    None
+                    if prior_result is None
+                    else EventId.parse(str(prior_result.event_id))
+                ),
+                recorded_at=UtcTimestamp.parse(recorded_at),
+            )
 
     def record_delivery(
         self,
@@ -1451,6 +2040,92 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
             updated_at=UtcTimestamp.parse(str(row["recorded_at"])),
         )
 
+    @staticmethod
+    def _validation_view_from_row(
+        row: sqlite3.Row | None,
+    ) -> ProjectionGenerationValidationView:
+        if row is None:
+            raise AuthorityPersistenceError(
+                "projection validation evidence is absent"
+            )
+        return ProjectionGenerationValidationView(
+            validation_digest=str(row["validation_digest"]),
+            generation_id=ProjectionGenerationId.parse(
+                str(row["generation_id"])
+            ),
+            validation_version=int(row["validation_version"]),
+            lifecycle_version=int(row["lifecycle_version"]),
+            checkpoint_ledger_seq=int(row["checkpoint_ledger_seq"]),
+            definition_digest=str(row["definition_digest"]),
+            ontology_contract_digest=str(row["ontology_contract_digest"]),
+            mapping_contract_digest=str(row["mapping_contract_digest"]),
+            projector_version=str(row["projector_version"]),
+            service_compatibility_digest=str(
+                row["service_compatibility_digest"]
+            ),
+            projection_state_digest=str(row["projection_state_digest"]),
+            authority_aggregate_version=int(
+                row["authority_aggregate_version"]
+            ),
+            authority_event_id=EventId.parse(str(row["authority_event_id"])),
+            recorded_at=UtcTimestamp.parse(str(row["recorded_at"])),
+        )
+
+    def _validation_for_authority_event(
+        self, conn: sqlite3.Connection, event_id: str
+    ) -> ProjectionGenerationValidationView:
+        return self._validation_view_from_row(
+            conn.execute(
+                "SELECT * FROM projection_generation_validations "
+                "WHERE authority_event_id=?",
+                (event_id,),
+            ).fetchone()
+        )
+
+    def _promotion_view_from_row(
+        self, conn: sqlite3.Connection, row: sqlite3.Row | None
+    ) -> ProjectionGenerationPromotionView:
+        if row is None:
+            raise AuthorityPersistenceError(
+                "projection promotion evidence is absent"
+            )
+        prior_id = row["prior_generation_id"]
+        return ProjectionGenerationPromotionView(
+            promotion_digest=str(row["promotion_digest"]),
+            family_id=str(row["family_id"]),
+            generation=self._generation_view(
+                conn, str(row["generation_id"])
+            ),
+            prior_generation=(
+                None
+                if prior_id is None
+                else self._generation_view(conn, str(prior_id))
+            ),
+            checkpoint_ledger_seq=int(row["checkpoint_ledger_seq"]),
+            validation_digest=str(row["validation_digest"]),
+            target_authority_event_id=EventId.parse(
+                str(row["target_authority_event_id"])
+            ),
+            prior_authority_event_id=(
+                None
+                if row["prior_authority_event_id"] is None
+                else EventId.parse(str(row["prior_authority_event_id"]))
+            ),
+            recorded_at=UtcTimestamp.parse(str(row["recorded_at"])),
+        )
+
+    def _promotion_for_authority_event(
+        self, conn: sqlite3.Connection, event_id: str
+    ) -> ProjectionGenerationPromotionView:
+        return self._promotion_view_from_row(
+            conn,
+            conn.execute(
+                "SELECT * FROM projection_generation_promotions "
+                "WHERE target_authority_event_id=?",
+                (event_id,),
+            ).fetchone(),
+        )
+
     def _delivery_for_authority_event(
         self, conn: sqlite3.Connection, event_id: str
     ) -> DeliveryRecordView:
@@ -1729,6 +2404,32 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
             ).fetchall()
             return tuple(
                 self._generation_view(self._connection, str(row["generation_id"]))
+                for row in rows
+            )
+
+    def projection_generation_validation(
+        self, generation_id: ProjectionGenerationId
+    ) -> ProjectionGenerationValidationView:
+        with self._lock:
+            return self._validation_view_from_row(
+                self._connection.execute(
+                    "SELECT * FROM projection_generation_validations "
+                    "WHERE generation_id=? ORDER BY validation_version DESC LIMIT 1",
+                    (str(generation_id),),
+                ).fetchone()
+            )
+
+    def projection_promotions(
+        self, family_id: str, limit: int
+    ) -> tuple[ProjectionGenerationPromotionView, ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM projection_generation_promotions "
+                "WHERE family_id=? ORDER BY recorded_at DESC LIMIT ?",
+                (family_id, limit),
+            ).fetchall()
+            return tuple(
+                self._promotion_view_from_row(self._connection, row)
                 for row in rows
             )
 

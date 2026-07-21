@@ -19,9 +19,16 @@ from .projection_migrations import (
     PROJECTION_MIGRATION_STATEMENTS,
     PROJECTION_SCHEMA_VERSION,
 )
+from .projection_promotion_migrations import (
+    PROJECTION_PROMOTION_MIGRATION,
+    PROJECTION_PROMOTION_MIGRATION_CHECKSUM,
+    PROJECTION_PROMOTION_MIGRATION_NAME,
+    PROJECTION_PROMOTION_MIGRATION_STATEMENTS,
+    PROJECTION_PROMOTION_SCHEMA_VERSION,
+)
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = PROJECTION_SCHEMA_VERSION
+SCHEMA_VERSION = PROJECTION_PROMOTION_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -539,6 +546,20 @@ def apply_pending_migrations(
                 ),
             )
             current = PROJECTION_SCHEMA_VERSION
+        if current == PROJECTION_SCHEMA_VERSION:
+            for statement in PROJECTION_PROMOTION_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    PROJECTION_PROMOTION_SCHEMA_VERSION,
+                    PROJECTION_PROMOTION_MIGRATION_NAME,
+                    PROJECTION_PROMOTION_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = PROJECTION_PROMOTION_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -551,6 +572,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     MIGRATION,
     OBJECT_MIGRATION,
     PROJECTION_MIGRATION,
+    PROJECTION_PROMOTION_MIGRATION,
 )
 
 def _expected_fingerprint() -> str:
@@ -573,5 +595,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         PROJECTION_SCHEMA_VERSION,
         PROJECTION_MIGRATION_NAME,
         PROJECTION_MIGRATION_CHECKSUM,
+    ),
+    (
+        PROJECTION_PROMOTION_SCHEMA_VERSION,
+        PROJECTION_PROMOTION_MIGRATION_NAME,
+        PROJECTION_PROMOTION_MIGRATION_CHECKSUM,
     ),
 )

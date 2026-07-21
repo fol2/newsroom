@@ -212,6 +212,52 @@ class ProjectionGenerationView:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectionGenerationValidationView:
+    validation_digest: str
+    generation_id: ProjectionGenerationId
+    validation_version: int
+    lifecycle_version: int
+    checkpoint_ledger_seq: int
+    definition_digest: str
+    ontology_contract_digest: str
+    mapping_contract_digest: str
+    projector_version: str
+    service_compatibility_digest: str
+    projection_state_digest: str
+    authority_aggregate_version: int
+    authority_event_id: EventId
+    recorded_at: UtcTimestamp
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("validation_digest", self.validation_digest),
+            ("definition_digest", self.definition_digest),
+            ("ontology_contract_digest", self.ontology_contract_digest),
+            ("mapping_contract_digest", self.mapping_contract_digest),
+            ("service_compatibility_digest", self.service_compatibility_digest),
+            ("projection_state_digest", self.projection_state_digest),
+        ):
+            validate_sha256_digest(value, field=field_name)
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionGenerationPromotionView:
+    promotion_digest: str
+    family_id: str
+    generation: ProjectionGenerationView
+    prior_generation: ProjectionGenerationView | None
+    checkpoint_ledger_seq: int
+    validation_digest: str
+    target_authority_event_id: EventId
+    prior_authority_event_id: EventId | None
+    recorded_at: UtcTimestamp
+
+    def __post_init__(self) -> None:
+        validate_sha256_digest(self.promotion_digest, field="promotion_digest")
+        validate_sha256_digest(self.validation_digest, field="validation_digest")
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectionCheckpointView:
     generation_id: ProjectionGenerationId
     checkpoint_version: int
@@ -331,6 +377,82 @@ class ProjectionGenerationTransitionRequest:
             require_non_negative_sequence(
                 self.validated_through_ledger_seq,
                 field="validated_through_ledger_seq",
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionGenerationValidationRequest:
+    generation_id: ProjectionGenerationId
+    expected_authority_version: int
+    checkpoint_ledger_seq: int
+    service_compatibility_digest: str
+    projection_state_digest: str
+    reason_code: str
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_id, ProjectionGenerationId):
+            raise ProjectionContractError("validation generation identity must be typed")
+        require_positive_sequence(
+            self.expected_authority_version, field="expected_authority_version"
+        )
+        require_non_negative_sequence(
+            self.checkpoint_ledger_seq, field="checkpoint_ledger_seq"
+        )
+        for field_name, value in (
+            ("service_compatibility_digest", self.service_compatibility_digest),
+            ("projection_state_digest", self.projection_state_digest),
+        ):
+            normalized = validate_sha256_digest(value, field=field_name)
+            if normalized != value:
+                raise ProjectionContractError(f"{field_name} must be canonical lowercase")
+        require_reason(self.reason_code)
+        require_idempotency_key(self.idempotency_key)
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionGenerationPromotionRequest:
+    generation_id: ProjectionGenerationId
+    expected_authority_version: int
+    checkpoint_ledger_seq: int
+    validation_digest: str
+    reason_code: str
+    idempotency_key: str
+    prior_generation_id: ProjectionGenerationId | None = None
+    expected_prior_authority_version: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_id, ProjectionGenerationId):
+            raise ProjectionContractError("promotion generation identity must be typed")
+        require_positive_sequence(
+            self.expected_authority_version, field="expected_authority_version"
+        )
+        require_non_negative_sequence(
+            self.checkpoint_ledger_seq, field="checkpoint_ledger_seq"
+        )
+        normalized = validate_sha256_digest(
+            self.validation_digest, field="validation_digest"
+        )
+        if normalized != self.validation_digest:
+            raise ProjectionContractError("validation_digest must be canonical lowercase")
+        require_reason(self.reason_code)
+        require_idempotency_key(self.idempotency_key)
+        paired = (
+            self.prior_generation_id is None,
+            self.expected_prior_authority_version is None,
+        )
+        if paired[0] != paired[1]:
+            raise ProjectionContractError(
+                "prior generation identity and expected version must be supplied together"
+            )
+        if self.prior_generation_id is not None:
+            if not isinstance(self.prior_generation_id, ProjectionGenerationId):
+                raise ProjectionContractError("prior generation identity must be typed")
+            if self.prior_generation_id == self.generation_id:
+                raise ProjectionContractError("promotion cannot replace itself")
+            require_positive_sequence(
+                self.expected_prior_authority_version,
+                field="expected_prior_authority_version",
             )
 
 

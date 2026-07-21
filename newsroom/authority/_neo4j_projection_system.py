@@ -577,10 +577,14 @@ def _open_with_adapter(
                 transition_generation=(
                     projection_boundary.transition_generation
                 ),
+                validate_generation=projection_boundary.validate_generation,
+                promote_generation=projection_boundary.promote_generation,
                 record_delivery=projection_boundary.record_delivery,
                 resolve_gap=projection_boundary.resolve_gap,
                 status=projection_boundary.status,
                 generations=projection_boundary.generations,
+                validation=projection_boundary.validation,
+                promotions=projection_boundary.promotions,
                 gaps=projection_boundary.gaps,
                 dead_letters=projection_boundary.dead_letters,
             ),
