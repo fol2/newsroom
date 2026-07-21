@@ -4,26 +4,32 @@ on:
   push:
     branches:
       - agent/increment-1b2-neo4j-structural
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
   export:
+    if: github.event_name == 'push' || github.head_ref == 'agent/increment-1b2-neo4j-structural'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           show-progress: false
 
       - name: Verify exact tracked checkout
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD}"
           test -z "$(git status --porcelain=v1)"
 
       - name: Export exact tracked source
@@ -37,7 +43,7 @@ jobs:
       - name: Upload exact source
         uses: actions/upload-artifact@v4
         with:
-          name: b2-fresh-checkout-${{ github.sha }}
+          name: b2-fresh-checkout-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
             b2-fresh-checkout.tar.gz
             b2-fresh-checkout.tar.gz.sha256
