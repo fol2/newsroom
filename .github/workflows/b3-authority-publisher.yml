@@ -27,11 +27,14 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD}"
+          test "$(wc -c < .github/b3-authority.patch.gz.b64 | tr -d ' ')" = "14720"
+          echo "cac7c9795920629fec37b13d18943a33fd292ebc6ad6e87b597b11bb759c8345  .github/b3-authority.patch.gz.b64" | sha256sum --check --strict
           base64 --decode .github/b3-authority.patch.gz.b64 > /tmp/b3-authority.patch.gz
-          echo "166a3a77983fa2adf9f036e8d23f29ed6d6f9a05febd78b5eaf8466f3b56e410  /tmp/b3-authority.patch.gz" | sha256sum --check --strict
+          echo "bec768609d609cb8d2f7ffeb1c0db5d2ea18649e70731f9d21b0510b5951cee9  /tmp/b3-authority.patch.gz" | sha256sum --check --strict
+          gzip --test /tmp/b3-authority.patch.gz
           gzip --decompress --stdout /tmp/b3-authority.patch.gz > /tmp/b3-authority.patch
           echo "87908db4a519654d94ea817a9234b32651d4236e7991ae859f0ccad4f5d2d05b  /tmp/b3-authority.patch" | sha256sum --check --strict
-          git apply --check /tmp/b3-authority.patch
+          git apply --check --verbose /tmp/b3-authority.patch
           git apply /tmp/b3-authority.patch
           rm .github/b3-authority.patch.gz.b64
           rm .github/workflows/b3-authority-publisher.yml
