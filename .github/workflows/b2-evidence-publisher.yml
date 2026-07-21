@@ -4,26 +4,32 @@ on:
   push:
     branches:
       - agent/increment-1b2-neo4j-structural
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   publish:
+    if: github.event_name == 'push' || github.head_ref == 'agent/increment-1b2-neo4j-structural'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           show-progress: false
 
       - name: Verify exact checkpoint transport
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           test "$(find .github/b2-checkpoint-v4 -maxdepth 1 -type f -name 'part-*' | wc -l | tr -d ' ')" = 1
           cat .github/b2-checkpoint-v4/part-* > /tmp/b2-evidence.tar.gz.b64
           echo "f1cd13ee0e162e3036208d69e64414c0a50b597e5ff817333bcee5a29ff196f5  /tmp/b2-evidence.tar.gz.b64" | sha256sum --check --strict
