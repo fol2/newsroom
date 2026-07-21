@@ -1,0 +1,103 @@
+name: B2 Actual Service Evidence Publisher
+
+on:
+  push:
+    branches:
+      - agent/increment-1b2-neo4j-structural
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Verify exact checkpoint transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(find .github/b2-checkpoint-v4 -maxdepth 1 -type f -name 'part-*' | wc -l | tr -d ' ')" = 1
+          cat .github/b2-checkpoint-v4/part-* > /tmp/b2-evidence.tar.gz.b64
+          echo "f1cd13ee0e162e3036208d69e64414c0a50b597e5ff817333bcee5a29ff196f5  /tmp/b2-evidence.tar.gz.b64" | sha256sum --check --strict
+          base64 --decode /tmp/b2-evidence.tar.gz.b64 > /tmp/b2-evidence.tar.gz
+          echo "a65c6fb4d99029845358b1bf323fe213d9a7d77b3b63f7f765c4207886ffa612  /tmp/b2-evidence.tar.gz" | sha256sum --check --strict
+          tar -tzf /tmp/b2-evidence.tar.gz | LC_ALL=C sort > /tmp/b2-evidence-files.txt
+          cat > /tmp/b2-evidence-expected.txt <<'EOF'
+          .github/workflows/projection-b2-neo4j.yml
+          docs/operations/neo4j-b2-qualification.md
+          newsroom/tests/projection_b2_helpers.py
+          newsroom/tests/test_projection_b2_boundaries.py
+          newsroom/tests/test_projection_b2_neo4j_service.py
+          pyproject.toml
+          EOF
+          sed -i 's/^          //' /tmp/b2-evidence-expected.txt
+          diff -u /tmp/b2-evidence-expected.txt /tmp/b2-evidence-files.txt
+
+      - name: Materialize source-only evidence checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf /tmp/b2-evidence.tar.gz -C .
+          rm -rf .github/b2-checkpoint-v4
+          rm -f .github/workflows/b2-evidence-publisher.yml
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Resolve exact public lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u UV_INDEX_URL -u PIP_INDEX_URL \
+            UV_DEFAULT_INDEX=https://pypi.org/simple \
+            uv lock
+          uv lock --check
+          ! grep -q 'packages.hub.ace-research.openai.org' uv.lock
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          lock = tomllib.loads(Path("uv.lock").read_text())
+          matches = [
+              package
+              for package in lock["package"]
+              if package["name"] == "neo4j"
+          ]
+          assert len(matches) == 1, matches
+          assert matches[0]["version"] == "6.2.0", matches[0]
+          assert matches[0]["source"]["registry"] == "https://pypi.org/simple", matches[0]
+          PY
+          uv sync --dev --locked
+
+      - name: Qualify coherent evidence checkpoint
+        run: |
+          uv run python -m compileall -q newsroom scripts
+          uv run python -m pytest -q \
+            newsroom/tests/test_projection_b1_*.py \
+            newsroom/tests/test_projection_b2_*.py
+
+      - name: Commit and push source-only evidence checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          ! git diff --cached --name-only | grep -E '(^|/)(b2-checkpoint-v4|b2-evidence-publisher)'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "test(projection): qualify authenticated Neo4j service"
+          git push origin HEAD:agent/increment-1b2-neo4j-structural
