@@ -1,5 +1,5 @@
 schema_version = "newsroom.sdlc.gates.v1"
-contract_version = "sdlc-v2.1"
+contract_version = "sdlc-v2.2"
 status = "proposed"
 owner = "fol2"
 canonical_language = "English"
@@ -8,7 +8,8 @@ issue = 98
 
 [global]
 gate_command_timeout_seconds = 55
-lane_hard_timeout_seconds = 60
+lane_execution_timeout_seconds = 55
+finalization_timeout_seconds = 5
 pr_feedback_p50_target_seconds = 30
 pr_feedback_p95_target_seconds = 60
 runner_queue_p95_target_seconds = 5
@@ -146,8 +147,15 @@ stateful_contract = [
 ]
 external_service_security = [
   "newsroom/projection/neo4j/**",
-  "newsroom/tests/test_projection_b2_neo4j_service.py",
-  "newsroom/tests/test_projection_b3_neo4j_service.py",
+  "newsroom/authority/_neo4j_projection_system.py",
+  "newsroom/authority/neo4j_projection_system.py",
+  "newsroom/authority/_projection_store.py",
+  "newsroom/authority/_projection_system.py",
+  "newsroom/authority/projection_migrations.py",
+  "newsroom/authority/projection_promotion_migrations.py",
+  "newsroom/tests/test_projection_b1_*.py",
+  "newsroom/tests/test_projection_b2_*.py",
+  "newsroom/tests/test_projection_b3_*.py",
   ".github/workflows/**",
   "pyproject.toml",
   "uv.lock",
