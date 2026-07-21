@@ -1,0 +1,195 @@
+diff --git a/newsroom/authority/_projection_store.py b/newsroom/authority/_projection_store.py
+--- a/newsroom/authority/_projection_store.py
++++ b/newsroom/authority/_projection_store.py
+@@ -946,6 +946,10 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
+             )
+             if result.replayed:
+                 return self._generation_version_for_event(conn, result.event_id)
++            if target_state is ProjectionGenerationState.ACTIVE:
++                raise ProjectionStateError(
++                    "ACTIVE generation requires authority promotion"
++                )
+             current = self._generation_row(conn, str(generation_id))
+             state = ProjectionGenerationState(str(current["state"]))
+             if target_state not in _ALLOWED_TRANSITIONS[state]:
+diff --git a/newsroom/tests/test_projection_b1_authority.py b/newsroom/tests/test_projection_b1_authority.py
+--- a/newsroom/tests/test_projection_b1_authority.py
++++ b/newsroom/tests/test_projection_b1_authority.py
+@@ -340,74 +340,47 @@ def test_generation_validation_cannot_cross_required_gap(
+         system.close()
+ 
+ 
+-def test_one_active_generation_per_family_is_enforced_before_commit(
++def test_direct_active_transition_requires_authority_promotion_before_commit(
+     tmp_path: Path,
+ ) -> None:
+     system = open_projection_system(tmp_path / "authority.sqlite3")
+     try:
+-        system.projections.register_family(
+-            ProjectionFamilyRegistrationRequest(FAMILY_ID, "family-register"),
+-            proof=proof(),
+-        )
+-        first = system.projections.create_generation(
+-            ProjectionGenerationCreateRequest(
+-                ProjectionGenerationId.new(), FAMILY_ID, "FIRST", "gen-first"
+-            ),
+-            proof=proof(),
+-        )
+-        second = system.projections.create_generation(
+-            ProjectionGenerationCreateRequest(
+-                ProjectionGenerationId.new(), FAMILY_ID, "SECOND", "gen-second"
+-            ),
+-            proof=proof(),
+-        )
+-        first_validating = system.projections.transition_generation(
++        _, generation = _register_and_create(system)
++        validating = system.projections.transition_generation(
+             ProjectionGenerationTransitionRequest(
+-                first.generation_id,
+-                first.authority_aggregate_version,
++                generation.generation_id,
++                generation.authority_aggregate_version,
+                 ProjectionGenerationState.VALIDATING,
+-                "FIRST_VALID",
+-                "first-validating",
++                "LEGACY_VALIDATING",
++                "legacy-validating",
+                 validated_through_ledger_seq=0,
+             ),
+             proof=proof(),
+         )
+-        system.projections.transition_generation(
+-            ProjectionGenerationTransitionRequest(
+-                first.generation_id,
+-                first_validating.authority_aggregate_version,
+-                ProjectionGenerationState.ACTIVE,
+-                "FIRST_ACTIVE",
+-                "first-active",
+-                validated_through_ledger_seq=0,
+-            ),
+-            proof=proof(),
+-        )
+-        second_validating = system.projections.transition_generation(
+-            ProjectionGenerationTransitionRequest(
+-                second.generation_id,
+-                second.authority_aggregate_version,
+-                ProjectionGenerationState.VALIDATING,
+-                "SECOND_VALID",
+-                "second-validating",
+-                validated_through_ledger_seq=0,
+-            ),
+-            proof=proof(),
+-        )
+-        with pytest.raises(ProjectionStateError, match="already has an active"):
++        before_events = system.events.after(0, limit=100, proof=proof())
++
++        with pytest.raises(ProjectionStateError, match="authority promotion"):
+             system.projections.transition_generation(
+                 ProjectionGenerationTransitionRequest(
+-                    second.generation_id,
+-                    second_validating.authority_aggregate_version,
++                    generation.generation_id,
++                    validating.authority_aggregate_version,
+                     ProjectionGenerationState.ACTIVE,
+-                    "SECOND_ACTIVE",
+-                    "second-active",
++                    "DIRECT_ACTIVE_FORBIDDEN",
++                    "direct-active-forbidden",
+                     validated_through_ledger_seq=0,
+                 ),
+                 proof=proof(),
+             )
++
++        assert system.events.after(0, limit=100, proof=proof()) == before_events
++        current = system.projections.generations(FAMILY_ID, proof=proof())[0]
++        assert current.state is ProjectionGenerationState.VALIDATING
++        assert current.authority_aggregate_version == (
++            validating.authority_aggregate_version
++        )
+     finally:
+         system.close()
+ 
+ 
+ diff --git a/newsroom/tests/test_projection_b3_authority.py b/newsroom/tests/test_projection_b3_authority.py
+--- a/newsroom/tests/test_projection_b3_authority.py
++++ b/newsroom/tests/test_projection_b3_authority.py
+@@ -16,6 +16,7 @@ from newsroom.projection import (
+     ProjectionGenerationId,
+     ProjectionGenerationPromotionRequest,
+     ProjectionGenerationState,
++    ProjectionGenerationTransitionRequest,
+     ProjectionGenerationValidationRequest,
+     ProjectionStateError,
+ )
+@@ -94,6 +95,68 @@ def _promote(
+     )
+ 
+ 
++def test_direct_active_transition_cannot_bypass_authority_promotion(
++    tmp_path: Path,
++) -> None:
++    system = open_projection_system(tmp_path / "authority.sqlite3")
++    try:
++        _register(system)
++        created = _create(system, "generation-create-direct-active")
++        validating = system.projections.transition_generation(
++            ProjectionGenerationTransitionRequest(
++                created.generation_id,
++                created.authority_aggregate_version,
++                ProjectionGenerationState.VALIDATING,
++                "LEGACY_VALIDATING",
++                "generation-legacy-validating",
++                validated_through_ledger_seq=0,
++            ),
++            proof=proof(),
++        )
++        before_events = system.events.after(0, limit=100, proof=proof())
++
++        with pytest.raises(ProjectionStateError, match="authority promotion"):
++            system.projections.transition_generation(
++                ProjectionGenerationTransitionRequest(
++                    validating.generation_id,
++                    validating.authority_aggregate_version,
++                    ProjectionGenerationState.ACTIVE,
++                    "DIRECT_ACTIVE_FORBIDDEN",
++                    "generation-direct-active-forbidden",
++                    validated_through_ledger_seq=0,
++                ),
++                proof=proof(),
++            )
++
++        assert system.events.after(0, limit=100, proof=proof()) == before_events
++        after_rejection = next(
++            item
++            for item in system.projections.generations(FAMILY_ID, proof=proof())
++            if item.generation_id == created.generation_id
++        )
++        assert after_rejection.state is ProjectionGenerationState.VALIDATING
++        assert after_rejection.authority_aggregate_version == (
++            validating.authority_aggregate_version
++        )
++
++        validation = _validate(
++            system,
++            after_rejection,
++            "generation-validate-after-direct-active",
++        )
++        validated = next(
++            item
++            for item in system.projections.generations(FAMILY_ID, proof=proof())
++            if item.generation_id == created.generation_id
++        )
++        promotion = _promote(
++            system,
++            validated,
++            validation,
++            "generation-promote-after-direct-active",
++        )
++        assert promotion.generation.state is ProjectionGenerationState.ACTIVE
++    finally:
++        system.close()
++
++
+ def test_validation_evidence_is_exact_typed_and_replayable(tmp_path: Path) -> None:
+     system = open_projection_system(tmp_path / "authority.sqlite3")
+     try:
