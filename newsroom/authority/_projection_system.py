@@ -261,8 +261,12 @@ class _ProjectionBoundary:
             reason_code=request.reason_code,
         )
 
-    def record_delivery(self, request: ProjectionDeliveryRequest, proof: AuthenticationProof) -> DeliveryRecordView:
-        grant = self._grant(
+    def _authorize_delivery(
+        self,
+        request: ProjectionDeliveryRequest,
+        proof: AuthenticationProof,
+    ):
+        return self._grant(
             command_type="projection.delivery.record",
             aggregate_id=request.generation_id.as_aggregate_id(),
             expected_version=request.expected_authority_version,
@@ -275,6 +279,12 @@ class _ProjectionBoundary:
             idempotency_key=request.idempotency_key,
             proof=proof,
         )
+
+    def _commit_delivery(
+        self,
+        grant: Any,
+        request: ProjectionDeliveryRequest,
+    ) -> DeliveryRecordView:
         return self._store.record_delivery(
             grant,
             generation_id=request.generation_id,
@@ -282,6 +292,10 @@ class _ProjectionBoundary:
             outcome=request.outcome,
             error_code=request.error_code,
         )
+
+    def record_delivery(self, request: ProjectionDeliveryRequest, proof: AuthenticationProof) -> DeliveryRecordView:
+        grant = self._authorize_delivery(request, proof)
+        return self._commit_delivery(grant, request)
 
     def resolve_gap(self, request: ProjectionGapResolutionRequest, proof: AuthenticationProof) -> ProjectionGapView:
         grant = self._grant(
