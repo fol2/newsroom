@@ -4,13 +4,20 @@ from typing import Any
 
 import pytest
 
-from newsroom.projection.neo4j import Neo4jIdentityConflict
+from newsroom.projection import ProjectionNodeType
+from newsroom.projection.neo4j import (
+    Neo4jIdentityConflict,
+    Neo4jReadError,
+    StructuralGraphNodeView,
+)
 from newsroom.projection.neo4j._adapter import (
     _CLEANUP_GENERATION_QUERY,
     _FIND_DELIVERY_QUERY,
     _MERGE_NODE_QUERY,
+    _READ_RELATIONS_QUERY,
     _Neo4jAdapter,
     _node_properties,
+    _require_node_within_watermark,
     _relation_properties,
     _relation_view,
 )
@@ -87,3 +94,19 @@ def test_node_properties_never_include_driver_internal_identity() -> None:
     assert "id" not in properties
     assert "element_id" not in properties
     assert "neo4j_id" not in properties
+
+
+def test_relation_reads_cannot_return_future_endpoint_nodes() -> None:
+    assert "source.first_ledger_seq <= $maximum_ledger_seq" in _READ_RELATIONS_QUERY
+    assert "target.first_ledger_seq <= $maximum_ledger_seq" in _READ_RELATIONS_QUERY
+    node = StructuralGraphNodeView(
+        canonical_id="npid:v1:fixture:future",
+        node_type=ProjectionNodeType.AUTHORITY_AGGREGATE,
+        identity_source="AUTHORITY_AGGREGATE",
+        identity_reference_digest="sha256:" + "a" * 64,
+        first_ledger_seq=11,
+        first_source_event_id="event-future",
+        first_source_event_digest="sha256:" + "b" * 64,
+    )
+    with pytest.raises(Neo4jReadError, match="watermark"):
+        _require_node_within_watermark(node, 10)

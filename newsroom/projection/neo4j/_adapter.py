@@ -134,6 +134,8 @@ MATCH (source:NewsroomProjectionNode {generation_id: $generation_id})
       (target:NewsroomProjectionNode {generation_id: $generation_id})
 WHERE (source.canonical_id IN $canonical_ids OR target.canonical_id IN $canonical_ids)
   AND r.ledger_seq <= $maximum_ledger_seq
+  AND source.first_ledger_seq <= $maximum_ledger_seq
+  AND target.first_ledger_seq <= $maximum_ledger_seq
 RETURN properties(source) AS source_properties,
        type(r) AS relation_type,
        properties(r) AS relation_properties,
@@ -330,11 +332,14 @@ class _Neo4jAdapter:
             nodes: dict[str, StructuralGraphNodeView] = {}
             for row in node_rows:
                 node = _node_view(_record_mapping(row, "properties"))
+                _require_node_within_watermark(node, maximum_ledger_seq)
                 nodes[node.canonical_id] = node
             relations: list[StructuralGraphRelationView] = []
             for row in relation_rows:
                 source = _node_view(_record_mapping(row, "source_properties"))
                 target = _node_view(_record_mapping(row, "target_properties"))
+                _require_node_within_watermark(source, maximum_ledger_seq)
+                _require_node_within_watermark(target, maximum_ledger_seq)
                 nodes[source.canonical_id] = source
                 nodes[target.canonical_id] = target
                 relation_type = ProjectionRelationType(str(row["relation_type"]))
@@ -643,6 +648,16 @@ def _node_view(properties: Mapping[str, object]) -> StructuralGraphNodeView:
         first_source_event_id=str(properties["first_source_event_id"]),
         first_source_event_digest=str(properties["first_source_event_digest"]),
     )
+
+
+def _require_node_within_watermark(
+    node: StructuralGraphNodeView,
+    maximum_ledger_seq: int,
+) -> None:
+    if node.first_ledger_seq > maximum_ledger_seq:
+        raise Neo4jReadError(
+            "Neo4j node provenance exceeds the authoritative watermark"
+        )
 
 
 def _relation_view(

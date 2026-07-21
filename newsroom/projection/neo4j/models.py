@@ -92,6 +92,10 @@ class Neo4jProjectorConfig:
             raise Neo4jConfigurationError("Neo4j URI port is invalid") from None
         require_token(self.database, field="neo4j_database")
         require_token(self.username, field="neo4j_projector_username")
+        if self.username.casefold() == "neo4j":
+            raise Neo4jConfigurationError(
+                "Neo4j projector must not use the bootstrap administrator identity"
+            )
         if not isinstance(self.password, str) or not self.password:
             raise Neo4jConfigurationError("Neo4j projector password is required")
         if self.password.strip().lower() == "none":
