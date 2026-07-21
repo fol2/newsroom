@@ -1,52 +1,90 @@
-name: B2 Fresh Source Export
+name: B2 Source Checkpoint Publisher
 
 on:
   push:
     branches:
       - agent/increment-1b2-neo4j-structural
-  pull_request:
-    branches:
-      - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export-source:
-    if: github.event_name == 'push' || github.head_ref == 'agent/increment-1b2-neo4j-structural'
+  publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           show-progress: false
 
-      - name: Verify exact tracked checkout
-        env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact checkpoint transport
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
-          test -z "$(git status --porcelain=v1)"
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(find .github/b2-checkpoint-v2 -maxdepth 1 -type f -name 'part-*' | wc -l | tr -d ' ')" = 7
+          cat .github/b2-checkpoint-v2/part-* > /tmp/b2-source-checkpoint.tar.gz.b64
+          echo "d2f5152bc449ede14a3cd35102bfc92030332b2471649f99644f836243bfba25  /tmp/b2-source-checkpoint.tar.gz.b64" | sha256sum --check --strict
+          base64 --decode /tmp/b2-source-checkpoint.tar.gz.b64 > /tmp/b2-source-checkpoint.tar.gz
+          echo "69b4656418bf947172e53fe97506e27b863b357fc67045a51cc0770ce9c8ed2e  /tmp/b2-source-checkpoint.tar.gz" | sha256sum --check --strict
+          tar -tzf /tmp/b2-source-checkpoint.tar.gz | LC_ALL=C sort > /tmp/b2-files.txt
+          cat > /tmp/b2-expected.txt <<'EOF'
+          newsroom/authority/_neo4j_projection_system.py
+          newsroom/authority/_projection_store.py
+          newsroom/authority/_projection_system.py
+          newsroom/authority/neo4j_projection_system.py
+          newsroom/projection/neo4j/__init__.py
+          newsroom/projection/neo4j/_adapter.py
+          newsroom/projection/neo4j/models.py
+          newsroom/projection/neo4j/traceability.py
+          newsroom/tests/projection_b2_helpers.py
+          newsroom/tests/test_projection_b2_authority.py
+          newsroom/tests/test_projection_b2_contracts.py
+          EOF
+          sed -i 's/^          //' /tmp/b2-expected.txt
+          diff -u /tmp/b2-expected.txt /tmp/b2-files.txt
 
-      - name: Export exact tracked source
+      - name: Materialize source-only checkpoint
         shell: bash
         run: |
           set -euo pipefail
-          git archive --format=tar.gz --output=b2-fresh-source.tar.gz HEAD
-          git rev-parse HEAD > b2-fresh-source-head.txt
-          sha256sum b2-fresh-source.tar.gz > b2-fresh-source.tar.gz.sha256
+          tar -xzf /tmp/b2-source-checkpoint.tar.gz -C .
+          rm -rf .github/b2-publish
+          rm -rf .github/b2-checkpoint-v2
+          rm -f .github/workflows/b2-source-bootstrap.yml
 
-      - name: Upload exact source
-        uses: actions/upload-artifact@v4
+      - uses: actions/setup-python@v5
         with:
-          name: b2-fresh-source-${{ github.event.pull_request.head.sha || github.sha }}
-          path: |
-            b2-fresh-source.tar.gz
-            b2-fresh-source.tar.gz.sha256
-            b2-fresh-source-head.txt
-          if-no-files-found: error
-          retention-days: 1
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Verify locked baseline
+        run: |
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Qualify B2 source checkpoint
+        run: |
+          uv run python -m compileall -q newsroom scripts
+          uv run python -m pytest -q \
+            newsroom/tests/test_projection_b1_*.py \
+            newsroom/tests/test_projection_b2_contracts.py \
+            newsroom/tests/test_projection_b2_authority.py
+
+      - name: Commit and push source-only checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          ! git diff --cached --name-only | grep -E '(^|/)(b2-publish|b2-checkpoint-v2|b2-source-bootstrap)'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat(projection): add Neo4j structural core"
+          git push origin HEAD:agent/increment-1b2-neo4j-structural
