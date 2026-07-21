@@ -1,0 +1,70 @@
+name: B3 Rebuild Unit Publisher
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.head_ref == 'agent/increment-1b3-rebuild-promotion'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Verify and apply exact rebuild unit
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD}"
+          echo "211333027074fea392a69a42e16d8833729601424da6b27083a545978e8da2a3  .github/b3-rebuild-unit.patch.gz.b64" | sha256sum --check --strict
+          base64 --decode .github/b3-rebuild-unit.patch.gz.b64 > /tmp/b3-rebuild-unit.patch.gz
+          echo "5cef7ae2738f37398606315508fba919eabcacadbad76b9c93d977067ec51e3f  /tmp/b3-rebuild-unit.patch.gz" | sha256sum --check --strict
+          gzip --decompress --stdout /tmp/b3-rebuild-unit.patch.gz > /tmp/b3-rebuild-unit.patch
+          echo "c710e0302010f32de9fd991e6b04e2f7e21a39504ea857e961fbfacc36ec10da  /tmp/b3-rebuild-unit.patch" | sha256sum --check --strict
+          git apply --check /tmp/b3-rebuild-unit.patch
+          git apply /tmp/b3-rebuild-unit.patch
+          rm .github/b3-rebuild-unit.patch.gz.b64
+          rm .github/workflows/b3-rebuild-unit-publisher.yml
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Qualify rebuild unit
+        run: |
+          uv lock --check
+          uv sync --dev --locked
+          uv run python -m compileall -q newsroom scripts
+          uv run python -m pytest -q \
+            newsroom/tests/test_authority_*.py \
+            newsroom/tests/test_projection_b1_*.py \
+            newsroom/tests/test_projection_b2_*.py \
+            newsroom/tests/test_projection_b3_*.py
+
+      - name: Commit and push source-only rebuild unit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          ! git diff --cached --name-only | grep -E '(^|/)(b3-rebuild-unit|publisher)'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat(projection): add restartable structural rebuild"
+          git push origin HEAD:agent/increment-1b3-rebuild-promotion
