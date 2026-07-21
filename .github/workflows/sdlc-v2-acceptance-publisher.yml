@@ -1,0 +1,191 @@
+name: SDLC V2 Acceptance Publisher
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.head_ref == 'agent/sdlc-v2-sub-60s-evidence'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Record exact owner acceptance
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD}"
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              if text.count(old) != 1:
+                  raise SystemExit(f"unexpected source shape for {path}: {old!r}")
+              target.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          spec_path = Path("docs/specs/sdlc/high-performance-evidence-sdlc.md")
+          replace_once(
+              str(spec_path),
+              "- Status: Proposed — owner review required before implementation replaces existing gates",
+              "- Status: Accepted — owner approved on 2026-07-22",
+          )
+          replace_once(
+              str(spec_path),
+              "- A critical main failure creates a typed incident, locates the first bad merge where possible, and opens/recommends the smallest revert or fix-forward. Merge pausing follows the owner decision.",
+              "- A critical main failure creates a typed incident, locates the first bad merge where possible, opens or recommends the smallest revert/fix-forward, and automatically pauses merges until the owner explicitly resumes them.",
+          )
+          replace_once(
+              str(spec_path),
+              "`SDLC-V2` becomes Accepted only after owner review.",
+              "`SDLC-V2` was accepted by the owner on 2026-07-22. Implementation remains reversible and must follow the phased evidence contract below.",
+          )
+          replace_once(
+              str(spec_path),
+              "## 18. Acceptance criteria\n\nThe owner may accept this specification when:",
+              "## 18. Acceptance evidence\n\nThe owner accepted this specification on 2026-07-22 after confirming that:",
+          )
+          spec = spec_path.read_text(encoding="utf-8")
+          marker = "## 19. Owner decisions requested\n"
+          if spec.count(marker) != 1:
+              raise SystemExit("unexpected SDLC owner-decision section")
+          spec = spec[: spec.index(marker)] + """## 19. Accepted owner decisions
+
+The owner accepted all five defaults on 2026-07-22:
+
+1. Review trigger: 400 net executable lines / 12 changed files.
+2. Selective-test blocking eligibility: at least 30 calendar days and 500 representative changes, zero known misses, and at least 99.5% mutation-kill recall relative to the full suite.
+3. A prewarmed ephemeral runner may be evaluated only after measured hosted-runner feedback p95 cannot meet 60 seconds.
+4. A critical main-certification failure automatically pauses merges until the owner explicitly resumes them.
+5. Evidence retention: PR 30 days, main 180 days, release 7 years.
+
+Acceptance authorises the reversible Phase 1/2 implementation. It does not authorise release, production, live-source, Graphiti, model, embedding, shadow, canary, spending or public effects.
+"""
+          spec_path.write_text(spec, encoding="utf-8")
+
+          plan_path = Path("docs/plans/2026-07-21-007-sdlc-v2-migration.md")
+          replace_once(
+              str(plan_path),
+              "- Status: Proposed — blocked on owner acceptance of `SDLC-V2`",
+              "- Status: Accepted — Phase 1/2 implementation authorised on 2026-07-22",
+          )
+          plan = plan_path.read_text(encoding="utf-8")
+          marker = "## 17. Owner decisions\n"
+          if plan.count(marker) != 1:
+              raise SystemExit("unexpected migration-plan owner-decision section")
+          plan = plan[: plan.index(marker)] + """## 17. Accepted owner decisions
+
+Accepted on issue #98 on 2026-07-22:
+
+- review trigger: 400 net executable lines / 12 changed files;
+- selector shadow: 30 calendar days and 500 representative changes, zero known misses and at least 99.5% mutation recall;
+- prewarmed ephemeral-runner evaluation is permitted only after measured hosted-runner feedback fails the 60-second p95 objective;
+- a critical main-certification failure automatically pauses merges until owner resume;
+- evidence retention: PR 30 days, main 180 days, release 7 years.
+
+No later phase may silently weaken these values. Changes require an owner-approved specification amendment.
+"""
+          plan_path.write_text(plan, encoding="utf-8")
+
+          gates_path = Path(".sdlc/gates.toml")
+          replace_once(str(gates_path), 'status = "proposed"', 'status = "accepted"')
+          gates = gates_path.read_text(encoding="utf-8")
+          if "[owner_decisions]" in gates:
+              raise SystemExit("owner decisions already present")
+          gates += """
+
+[owner_decisions]
+accepted_at = "2026-07-22"
+review_net_executable_lines_trigger = 400
+review_changed_files_trigger = 12
+selector_shadow_calendar_days = 30
+selector_shadow_minimum_changes = 500
+selector_known_failure_miss_limit = 0
+selector_mutation_recall_minimum = 0.995
+prewarmed_runner_evaluation_permitted_after_measured_slo_failure = true
+critical_main_failure_pauses_merges = true
+pr_evidence_retention_days = 30
+main_evidence_retention_days = 180
+release_evidence_retention_years = 7
+"""
+          gates_path.write_text(gates, encoding="utf-8")
+
+          readme_path = Path("docs/README.md")
+          readme = readme_path.read_text(encoding="utf-8")
+          old = """- [`specs/sdlc/high-performance-evidence-sdlc.md`](specs/sdlc/high-performance-evidence-sdlc.md) is the **Proposed** `SDLC-V2` target specification for sub-60-second machine gates, risk-routed evidence, exact provenance and scientific quality control. It requires owner review before it becomes implementation authority.
+- [`research/2026-07-21-high-performance-sdlc-evidence.md`](research/2026-07-21-high-performance-sdlc-evidence.md) is the Completed dated evidence study of the current five-workflow topology, exact JUnit timings, primary sources and rejected options.
+- [`plans/2026-07-21-007-sdlc-v2-migration.md`](plans/2026-07-21-007-sdlc-v2-migration.md) is the Proposed reversible migration plan from historical increment workflows to one always-reporting router, one cached core lane and one conditional actual-service lane.
+- [`../.sdlc/gates.toml`](../.sdlc/gates.toml), [`../.sdlc/route.schema.json`](../.sdlc/route.schema.json), [`../.sdlc/evidence.schema.json`](../.sdlc/evidence.schema.json) and [`../.sdlc/baselines/2026-07-21-b3.json`](../.sdlc/baselines/2026-07-21-b3.json) are the Proposed machine-readable contract and exact baseline evidence.
+- Issue #98 and Draft PR #99 are the owner-review boundary. Existing required workflows remain unchanged and B3 product expansion remains preserved on Draft PR #97 until the owner accepts the SDLC direction or explicitly authorises a different transition.
+"""
+          new = """- [`specs/sdlc/high-performance-evidence-sdlc.md`](specs/sdlc/high-performance-evidence-sdlc.md) is the **Accepted** `SDLC-V2` contract for sub-60-second machine gates, risk-routed evidence, exact provenance and scientific quality control.
+- [`specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md`](specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md) records the five accepted owner-policy decisions and implementation authority boundary.
+- [`research/2026-07-21-high-performance-sdlc-evidence.md`](research/2026-07-21-high-performance-sdlc-evidence.md) is the Completed dated evidence study of the current five-workflow topology, exact JUnit timings, primary sources and rejected options.
+- [`plans/2026-07-21-007-sdlc-v2-migration.md`](plans/2026-07-21-007-sdlc-v2-migration.md) is the Accepted reversible migration plan from historical increment workflows to one always-reporting router, one cached core lane and one conditional actual-service lane.
+- [`../.sdlc/gates.toml`](../.sdlc/gates.toml), [`../.sdlc/route.schema.json`](../.sdlc/route.schema.json), [`../.sdlc/evidence.schema.json`](../.sdlc/evidence.schema.json) and [`../.sdlc/baselines/2026-07-21-b3.json`](../.sdlc/baselines/2026-07-21-b3.json) are the Accepted machine-readable contract and exact baseline evidence.
+- Issue #98 and PR #99 are the acceptance boundary. Existing required workflows remain unchanged until reversible Phase 1/2 shadow controls are merged; B3 product expansion remains preserved on Draft PR #97 until those minimum controls exist.
+"""
+          if readme.count(old) != 1:
+              raise SystemExit("unexpected documentation-map SDLC section")
+          readme_path.write_text(readme.replace(old, new, 1), encoding="utf-8")
+
+          acceptance = Path("docs/specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md")
+          if acceptance.exists():
+              raise SystemExit("acceptance record already exists")
+          acceptance.write_text("""# SDLC-V2 owner acceptance
+
+- Role: Normative owner acceptance record
+- Status: Accepted
+- Owner: fol2
+- Canonical language: English
+- Date: 2026-07-22
+- Specification: `docs/specs/sdlc/high-performance-evidence-sdlc.md`
+- Contract version: `sdlc-v2.2`
+- Issue: #98
+- PR: #99
+
+## Decision
+
+The owner accepts `SDLC-V2` and authorises its reversible Phase 1/2 implementation.
+
+Accepted policy values:
+
+1. Review trigger: 400 net executable lines / 12 changed files.
+2. Selective-test blocking eligibility: at least 30 calendar days and 500 representative changes, zero known misses, and at least 99.5% mutation-kill recall relative to the full suite.
+3. A prewarmed ephemeral runner may be evaluated only after measured hosted-runner feedback p95 cannot meet 60 seconds.
+4. A critical main-certification failure automatically pauses merges until owner resume.
+5. Evidence retention: PR 30 days, main 180 days, release 7 years.
+
+## Authority boundary
+
+This acceptance authorises SDLC telemetry, budget enforcement, routing, shadow evidence and reversible workflow migration. It does not authorise release, production, live-source, Graphiti, model, embedding, publication, shadow product execution, canary, spending or public effects.
+
+Existing workflows remain in place until paired shadow evidence satisfies the migration plan. B3 product work may resume after minimum Phase 1/2 controls are available.
+""", encoding="utf-8")
+          PY
+          rm .github/workflows/sdlc-v2-acceptance-publisher.yml
+
+      - name: Commit and push accepted source-only contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          ! git diff --cached --name-only | grep -F 'sdlc-v2-acceptance-publisher.yml'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "docs(sdlc): record owner acceptance"
+          git push origin HEAD:agent/sdlc-v2-sub-60s-evidence
