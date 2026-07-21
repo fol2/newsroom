@@ -21,20 +21,38 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+          show-progress: false
 
       - name: Verify exact transport
+        id: verify
+        continue-on-error: true
         env:
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         shell: bash
         run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD}"
-          test "$(find .github/b2-publish -maxdepth 1 -type f -name 'part-*' | wc -l)" -eq 7
+          set -uox pipefail
+          ACTUAL_HEAD="$(git rev-parse HEAD)"
+          PART_COUNT="$(find .github/b2-publish -maxdepth 1 -type f -name 'part-*' | wc -l | tr -d ' ')"
           cat .github/b2-publish/part-* > /tmp/b2-checkpoint.tar.gz.b64
-          echo "7fd11eb94413e0a0ff93daa3df7e4521c355f3f1b6fcd3e9ea20d3468b24b010  /tmp/b2-checkpoint.tar.gz.b64" | sha256sum --check --strict
-          base64 --decode /tmp/b2-checkpoint.tar.gz.b64 > /tmp/b2-checkpoint.tar.gz
-          echo "692c3a6c4c52a485812c59dc32540c9a888b548d3e6310d39cf35cb473c2c3dd  /tmp/b2-checkpoint.tar.gz" | sha256sum --check --strict
-          tar -tzf /tmp/b2-checkpoint.tar.gz | LC_ALL=C sort > /tmp/b2-actual-files.txt
+          BASE64_SHA="$(sha256sum /tmp/b2-checkpoint.tar.gz.b64 | awk '{print $1}')"
+          DECODE_STATUS=success
+          if ! base64 --decode /tmp/b2-checkpoint.tar.gz.b64 > /tmp/b2-checkpoint.tar.gz; then
+            DECODE_STATUS=failure
+          fi
+          TAR_SHA=unavailable
+          TAR_LIST_STATUS=unavailable
+          : > /tmp/b2-actual-files.txt
+          if [ "$DECODE_STATUS" = success ]; then
+            TAR_SHA="$(sha256sum /tmp/b2-checkpoint.tar.gz | awk '{print $1}')"
+            if tar -tzf /tmp/b2-checkpoint.tar.gz \
+              | sed 's#^\./##' \
+              | grep -v '/$' \
+              | LC_ALL=C sort > /tmp/b2-actual-files.txt; then
+              TAR_LIST_STATUS=success
+            else
+              TAR_LIST_STATUS=failure
+            fi
+          fi
           cat > /tmp/b2-expected-files.txt <<'EOF'
           .github/workflows/projection-b2-neo4j.yml
           docs/operations/neo4j-b2-qualification.md
@@ -55,7 +73,46 @@ jobs:
           pyproject.toml
           EOF
           sed -i 's/^          //' /tmp/b2-expected-files.txt
-          diff -u /tmp/b2-expected-files.txt /tmp/b2-actual-files.txt
+          FILE_LIST_STATUS=failure
+          if diff -u /tmp/b2-expected-files.txt /tmp/b2-actual-files.txt > /tmp/b2-file-list.diff; then
+            FILE_LIST_STATUS=success
+          fi
+          {
+            echo "expected_head=${EXPECTED_HEAD}"
+            echo "actual_head=${ACTUAL_HEAD}"
+            echo "part_count=${PART_COUNT}"
+            echo "expected_base64_sha=7fd11eb94413e0a0ff93daa3df7e4521c355f3f1b6fcd3e9ea20d3468b24b010"
+            echo "actual_base64_sha=${BASE64_SHA}"
+            echo "decode_status=${DECODE_STATUS}"
+            echo "expected_tar_sha=692c3a6c4c52a485812c59dc32540c9a888b548d3e6310d39cf35cb473c2c3dd"
+            echo "actual_tar_sha=${TAR_SHA}"
+            echo "tar_list_status=${TAR_LIST_STATUS}"
+            echo "file_list_status=${FILE_LIST_STATUS}"
+          } | tee /tmp/b2-transport-diagnostics.txt
+          test "$ACTUAL_HEAD" = "$EXPECTED_HEAD"
+          test "$PART_COUNT" = 7
+          test "$BASE64_SHA" = 7fd11eb94413e0a0ff93daa3df7e4521c355f3f1b6fcd3e9ea20d3468b24b010
+          test "$DECODE_STATUS" = success
+          test "$TAR_SHA" = 692c3a6c4c52a485812c59dc32540c9a888b548d3e6310d39cf35cb473c2c3dd
+          test "$TAR_LIST_STATUS" = success
+          test "$FILE_LIST_STATUS" = success
+
+      - name: Upload transport diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b2-transport-diagnostics-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            /tmp/b2-transport-diagnostics.txt
+            /tmp/b2-actual-files.txt
+            /tmp/b2-expected-files.txt
+            /tmp/b2-file-list.diff
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Enforce verified transport
+        if: steps.verify.outcome != 'success'
+        run: exit 1
 
       - name: Materialize source-only checkpoint
         shell: bash
