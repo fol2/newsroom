@@ -61,7 +61,7 @@ jobs:
           } >> "${GITHUB_ENV}"
           docker run --detach \
             --name newsroom-b2-neo4j \
-            --publish 7687:7687 \
+            --publish 127.0.0.1:7687:7687 \
             --env "NEO4J_AUTH=neo4j/${NEO4J_ADMIN_PASSWORD}" \
             "${NEO4J_B2_IMAGE}"
 
