@@ -61,8 +61,8 @@ Required compensating controls for this qualification target are:
 - only the private projector composition receives the credential;
 - no agent, source adapter, model or Graphiti module imports the writer;
 - no general Cypher surface exists;
-- service networking is restricted to the projector/test process;
-- CI credentials are fixed disposable values and are not production credentials;
+- service networking is restricted to the projector/test process and CI binds Bolt to runner loopback only;
+- CI credentials are runtime-generated disposable values, masked before use, and are not production credentials;
 - production secrets must be supplied out of repository and omitted from logs and metadata.
 
 ## Actual-service evidence
