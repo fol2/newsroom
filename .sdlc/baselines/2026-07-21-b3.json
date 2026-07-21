@@ -1,0 +1,87 @@
+{
+  "schema_version": "newsroom.sdlc.baseline.v1",
+  "recorded_at": "2026-07-21T22:42:19Z",
+  "repository": "fol2/newsroom",
+  "head_sha": "74df38790fd17ba9163a6fbcd25a58a5a88d5395",
+  "context": "Increment 1B3 exact-head successful evidence before SDLC-V2",
+  "workflow_runs": {
+    "authority_a2a": 29874638866,
+    "authority_a2b": 29874638887,
+    "projection_b1": 29874638839,
+    "projection_b2_b3_neo4j": 29874638830,
+    "full_ci_clustering": 29874638841
+  },
+  "measurements": [
+    {
+      "id": "authority-a2a",
+      "artifact_id": 8512497562,
+      "tests": 29,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "suite_seconds": 1.134,
+      "longest_test_seconds": 0.147,
+      "p95_test_seconds": 0.043
+    },
+    {
+      "id": "authority-a2b-focused",
+      "artifact_id": 8512499396,
+      "tests": 86,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "suite_seconds": 6.988,
+      "longest_test_seconds": 0.675,
+      "p95_test_seconds": 0.171
+    },
+    {
+      "id": "authority-a2b-regression",
+      "artifact_id": 8512500313,
+      "tests": 79,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "suite_seconds": 1.572,
+      "longest_test_seconds": 0.277,
+      "p95_test_seconds": 0.039
+    },
+    {
+      "id": "authority-a2b-fault-matrix",
+      "artifact_id": 8512501422,
+      "tests": 31,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "suite_seconds": 2.127,
+      "longest_test_seconds": 0.175,
+      "p95_test_seconds": 0.115
+    },
+    {
+      "id": "projection-b1",
+      "artifact_id": 8512497737,
+      "tests": 35,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "suite_seconds": 1.809,
+      "longest_test_seconds": 0.084,
+      "p95_test_seconds": 0.082
+    },
+    {
+      "id": "projection-b2-b3-actual-service",
+      "artifact_id": 8512509061,
+      "tests": 94,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "suite_seconds": 7.401,
+      "longest_test_seconds": 2.258,
+      "p95_test_seconds": 0.346
+    }
+  ],
+  "limitations": [
+    "GitHub hosted-runner queue and provisioning p95 were not yet measured separately.",
+    "Full repository pytest did not emit JUnit in the baseline workflow, so its exact suite duration is not asserted here.",
+    "The measurements describe one exact successful head and are a baseline, not a permanent performance guarantee."
+  ]
+}
