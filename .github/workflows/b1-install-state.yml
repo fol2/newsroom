@@ -103,17 +103,17 @@ jobs:
           git diff --cached --check
           git status --short
 
-          # Temporary workflows are retained in this bot commit because the
-          # workflow token cannot create/delete workflow files. Exclude them
-          # only while verifying the exact reviewed source tree; the connected
-          # GitHub app removes them after the source commit lands.
+          # GITHUB_TOKEN cannot create or delete workflow files. Keep the three
+          # temporary workflows in the bot commit, but exclude the permanent
+          # Projection B1 workflow until the connected GitHub app adds it.
           git rm --cached --force .github/workflows/b1-export-checkout.yml
           git rm --cached --force .github/workflows/b1-install-checkpoint.yml
           git rm --cached --force .github/workflows/b1-install-state.yml
+          git rm --cached --force .github/workflows/projection-b1.yml
           actual_tree="$(git write-tree)"
           echo "actual_tree=$actual_tree"
-          echo 'expected_tree=02293369b4d95c440ef5ae014179612f23ee932c'
-          test "$actual_tree" = '02293369b4d95c440ef5ae014179612f23ee932c'
+          echo 'expected_tree=9a5da3dea30d6be3faf0c4e60117985843c1a1b3'
+          test "$actual_tree" = '9a5da3dea30d6be3faf0c4e60117985843c1a1b3'
           git add .github/workflows/b1-export-checkout.yml \
                   .github/workflows/b1-install-checkpoint.yml \
                   .github/workflows/b1-install-state.yml
@@ -126,6 +126,7 @@ jobs:
           test -f newsroom/tests/test_projection_b1_authority.py
           test -f newsroom/tests/test_projection_b1_boundaries.py
           test -f newsroom/tests/test_projection_b1_migrations.py
+          test -f .github/workflows/projection-b1.yml
           test ! -e .github/b1-state
           test ! -e .github/b1-fix
           echo 'installed=true' >> "$GITHUB_OUTPUT"
