@@ -1,29 +1,32 @@
 name: B2 Hardening Publisher
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/increment-1b2-neo4j-structural
+      - main
 
 permissions:
   contents: write
 
 jobs:
   publish:
+    if: github.head_ref == 'agent/increment-1b2-neo4j-structural'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           show-progress: false
 
       - name: Verify and apply exact hardening patch
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD}"
           echo "5ffdc8af589527b7ab08545664328332d4973483f673c34bf1b015bf81f02bc1  .github/b2-hardening.patch" | sha256sum --check --strict
           git apply --check .github/b2-hardening.patch
           git apply .github/b2-hardening.patch
