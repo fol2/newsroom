@@ -1,4 +1,4 @@
-name: B2 Checkpoint Publisher
+name: B2 Fresh Source Export
 
 on:
   push:
@@ -9,13 +9,13 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  publish:
+  export-source:
     if: github.event_name == 'push' || github.head_ref == 'agent/increment-1b2-neo4j-structural'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,137 +23,30 @@ jobs:
           fetch-depth: 0
           show-progress: false
 
-      - name: Verify exact transport
-        id: verify
-        continue-on-error: true
+      - name: Verify exact tracked checkout
         env:
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         shell: bash
         run: |
-          set -uox pipefail
-          ACTUAL_HEAD="$(git rev-parse HEAD)"
-          PART_COUNT="$(find .github/b2-publish -maxdepth 1 -type f -name 'part-*' | wc -l | tr -d ' ')"
-          cat .github/b2-publish/part-* > /tmp/b2-checkpoint.tar.gz.b64
-          BASE64_SHA="$(sha256sum /tmp/b2-checkpoint.tar.gz.b64 | awk '{print $1}')"
-          DECODE_STATUS=success
-          if ! base64 --decode /tmp/b2-checkpoint.tar.gz.b64 > /tmp/b2-checkpoint.tar.gz; then
-            DECODE_STATUS=failure
-          fi
-          TAR_SHA=unavailable
-          TAR_LIST_STATUS=unavailable
-          : > /tmp/b2-actual-files.txt
-          if [ "$DECODE_STATUS" = success ]; then
-            TAR_SHA="$(sha256sum /tmp/b2-checkpoint.tar.gz | awk '{print $1}')"
-            if tar -tzf /tmp/b2-checkpoint.tar.gz \
-              | sed 's#^\./##' \
-              | grep -v '/$' \
-              | LC_ALL=C sort > /tmp/b2-actual-files.txt; then
-              TAR_LIST_STATUS=success
-            else
-              TAR_LIST_STATUS=failure
-            fi
-          fi
-          cat > /tmp/b2-expected-files.txt <<'EOF'
-          .github/workflows/projection-b2-neo4j.yml
-          docs/operations/neo4j-b2-qualification.md
-          newsroom/authority/_neo4j_projection_system.py
-          newsroom/authority/_projection_store.py
-          newsroom/authority/_projection_system.py
-          newsroom/authority/neo4j_projection_system.py
-          newsroom/projection/neo4j/__init__.py
-          newsroom/projection/neo4j/_adapter.py
-          newsroom/projection/neo4j/models.py
-          newsroom/projection/neo4j/traceability.py
-          newsroom/tests/projection_b2_helpers.py
-          newsroom/tests/test_projection_b2_adapter_unit.py
-          newsroom/tests/test_projection_b2_authority.py
-          newsroom/tests/test_projection_b2_boundaries.py
-          newsroom/tests/test_projection_b2_contracts.py
-          newsroom/tests/test_projection_b2_neo4j_service.py
-          pyproject.toml
-          EOF
-          sed -i 's/^          //' /tmp/b2-expected-files.txt
-          FILE_LIST_STATUS=failure
-          if diff -u /tmp/b2-expected-files.txt /tmp/b2-actual-files.txt > /tmp/b2-file-list.diff; then
-            FILE_LIST_STATUS=success
-          fi
-          {
-            echo "expected_head=${EXPECTED_HEAD}"
-            echo "actual_head=${ACTUAL_HEAD}"
-            echo "part_count=${PART_COUNT}"
-            echo "expected_base64_sha=7fd11eb94413e0a0ff93daa3df7e4521c355f3f1b6fcd3e9ea20d3468b24b010"
-            echo "actual_base64_sha=${BASE64_SHA}"
-            echo "decode_status=${DECODE_STATUS}"
-            echo "expected_tar_sha=692c3a6c4c52a485812c59dc32540c9a888b548d3e6310d39cf35cb473c2c3dd"
-            echo "actual_tar_sha=${TAR_SHA}"
-            echo "tar_list_status=${TAR_LIST_STATUS}"
-            echo "file_list_status=${FILE_LIST_STATUS}"
-          } | tee /tmp/b2-transport-diagnostics.txt
-          test "$ACTUAL_HEAD" = "$EXPECTED_HEAD"
-          test "$PART_COUNT" = 7
-          test "$BASE64_SHA" = 7fd11eb94413e0a0ff93daa3df7e4521c355f3f1b6fcd3e9ea20d3468b24b010
-          test "$DECODE_STATUS" = success
-          test "$TAR_SHA" = 692c3a6c4c52a485812c59dc32540c9a888b548d3e6310d39cf35cb473c2c3dd
-          test "$TAR_LIST_STATUS" = success
-          test "$FILE_LIST_STATUS" = success
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test -z "$(git status --porcelain=v1)"
 
-      - name: Upload transport diagnostics
-        if: always()
+      - name: Export exact tracked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --output=b2-fresh-source.tar.gz HEAD
+          git rev-parse HEAD > b2-fresh-source-head.txt
+          sha256sum b2-fresh-source.tar.gz > b2-fresh-source.tar.gz.sha256
+
+      - name: Upload exact source
         uses: actions/upload-artifact@v4
         with:
-          name: b2-transport-diagnostics-${{ github.event.pull_request.head.sha || github.sha }}
+          name: b2-fresh-source-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
-            /tmp/b2-transport-diagnostics.txt
-            /tmp/b2-actual-files.txt
-            /tmp/b2-expected-files.txt
-            /tmp/b2-file-list.diff
-          if-no-files-found: warn
+            b2-fresh-source.tar.gz
+            b2-fresh-source.tar.gz.sha256
+            b2-fresh-source-head.txt
+          if-no-files-found: error
           retention-days: 1
-
-      - name: Enforce verified transport
-        if: steps.verify.outcome != 'success'
-        run: exit 1
-
-      - name: Materialize source-only checkpoint
-        shell: bash
-        run: |
-          set -euo pipefail
-          tar -xzf /tmp/b2-checkpoint.tar.gz -C .
-          rm -rf .github/b2-publish
-          rm -f .github/workflows/b2-source-bootstrap.yml
-          test ! -e .github/workflows/b2-lock-refresh.yml
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install uv
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install uv
-
-      - name: Resolve and verify locked environment
-        run: |
-          uv lock
-          uv lock --check
-          uv sync --dev --locked
-
-      - name: Qualify coherent checkpoint
-        run: |
-          uv run python -m compileall -q newsroom scripts
-          uv run python -m pytest -q \
-            newsroom/tests/test_authority_*.py \
-            newsroom/tests/test_projection_b1_*.py \
-            newsroom/tests/test_projection_b2_*.py
-
-      - name: Commit source-only checkpoint
-        shell: bash
-        run: |
-          set -euo pipefail
-          git add -A
-          git diff --cached --check
-          ! git diff --cached --name-only | grep -E '(^|/)(b2-publish|b2-source-bootstrap|b2-lock-refresh)'
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "feat(projection): add native Neo4j structural adapter"
-          git push origin HEAD:agent/increment-1b2-neo4j-structural
