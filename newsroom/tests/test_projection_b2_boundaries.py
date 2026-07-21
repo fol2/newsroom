@@ -170,4 +170,5 @@ def test_actual_service_workflow_masks_runtime_credentials() -> None:
     assert 'echo "::add-mask::${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"' in workflow
     assert '>> "${GITHUB_ENV}"' in workflow
     assert "docker run --detach" in workflow
+    assert "--publish 127.0.0.1:7687:7687" in workflow
     assert "docker rm --force newsroom-b2-neo4j" in workflow
