@@ -15,6 +15,8 @@ from newsroom.projection import (
     ProjectionFamilyKind,
     ProjectionFamilyRegistry,
     ProjectionIdentitySource,
+    StructuralIdentityContext,
+    canonical_node_id,
     ProjectionNodeType,
     ProjectionRelationType,
     StructuralEventMapping,
@@ -210,3 +212,42 @@ def test_graphiti_contract_is_proposal_only_and_has_no_execution_api() -> None:
         graphiti_workspaces=(contract,),
     )
     assert contracts.graphiti_contracts() == (contract,)
+
+
+def test_canonical_engine_neutral_node_ids_are_stable_and_typed() -> None:
+    context = StructuralIdentityContext(
+        aggregate_type="source_item",
+        aggregate_id="11111111-1111-4111-8111-111111111111",
+        aggregate_version=2,
+        event_id="22222222-2222-4222-8222-222222222222",
+        payload_id="33333333-3333-4333-8333-333333333333",
+        payload={"source_item_id": "item-123"},
+    )
+    aggregate = StructuralNodeBinding(
+        "item",
+        ProjectionNodeType.SOURCE_ITEM,
+        ProjectionIdentitySource.AGGREGATE,
+    )
+    first = canonical_node_id(aggregate, context)
+    assert first == canonical_node_id(aggregate, context)
+    assert first.startswith("npid:v1:source_item:")
+
+    version = StructuralNodeBinding(
+        "version",
+        ProjectionNodeType.AUTHORITY_VERSION,
+        ProjectionIdentitySource.AGGREGATE_VERSION,
+    )
+    assert canonical_node_id(version, context) != first
+
+    payload_field = StructuralNodeBinding(
+        "item",
+        ProjectionNodeType.SOURCE_ITEM,
+        ProjectionIdentitySource.PAYLOAD_FIELD,
+        "source_item_id",
+    )
+    assert canonical_node_id(payload_field, context) != first
+    with pytest.raises(ProjectionContractError, match="field is absent"):
+        canonical_node_id(
+            payload_field,
+            replace(context, payload={}),
+        )

@@ -140,7 +140,7 @@ PROJECTION_MIGRATION_STATEMENTS: tuple[str, ...] = (
         state TEXT NOT NULL CHECK(state IN ('OPEN','RESOLVED')),
         required INTEGER NOT NULL CHECK(required IN (0,1)),
         reason_code TEXT NOT NULL,
-        authority_event_id TEXT NOT NULL UNIQUE
+        authority_event_id TEXT NOT NULL
             REFERENCES ledger_events(event_id),
         recorded_at TEXT NOT NULL,
         PRIMARY KEY(gap_id, lifecycle_version)
@@ -245,8 +245,9 @@ PROJECTION_MIGRATION_STATEMENTS: tuple[str, ...] = (
         BEFORE UPDATE ON projection_generations
         WHEN NEW.generation_id != OLD.generation_id
           OR NEW.family_id != OLD.family_id
-          OR NEW.lifecycle_version != OLD.lifecycle_version + 1
-          OR NEW.authority_aggregate_version <= OLD.authority_aggregate_version
+          OR NEW.lifecycle_version < OLD.lifecycle_version
+          OR NEW.lifecycle_version > OLD.lifecycle_version + 1
+          OR NEW.authority_aggregate_version != OLD.authority_aggregate_version + 1
           OR NEW.created_event_id != OLD.created_event_id
           OR NEW.created_at != OLD.created_at
         BEGIN SELECT RAISE(ABORT,'invalid projection generation update'); END""",
@@ -296,7 +297,20 @@ PROJECTION_MIGRATION_STATEMENTS: tuple[str, ...] = (
           OR NEW.source_event_type != OLD.source_event_type
           OR NEW.required != OLD.required
           OR NEW.attempt_count != OLD.attempt_count + 1
-          OR OLD.finalized = 1
+          OR (
+              OLD.finalized = 1
+              AND NOT (
+                  OLD.current_outcome IN ('RETRYABLE_FAILURE','REQUIRED_UNSUPPORTED')
+                  AND (
+                      NEW.current_outcome = 'APPLIED'
+                      OR (
+                          OLD.required = 0
+                          AND NEW.current_outcome = 'IGNORED_OPTIONAL'
+                      )
+                  )
+                  AND NEW.finalized = 1
+              )
+          )
         BEGIN SELECT RAISE(ABORT,'invalid projection delivery update'); END""",
     """CREATE TRIGGER projection_delivery_state_delete_guard
         BEFORE DELETE ON projection_delivery_states BEGIN

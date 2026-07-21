@@ -295,11 +295,14 @@ class ProjectionFamilyRegistrationRequest:
 
 @dataclass(frozen=True, slots=True)
 class ProjectionGenerationCreateRequest:
+    generation_id: ProjectionGenerationId
     family_id: str
     reason_code: str
     idempotency_key: str
 
     def __post_init__(self) -> None:
+        if not isinstance(self.generation_id, ProjectionGenerationId):
+            raise ProjectionContractError("generation identity must be typed")
         require_token(self.family_id, field="projection_family_id")
         require_reason(self.reason_code)
         require_idempotency_key(self.idempotency_key)

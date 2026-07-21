@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from collections.abc import Mapping
 from typing import Iterable
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
 from newsroom.authority.types import require_token
 
 from .models import ProjectionContractError
@@ -46,6 +47,89 @@ class StructuralNodeBinding:
             "identity_source": self.identity_source.value,
             "payload_field": self.payload_field,
         }
+
+
+def _require_identity_text(value: str, *, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value.encode("utf-8")) > 512
+    ):
+        raise ProjectionContractError(f"{field} must be bounded canonical text")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralIdentityContext:
+    aggregate_type: str
+    aggregate_id: str
+    aggregate_version: int
+    event_id: str
+    payload_id: str
+    payload: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        require_token(self.aggregate_type, field="projection_identity_aggregate_type")
+        _require_identity_text(
+            self.aggregate_id, field="projection_identity_aggregate_id"
+        )
+        if isinstance(self.aggregate_version, bool) or not isinstance(
+            self.aggregate_version, int
+        ) or self.aggregate_version <= 0:
+            raise ProjectionContractError(
+                "projection identity aggregate version must be positive"
+            )
+        _require_identity_text(self.event_id, field="projection_identity_event_id")
+        _require_identity_text(self.payload_id, field="projection_identity_payload_id")
+        if not isinstance(self.payload, Mapping):
+            raise ProjectionContractError("projection identity payload must be a mapping")
+
+
+def canonical_node_id(
+    binding: StructuralNodeBinding,
+    context: StructuralIdentityContext,
+) -> str:
+    if not isinstance(binding, StructuralNodeBinding):
+        raise ProjectionContractError("canonical node ID requires typed binding")
+    if not isinstance(context, StructuralIdentityContext):
+        raise ProjectionContractError("canonical node ID requires typed context")
+    if binding.identity_source is ProjectionIdentitySource.AGGREGATE:
+        identity: object = {
+            "aggregate_type": context.aggregate_type,
+            "aggregate_id": context.aggregate_id,
+        }
+    elif binding.identity_source is ProjectionIdentitySource.AGGREGATE_VERSION:
+        identity = {
+            "aggregate_type": context.aggregate_type,
+            "aggregate_id": context.aggregate_id,
+            "aggregate_version": context.aggregate_version,
+        }
+    elif binding.identity_source is ProjectionIdentitySource.EVENT:
+        identity = {"event_id": context.event_id}
+    elif binding.identity_source is ProjectionIdentitySource.PAYLOAD:
+        identity = {"payload_id": context.payload_id}
+    else:
+        field = binding.payload_field or ""
+        if field not in context.payload:
+            raise ProjectionContractError(
+                f"projection identity payload field is absent: {field}"
+            )
+        value = context.payload[field]
+        if not isinstance(value, (str, int)) or isinstance(value, bool):
+            raise ProjectionContractError(
+                "projection identity payload field must be string or integer"
+            )
+        identity = {"payload_field": field, "value": value}
+    digest = digest_canonical(
+        {
+            "identity_contract": "newsroom-projection-id-v1",
+            "node_type": binding.node_type.value,
+            "identity_source": binding.identity_source.value,
+            "identity": identity,
+        }
+    ).removeprefix("sha256:")
+    return f"npid:v1:{binding.node_type.value.lower()}:{digest}"
 
 
 @dataclass(frozen=True, slots=True)
