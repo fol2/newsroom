@@ -39,6 +39,14 @@ A link does not make an entire reference or research document normative. A merge
 - Dated database, GraphRAG and discovery research remains non-normative evidence.
 - [`reference/editorial/product-editorial-charter.zh-HK.md`](reference/editorial/product-editorial-charter.zh-HK.md) is the canonical human charter; the English file is a development translation.
 
+## Current SDLC v2 documents
+
+- [`specs/sdlc/high-performance-evidence-sdlc.md`](specs/sdlc/high-performance-evidence-sdlc.md) is the **Proposed** `SDLC-V2` target specification for sub-60-second machine gates, risk-routed evidence, exact provenance and scientific quality control. It requires owner review before it becomes implementation authority.
+- [`research/2026-07-21-high-performance-sdlc-evidence.md`](research/2026-07-21-high-performance-sdlc-evidence.md) is the Completed dated evidence study of the current five-workflow topology, exact JUnit timings, primary sources and rejected options.
+- [`plans/2026-07-21-007-sdlc-v2-migration.md`](plans/2026-07-21-007-sdlc-v2-migration.md) is the Proposed reversible migration plan from historical increment workflows to one always-reporting router, one cached core lane and one conditional actual-service lane.
+- [`../.sdlc/gates.toml`](../.sdlc/gates.toml), [`../.sdlc/route.schema.json`](../.sdlc/route.schema.json), [`../.sdlc/evidence.schema.json`](../.sdlc/evidence.schema.json) and [`../.sdlc/baselines/2026-07-21-b3.json`](../.sdlc/baselines/2026-07-21-b3.json) are the Proposed machine-readable contract and exact baseline evidence.
+- Issue #98 and Draft PR #99 are the owner-review boundary. Existing required workflows remain unchanged and B3 product expansion remains preserved on Draft PR #97 until the owner accepts the SDLC direction or explicitly authorises a different transition.
+
 ## Current-system documentation
 
 `ARCHITECTURE.md`, `AGENTS.md` and `PROMPTS.md` describe the existing Brave, RSS, GDELT, Gemini and Discord system. `CONTRIBUTING.md` describes contribution procedures. `docs/evaluation/` and `docs/cleanup_runs/` retain current evaluation and run evidence.
