@@ -156,3 +156,18 @@ def test_traceability_names_permanent_boundary_service_and_operations_evidence()
     assert "newsroom.tests.test_projection_b2_neo4j_service" in flattened
     assert ".github.workflows.projection-b2-neo4j" in flattened
     assert "docs.operations.neo4j-b2-qualification" in flattened
+
+
+def test_actual_service_workflow_masks_runtime_credentials() -> None:
+    workflow = (
+        _REPOSITORY_ROOT / ".github/workflows/projection-b2-neo4j.yml"
+    ).read_text()
+    assert "services:" not in workflow
+    assert "NEO4J_AUTH: neo4j/" not in workflow
+    assert "B2Disposable" not in workflow
+    assert "secrets.token_urlsafe" in workflow
+    assert 'echo "::add-mask::${NEO4J_ADMIN_PASSWORD}"' in workflow
+    assert 'echo "::add-mask::${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"' in workflow
+    assert '>> "${GITHUB_ENV}"' in workflow
+    assert "docker run --detach" in workflow
+    assert "docker rm --force newsroom-b2-neo4j" in workflow

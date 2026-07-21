@@ -52,7 +52,7 @@ The accepted direct relation allow-list is:
 
 ## Authentication and Community Edition limitation
 
-The actual-service workflow starts Neo4j with authentication enabled. It uses a disposable CI administrator only to create a separate native `newsroom_projector` identity, then executes the B2 adapter and tests with the projector credential. The repository configuration contract rejects the bootstrap `neo4j` administrator identity for projector use. Missing or wrong credentials fail closed, and configuration, exceptions and response metadata do not disclose passwords.
+The actual-service workflow starts Neo4j with authentication enabled. It generates masked, run-scoped disposable credentials before starting the pinned container, uses the disposable administrator only to create a separate native `newsroom_projector` identity, and then executes the B2 adapter and tests with the projector credential. The repository configuration contract rejects the bootstrap `neo4j` administrator identity for projector use. Missing or wrong credentials fail closed, and configuration, workflow logs, exceptions and response metadata do not disclose passwords.
 
 Neo4j Community Edition does not provide the fine-grained role boundary required to call this database-level least privilege. Community users have implied administrative capability. The dedicated user therefore proves credential separation and supports process, network and secret-distribution controls; it does not prove fine-grained Neo4j RBAC.
 

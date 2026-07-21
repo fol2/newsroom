@@ -11,13 +11,12 @@ jobs:
   authenticated-neo4j-service:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    services:
-      neo4j:
-        image: neo4j:2026.06.0-community-trixie
-        env:
-          NEO4J_AUTH: neo4j/B2DisposableAdminPassword_2026
-        ports:
-          - 7687:7687
+    env:
+      NEO4J_B2_IMAGE: neo4j:2026.06.0-community-trixie
+      NEO4J_URI: bolt://localhost:7687
+      NEO4J_ADMIN_USERNAME: neo4j
+      NEWSROOM_NEO4J_DATABASE: neo4j
+      NEWSROOM_NEO4J_PROJECTOR_USERNAME: newsroom_projector
 
     steps:
       - uses: actions/checkout@v4
@@ -40,13 +39,33 @@ jobs:
           assert neo4j.__version__ == "6.2.0", neo4j.__version__
           PY
 
+      - name: Generate masked disposable credentials and start Neo4j
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEO4J_ADMIN_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          NEWSROOM_NEO4J_PROJECTOR_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          echo "::add-mask::${NEO4J_ADMIN_PASSWORD}"
+          echo "::add-mask::${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+          {
+            echo "NEO4J_ADMIN_PASSWORD=${NEO4J_ADMIN_PASSWORD}"
+            echo "NEWSROOM_NEO4J_PROJECTOR_PASSWORD=${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+          } >> "${GITHUB_ENV}"
+          docker run --detach \
+            --name newsroom-b2-neo4j \
+            --publish 7687:7687 \
+            --env "NEO4J_AUTH=neo4j/${NEO4J_ADMIN_PASSWORD}" \
+            "${NEO4J_B2_IMAGE}"
+
       - name: Wait for authenticated Neo4j and create projector identity
-        env:
-          NEO4J_URI: bolt://localhost:7687
-          NEO4J_ADMIN_USERNAME: neo4j
-          NEO4J_ADMIN_PASSWORD: B2DisposableAdminPassword_2026
-          NEWSROOM_NEO4J_PROJECTOR_USERNAME: newsroom_projector
-          NEWSROOM_NEO4J_PROJECTOR_PASSWORD: B2DisposableProjectorPassword_2026
         run: |
           uv run python - <<'PY'
           import os
@@ -60,6 +79,7 @@ jobs:
               os.environ["NEO4J_ADMIN_PASSWORD"],
           )
           last_error = None
+          driver = None
           for _ in range(120):
               try:
                   driver = GraphDatabase.driver(uri, auth=admin_auth)
@@ -67,14 +87,14 @@ jobs:
                   break
               except Exception as exc:
                   last_error = exc
-                  try:
+                  if driver is not None:
                       driver.close()
-                  except Exception:
-                      pass
+                  driver = None
                   time.sleep(2)
           else:
               raise RuntimeError("authenticated Neo4j readiness timed out") from last_error
 
+          assert driver is not None
           try:
               with driver.session(database="system") as session:
                   session.run(
@@ -103,10 +123,7 @@ jobs:
         continue-on-error: true
         env:
           NEWSROOM_NEO4J_SERVICE_REQUIRED: "1"
-          NEWSROOM_NEO4J_URI: bolt://localhost:7687
-          NEWSROOM_NEO4J_DATABASE: neo4j
-          NEWSROOM_NEO4J_PROJECTOR_USERNAME: newsroom_projector
-          NEWSROOM_NEO4J_PROJECTOR_PASSWORD: B2DisposableProjectorPassword_2026
+          NEWSROOM_NEO4J_URI: ${{ env.NEO4J_URI }}
         run: |
           uv run python -m pytest -q \
             newsroom/tests/test_projection_b1_*.py \
@@ -148,6 +165,10 @@ jobs:
           name: projection-b2-neo4j-evidence
           path: projection-b2-neo4j-results.xml
           if-no-files-found: error
+
+      - name: Remove disposable Neo4j state
+        if: always()
+        run: docker rm --force newsroom-b2-neo4j || true
 
       - name: Enforce B2 actual-service gate
         if: steps.focused.outcome != 'success'
