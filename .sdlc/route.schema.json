@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/fol2/newsroom/.sdlc/route.schema.json",
+  "title": "Newsroom SDLC route decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract_version",
+    "base_sha",
+    "head_sha",
+    "risk_tier",
+    "reasons",
+    "core_required",
+    "service_required",
+    "clustering_required",
+    "core_tests",
+    "service_tests",
+    "sentinels",
+    "selected_test_manifest_digest"
+  ],
+  "properties": {
+    "schema_version": {"const": "newsroom.sdlc.route.v1"},
+    "contract_version": {"type": "string", "minLength": 1},
+    "base_sha": {"$ref": "#/$defs/gitSha"},
+    "head_sha": {"$ref": "#/$defs/gitSha"},
+    "risk_tier": {
+      "enum": [
+        "R0_DOCUMENTATION",
+        "R1_LOCAL_CODE",
+        "R2_STATEFUL_CONTRACT",
+        "R3_EXTERNAL_SERVICE_SECURITY",
+        "R4_RELEASE_OPERATIONAL"
+      ]
+    },
+    "reasons": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "core_required": {"type": "boolean"},
+    "service_required": {"type": "boolean"},
+    "clustering_required": {"type": "boolean"},
+    "owner_authority_required": {"type": "boolean"},
+    "core_tests": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "service_tests": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "sentinels": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "selected_test_manifest_digest": {"$ref": "#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "risk_tier": {
+            "enum": ["R3_EXTERNAL_SERVICE_SECURITY", "R4_RELEASE_OPERATIONAL"]
+          }
+        },
+        "required": ["risk_tier"]
+      },
+      "then": {"properties": {"service_required": {"const": true}}}
+    },
+    {
+      "if": {
+        "properties": {"risk_tier": {"const": "R4_RELEASE_OPERATIONAL"}},
+        "required": ["risk_tier"]
+      },
+      "then": {
+        "required": ["owner_authority_required"],
+        "properties": {"owner_authority_required": {"const": true}}
+      }
+    }
+  ],
+  "$defs": {
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}
