@@ -21,7 +21,8 @@
       "skipped": 0,
       "suite_seconds": 1.134,
       "longest_test_seconds": 0.147,
-      "p95_test_seconds": 0.043
+      "p95_test_seconds": 0.043,
+      "artifact_digest": "sha256:9d19c66f3168f0529dd5ab27fe7c135b979bea58fe0a9b834b184d0777ad400b"
     },
     {
       "id": "authority-a2b-focused",
@@ -32,7 +33,8 @@
       "skipped": 0,
       "suite_seconds": 6.988,
       "longest_test_seconds": 0.675,
-      "p95_test_seconds": 0.171
+      "p95_test_seconds": 0.171,
+      "artifact_digest": "sha256:1cbb536d2a763a5d5f6cd616baf8964ada577528723dfa8c47bc2dcf35efbaa3"
     },
     {
       "id": "authority-a2b-regression",
@@ -43,7 +45,8 @@
       "skipped": 0,
       "suite_seconds": 1.572,
       "longest_test_seconds": 0.277,
-      "p95_test_seconds": 0.039
+      "p95_test_seconds": 0.039,
+      "artifact_digest": "sha256:9e2147969a9a27a68e04a00e3f62b801b757c2b47127a2f3500da0af03a415aa"
     },
     {
       "id": "authority-a2b-fault-matrix",
@@ -54,7 +57,8 @@
       "skipped": 0,
       "suite_seconds": 2.127,
       "longest_test_seconds": 0.175,
-      "p95_test_seconds": 0.115
+      "p95_test_seconds": 0.115,
+      "artifact_digest": "sha256:c94992d3207f47d1b138642400b2cc1fec1ec7338ba662b34b3778f2f8a87401"
     },
     {
       "id": "projection-b1",
@@ -65,7 +69,8 @@
       "skipped": 0,
       "suite_seconds": 1.809,
       "longest_test_seconds": 0.084,
-      "p95_test_seconds": 0.082
+      "p95_test_seconds": 0.082,
+      "artifact_digest": "sha256:c661c8e55d8b4d912eb07b66eb3abe08d4927670b8572ef064236763550cce27"
     },
     {
       "id": "projection-b2-b3-actual-service",
@@ -76,12 +81,19 @@
       "skipped": 0,
       "suite_seconds": 7.401,
       "longest_test_seconds": 2.258,
-      "p95_test_seconds": 0.346
+      "p95_test_seconds": 0.346,
+      "artifact_digest": "sha256:465406bb1840e1d5fbf5b9eaf23b6ed1efc8f7608d8fa5b1288f74dba22dce63"
     }
   ],
   "limitations": [
     "GitHub hosted-runner queue and provisioning p95 were not yet measured separately.",
     "Full repository pytest did not emit JUnit in the baseline workflow, so its exact suite duration is not asserted here.",
     "The measurements describe one exact successful head and are a baseline, not a permanent performance guarantee."
-  ]
+  ],
+  "measurement_method": {
+    "suite_seconds": "pytest JUnit testsuite @time",
+    "longest_test_seconds": "maximum testcase @time",
+    "p95_test_seconds": "nearest-rank p95 over sorted testcase @time values",
+    "artifact_source": "GitHub Actions exact-head artifacts"
+  }
 }
