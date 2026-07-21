@@ -15,6 +15,9 @@ from newsroom.authority import (
     UtcTimestamp,
 )
 from newsroom.authority._neo4j_projection_system import _open_with_adapter
+from newsroom.authority.neo4j_projection_system import (
+    open_neo4j_projection_authority_system,
+)
 from newsroom.projection import ProjectionGenerationId
 from newsroom.projection.neo4j import (
     NEO4J_B2_DRIVER_VERSION,
@@ -23,6 +26,7 @@ from newsroom.projection.neo4j import (
     Neo4jApplyResult,
     Neo4jCompatibility,
     Neo4jIdentityConflict,
+    Neo4jProjectorConfig,
     Neo4jStructuralRead,
     Neo4jWriteError,
     StructuralBatch,
@@ -204,6 +208,46 @@ def open_b2_system(
         event_read_policy=policy,
         projection_read_policy=projection_read_policy(),
         adapter=adapter,
+        clock=clock or (lambda: FIXED_NOW),
+    )
+
+
+def open_b2_service_system(
+    path: Path,
+    config: Neo4jProjectorConfig,
+    *,
+    scopes: frozenset[str] | None = None,
+    clock: Callable[[], UtcTimestamp] | None = None,
+):
+    """Open the public authenticated B2 composition against a real service."""
+
+    policy = event_read_policy()
+    selected = scopes or frozenset(
+        {
+            "authority.observed.write",
+            "authority.admitted.write",
+            policy.required_scope,
+            "authority.projection.manage",
+            "authority.projection.write",
+            "authority.projection.read",
+        }
+    )
+    return open_neo4j_projection_authority_system(
+        path=path,
+        registry=source_command_registry(),
+        payload_schemas=payload_schemas(),
+        contracts=projection_contracts(),
+        authenticator=StaticAuthenticator(
+            credentials={"token-1": StaticPrincipal("principal.alpha")},
+            authority_domain="newsroom.authority",
+        ),
+        authorizer=StaticAuthorizer(
+            policy_version="authz-v1",
+            grants_by_principal={"principal.alpha": selected},
+        ),
+        event_read_policy=policy,
+        projection_read_policy=projection_read_policy(),
+        neo4j_config=config,
         clock=clock or (lambda: FIXED_NOW),
     )
 
