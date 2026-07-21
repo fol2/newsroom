@@ -62,7 +62,7 @@ p50_target_seconds = 20
 p95_target_seconds = 50
 hard_timeout_seconds = 55
 blocking = true
-lane = "merge-group"
+lane = "merge_group"
 activation = "after_merge_queue_adoption"
 
 [gate.science-shard]
@@ -148,6 +148,7 @@ stateful_contract = [
 ]
 external_service_security = [
   "newsroom/projection/neo4j/**",
+  "newsroom/projection/policy.py",
   "newsroom/authority/_neo4j_projection_system.py",
   "newsroom/authority/neo4j_projection_system.py",
   "newsroom/authority/_projection_store.py",
