@@ -1,0 +1,175 @@
+name: Projection B2 Neo4j
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  authenticated-neo4j-service:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      NEO4J_B2_IMAGE: neo4j:2026.06.0-community-trixie
+      NEO4J_URI: bolt://localhost:7687
+      NEO4J_ADMIN_USERNAME: neo4j
+      NEWSROOM_NEO4J_DATABASE: neo4j
+      NEWSROOM_NEO4J_PROJECTOR_USERNAME: newsroom_projector
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Verify locked environment
+        run: |
+          uv lock --check
+          uv sync --dev --locked
+          uv run python - <<'PY'
+          import neo4j
+          assert neo4j.__version__ == "6.2.0", neo4j.__version__
+          PY
+
+      - name: Generate masked disposable credentials and start Neo4j
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEO4J_ADMIN_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          NEWSROOM_NEO4J_PROJECTOR_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          echo "::add-mask::${NEO4J_ADMIN_PASSWORD}"
+          echo "::add-mask::${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+          {
+            echo "NEO4J_ADMIN_PASSWORD=${NEO4J_ADMIN_PASSWORD}"
+            echo "NEWSROOM_NEO4J_PROJECTOR_PASSWORD=${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+          } >> "${GITHUB_ENV}"
+          docker run --detach \
+            --name newsroom-b2-neo4j \
+            --publish 127.0.0.1:7687:7687 \
+            --env "NEO4J_AUTH=neo4j/${NEO4J_ADMIN_PASSWORD}" \
+            "${NEO4J_B2_IMAGE}"
+
+      - name: Wait for authenticated Neo4j and create projector identity
+        run: |
+          uv run python - <<'PY'
+          import os
+          import time
+
+          from neo4j import GraphDatabase
+
+          uri = os.environ["NEO4J_URI"]
+          admin_auth = (
+              os.environ["NEO4J_ADMIN_USERNAME"],
+              os.environ["NEO4J_ADMIN_PASSWORD"],
+          )
+          last_error = None
+          driver = None
+          for _ in range(120):
+              try:
+                  driver = GraphDatabase.driver(uri, auth=admin_auth)
+                  driver.verify_connectivity()
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  if driver is not None:
+                      driver.close()
+                  driver = None
+                  time.sleep(2)
+          else:
+              raise RuntimeError("authenticated Neo4j readiness timed out") from last_error
+
+          assert driver is not None
+          try:
+              with driver.session(database="system") as session:
+                  session.run(
+                      "CREATE USER newsroom_projector IF NOT EXISTS "
+                      "SET PLAINTEXT PASSWORD $password CHANGE NOT REQUIRED",
+                      password=os.environ["NEWSROOM_NEO4J_PROJECTOR_PASSWORD"],
+                  ).consume()
+          finally:
+              driver.close()
+
+          projector = GraphDatabase.driver(
+              uri,
+              auth=(
+                  os.environ["NEWSROOM_NEO4J_PROJECTOR_USERNAME"],
+                  os.environ["NEWSROOM_NEO4J_PROJECTOR_PASSWORD"],
+              ),
+          )
+          try:
+              projector.verify_connectivity()
+          finally:
+              projector.close()
+          PY
+
+      - name: Focused B1 and B2 tests against actual service
+        id: focused
+        continue-on-error: true
+        env:
+          NEWSROOM_NEO4J_SERVICE_REQUIRED: "1"
+          NEWSROOM_NEO4J_URI: ${{ env.NEO4J_URI }}
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_projection_b1_*.py \
+            newsroom/tests/test_projection_b2_*.py \
+            --junitxml=projection-b2-neo4j-results.xml
+
+      - name: Prove actual-service tests executed
+        if: always()
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          report = Path("projection-b2-neo4j-results.xml")
+          if not report.is_file():
+              raise SystemExit("actual-service JUnit report is absent")
+          root = ET.parse(report).getroot()
+          cases = root.findall(".//testcase")
+          actual = [
+              case
+              for case in cases
+              if "test_projection_b2_neo4j_service" in case.attrib.get("classname", "")
+          ]
+          if len(actual) < 4:
+              raise SystemExit(f"expected at least 4 actual-service tests, found {len(actual)}")
+          if any(case.find("skipped") is not None for case in actual):
+              raise SystemExit("actual-service tests were skipped")
+          if any(
+              case.find("failure") is not None or case.find("error") is not None
+              for case in actual
+          ):
+              raise SystemExit("actual-service tests reported failure or error")
+          PY
+
+      - name: Upload B2 actual-service evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: projection-b2-neo4j-evidence
+          path: projection-b2-neo4j-results.xml
+          if-no-files-found: error
+
+      - name: Remove disposable Neo4j state
+        if: always()
+        run: docker rm --force newsroom-b2-neo4j || true
+
+      - name: Enforce B2 actual-service gate
+        if: steps.focused.outcome != 'success'
+        run: exit 1

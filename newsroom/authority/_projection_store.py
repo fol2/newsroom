@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+import json
 import sqlite3
+from types import MappingProxyType
 from typing import Any
 
 from ._capability import _AuthorizedCommandGrant
@@ -10,7 +13,10 @@ from .canonical import canonical_json_bytes, digest_bytes, digest_canonical
 from .persistence import AuthorityPersistenceError, LedgerEventRecord
 from .types import EventId, TrustScope, UtcTimestamp
 
-from newsroom.projection.mapping import StructuralEventMapping
+from newsroom.projection.mapping import (
+    StructuralEventMapping,
+    StructuralMappingContract,
+)
 from newsroom.projection.models import (
     DeliveryRecordView,
     ProjectionCheckpointView,
@@ -32,6 +38,29 @@ from newsroom.projection.models import (
     ProjectionStatusMetadata,
 )
 from newsroom.projection.policy import ProjectionContractRegistry
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectionDeliverySource:
+    generation: ProjectionGenerationView
+    family: ProjectionFamilyDefinition
+    mapping_contract: StructuralMappingContract
+    mapping: StructuralEventMapping | None
+    event: LedgerEventRecord
+    source_event_digest: str
+    payload: Mapping[str, object]
+    payload_is_mapping: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectionGenerationMetadata:
+    generation: ProjectionGenerationView
+    family: ProjectionFamilyDefinition
+    contiguous_ledger_seq: int
+    open_gap_count: int
+    dead_letter_count: int
+    serving_time: UtcTimestamp
+
 
 
 _SUCCESS_OUTCOMES = {
@@ -1513,6 +1542,107 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
             ),
             recorded_at=UtcTimestamp.parse(str(row["updated_at"])),
         )
+
+    def projection_delivery_source(
+        self,
+        generation_id: ProjectionGenerationId,
+        ledger_seq: int,
+    ) -> _ProjectionDeliverySource:
+        """Resolve exact retained projection input without exposing the store."""
+
+        with self._lock:
+            conn = self._connection
+            generation = self._generation_view(conn, str(generation_id))
+            family = self._registered_family_definition(
+                conn, generation.family_id
+            )
+            mapping_contract = (
+                self._projection_contracts.mappings.resolve_digest(
+                    family.mapping_contract_digest
+                )
+            )
+            event = self._source_event(conn, ledger_seq)
+            source_event_digest = digest_canonical(asdict(event))
+            row = conn.execute(
+                "SELECT mode,payload_digest,payload_bytes,object_admission_id "
+                "FROM authority_payloads WHERE payload_id=?",
+                (event.payload_id,),
+            ).fetchone()
+            if row is None:
+                raise AuthorityPersistenceError(
+                    "projection source payload record is absent"
+                )
+            if (
+                str(row["mode"]) != event.payload_mode
+                or str(row["payload_digest"]) != event.payload_digest
+            ):
+                raise AuthorityPersistenceError(
+                    "projection source payload metadata is inconsistent"
+                )
+            payload: Mapping[str, object]
+            payload_is_mapping = False
+            if event.payload_mode == "INLINE":
+                payload_bytes = bytes(row["payload_bytes"] or b"")
+                if not payload_bytes or digest_bytes(payload_bytes) != event.payload_digest:
+                    raise AuthorityPersistenceError(
+                        "projection source inline payload digest mismatch"
+                    )
+                try:
+                    decoded = json.loads(payload_bytes.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise AuthorityPersistenceError(
+                        "projection source inline payload is not canonical JSON"
+                    ) from exc
+                if isinstance(decoded, dict):
+                    payload = MappingProxyType(dict(decoded))
+                    payload_is_mapping = True
+                else:
+                    payload = MappingProxyType({})
+            else:
+                payload = MappingProxyType({})
+            return _ProjectionDeliverySource(
+                generation=generation,
+                family=family,
+                mapping_contract=mapping_contract,
+                mapping=mapping_contract.resolve(event.event_type),
+                event=event,
+                source_event_digest=source_event_digest,
+                payload=payload,
+                payload_is_mapping=payload_is_mapping,
+            )
+
+    def projection_generation_metadata(
+        self, generation_id: ProjectionGenerationId
+    ) -> _ProjectionGenerationMetadata:
+        with self._lock:
+            conn = self._connection
+            generation = self._generation_view(conn, str(generation_id))
+            family = self._registered_family_definition(
+                conn, generation.family_id
+            )
+            contiguous = self._checkpoint_seq(conn, str(generation_id))
+            open_gap_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM projection_gaps "
+                    "WHERE generation_id=? AND state='OPEN'",
+                    (str(generation_id),),
+                ).fetchone()[0]
+            )
+            dead_letter_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM projection_dead_letters "
+                    "WHERE generation_id=?",
+                    (str(generation_id),),
+                ).fetchone()[0]
+            )
+            return _ProjectionGenerationMetadata(
+                generation=generation,
+                family=family,
+                contiguous_ledger_seq=contiguous,
+                open_gap_count=open_gap_count,
+                dead_letter_count=dead_letter_count,
+                serving_time=self._clock(),
+            )
 
     def projection_family_definition(
         self, family_id: str
