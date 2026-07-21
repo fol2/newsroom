@@ -1,9 +1,6 @@
 name: B2 Actual Service Evidence Publisher
 
 on:
-  push:
-    branches:
-      - agent/increment-1b2-neo4j-structural
   pull_request:
     branches:
       - main
@@ -13,19 +10,19 @@ permissions:
 
 jobs:
   publish:
-    if: github.event_name == 'push' || github.head_ref == 'agent/increment-1b2-neo4j-structural'
+    if: github.head_ref == 'agent/increment-1b2-neo4j-structural'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           show-progress: false
 
       - name: Verify exact checkpoint transport
         env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -102,7 +99,8 @@ jobs:
           set -euo pipefail
           git add -A
           git diff --cached --check
-          ! git diff --cached --name-only | grep -E '(^|/)(b2-checkpoint-v4|b2-evidence-publisher)'
+          test ! -e .github/b2-checkpoint-v4
+          test ! -e .github/workflows/b2-evidence-publisher.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "test(projection): qualify authenticated Neo4j service"
