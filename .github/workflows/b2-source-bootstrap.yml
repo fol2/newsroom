@@ -15,11 +15,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
-      - name: Verify exact checkout
+      - name: Verify exact branch checkout
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD}"
           test -z "$(git status --porcelain=v1)"
 
       - name: Export tracked source
@@ -31,7 +34,7 @@ jobs:
       - name: Upload source bootstrap artifact
         uses: actions/upload-artifact@v4
         with:
-          name: b2-source-bootstrap-${{ github.sha }}
+          name: b2-source-bootstrap-${{ github.event.pull_request.head.sha }}
           path: |
             newsroom-source.tar.gz
             newsroom-source.tar.gz.sha256
