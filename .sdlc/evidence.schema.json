@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/fol2/newsroom/.sdlc/evidence.schema.json",
+  "title": "Newsroom SDLC gate evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "gate_id",
+    "gate_contract_version",
+    "repository",
+    "base_sha",
+    "head_sha",
+    "tree_sha",
+    "risk_tier",
+    "risk_reasons",
+    "runner_kind",
+    "queue_ms",
+    "bootstrap_ms",
+    "execution_ms",
+    "finalize_ms",
+    "cache_hit",
+    "python_version",
+    "uv_version",
+    "lockfile_digest",
+    "toolchain_digest",
+    "selected_test_manifest_digest",
+    "selected_tests",
+    "sentinel_tests",
+    "test_count",
+    "failure_count",
+    "error_count",
+    "skip_count",
+    "result",
+    "result_reason",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "newsroom.sdlc.evidence.v1"},
+    "gate_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "gate_contract_version": {"type": "string", "minLength": 1},
+    "repository": {"const": "fol2/newsroom"},
+    "base_sha": {"$ref": "#/$defs/gitSha"},
+    "head_sha": {"$ref": "#/$defs/gitSha"},
+    "tree_sha": {"$ref": "#/$defs/gitSha"},
+    "risk_tier": {
+      "enum": [
+        "R0_DOCUMENTATION",
+        "R1_LOCAL_CODE",
+        "R2_STATEFUL_CONTRACT",
+        "R3_EXTERNAL_SERVICE_SECURITY",
+        "R4_RELEASE_OPERATIONAL"
+      ]
+    },
+    "risk_reasons": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "runner_kind": {
+      "enum": ["github-hosted", "ephemeral-prewarmed", "local", "other"]
+    },
+    "queue_ms": {"$ref": "#/$defs/nonnegativeInteger"},
+    "bootstrap_ms": {"$ref": "#/$defs/nonnegativeInteger"},
+    "execution_ms": {"$ref": "#/$defs/nonnegativeInteger"},
+    "finalize_ms": {"$ref": "#/$defs/nonnegativeInteger"},
+    "cache_key": {"type": ["string", "null"]},
+    "cache_hit": {"type": "boolean"},
+    "python_version": {"type": "string", "minLength": 1},
+    "uv_version": {"type": "string", "minLength": 1},
+    "lockfile_digest": {"$ref": "#/$defs/sha256"},
+    "toolchain_digest": {"$ref": "#/$defs/sha256"},
+    "service_compatibility_digest": {
+      "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+    },
+    "selected_test_manifest_digest": {"$ref": "#/$defs/sha256"},
+    "selected_tests": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "sentinel_tests": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "random_sample_seed": {"type": ["string", "null"]},
+    "random_sample_tests": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "test_count": {"$ref": "#/$defs/nonnegativeInteger"},
+    "failure_count": {"$ref": "#/$defs/nonnegativeInteger"},
+    "error_count": {"$ref": "#/$defs/nonnegativeInteger"},
+    "skip_count": {"$ref": "#/$defs/nonnegativeInteger"},
+    "first_failure_fingerprint": {"type": ["string", "null"]},
+    "result": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BUDGET_EXCEEDED",
+        "CLASSIFIER_ERROR",
+        "ENVIRONMENT_ERROR",
+        "EVIDENCE_MISMATCH",
+        "UNAUTHORISED_EFFECT"
+      ]
+    },
+    "result_reason": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "nonnegativeInteger": {"type": "integer", "minimum": 0}
+  }
+}
