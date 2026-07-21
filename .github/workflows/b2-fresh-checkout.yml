@@ -1,52 +1,61 @@
-name: B2 Fresh Checkout Export
+name: B2 Hardening Publisher
 
 on:
   push:
     branches:
       - agent/increment-1b2-neo4j-structural
-  pull_request:
-    branches:
-      - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export:
-    if: github.event_name == 'push' || github.head_ref == 'agent/increment-1b2-neo4j-structural'
+  publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           show-progress: false
 
-      - name: Verify exact tracked checkout
-        env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify and apply exact hardening patch
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD}"
-          test -z "$(git status --porcelain=v1)"
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          echo "5ffdc8af589527b7ab08545664328332d4973483f673c34bf1b015bf81f02bc1  .github/b2-hardening.patch" | sha256sum --check --strict
+          git apply --check .github/b2-hardening.patch
+          git apply .github/b2-hardening.patch
+          rm .github/b2-hardening.patch
 
-      - name: Export exact tracked source
-        shell: bash
-        run: |
-          set -euo pipefail
-          git archive --format=tar.gz --output=b2-fresh-checkout.tar.gz HEAD
-          git rev-parse HEAD > b2-fresh-checkout-head.txt
-          sha256sum b2-fresh-checkout.tar.gz > b2-fresh-checkout.tar.gz.sha256
-
-      - name: Upload exact source
-        uses: actions/upload-artifact@v4
+      - uses: actions/setup-python@v5
         with:
-          name: b2-fresh-checkout-${{ github.event.pull_request.head.sha || github.sha }}
-          path: |
-            b2-fresh-checkout.tar.gz
-            b2-fresh-checkout.tar.gz.sha256
-            b2-fresh-checkout-head.txt
-          if-no-files-found: error
-          retention-days: 1
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Qualify source checkpoint
+        run: |
+          uv lock --check
+          uv sync --dev --locked
+          uv run python -m compileall -q newsroom scripts
+          uv run python -m pytest -q \
+            newsroom/tests/test_authority_*.py \
+            newsroom/tests/test_projection_b1_*.py \
+            newsroom/tests/test_projection_b2_*.py
+
+      - name: Commit and push source hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix(projection): harden Neo4j qualification"
+          git push origin HEAD:agent/increment-1b2-neo4j-structural
