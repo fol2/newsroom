@@ -1,4 +1,4 @@
-name: B2 Actual Service Evidence Publisher
+name: B2 Actual Service Evidence Export
 
 on:
   pull_request:
@@ -6,10 +6,10 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  publish:
+  export:
     if: github.head_ref == 'agent/increment-1b2-neo4j-structural'
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -44,7 +44,7 @@ jobs:
           sed -i 's/^          //' /tmp/b2-evidence-expected.txt
           diff -u /tmp/b2-evidence-expected.txt /tmp/b2-evidence-files.txt
 
-      - name: Materialize source-only evidence checkpoint
+      - name: Materialize source-only evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -86,22 +86,28 @@ jobs:
           PY
           uv sync --dev --locked
 
-      - name: Qualify coherent evidence checkpoint
+      - name: Qualify coherent evidence
         run: |
           uv run python -m compileall -q newsroom scripts
           uv run python -m pytest -q \
             newsroom/tests/test_projection_b1_*.py \
             newsroom/tests/test_projection_b2_*.py
-
-      - name: Commit and push source-only evidence checkpoint
-        shell: bash
-        run: |
-          set -euo pipefail
-          git add -A
-          git diff --cached --check
+          git diff --check
           test ! -e .github/b2-checkpoint-v4
           test ! -e .github/workflows/b2-evidence-publisher.yml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "test(projection): qualify authenticated Neo4j service"
-          git push origin HEAD:agent/increment-1b2-neo4j-structural
+
+      - name: Upload verified source and lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: b2-verified-evidence-${{ github.event.pull_request.head.sha }}
+          path: |
+            .github/workflows/projection-b2-neo4j.yml
+            docs/operations/neo4j-b2-qualification.md
+            newsroom/tests/projection_b2_helpers.py
+            newsroom/tests/test_projection_b2_boundaries.py
+            newsroom/tests/test_projection_b2_neo4j_service.py
+            pyproject.toml
+            uv.lock
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1
