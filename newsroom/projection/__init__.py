@@ -1,31 +1,45 @@
-"""Engine-neutral native GraphRAG projection contracts.
+"""Engine-neutral native GraphRAG projection contracts and authority facades.
 
-Neo4j and Graphiti adapters are intentionally absent from Increment 1B1.  The
-public surface contains typed immutable contracts, authenticated projection
-facades, and non-authoritative views only.
+Neo4j and Graphiti execution adapters are intentionally absent from Increment
+1B1. The public surface exposes typed contracts, authenticated projection
+facades and non-authoritative views only.
 """
 
 from .mapping import (
+    ProjectionIdentitySource,
     StructuralEventMapping,
     StructuralMappingContract,
     StructuralMappingRegistry,
+    StructuralNodeBinding,
+    StructuralRelationBinding,
     native_structural_mapping_v1,
 )
 from .models import (
     DeliveryRecordView,
+    GraphitiProposalWorkspaceContract,
+    GraphitiWorkspaceMode,
+    ProjectionAuthorizationError,
     ProjectionCheckpointView,
     ProjectionContractError,
     ProjectionDeadLetterId,
     ProjectionDeadLetterView,
+    ProjectionDeliveryAttemptId,
     ProjectionDeliveryOutcome,
+    ProjectionDeliveryRequest,
     ProjectionFamilyDefinition,
     ProjectionFamilyKind,
+    ProjectionFamilyRegistrationRequest,
+    ProjectionFamilyView,
     ProjectionGapId,
+    ProjectionGapResolutionRequest,
     ProjectionGapState,
     ProjectionGapView,
+    ProjectionGenerationCreateRequest,
     ProjectionGenerationId,
     ProjectionGenerationState,
+    ProjectionGenerationTransitionRequest,
     ProjectionGenerationView,
+    ProjectionReadPolicy,
     ProjectionStateError,
     ProjectionStatusMetadata,
 )
@@ -38,35 +52,61 @@ from .ontology import (
     ProjectionRelationType,
     native_ontology_v1,
 )
+from .policy import (
+    PROJECTION_COMMAND_TYPES,
+    ProjectionContractRegistry,
+    merge_projection_authority_registries,
+    projection_command_definitions,
+    projection_payload_contracts,
+)
 from .registry import ProjectionFamilyRegistry
 
 __all__ = [
     "DeliveryRecordView",
+    "GraphitiProposalWorkspaceContract",
+    "GraphitiWorkspaceMode",
     "OntologyContract",
     "OntologyNodeDefinition",
     "OntologyRegistry",
     "OntologyRelationDefinition",
+    "PROJECTION_COMMAND_TYPES",
+    "ProjectionAuthorizationError",
     "ProjectionCheckpointView",
     "ProjectionContractError",
+    "ProjectionContractRegistry",
     "ProjectionDeadLetterId",
     "ProjectionDeadLetterView",
+    "ProjectionDeliveryAttemptId",
     "ProjectionDeliveryOutcome",
+    "ProjectionDeliveryRequest",
     "ProjectionFamilyDefinition",
     "ProjectionFamilyKind",
+    "ProjectionFamilyRegistrationRequest",
     "ProjectionFamilyRegistry",
+    "ProjectionFamilyView",
     "ProjectionGapId",
+    "ProjectionGapResolutionRequest",
     "ProjectionGapState",
     "ProjectionGapView",
+    "ProjectionGenerationCreateRequest",
     "ProjectionGenerationId",
     "ProjectionGenerationState",
+    "ProjectionGenerationTransitionRequest",
     "ProjectionGenerationView",
+    "ProjectionIdentitySource",
     "ProjectionNodeType",
+    "ProjectionReadPolicy",
     "ProjectionRelationType",
     "ProjectionStateError",
     "ProjectionStatusMetadata",
     "StructuralEventMapping",
     "StructuralMappingContract",
     "StructuralMappingRegistry",
+    "StructuralNodeBinding",
+    "StructuralRelationBinding",
+    "merge_projection_authority_registries",
     "native_ontology_v1",
     "native_structural_mapping_v1",
+    "projection_command_definitions",
+    "projection_payload_contracts",
 ]

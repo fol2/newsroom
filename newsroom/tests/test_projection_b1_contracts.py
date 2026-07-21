@@ -4,35 +4,49 @@ from dataclasses import replace
 
 import pytest
 
-from newsroom.authority import AggregateId
+from newsroom.authority import AggregateId, PayloadMode
 from newsroom.projection import (
+    GraphitiProposalWorkspaceContract,
+    GraphitiWorkspaceMode,
     OntologyContract,
     OntologyRegistry,
     ProjectionContractError,
     ProjectionFamilyDefinition,
     ProjectionFamilyKind,
     ProjectionFamilyRegistry,
+    ProjectionIdentitySource,
     ProjectionNodeType,
     ProjectionRelationType,
     StructuralEventMapping,
     StructuralMappingContract,
     StructuralMappingRegistry,
+    StructuralNodeBinding,
+    StructuralRelationBinding,
     native_ontology_v1,
     native_structural_mapping_v1,
 )
+from newsroom.projection.policy import (
+    PROJECTION_COMMAND_TYPES,
+    ProjectionContractRegistry,
+    merge_projection_authority_registries,
+    projection_command_definitions,
+    projection_payload_contracts,
+)
+
+from .authority_event_helpers import payload_schemas, registry_v1
 
 
 FAMILY_AGGREGATE = AggregateId.parse("11111111-1111-4111-8111-111111111111")
 
 
-def family_definition() -> ProjectionFamilyDefinition:
+def family_definition(*, version: str = "family-v1") -> ProjectionFamilyDefinition:
     ontology = native_ontology_v1()
     mapping = native_structural_mapping_v1(ontology)
     return ProjectionFamilyDefinition(
         family_id="graph.structural",
         authority_aggregate_id=FAMILY_AGGREGATE,
         family_kind=ProjectionFamilyKind.GRAPH,
-        definition_version="family-v1",
+        definition_version=version,
         projector_version="structural-projector-v1",
         ontology_contract_digest=ontology.contract_digest,
         mapping_contract_digest=mapping.contract_digest,
@@ -47,11 +61,17 @@ def test_native_ontology_is_stable_and_rejects_generic_relations() -> None:
     assert all(item.name == item.value for item in ProjectionRelationType)
 
 
-def test_mapping_is_allow_listed_and_validated_against_exact_ontology() -> None:
+def test_mapping_is_allow_listed_deterministic_and_validated() -> None:
     ontology = native_ontology_v1()
     mapping = native_structural_mapping_v1(ontology)
     mapping.validate_against(ontology)
-    assert mapping.resolve("source.item.revised") is not None
+    revised = mapping.resolve("source.item.revised")
+    assert revised is not None
+    assert any(
+        node.identity_source is ProjectionIdentitySource.PAYLOAD_FIELD
+        and node.payload_field == "source_item_id"
+        for node in revised.nodes
+    )
     assert mapping.resolve("caller.related") is None
 
     changed = replace(ontology, ontology_version="ontology-v2")
@@ -59,81 +79,134 @@ def test_mapping_is_allow_listed_and_validated_against_exact_ontology() -> None:
         mapping.validate_against(changed)
 
 
-def test_mapping_rejects_unknown_relation_and_duplicate_event() -> None:
+def test_mapping_rejects_unknown_alias_and_relation_direction() -> None:
     ontology = native_ontology_v1()
-    valid = native_structural_mapping_v1(ontology).mappings[0]
-    with pytest.raises(ProjectionContractError, match="event types"):
-        StructuralMappingContract(
-            mapping_id="bad.mapping",
-            mapping_version="mapping-v1",
-            implementation_version="mapping-python-v1",
-            ontology_contract_digest=ontology.contract_digest,
-            mappings=(valid, valid),
+    with pytest.raises(ProjectionContractError, match="unknown node alias"):
+        StructuralEventMapping(
+            event_type="bad.alias",
+            required=True,
+            nodes=(
+                StructuralNodeBinding(
+                    "item",
+                    ProjectionNodeType.SOURCE_ITEM,
+                    ProjectionIdentitySource.AGGREGATE,
+                ),
+            ),
+            relations=(
+                StructuralRelationBinding(
+                    ProjectionRelationType.HAS_VERSION,
+                    "item",
+                    "missing",
+                ),
+            ),
         )
 
-    foreign_ontology = OntologyContract(
-        ontology_id="foreign",
-        ontology_version="ontology-v1",
-        implementation_version="foreign-v1",
-        nodes=tuple(item for item in ontology.nodes if item.node_type is not ProjectionNodeType.LEAD),
-        relations=tuple(
-            item
-            for item in ontology.relations
-            if ProjectionNodeType.LEAD not in item.source_types
-            and ProjectionNodeType.LEAD not in item.target_types
-        ),
-    )
-    lead_mapping = StructuralMappingContract(
-        mapping_id="bad.lead",
+    reversed_mapping = StructuralMappingContract(
+        mapping_id="bad.direction",
         mapping_version="mapping-v1",
         implementation_version="mapping-python-v1",
-        ontology_contract_digest=foreign_ontology.contract_digest,
+        ontology_contract_digest=ontology.contract_digest,
         mappings=(
             StructuralEventMapping(
-                event_type="lead.promoted",
+                event_type="bad.direction",
                 required=True,
-                node_types=frozenset({ProjectionNodeType.SIGNAL, ProjectionNodeType.LEAD}),
-                relation_types=frozenset({ProjectionRelationType.PROMOTED_TO_LEAD}),
+                nodes=(
+                    StructuralNodeBinding(
+                        "version",
+                        ProjectionNodeType.AUTHORITY_VERSION,
+                        ProjectionIdentitySource.AGGREGATE_VERSION,
+                    ),
+                    StructuralNodeBinding(
+                        "aggregate",
+                        ProjectionNodeType.AUTHORITY_AGGREGATE,
+                        ProjectionIdentitySource.AGGREGATE,
+                    ),
+                ),
+                relations=(
+                    StructuralRelationBinding(
+                        ProjectionRelationType.HAS_VERSION,
+                        "version",
+                        "aggregate",
+                    ),
+                ),
             ),
         ),
     )
-    with pytest.raises(ProjectionContractError, match="unknown node"):
-        lead_mapping.validate_against(foreign_ontology)
+    with pytest.raises(ProjectionContractError, match="source type"):
+        reversed_mapping.validate_against(ontology)
 
 
-def test_family_registry_binds_exact_ontology_and_mapping_contracts() -> None:
+def test_family_registry_binds_exact_contracts_and_retains_versions() -> None:
     ontology = native_ontology_v1()
     mapping = native_structural_mapping_v1(ontology)
+    v1 = family_definition()
+    v2 = replace(v1, definition_version="family-v2", projector_version="structural-projector-v2")
     registry = ProjectionFamilyRegistry(
-        (family_definition(),),
+        (v1, v2),
         ontologies=OntologyRegistry((ontology,)),
         mappings=StructuralMappingRegistry((mapping,)),
+        current_versions={"graph.structural": "family-v2"},
     )
-    selected = registry.resolve("graph.structural")
-    assert selected.family_kind is ProjectionFamilyKind.GRAPH
-    assert selected.digest == family_definition().digest
+    assert registry.resolve("graph.structural").definition_version == "family-v2"
+    assert registry.resolve("graph.structural", "family-v1").digest == v1.digest
 
-    broken = replace(selected, mapping_contract_digest="sha256:" + "0" * 64)
-    with pytest.raises(ProjectionContractError, match="unknown or ambiguous"):
+    cross_family = replace(v1, family_id="vector.semantic", family_kind=ProjectionFamilyKind.VECTOR)
+    with pytest.raises(ProjectionContractError, match="shared across families"):
         ProjectionFamilyRegistry(
-            (broken,),
+            (v1, cross_family),
             ontologies=OntologyRegistry((ontology,)),
             mappings=StructuralMappingRegistry((mapping,)),
         )
 
 
-def test_family_registry_rejects_duplicate_authority_aggregate_identity() -> None:
+def test_projection_authority_contracts_merge_without_caller_semantics() -> None:
+    registry, schemas = merge_projection_authority_registries(
+        command_registry=registry_v1(), payload_schemas=payload_schemas()
+    )
+    assert PROJECTION_COMMAND_TYPES <= {
+        item.command_type for item in registry.definitions()
+    }
+    for definition in projection_command_definitions():
+        selected = registry.resolve_exact(
+            definition.command_type,
+            definition.definition_version,
+            definition.digest,
+        )
+        assert selected.trust_scope.value == "ADMITTED"
+        assert selected.security_scope == "authority.projection"
+        assert selected.payload_mode is PayloadMode.INLINE
+    for contract in projection_payload_contracts():
+        assert schemas.resolve_exact(
+            contract.schema_version,
+            contract.payload_mode,
+            contract.contract_version,
+            contract.contract_digest,
+            contract.canonicalizer_implementation_version,
+        ) is not None
+
+
+def test_graphiti_contract_is_proposal_only_and_has_no_execution_api() -> None:
+    contract = GraphitiProposalWorkspaceContract(
+        workspace_id="graphiti.proposals",
+        contract_version="graphiti-workspace-v1",
+        implementation_version="graphiti-seam-v1",
+        endpoint_reference="config://graphiti/proposal-endpoint",
+        secret_reference="secret://graphiti/proposal-token",
+    )
+    assert contract.mode is GraphitiWorkspaceMode.PROPOSAL_ONLY
+    assert not hasattr(contract, "execute")
+    assert not hasattr(contract, "write_graph")
+
     ontology = native_ontology_v1()
     mapping = native_structural_mapping_v1(ontology)
-    first = family_definition()
-    second = replace(
-        first,
-        family_id="vector.semantic",
-        family_kind=ProjectionFamilyKind.VECTOR,
-    )
-    with pytest.raises(ProjectionContractError, match="aggregate IDs"):
-        ProjectionFamilyRegistry(
-            (first, second),
+    contracts = ProjectionContractRegistry(
+        ontologies=OntologyRegistry((ontology,)),
+        mappings=StructuralMappingRegistry((mapping,)),
+        families=ProjectionFamilyRegistry(
+            (family_definition(),),
             ontologies=OntologyRegistry((ontology,)),
             mappings=StructuralMappingRegistry((mapping,)),
-        )
+        ),
+        graphiti_workspaces=(contract,),
+    )
+    assert contracts.graphiti_contracts() == (contract,)

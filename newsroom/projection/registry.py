@@ -18,19 +18,23 @@ class ProjectionFamilyRegistry:
     ) -> None:
         by_key: dict[tuple[str, str], ProjectionFamilyDefinition] = {}
         versions: dict[str, list[str]] = {}
-        aggregate_ids: set[str] = set()
+        aggregate_owners: dict[str, str] = {}
         for definition in definitions:
             key = (definition.family_id, definition.definition_version)
             if key in by_key:
                 raise ProjectionContractError("duplicate projection family definition")
-            if str(definition.authority_aggregate_id) in aggregate_ids:
-                raise ProjectionContractError("projection family aggregate IDs must be unique")
+            aggregate_key = str(definition.authority_aggregate_id)
+            owner = aggregate_owners.get(aggregate_key)
+            if owner is not None and owner != definition.family_id:
+                raise ProjectionContractError(
+                    "projection family aggregate ID cannot be shared across families"
+                )
             ontology = ontologies.resolve_digest(definition.ontology_contract_digest)
             mapping = mappings.resolve_digest(definition.mapping_contract_digest)
             mapping.validate_against(ontology)
             by_key[key] = definition
             versions.setdefault(definition.family_id, []).append(definition.definition_version)
-            aggregate_ids.add(str(definition.authority_aggregate_id))
+            aggregate_owners[aggregate_key] = definition.family_id
         if not by_key:
             raise ProjectionContractError("projection family registry cannot be empty")
         requested = dict(current_versions or {})

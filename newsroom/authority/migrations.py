@@ -12,9 +12,16 @@ from .object_migrations import (
     OBJECT_MIGRATION_STATEMENTS,
     OBJECT_SCHEMA_VERSION,
 )
+from .projection_migrations import (
+    PROJECTION_MIGRATION,
+    PROJECTION_MIGRATION_CHECKSUM,
+    PROJECTION_MIGRATION_NAME,
+    PROJECTION_MIGRATION_STATEMENTS,
+    PROJECTION_SCHEMA_VERSION,
+)
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = OBJECT_SCHEMA_VERSION
+SCHEMA_VERSION = PROJECTION_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -518,6 +525,20 @@ def apply_pending_migrations(
                 ),
             )
             current = OBJECT_SCHEMA_VERSION
+        if current == OBJECT_SCHEMA_VERSION:
+            for statement in PROJECTION_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    PROJECTION_SCHEMA_VERSION,
+                    PROJECTION_MIGRATION_NAME,
+                    PROJECTION_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = PROJECTION_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -526,7 +547,11 @@ def apply_pending_migrations(
         raise
 
 
-MIGRATIONS: tuple[MigrationRecord | object, ...] = (MIGRATION, OBJECT_MIGRATION)
+MIGRATIONS: tuple[MigrationRecord | object, ...] = (
+    MIGRATION,
+    OBJECT_MIGRATION,
+    PROJECTION_MIGRATION,
+)
 
 def _expected_fingerprint() -> str:
     conn = sqlite3.connect(":memory:", isolation_level=None)
@@ -544,4 +569,9 @@ EXPECTED_SCHEMA_FINGERPRINT = _expected_fingerprint()
 EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
     (BASE_SCHEMA_VERSION, MIGRATION_NAME, MIGRATION_CHECKSUM),
     (OBJECT_SCHEMA_VERSION, OBJECT_MIGRATION_NAME, OBJECT_MIGRATION_CHECKSUM),
+    (
+        PROJECTION_SCHEMA_VERSION,
+        PROJECTION_MIGRATION_NAME,
+        PROJECTION_MIGRATION_CHECKSUM,
+    ),
 )
