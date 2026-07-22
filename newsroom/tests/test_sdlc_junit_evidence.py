@@ -90,7 +90,7 @@ def test_failure_error_and_first_fingerprint_are_order_independent(
     root_b = tmp_path / "two"
     failure_a = (
         '<failure type="AssertionError" message="bad">'
-        f"\x1b[31m{root_a}/module.py:7: assertion failed\x1b[0m"
+        f"{root_a}/module.py:7: assertion failed"
         "</failure>"
     )
     failure_b = failure_a.replace(str(root_a), str(root_b))
@@ -166,6 +166,13 @@ def test_duplicate_or_conflicting_cases_fail_closed_without_echoing_test_id(
     assert sensitive_id not in str(conflict.value)
 
 
+def test_normalized_duplicate_report_path_is_rejected(tmp_path: Path) -> None:
+    _write(tmp_path, "results.xml", _suite(_case("one")))
+
+    with pytest.raises(JUnitEvidenceError, match="duplicate_report"):
+        summarize_junit(tmp_path, ("results.xml", "./results.xml"))
+
+
 @pytest.mark.parametrize("duration", ["-1", "NaN", "Infinity", "60.001", "1e999999"])
 def test_invalid_or_oversized_duration_is_rejected(
     tmp_path: Path,
@@ -209,9 +216,13 @@ def test_external_entity_declarations_are_rejected_before_parsing(
 def test_path_escape_symlink_and_non_regular_report_are_rejected(
     tmp_path: Path,
 ) -> None:
-    outside = _write(tmp_path.parent, "outside.xml", _suite(_case("outside")))
+    outside = _write(
+        tmp_path.parent,
+        f"outside-{tmp_path.name}.xml",
+        _suite(_case("outside")),
+    )
     with pytest.raises(JUnitEvidenceError, match="path_escape"):
-        summarize_junit(tmp_path, ("../outside.xml",))
+        summarize_junit(tmp_path, (f"../{outside.name}",))
 
     link = tmp_path / "link.xml"
     link.symlink_to(outside)
