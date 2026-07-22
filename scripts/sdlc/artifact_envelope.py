@@ -293,18 +293,22 @@ def _validate_context(context: GithubRunContext) -> GithubRunContext:
     _positive_integer(context.head_repository_id, "head_repository_id")
     _positive_integer(context.run_id, "run_id")
     _positive_integer(context.run_attempt, "run_attempt")
-    if _SAFE_ID.fullmatch(context.job_id) is None:
+    job_id = _text(context.job_id, "job_id", maximum=128)
+    if _SAFE_ID.fullmatch(job_id) is None:
         raise ArtifactProvenanceError("job_id")
-    if f"{context.repository}/.github/workflows/" not in context.workflow_ref:
+    workflow_ref = _text(context.workflow_ref, "workflow_ref", maximum=2048)
+    if not workflow_ref.startswith(f"{context.repository}/.github/workflows/"):
         raise ArtifactProvenanceError("workflow_ref")
     _sha(context.workflow_sha, "workflow_sha")
-    if context.event_name not in _ALLOWED_EVENTS:
+    if _text(context.event_name, "event_name", maximum=64) not in _ALLOWED_EVENTS:
         raise ArtifactProvenanceError("event_name")
     _sha(context.event_sha, "event_sha")
     _sha(context.evaluated_sha, "evaluated_sha")
     _sha(context.evaluated_tree_sha, "evaluated_tree_sha")
     _text(context.ref, "ref", maximum=2048)
-    if context.runner_environment not in {"github-hosted", "self-hosted"}:
+    if _text(
+        context.runner_environment, "runner_environment", maximum=64
+    ) not in {"github-hosted", "self-hosted"}:
         raise ArtifactProvenanceError("runner_environment")
     return context
 
@@ -360,7 +364,7 @@ def context_from_environment(
         raise ArtifactProvenanceError("job_id")
     workflow_sha = _sha(env.get("GITHUB_WORKFLOW_SHA"), "workflow_sha")
     workflow_ref = _text(env.get("GITHUB_WORKFLOW_REF"), "workflow_ref", maximum=2048)
-    if f"{repository}/.github/workflows/" not in workflow_ref:
+    if not workflow_ref.startswith(f"{repository}/.github/workflows/"):
         raise ArtifactProvenanceError("workflow_ref")
     runner_environment = _text(
         env.get("RUNNER_ENVIRONMENT"), "runner_environment", maximum=64
@@ -387,7 +391,13 @@ def context_from_environment(
 
 def artifact_name(context: GithubRunContext) -> str:
     _validate_context(context)
-    return f"newsroom-sdlc-{context.job_id}-{context.evaluated_sha}"
+    value = (
+        f"newsroom-sdlc-{context.run_id}-{context.run_attempt}-"
+        f"{context.job_id}-{context.evaluated_sha}"
+    )
+    if len(value) > 255:
+        raise ArtifactProvenanceError("artifact_name")
+    return value
 
 
 def _relative_parts(repository_root: Path, candidate: Path, code: str) -> tuple[str, ...]:
