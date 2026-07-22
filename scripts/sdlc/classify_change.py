@@ -28,6 +28,7 @@ _PATH_RISKS = {
     "release_operational": "R4_RELEASE_OPERATIONAL",
 }
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
+_REGULAR_GIT_MODES = frozenset({b"100644", b"100755"})
 
 
 class GitRouteError(RuntimeError):
@@ -310,6 +311,17 @@ def verify_exact_clean_checkout(
     if status:
         first = status.split(b"\0", 1)[0].decode("utf-8", errors="replace")
         raise GitRouteError(f"checkout is not clean: {first}")
+    for record in _git(repo_root, "ls-files", "--stage", "-z").split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            mode = metadata.split(b" ", 1)[0]
+        except ValueError as exc:
+            raise GitRouteError("malformed tracked-file inventory") from exc
+        if mode not in _REGULAR_GIT_MODES:
+            path = raw_path.decode("utf-8", errors="replace")
+            raise GitRouteError(f"unsupported tracked entry mode {mode.decode()}: {path}")
 
 
 def parse_name_status(payload: bytes) -> tuple[ChangedPath, ...]:
