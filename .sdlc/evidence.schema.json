@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version",
+    "evidence_identity",
     "gate_id",
     "gate_contract_version",
     "risk_classifier_version",
@@ -48,14 +49,19 @@
     "schema_version": {
       "const": "newsroom.sdlc.evidence.v1"
     },
+    "evidence_identity": {
+      "$ref": "#/$defs/sha256"
+    },
     "gate_id": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 128
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.*-]+$"
     },
     "gate_contract_version": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 128
     },
     "repository": {
       "const": "fol2/newsroom"
@@ -82,8 +88,10 @@
       "type": "array",
       "items": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 512
       },
+      "maxItems": 4096,
       "uniqueItems": true
     },
     "runner_kind": {
@@ -110,18 +118,21 @@
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "maxLength": 512
     },
     "cache_hit": {
       "type": "boolean"
     },
     "python_version": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 128
     },
     "uv_version": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 128
     },
     "lockfile_digest": {
       "$ref": "#/$defs/sha256"
@@ -146,30 +157,37 @@
       "type": "array",
       "items": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 1024
       },
+      "maxItems": 100000,
       "uniqueItems": true
     },
     "sentinel_tests": {
       "type": "array",
       "items": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 1024
       },
+      "maxItems": 10000,
       "uniqueItems": true
     },
     "random_sample_seed": {
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "maxLength": 256
     },
     "random_sample_tests": {
       "type": "array",
       "items": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 1024
       },
+      "maxItems": 100000,
       "uniqueItems": true
     },
     "test_count": {
@@ -185,9 +203,13 @@
       "$ref": "#/$defs/nonnegativeInteger"
     },
     "first_failure_fingerprint": {
-      "type": [
-        "string",
-        "null"
+      "oneOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "result": {
@@ -203,7 +225,8 @@
     },
     "result_reason": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 512
     },
     "created_at": {
       "type": "string",
@@ -211,7 +234,8 @@
     },
     "risk_classifier_version": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 128
     },
     "base_tree_sha": {
       "$ref": "#/$defs/gitSha"
@@ -234,7 +258,8 @@
     },
     "nonnegativeInteger": {
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 9223372036854775807
     }
   },
   "allOf": [
@@ -259,6 +284,9 @@
           },
           "required_skip_count": {
             "const": 0
+          },
+          "first_failure_fingerprint": {
+            "type": "null"
           }
         }
       }
