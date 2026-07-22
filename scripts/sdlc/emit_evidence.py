@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -25,6 +26,7 @@ _REPOSITORY = "fol2/newsroom"
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
 _SAFE_ID = re.compile(r"[A-Za-z0-9_.*-]{1,128}")
+_UV_OUTPUT = re.compile(r"uv ([^\s]+)(?:\s.*)?")
 _RESULT_REASON = re.compile(
     r"(?:PASS|FAIL|BUDGET_EXCEEDED|CLASSIFIER_ERROR|ENVIRONMENT_ERROR|"
     r"EVIDENCE_MISMATCH|UNAUTHORISED_EFFECT):[A-Za-z0-9_.*-]+:"
@@ -311,6 +313,31 @@ def _git_bytes(
     if len(completed.stdout) > maximum:
         raise EvidenceError("git_blob_size")
     return completed.stdout
+
+
+@lru_cache(maxsize=1)
+def installed_uv_version() -> str:
+    try:
+        completed = subprocess.run(
+            ("uv", "--version"),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise EvidenceError("uv_environment") from exc
+    if completed.returncode != 0 or not completed.stdout or len(completed.stdout) > 256:
+        raise EvidenceError("uv_environment")
+    try:
+        rendered = completed.stdout.decode("utf-8").strip()
+    except UnicodeError as exc:
+        raise EvidenceError("uv_environment") from exc
+    matched = _UV_OUTPUT.fullmatch(rendered)
+    if matched is None:
+        raise EvidenceError("uv_version_output")
+    return _string(matched.group(1), "installed_uv_version", maximum=128)
 
 
 def git_blob_digest(repo_root: str | Path, commit_sha: str, path: str) -> str:
@@ -645,10 +672,18 @@ def validate_evidence_record(record_value: object) -> dict[str, object]:
         maximum_items=100000,
         maximum_length=1024,
     )
-    record["first_failure_fingerprint"] = _optional_sha(
+    fingerprint = _optional_sha(
         record.get("first_failure_fingerprint"),
         "first_failure_fingerprint",
     )
+    record["first_failure_fingerprint"] = fingerprint
+    has_test_failure = bool(
+        record["failure_count"]
+        or record["error_count"]
+        or record["required_skip_count"]
+    )
+    if has_test_failure != (fingerprint is not None):
+        raise EvidenceError("failure_fingerprint_invariant")
     result = _string(record.get("result"), "result", maximum=64)
     if result not in _RESULTS:
         raise EvidenceError("result")
@@ -658,12 +693,7 @@ def validate_evidence_record(record_value: object) -> dict[str, object]:
     record["created_at"] = _created_at(
         _string(record.get("created_at"), "created_at", maximum=64)
     )
-    if result == "PASS" and (
-        record["failure_count"]
-        or record["error_count"]
-        or record["required_skip_count"]
-        or record["first_failure_fingerprint"] is not None
-    ):
+    if result == "PASS" and has_test_failure:
         raise EvidenceError("pass_invariant")
     expected_identity = sha256_identity(_identity_inputs(record))
     if record["evidence_identity"] != expected_identity:
@@ -767,7 +797,10 @@ def build_gate_evidence(
         raise EvidenceError("service_compatibility_unexpected")
 
     actual_python = platform.python_version()
-    normalized_uv = _string(uv_version, "uv_version", maximum=128)
+    claimed_uv = _string(uv_version, "uv_version", maximum=128)
+    actual_uv = installed_uv_version()
+    if claimed_uv != actual_uv:
+        raise EvidenceError("uv_version_mismatch")
     normalized_runner = _string(runner_kind, "runner_kind", maximum=64)
     if normalized_runner not in _RUNNER_KINDS:
         raise EvidenceError("runner_kind")
@@ -778,7 +811,7 @@ def build_gate_evidence(
             "python_version": actual_python,
             "runner_arch": platform.machine(),
             "runner_os": platform.system().lower(),
-            "uv_version": normalized_uv,
+            "uv_version": actual_uv,
         }
     )
     command_digest = _sha(command_spec_digest, "command_spec_digest")
@@ -817,7 +850,7 @@ def build_gate_evidence(
         "cache_key": _optional_string(cache_key, "cache_key"),
         "cache_hit": _boolean(cache_hit, "cache_hit"),
         "python_version": actual_python,
-        "uv_version": normalized_uv,
+        "uv_version": actual_uv,
         "lockfile_digest": lockfile_digest,
         "toolchain_digest": toolchain_digest,
         "service_compatibility_digest": service_digest,
