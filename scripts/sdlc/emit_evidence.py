@@ -13,7 +13,7 @@ import subprocess
 import sys
 from typing import Mapping, Sequence
 
-from .classify_change import resolve_commit, resolve_tree
+from .classify_change import GitRouteError, resolve_commit, resolve_tree
 from .contracts import ContractError, SdlcContract, load_contract
 
 
@@ -39,6 +39,15 @@ _RESULTS = frozenset(
         "ENVIRONMENT_ERROR",
         "EVIDENCE_MISMATCH",
         "UNAUTHORISED_EFFECT",
+    }
+)
+_RISK_TIERS = frozenset(
+    {
+        "R0_DOCUMENTATION",
+        "R1_LOCAL_CODE",
+        "R2_STATEFUL_CONTRACT",
+        "R3_EXTERNAL_SERVICE_SECURITY",
+        "R4_RELEASE_OPERATIONAL",
     }
 )
 _RUNNER_KINDS = frozenset(
@@ -89,6 +98,56 @@ _EVIDENCE_KEYS = frozenset(
         "created_at",
     }
 )
+_ROUTE_KEYS = frozenset(
+    {
+        "schema_version",
+        "contract_version",
+        "base_sha",
+        "head_sha",
+        "base_tree_sha",
+        "head_tree_sha",
+        "risk_tier",
+        "reasons",
+        "core_required",
+        "service_required",
+        "clustering_required",
+        "owner_authority_required",
+        "core_tests",
+        "service_tests",
+        "sentinels",
+        "selected_test_manifest_digest",
+    }
+)
+_GATE_RUN_KEYS = frozenset(
+    {
+        "schema_version",
+        "gate_id",
+        "phase",
+        "result",
+        "result_reason",
+        "returncode",
+        "execution_ms",
+        "stdout",
+        "stderr",
+        "stdout_truncated",
+        "stderr_truncated",
+    }
+)
+_JUNIT_KEYS = frozenset(
+    {
+        "schema_version",
+        "outcome",
+        "reports",
+        "test_ids_digest",
+        "test_count",
+        "failure_count",
+        "error_count",
+        "skip_count",
+        "required_skip_count",
+        "duration_ms",
+        "first_failure_fingerprint",
+    }
+)
 
 
 class EvidenceError(ValueError):
@@ -136,15 +195,24 @@ def _mapping(value: object, name: str) -> Mapping[str, object]:
     return value
 
 
-def _string(value: object, name: str, *, maximum: int = 512) -> str:
-    if not isinstance(value, str) or not value or len(value) > maximum:
-        raise EvidenceError(f"{name}_string")
-    if any(ord(character) < 32 for character in value):
-        raise EvidenceError(f"{name}_control")
+def _text(value: object, name: str, *, maximum: int) -> str:
+    if not isinstance(value, str) or len(value) > maximum:
+        raise EvidenceError(f"{name}_text")
     return value
 
 
-def _optional_string(value: object, name: str, *, maximum: int = 512) -> str | None:
+def _string(value: object, name: str, *, maximum: int = 512) -> str:
+    text = _text(value, name, maximum=maximum)
+    if not text:
+        raise EvidenceError(f"{name}_string")
+    if any(ord(character) < 32 for character in text):
+        raise EvidenceError(f"{name}_control")
+    return text
+
+
+def _optional_string(
+    value: object, name: str, *, maximum: int = 512
+) -> str | None:
     if value is None:
         return None
     return _string(value, name, maximum=maximum)
@@ -189,13 +257,13 @@ def _string_list(
     maximum_items: int,
     maximum_length: int,
     sorted_required: bool = False,
+    nonempty: bool = False,
 ) -> list[str]:
     if not isinstance(value, list) or len(value) > maximum_items:
         raise EvidenceError(f"{name}_array")
-    result = [
-        _string(item, name, maximum=maximum_length)
-        for item in value
-    ]
+    result = [_string(item, name, maximum=maximum_length) for item in value]
+    if nonempty and not result:
+        raise EvidenceError(f"{name}_empty")
     if len(set(result)) != len(result):
         raise EvidenceError(f"{name}_duplicate")
     if sorted_required and result != sorted(result):
@@ -276,29 +344,12 @@ def _validate_route(
     route_value: object,
 ) -> dict[str, object]:
     route = dict(_mapping(route_value, "route"))
+    if set(route) != _ROUTE_KEYS:
+        raise EvidenceError("route_shape")
     if route.get("schema_version") != _ROUTE_SCHEMA_VERSION:
         raise EvidenceError("route_schema")
     if route.get("contract_version") != contract.contract_version:
         raise EvidenceError("route_contract_version")
-    if set(route) != {
-        "schema_version",
-        "contract_version",
-        "base_sha",
-        "head_sha",
-        "base_tree_sha",
-        "head_tree_sha",
-        "risk_tier",
-        "reasons",
-        "core_required",
-        "service_required",
-        "clustering_required",
-        "owner_authority_required",
-        "core_tests",
-        "service_tests",
-        "sentinels",
-        "selected_test_manifest_digest",
-    }:
-        raise EvidenceError("route_shape")
     for field in ("base_sha", "head_sha", "base_tree_sha", "head_tree_sha"):
         route[field] = _git_sha(route.get(field), f"route_{field}")
     risk_tier = _string(route.get("risk_tier"), "route_risk", maximum=64)
@@ -310,6 +361,7 @@ def _validate_route(
         maximum_items=4096,
         maximum_length=512,
         sorted_required=True,
+        nonempty=True,
     )
     for field in (
         "core_required",
@@ -332,6 +384,7 @@ def _validate_route(
         maximum_items=100000,
         maximum_length=1024,
         sorted_required=True,
+        nonempty=True,
     )
     route["service_tests"] = _string_list(
         route.get("service_tests"),
@@ -340,34 +393,35 @@ def _validate_route(
         maximum_length=1024,
         sorted_required=True,
     )
+    if expected_service != bool(route["service_tests"]):
+        raise EvidenceError("route_service_tests")
     route["sentinels"] = _string_list(
         route.get("sentinels"),
         "route_sentinels",
         maximum_items=10000,
         maximum_length=1024,
+        nonempty=True,
     )
-    route["selected_test_manifest_digest"] = _sha(
+    selected_digest = _sha(
         route.get("selected_test_manifest_digest"),
         "route_selected_manifest",
     )
+    expected_digest = sha256_identity(
+        {
+            "core_tests": route["core_tests"],
+            "service_tests": route["service_tests"],
+            "sentinels": route["sentinels"],
+        }
+    )
+    if selected_digest != expected_digest:
+        raise EvidenceError("route_selected_manifest_mismatch")
+    route["selected_test_manifest_digest"] = selected_digest
     return route
 
 
 def _validate_gate_run(gate_id: str, value: object) -> dict[str, object]:
     run = dict(_mapping(value, "gate_run"))
-    if set(run) != {
-        "schema_version",
-        "gate_id",
-        "phase",
-        "result",
-        "result_reason",
-        "returncode",
-        "execution_ms",
-        "stdout",
-        "stderr",
-        "stdout_truncated",
-        "stderr_truncated",
-    }:
+    if set(run) != _GATE_RUN_KEYS:
         raise EvidenceError("gate_run_shape")
     if run.get("schema_version") != _GATE_RUN_SCHEMA_VERSION:
         raise EvidenceError("gate_run_schema")
@@ -385,9 +439,13 @@ def _validate_gate_run(gate_id: str, value: object) -> dict[str, object]:
         isinstance(returncode, bool) or not isinstance(returncode, int)
     ):
         raise EvidenceError("gate_run_returncode")
+    if result == "PASS" and returncode != 0:
+        raise EvidenceError("gate_run_pass_returncode")
+    if result == "FAIL" and (returncode is None or returncode == 0):
+        raise EvidenceError("gate_run_fail_returncode")
     run["execution_ms"] = _nonnegative(run.get("execution_ms"), "execution_ms")
-    _string(run.get("stdout"), "gate_run_stdout", maximum=1_048_576)
-    _string(run.get("stderr"), "gate_run_stderr", maximum=1_048_576)
+    _text(run.get("stdout"), "gate_run_stdout", maximum=1_048_576)
+    _text(run.get("stderr"), "gate_run_stderr", maximum=1_048_576)
     _boolean(run.get("stdout_truncated"), "stdout_truncated")
     _boolean(run.get("stderr_truncated"), "stderr_truncated")
     return run
@@ -397,20 +455,7 @@ def _validate_junit(value: object | None) -> dict[str, object] | None:
     if value is None:
         return None
     summary = dict(_mapping(value, "junit"))
-    expected = {
-        "schema_version",
-        "outcome",
-        "reports",
-        "test_ids_digest",
-        "test_count",
-        "failure_count",
-        "error_count",
-        "skip_count",
-        "required_skip_count",
-        "duration_ms",
-        "first_failure_fingerprint",
-    }
-    if set(summary) != expected or summary.get("schema_version") != _JUNIT_SCHEMA_VERSION:
+    if set(summary) != _JUNIT_KEYS or summary.get("schema_version") != _JUNIT_SCHEMA_VERSION:
         raise EvidenceError("junit_shape")
     outcome = _string(summary.get("outcome"), "junit_outcome", maximum=16)
     if outcome not in {"PASS", "FAIL"}:
@@ -520,13 +565,16 @@ def validate_evidence_record(record_value: object) -> dict[str, object]:
         "risk_classifier_version",
         maximum=128,
     )
-    record["risk_tier"] = _string(record.get("risk_tier"), "risk_tier", maximum=64)
+    risk_tier = _string(record.get("risk_tier"), "risk_tier", maximum=64)
+    if risk_tier not in _RISK_TIERS:
+        raise EvidenceError("risk_tier")
     record["risk_reasons"] = _string_list(
         record.get("risk_reasons"),
         "risk_reasons",
         maximum_items=4096,
         maximum_length=512,
         sorted_required=True,
+        nonempty=True,
     )
     runner_kind = _string(record.get("runner_kind"), "runner_kind", maximum=64)
     if runner_kind not in _RUNNER_KINDS:
@@ -545,7 +593,12 @@ def validate_evidence_record(record_value: object) -> dict[str, object]:
         record[field] = _nonnegative(record.get(field), field)
     if record["required_skip_count"] > record["skip_count"]:
         raise EvidenceError("required_skip_count")
-    if record["failure_count"] + record["error_count"] + record["skip_count"] > record["test_count"]:
+    if (
+        record["failure_count"]
+        + record["error_count"]
+        + record["skip_count"]
+        > record["test_count"]
+    ):
         raise EvidenceError("test_counts")
     cache_key = _optional_string(record.get("cache_key"), "cache_key")
     cache_hit = _boolean(record.get("cache_hit"), "cache_hit")
@@ -554,7 +607,9 @@ def validate_evidence_record(record_value: object) -> dict[str, object]:
     record["python_version"] = _string(
         record.get("python_version"), "python_version", maximum=128
     )
-    record["uv_version"] = _string(record.get("uv_version"), "uv_version", maximum=128)
+    record["uv_version"] = _string(
+        record.get("uv_version"), "uv_version", maximum=128
+    )
     for field in (
         "lockfile_digest",
         "toolchain_digest",
@@ -577,6 +632,7 @@ def validate_evidence_record(record_value: object) -> dict[str, object]:
         "sentinel_tests",
         maximum_items=10000,
         maximum_length=1024,
+        nonempty=True,
     )
     record["random_sample_seed"] = _optional_string(
         record.get("random_sample_seed"),
@@ -596,10 +652,12 @@ def validate_evidence_record(record_value: object) -> dict[str, object]:
     result = _string(record.get("result"), "result", maximum=64)
     if result not in _RESULTS:
         raise EvidenceError("result")
-    record["result_reason"] = _string(
-        record.get("result_reason"), "result_reason", maximum=512
+    reason = _string(record.get("result_reason"), "result_reason", maximum=512)
+    if _RESULT_REASON.fullmatch(reason) is None or not reason.startswith(result + ":"):
+        raise EvidenceError("result_reason")
+    record["created_at"] = _created_at(
+        _string(record.get("created_at"), "created_at", maximum=64)
     )
-    record["created_at"] = _created_at(_string(record.get("created_at"), "created_at", maximum=64))
     if result == "PASS" and (
         record["failure_count"]
         or record["error_count"]
@@ -640,7 +698,10 @@ def build_gate_evidence(
         raise EvidenceError("head_mismatch")
     if resolve_tree(root, current_head) != normalized_route["head_tree_sha"]:
         raise EvidenceError("head_tree_mismatch")
-    if resolve_tree(root, str(normalized_route["base_sha"])) != normalized_route["base_tree_sha"]:
+    if (
+        resolve_tree(root, str(normalized_route["base_sha"]))
+        != normalized_route["base_tree_sha"]
+    ):
         raise EvidenceError("base_tree_mismatch")
 
     gate_id = _string(
@@ -651,8 +712,7 @@ def build_gate_evidence(
     if _SAFE_ID.fullmatch(gate_id) is None:
         raise EvidenceError("gate_id")
     accepted_gate_ids = {
-        str(value["id"])
-        for value in contract.data["gate"].values()
+        str(value["id"]) for value in contract.data["gate"].values()
     }
     if gate_id not in accepted_gate_ids:
         raise EvidenceError("gate_not_accepted")
@@ -664,7 +724,11 @@ def build_gate_evidence(
     if not selected_tests and junit is not None:
         raise EvidenceError("junit_unexpected")
 
-    if normalized_run["result"] == "PASS" and junit is not None and junit["outcome"] == "FAIL":
+    if (
+        normalized_run["result"] == "PASS"
+        and junit is not None
+        and junit["outcome"] == "FAIL"
+    ):
         result = "FAIL"
         result_reason = f"FAIL:{gate_id}:junit"
     else:
@@ -776,7 +840,12 @@ def build_gate_evidence(
 
 def _safe_json_path(root: Path, relative: str, *, output: bool) -> Path:
     candidate = Path(relative)
-    if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+    if (
+        candidate.is_absolute()
+        or not candidate.parts
+        or ".." in candidate.parts
+        or "\\" in relative
+    ):
         raise EvidenceError("json_path")
     path = root / candidate
     current = root
@@ -788,27 +857,42 @@ def _safe_json_path(root: Path, relative: str, *, output: bool) -> Path:
         raise EvidenceError("json_path")
     if path.suffix != ".json":
         raise EvidenceError("json_extension")
-    if output:
-        if not path.parent.is_dir():
-            raise EvidenceError("output_parent")
-    else:
-        try:
-            metadata = os.lstat(path)
-        except OSError as exc:
-            raise EvidenceError("json_input") from exc
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_JSON_BYTES:
-            raise EvidenceError("json_input")
+    if output and not path.parent.is_dir():
+        raise EvidenceError("output_parent")
     return path
 
 
 def _load_json(root: Path, relative: str) -> object:
     path = _safe_json_path(root, relative, output=False)
     try:
-        payload = path.read_bytes()
-        if not payload or len(payload) > _MAX_JSON_BYTES:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        raise EvidenceError("json_input") from exc
+    if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= _MAX_JSON_BYTES:
+        raise EvidenceError("json_input")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise EvidenceError("json_input") from exc
+    try:
+        current = os.fstat(descriptor)
+        if not stat.S_ISREG(current.st_mode) or not 0 < current.st_size <= _MAX_JSON_BYTES:
             raise EvidenceError("json_input")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            payload = stream.read(_MAX_JSON_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if not payload or len(payload) > _MAX_JSON_BYTES:
+        raise EvidenceError("json_input")
+    try:
         return json.loads(payload.decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise EvidenceError("json_input") from exc
 
 
@@ -872,9 +956,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write_json(root, arguments.output, record)
         else:
             sys.stdout.buffer.write(canonical_json_bytes(record) + b"\n")
-    except (ContractError, EvidenceError, OSError, UnicodeError) as exc:
-        reason = str(exc) or type(exc).__name__
-        print(f"EVIDENCE_MISMATCH:gate:{reason}", file=sys.stderr)
+    except EvidenceError as exc:
+        print(f"EVIDENCE_MISMATCH:gate:{str(exc)}", file=sys.stderr)
+        return 2
+    except (ContractError, GitRouteError, OSError, UnicodeError) as exc:
+        print(
+            f"EVIDENCE_MISMATCH:gate:{type(exc).__name__}",
+            file=sys.stderr,
+        )
         return 2
     return 0
 
