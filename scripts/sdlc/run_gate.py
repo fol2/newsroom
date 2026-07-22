@@ -32,10 +32,24 @@ class LaneDeadline:
     started_ns: int
     timeout_ms: int
 
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.started_ns, bool)
+            or not isinstance(self.started_ns, int)
+            or self.started_ns < 0
+        ):
+            raise GateRunError("deadline start must be a nonnegative monotonic integer")
+        if (
+            isinstance(self.timeout_ms, bool)
+            or not isinstance(self.timeout_ms, int)
+            or not 0 < self.timeout_ms < 60_000
+        ):
+            raise GateRunError("lane timeout must be positive and below 60 seconds")
+
     @classmethod
     def start(cls, timeout_seconds: float) -> "LaneDeadline":
         timeout = _timeout_seconds(timeout_seconds, "lane timeout")
-        return cls(time.monotonic_ns(), int(timeout * 1000))
+        return cls(time.monotonic_ns(), max(1, int(timeout * 1000)))
 
     def remaining_seconds(self, *, now_ns: int | None = None) -> float:
         current = time.monotonic_ns() if now_ns is None else now_ns
@@ -215,7 +229,7 @@ def _budget_result(gate_id: str, phase: str) -> GateRunResult:
     )
 
 
-def run_gate_command(
+def _run_gate_command(
     *,
     gate_id: str,
     phase: str,
@@ -374,6 +388,42 @@ def _gate_configuration(contract: SdlcContract, gate_id: str) -> tuple[float, fl
     raise GateRunError(f"unknown gate id: {gate_id}")
 
 
+def start_lane_deadline(contract: SdlcContract, gate_id: str) -> LaneDeadline:
+    _, lane_timeout = _gate_configuration(contract, gate_id)
+    return LaneDeadline.start(lane_timeout)
+
+
+def run_configured_gate(
+    *,
+    contract: SdlcContract,
+    gate_id: str,
+    phase: str,
+    argv: Sequence[str],
+    deadline: LaneDeadline | None = None,
+    cwd: str | Path | None = None,
+    env: Mapping[str, str] | None = None,
+    redact_values: Sequence[str] = (),
+    output_limit_bytes: int = 65_536,
+    termination_grace_seconds: float = 0.5,
+) -> GateRunResult:
+    command_timeout, lane_timeout = _gate_configuration(contract, gate_id)
+    active_deadline = deadline or LaneDeadline.start(lane_timeout)
+    if active_deadline.timeout_ms > int(lane_timeout * 1000):
+        raise GateRunError("deadline exceeds the accepted lane timeout")
+    return _run_gate_command(
+        gate_id=gate_id,
+        phase=phase,
+        argv=argv,
+        deadline=active_deadline,
+        command_timeout_seconds=command_timeout,
+        cwd=cwd,
+        env=env,
+        redact_values=redact_values,
+        output_limit_bytes=output_limit_bytes,
+        termination_grace_seconds=termination_grace_seconds,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run one Newsroom gate command within its accepted budget"
@@ -391,16 +441,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     try:
         contract = load_contract(arguments.repo_root)
-        command_timeout, lane_timeout = _gate_configuration(
-            contract,
-            arguments.gate_id,
-        )
-        result = run_gate_command(
+        result = run_configured_gate(
+            contract=contract,
             gate_id=arguments.gate_id,
             phase=arguments.phase,
             argv=command,
-            deadline=LaneDeadline.start(lane_timeout),
-            command_timeout_seconds=command_timeout,
             cwd=arguments.repo_root,
         )
     except (ContractError, GateRunError, OSError) as exc:
