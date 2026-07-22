@@ -22,6 +22,7 @@ from .artifact_envelope import (
     _read_artifact_file,
     _safe_machine_file,
     _unique_object,
+    _validate_context,
     _validate_json_depth,
     context_from_environment,
     validate_envelope,
@@ -43,7 +44,48 @@ _MAX_METADATA_BYTES = 1024 * 1024
 _MAX_ARTIFACT_ARCHIVE_BYTES = 512 * 1024 * 1024
 _MAX_FILES = 64
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
+_GIT_SHA = re.compile(r"[0-9a-f]{40}")
+_SAFE_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 _API_PREFIX = "https://api.github.com/repos/fol2/newsroom/actions/artifacts/"
+_ALLOWED_EVENTS = frozenset({"pull_request", "merge_group", "workflow_dispatch", "push"})
+_METADATA_KEYS = frozenset(
+    {
+        "artifact_id",
+        "name",
+        "size_bytes",
+        "digest",
+        "created_at",
+        "updated_at",
+        "expires_at",
+        "run_id",
+        "repository_id",
+        "head_repository_id",
+        "head_sha",
+    }
+)
+_RECEIPT_KEYS = frozenset(
+    {
+        "schema_version",
+        "receipt_identity",
+        "metadata",
+        "envelope_identity",
+        "repository",
+        "repository_id",
+        "head_repository",
+        "head_repository_id",
+        "producer_job_id",
+        "consumer_job_id",
+        "run_attempt",
+        "workflow_ref",
+        "workflow_sha",
+        "event_name",
+        "event_sha",
+        "evaluated_sha",
+        "evaluated_tree_sha",
+        "entries",
+        "raw_reports",
+    }
+)
 
 
 class ArtifactReceiptError(ValueError):
@@ -100,6 +142,10 @@ class RawReport:
 class ArtifactReceipt:
     metadata: ArtifactMetadata
     envelope_identity: str
+    repository: str
+    repository_id: int
+    head_repository: str
+    head_repository_id: int
     producer_job_id: str
     consumer_job_id: str
     run_attempt: int
@@ -119,6 +165,10 @@ class ArtifactReceipt:
             "receipt_identity": self.receipt_identity,
             "metadata": self.metadata.as_dict(),
             "envelope_identity": self.envelope_identity,
+            "repository": self.repository,
+            "repository_id": self.repository_id,
+            "head_repository": self.head_repository,
+            "head_repository_id": self.head_repository_id,
             "producer_job_id": self.producer_job_id,
             "consumer_job_id": self.consumer_job_id,
             "run_attempt": self.run_attempt,
@@ -150,6 +200,13 @@ def _text(value: object, code: str, *, maximum: int = 2048) -> str:
     return value
 
 
+def _identifier(value: object, code: str) -> str:
+    text = _text(value, code, maximum=128)
+    if _SAFE_ID.fullmatch(text) is None:
+        raise ArtifactReceiptError(code)
+    return text
+
+
 def _positive(value: object, code: str, *, maximum: int | None = None) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ArtifactReceiptError(code)
@@ -167,7 +224,7 @@ def _sha(value: object, code: str) -> str:
 
 def _git_sha(value: object, code: str) -> str:
     text = _text(value, code, maximum=40)
-    if re.fullmatch(r"[0-9a-f]{40}", text) is None:
+    if _GIT_SHA.fullmatch(text) is None:
         raise ArtifactReceiptError(code)
     return text
 
@@ -183,6 +240,21 @@ def _timestamp(value: object, code: str) -> tuple[str, datetime]:
     if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise ArtifactReceiptError(code)
     return text, parsed
+
+
+def _relative_path(value: object, code: str) -> str:
+    text = _text(value, code, maximum=1024)
+    candidate = Path(text)
+    if (
+        candidate.is_absolute()
+        or not candidate.parts
+        or ".." in candidate.parts
+        or "\\" in text
+        or candidate.as_posix() != text
+        or text == "envelope.json"
+    ):
+        raise ArtifactReceiptError(code)
+    return text
 
 
 def load_metadata(path: str | Path) -> Mapping[str, object]:
@@ -202,6 +274,11 @@ def validate_metadata(
     decision_context: GithubRunContext,
     now: datetime | None = None,
 ) -> ArtifactMetadata:
+    try:
+        producer_context = _validate_context(envelope.context)
+        consumer_context = _validate_context(decision_context)
+    except ArtifactProvenanceError as exc:
+        raise ArtifactReceiptError("artifact_context") from exc
     metadata = _mapping(value, "metadata")
     artifact_id = _positive(metadata.get("id"), "artifact_id")
     name = _text(metadata.get("name"), "artifact_name", maximum=255)
@@ -239,14 +316,14 @@ def validate_metadata(
     )
     head_sha = _git_sha(workflow_run.get("head_sha"), "artifact_head_sha")
     if (
-        run_id != decision_context.run_id
-        or run_id != envelope.context.run_id
-        or repository_id != decision_context.repository_id
-        or repository_id != envelope.context.repository_id
-        or head_repository_id != decision_context.head_repository_id
-        or head_repository_id != envelope.context.head_repository_id
-        or head_sha != decision_context.evaluated_sha
-        or head_sha != envelope.context.evaluated_sha
+        run_id != consumer_context.run_id
+        or run_id != producer_context.run_id
+        or repository_id != consumer_context.repository_id
+        or repository_id != producer_context.repository_id
+        or head_repository_id != consumer_context.head_repository_id
+        or head_repository_id != producer_context.head_repository_id
+        or head_sha != consumer_context.evaluated_sha
+        or head_sha != producer_context.evaluated_sha
     ):
         raise ArtifactReceiptError("artifact_workflow_identity")
     return ArtifactMetadata(
@@ -269,10 +346,16 @@ def _same_run_context(
     consumer: GithubRunContext,
     expected_job_id: str,
 ) -> None:
-    if producer.job_id != expected_job_id or producer.job_id == consumer.job_id:
+    try:
+        normalized_producer = _validate_context(producer)
+        normalized_consumer = _validate_context(consumer)
+    except ArtifactProvenanceError as exc:
+        raise ArtifactReceiptError("producer_context") from exc
+    expected_job = _identifier(expected_job_id, "producer_job")
+    if normalized_producer.job_id != expected_job or normalized_producer.job_id == normalized_consumer.job_id:
         raise ArtifactReceiptError("producer_job")
-    producer_value = producer.as_dict()
-    consumer_value = consumer.as_dict()
+    producer_value = normalized_producer.as_dict()
+    consumer_value = normalized_consumer.as_dict()
     producer_value.pop("job_id")
     consumer_value.pop("job_id")
     if producer_value != consumer_value:
@@ -308,7 +391,7 @@ def _validate_command_run(value: object) -> dict[str, object]:
         command_run.get("command_spec_digest"), "command_spec_digest"
     )
     gate_value = _mapping(command_run.get("gate_run"), "gate_run")
-    gate_id = _text(gate_value.get("gate_id"), "gate_id", maximum=128)
+    gate_id = _identifier(gate_value.get("gate_id"), "gate_id")
     try:
         command_run["gate_run"] = _validate_gate_run(gate_id, gate_value)
     except EvidenceError as exc:
@@ -354,6 +437,38 @@ def _evidence_signature(record: Mapping[str, object]) -> tuple[object, ...]:
         record["required_skip_count"],
         record["first_failure_fingerprint"],
     )
+
+
+def _expected_selected_tests(gate_id: str, route: Mapping[str, object]) -> list[str]:
+    if gate_id == "service-neo4j":
+        return list(route["service_tests"])
+    if gate_id in {"core-deterministic", "merge-exact"}:
+        return list(route["core_tests"])
+    return []
+
+
+def _reconcile_evidence_route(
+    *,
+    contract: SdlcContract,
+    route: Mapping[str, object],
+    evidence: Mapping[str, object],
+) -> None:
+    gate_id = str(evidence["gate_id"])
+    expected = {
+        "gate_contract_version": contract.contract_version,
+        "risk_classifier_version": contract.classifier_version,
+        "base_sha": route["base_sha"],
+        "head_sha": route["head_sha"],
+        "base_tree_sha": route["base_tree_sha"],
+        "tree_sha": route["head_tree_sha"],
+        "risk_tier": route["risk_tier"],
+        "risk_reasons": route["reasons"],
+        "selected_test_manifest_digest": route["selected_test_manifest_digest"],
+        "selected_tests": _expected_selected_tests(gate_id, route),
+        "sentinel_tests": route["sentinels"],
+    }
+    if any(evidence[field] != value for field, value in expected.items()):
+        raise ArtifactReceiptError("evidence_route")
 
 
 def _reconcile_artifacts(
@@ -427,15 +542,12 @@ def _reconcile_artifacts(
     for gate_id, evidence in evidence_by_gate.items():
         command_run = command_by_gate[gate_id]
         gate_run = _mapping(command_run["gate_run"], "gate_run")
+        _reconcile_evidence_route(contract=contract, route=route, evidence=evidence)
         if evidence["gate_inputs_digest"] != _gate_inputs_digest(
             route=route,
             command_run=command_run,
         ):
             raise ArtifactReceiptError("gate_inputs_digest")
-        if evidence["head_sha"] != route["head_sha"] or evidence["tree_sha"] != route[
-            "head_tree_sha"
-        ]:
-            raise ArtifactReceiptError("evidence_identity")
 
         candidates = [
             (path, summary)
@@ -459,13 +571,11 @@ def _reconcile_artifacts(
                 and summary["outcome"] == "FAIL"
                 else gate_run["result_reason"]
             )
-            if evidence["result"] != expected_result or evidence[
-                "result_reason"
-            ] != expected_reason:
+            if evidence["result"] != expected_result or evidence["result_reason"] != expected_reason:
                 raise ArtifactReceiptError("evidence_result")
             for report in summary["reports"]:
                 report_mapping = _mapping(report, "junit_report")
-                path = _text(report_mapping.get("path"), "junit_report_path", maximum=1024)
+                path = _relative_path(report_mapping.get("path"), "junit_report_path")
                 if path in allowed_paths:
                     raise ArtifactReceiptError("raw_report_path")
                 payload, normalized = _secure_file(root, path)
@@ -486,9 +596,7 @@ def _reconcile_artifacts(
                 raise ArtifactReceiptError("junit_unexpected")
             if any(evidence[field] for field in ("failure_count", "error_count", "skip_count")):
                 raise ArtifactReceiptError("zero_test_counts")
-            if evidence["result"] != gate_run["result"] or evidence[
-                "result_reason"
-            ] != gate_run["result_reason"]:
+            if evidence["result"] != gate_run["result"] or evidence["result_reason"] != gate_run["result_reason"]:
                 raise ArtifactReceiptError("evidence_result")
 
     if unmatched_junit:
@@ -535,15 +643,16 @@ def verify_artifact(
     if accepted.repo_root != repository_root:
         raise ArtifactReceiptError("contract_root")
     try:
+        normalized_decision = _validate_context(decision_context)
         root = _artifact_root(repository_root, artifact_root)
         envelope = _read_envelope(root)
     except ArtifactProvenanceError as exc:
-        raise ArtifactReceiptError("artifact_root") from exc
-    _same_run_context(envelope.context, decision_context, expected_job_id)
+        raise ArtifactReceiptError("artifact_context") from exc
+    _same_run_context(envelope.context, normalized_decision, expected_job_id)
     metadata = validate_metadata(
         metadata_value,
         envelope=envelope,
-        decision_context=decision_context,
+        decision_context=normalized_decision,
         now=now,
     )
     entries, raw_reports, allowed = _reconcile_artifacts(
@@ -557,8 +666,12 @@ def verify_artifact(
         "schema_version": SCHEMA_VERSION,
         "metadata": metadata.as_dict(),
         "envelope_identity": envelope.envelope_identity,
+        "repository": envelope.context.repository,
+        "repository_id": envelope.context.repository_id,
+        "head_repository": envelope.context.head_repository,
+        "head_repository_id": envelope.context.head_repository_id,
         "producer_job_id": envelope.context.job_id,
-        "consumer_job_id": decision_context.job_id,
+        "consumer_job_id": normalized_decision.job_id,
         "run_attempt": envelope.context.run_attempt,
         "workflow_ref": envelope.context.workflow_ref,
         "workflow_sha": envelope.context.workflow_sha,
@@ -576,8 +689,12 @@ def verify_artifact(
     return ArtifactReceipt(
         metadata=metadata,
         envelope_identity=envelope.envelope_identity,
+        repository=envelope.context.repository,
+        repository_id=envelope.context.repository_id,
+        head_repository=envelope.context.head_repository,
+        head_repository_id=envelope.context.head_repository_id,
         producer_job_id=envelope.context.job_id,
-        consumer_job_id=decision_context.job_id,
+        consumer_job_id=normalized_decision.job_id,
         run_attempt=envelope.context.run_attempt,
         workflow_ref=envelope.context.workflow_ref,
         workflow_sha=envelope.context.workflow_sha,
@@ -591,13 +708,16 @@ def verify_artifact(
     )
 
 
-def validate_receipt(value: object) -> ArtifactReceipt:
-    mapping = _mapping(value, "receipt")
-    if mapping.get("schema_version") != SCHEMA_VERSION:
-        raise ArtifactReceiptError("receipt_schema")
-    receipt_identity = _sha(mapping.get("receipt_identity"), "receipt_identity")
-    metadata_value = _mapping(mapping.get("metadata"), "receipt_metadata")
-    metadata = ArtifactMetadata(
+def _normalized_metadata(value: object) -> ArtifactMetadata:
+    metadata_value = _mapping(value, "receipt_metadata")
+    if frozenset(metadata_value) != _METADATA_KEYS:
+        raise ArtifactReceiptError("receipt_metadata")
+    created_text, created = _timestamp(metadata_value.get("created_at"), "created_at")
+    updated_text, updated = _timestamp(metadata_value.get("updated_at"), "updated_at")
+    expires_text, expires = _timestamp(metadata_value.get("expires_at"), "expires_at")
+    if not created <= updated < expires:
+        raise ArtifactReceiptError("receipt_metadata_time")
+    return ArtifactMetadata(
         artifact_id=_positive(metadata_value.get("artifact_id"), "artifact_id"),
         name=_text(metadata_value.get("name"), "artifact_name", maximum=255),
         size_bytes=_positive(
@@ -606,9 +726,9 @@ def validate_receipt(value: object) -> ArtifactReceipt:
             maximum=_MAX_ARTIFACT_ARCHIVE_BYTES,
         ),
         digest=_sha(metadata_value.get("digest"), "artifact_digest"),
-        created_at=_timestamp(metadata_value.get("created_at"), "created_at")[0],
-        updated_at=_timestamp(metadata_value.get("updated_at"), "updated_at")[0],
-        expires_at=_timestamp(metadata_value.get("expires_at"), "expires_at")[0],
+        created_at=created_text,
+        updated_at=updated_text,
+        expires_at=expires_text,
         run_id=_positive(metadata_value.get("run_id"), "run_id"),
         repository_id=_positive(metadata_value.get("repository_id"), "repository_id"),
         head_repository_id=_positive(
@@ -616,6 +736,52 @@ def validate_receipt(value: object) -> ArtifactReceipt:
         ),
         head_sha=_git_sha(metadata_value.get("head_sha"), "head_sha"),
     )
+
+
+def validate_receipt(value: object) -> ArtifactReceipt:
+    mapping = _mapping(value, "receipt")
+    if frozenset(mapping) != _RECEIPT_KEYS:
+        raise ArtifactReceiptError("receipt_shape")
+    if mapping.get("schema_version") != SCHEMA_VERSION:
+        raise ArtifactReceiptError("receipt_schema")
+    metadata = _normalized_metadata(mapping.get("metadata"))
+    repository = _text(mapping.get("repository"), "repository", maximum=255)
+    if repository != "fol2/newsroom":
+        raise ArtifactReceiptError("repository")
+    repository_id = _positive(mapping.get("repository_id"), "repository_id")
+    head_repository = _text(
+        mapping.get("head_repository"), "head_repository", maximum=255
+    )
+    head_repository_id = _positive(
+        mapping.get("head_repository_id"), "head_repository_id"
+    )
+    producer_job = _identifier(mapping.get("producer_job_id"), "producer_job_id")
+    consumer_job = _identifier(mapping.get("consumer_job_id"), "consumer_job_id")
+    if producer_job == consumer_job:
+        raise ArtifactReceiptError("receipt_jobs")
+    run_attempt = _positive(mapping.get("run_attempt"), "run_attempt")
+    workflow_ref = _text(mapping.get("workflow_ref"), "workflow_ref")
+    if not workflow_ref.startswith(f"{repository}/.github/workflows/"):
+        raise ArtifactReceiptError("workflow_ref")
+    workflow_sha = _git_sha(mapping.get("workflow_sha"), "workflow_sha")
+    event_name = _text(mapping.get("event_name"), "event_name", maximum=64)
+    if event_name not in _ALLOWED_EVENTS:
+        raise ArtifactReceiptError("event_name")
+    event_sha = _git_sha(mapping.get("event_sha"), "event_sha")
+    evaluated_sha = _git_sha(mapping.get("evaluated_sha"), "evaluated_sha")
+    evaluated_tree_sha = _git_sha(
+        mapping.get("evaluated_tree_sha"), "evaluated_tree_sha"
+    )
+    envelope_identity = _sha(mapping.get("envelope_identity"), "envelope_identity")
+    if (
+        metadata.repository_id != repository_id
+        or metadata.head_repository_id != head_repository_id
+        or metadata.head_sha != evaluated_sha
+        or metadata.name
+        != f"newsroom-sdlc-{metadata.run_id}-{run_attempt}-{producer_job}-{evaluated_sha}"
+    ):
+        raise ArtifactReceiptError("receipt_metadata_identity")
+
     raw_entries = mapping.get("entries")
     if not isinstance(raw_entries, list) or len(raw_entries) > _MAX_FILES:
         raise ArtifactReceiptError("receipt_entries")
@@ -626,13 +792,14 @@ def validate_receipt(value: object) -> ArtifactReceipt:
             raise ArtifactReceiptError("receipt_entry")
         entries.append(
             (
-                _text(item.get("role"), "entry_role", maximum=64),
-                _text(item.get("path"), "entry_path", maximum=1024),
+                _identifier(item.get("role"), "entry_role"),
+                _relative_path(item.get("path"), "entry_path"),
                 _sha(item.get("digest"), "entry_digest"),
             )
         )
     if entries != sorted(entries) or len({path for _, path, _ in entries}) != len(entries):
         raise ArtifactReceiptError("receipt_entries")
+
     raw_values = mapping.get("raw_reports")
     if not isinstance(raw_values, list) or len(raw_values) > _MAX_FILES:
         raise ArtifactReceiptError("receipt_reports")
@@ -643,10 +810,10 @@ def validate_receipt(value: object) -> ArtifactReceipt:
             raise ArtifactReceiptError("receipt_report")
         reports.append(
             RawReport(
-                summary_path=_text(
-                    item.get("summary_path"), "summary_path", maximum=1024
+                summary_path=_relative_path(
+                    item.get("summary_path"), "summary_path"
                 ),
-                path=_text(item.get("path"), "report_path", maximum=1024),
+                path=_relative_path(item.get("path"), "report_path"),
                 size_bytes=_positive(
                     item.get("size_bytes"),
                     "report_size",
@@ -658,48 +825,56 @@ def validate_receipt(value: object) -> ArtifactReceipt:
     ordered_reports = sorted(reports, key=lambda item: (item.summary_path, item.path))
     if reports != ordered_reports or len({item.path for item in reports}) != len(reports):
         raise ArtifactReceiptError("receipt_reports")
-    identity_inputs = {
-        key: mapping[key]
-        for key in (
-            "schema_version",
-            "metadata",
-            "envelope_identity",
-            "producer_job_id",
-            "consumer_job_id",
-            "run_attempt",
-            "workflow_ref",
-            "workflow_sha",
-            "event_name",
-            "event_sha",
-            "evaluated_sha",
-            "evaluated_tree_sha",
-            "entries",
-            "raw_reports",
-        )
-        if key in mapping
+    entry_paths = {path for _, path, _ in entries}
+    junit_paths = {path for role, path, _ in entries if role == "junit_summary"}
+    if any(
+        report.path in entry_paths or report.summary_path not in junit_paths
+        for report in reports
+    ):
+        raise ArtifactReceiptError("receipt_reports")
+
+    normalized = {
+        "schema_version": SCHEMA_VERSION,
+        "metadata": metadata.as_dict(),
+        "envelope_identity": envelope_identity,
+        "repository": repository,
+        "repository_id": repository_id,
+        "head_repository": head_repository,
+        "head_repository_id": head_repository_id,
+        "producer_job_id": producer_job,
+        "consumer_job_id": consumer_job,
+        "run_attempt": run_attempt,
+        "workflow_ref": workflow_ref,
+        "workflow_sha": workflow_sha,
+        "event_name": event_name,
+        "event_sha": event_sha,
+        "evaluated_sha": evaluated_sha,
+        "evaluated_tree_sha": evaluated_tree_sha,
+        "entries": [
+            {"role": role, "path": path, "digest": digest}
+            for role, path, digest in entries
+        ],
+        "raw_reports": [report.as_dict() for report in reports],
     }
-    if set(mapping) != set(identity_inputs) | {"receipt_identity"}:
-        raise ArtifactReceiptError("receipt_shape")
-    if receipt_identity != sha256_identity(identity_inputs):
+    receipt_identity = _sha(mapping.get("receipt_identity"), "receipt_identity")
+    if receipt_identity != sha256_identity(normalized):
         raise ArtifactReceiptError("receipt_identity")
     return ArtifactReceipt(
         metadata=metadata,
-        envelope_identity=_sha(mapping.get("envelope_identity"), "envelope_identity"),
-        producer_job_id=_text(
-            mapping.get("producer_job_id"), "producer_job_id", maximum=128
-        ),
-        consumer_job_id=_text(
-            mapping.get("consumer_job_id"), "consumer_job_id", maximum=128
-        ),
-        run_attempt=_positive(mapping.get("run_attempt"), "run_attempt"),
-        workflow_ref=_text(mapping.get("workflow_ref"), "workflow_ref"),
-        workflow_sha=_git_sha(mapping.get("workflow_sha"), "workflow_sha"),
-        event_name=_text(mapping.get("event_name"), "event_name", maximum=64),
-        event_sha=_git_sha(mapping.get("event_sha"), "event_sha"),
-        evaluated_sha=_git_sha(mapping.get("evaluated_sha"), "evaluated_sha"),
-        evaluated_tree_sha=_git_sha(
-            mapping.get("evaluated_tree_sha"), "evaluated_tree_sha"
-        ),
+        envelope_identity=envelope_identity,
+        repository=repository,
+        repository_id=repository_id,
+        head_repository=head_repository,
+        head_repository_id=head_repository_id,
+        producer_job_id=producer_job,
+        consumer_job_id=consumer_job,
+        run_attempt=run_attempt,
+        workflow_ref=workflow_ref,
+        workflow_sha=workflow_sha,
+        event_name=event_name,
+        event_sha=event_sha,
+        evaluated_sha=evaluated_sha,
+        evaluated_tree_sha=evaluated_tree_sha,
         entry_digests=tuple(entries),
         raw_reports=tuple(reports),
         receipt_identity=receipt_identity,
