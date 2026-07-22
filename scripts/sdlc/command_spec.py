@@ -172,6 +172,10 @@ def executable_digest(path: str | Path) -> tuple[str, str]:
         ):
             raise CommandSpecError("executable_file")
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            header = stream.read(2)
+            if header == b"#!":
+                raise CommandSpecError("executable_interpreter_unbound")
+            digest.update(header)
             while payload := stream.read(1024 * 1024):
                 digest.update(payload)
     finally:
