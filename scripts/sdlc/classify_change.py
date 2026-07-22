@@ -12,17 +12,19 @@ import sys
 from typing import Iterable, Sequence
 
 from .contracts import ContractError, SdlcContract, load_contract
+from .dependencies import DependencyError, build_dependency_graph, python_changes
 
 
 SCHEMA_VERSION = "newsroom.sdlc.route.v1"
 RISK_CLASSIFIER_VERSION = "sdlc-risk-v1"
+_R3 = "R3_EXTERNAL_SERVICE_SECURITY"
 _PATH_RISKS = {
     "documentation": "R0_DOCUMENTATION",
     "local_code": "R1_LOCAL_CODE",
     "clustering": "R1_LOCAL_CODE",
     "stateful_contract": "R2_STATEFUL_CONTRACT",
-    "contract_control": "R3_EXTERNAL_SERVICE_SECURITY",
-    "external_service_security": "R3_EXTERNAL_SERVICE_SECURITY",
+    "contract_control": _R3,
+    "external_service_security": _R3,
     "release_operational": "R4_RELEASE_OPERATIONAL",
 }
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
@@ -126,6 +128,35 @@ def _service_tests(repo_root: Path) -> tuple[str, ...]:
     )
 
 
+def _dependency_reasons(
+    contract: SdlcContract, changes: tuple[ChangedPath, ...]
+) -> tuple[str, ...]:
+    paths = python_changes(
+        path
+        for change in changes
+        for path in change.classified_paths()
+    )
+    if not paths:
+        return ()
+    try:
+        graph = build_dependency_graph(contract.repo_root)
+    except DependencyError as exc:
+        return (f"unknown_dependency_edge:{exc}:{_R3}",)
+
+    reasons: set[str] = set()
+    for path in paths:
+        try:
+            dependents = graph.dependent_paths(path)
+        except DependencyError as exc:
+            reasons.add(f"unknown_dependency_edge:{exc}:{_R3}")
+            continue
+        for dependent in dependents:
+            groups = _matching_groups(contract, dependent)
+            if any(_PATH_RISKS.get(group) == _R3 for group in groups):
+                reasons.add(f"dependency:{path}->{dependent}:{_R3}")
+    return tuple(sorted(reasons))
+
+
 def classify_paths(
     contract: SdlcContract,
     changes: Iterable[ChangedPath],
@@ -179,6 +210,12 @@ def classify_paths(
                     reasons.add(f"path:{path}:{group}:{risk}")
                 if ranks[risk] > ranks[selected_risk]:
                     selected_risk = risk
+
+    if ranks[selected_risk] < ranks[_R3]:
+        dependency_reasons = _dependency_reasons(contract, normalized_changes)
+        if dependency_reasons:
+            reasons.update(dependency_reasons)
+            selected_risk = _R3
 
     core_tests = ("newsroom/tests",)
     service_required = contract.service_required(selected_risk)
