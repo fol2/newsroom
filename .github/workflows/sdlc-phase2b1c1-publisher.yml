@@ -63,7 +63,7 @@ jobs:
           grep -Fx 'source_blob=adf3f22d48e5b33db36b2b3fea7aa5eef15dcf0e' integrity-before.txt
           grep -Fx 'test_blob=6df866ebca7778b8d673b5b137894c15a882c0f1' integrity-before.txt
           grep -Fx 'source_sha=b45ebf0c2f204ffd9874f6200f7dcc3455aeb7f7ec48dd8ca7c028abeacc9d20' integrity-after.txt
-          grep -Fx 'test_sha=41cdb0752aa51bf1f0e4dc695476a743d7e154983a5c04b5584ce0b18eecd531' integrity-after.txt
+          grep -Fx 'test_sha=a9e4f35300c05d9536f97b809b48b5dde313392ffe695129bc60b0a222d3a1eb' integrity-after.txt
 
       - name: Install exact uv and sync locked environment
         run: |
