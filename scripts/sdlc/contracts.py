@@ -46,10 +46,13 @@ def _positive_int(value: object, name: str, *, below: int | None = None) -> int:
     return value
 
 
-def _positive_number(value: object, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-        raise ContractError(f"{name} must be positive")
-    return float(value)
+def _probability(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ContractError(f"{name} must be numeric")
+    probability = float(value)
+    if not 0.0 < probability <= 1.0:
+        raise ContractError(f"{name} must be in (0, 1]")
+    return probability
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,10 @@ class SdlcContract:
         return str(self.data["contract_version"])
 
     @property
+    def classifier_version(self) -> str:
+        return str(self.classification["version"])
+
+    @property
     def classification(self) -> Mapping[str, Any]:
         return _mapping(self.data["classification"], "classification")
 
@@ -74,7 +81,10 @@ class SdlcContract:
     @property
     def risk_rank(self) -> Mapping[str, int]:
         raw = _mapping(self.data["risk"], "risk")
-        return {name: int(_mapping(value, f"risk.{name}")["rank"]) for name, value in raw.items()}
+        return {
+            name: int(_mapping(value, f"risk.{name}")["rank"])
+            for name, value in raw.items()
+        }
 
     @property
     def sentinels(self) -> tuple[str, ...]:
@@ -88,11 +98,17 @@ class SdlcContract:
         return str(self.classification["unknown_path"])
 
     def service_required(self, risk_tier: str) -> bool:
-        risk = _mapping(_mapping(self.data["risk"], "risk")[risk_tier], f"risk.{risk_tier}")
+        risk = _mapping(
+            _mapping(self.data["risk"], "risk")[risk_tier],
+            f"risk.{risk_tier}",
+        )
         return bool(risk["service"])
 
     def owner_authority_required(self, risk_tier: str) -> bool:
-        risk = _mapping(_mapping(self.data["risk"], "risk")[risk_tier], f"risk.{risk_tier}")
+        risk = _mapping(
+            _mapping(self.data["risk"], "risk")[risk_tier],
+            f"risk.{risk_tier}",
+        )
         return bool(risk.get("owner_authority_required", False))
 
 
@@ -117,7 +133,7 @@ def validate_contract_data(
         "global.lane_execution_timeout_seconds",
         below=60,
     )
-    _positive_int(
+    finalization_limit = _positive_int(
         global_config.get("finalization_timeout_seconds"),
         "global.finalization_timeout_seconds",
         below=60,
@@ -131,13 +147,22 @@ def validate_contract_data(
     gates = _mapping(data.get("gate"), "gate")
     if not gates:
         raise ContractError("at least one gate is required")
+    gate_ids: set[str] = set()
     for gate_name, gate_value in gates.items():
         gate = _mapping(gate_value, f"gate.{gate_name}")
-        if gate.get("id") != gate_name and gate_name != "science-shard":
+        gate_id = gate.get("id")
+        if not isinstance(gate_id, str) or not gate_id:
+            raise ContractError(f"gate.{gate_name}.id is required")
+        if gate_id in gate_ids:
+            raise ContractError(f"duplicate gate id: {gate_id}")
+        gate_ids.add(gate_id)
+        if gate_id != gate_name and (gate_name, gate_id) != ("science-shard", "science-*"):
             raise ContractError(f"gate.{gate_name}.id differs from its table name")
         lane_name = gate.get("lane")
         if not isinstance(lane_name, str) or lane_name not in lanes:
-            raise ContractError(f"gate.{gate_name}.lane does not resolve to lanes.{lane_name}")
+            raise ContractError(
+                f"gate.{gate_name}.lane does not resolve to lanes.{lane_name}"
+            )
         timeout = _positive_int(
             gate.get("hard_timeout_seconds"),
             f"gate.{gate_name}.hard_timeout_seconds",
@@ -155,19 +180,42 @@ def validate_contract_data(
         )
         if timeout > lane_limit:
             raise ContractError(f"lanes.{lane_name} exceeds the aggregate lane timeout")
+    science = _mapping(lanes.get("science"), "lanes.science")
+    _positive_int(
+        science.get("per_shard_hard_timeout_seconds"),
+        "lanes.science.per_shard_hard_timeout_seconds",
+        below=60,
+    )
     decision = _mapping(lanes.get("decision"), "lanes.decision")
+    decision_timeout = _positive_int(
+        decision.get("hard_timeout_seconds"),
+        "lanes.decision.hard_timeout_seconds",
+        below=60,
+    )
     if decision.get("always_reports") is not True:
         raise ContractError("lanes.decision must always report")
+    if decision_timeout > finalization_limit:
+        raise ContractError("lanes.decision exceeds the finalization timeout")
 
     risks = _mapping(data.get("risk"), "risk")
-    if tuple(sorted(risks, key=lambda name: int(_mapping(risks[name], name)["rank"]))) != _REQUIRED_RISKS:
+    if set(risks) != set(_REQUIRED_RISKS):
+        raise ContractError("risk contract must contain exactly R0 through R4")
+    ranked = {
+        name: int(_mapping(risks[name], f"risk.{name}")["rank"])
+        for name in _REQUIRED_RISKS
+    }
+    if tuple(ranked[name] for name in _REQUIRED_RISKS) != tuple(range(5)):
         raise ContractError("risk ranks must be unique and ordered R0 through R4")
     for name in _REQUIRED_RISKS:
         risk = _mapping(risks[name], f"risk.{name}")
-        if not isinstance(risk.get("core"), bool) or not isinstance(risk.get("service"), bool):
+        if not isinstance(risk.get("core"), bool) or not isinstance(
+            risk.get("service"), bool
+        ):
             raise ContractError(f"risk.{name} must define core/service booleans")
 
     classification = _mapping(data.get("classification"), "classification")
+    if classification.get("version") != "sdlc-risk-v1":
+        raise ContractError("unsupported risk classifier version")
     for field in (
         "unknown_path",
         "unknown_dependency_edge",
@@ -185,16 +233,24 @@ def validate_contract_data(
         raise ContractError(f"classification.paths lacks: {sorted(missing_groups)}")
     for group, patterns in paths.items():
         if not isinstance(patterns, list) or not patterns:
-            raise ContractError(f"classification.paths.{group} must be a non-empty array")
+            raise ContractError(
+                f"classification.paths.{group} must be a non-empty array"
+            )
         if any(not isinstance(pattern, str) or not pattern for pattern in patterns):
-            raise ContractError(f"classification.paths.{group} contains an invalid pattern")
+            raise ContractError(
+                f"classification.paths.{group} contains an invalid pattern"
+            )
 
     strategy = _mapping(data.get("test_strategy"), "test_strategy")
     owner = _mapping(data.get("owner_decisions"), "owner_decisions")
     review = _mapping(data.get("change_review"), "change_review")
-    if owner.get("review_net_executable_lines_trigger") != review.get("net_executable_lines_trigger"):
+    if owner.get("review_net_executable_lines_trigger") != review.get(
+        "net_executable_lines_trigger"
+    ):
         raise ContractError("accepted executable-line trigger differs from change_review")
-    if owner.get("review_changed_files_trigger") != review.get("changed_files_trigger"):
+    if owner.get("review_changed_files_trigger") != review.get(
+        "changed_files_trigger"
+    ):
         raise ContractError("accepted changed-file trigger differs from change_review")
     for owner_key, strategy_key in (
         ("selector_shadow_calendar_days", "selector_shadow_calendar_days"),
@@ -204,7 +260,12 @@ def validate_contract_data(
     ):
         if owner.get(owner_key) != strategy.get(strategy_key):
             raise ContractError(f"accepted {owner_key} differs from test_strategy")
-    _positive_number(owner.get("selector_mutation_recall_minimum"), "owner mutation recall")
+    _probability(
+        owner.get("selector_mutation_recall_minimum"),
+        "owner mutation recall",
+    )
+    if owner.get("prewarmed_runner_evaluation_permitted_after_measured_slo_failure") is not True:
+        raise ContractError("accepted runner evaluation policy is missing")
     if owner.get("critical_main_failure_pauses_merges") is not True:
         raise ContractError("critical main failure must pause merges")
     for field in (
@@ -215,15 +276,18 @@ def validate_contract_data(
         _positive_int(owner.get(field), f"owner_decisions.{field}")
 
     if repo_root is not None:
+        root = repo_root.resolve()
         for relative in (
             str(data.get("specification", "")),
             str(data.get("acceptance_record", "")),
             str(_mapping(data.get("evidence"), "evidence").get("schema", "")),
             str(_mapping(data.get("evidence"), "evidence").get("route_schema", "")),
         ):
-            path = repo_root / relative
-            if not relative or not path.is_file():
-                raise ContractError(f"referenced contract file does not exist: {relative}")
+            path = (root / relative).resolve()
+            if not relative or not path.is_relative_to(root) or not path.is_file():
+                raise ContractError(
+                    f"referenced contract file does not exist in repository: {relative}"
+                )
             if path.suffix == ".json":
                 try:
                     json.loads(path.read_text(encoding="utf-8"))
@@ -236,6 +300,8 @@ def load_contract(
 ) -> SdlcContract:
     root = Path(repo_root).resolve()
     source = (root / contract_path).resolve()
+    if not source.is_relative_to(root):
+        raise ContractError("SDLC contract path escapes the repository")
     try:
         data = tomllib.loads(source.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
