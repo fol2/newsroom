@@ -4,12 +4,15 @@ on:
   push:
     branches:
       - agent/sdlc-v2-phase2b1b-github-transport
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 concurrency:
-  group: sdlc-phase2b1b-publisher-${{ github.ref }}
+  group: sdlc-phase2b1b-publisher-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -64,9 +67,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f .sdlc/transport-hardening.part-* transport-hardening.py.gz.b64 transport-hardening.py.gz transport-hardening.py
+          rm -f .sdlc/transport-hardening.part-* .sdlc/transport-hardening.trigger transport-hardening.py.gz.b64 transport-hardening.py.gz transport-hardening.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add scripts/sdlc/github_transport.py newsroom/tests/test_sdlc_github_transport.py .sdlc/transport-hardening.part-00 .sdlc/transport-hardening.part-01 .sdlc/transport-hardening.part-02 .sdlc/transport-hardening.part-03
+          git add scripts/sdlc/github_transport.py newsroom/tests/test_sdlc_github_transport.py .sdlc/transport-hardening.part-00 .sdlc/transport-hardening.part-01 .sdlc/transport-hardening.part-02 .sdlc/transport-hardening.part-03 .sdlc/transport-hardening.trigger
           git commit -m 'fix(sdlc): harden GitHub artifact transport provenance'
           git push origin HEAD:agent/sdlc-v2-phase2b1b-github-transport
