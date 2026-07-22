@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
@@ -14,6 +15,8 @@ from scripts.sdlc.workflow_event import (
     derive_workflow_event,
     main as workflow_event_main,
     measure_job_telemetry,
+    validate_job_telemetry,
+    validate_workflow_event,
 )
 
 
@@ -310,6 +313,69 @@ def test_job_telemetry_fails_closed_on_ambiguous_or_invalid_api_data(
             bootstrap_end_step="Sync locked environment",
             finalization_step="Finalize evidence",
         )
+
+
+def test_serialized_event_and_telemetry_reject_identity_or_duration_tampering(
+    tmp_path: Path,
+) -> None:
+    repo, base, _, head, _ = _repository(tmp_path)
+    event = derive_workflow_event(
+        repo,
+        _environment(repo, event_name="pull_request", base=base, head=head),
+    ).as_dict()
+    assert validate_workflow_event(event).base_sha == base
+    changed_event = deepcopy(event)
+    changed_event["base_sha"] = "c" * 40
+    with pytest.raises(WorkflowEvidenceError, match="event_identity"):
+        validate_workflow_event(changed_event)
+
+    telemetry = measure_job_telemetry(
+        _jobs(),
+        run_id=12345,
+        run_attempt=2,
+        job_name="core",
+        bootstrap_end_step="Sync locked environment",
+        finalization_step="Finalize evidence",
+    ).as_dict()
+    assert validate_job_telemetry(telemetry).queue_ms == 1250
+    changed_telemetry = deepcopy(telemetry)
+    changed_telemetry["queue_ms"] = 1251
+    with pytest.raises(WorkflowEvidenceError, match="queue_ms"):
+        validate_job_telemetry(changed_telemetry)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlink evidence is POSIX-specific")
+def test_jobs_input_symlink_is_rejected(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(json.dumps(_jobs()), encoding="utf-8")
+    link = tmp_path / "jobs-link.json"
+    link.symlink_to(jobs)
+
+    assert workflow_event_main(
+        (
+            "telemetry",
+            "--repo-root",
+            str(tmp_path),
+            "--jobs-json",
+            str(link),
+            "--run-id",
+            "12345",
+            "--run-attempt",
+            "2",
+            "--job-name",
+            "core",
+            "--bootstrap-end-step",
+            "Sync locked environment",
+            "--finalization-step",
+            "Finalize evidence",
+        )
+    ) == 2
+    assert capsys.readouterr().err.strip() == (
+        "EVIDENCE_MISMATCH:workflow-event:jobs_file"
+    )
 
 
 def test_cli_writes_private_non_overwriting_event(
