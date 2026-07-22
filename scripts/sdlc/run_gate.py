@@ -87,7 +87,13 @@ class _TailBuffer:
         if overflow > 0:
             del self._data[:overflow]
 
-    def render(self, *, output_limit: int, secrets: Sequence[str], incomplete: bool) -> tuple[str, bool]:
+    def render(
+        self,
+        *,
+        output_limit: int,
+        secrets: Sequence[str],
+        incomplete: bool,
+    ) -> tuple[str, bool]:
         text = bytes(self._data).decode("utf-8", errors="replace")
         for secret in secrets:
             text = text.replace(secret, "***")
@@ -114,8 +120,13 @@ def _timeout_seconds(value: object, name: str) -> float:
     return timeout
 
 
-def _secret_values(environment: Mapping[str, str], explicit: Sequence[str]) -> tuple[str, ...]:
-    if any(not isinstance(name, str) or not isinstance(value, str) for name, value in environment.items()):
+def _secret_values(
+    environment: Mapping[str, str], explicit: Sequence[str]
+) -> tuple[str, ...]:
+    if any(
+        not isinstance(name, str) or not isinstance(value, str)
+        for name, value in environment.items()
+    ):
         raise GateRunError("environment names and values must be strings")
     if any(not isinstance(value, str) for value in explicit):
         raise GateRunError("redaction values must be strings")
@@ -138,12 +149,21 @@ def _group_exists(process_group: int) -> bool:
     return True
 
 
-def _wait_group_gone(process_group: int, timeout_seconds: float) -> bool:
+def _wait_group_gone(
+    process_group: int,
+    timeout_seconds: float,
+    *,
+    leader: subprocess.Popen[bytes] | None = None,
+) -> bool:
     stop_at = time.monotonic() + timeout_seconds
     while time.monotonic() < stop_at:
+        if leader is not None:
+            leader.poll()
         if not _group_exists(process_group):
             return True
         time.sleep(0.01)
+    if leader is not None:
+        leader.poll()
     return not _group_exists(process_group)
 
 
@@ -153,7 +173,7 @@ def _terminate_group(process: subprocess.Popen[bytes], grace_seconds: float) -> 
         os.killpg(process_group, signal.SIGTERM)
     except ProcessLookupError:
         pass
-    if not _wait_group_gone(process_group, grace_seconds):
+    if not _wait_group_gone(process_group, grace_seconds, leader=process):
         try:
             os.killpg(process_group, signal.SIGKILL)
         except ProcessLookupError:
@@ -263,8 +283,16 @@ def run_gate_command(
 
     assert process.stdout is not None and process.stderr is not None
     readers = (
-        threading.Thread(target=_drain, args=(process.stdout, stdout_buffer, capture_errors), daemon=True),
-        threading.Thread(target=_drain, args=(process.stderr, stderr_buffer, capture_errors), daemon=True),
+        threading.Thread(
+            target=_drain,
+            args=(process.stdout, stdout_buffer, capture_errors),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_drain,
+            args=(process.stderr, stderr_buffer, capture_errors),
+            daemon=True,
+        ),
     )
     for reader in readers:
         reader.start()
@@ -281,7 +309,10 @@ def run_gate_command(
             background_process = True
             _terminate_group(process, grace)
 
-    cleanup_stop = time.monotonic() + max(0.0, min(grace, deadline.remaining_seconds()))
+    cleanup_stop = time.monotonic() + max(
+        0.0,
+        min(grace, deadline.remaining_seconds()),
+    )
     for reader in readers:
         reader.join(timeout=max(0.0, cleanup_stop - time.monotonic()))
     capture_incomplete = any(reader.is_alive() for reader in readers)
@@ -342,17 +373,26 @@ def _gate_configuration(contract: SdlcContract, gate_id: str) -> tuple[float, fl
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run one Newsroom gate command within its accepted budget")
+    parser = argparse.ArgumentParser(
+        description="Run one Newsroom gate command within its accepted budget"
+    )
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--gate-id", required=True)
     parser.add_argument("--phase", required=True)
     parser.add_argument("--output")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     arguments = parser.parse_args(argv)
-    command = arguments.command[1:] if arguments.command[:1] == ["--"] else arguments.command
+    command = (
+        arguments.command[1:]
+        if arguments.command[:1] == ["--"]
+        else arguments.command
+    )
     try:
         contract = load_contract(arguments.repo_root)
-        command_timeout, lane_timeout = _gate_configuration(contract, arguments.gate_id)
+        command_timeout, lane_timeout = _gate_configuration(
+            contract,
+            arguments.gate_id,
+        )
         result = run_gate_command(
             gate_id=arguments.gate_id,
             phase=arguments.phase,
@@ -364,7 +404,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ContractError, GateRunError, OSError) as exc:
         print(f"ENVIRONMENT_ERROR:{type(exc).__name__}", file=sys.stderr)
         return 3
-    rendered = json.dumps(result.as_dict(), sort_keys=True, separators=(",", ":")) + "\n"
+    rendered = json.dumps(
+        result.as_dict(),
+        sort_keys=True,
+        separators=(",", ":"),
+    ) + "\n"
     if arguments.output:
         Path(arguments.output).write_text(rendered, encoding="utf-8")
     else:
