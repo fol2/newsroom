@@ -137,6 +137,8 @@ contract_control = [
   "docs/specs/sdlc/**",
   "docs/plans/*sdlc*",
   ".github/workflows/**",
+  "scripts/sdlc/**",
+  "newsroom/tests/test_sdlc_*.py",
 ]
 stateful_contract = [
   "newsroom/authority/**",
