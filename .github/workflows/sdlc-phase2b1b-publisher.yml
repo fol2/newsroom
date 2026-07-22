@@ -56,18 +56,74 @@ jobs:
           uv lock --check
           uv sync --dev --locked
 
-      - name: Verify hardening
+      - name: Compile transformed source
+        id: compile
+        shell: bash
         run: |
-          uv run python -m compileall -q newsroom scripts
-          uv run python -m pytest -q newsroom/tests/test_sdlc_github_transport.py
-          uv run python -m pytest -q newsroom/tests/test_sdlc_*.py
-          git diff --check
+          set +e
+          uv run python -m compileall -q newsroom scripts > compile.log 2>&1
+          status=$?
+          printf '%s\n' "$status" > compile.status
+          exit 0
+
+      - name: Run focused transport tests
+        id: focused
+        shell: bash
+        run: |
+          set +e
+          uv run python -m pytest -vv --tb=long newsroom/tests/test_sdlc_github_transport.py > focused.log 2>&1
+          status=$?
+          printf '%s\n' "$status" > focused.status
+          exit 0
+
+      - name: Run broader SDLC tests
+        id: broader
+        shell: bash
+        run: |
+          set +e
+          uv run python -m pytest -vv --tb=long newsroom/tests/test_sdlc_*.py > broader.log 2>&1
+          status=$?
+          printf '%s\n' "$status" > broader.status
+          exit 0
+
+      - name: Check diff
+        id: diff
+        shell: bash
+        run: |
+          set +e
+          git diff --check > diff.log 2>&1
+          status=$?
+          printf '%s\n' "$status" > diff.status
+          exit 0
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: sdlc-phase2b1b-hardening-${{ github.sha }}
+          path: |
+            compile.log
+            compile.status
+            focused.log
+            focused.status
+            broader.log
+            broader.status
+            diff.log
+            diff.status
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Enforce verification
+        run: |
+          test "$(cat compile.status)" = 0
+          test "$(cat focused.status)" = 0
+          test "$(cat broader.status)" = 0
+          test "$(cat diff.status)" = 0
 
       - name: Commit and push source-only checkpoint
         shell: bash
         run: |
           set -euo pipefail
-          rm -f .sdlc/transport-hardening.part-* .sdlc/transport-hardening.trigger transport-hardening.py.gz.b64 transport-hardening.py.gz transport-hardening.py
+          rm -f .sdlc/transport-hardening.part-* .sdlc/transport-hardening.trigger transport-hardening.py.gz.b64 transport-hardening.py.gz transport-hardening.py compile.log compile.status focused.log focused.status broader.log broader.status diff.log diff.status
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add scripts/sdlc/github_transport.py newsroom/tests/test_sdlc_github_transport.py .sdlc/transport-hardening.part-00 .sdlc/transport-hardening.part-01 .sdlc/transport-hardening.part-02 .sdlc/transport-hardening.part-03 .sdlc/transport-hardening.trigger
