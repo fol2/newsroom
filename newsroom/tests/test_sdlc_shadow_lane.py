@@ -110,14 +110,18 @@ def _replay(*, artifact_name: str = ARTIFACT_NAME) -> TransportReplay:
     )
 
 
-def _telemetry(*, job_name: str = "core") -> JobTelemetry:
+def _telemetry(
+    *,
+    job_name: str = "core",
+    ready_after_jobs: tuple[str, ...] = ("route",),
+) -> JobTelemetry:
     return JobTelemetry(
         run_id=RUN_ID,
         run_attempt=RUN_ATTEMPT,
         job_id=789,
         job_name=job_name,
         job_conclusion="success",
-        ready_after_jobs=(),
+        ready_after_jobs=ready_after_jobs,
         queue_ms=1000,
         bootstrap_ms=4000,
         finalize_ms=1000,
@@ -235,6 +239,7 @@ def test_verify_shadow_lane_composes_replay_telemetry_and_receipt(
     assert record.receipt == receipt
     assert record.telemetry == telemetry
     assert calls["measure"][1]["job_name"] == "core"  # type: ignore[index]
+    assert calls["measure"][1]["ready_after_job_names"] == ("route",)  # type: ignore[index]
     assert calls["measure"][1]["bootstrap_end_step"] == "Sync locked environment"  # type: ignore[index]
     assert calls["verify"]["expected_job_id"] == "core"  # type: ignore[index]
     assert validate_shadow_lane_record(record.as_dict(), contract=contract) == record
@@ -287,6 +292,7 @@ def test_service_lane_uses_exact_service_policy(
 
     assert record.lane_id == "service"
     assert calls["measure"]["job_name"] == "service"  # type: ignore[index]
+    assert calls["measure"]["ready_after_job_names"] == ("route",)  # type: ignore[index]
     assert calls["measure"]["bootstrap_end_step"] == "Wait for authenticated Neo4j"  # type: ignore[index]
     assert calls["verify"]["expected_job_id"] == "service"  # type: ignore[index]
 
@@ -302,6 +308,11 @@ def test_service_lane_uses_exact_service_policy(
         (
             _Receipt(_Metadata()),
             _telemetry(job_name="other"),
+            "producer_identity",
+        ),
+        (
+            _Receipt(_Metadata()),
+            _telemetry(ready_after_jobs=()),
             "producer_identity",
         ),
         (
@@ -409,6 +420,31 @@ def test_record_rejects_shape_policy_and_identity_tampering(
     changed["lane_identity"] = "sha256:" + "0" * 64
     with pytest.raises(ShadowLaneError, match="lane_identity"):
         validate_shadow_lane_record(changed)
+
+
+
+def test_direct_record_rejects_validator_substitution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _Receipt(_Metadata())
+    replay = _replay()
+    telemetry = _telemetry()
+    monkeypatch.setattr(
+        lane_module,
+        "validate_transport_replay",
+        lambda value: _replay(artifact_name=ARTIFACT_NAME.replace("core", "other")),
+    )
+    _patch_receipt_validator(monkeypatch, receipt)
+    with pytest.raises(ShadowLaneError, match="nested_evidence"):
+        ShadowLaneRecord(
+            lane_id="core",
+            run_event="pull_request",
+            run_created_at="2026-07-22T12:00:00.000Z",
+            replay=replay,
+            receipt=receipt,  # type: ignore[arg-type]
+            telemetry=telemetry,
+            lane_identity=_identity("core", replay, receipt, telemetry),
+        )
 
 
 def test_dependency_failures_use_stable_lane_categories(

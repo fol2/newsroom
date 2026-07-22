@@ -76,12 +76,14 @@ _POLICIES = {
         producer_job_id="core",
         bootstrap_end_step="Sync locked environment",
         finalization_step="Finalize evidence",
+        ready_after_jobs=("route",),
     ),
     "service": LanePolicy(
         lane_id="service",
         producer_job_id="service",
         bootstrap_end_step="Wait for authenticated Neo4j",
         finalization_step="Finalize evidence",
+        ready_after_jobs=("route",),
     ),
 }
 
@@ -106,6 +108,12 @@ class ShadowLaneRecord:
             telemetry = validate_job_telemetry(self.telemetry.as_dict())
         except (TransportReplayError, ArtifactReceiptError, WorkflowEvidenceError) as exc:
             raise ShadowLaneError("nested_evidence") from exc
+        if (
+            replay != self.replay
+            or receipt != self.receipt
+            or telemetry != self.telemetry
+        ):
+            raise ShadowLaneError("nested_evidence")
         _cross_check(
             policy=policy,
             run_event=self.run_event,
@@ -244,6 +252,7 @@ def _cross_check(
         telemetry.run_id != replay.run_id
         or telemetry.run_attempt != replay.run_attempt
         or telemetry.job_name != policy.producer_job_id
+        or telemetry.ready_after_jobs != policy.ready_after_jobs
         or receipt.producer_job_id != policy.producer_job_id
     ):
         raise ShadowLaneError("producer_identity")
