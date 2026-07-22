@@ -77,3 +77,15 @@ def test_tracked_or_untracked_worktree_content_blocks_route(tmp_path: Path) -> N
     (repo / "tracked.py").write_text("VALUE = 3\n", encoding="utf-8")
     with pytest.raises(GitRouteError, match="not clean"):
         verify_exact_clean_checkout(repo, head_sha=head, head_tree_sha=tree)
+
+
+def test_tracked_symlink_cannot_supply_external_evidence_bytes(tmp_path: Path) -> None:
+    repo, _, _ = _repository(tmp_path)
+    (repo / "linked.py").symlink_to("tracked.py")
+    _git(repo, "add", "linked.py")
+    _git(repo, "commit", "-m", "tracked symlink")
+    head = resolve_commit(repo, "HEAD")
+    tree = resolve_tree(repo, head)
+
+    with pytest.raises(GitRouteError, match="unsupported tracked entry mode 120000"):
+        verify_exact_clean_checkout(repo, head_sha=head, head_tree_sha=tree)
