@@ -46,7 +46,7 @@ def _package_for(module: str, path: Path) -> str:
 def _relative_module(package: str, level: int, module: str | None) -> str:
     package_parts = package.split(".") if package else []
     parents = level - 1
-    if parents > len(package_parts):
+    if parents >= len(package_parts):
         raise DependencyError(
             f"relative import escapes repository package: {package or '<root>'}"
         )
@@ -122,16 +122,17 @@ def build_dependency_graph(repo_root: str | Path) -> DependencyGraph:
     for importer, (source_path, tree) in sources.items():
         package = _package_for(importer, source_path)
         dependencies: set[str] = set()
+        importer_path = module_to_path[importer]
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name.split(".", 1)[0] in {"newsroom", "scripts"}:
-                        prefixes = _known_prefixes(alias.name, modules)
-                        if not prefixes:
-                            raise DependencyError(
-                                f"unresolved internal import in {module_to_path[importer]}: {alias.name}"
-                            )
-                        dependencies.update(prefixes)
+                    if alias.name.split(".", 1)[0] not in {"newsroom", "scripts"}:
+                        continue
+                    if alias.name not in modules:
+                        raise DependencyError(
+                            f"unresolved internal import in {importer_path}: {alias.name}"
+                        )
+                    dependencies.update(_known_prefixes(alias.name, modules))
             elif isinstance(node, ast.ImportFrom):
                 if node.level:
                     base = _relative_module(package, node.level, node.module)
@@ -139,22 +140,18 @@ def build_dependency_graph(repo_root: str | Path) -> DependencyGraph:
                     base = node.module or ""
                 if not base or base.split(".", 1)[0] not in {"newsroom", "scripts"}:
                     continue
-                candidates = {base}
-                candidates.update(
-                    f"{base}.{alias.name}"
-                    for alias in node.names
-                    if alias.name != "*"
-                )
-                resolved = {
-                    prefix
-                    for candidate in candidates
-                    for prefix in _known_prefixes(candidate, modules)
-                }
-                if not resolved:
+                base_prefixes = _known_prefixes(base, modules)
+                if not base_prefixes:
                     raise DependencyError(
-                        f"unresolved internal import in {module_to_path[importer]}: {base}"
+                        f"unresolved internal import in {importer_path}: {base}"
                     )
-                dependencies.update(resolved)
+                dependencies.update(base_prefixes)
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    child = f"{base}.{alias.name}"
+                    if child in modules:
+                        dependencies.update(_known_prefixes(child, modules))
         for imported in dependencies - {importer}:
             reverse[imported].add(importer)
 
@@ -170,4 +167,13 @@ def build_dependency_graph(repo_root: str | Path) -> DependencyGraph:
 
 
 def python_changes(paths: Iterable[str]) -> tuple[str, ...]:
-    return tuple(sorted({path for path in paths if module_name_for_path(path)}))
+    return tuple(
+        sorted(
+            {
+                path
+                for path in paths
+                if not path.startswith("newsroom/tests/")
+                and module_name_for_path(path)
+            }
+        )
+    )
