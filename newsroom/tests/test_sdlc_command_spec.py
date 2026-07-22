@@ -253,6 +253,16 @@ def test_executable_is_resolved_and_content_bound(tmp_path: Path) -> None:
     assert spec.executable_digest == digest
 
 
+@pytest.mark.skipif(os.name != "posix", reason="executable mode evidence is POSIX-specific")
+def test_shebang_executable_is_rejected_as_unbound_interpreter(tmp_path: Path) -> None:
+    script = tmp_path / "runner"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    script.chmod(0o700)
+
+    with pytest.raises(CommandSpecError, match="executable_interpreter_unbound"):
+        executable_digest(script)
+
+
 def test_all_ambient_values_are_redacted_and_bounded(tmp_path: Path) -> None:
     contract = _contract(tmp_path)
     unbound = _value(pass_env=["VALUE"], redact_env=[])
