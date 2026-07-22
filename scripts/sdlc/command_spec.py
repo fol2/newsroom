@@ -236,8 +236,8 @@ def parse_command_spec(
     passed = tuple(sorted(_environment_name(item) for item in raw_pass))
     if len(set(passed)) != len(passed):
         raise CommandSpecError("pass_env_duplicate")
-    if set(static) & set(passed):
-        raise CommandSpecError("environment_overlap")
+    if any(_SECRET_NAME.search(name) is None for name in passed):
+        raise CommandSpecError("unbound_environment")
 
     raw_redact = value.get("redact_env")
     if not isinstance(raw_redact, list) or len(raw_redact) > _MAX_ENVIRONMENT_ITEMS:
