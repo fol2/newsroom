@@ -25,13 +25,14 @@ _PATH_RISKS = {
     "external_service_security": "R3_EXTERNAL_SERVICE_SECURITY",
     "release_operational": "R4_RELEASE_OPERATIONAL",
 }
+_GIT_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 class GitRouteError(RuntimeError):
     """Raised when exact Git identities or a diff cannot be resolved."""
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=True)
 class ChangedPath:
     path: str
     status: str = "M"
@@ -44,7 +45,7 @@ class ChangedPath:
 
 
 def canonical_json_bytes(value: object) -> bytes:
-    """Return the repository's deterministic JSON bytes for routing manifests."""
+    """Return deterministic JSON bytes for values that contain no JSON floats."""
 
     return json.dumps(
         value,
@@ -57,6 +58,11 @@ def canonical_json_bytes(value: object) -> bytes:
 
 def sha256_identity(value: object) -> str:
     return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _require_git_sha(value: str, name: str) -> None:
+    if _GIT_SHA.fullmatch(value) is None:
+        raise ContractError(f"{name} must be a lowercase 40-character Git SHA")
 
 
 @lru_cache(maxsize=512)
@@ -87,7 +93,13 @@ def _compile_repository_glob(pattern: str) -> re.Pattern[str]:
 
 
 def matches_repository_glob(path: str, pattern: str) -> bool:
-    if path.startswith("/") or "\\" in path or "/../" in f"/{path}/":
+    if (
+        not path
+        or path.startswith("/")
+        or "\\" in path
+        or "/../" in f"/{path}/"
+        or path in {".", ".."}
+    ):
         return False
     return _compile_repository_glob(pattern).fullmatch(path) is not None
 
@@ -103,14 +115,15 @@ def _matching_groups(contract: SdlcContract, path: str) -> tuple[str, ...]:
 
 
 def _service_tests(repo_root: Path) -> tuple[str, ...]:
-    tests = sorted(
-        path.relative_to(repo_root).as_posix()
-        for path in (repo_root / "newsroom" / "tests").glob(
-            "test_projection_*_neo4j_service.py"
+    return tuple(
+        sorted(
+            path.relative_to(repo_root).as_posix()
+            for path in (repo_root / "newsroom" / "tests").glob(
+                "test_projection_*_neo4j_service.py"
+            )
+            if path.is_file()
         )
-        if path.is_file()
     )
-    return tuple(tests)
 
 
 def classify_paths(
@@ -122,11 +135,26 @@ def classify_paths(
     base_tree_sha: str,
     head_tree_sha: str,
 ) -> dict[str, object]:
+    for name, value in (
+        ("base_sha", base_sha),
+        ("head_sha", head_sha),
+        ("base_tree_sha", base_tree_sha),
+        ("head_tree_sha", head_tree_sha),
+    ):
+        _require_git_sha(value, name)
+    if contract.classifier_version != RISK_CLASSIFIER_VERSION:
+        raise ContractError("classifier implementation differs from the accepted contract")
+
     ranks = contract.risk_rank
     selected_risk = "R0_DOCUMENTATION"
     reasons: set[str] = set()
     clustering_required = False
-    normalized_changes = tuple(sorted(set(changes)))
+    normalized_changes = tuple(
+        sorted(
+            set(changes),
+            key=lambda item: (item.path, item.status, item.old_path or ""),
+        )
+    )
 
     if not normalized_changes:
         reasons.add("no_changes")
@@ -155,12 +183,14 @@ def classify_paths(
     core_tests = ("newsroom/tests",)
     service_required = contract.service_required(selected_risk)
     service_tests = _service_tests(contract.repo_root) if service_required else ()
+    if service_required and not service_tests:
+        raise ContractError("service evidence is required but no actual-service test exists")
     manifest = {
         "core_tests": list(core_tests),
         "service_tests": list(service_tests),
         "sentinels": list(contract.sentinels),
     }
-    route: dict[str, object] = {
+    return {
         "schema_version": SCHEMA_VERSION,
         "contract_version": contract.contract_version,
         "base_sha": base_sha,
@@ -178,7 +208,6 @@ def classify_paths(
         "sentinels": list(contract.sentinels),
         "selected_test_manifest_digest": sha256_identity(manifest),
     }
-    return route
 
 
 def _git(repo_root: Path, *arguments: str) -> bytes:
@@ -196,15 +225,27 @@ def _git(repo_root: Path, *arguments: str) -> bytes:
 
 
 def resolve_commit(repo_root: Path, reference: str) -> str:
-    value = _git(repo_root, "rev-parse", "--verify", f"{reference}^{{commit}}").decode().strip()
-    if re.fullmatch(r"[0-9a-f]{40}", value) is None:
-        raise GitRouteError(f"reference did not resolve to a full commit SHA: {reference}")
+    value = _git(
+        repo_root,
+        "rev-parse",
+        "--verify",
+        f"{reference}^{{commit}}",
+    ).decode().strip()
+    if _GIT_SHA.fullmatch(value) is None:
+        raise GitRouteError(
+            f"reference did not resolve to a full commit SHA: {reference}"
+        )
     return value
 
 
 def resolve_tree(repo_root: Path, commit_sha: str) -> str:
-    value = _git(repo_root, "rev-parse", "--verify", f"{commit_sha}^{{tree}}").decode().strip()
-    if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+    value = _git(
+        repo_root,
+        "rev-parse",
+        "--verify",
+        f"{commit_sha}^{{tree}}",
+    ).decode().strip()
+    if _GIT_SHA.fullmatch(value) is None:
         raise GitRouteError(f"commit did not resolve to a full tree SHA: {commit_sha}")
     return value
 
@@ -218,7 +259,7 @@ def parse_name_status(payload: bytes) -> tuple[ChangedPath, ...]:
     while index < len(fields):
         status = fields[index].decode("ascii", errors="strict")
         index += 1
-        if index >= len(fields):
+        if not status or index >= len(fields):
             raise GitRouteError("truncated git name-status output")
         if status.startswith(("R", "C")):
             if index + 1 >= len(fields):
@@ -234,14 +275,17 @@ def parse_name_status(payload: bytes) -> tuple[ChangedPath, ...]:
     return tuple(changes)
 
 
-def changed_paths(repo_root: Path, base_sha: str, head_sha: str) -> tuple[ChangedPath, ...]:
+def changed_paths(
+    repo_root: Path, base_sha: str, head_sha: str
+) -> tuple[ChangedPath, ...]:
     output = _git(
         repo_root,
         "diff",
         "--name-status",
         "-z",
         "--find-renames",
-        f"{base_sha}...{head_sha}",
+        base_sha,
+        head_sha,
         "--",
     )
     return parse_name_status(output)
