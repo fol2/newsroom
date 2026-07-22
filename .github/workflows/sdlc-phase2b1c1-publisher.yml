@@ -31,23 +31,39 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Apply exact review fixes
+      - name: Capture integrity hashes
         run: |
           set -euo pipefail
-          patch_sha=$(sha256sum .sdlc/replay-review-fixes.py | cut -d' ' -f1)
-          source_blob=$(git hash-object scripts/sdlc/transport_replay.py)
-          test_blob=$(git hash-object newsroom/tests/test_sdlc_transport_replay.py)
-          printf 'patch_sha=%s\nsource_blob=%s\ntest_blob=%s\n' "$patch_sha" "$source_blob" "$test_blob"
-          test "$patch_sha" = 8973b9b19527b811564282e03ba9a6c6ed6ed658821f1f7d97d6c6efd41d410e
-          test "$source_blob" = adf3f22d48e5b33db36b2b3fea7aa5eef15dcf0e
-          test "$test_blob" = 6df866ebca7778b8d673b5b137894c15a882c0f1
+          {
+            printf 'patch_sha=%s\n' "$(sha256sum .sdlc/replay-review-fixes.py | cut -d' ' -f1)"
+            printf 'source_blob=%s\n' "$(git hash-object scripts/sdlc/transport_replay.py)"
+            printf 'test_blob=%s\n' "$(git hash-object newsroom/tests/test_sdlc_transport_replay.py)"
+          } > integrity-before.txt
           python -m py_compile .sdlc/replay-review-fixes.py
           python .sdlc/replay-review-fixes.py
-          source_sha=$(sha256sum scripts/sdlc/transport_replay.py | cut -d' ' -f1)
-          test_sha=$(sha256sum newsroom/tests/test_sdlc_transport_replay.py | cut -d' ' -f1)
-          printf 'source_sha=%s\ntest_sha=%s\n' "$source_sha" "$test_sha"
-          test "$source_sha" = b45ebf0c2f204ffd9874f6200f7dcc3455aeb7f7ec48dd8ca7c028abeacc9d20
-          test "$test_sha" = 41cdb0752aa51bf1f0e4dc695476a743d7e154983a5c04b5584ce0b18eecd531
+          {
+            printf 'source_sha=%s\n' "$(sha256sum scripts/sdlc/transport_replay.py | cut -d' ' -f1)"
+            printf 'test_sha=%s\n' "$(sha256sum newsroom/tests/test_sdlc_transport_replay.py | cut -d' ' -f1)"
+          } > integrity-after.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: sdlc-phase2b1c1-integrity-${{ github.sha }}
+          path: |
+            integrity-before.txt
+            integrity-after.txt
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Enforce exact integrity hashes
+        run: |
+          set -euo pipefail
+          grep -Fx 'patch_sha=8973b9b19527b811564282e03ba9a6c6ed6ed658821f1f7d97d6c6efd41d410e' integrity-before.txt
+          grep -Fx 'source_blob=adf3f22d48e5b33db36b2b3fea7aa5eef15dcf0e' integrity-before.txt
+          grep -Fx 'test_blob=6df866ebca7778b8d673b5b137894c15a882c0f1' integrity-before.txt
+          grep -Fx 'source_sha=b45ebf0c2f204ffd9874f6200f7dcc3455aeb7f7ec48dd8ca7c028abeacc9d20' integrity-after.txt
+          grep -Fx 'test_sha=41cdb0752aa51bf1f0e4dc695476a743d7e154983a5c04b5584ce0b18eecd531' integrity-after.txt
 
       - name: Install exact uv and sync locked environment
         run: |
@@ -65,7 +81,7 @@ jobs:
       - name: Commit and push source-only checkpoint
         run: |
           set -euo pipefail
-          rm -f .sdlc/replay-review-fixes.py .sdlc/replay-review-fixes.trigger
+          rm -f .sdlc/replay-review-fixes.py .sdlc/replay-review-fixes.trigger integrity-before.txt integrity-after.txt
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add scripts/sdlc/transport_replay.py newsroom/tests/test_sdlc_transport_replay.py .sdlc/replay-review-fixes.py .sdlc/replay-review-fixes.trigger
