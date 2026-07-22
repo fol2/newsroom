@@ -23,13 +23,30 @@ def module_name_for_path(path: str) -> str | None:
     return ".".join(parts) if parts else None
 
 
+def _reject_symlink_components(repo_root: Path, path: Path) -> None:
+    try:
+        relative = path.relative_to(repo_root)
+    except ValueError as exc:
+        raise DependencyError(f"dependency path escapes repository: {path}") from exc
+    current = repo_root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise DependencyError(
+                f"repository dependency source is symlinked: {relative.as_posix()}"
+            )
+
+
 def _source_paths(repo_root: Path) -> tuple[Path, ...]:
     paths: list[Path] = []
     for package in ("newsroom", "scripts"):
         root = repo_root / package
+        if root.is_symlink():
+            raise DependencyError(f"repository package is symlinked: {package}")
         if not root.is_dir():
             continue
         for path in root.rglob("*.py"):
+            _reject_symlink_components(repo_root, path)
             relative = path.relative_to(repo_root)
             if "__pycache__" in relative.parts:
                 continue
