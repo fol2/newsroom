@@ -35,10 +35,6 @@ CONTRACT_VERSION = "sdlc-v2.2"
 CLASSIFIER_VERSION = "sdlc-risk-v1"
 _SERVICE_RISKS = frozenset({"R3_EXTERNAL_SERVICE_SECURITY", "R4_RELEASE_OPERATIONAL"})
 _OWNER_RISKS = frozenset({"R4_RELEASE_OPERATIONAL"})
-_LANE_GATE_IDS = {
-    "core": frozenset({"source-integrity", "core-deterministic"}),
-    "service": frozenset({"service-neo4j"}),
-}
 _SAFE_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\x00-\x1f\x7f]{1,48}Z")
@@ -65,6 +61,8 @@ class ShadowLaneError(ValueError):
 class LanePolicy:
     lane_id: str
     producer_job_id: str
+    consumer_job_id: str
+    gate_keys: frozenset[tuple[str, str]]
     bootstrap_end_step: str
     finalization_step: str
     ready_after_jobs: tuple[str, ...] = ()
@@ -74,6 +72,10 @@ _POLICIES = {
     "core": LanePolicy(
         lane_id="core",
         producer_job_id="core",
+        consumer_job_id="decision",
+        gate_keys=frozenset(
+            {("source-integrity", "source"), ("core-deterministic", "tests")}
+        ),
         bootstrap_end_step="Sync locked environment",
         finalization_step="Finalize evidence",
         ready_after_jobs=("route",),
@@ -81,6 +83,8 @@ _POLICIES = {
     "service": LanePolicy(
         lane_id="service",
         producer_job_id="service",
+        consumer_job_id="decision",
+        gate_keys=frozenset({("service-neo4j", "tests")}),
         bootstrap_end_step="Wait for authenticated Neo4j",
         finalization_step="Finalize evidence",
         ready_after_jobs=("route",),
@@ -254,6 +258,7 @@ def _cross_check(
         or telemetry.job_name != policy.producer_job_id
         or telemetry.ready_after_jobs != policy.ready_after_jobs
         or receipt.producer_job_id != policy.producer_job_id
+        or receipt.consumer_job_id != policy.consumer_job_id
     ):
         raise ShadowLaneError("producer_identity")
     if telemetry.workflow_created_at != run_created_at:
@@ -270,8 +275,11 @@ def _cross_check(
         raise ShadowLaneError("route_contract")
     if policy.lane_id == "service" and not route.service_required:
         raise ShadowLaneError("lane_route")
-    gate_ids = frozenset(decision.gate_id for decision in receipt.gate_decisions)
-    if gate_ids != _LANE_GATE_IDS[policy.lane_id]:
+    gate_keys = frozenset(
+        (decision.gate_id, decision.phase)
+        for decision in receipt.gate_decisions
+    )
+    if gate_keys != policy.gate_keys:
         raise ShadowLaneError("lane_gates")
 
 

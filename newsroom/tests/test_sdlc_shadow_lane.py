@@ -52,6 +52,7 @@ class _Route:
 @dataclass(frozen=True)
 class _GateDecision:
     gate_id: str
+    phase: str
 
 
 @dataclass(frozen=True)
@@ -63,10 +64,11 @@ class _Receipt:
     head_repository_id: int = HEAD_REPOSITORY_ID
     evaluated_sha: str = HEAD_SHA
     producer_job_id: str = "core"
+    consumer_job_id: str = "decision"
     event_name: str = "pull_request"
     gate_decisions: tuple[_GateDecision, ...] = (
-        _GateDecision("source-integrity"),
-        _GateDecision("core-deterministic"),
+        _GateDecision("source-integrity", "source"),
+        _GateDecision("core-deterministic", "tests"),
     )
     receipt_identity: str = "sha256:" + "2" * 64
 
@@ -256,7 +258,7 @@ def test_service_lane_uses_exact_service_policy(
             service_required=True,
         ),
         producer_job_id="service",
-        gate_decisions=(_GateDecision("service-neo4j"),),
+        gate_decisions=(_GateDecision("service-neo4j", "tests"),),
     )
     replay = _replay(artifact_name=receipt.metadata.name)
     telemetry = _telemetry(job_name="service")
@@ -320,6 +322,11 @@ def test_service_lane_uses_exact_service_policy(
             _telemetry(),
             "run_event",
         ),
+        (
+            _Receipt(_Metadata(), consumer_job_id="other"),
+            _telemetry(),
+            "producer_identity",
+        ),
     ],
 )
 def test_cross_record_identity_mismatch_fails_closed(
@@ -369,7 +376,7 @@ def test_route_and_lane_gate_semantics_fail_closed(
     unexpected_service = _Receipt(
         _Metadata(name=ARTIFACT_NAME.replace("-core-", "-service-")),
         producer_job_id="service",
-        gate_decisions=(_GateDecision("service-neo4j"),),
+        gate_decisions=(_GateDecision("service-neo4j", "tests"),),
     )
     _patch_receipt_validator(monkeypatch, unexpected_service)
     service_replay = _replay(artifact_name=unexpected_service.metadata.name)
@@ -386,7 +393,10 @@ def test_route_and_lane_gate_semantics_fail_closed(
 
     invalid_gates = _Receipt(
         _Metadata(),
-        gate_decisions=(_GateDecision("core-deterministic"),),
+        gate_decisions=(
+            _GateDecision("source-integrity", "source"),
+            _GateDecision("core-deterministic", "extra"),
+        ),
     )
     _patch_receipt_validator(monkeypatch, invalid_gates)
     with pytest.raises(ShadowLaneError, match="lane_gates"):
