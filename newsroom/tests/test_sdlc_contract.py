@@ -20,6 +20,7 @@ def test_accepted_contract_loads_and_references_exact_source_files() -> None:
     contract = load_contract(REPO_ROOT)
 
     assert contract.contract_version == "sdlc-v2.2"
+    assert contract.classifier_version == "sdlc-risk-v1"
     assert contract.data["status"] == "accepted"
     assert contract.source_path == REPO_ROOT / ".sdlc" / "gates.toml"
     assert contract.data["acceptance_record"] == (
@@ -35,10 +36,11 @@ def test_every_gate_lane_resolves_and_all_machine_timeouts_are_sub_minute() -> N
     for gate in contract.data["gate"].values():
         assert gate["lane"] in lanes
         assert 0 < gate["hard_timeout_seconds"] < 60
-    assert lanes["decision"]["always_reports"] is True
+    assert lanes["decision"] == {"always_reports": True, "hard_timeout_seconds": 5}
     assert lanes["core"]["hard_timeout_seconds"] == 55
     assert lanes["service"]["hard_timeout_seconds"] == 55
     assert lanes["merge_group"]["hard_timeout_seconds"] == 55
+    assert lanes["science"]["per_shard_hard_timeout_seconds"] == 55
 
 
 def test_unresolved_lane_is_rejected_instead_of_using_a_generic_default() -> None:
@@ -50,13 +52,36 @@ def test_unresolved_lane_is_rejected_instead_of_using_a_generic_default() -> Non
         validate_contract_data(data)
 
 
-def test_proposed_contract_cannot_drive_accepted_implementation() -> None:
+def test_duplicate_risk_rank_and_out_of_range_mutation_recall_are_rejected() -> None:
     contract = load_contract(REPO_ROOT)
-    data = deepcopy(contract.data)
-    data["status"] = "proposed"
+    duplicate = deepcopy(contract.data)
+    duplicate["risk"]["R2_STATEFUL_CONTRACT"]["rank"] = 1
+    with pytest.raises(ContractError, match="risk ranks"):
+        validate_contract_data(duplicate)
 
+    invalid_probability = deepcopy(contract.data)
+    invalid_probability["owner_decisions"]["selector_mutation_recall_minimum"] = 1.1
+    invalid_probability["test_strategy"]["selector_mutation_recall_minimum"] = 1.1
+    with pytest.raises(ContractError, match=r"\(0, 1\]"):
+        validate_contract_data(invalid_probability)
+
+
+def test_proposed_or_unknown_classifier_contract_cannot_drive_implementation() -> None:
+    contract = load_contract(REPO_ROOT)
+    proposed = deepcopy(contract.data)
+    proposed["status"] = "proposed"
     with pytest.raises(ContractError, match="not accepted"):
-        validate_contract_data(data)
+        validate_contract_data(proposed)
+
+    unknown_classifier = deepcopy(contract.data)
+    unknown_classifier["classification"]["version"] = "future-unreviewed"
+    with pytest.raises(ContractError, match="classifier version"):
+        validate_contract_data(unknown_classifier)
+
+
+def test_contract_path_cannot_escape_repository() -> None:
+    with pytest.raises(ContractError, match="escapes the repository"):
+        load_contract(REPO_ROOT, "../outside.toml")
 
 
 def test_owner_values_match_review_and_selector_policy() -> None:
@@ -79,7 +104,17 @@ def test_owner_values_match_review_and_selector_policy() -> None:
     }
 
 
-def test_contract_validation_cli_emits_a_small_typed_summary(capsys: pytest.CaptureFixture[str]) -> None:
+def test_contract_control_includes_classifier_source_and_tests() -> None:
+    contract = load_contract(REPO_ROOT)
+    patterns = contract.path_groups["contract_control"]
+
+    assert "scripts/sdlc/**" in patterns
+    assert "newsroom/tests/test_sdlc_*.py" in patterns
+
+
+def test_contract_validation_cli_emits_a_small_typed_summary(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     assert validate_main(("--repo-root", str(REPO_ROOT))) == 0
     output = capsys.readouterr().out
 
