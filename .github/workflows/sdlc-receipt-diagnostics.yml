@@ -25,8 +25,21 @@ jobs:
           ref: agent/sdlc-v2-phase2a2b-artifact-receipts
           fetch-depth: 1
           show-progress: false
-      - name: Verify chunk 0
-        run: test "$(sha256sum .sdlc/receipt-fix.patch.gz.b64 | cut -d' ' -f1)" = 79319fcc5bce9d374b4ac4d6498d397edd681af49837ff478d59e7c0508a7e9d
+      - name: Verify chunk 00a
+        run: test "$(sha256sum .sdlc/receipt-fix.part-00a | cut -d' ' -f1)" = 5486eb83d16e08fd38ddcbdf56ec6d8c3735225ce9e43af1b65551566af19def
+      - name: Verify chunk 00b
+        run: test "$(sha256sum .sdlc/receipt-fix.part-00b | cut -d' ' -f1)" = 36f5b2e74094b2938b7b0bcecd1d9a87cfd3993aeb5048f21fb57fa215adf46a
+      - name: Verify chunk 00c
+        run: test "$(sha256sum .sdlc/receipt-fix.part-00c | cut -d' ' -f1)" = 19363d4660a7ef12417973275e804c523ae0584ccf41cb304212f5dcf6367b81
+      - name: Verify chunk 00d
+        run: test "$(sha256sum .sdlc/receipt-fix.part-00d | cut -d' ' -f1)" = 0fa51276d0aafcb7b8ff82529f3d71f02454f5c0df8c82c92cbd778aa86c25a7
+      - name: Verify chunk 00e
+        run: test "$(sha256sum .sdlc/receipt-fix.part-00e | cut -d' ' -f1)" = fafa5be80fde1d21a6976a92b93208bbdd1d4f84d42492042f577eba53796186
+      - name: Assemble and verify chunk zero
+        run: |
+          cat .sdlc/receipt-fix.part-00a .sdlc/receipt-fix.part-00b .sdlc/receipt-fix.part-00c .sdlc/receipt-fix.part-00d .sdlc/receipt-fix.part-00e > receipt-fix.part-00
+          test "$(wc -c < receipt-fix.part-00)" = 5000
+          test "$(sha256sum receipt-fix.part-00 | cut -d' ' -f1)" = 79319fcc5bce9d374b4ac4d6498d397edd681af49837ff478d59e7c0508a7e9d
       - name: Verify chunk 1
         run: test "$(sha256sum .sdlc/receipt-fix.part-01 | cut -d' ' -f1)" = 06ed71e21964c3700e744c98bcd2c10a7e49c51d871e4b486a32fa603e1a7abb
       - name: Verify chunk 2
@@ -36,7 +49,7 @@ jobs:
       - name: Verify chunk 4
         run: test "$(sha256sum .sdlc/receipt-fix.part-04 | cut -d' ' -f1)" = c409d8ab391eabc50e404e6309d28ea01aea29211119faae75f3528a0f5a8c8e
       - name: Assemble encoded patch
-        run: cat .sdlc/receipt-fix.patch.gz.b64 .sdlc/receipt-fix.part-01 .sdlc/receipt-fix.part-02 .sdlc/receipt-fix.part-03 .sdlc/receipt-fix.part-04 > receipt-fix.patch.gz.b64
+        run: cat receipt-fix.part-00 .sdlc/receipt-fix.part-01 .sdlc/receipt-fix.part-02 .sdlc/receipt-fix.part-03 .sdlc/receipt-fix.part-04 > receipt-fix.patch.gz.b64
       - name: Verify encoded patch
         run: test "$(sha256sum receipt-fix.patch.gz.b64 | cut -d' ' -f1)" = 2852a91797220ab2e5cfcd446610b10af3a4024179c509cfbf66f99e744d99f3
       - name: Decode and verify gzip
