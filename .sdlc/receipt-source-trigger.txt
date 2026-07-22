@@ -1,1 +1,0 @@
-trigger verified artifact receipt source publication
