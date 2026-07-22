@@ -84,6 +84,14 @@ def test_contract_path_cannot_escape_repository() -> None:
         load_contract(REPO_ROOT, "../outside.toml")
 
 
+def test_contract_path_cannot_be_a_symlink(tmp_path: Path) -> None:
+    link = tmp_path / "gates.toml"
+    link.symlink_to(REPO_ROOT / ".sdlc" / "gates.toml")
+
+    with pytest.raises(ContractError, match="symlinked"):
+        load_contract(tmp_path, "gates.toml")
+
+
 def test_owner_values_match_review_and_selector_policy() -> None:
     contract = load_contract(REPO_ROOT)
     owner = contract.data["owner_decisions"]
