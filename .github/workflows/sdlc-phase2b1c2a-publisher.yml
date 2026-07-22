@@ -1,0 +1,65 @@
+name: SDLC Phase 2B1c2a Lane Publisher
+
+on:
+  push:
+    branches:
+      - agent/sdlc-v2-phase2b1c2-shadow-decision
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sdlc-phase2b1c2a-publisher-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: agent/sdlc-v2-phase2b1c2-shadow-decision
+          fetch-depth: 0
+          show-progress: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Apply exact semantic fixes
+        run: |
+          set -euo pipefail
+          test "$(git hash-object .sdlc/shadow-lane-semantic-fixes.py)" = a426ebe868b80b6d29e37a790e4faf78448a7ba2
+          test "$(git hash-object scripts/sdlc/shadow_lane.py)" = 9e0e2967236640a8d15984f7beb9927c2a5f4ca8
+          test "$(git hash-object newsroom/tests/test_sdlc_shadow_lane.py)" = eb6f94c7973567eb8e43ee44197e80861b6302fa
+          python -m py_compile .sdlc/shadow-lane-semantic-fixes.py
+          python .sdlc/shadow-lane-semantic-fixes.py
+
+      - name: Install exact uv and sync locked environment
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.8.0
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Verify lane boundary
+        run: |
+          uv run python -m compileall -q newsroom scripts
+          uv run python -m pytest -q newsroom/tests/test_sdlc_shadow_lane.py
+          uv run python -m pytest -q newsroom/tests/test_sdlc_*.py
+          git diff --check
+
+      - name: Commit and push source-only checkpoint
+        run: |
+          set -euo pipefail
+          rm -f .sdlc/shadow-lane-semantic-fixes.py .sdlc/shadow-lane-semantic-fixes.trigger
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/sdlc/shadow_lane.py newsroom/tests/test_sdlc_shadow_lane.py .sdlc/shadow-lane-semantic-fixes.py .sdlc/shadow-lane-semantic-fixes.trigger
+          git commit -m 'fix(sdlc): bind shadow lane semantics'
+          git push origin HEAD:agent/sdlc-v2-phase2b1c2-shadow-decision || true
+          test "$(git ls-remote origin refs/heads/agent/sdlc-v2-phase2b1c2-shadow-decision | cut -f1)" = "$(git rev-parse HEAD)"
