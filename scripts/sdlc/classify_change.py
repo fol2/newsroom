@@ -287,6 +287,31 @@ def resolve_tree(repo_root: Path, commit_sha: str) -> str:
     return value
 
 
+def verify_exact_clean_checkout(
+    repo_root: Path, *, head_sha: str, head_tree_sha: str
+) -> None:
+    current_head = resolve_commit(repo_root, "HEAD")
+    if current_head != head_sha:
+        raise GitRouteError(
+            f"checkout HEAD differs from route head: {current_head} != {head_sha}"
+        )
+    current_tree = resolve_tree(repo_root, current_head)
+    if current_tree != head_tree_sha:
+        raise GitRouteError(
+            f"checkout tree differs from route tree: {current_tree} != {head_tree_sha}"
+        )
+    status = _git(
+        repo_root,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    )
+    if status:
+        first = status.split(b"\0", 1)[0].decode("utf-8", errors="replace")
+        raise GitRouteError(f"checkout is not clean: {first}")
+
+
 def parse_name_status(payload: bytes) -> tuple[ChangedPath, ...]:
     fields = payload.split(b"\0")
     if fields and fields[-1] == b"":
@@ -332,16 +357,22 @@ def build_git_route(
     repo_root: str | Path, *, base_reference: str, head_reference: str
 ) -> dict[str, object]:
     root = Path(repo_root).resolve()
-    contract = load_contract(root)
     base_sha = resolve_commit(root, base_reference)
     head_sha = resolve_commit(root, head_reference)
+    head_tree_sha = resolve_tree(root, head_sha)
+    verify_exact_clean_checkout(
+        root,
+        head_sha=head_sha,
+        head_tree_sha=head_tree_sha,
+    )
+    contract = load_contract(root)
     return classify_paths(
         contract,
         changed_paths(root, base_sha, head_sha),
         base_sha=base_sha,
         head_sha=head_sha,
         base_tree_sha=resolve_tree(root, base_sha),
-        head_tree_sha=resolve_tree(root, head_sha),
+        head_tree_sha=head_tree_sha,
     )
 
 
