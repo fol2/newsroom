@@ -24,12 +24,11 @@ def _python(source: str, *arguments: str) -> tuple[str, ...]:
 
 
 def test_success_and_nonzero_exit_are_typed() -> None:
-    deadline = LaneDeadline.start(2)
     passed = run_gate_command(
         gate_id="route",
         phase="unit",
         argv=_python("print('ok')"),
-        deadline=deadline,
+        deadline=LaneDeadline.start(2),
         command_timeout_seconds=1,
     )
     failed = run_gate_command(
@@ -68,13 +67,14 @@ def test_expired_shared_deadline_prevents_process_start(tmp_path: Path) -> None:
 
 
 def test_multiple_commands_share_one_lane_deadline() -> None:
-    deadline = LaneDeadline.start(0.4)
+    deadline = LaneDeadline.start(0.5)
     first = run_gate_command(
         gate_id="core-deterministic",
         phase="first",
         argv=_python("import time; time.sleep(0.1)"),
         deadline=deadline,
         command_timeout_seconds=0.3,
+        termination_grace_seconds=0.05,
     )
     second = run_gate_command(
         gate_id="core-deterministic",
@@ -87,7 +87,7 @@ def test_multiple_commands_share_one_lane_deadline() -> None:
 
     assert first.result == "PASS"
     assert second.result == "BUDGET_EXCEEDED"
-    assert second.execution_ms < 400
+    assert second.execution_ms < 450
     assert deadline.remaining_seconds() == 0
 
 
@@ -123,9 +123,9 @@ time.sleep(30)
         gate_id="core-deterministic",
         phase="descendants",
         argv=_python(parent, child, str(marker), str(pid_file)),
-        deadline=LaneDeadline.start(0.7),
-        command_timeout_seconds=0.65,
-        termination_grace_seconds=0.4,
+        deadline=LaneDeadline.start(1.2),
+        command_timeout_seconds=0.9,
+        termination_grace_seconds=0.35,
     )
 
     stop_at = time.monotonic() + 1
@@ -134,27 +134,57 @@ time.sleep(30)
     assert pid_file.exists()
     assert marker.read_text(encoding="utf-8") == "terminated"
     assert result.result == "BUDGET_EXCEEDED"
+    assert result.execution_ms < 900
     assert result.result_reason == "BUDGET_EXCEEDED:core-deterministic:descendants"
 
 
-def test_output_is_bounded_and_secret_values_are_redacted() -> None:
+@pytest.mark.skipif(os.name != "posix", reason="process-group evidence is POSIX-specific")
+def test_successful_parent_cannot_leave_background_process(tmp_path: Path) -> None:
+    pid_file = tmp_path / "background-pid"
+    parent = """
+import subprocess
+from pathlib import Path
+import sys
+
+process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+Path(sys.argv[1]).write_text(str(process.pid), encoding='utf-8')
+"""
+    result = run_gate_command(
+        gate_id="core-deterministic",
+        phase="background",
+        argv=_python(parent, str(pid_file)),
+        deadline=LaneDeadline.start(2),
+        command_timeout_seconds=1,
+        termination_grace_seconds=0.3,
+    )
+
+    assert pid_file.exists()
+    assert result.result == "UNAUTHORISED_EFFECT"
+    assert result.result_reason.endswith(":background_process")
+
+
+def test_output_is_memory_bounded_and_secret_boundary_is_redacted() -> None:
+    secret = "ultra-sensitive-boundary"
     environment = dict(os.environ)
-    environment["NEWSROOM_TEST_API_TOKEN"] = "highly-sensitive-value"
+    environment["NEWSROOM_TEST_API_TOKEN"] = secret
     result = run_gate_command(
         gate_id="core-deterministic",
         phase="output",
         argv=_python(
-            "import os; print('x' * 4096); print(os.environ['NEWSROOM_TEST_API_TOKEN'])"
+            "import os, sys; "
+            "sys.stdout.write('x' * 2000000); "
+            "sys.stdout.write(os.environ['NEWSROOM_TEST_API_TOKEN'] + 'z' * 124)"
         ),
-        deadline=LaneDeadline.start(2),
-        command_timeout_seconds=1,
+        deadline=LaneDeadline.start(3),
+        command_timeout_seconds=2,
         env=environment,
         output_limit_bytes=128,
     )
 
     assert result.result == "PASS"
     assert result.stdout_truncated is True
-    assert "highly-sensitive-value" not in result.stdout
+    assert secret not in result.stdout
+    assert "sensitive-boundary" not in result.stdout
     assert "***" in result.stdout
     assert len(result.stdout.encode("utf-8")) <= 128
 
@@ -167,6 +197,7 @@ def test_environment_error_does_not_echo_command_or_exception_message() -> None:
         argv=(missing,),
         deadline=LaneDeadline.start(1),
         command_timeout_seconds=0.5,
+        termination_grace_seconds=0.1,
     )
 
     assert result.result == "ENVIRONMENT_ERROR"
@@ -175,7 +206,7 @@ def test_environment_error_does_not_echo_command_or_exception_message() -> None:
     assert result.result_reason.endswith(":FileNotFoundError")
 
 
-def test_invalid_budget_or_identifier_is_rejected() -> None:
+def test_invalid_budget_identifier_and_output_limit_are_rejected() -> None:
     with pytest.raises(GateRunError, match="below 60"):
         LaneDeadline.start(60)
     with pytest.raises(GateRunError, match="unsupported characters"):
@@ -185,6 +216,24 @@ def test_invalid_budget_or_identifier_is_rejected() -> None:
             argv=_python("pass"),
             deadline=LaneDeadline.start(1),
             command_timeout_seconds=0.5,
+        )
+    with pytest.raises(GateRunError, match="output limit"):
+        run_gate_command(
+            gate_id="route",
+            phase="unit",
+            argv=_python("pass"),
+            deadline=LaneDeadline.start(2),
+            command_timeout_seconds=1,
+            output_limit_bytes=1_048_577,
+        )
+    with pytest.raises(GateRunError, match="five seconds"):
+        run_gate_command(
+            gate_id="route",
+            phase="unit",
+            argv=_python("pass"),
+            deadline=LaneDeadline.start(10),
+            command_timeout_seconds=9,
+            termination_grace_seconds=5.1,
         )
 
 
