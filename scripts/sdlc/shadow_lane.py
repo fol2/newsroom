@@ -33,6 +33,12 @@ SCHEMA_VERSION = "newsroom.sdlc.shadow-lane.v1"
 POLICY_VERSION = "sdlc-shadow-lane-v1"
 CONTRACT_VERSION = "sdlc-v2.2"
 CLASSIFIER_VERSION = "sdlc-risk-v1"
+_SERVICE_RISKS = frozenset({"R3_EXTERNAL_SERVICE_SECURITY", "R4_RELEASE_OPERATIONAL"})
+_OWNER_RISKS = frozenset({"R4_RELEASE_OPERATIONAL"})
+_LANE_GATE_IDS = {
+    "core": frozenset({"source-integrity", "core-deterministic"}),
+    "service": frozenset({"service-neo4j"}),
+}
 _SAFE_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\x00-\x1f\x7f]{1,48}Z")
@@ -245,13 +251,17 @@ def _cross_check(
         raise ShadowLaneError("workflow_created_at")
     if receipt.event_name != run_event:
         raise ShadowLaneError("run_event")
+    route = receipt.route
     if (
-        receipt.route.contract_version != CONTRACT_VERSION
-        or receipt.route.risk_classifier_version != CLASSIFIER_VERSION
+        route.contract_version != CONTRACT_VERSION
+        or route.risk_classifier_version != CLASSIFIER_VERSION
+        or route.service_required is not (route.risk_tier in _SERVICE_RISKS)
+        or route.owner_authority_required is not (route.risk_tier in _OWNER_RISKS)
     ):
         raise ShadowLaneError("route_contract")
-    if not receipt.gate_decisions:
-        raise ShadowLaneError("gate_decisions")
+    gate_ids = frozenset(decision.gate_id for decision in receipt.gate_decisions)
+    if gate_ids != _LANE_GATE_IDS[policy.lane_id]:
+        raise ShadowLaneError("lane_gates")
 
 
 def validate_shadow_lane_record(

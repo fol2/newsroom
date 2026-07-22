@@ -44,6 +44,14 @@ class _Metadata:
 class _Route:
     contract_version: str = "sdlc-v2.2"
     risk_classifier_version: str = "sdlc-risk-v1"
+    risk_tier: str = "R1_LOCAL_CODE"
+    service_required: bool = False
+    owner_authority_required: bool = False
+
+
+@dataclass(frozen=True)
+class _GateDecision:
+    gate_id: str
 
 
 @dataclass(frozen=True)
@@ -56,7 +64,10 @@ class _Receipt:
     evaluated_sha: str = HEAD_SHA
     producer_job_id: str = "core"
     event_name: str = "pull_request"
-    gate_decisions: tuple[object, ...] = (object(),)
+    gate_decisions: tuple[_GateDecision, ...] = (
+        _GateDecision("source-integrity"),
+        _GateDecision("core-deterministic"),
+    )
     receipt_identity: str = "sha256:" + "2" * 64
 
     def as_dict(self) -> dict[str, object]:
@@ -235,7 +246,12 @@ def test_service_lane_uses_exact_service_policy(
 ) -> None:
     receipt = _Receipt(
         _Metadata(name=ARTIFACT_NAME.replace("-core-", "-service-")),
+        route=_Route(
+            risk_tier="R3_EXTERNAL_SERVICE_SECURITY",
+            service_required=True,
+        ),
         producer_job_id="service",
+        gate_decisions=(_GateDecision("service-neo4j"),),
     )
     replay = _replay(artifact_name=receipt.metadata.name)
     telemetry = _telemetry(job_name="service")
@@ -311,6 +327,47 @@ def test_cross_record_identity_mismatch_fails_closed(
             replay=replay,
             receipt=receipt,  # type: ignore[arg-type]
             telemetry=telemetry,
+            lane_identity="sha256:" + "0" * 64,
+        )
+
+
+
+def test_route_and_lane_gate_semantics_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid_route = _Receipt(
+        _Metadata(),
+        route=_Route(
+            risk_tier="R1_LOCAL_CODE",
+            service_required=True,
+        ),
+    )
+    _patch_receipt_validator(monkeypatch, invalid_route)
+    replay = _replay()
+    with pytest.raises(ShadowLaneError, match="route_contract"):
+        ShadowLaneRecord(
+            lane_id="core",
+            run_event="pull_request",
+            run_created_at="2026-07-22T12:00:00.000Z",
+            replay=replay,
+            receipt=invalid_route,  # type: ignore[arg-type]
+            telemetry=_telemetry(),
+            lane_identity="sha256:" + "0" * 64,
+        )
+
+    invalid_gates = _Receipt(
+        _Metadata(),
+        gate_decisions=(_GateDecision("core-deterministic"),),
+    )
+    _patch_receipt_validator(monkeypatch, invalid_gates)
+    with pytest.raises(ShadowLaneError, match="lane_gates"):
+        ShadowLaneRecord(
+            lane_id="core",
+            run_event="pull_request",
+            run_created_at="2026-07-22T12:00:00.000Z",
+            replay=replay,
+            receipt=invalid_gates,  # type: ignore[arg-type]
+            telemetry=_telemetry(),
             lane_identity="sha256:" + "0" * 64,
         )
 
