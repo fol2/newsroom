@@ -58,16 +58,14 @@ jobs:
       - name: Compile
         run: uv run python -m compileall -q newsroom scripts
       - name: Run focused receipt tests
-        id: focused
         shell: bash
         run: |
           set +e
           uv run python -m pytest -vv --tb=long newsroom/tests/test_sdlc_artifact_receipt.py > focused.log 2>&1
           status=$?
-          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$status" > focused.status
           exit 0
       - name: Run broader SDLC tests
-        id: broader
         shell: bash
         run: |
           set +e
@@ -83,16 +81,15 @@ jobs:
             newsroom/tests/test_sdlc_junit_encoding.py \
             newsroom/tests/test_sdlc_junit_evidence.py > broader.log 2>&1
           status=$?
-          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$status" > broader.status
           exit 0
       - name: Check diff
-        id: diff
         shell: bash
         run: |
           set +e
           git diff --check > diff.log 2>&1
           status=$?
-          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$status" > diff.status
           exit 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -100,16 +97,19 @@ jobs:
           name: sdlc-receipt-qualification-${{ github.sha }}
           path: |
             focused.log
+            focused.status
             broader.log
+            broader.status
             diff.log
+            diff.status
           if-no-files-found: error
           retention-days: 1
       - name: Preserve qualification result
         shell: bash
         run: |
-          test "${{ steps.focused.outputs.status }}" = 0
-          test "${{ steps.broader.outputs.status }}" = 0
-          test "${{ steps.diff.outputs.status }}" = 0
+          test "$(cat focused.status)" = 0
+          test "$(cat broader.status)" = 0
+          test "$(cat diff.status)" = 0
       - name: Commit and push source checkpoint
         if: steps.patch.outputs.changed == 'true'
         shell: bash
