@@ -41,8 +41,15 @@ class _Metadata:
 
 
 @dataclass(frozen=True)
+class _Route:
+    contract_version: str = "sdlc-v2.2"
+    risk_classifier_version: str = "sdlc-risk-v1"
+
+
+@dataclass(frozen=True)
 class _Receipt:
     metadata: _Metadata
+    route: _Route = _Route()
     run_attempt: int = RUN_ATTEMPT
     repository_id: int = REPOSITORY_ID
     head_repository_id: int = HEAD_REPOSITORY_ID
@@ -133,10 +140,15 @@ def _identity(
     )
 
 
-def _patch_nested_validators(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(lane_module, "validate_transport_replay", lambda value: value)
-    monkeypatch.setattr(lane_module, "validate_receipt", lambda value, contract=None: value)
-    monkeypatch.setattr(lane_module, "validate_job_telemetry", lambda value: value)
+def _patch_receipt_validator(
+    monkeypatch: pytest.MonkeyPatch,
+    receipt: _Receipt,
+) -> None:
+    monkeypatch.setattr(
+        lane_module,
+        "validate_receipt",
+        lambda value, contract=None: receipt,
+    )
 
 
 def _record(
@@ -146,9 +158,9 @@ def _record(
     receipt: _Receipt | None = None,
     telemetry: JobTelemetry | None = None,
 ) -> ShadowLaneRecord:
-    _patch_nested_validators(monkeypatch)
-    replay = _replay(artifact_name=(receipt or _Receipt(_Metadata())).metadata.name)
     selected_receipt = receipt or _Receipt(_Metadata())
+    _patch_receipt_validator(monkeypatch, selected_receipt)
+    replay = _replay(artifact_name=selected_receipt.metadata.name)
     selected_telemetry = telemetry or _telemetry(job_name=lane_id)
     return ShadowLaneRecord(
         lane_id=lane_id,
@@ -194,7 +206,7 @@ def test_verify_shadow_lane_composes_replay_telemetry_and_receipt(
 
     monkeypatch.setattr(lane_module, "measure_job_telemetry", measure)
     monkeypatch.setattr(lane_module, "verify_artifact", verify)
-    _patch_nested_validators(monkeypatch)
+    _patch_receipt_validator(monkeypatch, receipt)
     contract = SimpleNamespace(repo_root=tmp_path)
     decision_context = SimpleNamespace(job_id="decision")
 
@@ -247,7 +259,7 @@ def test_service_lane_uses_exact_service_policy(
         "verify_artifact",
         lambda **kwargs: calls.setdefault("verify", kwargs) and receipt,
     )
-    _patch_nested_validators(monkeypatch)
+    _patch_receipt_validator(monkeypatch, receipt)
 
     record = verify_shadow_lane(
         repo_root=tmp_path,
@@ -289,7 +301,7 @@ def test_cross_record_identity_mismatch_fails_closed(
     telemetry: JobTelemetry,
     reason: str,
 ) -> None:
-    _patch_nested_validators(monkeypatch)
+    _patch_receipt_validator(monkeypatch, receipt)
     replay = _replay(artifact_name=receipt.metadata.name)
     with pytest.raises(ShadowLaneError, match=reason):
         ShadowLaneRecord(

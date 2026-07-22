@@ -31,6 +31,8 @@ from .workflow_event import (
 
 SCHEMA_VERSION = "newsroom.sdlc.shadow-lane.v1"
 POLICY_VERSION = "sdlc-shadow-lane-v1"
+CONTRACT_VERSION = "sdlc-v2.2"
+CLASSIFIER_VERSION = "sdlc-risk-v1"
 _SAFE_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\x00-\x1f\x7f]{1,48}Z")
@@ -178,17 +180,36 @@ def _policy(lane_id: object) -> LanePolicy:
         raise ShadowLaneError("lane_id") from exc
 
 
-def _identity_inputs(record: ShadowLaneRecord) -> dict[str, object]:
+def _identity_values(
+    *,
+    lane_id: str,
+    run_event: str,
+    run_created_at: str,
+    replay: TransportReplay,
+    receipt: ArtifactReceipt,
+    telemetry: JobTelemetry,
+) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
         "policy_version": POLICY_VERSION,
-        "lane_id": record.lane_id,
-        "run_event": record.run_event,
-        "run_created_at": record.run_created_at,
-        "replay_identity": record.replay.replay_identity,
-        "receipt_identity": record.receipt.receipt_identity,
-        "telemetry_identity": record.telemetry.as_dict()["telemetry_identity"],
+        "lane_id": lane_id,
+        "run_event": run_event,
+        "run_created_at": run_created_at,
+        "replay_identity": replay.replay_identity,
+        "receipt_identity": receipt.receipt_identity,
+        "telemetry_identity": telemetry.as_dict()["telemetry_identity"],
     }
+
+
+def _identity_inputs(record: ShadowLaneRecord) -> dict[str, object]:
+    return _identity_values(
+        lane_id=record.lane_id,
+        run_event=record.run_event,
+        run_created_at=record.run_created_at,
+        replay=record.replay,
+        receipt=record.receipt,
+        telemetry=record.telemetry,
+    )
 
 
 def _cross_check(
@@ -224,6 +245,11 @@ def _cross_check(
         raise ShadowLaneError("workflow_created_at")
     if receipt.event_name != run_event:
         raise ShadowLaneError("run_event")
+    if (
+        receipt.route.contract_version != CONTRACT_VERSION
+        or receipt.route.risk_classifier_version != CLASSIFIER_VERSION
+    ):
+        raise ShadowLaneError("route_contract")
     if not receipt.gate_decisions:
         raise ShadowLaneError("gate_decisions")
 
@@ -305,16 +331,16 @@ def verify_shadow_lane(
         )
     except ArtifactReceiptError as exc:
         raise ShadowLaneError("artifact_receipt") from exc
-    provisional = ShadowLaneRecord(
-        lane_id=policy.lane_id,
-        run_event=run_event,
-        run_created_at=run_created_at,
-        replay=transport.replay,
-        receipt=receipt,
-        telemetry=telemetry,
-        lane_identity="sha256:" + "0" * 64,
+    lane_identity = sha256_identity(
+        _identity_values(
+            lane_id=policy.lane_id,
+            run_event=run_event,
+            run_created_at=run_created_at,
+            replay=transport.replay,
+            receipt=receipt,
+            telemetry=telemetry,
+        )
     )
-    lane_identity = sha256_identity(_identity_inputs(provisional))
     record = ShadowLaneRecord(
         lane_id=policy.lane_id,
         run_event=run_event,
