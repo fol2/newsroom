@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from io import BytesIO
 import hashlib
 import json
@@ -20,7 +21,9 @@ from scripts.sdlc.github_transport import (
     GitHubActionsClient,
     GitHubTransportError,
     _SafeRedirectHandler,
+    _publish_directory,
     _safe_extract,
+    _write_private,
     fetch_artifact_bundle,
     main as transport_main,
     validate_transport_bundle,
@@ -386,12 +389,12 @@ def test_artifact_selection_and_download_digest_fail_closed(tmp_path: Path) -> N
     ]
     client, _ = _client(archive_bytes, listed_artifacts=duplicates)
     with pytest.raises(GitHubTransportError, match="artifact_identity"):
-        client.select_artifact(RUN_ID, ARTIFACT_NAME)
+        client.select_artifact(_run_value(), ARTIFACT_NAME)
 
     expired = [{"id": ARTIFACT_ID, "name": ARTIFACT_NAME, "expired": True}]
     client, _ = _client(archive_bytes, listed_artifacts=expired)
     with pytest.raises(GitHubTransportError, match="artifact_identity"):
-        client.select_artifact(RUN_ID, ARTIFACT_NAME)
+        client.select_artifact(_run_value(), ARTIFACT_NAME)
 
     metadata = _metadata(archive_bytes)
     metadata["digest"] = "sha256:" + "0" * 64
@@ -580,3 +583,220 @@ def test_output_parent_symlink_and_cli_missing_token_are_private(
         "EVIDENCE_MISMATCH:github-transport:token_missing"
     )
     assert TOKEN not in captured.err
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("id",), True),
+        (("run_attempt",), True),
+        (("repository", "id"), True),
+        (("head_repository", "id"), True),
+    ],
+)
+def test_run_identity_rejects_boolean_integer_fields(
+    path: tuple[str, ...],
+    value: object,
+) -> None:
+    archive_bytes = _archive_bytes()
+    changed = deepcopy(_run_value())
+    target = changed
+    for part in path[:-1]:
+        target = target[part]  # type: ignore[assignment,index]
+    target[path[-1]] = value  # type: ignore[index]
+    client, _ = _client(archive_bytes, run=changed)
+    with pytest.raises(GitHubTransportError, match="run_identity"):
+        client.fetch_run(RUN_ID)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("id", True),
+        ("repository_id", True),
+        ("repository_id", 77),
+        ("head_repository_id", 999),
+        ("head_sha", "b" * 40),
+    ],
+)
+def test_artifact_metadata_must_match_fetched_run(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    archive_bytes = _archive_bytes()
+    metadata = _metadata(archive_bytes)
+    workflow_run = metadata["workflow_run"]
+    assert isinstance(workflow_run, dict)
+    workflow_run[field] = value
+    client, _ = _client(archive_bytes, metadata=metadata)
+    with pytest.raises(GitHubTransportError, match="artifact_run_identity"):
+        fetch_artifact_bundle(
+            client=client,
+            output_parent=tmp_path,
+            output_name=f"mismatch-{field}",
+            run_id=RUN_ID,
+            run_attempt=RUN_ATTEMPT,
+            artifact_name=ARTIFACT_NAME,
+        )
+
+
+def test_json_duplicate_keys_and_content_length_mismatch_fail_closed() -> None:
+    run_url = f"{API_PREFIX}/actions/runs/{RUN_ID}"
+    duplicate = FakeOpen(
+        {
+            run_url: [
+                FakeResponse(
+                    b'{"id":123,"id":124}',
+                    url=run_url,
+                    content_type="application/json",
+                )
+            ]
+        }
+    )
+    with pytest.raises(GitHubTransportError, match="json_response"):
+        GitHubActionsClient(TOKEN, open_request=duplicate).fetch_run(RUN_ID)
+
+    payload = json.dumps(_run_value(), sort_keys=True, separators=(",", ":")).encode()
+    wrong_length = FakeOpen(
+        {
+            run_url: [
+                FakeResponse(
+                    payload,
+                    url=run_url,
+                    content_type="application/json",
+                    content_length=len(payload) + 1,
+                )
+            ]
+        }
+    )
+    with pytest.raises(GitHubTransportError, match="json_size"):
+        GitHubActionsClient(TOKEN, open_request=wrong_length).fetch_run(RUN_ID)
+
+
+def test_artifact_content_length_and_setup_failure_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_bytes = _archive_bytes()
+    metadata = _metadata(archive_bytes)
+    download_url = f"{API_PREFIX}/actions/artifacts/{ARTIFACT_ID}/zip"
+    final_url = "https://newsroom.blob.core.windows.net/evidence/archive.zip?sig=x"
+
+    response = FakeResponse(
+        archive_bytes,
+        url=final_url,
+        content_type="application/zip",
+        content_length=len(archive_bytes) + 1,
+    )
+    client = GitHubActionsClient(TOKEN, open_request=FakeOpen({download_url: [response]}))
+    with pytest.raises(GitHubTransportError, match="artifact_size"):
+        client.download_artifact(metadata, tmp_path / "wrong-length.zip")
+    assert response.closed
+    assert not (tmp_path / "wrong-length.zip").exists()
+
+    response = FakeResponse(archive_bytes, url=final_url, content_type="application/zip")
+    client = GitHubActionsClient(TOKEN, open_request=FakeOpen({download_url: [response]}))
+    real_mkstemp = transport_module.tempfile.mkstemp
+    holder: dict[str, int] = {}
+
+    def tracked_mkstemp(*args, **kwargs):
+        descriptor, name = real_mkstemp(*args, **kwargs)
+        holder["descriptor"] = descriptor
+        return descriptor, name
+
+    def fail_fdopen(*_args, **_kwargs):
+        raise OSError("fdopen failed")
+
+    monkeypatch.setattr(transport_module.tempfile, "mkstemp", tracked_mkstemp)
+    monkeypatch.setattr(transport_module.os, "fdopen", fail_fdopen)
+    with pytest.raises(GitHubTransportError, match="output_open"):
+        client.download_artifact(metadata, tmp_path / "fdopen.zip")
+    assert response.closed
+    with pytest.raises(OSError):
+        os.fstat(holder["descriptor"])
+    assert not any(path.name.startswith(".fdopen.zip.") for path in tmp_path.iterdir())
+
+
+def test_private_writer_closes_descriptor_when_fdopen_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_open = transport_module.os.open
+    holder: dict[str, int] = {}
+
+    def tracked_open(*args, **kwargs):
+        descriptor = real_open(*args, **kwargs)
+        holder["descriptor"] = descriptor
+        return descriptor
+
+    def fail_fdopen(*_args, **_kwargs):
+        raise OSError("fdopen failed")
+
+    monkeypatch.setattr(transport_module.os, "open", tracked_open)
+    monkeypatch.setattr(transport_module.os, "fdopen", fail_fdopen)
+    target = tmp_path / "private.json"
+    with pytest.raises(GitHubTransportError, match="output_open"):
+        _write_private(target, b"{}\n")
+    with pytest.raises(OSError):
+        os.fstat(holder["descriptor"])
+    assert not target.exists()
+
+
+def test_untrusted_cloud_storage_redirect_is_rejected() -> None:
+    handler = _SafeRedirectHandler()
+    request = Request(
+        f"{API_PREFIX}/actions/artifacts/{ARTIFACT_ID}/zip",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        method="GET",
+    )
+    with pytest.raises(HTTPError):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://attacker.amazonaws.com/archive.zip",
+        )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlink evidence is POSIX-specific")
+def test_archive_symlink_input_fails_closed(tmp_path: Path) -> None:
+    real = tmp_path / "real.zip"
+    real.write_bytes(_archive_bytes())
+    linked = tmp_path / "linked.zip"
+    linked.symlink_to(real)
+    with pytest.raises(GitHubTransportError, match="archive_symlink"):
+        _safe_extract(linked, tmp_path / "output")
+
+
+def test_noreplace_race_and_parent_fsync_failure_do_not_replace_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "new").write_text("new", encoding="utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+    sentinel = target / "keep"
+    sentinel.write_text("old", encoding="utf-8")
+    with pytest.raises(GitHubTransportError, match="output_exists"):
+        _publish_directory(source, target, "bundle_publish")
+    assert sentinel.read_text(encoding="utf-8") == "old"
+
+    source = tmp_path / "source-two"
+    source.mkdir()
+    (source / "new").write_text("new", encoding="utf-8")
+    target = tmp_path / "target-two"
+    real_fsync = transport_module._fsync_directory
+
+    def fail_parent_fsync(path: Path) -> None:
+        if path == target.parent:
+            raise OSError("fsync failed")
+        real_fsync(path)
+
+    monkeypatch.setattr(transport_module, "_fsync_directory", fail_parent_fsync)
+    with pytest.raises(GitHubTransportError, match="bundle_publish"):
+        _publish_directory(source, target, "bundle_publish")
+    assert not target.exists()

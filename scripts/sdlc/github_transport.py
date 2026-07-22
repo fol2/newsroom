@@ -60,7 +60,6 @@ _ARTIFACT_KEYS = frozenset(
 )
 _ALLOWED_DOWNLOAD_HOST_SUFFIXES = (
     ".blob.core.windows.net",
-    ".amazonaws.com",
     ".githubusercontent.com",
 )
 
@@ -224,6 +223,39 @@ def _mapping(value: object, code: str) -> Mapping[str, object]:
     return value
 
 
+def _run_identity(
+    value: object,
+    *,
+    expected_run_id: int | None = None,
+) -> tuple[int, int, int, int, str]:
+    run = _mapping(value, "run_identity")
+    repository = _mapping(run.get("repository"), "run_repository")
+    head_repository = _mapping(run.get("head_repository"), "run_head_repository")
+    try:
+        run_id = _positive(run.get("id"), "run_id")
+        run_attempt = _positive(run.get("run_attempt"), "run_attempt")
+        repository_id = _positive(repository.get("id"), "run_repository_id")
+        head_repository_id = _positive(
+            head_repository.get("id"), "run_head_repository_id"
+        )
+        head_repository_name = _text(
+            head_repository.get("full_name"),
+            "run_head_repository_name",
+            maximum=255,
+        )
+        head_sha = _text(run.get("head_sha"), "run_head_sha", maximum=40)
+    except GitHubTransportError as exc:
+        raise GitHubTransportError("run_identity") from exc
+    if (
+        (expected_run_id is not None and run_id != _positive(expected_run_id, "run_id"))
+        or repository.get("full_name") != _REPOSITORY
+        or not head_repository_name
+        or _GIT_SHA.fullmatch(head_sha) is None
+    ):
+        raise GitHubTransportError("run_identity")
+    return run_id, run_attempt, repository_id, head_repository_id, head_sha
+
+
 def _transport_identity_inputs(bundle: TransportBundle) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -304,7 +336,16 @@ def _content_type(headers: Mapping[str, str]) -> str | None:
 
 def _is_allowed_download_url(url: str) -> bool:
     parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.username or parsed.password:
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or port not in {None, 443}
+    ):
         return False
     host = (parsed.hostname or "").lower()
     return host == "api.github.com" or any(
@@ -384,24 +425,14 @@ class GitHubActionsClient:
             if length is not None and not 0 < length <= _MAX_JSON_BYTES:
                 raise GitHubTransportError("json_size")
             payload = _bounded_read(response, maximum=_MAX_JSON_BYTES, code="json_size")
+        if length is not None and len(payload) != length:
+            raise GitHubTransportError("json_size")
         return _unique_json(payload, "json_response")
 
     def fetch_run(self, run_id: int) -> Mapping[str, object]:
         run = _positive(run_id, "run_id")
         value = self._get_json(f"{_API_PREFIX}/actions/runs/{run}")
-        repository = _mapping(value.get("repository"), "run_repository")
-        head_repository = _mapping(value.get("head_repository"), "run_head_repository")
-        if (
-            value.get("id") != run
-            or repository.get("full_name") != _REPOSITORY
-            or not isinstance(repository.get("id"), int)
-            or not isinstance(head_repository.get("full_name"), str)
-            or not isinstance(head_repository.get("id"), int)
-            or _GIT_SHA.fullmatch(str(value.get("head_sha", ""))) is None
-            or not isinstance(value.get("run_attempt"), int)
-            or value.get("run_attempt", 0) <= 0
-        ):
-            raise GitHubTransportError("run_identity")
+        _run_identity(value, expected_run_id=run)
         return value
 
     def fetch_jobs(self, run_id: int, run_attempt: int) -> Mapping[str, object]:
@@ -445,7 +476,21 @@ class GitHubActionsClient:
             raise GitHubTransportError("artifact_pagination")
         return value
 
-    def select_artifact(self, run_id: int, expected_name: str) -> Mapping[str, object]:
+    def select_artifact(
+        self,
+        run_value: Mapping[str, object],
+        expected_name: str,
+    ) -> Mapping[str, object]:
+        try:
+            (
+                run_id,
+                _,
+                repository_id,
+                head_repository_id,
+                head_sha,
+            ) = _run_identity(run_value)
+        except GitHubTransportError as exc:
+            raise GitHubTransportError("artifact_run_identity") from exc
         name = _safe_name(expected_name, "artifact_name")
         listed = self.list_artifacts(run_id)
         matches = [
@@ -470,11 +515,27 @@ class GitHubActionsClient:
         if size > _MAX_ARCHIVE_BYTES:
             raise GitHubTransportError("artifact_size")
         _sha(metadata.get("digest"), "artifact_digest")
-        workflow_run = metadata.get("workflow_run")
+        workflow_run = _mapping(metadata.get("workflow_run"), "artifact_workflow_run")
+        try:
+            metadata_run_id = _positive(workflow_run.get("id"), "artifact_run_id")
+            metadata_repository_id = _positive(
+                workflow_run.get("repository_id"), "artifact_repository_id"
+            )
+            metadata_head_repository_id = _positive(
+                workflow_run.get("head_repository_id"),
+                "artifact_head_repository_id",
+            )
+            metadata_head_sha = _text(
+                workflow_run.get("head_sha"), "artifact_head_sha", maximum=40
+            )
+        except GitHubTransportError as exc:
+            raise GitHubTransportError("artifact_run_identity") from exc
         if (
-            not isinstance(workflow_run, dict)
-            or workflow_run.get("id") != run_id
-            or _GIT_SHA.fullmatch(str(workflow_run.get("head_sha", ""))) is None
+            metadata_run_id != run_id
+            or metadata_repository_id != repository_id
+            or metadata_head_repository_id != head_repository_id
+            or metadata_head_sha != head_sha
+            or _GIT_SHA.fullmatch(metadata_head_sha) is None
         ):
             raise GitHubTransportError("artifact_run_identity")
         return metadata
@@ -495,32 +556,43 @@ class GitHubActionsClient:
         if output_path.exists() or output_path.is_symlink():
             raise GitHubTransportError("output_exists")
         response = self._request(expected_url, download=True)
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
-        )
-        temporary = Path(temporary_name)
+        descriptor = -1
+        temporary: Path | None = None
         digest = hashlib.sha256()
         total = 0
         linked = False
         try:
-            os.fchmod(descriptor, 0o600)
-            with closing(response), os.fdopen(descriptor, "wb", closefd=True) as stream:
-                length = _content_length(response.headers)
-                if length is not None and length != size:
-                    raise GitHubTransportError("artifact_size")
-                while payload := response.read(1024 * 1024):
-                    total += len(payload)
-                    if total > size or total > _MAX_ARCHIVE_BYTES:
+            with closing(response):
+                try:
+                    descriptor, temporary_name = tempfile.mkstemp(
+                        prefix=f".{output_path.name}.",
+                        suffix=".tmp",
+                        dir=output_path.parent,
+                    )
+                    temporary = Path(temporary_name)
+                    os.fchmod(descriptor, 0o600)
+                    stream = os.fdopen(descriptor, "wb", closefd=True)
+                    descriptor = -1
+                except OSError as exc:
+                    raise GitHubTransportError("output_open") from exc
+                with stream:
+                    length = _content_length(response.headers)
+                    if length is not None and length != size:
                         raise GitHubTransportError("artifact_size")
-                    digest.update(payload)
-                    stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
+                    while payload := response.read(1024 * 1024):
+                        total += len(payload)
+                        if total > size or total > _MAX_ARCHIVE_BYTES:
+                            raise GitHubTransportError("artifact_size")
+                        digest.update(payload)
+                        stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
             rendered_digest = "sha256:" + digest.hexdigest()
             if total != size:
                 raise GitHubTransportError("artifact_size")
             if rendered_digest != expected_digest:
                 raise GitHubTransportError("artifact_digest")
+            assert temporary is not None
             try:
                 os.link(temporary, output_path, follow_symlinks=False)
                 linked = True
@@ -530,10 +602,17 @@ class GitHubActionsClient:
             except OSError as exc:
                 if linked:
                     output_path.unlink(missing_ok=True)
+                    try:
+                        _fsync_directory(output_path.parent)
+                    except OSError:
+                        pass
                 raise GitHubTransportError("output_publish") from exc
             return total, rendered_digest
         finally:
-            temporary.unlink(missing_ok=True)
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
 
 def _member_path(value: str) -> PurePosixPath:
@@ -677,6 +756,47 @@ def _publish_directory(source: Path, target: Path, code: str) -> None:
         raise GitHubTransportError(code) from exc
 
 
+def _open_archive_stream(path: Path) -> BinaryIO:
+    absolute = path if path.is_absolute() else path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise GitHubTransportError("archive_symlink")
+    try:
+        initial = os.lstat(absolute)
+    except OSError as exc:
+        raise GitHubTransportError("archive_file") from exc
+    if not stat.S_ISREG(initial.st_mode) or not 0 < initial.st_size <= _MAX_ARCHIVE_BYTES:
+        raise GitHubTransportError("archive_file")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor = -1
+    try:
+        descriptor = os.open(absolute, flags)
+        current_metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(current_metadata.st_mode)
+            or current_metadata.st_size != initial.st_size
+            or not 0 < current_metadata.st_size <= _MAX_ARCHIVE_BYTES
+        ):
+            raise GitHubTransportError("archive_file")
+        stream = os.fdopen(descriptor, "rb", closefd=True)
+        descriptor = -1
+        return stream
+    except GitHubTransportError:
+        raise
+    except OSError as exc:
+        raise GitHubTransportError("archive_file") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _safe_extract(archive_path: Path, target: Path) -> None:
     if target.exists() or target.is_symlink():
         raise GitHubTransportError("output_exists")
@@ -684,59 +804,65 @@ def _safe_extract(archive_path: Path, target: Path) -> None:
     published = False
     try:
         os.chmod(temporary, 0o700)
-        try:
-            archive = zipfile.ZipFile(archive_path)
-        except (OSError, zipfile.BadZipFile) as exc:
-            raise GitHubTransportError("archive_zip") from exc
-        with archive:
-            members = _validated_zip_members(archive)
-            for info, member in members:
-                destination = temporary.joinpath(*member.parts)
-                if info.is_dir():
+        with _open_archive_stream(archive_path) as archive_stream:
+            try:
+                archive = zipfile.ZipFile(archive_stream)
+            except (OSError, zipfile.BadZipFile) as exc:
+                raise GitHubTransportError("archive_zip") from exc
+            with archive:
+                members = _validated_zip_members(archive)
+                for info, member in members:
+                    destination = temporary.joinpath(*member.parts)
+                    if info.is_dir():
+                        try:
+                            destination.mkdir(mode=0o700, parents=True, exist_ok=False)
+                        except FileExistsError:
+                            if not destination.is_dir() or destination.is_symlink():
+                                raise GitHubTransportError("archive_member_conflict")
+                        continue
                     try:
-                        destination.mkdir(mode=0o700, parents=True, exist_ok=False)
-                    except FileExistsError:
-                        if not destination.is_dir() or destination.is_symlink():
+                        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    except OSError as exc:
+                        raise GitHubTransportError("archive_extract") from exc
+                    current = temporary
+                    for part in member.parts[:-1]:
+                        current /= part
+                        if current.is_symlink() or not current.is_dir():
                             raise GitHubTransportError("archive_member_conflict")
-                    continue
-                try:
-                    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                except OSError as exc:
-                    raise GitHubTransportError("archive_extract") from exc
-                current = temporary
-                for part in member.parts[:-1]:
-                    current /= part
-                    if current.is_symlink() or not current.is_dir():
-                        raise GitHubTransportError("archive_member_conflict")
-                flags = (
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NOFOLLOW", 0)
-                )
-                try:
-                    descriptor = os.open(destination, flags, 0o600)
-                except OSError as exc:
-                    raise GitHubTransportError("archive_extract") from exc
-                total = 0
-                try:
-                    with archive.open(info, "r") as source, os.fdopen(
-                        descriptor, "wb", closefd=True
-                    ) as output:
-                        while payload := source.read(1024 * 1024):
-                            total += len(payload)
-                            if total > info.file_size or total > _MAX_MEMBER_BYTES:
-                                raise GitHubTransportError("archive_member_size")
-                            output.write(payload)
-                        output.flush()
-                        os.fsync(output.fileno())
-                except GitHubTransportError:
-                    raise
-                except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
-                    raise GitHubTransportError("archive_extract") from exc
-                if total != info.file_size:
-                    raise GitHubTransportError("archive_member_size")
+                    flags = (
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0)
+                    )
+                    descriptor = -1
+                    try:
+                        descriptor = os.open(destination, flags, 0o600)
+                        try:
+                            output = os.fdopen(descriptor, "wb", closefd=True)
+                            descriptor = -1
+                        except OSError as exc:
+                            raise GitHubTransportError("archive_extract") from exc
+                        total = 0
+                        try:
+                            with output, archive.open(info, "r") as source:
+                                while payload := source.read(1024 * 1024):
+                                    total += len(payload)
+                                    if total > info.file_size or total > _MAX_MEMBER_BYTES:
+                                        raise GitHubTransportError("archive_member_size")
+                                    output.write(payload)
+                                output.flush()
+                                os.fsync(output.fileno())
+                        except GitHubTransportError:
+                            raise
+                        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+                            raise GitHubTransportError("archive_extract") from exc
+                        if total != info.file_size:
+                            raise GitHubTransportError("archive_member_size")
+                    finally:
+                        if descriptor >= 0:
+                            os.close(descriptor)
         _fsync_tree(temporary)
         _publish_directory(temporary, target, "archive_publish")
         published = True
@@ -749,18 +875,24 @@ def _write_private(path: Path, payload: bytes) -> None:
     if path.exists() or path.is_symlink():
         raise GitHubTransportError("output_exists")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    descriptor = -1
     try:
         descriptor = os.open(path, flags, 0o600)
-    except OSError as exc:
-        raise GitHubTransportError("output_open") from exc
-    try:
-        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+        try:
+            stream = os.fdopen(descriptor, "wb", closefd=True)
+            descriptor = -1
+        except OSError as exc:
+            raise GitHubTransportError("output_open") from exc
+        with stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
     except Exception:
         path.unlink(missing_ok=True)
         raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def fetch_artifact_bundle(
@@ -785,7 +917,7 @@ def fetch_artifact_bundle(
         if run_value.get("run_attempt") != attempt:
             raise GitHubTransportError("run_attempt")
         jobs_value = client.fetch_jobs(run, attempt)
-        metadata = client.select_artifact(run, name)
+        metadata = client.select_artifact(run_value, name)
         run_payload = _json_bytes(run_value)
         jobs_payload = _json_bytes(jobs_value)
         metadata_payload = _json_bytes(metadata)
