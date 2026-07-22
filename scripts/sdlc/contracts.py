@@ -55,6 +55,23 @@ def _probability(value: object, name: str) -> float:
     return probability
 
 
+def _repository_file(root: Path, relative: str, *, label: str) -> Path:
+    if not relative:
+        raise ContractError(f"{label} path is required")
+    lexical = Path(relative)
+    if lexical.is_absolute() or any(part in {"", ".", ".."} for part in lexical.parts):
+        raise ContractError(f"{label} path escapes the repository: {relative}")
+    current = root
+    for part in lexical.parts:
+        current /= part
+        if current.is_symlink():
+            raise ContractError(f"{label} path is symlinked: {relative}")
+    resolved = current.resolve()
+    if not resolved.is_relative_to(root) or not resolved.is_file():
+        raise ContractError(f"{label} file does not exist in repository: {relative}")
+    return resolved
+
+
 @dataclass(frozen=True)
 class SdlcContract:
     repo_root: Path
@@ -277,17 +294,23 @@ def validate_contract_data(
 
     if repo_root is not None:
         root = repo_root.resolve()
-        for relative in (
-            str(data.get("specification", "")),
-            str(data.get("acceptance_record", "")),
-            str(_mapping(data.get("evidence"), "evidence").get("schema", "")),
-            str(_mapping(data.get("evidence"), "evidence").get("route_schema", "")),
+        for label, relative in (
+            ("specification", str(data.get("specification", ""))),
+            ("acceptance record", str(data.get("acceptance_record", ""))),
+            (
+                "evidence schema",
+                str(_mapping(data.get("evidence"), "evidence").get("schema", "")),
+            ),
+            (
+                "route schema",
+                str(
+                    _mapping(data.get("evidence"), "evidence").get(
+                        "route_schema", ""
+                    )
+                ),
+            ),
         ):
-            path = (root / relative).resolve()
-            if not relative or not path.is_relative_to(root) or not path.is_file():
-                raise ContractError(
-                    f"referenced contract file does not exist in repository: {relative}"
-                )
+            path = _repository_file(root, relative, label=label)
             if path.suffix == ".json":
                 try:
                     json.loads(path.read_text(encoding="utf-8"))
@@ -299,9 +322,7 @@ def load_contract(
     repo_root: str | Path, contract_path: str | Path = ".sdlc/gates.toml"
 ) -> SdlcContract:
     root = Path(repo_root).resolve()
-    source = (root / contract_path).resolve()
-    if not source.is_relative_to(root):
-        raise ContractError("SDLC contract path escapes the repository")
+    source = _repository_file(root, str(contract_path), label="SDLC contract")
     try:
         data = tomllib.loads(source.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
