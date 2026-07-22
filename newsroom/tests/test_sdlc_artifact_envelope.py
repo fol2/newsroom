@@ -36,7 +36,7 @@ def _git(repo: Path, *arguments: str) -> str:
 
 def _repository(tmp_path: Path) -> tuple[Path, str, str]:
     repo = tmp_path / "repo"
-    repo.mkdir()
+    repo.mkdir(parents=True)
     _git(repo, "init", "-b", "main")
     _git(repo, "config", "user.email", "sdlc@example.invalid")
     _git(repo, "config", "user.name", "SDLC Test")
