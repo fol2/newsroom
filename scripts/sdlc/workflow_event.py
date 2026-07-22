@@ -28,7 +28,6 @@ from .emit_evidence import EvidenceError, canonical_json_bytes, sha256_identity
 
 EVENT_SCHEMA_VERSION = "newsroom.sdlc.workflow-event.v1"
 TELEMETRY_SCHEMA_VERSION = "newsroom.sdlc.job-telemetry.v1"
-_REPOSITORY = "fol2/newsroom"
 _MAX_JOBS_JSON_BYTES = 8 * 1024 * 1024
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
 _SAFE_ID = re.compile(r"[A-Za-z0-9_. -]{1,256}")
@@ -53,9 +52,10 @@ _EVENT_KEYS = frozenset({
 })
 _TELEMETRY_KEYS = frozenset({
     "schema_version", "telemetry_identity", "run_id", "run_attempt", "job_id",
-    "job_name", "job_conclusion", "queue_ms", "bootstrap_ms", "finalize_ms",
-    "job_created_at", "job_started_at", "bootstrap_completed_at",
-    "finalization_started_at", "finalization_completed_at", "job_completed_at",
+    "job_name", "job_conclusion", "ready_after_jobs", "queue_ms",
+    "bootstrap_ms", "finalize_ms", "workflow_created_at", "ready_at",
+    "job_started_at", "bootstrap_completed_at", "finalization_started_at",
+    "finalization_completed_at", "job_completed_at",
 })
 
 
@@ -109,10 +109,12 @@ class JobTelemetry:
     job_id: int
     job_name: str
     job_conclusion: str
+    ready_after_jobs: tuple[str, ...]
     queue_ms: int
     bootstrap_ms: int
     finalize_ms: int
-    job_created_at: str
+    workflow_created_at: str
+    ready_at: str
     job_started_at: str
     bootstrap_completed_at: str
     finalization_started_at: str
@@ -131,10 +133,12 @@ class JobTelemetry:
             "job_id": self.job_id,
             "job_name": self.job_name,
             "job_conclusion": self.job_conclusion,
+            "ready_after_jobs": list(self.ready_after_jobs),
             "queue_ms": self.queue_ms,
             "bootstrap_ms": self.bootstrap_ms,
             "finalize_ms": self.finalize_ms,
-            "job_created_at": self.job_created_at,
+            "workflow_created_at": self.workflow_created_at,
+            "ready_at": self.ready_at,
             "job_started_at": self.job_started_at,
             "bootstrap_completed_at": self.bootstrap_completed_at,
             "finalization_started_at": self.finalization_started_at,
@@ -253,21 +257,33 @@ def _validate_job_telemetry_fields(telemetry: JobTelemetry) -> None:
         raise WorkflowEvidenceError("job_name")
     if telemetry.job_conclusion not in _JOB_CONCLUSIONS:
         raise WorkflowEvidenceError("job_conclusion")
+    if (
+        telemetry.ready_after_jobs != tuple(sorted(telemetry.ready_after_jobs))
+        or len(set(telemetry.ready_after_jobs)) != len(telemetry.ready_after_jobs)
+        or telemetry.job_name in telemetry.ready_after_jobs
+    ):
+        raise WorkflowEvidenceError("ready_after_jobs")
+    for dependency in telemetry.ready_after_jobs:
+        if _SAFE_ID.fullmatch(_text(dependency, "ready_after_jobs", maximum=256)) is None:
+            raise WorkflowEvidenceError("ready_after_jobs")
     for field, value in (
         ("queue_ms", telemetry.queue_ms),
         ("bootstrap_ms", telemetry.bootstrap_ms),
         ("finalize_ms", telemetry.finalize_ms),
     ):
         _nonnegative(value, field)
-    _, created = _timestamp(telemetry.job_created_at, "job_created_at")
+    _, workflow_created = _timestamp(
+        telemetry.workflow_created_at, "workflow_created_at"
+    )
+    _, ready = _timestamp(telemetry.ready_at, "ready_at")
     _, started = _timestamp(telemetry.job_started_at, "job_started_at")
     _, bootstrap = _timestamp(telemetry.bootstrap_completed_at, "bootstrap_completed_at")
     _, final_started = _timestamp(telemetry.finalization_started_at, "finalization_started_at")
     _, final_completed = _timestamp(telemetry.finalization_completed_at, "finalization_completed_at")
     _, completed = _timestamp(telemetry.job_completed_at, "job_completed_at")
-    if not created <= started <= bootstrap <= final_started <= final_completed <= completed:
+    if not workflow_created <= ready <= started <= bootstrap <= final_started <= final_completed <= completed:
         raise WorkflowEvidenceError("job_phase_order")
-    if telemetry.queue_ms != _milliseconds(created, started, "queue_ms"):
+    if telemetry.queue_ms != _milliseconds(ready, started, "queue_ms"):
         raise WorkflowEvidenceError("queue_ms")
     if telemetry.bootstrap_ms != _milliseconds(started, bootstrap, "bootstrap_ms"):
         raise WorkflowEvidenceError("bootstrap_ms")
@@ -279,16 +295,24 @@ def validate_job_telemetry(value: object) -> JobTelemetry:
     mapping = _mapping_value(value, "job_telemetry")
     if frozenset(mapping) != _TELEMETRY_KEYS or mapping.get("schema_version") != TELEMETRY_SCHEMA_VERSION:
         raise WorkflowEvidenceError("job_telemetry_shape")
+    raw_ready_after = mapping.get("ready_after_jobs")
+    if not isinstance(raw_ready_after, list) or len(raw_ready_after) > 100:
+        raise WorkflowEvidenceError("ready_after_jobs")
+    ready_after = tuple(
+        _text(item, "ready_after_jobs", maximum=256) for item in raw_ready_after
+    )
     telemetry = JobTelemetry(
         run_id=_positive(mapping.get("run_id"), "run_id"),
         run_attempt=_positive(mapping.get("run_attempt"), "run_attempt"),
         job_id=_positive(mapping.get("job_id"), "job_id"),
         job_name=_text(mapping.get("job_name"), "job_name", maximum=256),
         job_conclusion=_text(mapping.get("job_conclusion"), "job_conclusion", maximum=32),
+        ready_after_jobs=ready_after,
         queue_ms=_nonnegative(mapping.get("queue_ms"), "queue_ms"),
         bootstrap_ms=_nonnegative(mapping.get("bootstrap_ms"), "bootstrap_ms"),
         finalize_ms=_nonnegative(mapping.get("finalize_ms"), "finalize_ms"),
-        job_created_at=_text(mapping.get("job_created_at"), "job_created_at", maximum=64),
+        workflow_created_at=_text(mapping.get("workflow_created_at"), "workflow_created_at", maximum=64),
+        ready_at=_text(mapping.get("ready_at"), "ready_at", maximum=64),
         job_started_at=_text(mapping.get("job_started_at"), "job_started_at", maximum=64),
         bootstrap_completed_at=_text(mapping.get("bootstrap_completed_at"), "bootstrap_completed_at", maximum=64),
         finalization_started_at=_text(mapping.get("finalization_started_at"), "finalization_started_at", maximum=64),
@@ -312,10 +336,6 @@ def _event_snapshot(path: str | Path) -> tuple[Mapping[str, object], str]:
         )
     except (ArtifactProvenanceError, UnicodeError, json.JSONDecodeError) as exc:
         raise WorkflowEvidenceError("event_file") from exc
-
-
-def _event_mapping(path: str | Path) -> Mapping[str, object]:
-    return _event_snapshot(path)[0]
 
 
 def _base_identity(
@@ -416,6 +436,8 @@ def measure_job_telemetry(
     run_id: int,
     run_attempt: int,
     job_name: str,
+    workflow_created_at: str,
+    ready_after_job_names: Sequence[str] = (),
     bootstrap_end_step: str,
     finalization_step: str,
 ) -> JobTelemetry:
@@ -424,6 +446,19 @@ def measure_job_telemetry(
     expected_name = _text(job_name, "job_name", maximum=256)
     if _SAFE_ID.fullmatch(expected_name) is None:
         raise WorkflowEvidenceError("job_name")
+    ready_after = tuple(sorted(
+        _text(name, "ready_after_jobs", maximum=256)
+        for name in ready_after_job_names
+    ))
+    if (
+        len(set(ready_after)) != len(ready_after)
+        or expected_name in ready_after
+        or any(_SAFE_ID.fullmatch(name) is None for name in ready_after)
+    ):
+        raise WorkflowEvidenceError("ready_after_jobs")
+    workflow_created_text, workflow_created = _timestamp(
+        workflow_created_at, "workflow_created_at"
+    )
     bootstrap_name = _text(bootstrap_end_step, "bootstrap_step", maximum=256)
     final_name = _text(finalization_step, "finalization_step", maximum=256)
 
@@ -431,10 +466,33 @@ def measure_job_telemetry(
     jobs = payload.get("jobs")
     if not isinstance(jobs, list) or len(jobs) > 100:
         raise WorkflowEvidenceError("jobs_shape")
-    matches = [job for job in jobs if isinstance(job, dict) and job.get("name") == expected_name]
-    if len(matches) != 1:
-        raise WorkflowEvidenceError("job_identity")
-    job = _mapping(matches[0], "job")
+
+    def unique_job(name: str, code: str) -> Mapping[str, object]:
+        matches = [
+            job for job in jobs
+            if isinstance(job, dict) and job.get("name") == name
+        ]
+        if len(matches) != 1:
+            raise WorkflowEvidenceError(code)
+        return _mapping(matches[0], "job")
+
+    job = unique_job(expected_name, "job_identity")
+    ready_text = workflow_created_text
+    ready = workflow_created
+    for dependency_name in ready_after:
+        dependency = unique_job(dependency_name, "ready_after_job")
+        if (
+            dependency.get("run_id") not in {None, expected_run}
+            or dependency.get("run_attempt") not in {None, expected_attempt}
+        ):
+            raise WorkflowEvidenceError("ready_after_job_identity")
+        if dependency.get("status") != "completed":
+            raise WorkflowEvidenceError("ready_after_job_incomplete")
+        dependency_text, dependency_completed = _timestamp(
+            dependency.get("completed_at"), "ready_after_job_completed_at"
+        )
+        if dependency_completed > ready:
+            ready_text, ready = dependency_text, dependency_completed
     if job.get("run_id") not in {None, expected_run}:
         raise WorkflowEvidenceError("job_run_id")
     if job.get("run_attempt") not in {None, expected_attempt}:
@@ -445,9 +503,8 @@ def measure_job_telemetry(
     conclusion = _text(job.get("conclusion"), "job_conclusion", maximum=32)
     if conclusion not in _JOB_CONCLUSIONS:
         raise WorkflowEvidenceError("job_conclusion")
-    created_text, created = _timestamp(job.get("created_at"), "job_created_at")
     started_text, started = _timestamp(job.get("started_at"), "job_started_at")
-    if started < created:
+    if started < ready:
         raise WorkflowEvidenceError("job_queue_time")
 
     steps_value = job.get("steps")
@@ -490,10 +547,12 @@ def measure_job_telemetry(
         job_id=job_id,
         job_name=expected_name,
         job_conclusion=conclusion,
-        queue_ms=_milliseconds(created, started, "queue_ms"),
+        ready_after_jobs=ready_after,
+        queue_ms=_milliseconds(ready, started, "queue_ms"),
         bootstrap_ms=_milliseconds(started, bootstrap_completed, "bootstrap_ms"),
         finalize_ms=_milliseconds(final_started, final_completed, "finalize_ms"),
-        job_created_at=created_text,
+        workflow_created_at=workflow_created_text,
+        ready_at=ready_text,
         job_started_at=started_text,
         bootstrap_completed_at=bootstrap_text,
         finalization_started_at=final_started_text,
@@ -579,6 +638,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     telemetry_parser.add_argument("--run-id", type=int, required=True)
     telemetry_parser.add_argument("--run-attempt", type=int, required=True)
     telemetry_parser.add_argument("--job-name", required=True)
+    telemetry_parser.add_argument("--workflow-created-at", required=True)
+    telemetry_parser.add_argument("--ready-after-job", action="append", default=[])
     telemetry_parser.add_argument("--bootstrap-end-step", required=True)
     telemetry_parser.add_argument("--finalization-step", required=True)
     telemetry_parser.add_argument("--output")
@@ -594,6 +655,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_id=arguments.run_id,
                 run_attempt=arguments.run_attempt,
                 job_name=arguments.job_name,
+                workflow_created_at=arguments.workflow_created_at,
+                ready_after_job_names=arguments.ready_after_job,
                 bootstrap_end_step=arguments.bootstrap_end_step,
                 finalization_step=arguments.finalization_step,
             ).as_dict()
