@@ -18,6 +18,7 @@ SCHEMA_VERSION = "newsroom.sdlc.junit-summary.v1"
 _MAX_REPORTS = 32
 _MAX_REPORT_BYTES = 16 * 1024 * 1024
 _MAX_TESTS = 100_000
+_MAX_TEST_SECONDS = Decimal("60")
 _MAX_FIELD_CHARS = 262_144
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -78,7 +79,12 @@ def _local_name(tag: str) -> str:
 
 def _safe_relative(root: Path, relative: str | Path, *, must_exist: bool) -> Path:
     candidate = Path(relative)
-    if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+    if (
+        candidate.is_absolute()
+        or not candidate.parts
+        or ".." in candidate.parts
+        or "\\" in str(relative)
+    ):
         raise JUnitEvidenceError("path_escape")
     unresolved = root / candidate
     current = root
@@ -89,22 +95,30 @@ def _safe_relative(root: Path, relative: str | Path, *, must_exist: bool) -> Pat
     resolved = unresolved.resolve()
     if not resolved.is_relative_to(root):
         raise JUnitEvidenceError("path_escape")
-    if must_exist:
-        try:
-            mode = os.lstat(unresolved).st_mode
-        except OSError as exc:
-            raise JUnitEvidenceError("missing_report") from exc
-        if not stat.S_ISREG(mode):
-            raise JUnitEvidenceError("non_regular_report")
+    if must_exist and not unresolved.exists():
+        raise JUnitEvidenceError("missing_report")
     return unresolved
 
 
 def _read_report(root: Path, relative: str) -> tuple[bytes, str]:
     path = _safe_relative(root, relative, must_exist=True)
-    size = path.stat().st_size
-    if size <= 0 or size > _MAX_REPORT_BYTES:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise JUnitEvidenceError("report_open") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise JUnitEvidenceError("non_regular_report")
+        if metadata.st_size <= 0 or metadata.st_size > _MAX_REPORT_BYTES:
+            raise JUnitEvidenceError("report_size")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            payload = stream.read(_MAX_REPORT_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if not payload or len(payload) > _MAX_REPORT_BYTES:
         raise JUnitEvidenceError("report_size")
-    payload = path.read_bytes()
     upper = payload.upper()
     if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
         raise JUnitEvidenceError("xml_declaration_forbidden")
@@ -136,7 +150,7 @@ def _duration_seconds(case: ET.Element) -> Decimal:
         value = Decimal(raw)
     except InvalidOperation as exc:
         raise JUnitEvidenceError("invalid_test_duration") from exc
-    if not value.is_finite() or value < 0:
+    if not value.is_finite() or value < 0 or value > _MAX_TEST_SECONDS:
         raise JUnitEvidenceError("invalid_test_duration")
     return value
 
@@ -175,19 +189,26 @@ def summarize_junit(
     optional_test_ids: Iterable[str] = (),
 ) -> JUnitSummary:
     root = Path(repo_root).resolve()
+    if not root.is_dir():
+        raise JUnitEvidenceError("repo_root_missing")
     report_names = tuple(str(item) for item in reports)
     if not report_names or len(report_names) > _MAX_REPORTS:
         raise JUnitEvidenceError("report_count")
-    if len(set(report_names)) != len(report_names):
-        raise JUnitEvidenceError("duplicate_report")
-    optional = frozenset(optional_test_ids)
-    if any(not item for item in optional):
-        raise JUnitEvidenceError("optional_test_id_empty")
+    optional_values = tuple(optional_test_ids)
+    if len(optional_values) > _MAX_TESTS:
+        raise JUnitEvidenceError("optional_test_count")
+    if any(not item or len(item) > _MAX_FIELD_CHARS for item in optional_values):
+        raise JUnitEvidenceError("optional_test_id_invalid")
+    optional = frozenset(optional_values)
 
     cases: dict[str, tuple[str, ET.Element | None, Decimal]] = {}
     report_digests: list[tuple[str, str]] = []
+    seen_reports: set[str] = set()
     for report in report_names:
         payload, normalized_path = _read_report(root, report)
+        if normalized_path in seen_reports:
+            raise JUnitEvidenceError("duplicate_report")
+        seen_reports.add(normalized_path)
         try:
             document = ET.fromstring(payload)
         except ET.ParseError as exc:
@@ -200,14 +221,14 @@ def summarize_junit(
         ):
             test_id = _case_id(case)
             if test_id in cases:
-                raise JUnitEvidenceError(f"duplicate_testcase:{test_id}")
+                raise JUnitEvidenceError("duplicate_testcase")
             terminals = [
                 child
                 for child in case
                 if _local_name(child.tag) in {"failure", "error", "skipped"}
             ]
             if len(terminals) > 1:
-                raise JUnitEvidenceError(f"conflicting_outcomes:{test_id}")
+                raise JUnitEvidenceError("conflicting_outcomes")
             outcome = _local_name(terminals[0].tag) if terminals else "passed"
             cases[test_id] = (
                 outcome,
@@ -219,8 +240,7 @@ def summarize_junit(
 
     if not cases:
         raise JUnitEvidenceError("no_testcases")
-    missing_optional = optional - cases.keys()
-    if missing_optional:
+    if optional - cases.keys():
         raise JUnitEvidenceError("optional_test_missing")
 
     failure_count = error_count = skip_count = required_skip_count = 0
@@ -281,11 +301,30 @@ def summarize_junit(
     )
 
 
-def _write_output(root: Path, relative: str, rendered: str) -> None:
+def _write_output(
+    root: Path,
+    relative: str,
+    rendered: str,
+    *,
+    report_paths: frozenset[str],
+) -> None:
     path = _safe_relative(root, relative, must_exist=False)
+    normalized = path.relative_to(root).as_posix()
+    if path.suffix != ".json":
+        raise JUnitEvidenceError("output_extension")
+    if normalized in report_paths:
+        raise JUnitEvidenceError("output_overwrites_report")
     if not path.parent.is_dir():
         raise JUnitEvidenceError("output_parent_missing")
-    path.write_text(rendered, encoding="utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as exc:
+        raise JUnitEvidenceError("output_exists") from exc
+    except OSError as exc:
+        raise JUnitEvidenceError("output_open") from exc
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(rendered)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -308,7 +347,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             separators=(",", ":"),
         ) + "\n"
         if arguments.output:
-            _write_output(root, arguments.output, rendered)
+            _write_output(
+                root,
+                arguments.output,
+                rendered,
+                report_paths=frozenset(path for path, _ in summary.report_digests),
+            )
         else:
             sys.stdout.write(rendered)
     except (JUnitEvidenceError, OSError, UnicodeError) as exc:
