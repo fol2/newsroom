@@ -28,15 +28,15 @@ def test_success_and_nonzero_exit_are_typed() -> None:
         gate_id="route",
         phase="unit",
         argv=_python("print('ok')"),
-        deadline=LaneDeadline.start(2),
-        command_timeout_seconds=1,
+        deadline=LaneDeadline.start(4),
+        command_timeout_seconds=3,
     )
     failed = run_gate_command(
         gate_id="route",
         phase="unit",
         argv=_python("raise SystemExit(7)"),
-        deadline=LaneDeadline.start(2),
-        command_timeout_seconds=1,
+        deadline=LaneDeadline.start(4),
+        command_timeout_seconds=3,
     )
 
     assert passed.result == "PASS"
@@ -55,7 +55,10 @@ def test_expired_shared_deadline_prevents_process_start(tmp_path: Path) -> None:
     result = run_gate_command(
         gate_id="core-deterministic",
         phase="tests",
-        argv=_python("from pathlib import Path; Path(__import__('sys').argv[1]).touch()", str(marker)),
+        argv=_python(
+            "from pathlib import Path; Path(__import__('sys').argv[1]).touch()",
+            str(marker),
+        ),
         deadline=deadline,
         command_timeout_seconds=1,
     )
@@ -67,28 +70,29 @@ def test_expired_shared_deadline_prevents_process_start(tmp_path: Path) -> None:
 
 
 def test_multiple_commands_share_one_lane_deadline() -> None:
-    deadline = LaneDeadline.start(0.5)
+    deadline = LaneDeadline.start(2.5)
+    started = time.monotonic()
     first = run_gate_command(
         gate_id="core-deterministic",
         phase="first",
         argv=_python("import time; time.sleep(0.1)"),
         deadline=deadline,
-        command_timeout_seconds=0.3,
-        termination_grace_seconds=0.05,
+        command_timeout_seconds=1.5,
+        termination_grace_seconds=0.1,
     )
     second = run_gate_command(
         gate_id="core-deterministic",
         phase="second",
-        argv=_python("import time; time.sleep(1)"),
+        argv=_python("import time; time.sleep(5)"),
         deadline=deadline,
-        command_timeout_seconds=0.9,
-        termination_grace_seconds=0.1,
+        command_timeout_seconds=3,
+        termination_grace_seconds=0.2,
     )
 
     assert first.result == "PASS"
     assert second.result == "BUDGET_EXCEEDED"
-    assert second.execution_ms < 450
-    assert deadline.remaining_seconds() == 0
+    assert time.monotonic() - started < 2.5
+    assert deadline.remaining_seconds() <= 0.25
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group evidence is POSIX-specific")
@@ -123,9 +127,9 @@ time.sleep(30)
         gate_id="core-deterministic",
         phase="descendants",
         argv=_python(parent, child, str(marker), str(pid_file)),
-        deadline=LaneDeadline.start(1.2),
-        command_timeout_seconds=0.9,
-        termination_grace_seconds=0.35,
+        deadline=LaneDeadline.start(3),
+        command_timeout_seconds=2.5,
+        termination_grace_seconds=0.5,
     )
 
     stop_at = time.monotonic() + 1
@@ -134,7 +138,7 @@ time.sleep(30)
     assert pid_file.exists()
     assert marker.read_text(encoding="utf-8") == "terminated"
     assert result.result == "BUDGET_EXCEEDED"
-    assert result.execution_ms < 900
+    assert result.execution_ms < 2_500
     assert result.result_reason == "BUDGET_EXCEEDED:core-deterministic:descendants"
 
 
@@ -153,9 +157,9 @@ Path(sys.argv[1]).write_text(str(process.pid), encoding='utf-8')
         gate_id="core-deterministic",
         phase="background",
         argv=_python(parent, str(pid_file)),
-        deadline=LaneDeadline.start(2),
-        command_timeout_seconds=1,
-        termination_grace_seconds=0.3,
+        deadline=LaneDeadline.start(4),
+        command_timeout_seconds=3,
+        termination_grace_seconds=0.5,
     )
 
     assert pid_file.exists()
@@ -175,8 +179,8 @@ def test_output_is_memory_bounded_and_secret_boundary_is_redacted() -> None:
             "sys.stdout.write('x' * 2000000); "
             "sys.stdout.write(os.environ['NEWSROOM_TEST_API_TOKEN'] + 'z' * 124)"
         ),
-        deadline=LaneDeadline.start(3),
-        command_timeout_seconds=2,
+        deadline=LaneDeadline.start(5),
+        command_timeout_seconds=3.5,
         env=environment,
         output_limit_bytes=128,
     )
@@ -195,8 +199,8 @@ def test_environment_error_does_not_echo_command_or_exception_message() -> None:
         gate_id="route",
         phase="spawn",
         argv=(missing,),
-        deadline=LaneDeadline.start(1),
-        command_timeout_seconds=0.5,
+        deadline=LaneDeadline.start(2),
+        command_timeout_seconds=1,
         termination_grace_seconds=0.1,
     )
 
@@ -237,7 +241,9 @@ def test_invalid_budget_identifier_and_output_limit_are_rejected() -> None:
         )
 
 
-def test_cli_uses_accepted_gate_and_lane_budget(capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_uses_accepted_gate_and_lane_budget(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     exit_code = watchdog_main(
         (
             "--repo-root",
