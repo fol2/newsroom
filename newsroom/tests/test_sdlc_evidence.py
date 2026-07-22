@@ -29,6 +29,7 @@ SERVICE_DIGEST = "sha256:" + "b" * 64
 REPORT_DIGEST = "sha256:" + "c" * 64
 TEST_IDS_DIGEST = "sha256:" + "d" * 64
 FAILURE_DIGEST = "sha256:" + "e" * 64
+_MISSING = object()
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -160,7 +161,7 @@ def _build(
     route: dict[str, object],
     *,
     gate_run: dict[str, object] | None = None,
-    junit: dict[str, object] | None = None,
+    junit: object = _MISSING,
     command_digest: str = COMMAND_DIGEST,
     service_digest: str | None = None,
     queue_ms: int = 1,
@@ -169,7 +170,12 @@ def _build(
     created_at: str = "2026-07-22T07:30:00Z",
 ) -> dict[str, object]:
     run = gate_run or _gate_run()
-    selected_junit = _junit() if junit is None and run["result"] == "PASS" else junit
+    if junit is _MISSING:
+        selected_junit: object | None = (
+            _junit() if run["result"] == "PASS" else None
+        )
+    else:
+        selected_junit = junit
     return build_gate_evidence(
         repo_root=contract.repo_root,
         contract=contract,
