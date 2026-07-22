@@ -214,7 +214,7 @@ def test_event_rejects_wrong_base_repository_missing_base_or_head_mismatch(
     value = json.loads(path.read_text(encoding="utf-8"))
     value["merge_group"]["head_sha"] = "c" * 40
     path.write_text(json.dumps(value), encoding="utf-8")
-    with pytest.raises(WorkflowEvidenceError, match="event_head_sha"):
+    with pytest.raises(WorkflowEvidenceError, match="run_context"):
         derive_workflow_event(repo, environment)
 
     environment = _environment(repo, event_name="merge_group", base=base, head=head)
