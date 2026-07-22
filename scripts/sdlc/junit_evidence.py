@@ -95,14 +95,26 @@ def _safe_relative(root: Path, relative: str | Path, *, must_exist: bool) -> Pat
     resolved = unresolved.resolve()
     if not resolved.is_relative_to(root):
         raise JUnitEvidenceError("path_escape")
-    if must_exist and not unresolved.exists():
-        raise JUnitEvidenceError("missing_report")
+    if must_exist:
+        try:
+            metadata = os.lstat(unresolved)
+        except FileNotFoundError as exc:
+            raise JUnitEvidenceError("missing_report") from exc
+        except OSError as exc:
+            raise JUnitEvidenceError("report_stat") from exc
+        if not stat.S_ISREG(metadata.st_mode):
+            raise JUnitEvidenceError("non_regular_report")
     return unresolved
 
 
 def _read_report(root: Path, relative: str) -> tuple[bytes, str]:
     path = _safe_relative(root, relative, must_exist=True)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
@@ -310,10 +322,10 @@ def _write_output(
 ) -> None:
     path = _safe_relative(root, relative, must_exist=False)
     normalized = path.relative_to(root).as_posix()
-    if path.suffix != ".json":
-        raise JUnitEvidenceError("output_extension")
     if normalized in report_paths:
         raise JUnitEvidenceError("output_overwrites_report")
+    if path.suffix != ".json":
+        raise JUnitEvidenceError("output_extension")
     if not path.parent.is_dir():
         raise JUnitEvidenceError("output_parent_missing")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
