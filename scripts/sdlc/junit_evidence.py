@@ -131,8 +131,12 @@ def _read_report(root: Path, relative: str) -> tuple[bytes, str]:
         os.close(descriptor)
     if not payload or len(payload) > _MAX_REPORT_BYTES:
         raise JUnitEvidenceError("report_size")
-    upper = payload.upper()
-    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+    try:
+        decoded = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise JUnitEvidenceError("invalid_encoding") from exc
+    upper = decoded.upper()
+    if "<!DOCTYPE" in upper or "<!ENTITY" in upper:
         raise JUnitEvidenceError("xml_declaration_forbidden")
     return payload, path.relative_to(root).as_posix()
 
