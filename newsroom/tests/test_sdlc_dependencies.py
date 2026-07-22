@@ -72,6 +72,40 @@ def test_package_reexport_links_child_module_to_package_importer(
     )
 
 
+def test_constant_dynamic_internal_import_creates_an_edge(tmp_path: Path) -> None:
+    _write(tmp_path, "newsroom/__init__.py")
+    _write(tmp_path, "newsroom/core.py", "VALUE = 1\n")
+    _write(
+        tmp_path,
+        "newsroom/consumer.py",
+        "import importlib\nmodule = importlib.import_module('newsroom.core')\n",
+    )
+
+    graph = build_dependency_graph(tmp_path)
+
+    assert graph.dependent_paths("newsroom/core.py") == (
+        "newsroom/consumer.py",
+    )
+
+
+def test_variable_or_relative_dynamic_import_fails_closed(tmp_path: Path) -> None:
+    _write(tmp_path, "newsroom/__init__.py")
+    _write(
+        tmp_path,
+        "newsroom/bad.py",
+        "import importlib\nname = 'newsroom.core'\nimportlib.import_module(name)\n",
+    )
+    with pytest.raises(DependencyError, match="not statically resolvable"):
+        build_dependency_graph(tmp_path)
+
+    (tmp_path / "newsroom" / "bad.py").write_text(
+        "import importlib\nimportlib.import_module('.core', package='newsroom')\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DependencyError, match="relative dynamic import"):
+        build_dependency_graph(tmp_path)
+
+
 def test_unresolved_internal_import_and_relative_escape_fail_closed(
     tmp_path: Path,
 ) -> None:
