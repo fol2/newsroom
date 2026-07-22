@@ -11,9 +11,11 @@ import pytest
 
 import scripts.sdlc.command_spec as command_spec_module
 from scripts.sdlc.command_spec import (
+    CommandSpec,
     CommandSpecError,
     build_environment,
     execute_command_spec,
+    executable_digest,
     load_command_spec,
     main as command_main,
     parse_command_spec,
@@ -22,7 +24,7 @@ from scripts.sdlc.contracts import SdlcContract, load_contract
 
 
 REPO_ROOT = Path(__file__).parents[2]
-FIXED_DIGEST = "sha256:a06f3cb359bd3b59d89b388130577ca4b54c30139cc3ef8dc902ac8272456063"
+FIXED_DIGEST = "sha256:4a0780dacdf4bc9f4864efd7f5ff10b123131788af556c5bd4b254f1b63e6108"
 
 
 def _contract(root: Path = REPO_ROOT) -> SdlcContract:
@@ -39,16 +41,20 @@ def _value(
     static_env: dict[str, str] | None = None,
     pass_env: list[str] | None = None,
     redact_env: list[str] | None = None,
+    executable_sha: str | None = None,
 ) -> dict[str, object]:
+    selected_argv = argv or [sys.executable, "-c", "print('ok')"]
+    _, actual_digest = executable_digest(selected_argv[0])
     return {
         "schema_version": "newsroom.sdlc.command-spec.v1",
         "gate_id": "route",
         "phase": "unit",
-        "argv": argv or [sys.executable, "-c", "print('ok')"],
+        "argv": selected_argv,
         "cwd": cwd,
         "static_env": static_env or {},
         "pass_env": pass_env or [],
         "redact_env": redact_env or [],
+        "executable_digest": executable_sha or actual_digest,
         "output_limit_bytes": 65_536,
         "termination_grace_ms": 500,
     }
@@ -62,16 +68,21 @@ def _write_spec(root: Path, name: str, value: dict[str, object]) -> Path:
 
 
 def test_command_spec_has_fixed_canonical_digest() -> None:
-    value = _value(
-        argv=["python", "-c", "print('ok')"],
-        static_env={"PYTHONHASHSEED": "0"},
-        pass_env=["PATH"],
+    spec = CommandSpec(
+        gate_id="route",
+        phase="unit",
+        argv=("/usr/bin/python", "-c", "print('ok')"),
+        cwd=".",
+        static_env=(("PYTHONHASHSEED", "0"),),
+        pass_env=(),
+        redact_env=(),
+        executable_digest="sha256:" + "1" * 64,
+        output_limit_bytes=65_536,
+        termination_grace_ms=500,
     )
 
-    spec = parse_command_spec(value, contract=_contract())
-
     assert spec.digest == FIXED_DIGEST
-    assert spec.as_dict() == value
+    assert spec.as_dict()["executable_digest"] == "sha256:" + "1" * 64
 
 
 def test_order_is_normalized_but_each_execution_input_changes_digest(
@@ -81,13 +92,14 @@ def test_order_is_normalized_but_each_execution_input_changes_digest(
     contract = _contract(tmp_path)
     baseline_value = _value(
         static_env={"B": "2", "A": "1"},
-        pass_env=["VISIBLE", "CUSTOM_VALUE"],
-        redact_env=["CUSTOM_VALUE"],
+        pass_env=["SECRET_TWO", "SECRET_ONE"],
+        redact_env=["SECRET_ONE", "SECRET_TWO"],
     )
     baseline = parse_command_spec(baseline_value, contract=contract)
     reordered = deepcopy(baseline_value)
     reordered["static_env"] = {"A": "1", "B": "2"}
-    reordered["pass_env"] = ["CUSTOM_VALUE", "VISIBLE"]
+    reordered["pass_env"] = ["SECRET_ONE", "SECRET_TWO"]
+    reordered["redact_env"] = ["SECRET_TWO", "SECRET_ONE"]
     assert parse_command_spec(reordered, contract=contract).digest == baseline.digest
 
     variants: list[dict[str, object]] = []
@@ -95,14 +107,16 @@ def test_order_is_normalized_but_each_execution_input_changes_digest(
         ("argv", [sys.executable, "-c", "print('changed')"]),
         ("cwd", "sub"),
         ("static_env", {"A": "1", "B": "3"}),
-        ("pass_env", ["VISIBLE", "CUSTOM_VALUE", "PATH"]),
-        ("redact_env", []),
         ("output_limit_bytes", 4096),
         ("termination_grace_ms", 250),
     ):
         changed = deepcopy(baseline_value)
         changed[field] = value
         variants.append(changed)
+    changed_environment = deepcopy(baseline_value)
+    changed_environment["pass_env"] = ["SECRET_ONE", "SECRET_TWO", "SECRET_THREE"]
+    changed_environment["redact_env"] = ["SECRET_ONE", "SECRET_TWO", "SECRET_THREE"]
+    variants.append(changed_environment)
 
     assert all(
         parse_command_spec(value, contract=contract).digest != baseline.digest
@@ -124,8 +138,8 @@ def test_same_spec_drives_execution_digest_and_minimal_redacted_environment(
     spec = parse_command_spec(
         _value(
             argv=[sys.executable, "-c", source],
-            static_env={"STATIC_VALUE": "fixed"},
-            pass_env=["VISIBLE", "CUSTOM_VALUE"],
+            static_env={"STATIC_VALUE": "fixed", "VISIBLE": "allowed"},
+            pass_env=["CUSTOM_VALUE"],
             redact_env=["CUSTOM_VALUE"],
         ),
         contract=contract,
@@ -135,7 +149,6 @@ def test_same_spec_drives_execution_digest_and_minimal_redacted_environment(
         contract=contract,
         spec=spec,
         ambient_env={
-            "VISIBLE": "allowed",
             "CUSTOM_VALUE": "sensitive-value",
             "UNLISTED": "must-not-leak",
         },
@@ -157,10 +170,14 @@ def test_secret_static_environment_and_unscoped_redaction_are_rejected(
         parse_command_spec(secret, contract=contract)
 
     unscoped = _value(redact_env=["MISSING"])
-    with pytest.raises(CommandSpecError, match="redact_env_scope"):
+    with pytest.raises(CommandSpecError, match="unbound_environment"):
         parse_command_spec(unscoped, contract=contract)
 
-    overlap = _value(static_env={"VALUE": "x"}, pass_env=["VALUE"])
+    overlap = _value(
+        static_env={"VALUE": "x"},
+        pass_env=["VALUE"],
+        redact_env=["VALUE"],
+    )
     with pytest.raises(CommandSpecError, match="environment_overlap"):
         parse_command_spec(overlap, contract=contract)
 
@@ -168,7 +185,10 @@ def test_secret_static_environment_and_unscoped_redaction_are_rejected(
 def test_missing_environment_fails_without_echoing_name_or_value(tmp_path: Path) -> None:
     contract = _contract(tmp_path)
     spec = parse_command_spec(
-        _value(pass_env=["PRIVATE_MISSING_VALUE"]),
+        _value(
+            pass_env=["PRIVATE_MISSING_VALUE"],
+            redact_env=["PRIVATE_MISSING_VALUE"],
+        ),
         contract=contract,
     )
 
@@ -197,10 +217,81 @@ def test_shape_identifiers_and_numeric_limits_fail_closed(tmp_path: Path) -> Non
     bad_grace = _value()
     bad_grace["termination_grace_ms"] = 5001
     cases.append((bad_grace, "termination_grace"))
+    bad_executable = _value(executable_sha="sha256:" + "0" * 64)
+    cases.append((bad_executable, "executable_digest"))
+    relative_executable = _value()
+    relative_executable["argv"] = ["python", "-c", "pass"]
+    cases.append((relative_executable, "executable_path"))
 
     for value, code in cases:
         with pytest.raises(CommandSpecError, match=code):
             parse_command_spec(value, contract=contract)
+
+
+def test_direct_dataclass_cannot_bypass_parser_invariants(tmp_path: Path) -> None:
+    contract = _contract(tmp_path)
+    parsed = parse_command_spec(_value(), contract=contract)
+    bypass = CommandSpec(
+        gate_id=parsed.gate_id,
+        phase=parsed.phase,
+        argv=parsed.argv,
+        cwd=parsed.cwd,
+        static_env=parsed.static_env,
+        pass_env=("UNBOUND_VALUE",),
+        redact_env=(),
+        executable_digest=parsed.executable_digest,
+        output_limit_bytes=parsed.output_limit_bytes,
+        termination_grace_ms=parsed.termination_grace_ms,
+    )
+
+    with pytest.raises(CommandSpecError, match="unbound_environment"):
+        execute_command_spec(
+            contract=contract,
+            spec=bypass,
+            ambient_env={"UNBOUND_VALUE": "secret"},
+        )
+
+
+def test_executable_is_resolved_and_content_bound(tmp_path: Path) -> None:
+    contract = _contract(tmp_path)
+    resolved, digest = executable_digest(sys.executable)
+    spec = parse_command_spec(_value(), contract=contract)
+
+    assert spec.argv[0] == resolved
+    assert spec.executable_digest == digest
+
+
+def test_all_ambient_values_are_redacted_and_bounded(tmp_path: Path) -> None:
+    contract = _contract(tmp_path)
+    unbound = _value(pass_env=["VALUE"], redact_env=[])
+    with pytest.raises(CommandSpecError, match="unbound_environment"):
+        parse_command_spec(unbound, contract=contract)
+
+    spec = parse_command_spec(
+        _value(pass_env=["VALUE"], redact_env=["VALUE"]),
+        contract=contract,
+    )
+    with pytest.raises(CommandSpecError, match="environment_value"):
+        build_environment(spec, {"VALUE": "x" * 65_537})
+    with pytest.raises(CommandSpecError, match="environment_value"):
+        build_environment(spec, {"VALUE": "bad\x00value"})
+
+
+def test_duplicate_json_keys_fail_closed(tmp_path: Path) -> None:
+    contract = _contract(tmp_path)
+    _, digest = executable_digest(sys.executable)
+    payload = (
+        '{"schema_version":"newsroom.sdlc.command-spec.v1",'
+        '"gate_id":"route","gate_id":"route","phase":"unit",'
+        f'"argv":[{json.dumps(sys.executable)},"-c","pass"],'
+        '"cwd":".","static_env":{},"pass_env":[],"redact_env":[],'
+        f'"executable_digest":"{digest}",'
+        '"output_limit_bytes":65536,"termination_grace_ms":500}'
+    )
+    (tmp_path / "duplicate.json").write_text(payload, encoding="utf-8")
+
+    with pytest.raises(CommandSpecError, match="spec_duplicate_key"):
+        load_command_spec(tmp_path, "duplicate.json", contract=contract)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="symlink evidence is POSIX-specific")
@@ -291,7 +382,7 @@ def test_cli_preserves_gate_exit_semantics_and_hides_input_details(
     _write_spec(
         tmp_path,
         "missing.json",
-        _value(pass_env=[private_name]),
+        _value(pass_env=[private_name], redact_env=[private_name]),
     )
     assert command_main(
         ("--repo-root", str(tmp_path), "--spec", "missing.json")
