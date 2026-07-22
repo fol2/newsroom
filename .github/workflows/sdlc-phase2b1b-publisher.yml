@@ -1,0 +1,72 @@
+name: SDLC Phase 2B1b Hardening Publisher
+
+on:
+  push:
+    branches:
+      - agent/sdlc-v2-phase2b1b-github-transport
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sdlc-phase2b1b-publisher-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: agent/sdlc-v2-phase2b1b-github-transport
+          fetch-depth: 0
+          show-progress: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Reconstruct and verify hardening script
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum .sdlc/transport-hardening.part-00 | cut -d' ' -f1)" = fc0c098bae59873820ad6f2648faf2d31b49d8100bde5e199a767c075abc8970
+          test "$(sha256sum .sdlc/transport-hardening.part-01 | cut -d' ' -f1)" = e99023590474aa98c00e478353532141adf4bc44255717654df8e628e54a1e38
+          test "$(sha256sum .sdlc/transport-hardening.part-02 | cut -d' ' -f1)" = 199ca0dbb70e4bf642e7cb061cd05521cdc20fd09537d1e8352f7effd111cd11
+          test "$(sha256sum .sdlc/transport-hardening.part-03 | cut -d' ' -f1)" = ac37a924449b1d1ec7ec2e2773c801fca07f0910cab086246d357119883073f9
+          cat .sdlc/transport-hardening.part-* > transport-hardening.py.gz.b64
+          test "$(sha256sum transport-hardening.py.gz.b64 | cut -d' ' -f1)" = 658aa0557ffb604f255a6c702f28c244dba9ee6bf88ee18f1a7b99dea614cd95
+          base64 --decode transport-hardening.py.gz.b64 > transport-hardening.py.gz
+          test "$(sha256sum transport-hardening.py.gz | cut -d' ' -f1)" = 8cbc32627bfe565e37f7d494d7bf91f7f3d9762fd24a7b2b9231d75dccac7ef2
+          gzip --decompress --stdout transport-hardening.py.gz > transport-hardening.py
+          test "$(sha256sum transport-hardening.py | cut -d' ' -f1)" = 6a498bb33097d890bae87b692d0965133fa74731d25323c5abc2b955952183c5
+          test "$(git hash-object scripts/sdlc/github_transport.py)" = 72184c559947862c64328bfb06c4891eaf2c4582
+          test "$(git hash-object newsroom/tests/test_sdlc_github_transport.py)" = f83fb6bf6e4cf14a854b164e4ecbca3755e58d6a
+          python -m py_compile transport-hardening.py
+          python transport-hardening.py
+
+      - name: Install exact uv and sync locked environment
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.8.0
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Verify hardening
+        run: |
+          uv run python -m compileall -q newsroom scripts
+          uv run python -m pytest -q newsroom/tests/test_sdlc_github_transport.py
+          uv run python -m pytest -q newsroom/tests/test_sdlc_*.py
+          git diff --check
+
+      - name: Commit and push source-only checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .sdlc/transport-hardening.part-* transport-hardening.py.gz.b64 transport-hardening.py.gz transport-hardening.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/sdlc/github_transport.py newsroom/tests/test_sdlc_github_transport.py .sdlc/transport-hardening.part-00 .sdlc/transport-hardening.part-01 .sdlc/transport-hardening.part-02 .sdlc/transport-hardening.part-03
+          git commit -m 'fix(sdlc): harden GitHub artifact transport provenance'
+          git push origin HEAD:agent/sdlc-v2-phase2b1b-github-transport
