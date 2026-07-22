@@ -82,6 +82,35 @@ def _known_prefixes(module: str, modules: set[str]) -> tuple[str, ...]:
     )
 
 
+def _dynamic_import_call(node: ast.Call) -> bool:
+    if isinstance(node.func, ast.Name):
+        return node.func.id in {"__import__", "import_module"}
+    return isinstance(node.func, ast.Attribute) and node.func.attr == "import_module"
+
+
+def _resolve_dynamic_import(
+    node: ast.Call, *, importer_path: str, modules: set[str]
+) -> tuple[str, ...]:
+    if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(
+        node.args[0].value, str
+    ):
+        raise DependencyError(
+            f"dynamic import is not statically resolvable in {importer_path}"
+        )
+    target = node.args[0].value
+    if target.startswith("."):
+        raise DependencyError(
+            f"relative dynamic import is not statically resolved in {importer_path}: {target}"
+        )
+    if target.split(".", 1)[0] not in {"newsroom", "scripts"}:
+        return ()
+    if target not in modules:
+        raise DependencyError(
+            f"unresolved dynamic internal import in {importer_path}: {target}"
+        )
+    return _known_prefixes(target, modules)
+
+
 @dataclass(frozen=True)
 class DependencyGraph:
     repo_root: Path
@@ -169,6 +198,14 @@ def build_dependency_graph(repo_root: str | Path) -> DependencyGraph:
                     child = f"{base}.{alias.name}"
                     if child in modules:
                         dependencies.update(_known_prefixes(child, modules))
+            elif isinstance(node, ast.Call) and _dynamic_import_call(node):
+                dependencies.update(
+                    _resolve_dynamic_import(
+                        node,
+                        importer_path=importer_path,
+                        modules=modules,
+                    )
+                )
         for imported in dependencies - {importer}:
             reverse[imported].add(importer)
 
