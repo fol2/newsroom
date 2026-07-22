@@ -27,8 +27,12 @@ replacements = (
         '    ready_after_jobs: tuple[str, ...] = ()\n',
     ),
     (
+        '    "core": LanePolicy(\n'
+        '        lane_id="core",\n'
         '        producer_job_id="core",\n'
         '        bootstrap_end_step="Sync locked environment",\n',
+        '    "core": LanePolicy(\n'
+        '        lane_id="core",\n'
         '        producer_job_id="core",\n'
         '        consumer_job_id="decision",\n'
         '        gate_keys=frozenset(\n'
@@ -37,8 +41,12 @@ replacements = (
         '        bootstrap_end_step="Sync locked environment",\n',
     ),
     (
+        '    "service": LanePolicy(\n'
+        '        lane_id="service",\n'
         '        producer_job_id="service",\n'
         '        bootstrap_end_step="Wait for authenticated Neo4j",\n',
+        '    "service": LanePolicy(\n'
+        '        lane_id="service",\n'
         '        producer_job_id="service",\n'
         '        consumer_job_id="decision",\n'
         '        gate_keys=frozenset({("service-neo4j", "tests")}),\n'
@@ -93,14 +101,33 @@ replacements = (
         '        _GateDecision("core-deterministic", "tests"),\n',
     ),
     (
-        '        gate_decisions=(_GateDecision("service-neo4j"),),\n',
-        '        gate_decisions=(_GateDecision("service-neo4j", "tests"),),\n',
+        '    receipt = _Receipt(\n'
+        '        _Metadata(name=ARTIFACT_NAME.replace("-core-", "-service-")),\n'
+        '        route=_Route(\n'
+        '            risk_tier="R3_EXTERNAL_SERVICE_SECURITY",\n'
+        '            service_required=True,\n'
+        '        ),\n'
+        '        producer_job_id="service",\n'
+        '        gate_decisions=(_GateDecision("service-neo4j"),),\n'
+        '    )\n',
+        '    receipt = _Receipt(\n'
+        '        _Metadata(name=ARTIFACT_NAME.replace("-core-", "-service-")),\n'
+        '        route=_Route(\n'
+        '            risk_tier="R3_EXTERNAL_SERVICE_SECURITY",\n'
+        '            service_required=True,\n'
+        '        ),\n'
+        '        producer_job_id="service",\n'
+        '        gate_decisions=(_GateDecision("service-neo4j", "tests"),),\n'
+        '    )\n',
     ),
     (
+        '        (\n'
         '            _Receipt(_Metadata(), event_name="push"),\n'
         '            _telemetry(),\n'
         '            "run_event",\n'
-        '        ),\n',
+        '        ),\n'
+        '    ],\n',
+        '        (\n'
         '            _Receipt(_Metadata(), event_name="push"),\n'
         '            _telemetry(),\n'
         '            "run_event",\n'
@@ -109,18 +136,33 @@ replacements = (
         '            _Receipt(_Metadata(), consumer_job_id="other"),\n'
         '            _telemetry(),\n'
         '            "producer_identity",\n'
-        '        ),\n',
+        '        ),\n'
+        '    ],\n',
     ),
     (
-        '        gate_decisions=(_GateDecision("service-neo4j"),),\n',
-        '        gate_decisions=(_GateDecision("service-neo4j", "tests"),),\n',
+        '    unexpected_service = _Receipt(\n'
+        '        _Metadata(name=ARTIFACT_NAME.replace("-core-", "-service-")),\n'
+        '        producer_job_id="service",\n'
+        '        gate_decisions=(_GateDecision("service-neo4j"),),\n'
+        '    )\n',
+        '    unexpected_service = _Receipt(\n'
+        '        _Metadata(name=ARTIFACT_NAME.replace("-core-", "-service-")),\n'
+        '        producer_job_id="service",\n'
+        '        gate_decisions=(_GateDecision("service-neo4j", "tests"),),\n'
+        '    )\n',
     ),
     (
-        '        gate_decisions=(_GateDecision("core-deterministic"),),\n',
+        '    invalid_gates = _Receipt(\n'
+        '        _Metadata(),\n'
+        '        gate_decisions=(_GateDecision("core-deterministic"),),\n'
+        '    )\n',
+        '    invalid_gates = _Receipt(\n'
+        '        _Metadata(),\n'
         '        gate_decisions=(\n'
         '            _GateDecision("source-integrity", "source"),\n'
         '            _GateDecision("core-deterministic", "extra"),\n'
-        '        ),\n',
+        '        ),\n'
+        '    )\n',
     ),
 )
 for old, new in replacements:
