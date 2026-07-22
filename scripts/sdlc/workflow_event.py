@@ -27,10 +27,23 @@ from .emit_evidence import EvidenceError, canonical_json_bytes, sha256_identity
 
 EVENT_SCHEMA_VERSION = "newsroom.sdlc.workflow-event.v1"
 TELEMETRY_SCHEMA_VERSION = "newsroom.sdlc.job-telemetry.v1"
+_REPOSITORY = "fol2/newsroom"
 _MAX_JOBS_JSON_BYTES = 8 * 1024 * 1024
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
 _SAFE_ID = re.compile(r"[A-Za-z0-9_. -]{1,256}")
 _ZERO_SHA = "0" * 40
+_ALLOWED_EVENTS = frozenset({"pull_request", "merge_group", "push", "workflow_dispatch"})
+_EVENT_KEYS = frozenset({
+    "schema_version", "event_identity", "repository", "repository_id",
+    "head_repository", "head_repository_id", "event_name", "event_sha",
+    "base_sha", "base_tree_sha", "evaluated_sha", "evaluated_tree_sha", "ref",
+})
+_TELEMETRY_KEYS = frozenset({
+    "schema_version", "telemetry_identity", "run_id", "run_attempt", "job_id",
+    "job_name", "queue_ms", "bootstrap_ms", "finalize_ms", "job_created_at",
+    "job_started_at", "bootstrap_completed_at", "finalization_started_at",
+    "finalization_completed_at",
+})
 
 
 class WorkflowEvidenceError(ValueError):
@@ -50,6 +63,9 @@ class WorkflowEvent:
     evaluated_sha: str
     evaluated_tree_sha: str
     ref: str
+
+    def __post_init__(self) -> None:
+        _validate_workflow_event_fields(self)
 
     def as_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
@@ -88,6 +104,9 @@ class JobTelemetry:
     finalization_started_at: str
     finalization_completed_at: str
 
+    def __post_init__(self) -> None:
+        _validate_job_telemetry_fields(self)
+
     def as_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
             "schema_version": TELEMETRY_SCHEMA_VERSION,
@@ -113,6 +132,18 @@ class JobTelemetry:
 
 def _positive(value: object, code: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise WorkflowEvidenceError(code)
+    return value
+
+
+def _nonnegative(value: object, code: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise WorkflowEvidenceError(code)
+    return value
+
+
+def _mapping_value(value: object, code: str) -> Mapping[str, object]:
+    if not isinstance(value, dict):
         raise WorkflowEvidenceError(code)
     return value
 
@@ -154,6 +185,100 @@ def _milliseconds(start: datetime, end: datetime, code: str) -> int:
     return value
 
 
+def _validate_workflow_event_fields(event: WorkflowEvent) -> None:
+    if event.repository != "fol2/newsroom":
+        raise WorkflowEvidenceError("repository")
+    _positive(event.repository_id, "repository_id")
+    _text(event.head_repository, "head_repository", maximum=255)
+    _positive(event.head_repository_id, "head_repository_id")
+    if event.event_name not in _ALLOWED_EVENTS:
+        raise WorkflowEvidenceError("event_name")
+    for name, value in (
+        ("event_sha", event.event_sha),
+        ("base_sha", event.base_sha),
+        ("base_tree_sha", event.base_tree_sha),
+        ("evaluated_sha", event.evaluated_sha),
+        ("evaluated_tree_sha", event.evaluated_tree_sha),
+    ):
+        _sha(value, name)
+    _text(event.ref, "ref", maximum=2048)
+
+
+def validate_workflow_event(value: object) -> WorkflowEvent:
+    mapping = _mapping_value(value, "workflow_event")
+    if frozenset(mapping) != _EVENT_KEYS or mapping.get("schema_version") != EVENT_SCHEMA_VERSION:
+        raise WorkflowEvidenceError("workflow_event_shape")
+    event = WorkflowEvent(
+        repository=_text(mapping.get("repository"), "repository", maximum=255),
+        repository_id=_positive(mapping.get("repository_id"), "repository_id"),
+        head_repository=_text(mapping.get("head_repository"), "head_repository", maximum=255),
+        head_repository_id=_positive(mapping.get("head_repository_id"), "head_repository_id"),
+        event_name=_text(mapping.get("event_name"), "event_name", maximum=64),
+        event_sha=_sha(mapping.get("event_sha"), "event_sha"),
+        base_sha=_sha(mapping.get("base_sha"), "base_sha"),
+        base_tree_sha=_sha(mapping.get("base_tree_sha"), "base_tree_sha"),
+        evaluated_sha=_sha(mapping.get("evaluated_sha"), "evaluated_sha"),
+        evaluated_tree_sha=_sha(mapping.get("evaluated_tree_sha"), "evaluated_tree_sha"),
+        ref=_text(mapping.get("ref"), "ref", maximum=2048),
+    )
+    expected = event.as_dict()["event_identity"]
+    if mapping.get("event_identity") != expected:
+        raise WorkflowEvidenceError("event_identity")
+    return event
+
+
+def _validate_job_telemetry_fields(telemetry: JobTelemetry) -> None:
+    _positive(telemetry.run_id, "run_id")
+    _positive(telemetry.run_attempt, "run_attempt")
+    _positive(telemetry.job_id, "job_id")
+    name = _text(telemetry.job_name, "job_name", maximum=256)
+    if _SAFE_ID.fullmatch(name) is None:
+        raise WorkflowEvidenceError("job_name")
+    for field, value in (
+        ("queue_ms", telemetry.queue_ms),
+        ("bootstrap_ms", telemetry.bootstrap_ms),
+        ("finalize_ms", telemetry.finalize_ms),
+    ):
+        _nonnegative(value, field)
+    _, created = _timestamp(telemetry.job_created_at, "job_created_at")
+    _, started = _timestamp(telemetry.job_started_at, "job_started_at")
+    _, bootstrap = _timestamp(telemetry.bootstrap_completed_at, "bootstrap_completed_at")
+    _, final_started = _timestamp(telemetry.finalization_started_at, "finalization_started_at")
+    _, final_completed = _timestamp(telemetry.finalization_completed_at, "finalization_completed_at")
+    if not created <= started <= bootstrap <= final_started <= final_completed:
+        raise WorkflowEvidenceError("job_phase_order")
+    if telemetry.queue_ms != _milliseconds(created, started, "queue_ms"):
+        raise WorkflowEvidenceError("queue_ms")
+    if telemetry.bootstrap_ms != _milliseconds(started, bootstrap, "bootstrap_ms"):
+        raise WorkflowEvidenceError("bootstrap_ms")
+    if telemetry.finalize_ms != _milliseconds(final_started, final_completed, "finalize_ms"):
+        raise WorkflowEvidenceError("finalize_ms")
+
+
+def validate_job_telemetry(value: object) -> JobTelemetry:
+    mapping = _mapping_value(value, "job_telemetry")
+    if frozenset(mapping) != _TELEMETRY_KEYS or mapping.get("schema_version") != TELEMETRY_SCHEMA_VERSION:
+        raise WorkflowEvidenceError("job_telemetry_shape")
+    telemetry = JobTelemetry(
+        run_id=_positive(mapping.get("run_id"), "run_id"),
+        run_attempt=_positive(mapping.get("run_attempt"), "run_attempt"),
+        job_id=_positive(mapping.get("job_id"), "job_id"),
+        job_name=_text(mapping.get("job_name"), "job_name", maximum=256),
+        queue_ms=_nonnegative(mapping.get("queue_ms"), "queue_ms"),
+        bootstrap_ms=_nonnegative(mapping.get("bootstrap_ms"), "bootstrap_ms"),
+        finalize_ms=_nonnegative(mapping.get("finalize_ms"), "finalize_ms"),
+        job_created_at=_text(mapping.get("job_created_at"), "job_created_at", maximum=64),
+        job_started_at=_text(mapping.get("job_started_at"), "job_started_at", maximum=64),
+        bootstrap_completed_at=_text(mapping.get("bootstrap_completed_at"), "bootstrap_completed_at", maximum=64),
+        finalization_started_at=_text(mapping.get("finalization_started_at"), "finalization_started_at", maximum=64),
+        finalization_completed_at=_text(mapping.get("finalization_completed_at"), "finalization_completed_at", maximum=64),
+    )
+    expected = telemetry.as_dict()["telemetry_identity"]
+    if mapping.get("telemetry_identity") != expected:
+        raise WorkflowEvidenceError("telemetry_identity")
+    return telemetry
+
+
 def _event_mapping(path: str | Path) -> Mapping[str, object]:
     try:
         payload = _safe_machine_file(path, maximum=4 * 1024 * 1024, code="event_file")
@@ -164,7 +289,10 @@ def _event_mapping(path: str | Path) -> Mapping[str, object]:
         raise WorkflowEvidenceError("event_file") from exc
 
 
-def _base_identity(context: GithubRunContext, event: Mapping[str, object]) -> str:
+def _base_identity(
+    context: GithubRunContext,
+    event: Mapping[str, object],
+) -> str:
     if context.event_name == "pull_request":
         pull = _mapping(event.get("pull_request"), "event_pull_request")
         base = _mapping(pull.get("base"), "event_pull_request_base")
@@ -211,7 +339,10 @@ def derive_workflow_event(
     if not isinstance(event_path, str):
         raise WorkflowEvidenceError("event_file")
     event = _event_mapping(event_path)
-    base_sha = _base_identity(context, event)
+    try:
+        base_sha = _base_identity(context, event)
+    except ArtifactProvenanceError as exc:
+        raise WorkflowEvidenceError("event_shape") from exc
     try:
         if resolve_commit(root, base_sha) != base_sha:
             raise WorkflowEvidenceError("base_commit")
@@ -235,8 +366,10 @@ def derive_workflow_event(
 
 def _load_jobs(path: str | Path) -> Mapping[str, object]:
     try:
+        candidate = Path(path)
+        absolute = candidate if candidate.is_absolute() else candidate.absolute()
         payload = _safe_machine_file(
-            Path(path).resolve(), maximum=_MAX_JOBS_JSON_BYTES, code="jobs_file"
+            absolute, maximum=_MAX_JOBS_JSON_BYTES, code="jobs_file"
         )
         value = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object)
         _validate_json_depth(value)
