@@ -36,6 +36,36 @@ _SCHEMA_BY_ROLE = {
     "gate_evidence": "newsroom.sdlc.evidence.v1",
 }
 _ALLOWED_EVENTS = frozenset({"pull_request", "merge_group", "workflow_dispatch", "push"})
+_CONTEXT_KEYS = frozenset(
+    {
+        "schema_version",
+        "repository",
+        "repository_id",
+        "head_repository",
+        "head_repository_id",
+        "run_id",
+        "run_attempt",
+        "job_id",
+        "workflow_ref",
+        "workflow_sha",
+        "event_name",
+        "event_sha",
+        "evaluated_sha",
+        "evaluated_tree_sha",
+        "ref",
+        "runner_environment",
+    }
+)
+_ENTRY_KEYS = frozenset(
+    {
+        "schema_version",
+        "role",
+        "path",
+        "content_schema_version",
+        "size_bytes",
+        "digest",
+    }
+)
 
 
 class ArtifactProvenanceError(ValueError):
@@ -255,6 +285,30 @@ def _derived_head(
     raise ArtifactProvenanceError("event_name")
 
 
+def _validate_context(context: GithubRunContext) -> GithubRunContext:
+    if context.repository != _REPOSITORY:
+        raise ArtifactProvenanceError("repository")
+    _positive_integer(context.repository_id, "repository_id")
+    _text(context.head_repository, "head_repository")
+    _positive_integer(context.head_repository_id, "head_repository_id")
+    _positive_integer(context.run_id, "run_id")
+    _positive_integer(context.run_attempt, "run_attempt")
+    if _SAFE_ID.fullmatch(context.job_id) is None:
+        raise ArtifactProvenanceError("job_id")
+    if f"{context.repository}/.github/workflows/" not in context.workflow_ref:
+        raise ArtifactProvenanceError("workflow_ref")
+    _sha(context.workflow_sha, "workflow_sha")
+    if context.event_name not in _ALLOWED_EVENTS:
+        raise ArtifactProvenanceError("event_name")
+    _sha(context.event_sha, "event_sha")
+    _sha(context.evaluated_sha, "evaluated_sha")
+    _sha(context.evaluated_tree_sha, "evaluated_tree_sha")
+    _text(context.ref, "ref", maximum=2048)
+    if context.runner_environment not in {"github-hosted", "self-hosted"}:
+        raise ArtifactProvenanceError("runner_environment")
+    return context
+
+
 def context_from_environment(
     repo_root: str | Path,
     environment: Mapping[str, str] | None = None,
@@ -272,6 +326,13 @@ def context_from_environment(
         raise ArtifactProvenanceError("event_name")
     event_sha = _sha(env.get("GITHUB_SHA"), "event_sha")
     event = _load_event(_text(env.get("GITHUB_EVENT_PATH"), "event_path", maximum=4096))
+    event_repository = _mapping(event.get("repository"), "event_repository")
+    if (
+        event_repository.get("full_name") != repository
+        or _positive_integer(event_repository.get("id"), "event_repository_id")
+        != repository_id
+    ):
+        raise ArtifactProvenanceError("event_repository")
     evaluated_sha, head_repository, head_repository_id = _derived_head(
         event_name,
         event,
@@ -304,9 +365,7 @@ def context_from_environment(
     runner_environment = _text(
         env.get("RUNNER_ENVIRONMENT"), "runner_environment", maximum=64
     )
-    if runner_environment not in {"github-hosted", "self-hosted"}:
-        raise ArtifactProvenanceError("runner_environment")
-    return GithubRunContext(
+    context = GithubRunContext(
         repository=repository,
         repository_id=repository_id,
         head_repository=head_repository,
@@ -323,10 +382,42 @@ def context_from_environment(
         ref=_text(env.get("GITHUB_REF"), "ref", maximum=2048),
         runner_environment=runner_environment,
     )
+    return _validate_context(context)
 
 
 def artifact_name(context: GithubRunContext) -> str:
+    _validate_context(context)
     return f"newsroom-sdlc-{context.job_id}-{context.evaluated_sha}"
+
+
+def _relative_parts(repository_root: Path, candidate: Path, code: str) -> tuple[str, ...]:
+    if candidate.is_absolute():
+        try:
+            relative = candidate.relative_to(repository_root)
+        except ValueError as exc:
+            raise ArtifactProvenanceError(code) from exc
+    else:
+        relative = candidate
+    if (
+        not relative.parts
+        or ".." in relative.parts
+        or "\\" in str(candidate)
+    ):
+        raise ArtifactProvenanceError(code)
+    return relative.parts
+
+
+def _artifact_root(repository_root: Path, value: str | Path) -> Path:
+    parts = _relative_parts(repository_root, Path(value), "artifact_root")
+    current = repository_root
+    for part in parts:
+        current /= part
+        if current.is_symlink():
+            raise ArtifactProvenanceError("artifact_root")
+    resolved = current.resolve()
+    if not resolved.is_relative_to(repository_root) or not resolved.is_dir():
+        raise ArtifactProvenanceError("artifact_root")
+    return resolved
 
 
 def _safe_artifact_path(root: Path, relative: str | Path) -> tuple[str, Path]:
@@ -347,6 +438,21 @@ def _safe_artifact_path(root: Path, relative: str | Path) -> tuple[str, Path]:
     if not resolved.is_relative_to(root):
         raise ArtifactProvenanceError("artifact_path")
     return resolved.relative_to(root).as_posix(), current
+
+
+def _normalized_artifact_path(value: object) -> str:
+    text = _text(value, "entry_path", maximum=1024)
+    candidate = Path(text)
+    if (
+        candidate.is_absolute()
+        or not candidate.parts
+        or ".." in candidate.parts
+        or "\\" in text
+        or candidate.as_posix() != text
+        or text == "envelope.json"
+    ):
+        raise ArtifactProvenanceError("entry_path")
+    return text
 
 
 def _read_artifact_file(root: Path, relative: str) -> tuple[bytes, str]:
@@ -434,23 +540,17 @@ def create_envelope(
     files: Iterable[tuple[str, str]],
 ) -> ArtifactEnvelope:
     repository_root = Path(repo_root).resolve()
-    root_candidate = Path(artifact_root)
-    if root_candidate.is_absolute():
-        root = root_candidate.resolve()
-    else:
-        root = (repository_root / root_candidate).resolve()
-    if not root.is_relative_to(repository_root) or not root.is_dir() or root.is_symlink():
-        raise ArtifactProvenanceError("artifact_root")
+    _validate_context(context)
+    root = _artifact_root(repository_root, artifact_root)
     selected = tuple(files)
     if not 0 < len(selected) <= _MAX_ARTIFACT_FILES:
         raise ArtifactProvenanceError("artifact_count")
-    roles: set[str] = set()
     paths: set[str] = set()
     entries: list[ArtifactEntry] = []
     total = 0
     for role_value, path_value in selected:
         role = _text(role_value, "artifact_role", maximum=64)
-        if _SAFE_ID.fullmatch(role) is None or role in roles:
+        if _SAFE_ID.fullmatch(role) is None:
             raise ArtifactProvenanceError("artifact_role")
         payload, normalized = _read_artifact_file(root, path_value)
         if normalized == "envelope.json" or normalized in paths:
@@ -460,7 +560,6 @@ def create_envelope(
         total += len(payload)
         if total > _MAX_ARTIFACT_TOTAL_BYTES:
             raise ArtifactProvenanceError("artifact_total_size")
-        roles.add(role)
         paths.add(normalized)
         entries.append(
             ArtifactEntry(
@@ -490,6 +589,53 @@ def create_envelope(
     )
 
 
+def _context_from_mapping(value: object) -> GithubRunContext:
+    context_value = _mapping(value, "envelope_context")
+    if frozenset(context_value) != _CONTEXT_KEYS:
+        raise ArtifactProvenanceError("envelope_context")
+    if context_value.get("schema_version") != CONTEXT_SCHEMA_VERSION:
+        raise ArtifactProvenanceError("envelope_context")
+    return _validate_context(
+        GithubRunContext(
+            repository=_text(context_value.get("repository"), "repository"),
+            repository_id=_positive_integer(
+                context_value.get("repository_id"), "repository_id"
+            ),
+            head_repository=_text(
+                context_value.get("head_repository"), "head_repository"
+            ),
+            head_repository_id=_positive_integer(
+                context_value.get("head_repository_id"), "head_repository_id"
+            ),
+            run_id=_positive_integer(context_value.get("run_id"), "run_id"),
+            run_attempt=_positive_integer(
+                context_value.get("run_attempt"), "run_attempt"
+            ),
+            job_id=_text(context_value.get("job_id"), "job_id", maximum=128),
+            workflow_ref=_text(
+                context_value.get("workflow_ref"), "workflow_ref", maximum=2048
+            ),
+            workflow_sha=_sha(context_value.get("workflow_sha"), "workflow_sha"),
+            event_name=_text(
+                context_value.get("event_name"), "event_name", maximum=64
+            ),
+            event_sha=_sha(context_value.get("event_sha"), "event_sha"),
+            evaluated_sha=_sha(
+                context_value.get("evaluated_sha"), "evaluated_sha"
+            ),
+            evaluated_tree_sha=_sha(
+                context_value.get("evaluated_tree_sha"), "evaluated_tree_sha"
+            ),
+            ref=_text(context_value.get("ref"), "ref", maximum=2048),
+            runner_environment=_text(
+                context_value.get("runner_environment"),
+                "runner_environment",
+                maximum=64,
+            ),
+        )
+    )
+
+
 def validate_envelope(value: object) -> ArtifactEnvelope:
     mapping = _mapping(value, "envelope")
     if frozenset(mapping) != {
@@ -502,67 +648,40 @@ def validate_envelope(value: object) -> ArtifactEnvelope:
         raise ArtifactProvenanceError("envelope_shape")
     if mapping.get("schema_version") != ENVELOPE_SCHEMA_VERSION:
         raise ArtifactProvenanceError("envelope_schema")
-    context_value = _mapping(mapping.get("context"), "envelope_context")
-    if context_value.get("schema_version") != CONTEXT_SCHEMA_VERSION:
-        raise ArtifactProvenanceError("envelope_context")
-    context = GithubRunContext(
-        repository=_text(context_value.get("repository"), "repository"),
-        repository_id=_positive_integer(context_value.get("repository_id"), "repository_id"),
-        head_repository=_text(context_value.get("head_repository"), "head_repository"),
-        head_repository_id=_positive_integer(
-            context_value.get("head_repository_id"), "head_repository_id"
-        ),
-        run_id=_positive_integer(context_value.get("run_id"), "run_id"),
-        run_attempt=_positive_integer(context_value.get("run_attempt"), "run_attempt"),
-        job_id=_text(context_value.get("job_id"), "job_id", maximum=128),
-        workflow_ref=_text(
-            context_value.get("workflow_ref"), "workflow_ref", maximum=2048
-        ),
-        workflow_sha=_sha(context_value.get("workflow_sha"), "workflow_sha"),
-        event_name=_text(context_value.get("event_name"), "event_name", maximum=64),
-        event_sha=_sha(context_value.get("event_sha"), "event_sha"),
-        evaluated_sha=_sha(context_value.get("evaluated_sha"), "evaluated_sha"),
-        evaluated_tree_sha=_sha(
-            context_value.get("evaluated_tree_sha"), "evaluated_tree_sha"
-        ),
-        ref=_text(context_value.get("ref"), "ref", maximum=2048),
-        runner_environment=_text(
-            context_value.get("runner_environment"), "runner_environment", maximum=64
-        ),
-    )
+    context = _context_from_mapping(mapping.get("context"))
     raw_entries = mapping.get("entries")
     if not isinstance(raw_entries, list) or not 0 < len(raw_entries) <= _MAX_ARTIFACT_FILES:
         raise ArtifactProvenanceError("envelope_entries")
     entries: list[ArtifactEntry] = []
+    total = 0
     for raw in raw_entries:
         item = _mapping(raw, "envelope_entry")
-        if frozenset(item) != {
-            "schema_version",
-            "role",
-            "path",
-            "content_schema_version",
-            "size_bytes",
-            "digest",
-        } or item.get("schema_version") != ENTRY_SCHEMA_VERSION:
+        if frozenset(item) != _ENTRY_KEYS or item.get("schema_version") != ENTRY_SCHEMA_VERSION:
             raise ArtifactProvenanceError("envelope_entry")
+        role = _text(item.get("role"), "entry_role", maximum=64)
+        expected_schema = _SCHEMA_BY_ROLE.get(role)
+        if expected_schema is None or item.get("content_schema_version") != expected_schema:
+            raise ArtifactProvenanceError("entry_schema")
         digest = _text(item.get("digest"), "entry_digest", maximum=71)
         if _SHA256.fullmatch(digest) is None:
             raise ArtifactProvenanceError("entry_digest")
+        size = _positive_integer(item.get("size_bytes"), "entry_size")
+        if size > _MAX_ARTIFACT_FILE_BYTES:
+            raise ArtifactProvenanceError("entry_size")
+        total += size
+        if total > _MAX_ARTIFACT_TOTAL_BYTES:
+            raise ArtifactProvenanceError("artifact_total_size")
         entries.append(
             ArtifactEntry(
-                role=_text(item.get("role"), "entry_role", maximum=64),
-                path=_text(item.get("path"), "entry_path", maximum=1024),
-                schema_version=_text(
-                    item.get("content_schema_version"), "entry_schema", maximum=128
-                ),
-                size_bytes=_positive_integer(item.get("size_bytes"), "entry_size"),
+                role=role,
+                path=_normalized_artifact_path(item.get("path")),
+                schema_version=expected_schema,
+                size_bytes=size,
                 digest=digest,
             )
         )
     ordered = tuple(sorted(entries, key=lambda entry: (entry.role, entry.path)))
-    if len({entry.role for entry in ordered}) != len(ordered) or len(
-        {entry.path for entry in ordered}
-    ) != len(ordered):
+    if tuple(entries) != ordered or len({entry.path for entry in ordered}) != len(ordered):
         raise ArtifactProvenanceError("envelope_entries")
     name = _text(mapping.get("artifact_name"), "artifact_name", maximum=255)
     if name != artifact_name(context):
@@ -641,17 +760,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", default="envelope.json")
     arguments = parser.parse_args(argv)
     repository_root = Path(arguments.repo_root).resolve()
-    artifact_root = (repository_root / arguments.artifact_root).resolve()
     try:
+        root = _artifact_root(repository_root, arguments.artifact_root)
         context = context_from_environment(repository_root)
         envelope = create_envelope(
             repo_root=repository_root,
-            artifact_root=artifact_root,
+            artifact_root=root,
             context=context,
             files=arguments.file,
         )
         rendered = canonical_json_bytes(envelope.as_dict()) + b"\n"
-        _publish(_safe_output(artifact_root, arguments.output), rendered)
+        _publish(_safe_output(root, arguments.output), rendered)
     except (
         ArtifactProvenanceError,
         EvidenceError,
