@@ -355,6 +355,24 @@ def test_route_and_lane_gate_semantics_fail_closed(
             lane_identity="sha256:" + "0" * 64,
         )
 
+    unexpected_service = _Receipt(
+        _Metadata(name=ARTIFACT_NAME.replace("-core-", "-service-")),
+        producer_job_id="service",
+        gate_decisions=(_GateDecision("service-neo4j"),),
+    )
+    _patch_receipt_validator(monkeypatch, unexpected_service)
+    service_replay = _replay(artifact_name=unexpected_service.metadata.name)
+    with pytest.raises(ShadowLaneError, match="lane_route"):
+        ShadowLaneRecord(
+            lane_id="service",
+            run_event="pull_request",
+            run_created_at="2026-07-22T12:00:00.000Z",
+            replay=service_replay,
+            receipt=unexpected_service,  # type: ignore[arg-type]
+            telemetry=_telemetry(job_name="service"),
+            lane_identity="sha256:" + "0" * 64,
+        )
+
     invalid_gates = _Receipt(
         _Metadata(),
         gate_decisions=(_GateDecision("core-deterministic"),),

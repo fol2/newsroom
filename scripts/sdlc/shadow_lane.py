@@ -259,6 +259,8 @@ def _cross_check(
         or route.owner_authority_required is not (route.risk_tier in _OWNER_RISKS)
     ):
         raise ShadowLaneError("route_contract")
+    if policy.lane_id == "service" and not route.service_required:
+        raise ShadowLaneError("lane_route")
     gate_ids = frozenset(decision.gate_id for decision in receipt.gate_decisions)
     if gate_ids != _LANE_GATE_IDS[policy.lane_id]:
         raise ShadowLaneError("lane_gates")
