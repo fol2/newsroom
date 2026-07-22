@@ -179,7 +179,7 @@ def test_pull_request_context_uses_event_head_not_merge_sha(tmp_path: Path) -> N
     assert context.head_repository == "fol2/newsroom"
     assert context.run_id == 123456
     assert context.run_attempt == 2
-    assert artifact_name(context) == f"newsroom-sdlc-route-{head}"
+    assert artifact_name(context) == f"newsroom-sdlc-123456-2-route-{head}"
 
 
 def test_fork_head_identity_is_retained_without_changing_base_repository(
@@ -452,7 +452,7 @@ def test_cli_publishes_private_non_overwriting_envelope(
     assert envelope_main(arguments) == 0
     output = json.loads(capsys.readouterr().out)
     envelope_path = artifact_root / "envelope.json"
-    assert output["artifact_name"] == f"newsroom-sdlc-route-{head}"
+    assert output["artifact_name"] == f"newsroom-sdlc-123456-2-route-{head}"
     assert output["envelope_identity"].startswith("sha256:")
     assert stat.S_IMODE(envelope_path.stat().st_mode) == 0o600
     validate_envelope(json.loads(envelope_path.read_text(encoding="utf-8")))
