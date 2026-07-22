@@ -1,0 +1,157 @@
+pytest_status=1
+........................................................................ [  9%]
+........................................................................ [ 19%]
+........................................................................ [ 29%]
+........................................................................ [ 39%]
+........................................................................ [ 48%]
+........................................................................ [ 58%]
+........................................................................ [ 68%]
+....................ssss................................................ [ 78%]
+........................................................................ [ 88%]
+.....................................................F.................. [ 97%]
+...............                                                          [100%]
+=================================== FAILURES ===================================
+____ test_event_rejects_wrong_base_repository_missing_base_or_head_mismatch ____
+
+repo_root = PosixPath('/tmp/pytest-of-runner/pytest-0/test_event_rejects_wrong_base_0/repo')
+environment = {'GITHUB_ACTIONS': 'true', 'GITHUB_EVENT_NAME': 'merge_group', 'GITHUB_EVENT_PATH': '/tmp/pytest-of-runner/pytest-0/test_event_rejects_wrong_base_0/repo/event.json', 'GITHUB_JOB': 'route', ...}
+
+    def derive_workflow_event(
+        repo_root: str | Path,
+        environment: Mapping[str, str] | None = None,
+    ) -> WorkflowEvent:
+        root = Path(repo_root).resolve()
+        env = os.environ if environment is None else environment
+        event_path = env.get("GITHUB_EVENT_PATH")
+        if not isinstance(event_path, str):
+            raise WorkflowEvidenceError("event_file")
+        _, before_digest = _event_snapshot(event_path)
+        try:
+>           context = context_from_environment(root, env)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+scripts/sdlc/workflow_event.py:388: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+repo_root = PosixPath('/tmp/pytest-of-runner/pytest-0/test_event_rejects_wrong_base_0/repo')
+environment = {'GITHUB_ACTIONS': 'true', 'GITHUB_EVENT_NAME': 'merge_group', 'GITHUB_EVENT_PATH': '/tmp/pytest-of-runner/pytest-0/test_event_rejects_wrong_base_0/repo/event.json', 'GITHUB_JOB': 'route', ...}
+
+    def context_from_environment(
+        repo_root: str | Path,
+        environment: Mapping[str, str] | None = None,
+    ) -> GithubRunContext:
+        root = Path(repo_root).resolve()
+        env = os.environ if environment is None else environment
+        if env.get("GITHUB_ACTIONS") != "true":
+            raise ArtifactProvenanceError("github_actions_required")
+        repository = _text(env.get("GITHUB_REPOSITORY"), "repository")
+        if repository != _REPOSITORY:
+            raise ArtifactProvenanceError("repository")
+        repository_id = _positive_integer(env.get("GITHUB_REPOSITORY_ID"), "repository_id")
+        event_name = _text(env.get("GITHUB_EVENT_NAME"), "event_name", maximum=64)
+        if event_name not in _ALLOWED_EVENTS:
+            raise ArtifactProvenanceError("event_name")
+        event_sha = _sha(env.get("GITHUB_SHA"), "event_sha")
+        event = _load_event(_text(env.get("GITHUB_EVENT_PATH"), "event_path", maximum=4096))
+        event_repository = _mapping(event.get("repository"), "event_repository")
+        if (
+            event_repository.get("full_name") != repository
+            or _positive_integer(event_repository.get("id"), "event_repository_id")
+            != repository_id
+        ):
+            raise ArtifactProvenanceError("event_repository")
+        evaluated_sha, head_repository, head_repository_id = _derived_head(
+            event_name,
+            event,
+            repository=repository,
+            repository_id=repository_id,
+            event_sha=event_sha,
+        )
+        current_head = resolve_commit(root, "HEAD")
+        if current_head != evaluated_sha:
+>           raise ArtifactProvenanceError("checkout_head_mismatch")
+E           scripts.sdlc.artifact_envelope.ArtifactProvenanceError: checkout_head_mismatch
+
+scripts/sdlc/artifact_envelope.py:349: ArtifactProvenanceError
+
+The above exception was the direct cause of the following exception:
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_event_rejects_wrong_base_0')
+
+    def test_event_rejects_wrong_base_repository_missing_base_or_head_mismatch(
+        tmp_path: Path,
+    ) -> None:
+        repo, base, _, head, _ = _repository(tmp_path)
+        environment = _environment(repo, event_name="pull_request", base=base, head=head)
+        path = Path(environment["GITHUB_EVENT_PATH"])
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["pull_request"]["base"]["repo"] = {"full_name": "other/repo", "id": 77}
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with pytest.raises(WorkflowEvidenceError, match="event_base_repository"):
+            derive_workflow_event(repo, environment)
+    
+        environment = _environment(repo, event_name="merge_group", base=base, head=head)
+        path = Path(environment["GITHUB_EVENT_PATH"])
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["merge_group"]["head_sha"] = "c" * 40
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with pytest.raises(WorkflowEvidenceError, match="event_head_sha"):
+>           derive_workflow_event(repo, environment)
+
+newsroom/tests/test_sdlc_workflow_event.py:218: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+repo_root = PosixPath('/tmp/pytest-of-runner/pytest-0/test_event_rejects_wrong_base_0/repo')
+environment = {'GITHUB_ACTIONS': 'true', 'GITHUB_EVENT_NAME': 'merge_group', 'GITHUB_EVENT_PATH': '/tmp/pytest-of-runner/pytest-0/test_event_rejects_wrong_base_0/repo/event.json', 'GITHUB_JOB': 'route', ...}
+
+    def derive_workflow_event(
+        repo_root: str | Path,
+        environment: Mapping[str, str] | None = None,
+    ) -> WorkflowEvent:
+        root = Path(repo_root).resolve()
+        env = os.environ if environment is None else environment
+        event_path = env.get("GITHUB_EVENT_PATH")
+        if not isinstance(event_path, str):
+            raise WorkflowEvidenceError("event_file")
+        _, before_digest = _event_snapshot(event_path)
+        try:
+            context = context_from_environment(root, env)
+        except (ArtifactProvenanceError, GitRouteError, OSError) as exc:
+>           raise WorkflowEvidenceError("run_context") from exc
+E           scripts.sdlc.workflow_event.WorkflowEvidenceError: run_context
+
+scripts/sdlc/workflow_event.py:390: WorkflowEvidenceError
+
+During handling of the above exception, another exception occurred:
+
+tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_event_rejects_wrong_base_0')
+
+    def test_event_rejects_wrong_base_repository_missing_base_or_head_mismatch(
+        tmp_path: Path,
+    ) -> None:
+        repo, base, _, head, _ = _repository(tmp_path)
+        environment = _environment(repo, event_name="pull_request", base=base, head=head)
+        path = Path(environment["GITHUB_EVENT_PATH"])
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["pull_request"]["base"]["repo"] = {"full_name": "other/repo", "id": 77}
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with pytest.raises(WorkflowEvidenceError, match="event_base_repository"):
+            derive_workflow_event(repo, environment)
+    
+        environment = _environment(repo, event_name="merge_group", base=base, head=head)
+        path = Path(environment["GITHUB_EVENT_PATH"])
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["merge_group"]["head_sha"] = "c" * 40
+        path.write_text(json.dumps(value), encoding="utf-8")
+>       with pytest.raises(WorkflowEvidenceError, match="event_head_sha"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'event_head_sha'
+E         Actual message: 'run_context'
+
+newsroom/tests/test_sdlc_workflow_event.py:217: AssertionError
+=========================== short test summary info ============================
+FAILED newsroom/tests/test_sdlc_workflow_event.py::test_event_rejects_wrong_base_repository_missing_base_or_head_mismatch - AssertionError: Regex pattern did not match.
+  Expected regex: 'event_head_sha'
+  Actual message: 'run_context'
+1 failed, 730 passed, 4 skipped in 35.07s
