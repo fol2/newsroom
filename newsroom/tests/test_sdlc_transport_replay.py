@@ -51,6 +51,13 @@ def _transport_identity(value: dict[str, object]) -> str:
     )
 
 
+
+def _replay_identity(value: dict[str, object]) -> str:
+    return sha256_identity(
+        {key: item for key, item in value.items() if key != "replay_identity"}
+    )
+
+
 def _archive(root: Path) -> tuple[bytes, str]:
     archive_path = root / "artifact.zip"
     info = zipfile.ZipInfo("envelope.json", date_time=(2026, 7, 22, 12, 0, 0))
@@ -225,13 +232,30 @@ def test_run_identity_is_revalidated_after_digest_replay(
         load_verified_transport(root)
 
 
-def test_jobs_must_belong_to_exact_run_and_attempt(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("run_id", None, "job_run_id"),
+        ("run_attempt", None, "job_run_attempt"),
+        ("run_id", RUN_ID + 1, "job_run_id"),
+        ("run_attempt", RUN_ATTEMPT + 1, "job_run_attempt"),
+    ],
+)
+def test_jobs_must_belong_to_exact_run_and_attempt(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    reason: str,
+) -> None:
     root = _fixture(tmp_path)
     jobs = json.loads((root / "jobs.json").read_text(encoding="utf-8"))
-    jobs["jobs"][0]["run_attempt"] = RUN_ATTEMPT + 1
+    if value is None:
+        del jobs["jobs"][0][field]
+    else:
+        jobs["jobs"][0][field] = value
     _rewrite_snapshot(root, "jobs.json", jobs)
 
-    with pytest.raises(TransportReplayError, match="job_run_attempt"):
+    with pytest.raises(TransportReplayError, match=reason):
         load_verified_transport(root)
 
 
@@ -285,6 +309,38 @@ def test_bundle_inventory_symlinks_and_permissions_fail_closed(tmp_path: Path) -
     linked.symlink_to(real, target_is_directory=True)
     with pytest.raises(TransportReplayError, match="bundle_symlink"):
         load_verified_transport(linked)
+
+
+
+def test_snapshots_must_retain_canonical_json_bytes(tmp_path: Path) -> None:
+    root = _fixture(tmp_path)
+    run = json.loads((root / "run.json").read_text(encoding="utf-8"))
+    payload = json.dumps(run, indent=2).encode("utf-8") + b"\n"
+    _write_private(root / "run.json", payload)
+    transport_path = root / "transport.json"
+    transport = json.loads(transport_path.read_text(encoding="utf-8"))
+    transport["run_digest"] = "sha256:" + hashlib.sha256(payload).hexdigest()
+    transport["transport_identity"] = _transport_identity(transport)
+    _write_private(transport_path, _json_bytes(transport))
+
+    with pytest.raises(TransportReplayError, match="run_json_canonical"):
+        load_verified_transport(root)
+
+
+def test_standalone_replay_revalidates_artifact_name_and_size(tmp_path: Path) -> None:
+    replay = load_verified_transport(_fixture(tmp_path)).replay.as_dict()
+
+    changed = deepcopy(replay)
+    changed["artifact_name"] = "unsafe/name"
+    changed["replay_identity"] = _replay_identity(changed)
+    with pytest.raises(TransportReplayError, match="artifact_name"):
+        validate_transport_replay(changed)
+
+    changed = deepcopy(replay)
+    changed["artifact_size_bytes"] = 512 * 1024 * 1024 + 1
+    changed["replay_identity"] = _replay_identity(changed)
+    with pytest.raises(TransportReplayError, match="artifact_size"):
+        validate_transport_replay(changed)
 
 
 def test_replay_record_rejects_shape_and_identity_tampering(tmp_path: Path) -> None:

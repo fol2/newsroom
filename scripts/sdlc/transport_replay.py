@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 from typing import BinaryIO, Mapping
 
@@ -13,7 +14,7 @@ from .artifact_envelope import (
     _unique_object,
     _validate_json_depth,
 )
-from .emit_evidence import sha256_identity
+from .emit_evidence import canonical_json_bytes, sha256_identity
 from .github_transport import (
     GitHubTransportError,
     TransportBundle,
@@ -26,6 +27,7 @@ from .github_transport import (
 SCHEMA_VERSION = "newsroom.sdlc.transport-replay.v1"
 _MAX_JSON_BYTES = 8 * 1024 * 1024
 _MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+_SAFE_NAME = re.compile(r"[A-Za-z0-9_.-]{1,255}")
 _EXPECTED_ENTRIES = frozenset(
     {
         "artifact",
@@ -85,8 +87,9 @@ class TransportReplay:
         _positive(self.head_repository_id, "head_repository_id")
         _git_sha(self.head_sha, "head_sha")
         _positive(self.artifact_id, "artifact_id")
-        _text(self.artifact_name, "artifact_name", maximum=255)
-        _positive(self.artifact_size_bytes, "artifact_size")
+        _safe_name(self.artifact_name, "artifact_name")
+        if _positive(self.artifact_size_bytes, "artifact_size") > _MAX_ARCHIVE_BYTES:
+            raise TransportReplayError("artifact_size")
         for value, code in (
             (self.transport_identity, "transport_identity"),
             (self.artifact_digest, "artifact_digest"),
@@ -157,6 +160,13 @@ def _text(value: object, code: str, *, maximum: int = 4096) -> str:
     return value
 
 
+def _safe_name(value: object, code: str) -> str:
+    text = _text(value, code, maximum=255)
+    if _SAFE_NAME.fullmatch(text) is None:
+        raise TransportReplayError(code)
+    return text
+
+
 def _sha(value: object, code: str) -> str:
     text = _text(value, code, maximum=71)
     if not text.startswith("sha256:") or len(text) != 71:
@@ -216,7 +226,7 @@ def validate_transport_replay(value: object) -> TransportReplay:
         ),
         head_sha=_git_sha(item.get("head_sha"), "head_sha"),
         artifact_id=_positive(item.get("artifact_id"), "artifact_id"),
-        artifact_name=_text(item.get("artifact_name"), "artifact_name", maximum=255),
+        artifact_name=_safe_name(item.get("artifact_name"), "artifact_name"),
         artifact_size_bytes=_positive(
             item.get("artifact_size_bytes"), "artifact_size"
         ),
@@ -306,6 +316,13 @@ def _load_json(payload: bytes, code: str) -> Mapping[str, object]:
     return _mapping(value, code)
 
 
+def _canonical_json(payload: bytes, code: str) -> Mapping[str, object]:
+    value = _load_json(payload, code)
+    if payload != canonical_json_bytes(value) + b"\n":
+        raise TransportReplayError(f"{code}_canonical")
+    return value
+
+
 def _digest(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
@@ -356,11 +373,9 @@ def _validate_jobs(value: Mapping[str, object], run_id: int, attempt: int) -> No
         raise TransportReplayError("jobs_shape")
     for raw in jobs:
         job = _mapping(raw, "job")
-        job_run_id = job.get("run_id")
-        job_attempt = job.get("run_attempt")
-        if job_run_id is not None and _positive(job_run_id, "job_run_id") != run_id:
+        if _positive(job.get("run_id"), "job_run_id") != run_id:
             raise TransportReplayError("job_run_id")
-        if job_attempt is not None and _positive(job_attempt, "job_run_attempt") != attempt:
+        if _positive(job.get("run_attempt"), "job_run_attempt") != attempt:
             raise TransportReplayError("job_run_attempt")
 
 
@@ -382,12 +397,14 @@ def load_verified_transport(bundle_root: str | Path) -> VerifiedTransport:
     )
 
     try:
-        bundle = validate_transport_bundle(_load_json(transport_payload, "transport_json"))
+        bundle = validate_transport_bundle(
+            _canonical_json(transport_payload, "transport_json")
+        )
     except GitHubTransportError as exc:
         raise TransportReplayError("transport_invalid") from exc
-    run_value = _load_json(run_payload, "run_json")
-    jobs_value = _load_json(jobs_payload, "jobs_json")
-    metadata_value = _load_json(metadata_payload, "metadata_json")
+    run_value = _canonical_json(run_payload, "run_json")
+    jobs_value = _canonical_json(jobs_payload, "jobs_json")
+    metadata_value = _canonical_json(metadata_payload, "metadata_json")
 
     if (
         _digest(run_payload) != bundle.run_digest
