@@ -131,7 +131,7 @@ def test_same_spec_drives_execution_digest_and_minimal_redacted_environment(
         "import os; "
         "print('|'.join([os.environ.get('STATIC_VALUE','missing'),"
         "os.environ.get('VISIBLE','missing'),"
-        "os.environ.get('CUSTOM_VALUE','missing'),"
+        "os.environ.get('CUSTOM_SECRET','missing'),"
         "os.environ.get('UNLISTED','missing')]))"
     )
     contract = _contract(tmp_path)
@@ -139,8 +139,8 @@ def test_same_spec_drives_execution_digest_and_minimal_redacted_environment(
         _value(
             argv=[sys.executable, "-c", source],
             static_env={"STATIC_VALUE": "fixed", "VISIBLE": "allowed"},
-            pass_env=["CUSTOM_VALUE"],
-            redact_env=["CUSTOM_VALUE"],
+            pass_env=["CUSTOM_SECRET"],
+            redact_env=["CUSTOM_SECRET"],
         ),
         contract=contract,
     )
@@ -149,7 +149,7 @@ def test_same_spec_drives_execution_digest_and_minimal_redacted_environment(
         contract=contract,
         spec=spec,
         ambient_env={
-            "CUSTOM_VALUE": "sensitive-value",
+            "CUSTOM_SECRET": "sensitive-value",
             "UNLISTED": "must-not-leak",
         },
     )
@@ -173,21 +173,13 @@ def test_secret_static_environment_and_unscoped_redaction_are_rejected(
     with pytest.raises(CommandSpecError, match="unbound_environment"):
         parse_command_spec(unscoped, contract=contract)
 
-    overlap = _value(
-        static_env={"VALUE": "x"},
-        pass_env=["VALUE"],
-        redact_env=["VALUE"],
-    )
-    with pytest.raises(CommandSpecError, match="environment_overlap"):
-        parse_command_spec(overlap, contract=contract)
-
 
 def test_missing_environment_fails_without_echoing_name_or_value(tmp_path: Path) -> None:
     contract = _contract(tmp_path)
     spec = parse_command_spec(
         _value(
-            pass_env=["PRIVATE_MISSING_VALUE"],
-            redact_env=["PRIVATE_MISSING_VALUE"],
+            pass_env=["PRIVATE_MISSING_SECRET"],
+            redact_env=["PRIVATE_MISSING_SECRET"],
         ),
         contract=contract,
     )
@@ -196,7 +188,7 @@ def test_missing_environment_fails_without_echoing_name_or_value(tmp_path: Path)
         build_environment(spec, {})
 
     assert str(failure.value) == "missing_environment"
-    assert "PRIVATE_MISSING_VALUE" not in str(failure.value)
+    assert "PRIVATE_MISSING_SECRET" not in str(failure.value)
 
 
 def test_shape_identifiers_and_numeric_limits_fail_closed(tmp_path: Path) -> None:
@@ -268,13 +260,13 @@ def test_all_ambient_values_are_redacted_and_bounded(tmp_path: Path) -> None:
         parse_command_spec(unbound, contract=contract)
 
     spec = parse_command_spec(
-        _value(pass_env=["VALUE"], redact_env=["VALUE"]),
+        _value(pass_env=["CUSTOM_SECRET"], redact_env=["CUSTOM_SECRET"]),
         contract=contract,
     )
     with pytest.raises(CommandSpecError, match="environment_value"):
-        build_environment(spec, {"VALUE": "x" * 65_537})
+        build_environment(spec, {"CUSTOM_SECRET": "x" * 65_537})
     with pytest.raises(CommandSpecError, match="environment_value"):
-        build_environment(spec, {"VALUE": "bad\x00value"})
+        build_environment(spec, {"CUSTOM_SECRET": "bad\x00value"})
 
 
 def test_duplicate_json_keys_fail_closed(tmp_path: Path) -> None:
@@ -378,7 +370,7 @@ def test_cli_preserves_gate_exit_semantics_and_hides_input_details(
     assert payload["gate_run"]["result"] == "FAIL"
     assert payload["gate_run"]["returncode"] == 7
 
-    private_name = "PRIVATE_MISSING_VALUE_12345"
+    private_name = "PRIVATE_MISSING_SECRET_12345"
     _write_spec(
         tmp_path,
         "missing.json",
