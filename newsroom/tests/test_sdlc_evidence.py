@@ -17,6 +17,7 @@ from scripts.sdlc.emit_evidence import (
     EvidenceError,
     build_gate_evidence,
     canonical_json_bytes,
+    installed_uv_version,
     main as evidence_main,
     sha256_identity,
     validate_evidence_record,
@@ -164,6 +165,7 @@ def _build(
     junit: object = _MISSING,
     command_digest: str = COMMAND_DIGEST,
     service_digest: str | None = None,
+    uv_version: str | None = None,
     queue_ms: int = 1,
     bootstrap_ms: int = 2,
     finalize_ms: int = 3,
@@ -188,7 +190,7 @@ def _build(
         finalize_ms=finalize_ms,
         cache_key=None,
         cache_hit=False,
-        uv_version="0.8.0",
+        uv_version=uv_version or installed_uv_version(),
         command_spec_digest=command_digest,
         service_compatibility_digest=service_digest,
         created_at=created_at,
@@ -223,6 +225,7 @@ def test_pass_record_is_exact_schema_valid_and_omits_process_output(
     )
     assert record["selected_tests"] == ["newsroom/tests"]
     assert record["test_count"] == 3
+    assert record["uv_version"] == installed_uv_version()
     assert "stdout" not in record
     assert "stderr" not in record
 
@@ -267,6 +270,11 @@ def test_required_skip_downgrades_process_pass_and_pass_tamper_is_rejected(
     assert record["result_reason"] == "FAIL:core-deterministic:junit"
     assert record["required_skip_count"] == 1
     assert record["first_failure_fingerprint"] == FAILURE_DIGEST
+
+    missing_fingerprint = deepcopy(record)
+    missing_fingerprint["first_failure_fingerprint"] = None
+    with pytest.raises(EvidenceError, match="failure_fingerprint_invariant"):
+        validate_evidence_record(missing_fingerprint)
 
     tampered = deepcopy(record)
     tampered["result"] = "PASS"
@@ -324,6 +332,17 @@ def test_selected_gate_requires_junit_and_service_gate_requires_compatibility(
             contract,
             route,
             service_digest=SERVICE_DIGEST,
+        )
+
+
+def test_claimed_uv_version_must_match_the_executable(tmp_path: Path) -> None:
+    contract, head, tree = _repository(tmp_path)
+
+    with pytest.raises(EvidenceError, match="uv_version_mismatch"):
+        _build(
+            contract,
+            _route(contract, head, tree),
+            uv_version="999.999.999-fake",
         )
 
 
@@ -405,7 +424,7 @@ def test_cli_emits_private_schema_valid_record_and_never_overwrites(
         "--finalize-ms",
         "3",
         "--uv-version",
-        "0.8.0",
+        installed_uv_version(),
         "--command-spec-digest",
         COMMAND_DIGEST,
         "--created-at",
