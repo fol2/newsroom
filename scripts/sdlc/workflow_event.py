@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,18 @@ _GIT_SHA = re.compile(r"[0-9a-f]{40}")
 _SAFE_ID = re.compile(r"[A-Za-z0-9_. -]{1,256}")
 _ZERO_SHA = "0" * 40
 _ALLOWED_EVENTS = frozenset({"pull_request", "merge_group", "push", "workflow_dispatch"})
+_JOB_CONCLUSIONS = frozenset(
+    {
+        "action_required",
+        "cancelled",
+        "failure",
+        "neutral",
+        "skipped",
+        "stale",
+        "success",
+        "timed_out",
+    }
+)
 _EVENT_KEYS = frozenset({
     "schema_version", "event_identity", "repository", "repository_id",
     "head_repository", "head_repository_id", "event_name", "event_sha",
@@ -40,9 +53,9 @@ _EVENT_KEYS = frozenset({
 })
 _TELEMETRY_KEYS = frozenset({
     "schema_version", "telemetry_identity", "run_id", "run_attempt", "job_id",
-    "job_name", "queue_ms", "bootstrap_ms", "finalize_ms", "job_created_at",
-    "job_started_at", "bootstrap_completed_at", "finalization_started_at",
-    "finalization_completed_at",
+    "job_name", "job_conclusion", "queue_ms", "bootstrap_ms", "finalize_ms",
+    "job_created_at", "job_started_at", "bootstrap_completed_at",
+    "finalization_started_at", "finalization_completed_at", "job_completed_at",
 })
 
 
@@ -95,6 +108,7 @@ class JobTelemetry:
     run_attempt: int
     job_id: int
     job_name: str
+    job_conclusion: str
     queue_ms: int
     bootstrap_ms: int
     finalize_ms: int
@@ -103,6 +117,7 @@ class JobTelemetry:
     bootstrap_completed_at: str
     finalization_started_at: str
     finalization_completed_at: str
+    job_completed_at: str
 
     def __post_init__(self) -> None:
         _validate_job_telemetry_fields(self)
@@ -115,6 +130,7 @@ class JobTelemetry:
             "run_attempt": self.run_attempt,
             "job_id": self.job_id,
             "job_name": self.job_name,
+            "job_conclusion": self.job_conclusion,
             "queue_ms": self.queue_ms,
             "bootstrap_ms": self.bootstrap_ms,
             "finalize_ms": self.finalize_ms,
@@ -123,6 +139,7 @@ class JobTelemetry:
             "bootstrap_completed_at": self.bootstrap_completed_at,
             "finalization_started_at": self.finalization_started_at,
             "finalization_completed_at": self.finalization_completed_at,
+            "job_completed_at": self.job_completed_at,
         }
         value["telemetry_identity"] = sha256_identity(
             {key: item for key, item in value.items() if key != "telemetry_identity"}
@@ -234,6 +251,8 @@ def _validate_job_telemetry_fields(telemetry: JobTelemetry) -> None:
     name = _text(telemetry.job_name, "job_name", maximum=256)
     if _SAFE_ID.fullmatch(name) is None:
         raise WorkflowEvidenceError("job_name")
+    if telemetry.job_conclusion not in _JOB_CONCLUSIONS:
+        raise WorkflowEvidenceError("job_conclusion")
     for field, value in (
         ("queue_ms", telemetry.queue_ms),
         ("bootstrap_ms", telemetry.bootstrap_ms),
@@ -245,7 +264,8 @@ def _validate_job_telemetry_fields(telemetry: JobTelemetry) -> None:
     _, bootstrap = _timestamp(telemetry.bootstrap_completed_at, "bootstrap_completed_at")
     _, final_started = _timestamp(telemetry.finalization_started_at, "finalization_started_at")
     _, final_completed = _timestamp(telemetry.finalization_completed_at, "finalization_completed_at")
-    if not created <= started <= bootstrap <= final_started <= final_completed:
+    _, completed = _timestamp(telemetry.job_completed_at, "job_completed_at")
+    if not created <= started <= bootstrap <= final_started <= final_completed <= completed:
         raise WorkflowEvidenceError("job_phase_order")
     if telemetry.queue_ms != _milliseconds(created, started, "queue_ms"):
         raise WorkflowEvidenceError("queue_ms")
@@ -264,6 +284,7 @@ def validate_job_telemetry(value: object) -> JobTelemetry:
         run_attempt=_positive(mapping.get("run_attempt"), "run_attempt"),
         job_id=_positive(mapping.get("job_id"), "job_id"),
         job_name=_text(mapping.get("job_name"), "job_name", maximum=256),
+        job_conclusion=_text(mapping.get("job_conclusion"), "job_conclusion", maximum=32),
         queue_ms=_nonnegative(mapping.get("queue_ms"), "queue_ms"),
         bootstrap_ms=_nonnegative(mapping.get("bootstrap_ms"), "bootstrap_ms"),
         finalize_ms=_nonnegative(mapping.get("finalize_ms"), "finalize_ms"),
@@ -272,6 +293,7 @@ def validate_job_telemetry(value: object) -> JobTelemetry:
         bootstrap_completed_at=_text(mapping.get("bootstrap_completed_at"), "bootstrap_completed_at", maximum=64),
         finalization_started_at=_text(mapping.get("finalization_started_at"), "finalization_started_at", maximum=64),
         finalization_completed_at=_text(mapping.get("finalization_completed_at"), "finalization_completed_at", maximum=64),
+        job_completed_at=_text(mapping.get("job_completed_at"), "job_completed_at", maximum=64),
     )
     expected = telemetry.as_dict()["telemetry_identity"]
     if mapping.get("telemetry_identity") != expected:
@@ -279,14 +301,21 @@ def validate_job_telemetry(value: object) -> JobTelemetry:
     return telemetry
 
 
-def _event_mapping(path: str | Path) -> Mapping[str, object]:
+def _event_snapshot(path: str | Path) -> tuple[Mapping[str, object], str]:
     try:
         payload = _safe_machine_file(path, maximum=4 * 1024 * 1024, code="event_file")
         value = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object)
         _validate_json_depth(value)
-        return _mapping(value, "event_mapping")
+        return (
+            _mapping(value, "event_mapping"),
+            "sha256:" + hashlib.sha256(payload).hexdigest(),
+        )
     except (ArtifactProvenanceError, UnicodeError, json.JSONDecodeError) as exc:
         raise WorkflowEvidenceError("event_file") from exc
+
+
+def _event_mapping(path: str | Path) -> Mapping[str, object]:
+    return _event_snapshot(path)[0]
 
 
 def _base_identity(
@@ -331,14 +360,17 @@ def derive_workflow_event(
 ) -> WorkflowEvent:
     root = Path(repo_root).resolve()
     env = os.environ if environment is None else environment
+    event_path = env.get("GITHUB_EVENT_PATH")
+    if not isinstance(event_path, str):
+        raise WorkflowEvidenceError("event_file")
+    _, before_digest = _event_snapshot(event_path)
     try:
         context = context_from_environment(root, env)
     except (ArtifactProvenanceError, GitRouteError, OSError) as exc:
         raise WorkflowEvidenceError("run_context") from exc
-    event_path = env.get("GITHUB_EVENT_PATH")
-    if not isinstance(event_path, str):
-        raise WorkflowEvidenceError("event_file")
-    event = _event_mapping(event_path)
+    event, after_digest = _event_snapshot(event_path)
+    if before_digest != after_digest:
+        raise WorkflowEvidenceError("event_file_changed")
     try:
         base_sha = _base_identity(context, event)
     except ArtifactProvenanceError as exc:
@@ -408,6 +440,11 @@ def measure_job_telemetry(
     if job.get("run_attempt") not in {None, expected_attempt}:
         raise WorkflowEvidenceError("job_run_attempt")
     job_id = _positive(job.get("id"), "job_id")
+    if job.get("status") != "completed":
+        raise WorkflowEvidenceError("job_incomplete")
+    conclusion = _text(job.get("conclusion"), "job_conclusion", maximum=32)
+    if conclusion not in _JOB_CONCLUSIONS:
+        raise WorkflowEvidenceError("job_conclusion")
     created_text, created = _timestamp(job.get("created_at"), "job_created_at")
     started_text, started = _timestamp(job.get("started_at"), "job_started_at")
     if started < created:
@@ -439,7 +476,12 @@ def measure_job_telemetry(
     final_completed_text, final_completed = _timestamp(
         finalization.get("completed_at"), "finalization_completed_at"
     )
-    if bootstrap_completed < started or final_started < bootstrap_completed:
+    completed_text, completed = _timestamp(job.get("completed_at"), "job_completed_at")
+    if (
+        bootstrap_completed < started
+        or final_started < bootstrap_completed
+        or completed < final_completed
+    ):
         raise WorkflowEvidenceError("job_phase_order")
 
     return JobTelemetry(
@@ -447,6 +489,7 @@ def measure_job_telemetry(
         run_attempt=expected_attempt,
         job_id=job_id,
         job_name=expected_name,
+        job_conclusion=conclusion,
         queue_ms=_milliseconds(created, started, "queue_ms"),
         bootstrap_ms=_milliseconds(started, bootstrap_completed, "bootstrap_ms"),
         finalize_ms=_milliseconds(final_started, final_completed, "finalize_ms"),
@@ -455,6 +498,7 @@ def measure_job_telemetry(
         bootstrap_completed_at=bootstrap_text,
         finalization_started_at=final_started_text,
         finalization_completed_at=final_completed_text,
+        job_completed_at=completed_text,
     )
 
 
