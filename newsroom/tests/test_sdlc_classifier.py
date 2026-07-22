@@ -63,7 +63,7 @@ def test_risk_routing_uses_maximum_triggered_tier() -> None:
     assert _route("newsroom/tests/test_unrelated.py")["risk_tier"] == (
         "R1_LOCAL_CODE"
     )
-    assert _route("newsroom/authority/transaction.py")["risk_tier"] == (
+    assert _route("newsroom/authority/object_system.py")["risk_tier"] == (
         "R2_STATEFUL_CONTRACT"
     )
     assert _route("newsroom/projection/policy.py")["risk_tier"] == (
@@ -132,7 +132,7 @@ def test_adding_a_path_never_lowers_risk_metamorphic() -> None:
     paths = (
         "README.md",
         "newsroom/tests/test_unrelated.py",
-        "newsroom/authority/transaction.py",
+        "newsroom/authority/object_system.py",
         "newsroom/projection/policy.py",
         "release/production.yml",
     )
