@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,10 @@ _MAX_ARGUMENT_CHARS = 4096
 _MAX_ENVIRONMENT_ITEMS = 128
 _MAX_ENVIRONMENT_VALUE_CHARS = 4096
 _MAX_OUTPUT_BYTES = 1_048_576
+_MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024
+_MAX_PASSED_ENV_VALUE_CHARS = 65_536
+_MAX_PASSED_ENV_TOTAL_CHARS = 262_144
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _SAFE_ID = re.compile(r"[A-Za-z0-9_.*-]{1,128}")
 _SECRET_NAME = re.compile(
@@ -39,6 +44,7 @@ _REQUIRED_KEYS = frozenset(
         "static_env",
         "pass_env",
         "redact_env",
+        "executable_digest",
         "output_limit_bytes",
         "termination_grace_ms",
     }
@@ -58,6 +64,7 @@ class CommandSpec:
     static_env: tuple[tuple[str, str], ...]
     pass_env: tuple[str, ...]
     redact_env: tuple[str, ...]
+    executable_digest: str
     output_limit_bytes: int
     termination_grace_ms: int
 
@@ -71,6 +78,7 @@ class CommandSpec:
             "static_env": dict(self.static_env),
             "pass_env": list(self.pass_env),
             "redact_env": list(self.redact_env),
+            "executable_digest": self.executable_digest,
             "output_limit_bytes": self.output_limit_bytes,
             "termination_grace_ms": self.termination_grace_ms,
         }
@@ -141,6 +149,45 @@ def _accepted_gate_ids(contract: SdlcContract) -> frozenset[str]:
     return frozenset(str(gate["id"]) for gate in contract.data["gate"].values())
 
 
+def executable_digest(path: str | Path) -> tuple[str, str]:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        raise CommandSpecError("executable_path")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise CommandSpecError("executable_path") from exc
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(resolved, flags)
+    except OSError as exc:
+        raise CommandSpecError("executable_open") from exc
+    digest = hashlib.sha256()
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or not 0 < metadata.st_size <= _MAX_EXECUTABLE_BYTES
+            or not os.access(resolved, os.X_OK)
+        ):
+            raise CommandSpecError("executable_file")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            while payload := stream.read(1024 * 1024):
+                digest.update(payload)
+    finally:
+        os.close(descriptor)
+    return resolved.as_posix(), "sha256:" + digest.hexdigest()
+
+
+def _verified_executable(path: str, expected_digest: object) -> tuple[str, str]:
+    if not isinstance(expected_digest, str) or _SHA256.fullmatch(expected_digest) is None:
+        raise CommandSpecError("executable_digest")
+    resolved, actual = executable_digest(path)
+    if actual != expected_digest:
+        raise CommandSpecError("executable_digest")
+    return resolved, actual
+
+
 def parse_command_spec(
     value: object,
     *,
@@ -161,7 +208,7 @@ def parse_command_spec(
     raw_argv = value.get("argv")
     if not isinstance(raw_argv, list) or not 0 < len(raw_argv) <= _MAX_ARGUMENTS:
         raise CommandSpecError("argv")
-    argv = tuple(
+    argv_values = tuple(
         _bounded_string(item, "argv", maximum=_MAX_ARGUMENT_CHARS)
         for item in raw_argv
     )
@@ -198,8 +245,14 @@ def parse_command_spec(
     redacted = tuple(sorted(_environment_name(item) for item in raw_redact))
     if len(set(redacted)) != len(redacted):
         raise CommandSpecError("redact_env_duplicate")
-    if not set(redacted).issubset(passed):
-        raise CommandSpecError("redact_env_scope")
+    if redacted != passed:
+        raise CommandSpecError("unbound_environment")
+
+    resolved_executable, expected_executable_digest = _verified_executable(
+        argv_values[0],
+        value.get("executable_digest"),
+    )
+    argv = (resolved_executable, *argv_values[1:])
 
     output_limit = value.get("output_limit_bytes")
     if (
@@ -225,6 +278,7 @@ def parse_command_spec(
         static_env=tuple(sorted(static.items())),
         pass_env=passed,
         redact_env=redacted,
+        executable_digest=expected_executable_digest,
         output_limit_bytes=output_limit,
         termination_grace_ms=grace_ms,
     )
@@ -256,6 +310,15 @@ def _safe_input_path(repo_root: Path, relative: str | Path) -> Path:
     return current
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for name, item in pairs:
+        if name in value:
+            raise CommandSpecError("spec_duplicate_key")
+        value[name] = item
+    return value
+
+
 def load_command_spec(
     repo_root: str | Path,
     spec_path: str | Path,
@@ -283,7 +346,10 @@ def load_command_spec(
     if not payload or len(payload) > _MAX_SPEC_BYTES:
         raise CommandSpecError("spec_file")
     try:
-        value = json.loads(payload.decode("utf-8"))
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+        )
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise CommandSpecError("spec_json") from exc
     return parse_command_spec(value, contract=accepted)
@@ -299,10 +365,16 @@ def build_environment(
     ):
         raise CommandSpecError("ambient_environment")
     environment = dict(spec.static_env)
+    total = 0
     for name in spec.pass_env:
         value = ambient.get(name)
         if value is None:
             raise CommandSpecError("missing_environment")
+        if "\x00" in value or len(value) > _MAX_PASSED_ENV_VALUE_CHARS:
+            raise CommandSpecError("environment_value")
+        total += len(value)
+        if total > _MAX_PASSED_ENV_TOTAL_CHARS:
+            raise CommandSpecError("environment_size")
         environment[name] = value
     return environment
 
@@ -313,22 +385,29 @@ def execute_command_spec(
     spec: CommandSpec,
     ambient_env: Mapping[str, str] | None = None,
 ) -> CommandRun:
-    _, cwd = _safe_relative_directory(contract.repo_root, spec.cwd)
-    environment = build_environment(spec, os.environ if ambient_env is None else ambient_env)
+    validated = parse_command_spec(spec.as_dict(), contract=contract)
+    if validated != spec:
+        raise CommandSpecError("spec_not_normalized")
+    _, cwd = _safe_relative_directory(contract.repo_root, validated.cwd)
+    environment = build_environment(
+        validated, os.environ if ambient_env is None else ambient_env
+    )
     result = run_configured_gate(
         contract=contract,
-        gate_id=spec.gate_id,
-        phase=spec.phase,
-        argv=spec.argv,
+        gate_id=validated.gate_id,
+        phase=validated.phase,
+        argv=validated.argv,
         cwd=cwd,
         env=environment,
         redact_values=tuple(
-            environment[name] for name in spec.redact_env if environment[name]
+            environment[name]
+            for name in validated.redact_env
+            if environment[name]
         ),
-        output_limit_bytes=spec.output_limit_bytes,
-        termination_grace_seconds=spec.termination_grace_ms / 1000.0,
+        output_limit_bytes=validated.output_limit_bytes,
+        termination_grace_seconds=validated.termination_grace_ms / 1000.0,
     )
-    return CommandRun(spec.digest, result)
+    return CommandRun(validated.digest, result)
 
 
 def _safe_output_path(repo_root: Path, relative: str | Path) -> Path:
