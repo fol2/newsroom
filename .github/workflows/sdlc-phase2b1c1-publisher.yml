@@ -34,13 +34,20 @@ jobs:
       - name: Apply exact review fixes
         run: |
           set -euo pipefail
-          test "$(sha256sum .sdlc/replay-review-fixes.py | cut -d' ' -f1)" = 8973b9b19527b811564282e03ba9a6c6ed6ed658821f1f7d97d6c6efd41d410e
-          test "$(git hash-object scripts/sdlc/transport_replay.py)" = adf3f22d48e5b33db36b2b3fea7aa5eef15dcf0e
-          test "$(git hash-object newsroom/tests/test_sdlc_transport_replay.py)" = 6df866ebca7778b8d673b5b137894c15a882c0f1
+          patch_sha=$(sha256sum .sdlc/replay-review-fixes.py | cut -d' ' -f1)
+          source_blob=$(git hash-object scripts/sdlc/transport_replay.py)
+          test_blob=$(git hash-object newsroom/tests/test_sdlc_transport_replay.py)
+          printf 'patch_sha=%s\nsource_blob=%s\ntest_blob=%s\n' "$patch_sha" "$source_blob" "$test_blob"
+          test "$patch_sha" = 8973b9b19527b811564282e03ba9a6c6ed6ed658821f1f7d97d6c6efd41d410e
+          test "$source_blob" = adf3f22d48e5b33db36b2b3fea7aa5eef15dcf0e
+          test "$test_blob" = 6df866ebca7778b8d673b5b137894c15a882c0f1
           python -m py_compile .sdlc/replay-review-fixes.py
           python .sdlc/replay-review-fixes.py
-          test "$(sha256sum scripts/sdlc/transport_replay.py | cut -d' ' -f1)" = b45ebf0c2f204ffd9874f6200f7dcc3455aeb7f7ec48dd8ca7c028abeacc9d20
-          test "$(sha256sum newsroom/tests/test_sdlc_transport_replay.py | cut -d' ' -f1)" = 41cdb0752aa51bf1f0e4dc695476a743d7e154983a5c04b5584ce0b18eecd531
+          source_sha=$(sha256sum scripts/sdlc/transport_replay.py | cut -d' ' -f1)
+          test_sha=$(sha256sum newsroom/tests/test_sdlc_transport_replay.py | cut -d' ' -f1)
+          printf 'source_sha=%s\ntest_sha=%s\n' "$source_sha" "$test_sha"
+          test "$source_sha" = b45ebf0c2f204ffd9874f6200f7dcc3455aeb7f7ec48dd8ca7c028abeacc9d20
+          test "$test_sha" = 41cdb0752aa51bf1f0e4dc695476a743d7e154983a5c04b5584ce0b18eecd531
 
       - name: Install exact uv and sync locked environment
         run: |
