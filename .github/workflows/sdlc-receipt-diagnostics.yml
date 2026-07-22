@@ -55,13 +55,23 @@ jobs:
           echo 'changed=true' >> "$GITHUB_OUTPUT"
       - name: Sync locked environment
         run: uv sync --dev --locked
-      - name: Verify exact review unit
+      - name: Compile
+        run: uv run python -m compileall -q newsroom scripts
+      - name: Run focused receipt tests
+        id: focused
         shell: bash
         run: |
-          set -euo pipefail
-          uv run python -m compileall -q newsroom scripts
-          uv run python -m pytest -q newsroom/tests/test_sdlc_artifact_receipt.py
-          uv run python -m pytest -q \
+          set +e
+          uv run python -m pytest -vv --tb=long newsroom/tests/test_sdlc_artifact_receipt.py > focused.log 2>&1
+          status=$?
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Run broader SDLC tests
+        id: broader
+        shell: bash
+        run: |
+          set +e
+          uv run python -m pytest -vv --tb=long \
             newsroom/tests/test_sdlc_artifact_envelope.py \
             newsroom/tests/test_sdlc_classifier.py \
             newsroom/tests/test_sdlc_command_spec.py \
@@ -71,8 +81,35 @@ jobs:
             newsroom/tests/test_sdlc_evidence.py \
             newsroom/tests/test_sdlc_exact_checkout.py \
             newsroom/tests/test_sdlc_junit_encoding.py \
-            newsroom/tests/test_sdlc_junit_evidence.py
-          git diff --check
+            newsroom/tests/test_sdlc_junit_evidence.py > broader.log 2>&1
+          status=$?
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Check diff
+        id: diff
+        shell: bash
+        run: |
+          set +e
+          git diff --check > diff.log 2>&1
+          status=$?
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          exit 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: sdlc-receipt-qualification-${{ github.sha }}
+          path: |
+            focused.log
+            broader.log
+            diff.log
+          if-no-files-found: error
+          retention-days: 1
+      - name: Preserve qualification result
+        shell: bash
+        run: |
+          test "${{ steps.focused.outputs.status }}" = 0
+          test "${{ steps.broader.outputs.status }}" = 0
+          test "${{ steps.diff.outputs.status }}" = 0
       - name: Commit and push source checkpoint
         if: steps.patch.outputs.changed == 'true'
         shell: bash
