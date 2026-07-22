@@ -4,30 +4,36 @@ on:
   push:
     branches:
       - agent/sdlc-v2-phase1a2-dependency-escalation
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
   export:
+    if: github.event_name == 'push' || github.head_ref == 'agent/sdlc-v2-phase1a2-dependency-escalation'
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
           show-progress: false
       - name: Export exact tracked source
         shell: bash
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD}"
           git ls-files -z | tar --null --files-from=- --create --gzip --file=sdlc-a2-source.tar.gz
           sha256sum sdlc-a2-source.tar.gz > sdlc-a2-source.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: sdlc-a2-source-${{ github.sha }}
+          name: sdlc-a2-source-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
             sdlc-a2-source.tar.gz
             sdlc-a2-source.sha256
