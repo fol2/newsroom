@@ -11,6 +11,7 @@ import subprocess
 from jsonschema import Draft202012Validator, FormatChecker
 import pytest
 
+from scripts.sdlc import emit_evidence
 from scripts.sdlc.classify_change import resolve_commit, resolve_tree
 from scripts.sdlc.contracts import SdlcContract, load_contract
 from scripts.sdlc.emit_evidence import (
@@ -346,6 +347,28 @@ def test_claimed_uv_version_must_match_the_executable(tmp_path: Path) -> None:
         )
 
 
+def test_gate_run_reason_is_bound_to_gate_phase_and_exit_code(
+    tmp_path: Path,
+) -> None:
+    contract, head, tree = _repository(tmp_path)
+    route = _route(contract, head, tree)
+
+    wrong_gate = _gate_run()
+    wrong_gate["result_reason"] = "PASS:route:tests"
+    with pytest.raises(EvidenceError, match="gate_run_reason"):
+        _build(contract, route, gate_run=wrong_gate)
+
+    wrong_phase = _gate_run()
+    wrong_phase["result_reason"] = "PASS:core-deterministic:other"
+    with pytest.raises(EvidenceError, match="gate_run_reason"):
+        _build(contract, route, gate_run=wrong_phase)
+
+    wrong_exit = _gate_run(result="FAIL")
+    wrong_exit["result_reason"] = "FAIL:core-deterministic:tests:exit=8"
+    with pytest.raises(EvidenceError, match="gate_run_reason"):
+        _build(contract, route, gate_run=wrong_exit, junit=None)
+
+
 def test_gate_run_and_junit_internal_inconsistency_are_rejected(
     tmp_path: Path,
 ) -> None:
@@ -362,18 +385,29 @@ def test_gate_run_and_junit_internal_inconsistency_are_rejected(
         _build(contract, route, junit=invalid_junit)
 
 
-def test_exact_git_blob_wins_over_dirty_worktree_lockfile(tmp_path: Path) -> None:
+def test_exact_git_blob_wins_over_dirty_untracked_lockfile_bytes(
+    tmp_path: Path,
+) -> None:
     contract, head, tree = _repository(tmp_path)
-    (tmp_path / "uv.lock").write_text("tampered = true\n", encoding="utf-8")
+    (tmp_path / "untracked-evidence.json").write_text("{}", encoding="utf-8")
 
     record = _build(contract, _route(contract, head, tree))
 
     assert record["lockfile_digest"] == (
         "sha256:" + hashlib.sha256(b"version = 1\n").hexdigest()
     )
-    assert record["lockfile_digest"] != (
-        "sha256:" + hashlib.sha256(b"tampered = true\n").hexdigest()
+
+
+def test_tracked_worktree_drift_blocks_evidence(tmp_path: Path) -> None:
+    contract, head, tree = _repository(tmp_path)
+    contract_path = tmp_path / ".sdlc" / "gates.toml"
+    contract_path.write_text(
+        contract_path.read_text(encoding="utf-8") + "\n# dirty\n",
+        encoding="utf-8",
     )
+
+    with pytest.raises(EvidenceError, match="tracked_checkout_dirty"):
+        _build(contract, _route(contract, head, tree))
 
 
 def test_head_or_base_tree_mismatch_is_rejected(tmp_path: Path) -> None:
@@ -387,6 +421,21 @@ def test_head_or_base_tree_mismatch_is_rejected(tmp_path: Path) -> None:
     wrong_tree["base_tree_sha"] = "1" * 40
     with pytest.raises(EvidenceError, match="base_tree_mismatch"):
         _build(contract, wrong_tree)
+
+
+def test_atomic_output_failure_leaves_no_target_or_temporary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_link(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated")
+
+    monkeypatch.setattr(emit_evidence.os, "link", fail_link)
+    with pytest.raises(EvidenceError, match="output_open"):
+        emit_evidence._write_json(tmp_path, "evidence.json", {"value": 1})
+
+    assert not (tmp_path / "evidence.json").exists()
+    assert list(tmp_path.glob(".evidence.json.*.tmp")) == []
 
 
 def test_cli_emits_private_schema_valid_record_and_never_overwrites(
