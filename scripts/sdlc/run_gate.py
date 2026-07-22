@@ -20,6 +20,7 @@ SCHEMA_VERSION = "newsroom.sdlc.gate-run.v1"
 _SECRET_NAME = re.compile(r"(?:AUTH|CREDENTIAL|KEY|PASSWORD|SECRET|TOKEN)", re.IGNORECASE)
 _SAFE_ID = re.compile(r"[A-Za-z0-9_.*-]{1,128}")
 _MAX_OUTPUT_BYTES = 1_048_576
+_SCHEDULER_MARGIN_SECONDS = 0.05
 
 
 class GateRunError(ValueError):
@@ -243,9 +244,10 @@ def run_gate_command(
         raise GateRunError("output limit must be between 1 and 1048576 bytes")
 
     budget = min(deadline.remaining_seconds(), command_timeout)
-    if budget <= grace:
+    margin = min(_SCHEDULER_MARGIN_SECONDS, budget / 10)
+    if budget <= grace + margin:
         return _budget_result(gate_id, phase)
-    run_timeout = budget - grace
+    run_timeout = budget - grace - margin
 
     environment = dict(os.environ if env is None else env)
     secrets = _secret_values(environment, redact_values)
@@ -311,7 +313,7 @@ def run_gate_command(
 
     cleanup_stop = time.monotonic() + max(
         0.0,
-        min(grace, deadline.remaining_seconds()),
+        min(grace + margin, deadline.remaining_seconds()),
     )
     for reader in readers:
         reader.join(timeout=max(0.0, cleanup_stop - time.monotonic()))
