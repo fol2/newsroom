@@ -12,6 +12,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 from typing import Mapping, Sequence
 
 from .classify_change import GitRouteError, resolve_commit, resolve_tree
@@ -26,12 +27,8 @@ _REPOSITORY = "fol2/newsroom"
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
 _SAFE_ID = re.compile(r"[A-Za-z0-9_.*-]{1,128}")
+_SAFE_REASON_SUFFIX = re.compile(r"[A-Za-z0-9_=.*-]{1,256}")
 _UV_OUTPUT = re.compile(r"uv ([^\s]+)(?:\s.*)?")
-_RESULT_REASON = re.compile(
-    r"(?:PASS|FAIL|BUDGET_EXCEEDED|CLASSIFIER_ERROR|ENVIRONMENT_ERROR|"
-    r"EVIDENCE_MISMATCH|UNAUTHORISED_EFFECT):[A-Za-z0-9_.*-]+:"
-    r"[A-Za-z0-9_.*-]+(?::[A-Za-z0-9_=.*-]+)?"
-)
 _RESULTS = frozenset(
     {
         "PASS",
@@ -315,6 +312,20 @@ def _git_bytes(
     return completed.stdout
 
 
+def verify_tracked_checkout(repo_root: str | Path, head_sha: str) -> None:
+    root = Path(repo_root).resolve()
+    expected_head = _git_sha(head_sha, "head_sha")
+    if resolve_commit(root, "HEAD") != expected_head:
+        raise EvidenceError("head_mismatch")
+    status = _git_bytes(
+        root,
+        ("status", "--porcelain=v1", "-z", "--untracked-files=no"),
+        maximum=_MAX_JSON_BYTES,
+    )
+    if status:
+        raise EvidenceError("tracked_checkout_dirty")
+
+
 @lru_cache(maxsize=1)
 def installed_uv_version() -> str:
     try:
@@ -446,6 +457,32 @@ def _validate_route(
     return route
 
 
+def _expected_gate_run_reason(
+    *,
+    result: str,
+    gate_id: str,
+    phase: str,
+    returncode: int | None,
+    reason: str,
+) -> None:
+    base = f"{result}:{gate_id}:{phase}"
+    if result in {"PASS", "BUDGET_EXCEEDED"}:
+        if reason != base:
+            raise EvidenceError("gate_run_reason")
+        return
+    if result == "FAIL":
+        if returncode is None or returncode == 0 or reason != f"{base}:exit={returncode}":
+            raise EvidenceError("gate_run_reason")
+        return
+    if reason == base:
+        return
+    prefix = base + ":"
+    if not reason.startswith(prefix) or _SAFE_REASON_SUFFIX.fullmatch(
+        reason[len(prefix) :]
+    ) is None:
+        raise EvidenceError("gate_run_reason")
+
+
 def _validate_gate_run(gate_id: str, value: object) -> dict[str, object]:
     run = dict(_mapping(value, "gate_run"))
     if set(run) != _GATE_RUN_KEYS:
@@ -454,13 +491,11 @@ def _validate_gate_run(gate_id: str, value: object) -> dict[str, object]:
         raise EvidenceError("gate_run_schema")
     if run.get("gate_id") != gate_id:
         raise EvidenceError("gate_run_id")
-    run["phase"] = _string(run.get("phase"), "gate_run_phase", maximum=128)
+    phase = _string(run.get("phase"), "gate_run_phase", maximum=128)
     result = _string(run.get("result"), "gate_run_result", maximum=64)
     if result not in _RESULTS:
         raise EvidenceError("gate_run_result")
     reason = _string(run.get("result_reason"), "gate_run_reason", maximum=512)
-    if _RESULT_REASON.fullmatch(reason) is None or not reason.startswith(result + ":"):
-        raise EvidenceError("gate_run_reason")
     returncode = run.get("returncode")
     if returncode is not None and (
         isinstance(returncode, bool) or not isinstance(returncode, int)
@@ -468,8 +503,14 @@ def _validate_gate_run(gate_id: str, value: object) -> dict[str, object]:
         raise EvidenceError("gate_run_returncode")
     if result == "PASS" and returncode != 0:
         raise EvidenceError("gate_run_pass_returncode")
-    if result == "FAIL" and (returncode is None or returncode == 0):
-        raise EvidenceError("gate_run_fail_returncode")
+    _expected_gate_run_reason(
+        result=result,
+        gate_id=gate_id,
+        phase=phase,
+        returncode=returncode,
+        reason=reason,
+    )
+    run["phase"] = phase
     run["execution_ms"] = _nonnegative(run.get("execution_ms"), "execution_ms")
     _text(run.get("stdout"), "gate_run_stdout", maximum=1_048_576)
     _text(run.get("stderr"), "gate_run_stderr", maximum=1_048_576)
@@ -688,7 +729,7 @@ def validate_evidence_record(record_value: object) -> dict[str, object]:
     if result not in _RESULTS:
         raise EvidenceError("result")
     reason = _string(record.get("result_reason"), "result_reason", maximum=512)
-    if _RESULT_REASON.fullmatch(reason) is None or not reason.startswith(result + ":"):
+    if not reason.startswith(result + ":"):
         raise EvidenceError("result_reason")
     record["created_at"] = _created_at(
         _string(record.get("created_at"), "created_at", maximum=64)
@@ -724,6 +765,7 @@ def build_gate_evidence(
         raise EvidenceError("contract_repository")
     normalized_route = _validate_route(contract, route)
     current_head = resolve_commit(root, "HEAD")
+    verify_tracked_checkout(root, current_head)
     if current_head != normalized_route["head_sha"]:
         raise EvidenceError("head_mismatch")
     if resolve_tree(root, current_head) != normalized_route["head_tree_sha"]:
@@ -931,16 +973,32 @@ def _load_json(root: Path, relative: str) -> object:
 
 def _write_json(root: Path, relative: str, value: object) -> None:
     path = _safe_json_path(root, relative, output=True)
+    if path.exists():
+        raise EvidenceError("output_exists")
     payload = canonical_json_bytes(value) + b"\n"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
     try:
-        descriptor = os.open(path, flags, 0o600)
-    except FileExistsError as exc:
-        raise EvidenceError("output_exists") from exc
-    except OSError as exc:
-        raise EvidenceError("output_open") from exc
-    with os.fdopen(descriptor, "wb") as stream:
-        stream.write(payload)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise EvidenceError("output_exists") from exc
+        except OSError as exc:
+            raise EvidenceError("output_open") from exc
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def main(argv: Sequence[str] | None = None) -> int:
