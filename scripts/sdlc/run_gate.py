@@ -9,9 +9,9 @@ import re
 import signal
 import subprocess
 import sys
-import tempfile
+import threading
 import time
-from typing import Mapping, Sequence
+from typing import BinaryIO, Mapping, Sequence
 
 from .contracts import ContractError, SdlcContract, load_contract
 
@@ -19,6 +19,7 @@ from .contracts import ContractError, SdlcContract, load_contract
 SCHEMA_VERSION = "newsroom.sdlc.gate-run.v1"
 _SECRET_NAME = re.compile(r"(?:AUTH|CREDENTIAL|KEY|PASSWORD|SECRET|TOKEN)", re.IGNORECASE)
 _SAFE_ID = re.compile(r"[A-Za-z0-9_.*-]{1,128}")
+_MAX_OUTPUT_BYTES = 1_048_576
 
 
 class GateRunError(ValueError):
@@ -32,10 +33,8 @@ class LaneDeadline:
 
     @classmethod
     def start(cls, timeout_seconds: float) -> "LaneDeadline":
-        timeout_ms = int(timeout_seconds * 1000)
-        if timeout_ms <= 0 or timeout_ms >= 60_000:
-            raise GateRunError("lane timeout must be positive and below 60 seconds")
-        return cls(time.monotonic_ns(), timeout_ms)
+        timeout = _timeout_seconds(timeout_seconds, "lane timeout")
+        return cls(time.monotonic_ns(), int(timeout * 1000))
 
     def remaining_seconds(self, *, now_ns: int | None = None) -> float:
         current = time.monotonic_ns() if now_ns is None else now_ns
@@ -72,18 +71,54 @@ class GateRunResult:
         }
 
 
+class _TailBuffer:
+    def __init__(self, retained_bytes: int) -> None:
+        self._retained_bytes = retained_bytes
+        self._data = bytearray()
+        self.total_bytes = 0
+
+    def feed(self, payload: bytes) -> None:
+        self.total_bytes += len(payload)
+        if len(payload) >= self._retained_bytes:
+            self._data[:] = payload[-self._retained_bytes :]
+            return
+        self._data.extend(payload)
+        overflow = len(self._data) - self._retained_bytes
+        if overflow > 0:
+            del self._data[:overflow]
+
+    def render(self, *, output_limit: int, secrets: Sequence[str], incomplete: bool) -> tuple[str, bool]:
+        text = bytes(self._data).decode("utf-8", errors="replace")
+        for secret in secrets:
+            text = text.replace(secret, "***")
+        encoded = text.encode("utf-8")
+        if len(encoded) > output_limit:
+            encoded = encoded[-output_limit:]
+            text = encoded.decode("utf-8", errors="replace")
+            while len(text.encode("utf-8")) > output_limit:
+                text = text[1:]
+        return text, incomplete or self.total_bytes > output_limit
+
+
 def _validate_id(value: str, name: str) -> None:
     if _SAFE_ID.fullmatch(value) is None:
         raise GateRunError(f"{name} contains unsupported characters")
 
 
-def _timeout_seconds(value: float, name: str) -> float:
-    if isinstance(value, bool) or value <= 0 or value >= 60:
+def _timeout_seconds(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise GateRunError(f"{name} must be numeric")
+    timeout = float(value)
+    if timeout <= 0 or timeout >= 60:
         raise GateRunError(f"{name} must be positive and below 60 seconds")
-    return float(value)
+    return timeout
 
 
 def _secret_values(environment: Mapping[str, str], explicit: Sequence[str]) -> tuple[str, ...]:
+    if any(not isinstance(name, str) or not isinstance(value, str) for name, value in environment.items()):
+        raise GateRunError("environment names and values must be strings")
+    if any(not isinstance(value, str) for value in explicit):
+        raise GateRunError("redaction values must be strings")
     values = {
         value
         for name, value in environment.items()
@@ -91,23 +126,6 @@ def _secret_values(environment: Mapping[str, str], explicit: Sequence[str]) -> t
     }
     values.update(value for value in explicit if value)
     return tuple(sorted(values, key=lambda item: (-len(item), item)))
-
-
-def _redact(value: str, secrets: Sequence[str]) -> str:
-    for secret in secrets:
-        value = value.replace(secret, "***")
-    return value
-
-
-def _read_tail(stream: object, limit: int) -> tuple[str, bool]:
-    if limit <= 0:
-        raise GateRunError("output limit must be positive")
-    stream.seek(0, os.SEEK_END)  # type: ignore[attr-defined]
-    size = stream.tell()  # type: ignore[attr-defined]
-    truncated = size > limit
-    stream.seek(max(0, size - limit))  # type: ignore[attr-defined]
-    payload = stream.read()  # type: ignore[attr-defined]
-    return payload.decode("utf-8", errors="replace"), truncated
 
 
 def _group_exists(process_group: int) -> bool:
@@ -120,34 +138,60 @@ def _group_exists(process_group: int) -> bool:
     return True
 
 
-def _terminate(process: subprocess.Popen[bytes], grace_seconds: float) -> None:
-    if os.name != "posix":
-        process.terminate()
-        try:
-            process.wait(timeout=grace_seconds)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        return
+def _wait_group_gone(process_group: int, timeout_seconds: float) -> bool:
+    stop_at = time.monotonic() + timeout_seconds
+    while time.monotonic() < stop_at:
+        if not _group_exists(process_group):
+            return True
+        time.sleep(0.01)
+    return not _group_exists(process_group)
 
+
+def _terminate_group(process: subprocess.Popen[bytes], grace_seconds: float) -> None:
     process_group = process.pid
     try:
         os.killpg(process_group, signal.SIGTERM)
     except ProcessLookupError:
-        return
-    stop_at = time.monotonic() + grace_seconds
-    while time.monotonic() < stop_at and _group_exists(process_group):
-        time.sleep(0.01)
-    if _group_exists(process_group):
+        pass
+    if not _wait_group_gone(process_group, grace_seconds):
         try:
             os.killpg(process_group, signal.SIGKILL)
         except ProcessLookupError:
             pass
+    if process.poll() is None:
+        try:
+            process.wait(timeout=max(0.05, grace_seconds))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def _drain(stream: BinaryIO, buffer: _TailBuffer, errors: list[str]) -> None:
     try:
-        process.wait(timeout=max(0.1, grace_seconds))
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
+        while payload := stream.read(65_536):
+            buffer.feed(payload)
+    except (OSError, ValueError) as exc:
+        errors.append(type(exc).__name__)
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _budget_result(gate_id: str, phase: str) -> GateRunResult:
+    return GateRunResult(
+        gate_id,
+        phase,
+        "BUDGET_EXCEEDED",
+        f"BUDGET_EXCEEDED:{gate_id}:{phase}",
+        None,
+        0,
+        "",
+        "",
+        False,
+        False,
+    )
 
 
 def run_gate_command(
@@ -165,74 +209,105 @@ def run_gate_command(
 ) -> GateRunResult:
     _validate_id(gate_id, "gate_id")
     _validate_id(phase, "phase")
+    if os.name != "posix":
+        raise GateRunError("bounded process-group execution requires POSIX")
     if not argv or any(not isinstance(item, str) or not item for item in argv):
         raise GateRunError("argv must contain non-empty strings")
     command_timeout = _timeout_seconds(command_timeout_seconds, "command timeout")
-    if termination_grace_seconds <= 0:
-        raise GateRunError("termination grace must be positive")
+    grace = _timeout_seconds(termination_grace_seconds, "termination grace")
+    if grace > 5:
+        raise GateRunError("termination grace must not exceed five seconds")
+    if isinstance(output_limit_bytes, bool) or not isinstance(output_limit_bytes, int):
+        raise GateRunError("output limit must be an integer")
+    if not 0 < output_limit_bytes <= _MAX_OUTPUT_BYTES:
+        raise GateRunError("output limit must be between 1 and 1048576 bytes")
 
-    remaining = min(deadline.remaining_seconds(), command_timeout)
-    if remaining <= 0:
+    budget = min(deadline.remaining_seconds(), command_timeout)
+    if budget <= grace:
+        return _budget_result(gate_id, phase)
+    run_timeout = budget - grace
+
+    environment = dict(os.environ if env is None else env)
+    secrets = _secret_values(environment, redact_values)
+    overlap = max((len(secret.encode("utf-8")) for secret in secrets), default=0)
+    stdout_buffer = _TailBuffer(output_limit_bytes + overlap)
+    stderr_buffer = _TailBuffer(output_limit_bytes + overlap)
+    capture_errors: list[str] = []
+    started_ns = time.monotonic_ns()
+    try:
+        process = subprocess.Popen(
+            tuple(argv),
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError as exc:
+        elapsed = max(0, (time.monotonic_ns() - started_ns) // 1_000_000)
         return GateRunResult(
             gate_id,
             phase,
-            "BUDGET_EXCEEDED",
-            f"BUDGET_EXCEEDED:{gate_id}:{phase}",
+            "ENVIRONMENT_ERROR",
+            f"ENVIRONMENT_ERROR:{gate_id}:{phase}:{type(exc).__name__}",
             None,
-            0,
+            elapsed,
             "",
             "",
             False,
             False,
         )
 
-    environment = dict(os.environ if env is None else env)
-    secrets = _secret_values(environment, redact_values)
-    started_ns = time.monotonic_ns()
-    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
-        try:
-            process = subprocess.Popen(
-                tuple(argv),
-                cwd=cwd,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                shell=False,
-                start_new_session=True,
-                close_fds=True,
-            )
-        except OSError as exc:
-            elapsed = max(0, (time.monotonic_ns() - started_ns) // 1_000_000)
-            return GateRunResult(
-                gate_id,
-                phase,
-                "ENVIRONMENT_ERROR",
-                f"ENVIRONMENT_ERROR:{gate_id}:{phase}:{type(exc).__name__}",
-                None,
-                elapsed,
-                "",
-                "",
-                False,
-                False,
-            )
+    assert process.stdout is not None and process.stderr is not None
+    readers = (
+        threading.Thread(target=_drain, args=(process.stdout, stdout_buffer, capture_errors), daemon=True),
+        threading.Thread(target=_drain, args=(process.stderr, stderr_buffer, capture_errors), daemon=True),
+    )
+    for reader in readers:
+        reader.start()
 
-        timed_out = False
-        try:
-            process.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _terminate(process, termination_grace_seconds)
+    timed_out = False
+    background_process = False
+    try:
+        process.wait(timeout=run_timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _terminate_group(process, grace)
+    else:
+        if not _wait_group_gone(process.pid, min(0.05, grace / 2)):
+            background_process = True
+            _terminate_group(process, grace)
 
-        execution_ms = max(0, (time.monotonic_ns() - started_ns) // 1_000_000)
-        stdout, stdout_truncated = _read_tail(stdout_file, output_limit_bytes)
-        stderr, stderr_truncated = _read_tail(stderr_file, output_limit_bytes)
-        stdout = _redact(stdout, secrets)
-        stderr = _redact(stderr, secrets)
+    cleanup_stop = time.monotonic() + max(0.0, min(grace, deadline.remaining_seconds()))
+    for reader in readers:
+        reader.join(timeout=max(0.0, cleanup_stop - time.monotonic()))
+    capture_incomplete = any(reader.is_alive() for reader in readers)
+    execution_ms = max(0, (time.monotonic_ns() - started_ns) // 1_000_000)
+    if deadline.remaining_seconds() <= 0 or execution_ms > int(budget * 1000):
+        timed_out = True
+    stdout, stdout_truncated = stdout_buffer.render(
+        output_limit=output_limit_bytes,
+        secrets=secrets,
+        incomplete=capture_incomplete,
+    )
+    stderr, stderr_truncated = stderr_buffer.render(
+        output_limit=output_limit_bytes,
+        secrets=secrets,
+        incomplete=capture_incomplete,
+    )
 
     if timed_out:
         result = "BUDGET_EXCEEDED"
         reason = f"BUDGET_EXCEEDED:{gate_id}:{phase}"
+    elif capture_errors or capture_incomplete:
+        result = "ENVIRONMENT_ERROR"
+        reason = f"ENVIRONMENT_ERROR:{gate_id}:{phase}:output_capture"
+    elif background_process:
+        result = "UNAUTHORISED_EFFECT"
+        reason = f"UNAUTHORISED_EFFECT:{gate_id}:{phase}:background_process"
     elif process.returncode == 0:
         result = "PASS"
         reason = f"PASS:{gate_id}:{phase}"
