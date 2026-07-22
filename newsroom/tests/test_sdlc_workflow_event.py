@@ -226,6 +226,31 @@ def test_event_rejects_wrong_base_repository_missing_base_or_head_mismatch(
         derive_workflow_event(repo, environment)
 
 
+def test_event_file_must_remain_stable_while_context_is_derived(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, base, _, head, _ = _repository(tmp_path)
+    environment = _environment(repo, event_name="pull_request", base=base, head=head)
+    event_path = Path(environment["GITHUB_EVENT_PATH"])
+    original = workflow_event_module.context_from_environment
+
+    def derive_then_replace(root: Path, env: dict[str, str]):
+        context = original(root, env)
+        value = json.loads(event_path.read_text(encoding="utf-8"))
+        value["pull_request"]["base"]["sha"] = head
+        event_path.write_text(json.dumps(value), encoding="utf-8")
+        return context
+
+    monkeypatch.setattr(
+        workflow_event_module,
+        "context_from_environment",
+        derive_then_replace,
+    )
+    with pytest.raises(WorkflowEvidenceError, match="event_file_changed"):
+        derive_workflow_event(repo, environment)
+
+
 def _jobs() -> dict[str, object]:
     return {
         "total_count": 1,
@@ -235,8 +260,11 @@ def _jobs() -> dict[str, object]:
                 "run_id": 12345,
                 "run_attempt": 2,
                 "name": "core",
+                "status": "completed",
+                "conclusion": "success",
                 "created_at": "2026-07-22T12:00:00.000Z",
                 "started_at": "2026-07-22T12:00:01.250Z",
+                "completed_at": "2026-07-22T12:00:42.000Z",
                 "steps": [
                     {
                         "name": "Sync locked environment",
@@ -266,6 +294,7 @@ def test_job_telemetry_uses_api_timestamps() -> None:
         finalization_step="Finalize evidence",
     )
 
+    assert telemetry.job_conclusion == "success"
     assert telemetry.queue_ms == 1250
     assert telemetry.bootstrap_ms == 5250
     assert telemetry.finalize_ms == 1250
@@ -285,6 +314,20 @@ def test_job_telemetry_uses_api_timestamps() -> None:
         (
             lambda value: value["jobs"][0]["steps"][1].update(status="in_progress"),
             "step_incomplete",
+        ),
+        (
+            lambda value: value["jobs"][0].update(status="in_progress"),
+            "job_incomplete",
+        ),
+        (
+            lambda value: value["jobs"][0].update(conclusion="mystery"),
+            "job_conclusion",
+        ),
+        (
+            lambda value: value["jobs"][0].update(
+                completed_at="2026-07-22T12:00:40.500Z"
+            ),
+            "job_phase_order",
         ),
         (
             lambda value: value["jobs"][0].update(started_at="2026-07-22T11:59:59.000Z"),
