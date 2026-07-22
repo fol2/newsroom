@@ -4,12 +4,15 @@ on:
   push:
     branches:
       - agent/sdlc-v2-phase2a2b-artifact-receipts
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 concurrency:
-  group: sdlc-receipt-diagnostics-${{ github.ref }}
+  group: sdlc-receipt-diagnostics-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
