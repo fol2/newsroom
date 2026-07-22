@@ -253,8 +253,19 @@ def test_event_file_must_remain_stable_while_context_is_derived(
 
 def _jobs() -> dict[str, object]:
     return {
-        "total_count": 1,
+        "total_count": 2,
         "jobs": [
+            {
+                "id": 986,
+                "run_id": 12345,
+                "run_attempt": 2,
+                "name": "route",
+                "status": "completed",
+                "conclusion": "success",
+                "started_at": "2026-07-22T11:59:59.500Z",
+                "completed_at": "2026-07-22T12:00:00.750Z",
+                "steps": [],
+            },
             {
                 "id": 987,
                 "run_id": 12345,
@@ -262,7 +273,6 @@ def _jobs() -> dict[str, object]:
                 "name": "core",
                 "status": "completed",
                 "conclusion": "success",
-                "created_at": "2026-07-22T12:00:00.000Z",
                 "started_at": "2026-07-22T12:00:01.250Z",
                 "completed_at": "2026-07-22T12:00:42.000Z",
                 "steps": [
@@ -290,12 +300,16 @@ def test_job_telemetry_uses_api_timestamps() -> None:
         run_id=12345,
         run_attempt=2,
         job_name="core",
+        workflow_created_at="2026-07-22T11:59:59.000Z",
+        ready_after_job_names=("route",),
         bootstrap_end_step="Sync locked environment",
         finalization_step="Finalize evidence",
     )
 
     assert telemetry.job_conclusion == "success"
-    assert telemetry.queue_ms == 1250
+    assert telemetry.ready_after_jobs == ("route",)
+    assert telemetry.ready_at == "2026-07-22T12:00:00.750Z"
+    assert telemetry.queue_ms == 500
     assert telemetry.bootstrap_ms == 5250
     assert telemetry.finalize_ms == 1250
     assert telemetry.as_dict()["telemetry_identity"].startswith("sha256:")
@@ -304,37 +318,45 @@ def test_job_telemetry_uses_api_timestamps() -> None:
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     [
-        (lambda value: value["jobs"].append(deepcopy(value["jobs"][0])), "job_identity"),
+        (lambda value: value["jobs"].append(deepcopy(value["jobs"][1])), "job_identity"),
         (
-            lambda value: value["jobs"][0]["steps"].append(
-                deepcopy(value["jobs"][0]["steps"][0])
+            lambda value: value["jobs"][1]["steps"].append(
+                deepcopy(value["jobs"][1]["steps"][0])
             ),
             "step_duplicate",
         ),
         (
-            lambda value: value["jobs"][0]["steps"][1].update(status="in_progress"),
+            lambda value: value["jobs"][1]["steps"][1].update(status="in_progress"),
             "step_incomplete",
         ),
         (
-            lambda value: value["jobs"][0].update(status="in_progress"),
+            lambda value: value["jobs"][1].update(status="in_progress"),
             "job_incomplete",
         ),
         (
-            lambda value: value["jobs"][0].update(conclusion="mystery"),
+            lambda value: value["jobs"][1].update(conclusion="mystery"),
             "job_conclusion",
         ),
         (
-            lambda value: value["jobs"][0].update(
+            lambda value: value["jobs"][0].update(status="in_progress"),
+            "ready_after_job_incomplete",
+        ),
+        (
+            lambda value: value["jobs"][0].update(run_id=999),
+            "ready_after_job_identity",
+        ),
+        (
+            lambda value: value["jobs"][1].update(
                 completed_at="2026-07-22T12:00:40.500Z"
             ),
             "job_phase_order",
         ),
         (
-            lambda value: value["jobs"][0].update(started_at="2026-07-22T11:59:59.000Z"),
+            lambda value: value["jobs"][1].update(started_at="2026-07-22T11:59:59.000Z"),
             "job_queue_time",
         ),
         (
-            lambda value: value["jobs"][0]["steps"][0].update(
+            lambda value: value["jobs"][1]["steps"][0].update(
                 completed_at="2026-07-22T11:59:59.000Z"
             ),
             "job_phase_order",
@@ -353,6 +375,8 @@ def test_job_telemetry_fails_closed_on_ambiguous_or_invalid_api_data(
             run_id=12345,
             run_attempt=2,
             job_name="core",
+            workflow_created_at="2026-07-22T11:59:59.000Z",
+            ready_after_job_names=("route",),
             bootstrap_end_step="Sync locked environment",
             finalization_step="Finalize evidence",
         )
@@ -377,10 +401,12 @@ def test_serialized_event_and_telemetry_reject_identity_or_duration_tampering(
         run_id=12345,
         run_attempt=2,
         job_name="core",
+        workflow_created_at="2026-07-22T11:59:59.000Z",
+        ready_after_job_names=("route",),
         bootstrap_end_step="Sync locked environment",
         finalization_step="Finalize evidence",
     ).as_dict()
-    assert validate_job_telemetry(telemetry).queue_ms == 1250
+    assert validate_job_telemetry(telemetry).queue_ms == 500
     changed_telemetry = deepcopy(telemetry)
     changed_telemetry["queue_ms"] = 1251
     with pytest.raises(WorkflowEvidenceError, match="queue_ms"):
@@ -410,6 +436,10 @@ def test_jobs_input_symlink_is_rejected(
             "2",
             "--job-name",
             "core",
+            "--workflow-created-at",
+            "2026-07-22T11:59:59.000Z",
+            "--ready-after-job",
+            "route",
             "--bootstrap-end-step",
             "Sync locked environment",
             "--finalization-step",
