@@ -49,6 +49,11 @@ jobs:
           test "$(git hash-object newsroom/tests/test_sdlc_github_transport.py)" = f83fb6bf6e4cf14a854b164e4ecbca3755e58d6a
           python -m py_compile transport-hardening.py
           python transport-hardening.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('newsroom/tests/test_sdlc_github_transport.py')
+          path.write_bytes(path.read_bytes().rstrip(b'\n') + b'\n')
+          PY
 
       - name: Install exact uv and sync locked environment
         run: |
