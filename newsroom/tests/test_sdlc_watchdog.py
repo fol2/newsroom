@@ -8,11 +8,14 @@ import time
 
 import pytest
 
+from scripts.sdlc.contracts import load_contract
 from scripts.sdlc.run_gate import (
     GateRunError,
     LaneDeadline,
+    _run_gate_command,
     main as watchdog_main,
-    run_gate_command,
+    run_configured_gate,
+    start_lane_deadline,
 )
 
 
@@ -24,14 +27,14 @@ def _python(source: str, *arguments: str) -> tuple[str, ...]:
 
 
 def test_success_and_nonzero_exit_are_typed() -> None:
-    passed = run_gate_command(
+    passed = _run_gate_command(
         gate_id="route",
         phase="unit",
         argv=_python("print('ok')"),
         deadline=LaneDeadline.start(4),
         command_timeout_seconds=3,
     )
-    failed = run_gate_command(
+    failed = _run_gate_command(
         gate_id="route",
         phase="unit",
         argv=_python("raise SystemExit(7)"),
@@ -52,7 +55,7 @@ def test_expired_shared_deadline_prevents_process_start(tmp_path: Path) -> None:
     marker = tmp_path / "must-not-exist"
     deadline = LaneDeadline(time.monotonic_ns() - 2_000_000_000, 10)
 
-    result = run_gate_command(
+    result = _run_gate_command(
         gate_id="core-deterministic",
         phase="tests",
         argv=_python(
@@ -72,7 +75,7 @@ def test_expired_shared_deadline_prevents_process_start(tmp_path: Path) -> None:
 def test_multiple_commands_share_one_lane_deadline() -> None:
     deadline = LaneDeadline.start(2.5)
     started = time.monotonic()
-    first = run_gate_command(
+    first = _run_gate_command(
         gate_id="core-deterministic",
         phase="first",
         argv=_python("import time; time.sleep(0.1)"),
@@ -80,7 +83,7 @@ def test_multiple_commands_share_one_lane_deadline() -> None:
         command_timeout_seconds=1.5,
         termination_grace_seconds=0.1,
     )
-    second = run_gate_command(
+    second = _run_gate_command(
         gate_id="core-deterministic",
         phase="second",
         argv=_python("import time; time.sleep(5)"),
@@ -123,7 +126,7 @@ Path(sys.argv[3]).write_text(str(process.pid), encoding='utf-8')
 time.sleep(30)
 """
 
-    result = run_gate_command(
+    result = _run_gate_command(
         gate_id="core-deterministic",
         phase="descendants",
         argv=_python(parent, child, str(marker), str(pid_file)),
@@ -153,7 +156,7 @@ import sys
 process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
 Path(sys.argv[1]).write_text(str(process.pid), encoding='utf-8')
 """
-    result = run_gate_command(
+    result = _run_gate_command(
         gate_id="core-deterministic",
         phase="background",
         argv=_python(parent, str(pid_file)),
@@ -171,7 +174,7 @@ def test_output_is_memory_bounded_and_secret_boundary_is_redacted() -> None:
     secret = "ultra-sensitive-boundary"
     environment = dict(os.environ)
     environment["NEWSROOM_TEST_API_TOKEN"] = secret
-    result = run_gate_command(
+    result = _run_gate_command(
         gate_id="core-deterministic",
         phase="output",
         argv=_python(
@@ -195,7 +198,7 @@ def test_output_is_memory_bounded_and_secret_boundary_is_redacted() -> None:
 
 def test_environment_error_does_not_echo_command_or_exception_message() -> None:
     missing = "/definitely-not-a-newsroom-command/secret-value"
-    result = run_gate_command(
+    result = _run_gate_command(
         gate_id="route",
         phase="spawn",
         argv=(missing,),
@@ -210,11 +213,27 @@ def test_environment_error_does_not_echo_command_or_exception_message() -> None:
     assert result.result_reason.endswith(":FileNotFoundError")
 
 
+def test_deadline_and_configured_budget_cannot_be_raised() -> None:
+    contract = load_contract(REPO_ROOT)
+    assert start_lane_deadline(contract, "route").timeout_ms == 55_000
+
+    with pytest.raises(GateRunError, match="below 60"):
+        LaneDeadline(0, 60_000)
+    with pytest.raises(GateRunError, match="accepted lane timeout"):
+        run_configured_gate(
+            contract=contract,
+            gate_id="route",
+            phase="oversized",
+            argv=_python("pass"),
+            deadline=LaneDeadline.start(59),
+        )
+
+
 def test_invalid_budget_identifier_and_output_limit_are_rejected() -> None:
     with pytest.raises(GateRunError, match="below 60"):
         LaneDeadline.start(60)
     with pytest.raises(GateRunError, match="unsupported characters"):
-        run_gate_command(
+        _run_gate_command(
             gate_id="bad:gate",
             phase="unit",
             argv=_python("pass"),
@@ -222,7 +241,7 @@ def test_invalid_budget_identifier_and_output_limit_are_rejected() -> None:
             command_timeout_seconds=0.5,
         )
     with pytest.raises(GateRunError, match="output limit"):
-        run_gate_command(
+        _run_gate_command(
             gate_id="route",
             phase="unit",
             argv=_python("pass"),
@@ -231,7 +250,7 @@ def test_invalid_budget_identifier_and_output_limit_are_rejected() -> None:
             output_limit_bytes=1_048_577,
         )
     with pytest.raises(GateRunError, match="five seconds"):
-        run_gate_command(
+        _run_gate_command(
             gate_id="route",
             phase="unit",
             argv=_python("pass"),
