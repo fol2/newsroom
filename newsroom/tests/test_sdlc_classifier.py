@@ -60,7 +60,9 @@ def test_repository_globs_treat_double_star_as_zero_or_more_segments() -> None:
 
 def test_risk_routing_uses_maximum_triggered_tier() -> None:
     assert _route("README.md")["risk_tier"] == "R0_DOCUMENTATION"
-    assert _route("newsroom/pure_helper.py")["risk_tier"] == "R1_LOCAL_CODE"
+    assert _route("newsroom/tests/test_unrelated.py")["risk_tier"] == (
+        "R1_LOCAL_CODE"
+    )
     assert _route("newsroom/authority/transaction.py")["risk_tier"] == (
         "R2_STATEFUL_CONTRACT"
     )
@@ -129,7 +131,7 @@ def test_adding_a_path_never_lowers_risk_metamorphic() -> None:
     ranks = contract.risk_rank
     paths = (
         "README.md",
-        "newsroom/pure_helper.py",
+        "newsroom/tests/test_unrelated.py",
         "newsroom/authority/transaction.py",
         "newsroom/projection/policy.py",
         "release/production.yml",
@@ -205,14 +207,20 @@ def test_exact_base_to_head_diff_does_not_hide_diverged_base_changes(
 
     _git(tmp_path, "checkout", "-b", "head")
     (tmp_path / "newsroom").mkdir()
-    (tmp_path / "newsroom" / "pure_helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "newsroom" / "pure_helper.py").write_text(
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-m", "head change")
     head = _git(tmp_path, "rev-parse", "HEAD")
 
     _git(tmp_path, "checkout", "main")
     (tmp_path / "release").mkdir()
-    (tmp_path / "release" / "production.yml").write_text("enabled: false\n", encoding="utf-8")
+    (tmp_path / "release" / "production.yml").write_text(
+        "enabled: false\n",
+        encoding="utf-8",
+    )
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-m", "base advanced")
     base = _git(tmp_path, "rev-parse", "HEAD")
