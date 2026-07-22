@@ -88,6 +88,17 @@ def test_unresolved_internal_import_and_relative_escape_fail_closed(
         build_dependency_graph(tmp_path)
 
 
+def test_symlinked_dependency_source_is_not_treated_as_tree_content(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "outside.py", "VALUE = 1\n")
+    _write(tmp_path, "newsroom/__init__.py")
+    (tmp_path / "newsroom" / "linked.py").symlink_to(tmp_path / "outside.py")
+
+    with pytest.raises(DependencyError, match="symlinked"):
+        build_dependency_graph(tmp_path)
+
+
 def test_deleted_or_untracked_python_module_has_no_inferred_safe_edge(
     tmp_path: Path,
 ) -> None:
