@@ -34,7 +34,7 @@ jobs:
       - name: Apply exact policy bindings
         run: |
           set -euo pipefail
-          test "$(git hash-object .sdlc/shadow-lane-policy-final.py)" = 079c6341151984d02d2f6e55e1a3a61170feb8b8
+          test "$(git hash-object .sdlc/shadow-lane-policy-final.py)" = 3001283b2d95959d04039abe6b179bd101d68979
           test "$(git hash-object scripts/sdlc/shadow_lane.py)" = 88cc9c194d93d64cc2d209caa6ae055fa0552e1d
           test "$(git hash-object newsroom/tests/test_sdlc_shadow_lane.py)" = 35c6bd2a2e4da300946e5008e9d6fe2285a709b0
           python -m py_compile .sdlc/shadow-lane-policy-final.py
