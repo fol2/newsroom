@@ -12,20 +12,23 @@ import sys
 from typing import Iterable, Sequence
 
 from .contracts import ContractError, SdlcContract, load_contract
+from .dependencies import DependencyError, build_dependency_graph, python_changes
 
 
 SCHEMA_VERSION = "newsroom.sdlc.route.v1"
 RISK_CLASSIFIER_VERSION = "sdlc-risk-v1"
+_R3 = "R3_EXTERNAL_SERVICE_SECURITY"
 _PATH_RISKS = {
     "documentation": "R0_DOCUMENTATION",
     "local_code": "R1_LOCAL_CODE",
     "clustering": "R1_LOCAL_CODE",
     "stateful_contract": "R2_STATEFUL_CONTRACT",
-    "contract_control": "R3_EXTERNAL_SERVICE_SECURITY",
-    "external_service_security": "R3_EXTERNAL_SERVICE_SECURITY",
+    "contract_control": _R3,
+    "external_service_security": _R3,
     "release_operational": "R4_RELEASE_OPERATIONAL",
 }
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
+_REGULAR_GIT_MODES = frozenset({b"100644", b"100755"})
 
 
 class GitRouteError(RuntimeError):
@@ -126,6 +129,35 @@ def _service_tests(repo_root: Path) -> tuple[str, ...]:
     )
 
 
+def _dependency_reasons(
+    contract: SdlcContract, changes: tuple[ChangedPath, ...]
+) -> tuple[str, ...]:
+    paths = python_changes(
+        path
+        for change in changes
+        for path in change.classified_paths()
+    )
+    if not paths:
+        return ()
+    try:
+        graph = build_dependency_graph(contract.repo_root)
+    except DependencyError as exc:
+        return (f"unknown_dependency_edge:{exc}:{_R3}",)
+
+    reasons: set[str] = set()
+    for path in paths:
+        try:
+            dependents = graph.dependent_paths(path)
+        except DependencyError as exc:
+            reasons.add(f"unknown_dependency_edge:{exc}:{_R3}")
+            continue
+        for dependent in dependents:
+            groups = _matching_groups(contract, dependent)
+            if any(_PATH_RISKS.get(group) == _R3 for group in groups):
+                reasons.add(f"dependency:{path}->{dependent}:{_R3}")
+    return tuple(sorted(reasons))
+
+
 def classify_paths(
     contract: SdlcContract,
     changes: Iterable[ChangedPath],
@@ -179,6 +211,12 @@ def classify_paths(
                     reasons.add(f"path:{path}:{group}:{risk}")
                 if ranks[risk] > ranks[selected_risk]:
                     selected_risk = risk
+
+    if ranks[selected_risk] < ranks[_R3]:
+        dependency_reasons = _dependency_reasons(contract, normalized_changes)
+        if dependency_reasons:
+            reasons.update(dependency_reasons)
+            selected_risk = _R3
 
     core_tests = ("newsroom/tests",)
     service_required = contract.service_required(selected_risk)
@@ -250,6 +288,42 @@ def resolve_tree(repo_root: Path, commit_sha: str) -> str:
     return value
 
 
+def verify_exact_clean_checkout(
+    repo_root: Path, *, head_sha: str, head_tree_sha: str
+) -> None:
+    current_head = resolve_commit(repo_root, "HEAD")
+    if current_head != head_sha:
+        raise GitRouteError(
+            f"checkout HEAD differs from route head: {current_head} != {head_sha}"
+        )
+    current_tree = resolve_tree(repo_root, current_head)
+    if current_tree != head_tree_sha:
+        raise GitRouteError(
+            f"checkout tree differs from route tree: {current_tree} != {head_tree_sha}"
+        )
+    status = _git(
+        repo_root,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    )
+    if status:
+        first = status.split(b"\0", 1)[0].decode("utf-8", errors="replace")
+        raise GitRouteError(f"checkout is not clean: {first}")
+    for record in _git(repo_root, "ls-files", "--stage", "-z").split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            mode = metadata.split(b" ", 1)[0]
+        except ValueError as exc:
+            raise GitRouteError("malformed tracked-file inventory") from exc
+        if mode not in _REGULAR_GIT_MODES:
+            path = raw_path.decode("utf-8", errors="replace")
+            raise GitRouteError(f"unsupported tracked entry mode {mode.decode()}: {path}")
+
+
 def parse_name_status(payload: bytes) -> tuple[ChangedPath, ...]:
     fields = payload.split(b"\0")
     if fields and fields[-1] == b"":
@@ -295,16 +369,22 @@ def build_git_route(
     repo_root: str | Path, *, base_reference: str, head_reference: str
 ) -> dict[str, object]:
     root = Path(repo_root).resolve()
-    contract = load_contract(root)
     base_sha = resolve_commit(root, base_reference)
     head_sha = resolve_commit(root, head_reference)
+    head_tree_sha = resolve_tree(root, head_sha)
+    verify_exact_clean_checkout(
+        root,
+        head_sha=head_sha,
+        head_tree_sha=head_tree_sha,
+    )
+    contract = load_contract(root)
     return classify_paths(
         contract,
         changed_paths(root, base_sha, head_sha),
         base_sha=base_sha,
         head_sha=head_sha,
         base_tree_sha=resolve_tree(root, base_sha),
-        head_tree_sha=resolve_tree(root, head_sha),
+        head_tree_sha=head_tree_sha,
     )
 
 
