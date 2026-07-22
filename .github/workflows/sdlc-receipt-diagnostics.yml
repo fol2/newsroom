@@ -35,19 +35,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          target_source=c43e2999c1ef8cb3fd08b64da1242ed399a7a2d630fa8d3fc9e7ada28244d29e
-          target_test=c92aa4f3b2702d77d86bbff5096d5ab374e468e07817ee6eee57fa7e8205604b
+          target_source=fee58776c41d78992078330d2333f251221d30483b46cbb9d4a55a5c745c6ddc
+          target_test=11fb8f219619e911b6d545d7699788a77525ac7dfbef12526e94e3b6999b2e29
           current_source=$(sha256sum scripts/sdlc/artifact_receipt.py | cut -d' ' -f1)
           current_test=$(sha256sum newsroom/tests/test_sdlc_artifact_receipt.py | cut -d' ' -f1)
           if [[ "$current_source" == "$target_source" && "$current_test" == "$target_test" ]]; then
             echo 'changed=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          test "$(sha256sum .sdlc/receipt-fix.patch.gz.b64 | cut -d' ' -f1)" = c8f2db0696ffe281d6cf90d70d9154cbcd1ff73b2ac3c7f4cec171bd2a2397ca
+          test "$(sha256sum .sdlc/receipt-fix.patch.gz.b64 | cut -d' ' -f1)" = 2852a91797220ab2e5cfcd446610b10af3a4024179c509cfbf66f99e744d99f3
           base64 --decode .sdlc/receipt-fix.patch.gz.b64 > receipt-fix.patch.gz
-          test "$(sha256sum receipt-fix.patch.gz | cut -d' ' -f1)" = 916e42b901de65d675cd57b13605c421f501eeb84648ec837681da185a20f7e0
+          test "$(sha256sum receipt-fix.patch.gz | cut -d' ' -f1)" = 9be12f50022eb03b09754ab3ba8282ba75e05e7ffe13a9d5b0c2964f1f7eb861
           gzip --decompress --stdout receipt-fix.patch.gz > receipt-fix.patch
-          test "$(sha256sum receipt-fix.patch | cut -d' ' -f1)" = 624e32a6df558005bd015a62ef4cb04c116caefd00abcd7b992a63b1bd36e630
+          test "$(sha256sum receipt-fix.patch | cut -d' ' -f1)" = 824f4a72f026ecf663ef0f1da513d389fab457d902636bf0c04bfd74f21adede
           git apply --check receipt-fix.patch
           git apply receipt-fix.patch
           test "$(sha256sum scripts/sdlc/artifact_receipt.py | cut -d' ' -f1)" = "$target_source"
