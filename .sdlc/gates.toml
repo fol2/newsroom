@@ -113,6 +113,7 @@ owner_authority_required = true
 description = "Release, deployment, operational admission, canary, shadow or public-effect change."
 
 [classification]
+version = "sdlc-risk-v1"
 strategy = "maximum_triggered_risk"
 unknown_path = "R3_EXTERNAL_SERVICE_SECURITY"
 unknown_dependency_edge = "R3_EXTERNAL_SERVICE_SECURITY"
@@ -125,15 +126,19 @@ changed_release_or_deployment = "R4_RELEASE_OPERATIONAL"
 [classification.paths]
 documentation = [
   "docs/**",
-  "README.md",
-  "CONTRIBUTING.md",
-  "PROMPTS.md",
+  "*.md",
+]
+local_code = [
+  "newsroom/**",
+  "scripts/**",
 ]
 contract_control = [
   ".sdlc/**",
   "docs/specs/sdlc/**",
   "docs/plans/*sdlc*",
   ".github/workflows/**",
+  "scripts/sdlc/**",
+  "newsroom/tests/test_sdlc_*.py",
 ]
 stateful_contract = [
   "newsroom/authority/**",
@@ -199,6 +204,10 @@ hard_timeout_seconds = 55
 parallel_shards = true
 per_shard_hard_timeout_seconds = 55
 pr_blocking = false
+
+[lanes.decision]
+always_reports = true
+hard_timeout_seconds = 5
 
 [test_strategy]
 full_suite_blocking_default = true
