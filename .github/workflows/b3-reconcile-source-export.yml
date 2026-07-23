@@ -1,4 +1,4 @@
-name: B3 Reconciliation Source Export
+name: B3 Reconciliation Source Publisher
 
 on:
   push:
@@ -9,14 +9,14 @@ permissions:
   contents: write
 
 concurrency:
-  group: b3-reconcile-source-export-${{ github.ref }}
+  group: b3-reconciliation-source-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  export:
+  publish:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Checkout exact branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -26,45 +26,100 @@ jobs:
           persist-credentials: true
           show-progress: false
 
-      - name: Build exact source archive
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          github-token: ''
+
+      - name: Verify exact input and apply reconciliation patch
         shell: bash
         run: |
           set -euo pipefail
-          test -z "$(git status --porcelain --untracked-files=all)"
-          git archive --format=tar.gz --output="${RUNNER_TEMP}/newsroom-source.tar.gz" HEAD
-          sha256sum "${RUNNER_TEMP}/newsroom-source.tar.gz" > "${RUNNER_TEMP}/sha256sum.txt"
+          diagnostic="${RUNNER_TEMP}/b3-reconciliation.log"
+          set +e
+          (
+            set -euo pipefail
+            git merge-base --is-ancestor 9885a5b3d1360313e94cb54726d184e45b55f1ba HEAD
+            test "$(git hash-object newsroom/authority/_neo4j_projection_system.py)" = 49ffd8663e2289fc2a8277e14d13a0dd953ca333
+            test "$(git hash-object newsroom/authority/_projection_system.py)" = 63f522df6598d47a4edb1da860f3e2f462d5c3e1
+            test "$(git hash-object newsroom/projection/neo4j/__init__.py)" = 107a8a47930b717f9a778c70c9efaba1e23628a6
+            test "$(git hash-object newsroom/projection/neo4j/_adapter.py)" = ea26b5959deb32c98381cf6d8861823b881a2bbe
+            test "$(git hash-object newsroom/projection/neo4j/models.py)" = bc9cdd1ad5013d1992ebba2e1309189a6488ef64
+            test "$(git hash-object newsroom/tests/projection_b2_helpers.py)" = d3856cda8e05a38eca22835a429a1cd6de9ea580
+            test "$(git hash-object newsroom/tests/test_projection_b2_boundaries.py)" = 4ce93e7dfb3dc35d09f8122cbda1255f74c463ba
+            test "$(git hash-object newsroom/tests/test_projection_b3_neo4j_service.py)" = 7f0be2aaea58710b9486d4dd2663e9e780f52c9d
+            test "$(git hash-object newsroom/tests/test_projection_b3_tombstone.py)" = bda0e6bd4bc3bd543e424049dac41bf49d58e89f
+            test ! -e newsroom/projection/neo4j/_state.py
+            test ! -e newsroom/tests/test_projection_b3_reconciliation.py
+            test "$(sha256sum .sdlc/b3-reconciliation.patch.gz.b64 | cut -d' ' -f1)" = f506afbe761254a6b695e8d7704778fa613993f5acaa390de33d78b6a86df6bd
+            base64 --decode .sdlc/b3-reconciliation.patch.gz.b64 > "${RUNNER_TEMP}/b3-reconciliation.patch.gz"
+            test "$(sha256sum "${RUNNER_TEMP}/b3-reconciliation.patch.gz" | cut -d' ' -f1)" = 908d9d3315f9a26baf9b813a380440c3c4593e509ee3cf44f93babf93f1497c2
+            gzip --decompress --stdout "${RUNNER_TEMP}/b3-reconciliation.patch.gz" > "${RUNNER_TEMP}/b3-reconciliation.patch"
+            test "$(sha256sum "${RUNNER_TEMP}/b3-reconciliation.patch" | cut -d' ' -f1)" = 14a4a7929416fcf4a5d75055261586a5bbf8923ea999dd8f836e41c523a68788
+            git apply --check "${RUNNER_TEMP}/b3-reconciliation.patch"
+            git apply "${RUNNER_TEMP}/b3-reconciliation.patch"
+            test -z "$(git diff --name-only -- .github/workflows)"
+            uv lock --check
+            uv sync --dev --locked
+            uv run --no-sync python -m compileall -q newsroom scripts
+            uv run --no-sync python -m pytest -q \
+              newsroom/tests/test_projection_b1_*.py \
+              newsroom/tests/test_projection_b2_*.py \
+              newsroom/tests/test_projection_b3_*.py
+            uv run --no-sync python -m pytest -q newsroom/tests
+            uv run --no-sync python scripts/eval_clustering_metrics.py \
+              --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+              --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+              --fail-on-regression
+            git diff --check
+          ) > "${diagnostic}" 2>&1
+          status="$?"
+          set -e
+          if test "${status}" -ne 0; then
+            tail -n 260 "${diagnostic}"
+            exit "${status}"
+          fi
 
-      - name: Upload exact source artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: newsroom-b3-reconcile-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/newsroom-source.tar.gz
-            ${{ runner.temp }}/sha256sum.txt
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-          overwrite: false
-          include-hidden-files: false
-
-      - name: Publish artifact run identity
+      - name: Commit exact source-only reconciliation
         shell: bash
         run: |
           set -euo pipefail
           expected_head="$(git rev-parse HEAD)"
-          mkdir -p .sdlc
-          {
-            printf 'run_id=%s\n' '${{ github.run_id }}'
-            printf 'run_attempt=%s\n' '${{ github.run_attempt }}'
-            printf 'head=%s\n' "${expected_head}"
-            cat "${RUNNER_TEMP}/sha256sum.txt"
-          } > .sdlc/b3-reconcile-export-run.txt
-          rm -f .sdlc/b3-reconcile-source.tar.gz.b64 .sdlc/b3-reconcile-source.sha256
+          rm -f \
+            .sdlc/b3-reconciliation.patch.gz.b64 \
+            .sdlc/b3-reconcile-export-run.txt \
+            .sdlc/b3-reconcile-source.tar.gz.b64 \
+            .sdlc/b3-reconcile-source.sha256
           git add -A
+          test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
+          cat > "${RUNNER_TEMP}/expected-files.txt" <<'EOF'
+          newsroom/authority/_neo4j_projection_system.py
+          newsroom/authority/_projection_system.py
+          newsroom/projection/neo4j/__init__.py
+          newsroom/projection/neo4j/_adapter.py
+          newsroom/projection/neo4j/_state.py
+          newsroom/projection/neo4j/models.py
+          newsroom/tests/projection_b2_helpers.py
+          newsroom/tests/test_projection_b2_boundaries.py
+          newsroom/tests/test_projection_b3_neo4j_service.py
+          newsroom/tests/test_projection_b3_reconciliation.py
+          newsroom/tests/test_projection_b3_tombstone.py
+          EOF
+          git diff --cached --name-only | grep -v '^.sdlc/' | LC_ALL=C sort > "${RUNNER_TEMP}/actual-files.txt"
+          LC_ALL=C sort -o "${RUNNER_TEMP}/expected-files.txt" "${RUNNER_TEMP}/expected-files.txt"
+          cmp "${RUNNER_TEMP}/expected-files.txt" "${RUNNER_TEMP}/actual-files.txt"
           git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'chore(b3): record exact reconciliation artifact'
+          git commit -m 'fix(projection): reconcile generation state before validation'
           remote_head="$(git ls-remote origin refs/heads/agent/increment-1b3-rebuild-promotion | cut -f1)"
           test "${remote_head}" = "${expected_head}"
           git push --force-with-lease=refs/heads/agent/increment-1b3-rebuild-promotion:${expected_head} origin HEAD:agent/increment-1b3-rebuild-promotion
