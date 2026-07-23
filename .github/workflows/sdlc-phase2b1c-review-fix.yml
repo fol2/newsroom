@@ -31,25 +31,15 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Reconstruct and apply reviewed patch
+      - name: Apply exact reviewed transformations
         shell: bash
         run: |
           set -euo pipefail
           test "$(git hash-object scripts/sdlc/shadow_decision.py)" = c1f0defe68f700e1c9833b911e28933de045bb79
           test "$(git hash-object newsroom/tests/test_sdlc_shadow_decision.py)" = c7895806f7105a58f9ff178be9c6862f961ca049
-          test "$(sha256sum .sdlc/shadow-decision-review.part-00 | cut -d' ' -f1)" = 7ead72d40e2c823875492722132ce9b68ceea3c9653c6aa45f4dab9a0ae9fddd
-          test "$(sha256sum .sdlc/shadow-decision-review.part-01 | cut -d' ' -f1)" = a234323420c134eb72b31e6b6c2ea042bac005f34feb9449aaf15909fe5d228f
-          test "$(sha256sum .sdlc/shadow-decision-review.part-02 | cut -d' ' -f1)" = 7118d84e74d5b194aacd842e0ff7ddc20eac16189a6f48500241b34f45c959f3
-          cat .sdlc/shadow-decision-review.part-* > review-fix.patch.gz.b64
-          test "$(sha256sum review-fix.patch.gz.b64 | cut -d' ' -f1)" = 0d294688c6786b5aa5cc7cfa11453f75531164388e5ae5553e046050538c2a8d
-          base64 --decode review-fix.patch.gz.b64 > review-fix.patch.gz
-          test "$(sha256sum review-fix.patch.gz | cut -d' ' -f1)" = 7216479e31a2567e4729a516e8b3bec26d228d01bcbadf95e8e7cd334db5d49d
-          gzip --decompress --stdout review-fix.patch.gz > review-fix.patch
-          test "$(sha256sum review-fix.patch | cut -d' ' -f1)" = e14fcc043dfcfec38d442fa5f12e5be62ac9c56a922c47f91b44d25ea1771978
-          git apply --check review-fix.patch
-          git apply review-fix.patch
-          test "$(sha256sum scripts/sdlc/shadow_decision.py | cut -d' ' -f1)" = f32cf572c8616f4e53d01ce8a6a4b64fb20cd3e5294186c0f7ec5e5bc3c3c087
-          test "$(sha256sum newsroom/tests/test_sdlc_shadow_decision.py | cut -d' ' -f1)" = d0464dd6cde93027fb7a01bb08bf85d6327baf39dcd53795622e30494416baec
+          test "$(git hash-object .sdlc/apply-shadow-decision-review.py)" = cde8c2e5f48c867d75930f42a3b7949b7d4822d9
+          python .sdlc/apply-shadow-decision-review.py
+          python -m py_compile scripts/sdlc/shadow_decision.py newsroom/tests/test_sdlc_shadow_decision.py
 
       - name: Sync locked Python environment
         run: |
@@ -68,8 +58,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f review-fix.patch review-fix.patch.gz review-fix.patch.gz.b64
-          git rm -f .github/workflows/sdlc-phase2b1c-review-fix.yml .sdlc/shadow-decision-review.part-* .sdlc/shadow-decision-review.trigger
+          git rm -f .github/workflows/sdlc-phase2b1c-review-fix.yml .sdlc/apply-shadow-decision-review.py .sdlc/shadow-decision-review.part-* .sdlc/shadow-decision-review.trigger
           git add scripts/sdlc/shadow_decision.py newsroom/tests/test_sdlc_shadow_decision.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
