@@ -342,6 +342,7 @@ def _lane_matches_context(
         or receipt.metadata.run_id != context.run_id
         or receipt.run_attempt != context.run_attempt
         or receipt.consumer_job_id != context.job_id
+        or receipt.consumer_runner_environment != context.runner_environment
         or receipt.workflow_ref != context.workflow_ref
         or receipt.workflow_sha != context.workflow_sha
         or receipt.event_name != context.event_name

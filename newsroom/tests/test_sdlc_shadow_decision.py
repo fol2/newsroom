@@ -132,6 +132,7 @@ class _Receipt:
     head_repository_id: int = REPOSITORY_ID
     run_attempt: int = RUN_ATTEMPT
     consumer_job_id: str = "decision"
+    consumer_runner_environment: str = "github-hosted"
     workflow_ref: str = "fol2/newsroom/.github/workflows/evidence.yml@refs/pull/10/merge"
     workflow_sha: str = "a" * 40
     event_name: str = "pull_request"
@@ -656,3 +657,28 @@ def test_direct_failure_summary_must_match_top_level_decision(
     )
     with pytest.raises(ShadowDecisionError, match="failure_record"):
         replace(typed, first_failure=changed)
+
+
+
+def test_consumer_runner_environment_must_match_decision_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _route()
+    core = _lane("core", route)
+    mismatched = replace(
+        core,
+        receipt=replace(
+            core.receipt,
+            consumer_runner_environment="self-hosted",
+        ),
+    )
+    _patch_lane_validator(monkeypatch, mismatched)
+
+    with pytest.raises(ShadowDecisionError, match="lane_context"):
+        aggregate_shadow_decision(
+            context=_context(),
+            event=_event(),
+            core=mismatched,  # type: ignore[arg-type]
+            service=None,
+            contract=_contract(),
+        )
