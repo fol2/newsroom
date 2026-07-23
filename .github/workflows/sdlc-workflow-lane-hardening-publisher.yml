@@ -37,8 +37,16 @@ jobs:
           set -euo pipefail
           test "$(git hash-object scripts/sdlc/workflow_lane.py)" = 3f41a7999a35aa53fc05d92909ae2c835f7fff00
           test "$(git hash-object newsroom/tests/test_sdlc_workflow_lane.py)" = 30d2bea4c84df3c6ddf960021fc3ec10eada5a72
-          test "$(sha256sum .sdlc/workflow-lane-hardening.py.gz.b64 | cut -d' ' -f1)" = 696fae9c8ae774805ca6557d8590c5018fb1103f9e08b6f7698bc8db3ef92a8e
-          base64 --decode .sdlc/workflow-lane-hardening.py.gz.b64 > lane-hardening.py.gz
+          test "$(sha256sum .sdlc/lane-hardening.part-00 | cut -d' ' -f1)" = d674ec74096fde9449763c7cb81bb77c8e4d2e59f7c8cda8743f3e32ac35a652
+          test "$(sha256sum .sdlc/lane-hardening.part-01 | cut -d' ' -f1)" = 43e00f2511c8fb6b15e825fe69bd6258486d76a380747823fa4ce155b5561794
+          test "$(sha256sum .sdlc/lane-hardening.part-02 | cut -d' ' -f1)" = 848b315fc24e9f84659bc493bf1b3c910716664d91013a28c0ad33284bff7b02
+          test "$(sha256sum .sdlc/lane-hardening.part-03 | cut -d' ' -f1)" = abc1bd052b6e8b5aa3202a5f7a9bbd0772dc97e10ab4de172eaddb727a457694
+          test "$(sha256sum .sdlc/lane-hardening.part-04 | cut -d' ' -f1)" = c993452d6b08f0ccc8d95477c76dd424ffc15b33d2acb24ee1a9f0390522416b
+          test "$(sha256sum .sdlc/lane-hardening.part-05 | cut -d' ' -f1)" = 7fb3e9b5c442bafd3c86415d4fce05f58f84c2ddfee3aee84b04fe1e8b40b4e2
+          test "$(sha256sum .sdlc/lane-hardening.part-06 | cut -d' ' -f1)" = 1128a5730896edcf4409ff317ab2ea171513b1b91b569e783b2be90369b6e4f9
+          cat .sdlc/lane-hardening.part-* > lane-hardening.py.gz.b64
+          test "$(sha256sum lane-hardening.py.gz.b64 | cut -d' ' -f1)" = 696fae9c8ae774805ca6557d8590c5018fb1103f9e08b6f7698bc8db3ef92a8e
+          base64 --decode lane-hardening.py.gz.b64 > lane-hardening.py.gz
           test "$(sha256sum lane-hardening.py.gz | cut -d' ' -f1)" = 359a8d54c00bb5af17c612c2b5293104d134d020511525181f3a94d1bb17e30e
           gzip --decompress --stdout lane-hardening.py.gz > lane-hardening.py
           test "$(sha256sum lane-hardening.py | cut -d' ' -f1)" = c3fff25717f59feb0e379af0941e44ebb091fb183d0ba068cae6ddd45ea21c64
@@ -71,9 +79,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f lane-hardening.py lane-hardening.py.gz
-          git rm -f .github/workflows/sdlc-workflow-lane-hardening-publisher.yml .sdlc/workflow-lane-hardening.py.gz.b64 .sdlc/workflow-lane-hardening.trigger
-          git add scripts/sdlc/workflow_lane.py newsroom/tests/test_sdlc_workflow_lane.py
+          rm -f lane-hardening.py lane-hardening.py.gz lane-hardening.py.gz.b64 .sdlc/lane-hardening-diagnostic.txt
+          git rm -f .github/workflows/sdlc-workflow-lane-hardening-publisher.yml .sdlc/workflow-lane-hardening.py.gz.b64 .sdlc/workflow-lane-hardening.trigger .sdlc/lane-hardening.part-*
+          git add -A scripts/sdlc/workflow_lane.py newsroom/tests/test_sdlc_workflow_lane.py .sdlc
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'fix(sdlc): bind exact lane commands and finalisation'
