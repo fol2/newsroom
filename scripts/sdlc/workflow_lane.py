@@ -448,15 +448,35 @@ def _gate_directory(artifact_root: Path, gate_id: str, phase: str) -> Path:
 def _report_summary(
     *,
     repo_root: Path,
+    artifact_root: Path,
     report: Path,
     optional_test_ids: Sequence[str],
 ) -> JUnitSummary | None:
     if not report.is_file():
         return None
-    return summarize_junit(
+    try:
+        repository_relative = report.relative_to(repo_root).as_posix()
+        artifact_relative = report.relative_to(artifact_root).as_posix()
+    except ValueError as exc:
+        raise WorkflowLaneError("report_path") from exc
+    summary = summarize_junit(
         repo_root,
-        (report.relative_to(repo_root).as_posix(),),
+        (repository_relative,),
         optional_test_ids=optional_test_ids,
+    )
+    if len(summary.report_digests) != 1 or summary.report_digests[0][0] != repository_relative:
+        raise WorkflowLaneError("report_summary")
+    return JUnitSummary(
+        outcome=summary.outcome,
+        report_digests=((artifact_relative, summary.report_digests[0][1]),),
+        test_ids_digest=summary.test_ids_digest,
+        test_count=summary.test_count,
+        failure_count=summary.failure_count,
+        error_count=summary.error_count,
+        skip_count=summary.skip_count,
+        required_skip_count=summary.required_skip_count,
+        duration_ms=summary.duration_ms,
+        first_failure_fingerprint=summary.first_failure_fingerprint,
     )
 
 
@@ -692,7 +712,10 @@ def finalize_lane(
             raise WorkflowLaneError("command_spec_digest")
         files.append(("command_run", run_path.relative_to(output).as_posix()))
         summary = _report_summary(
-            repo_root=root, report=report, optional_test_ids=optional
+            repo_root=root,
+            artifact_root=output,
+            report=report,
+            optional_test_ids=optional,
         )
         if summary is not None:
             summary_path = run_path.parent / "junit-summary.json"

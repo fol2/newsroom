@@ -781,3 +781,57 @@ def test_uv_command_uses_the_locked_project_environment() -> None:
         timeout=10,
     )
     assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+
+
+
+def test_report_summary_records_artifact_relative_raw_report_path(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / ".sdlc-run" / "core"
+    report = artifact / "gates/core-deterministic/tests/reports/pytest.xml"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        '<testsuite><testcase classname="example" name="test_ok" time="0.001"/></testsuite>',
+        encoding="utf-8",
+    )
+
+    original = lane_module.summarize_junit(
+        tmp_path,
+        (report.relative_to(tmp_path).as_posix(),),
+    )
+    summary = lane_module._report_summary(
+        repo_root=tmp_path,
+        artifact_root=artifact,
+        report=report,
+        optional_test_ids=(),
+    )
+
+    assert summary is not None
+    assert summary.report_digests == (
+        (
+            "gates/core-deterministic/tests/reports/pytest.xml",
+            original.report_digests[0][1],
+        ),
+    )
+    assert summary.test_ids_digest == original.test_ids_digest
+    assert summary.test_count == original.test_count == 1
+    assert summary.first_failure_fingerprint == original.first_failure_fingerprint
+
+
+def test_report_summary_rejects_report_outside_artifact_root(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    report = tmp_path / "outside.xml"
+    report.write_text(
+        '<testsuite><testcase classname="example" name="test_ok"/></testsuite>',
+        encoding="utf-8",
+    )
+    with pytest.raises(WorkflowLaneError, match="report_path"):
+        lane_module._report_summary(
+            repo_root=tmp_path,
+            artifact_root=artifact,
+            report=report,
+            optional_test_ids=(),
+        )
