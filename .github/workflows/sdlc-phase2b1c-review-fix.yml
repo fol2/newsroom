@@ -4,12 +4,15 @@ on:
   push:
     branches:
       - agent/sdlc-v2-phase2b1c-final-decision
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 concurrency:
-  group: sdlc-phase2b1c2b-review-fix-${{ github.ref }}
+  group: sdlc-phase2b1c2b-review-fix-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
