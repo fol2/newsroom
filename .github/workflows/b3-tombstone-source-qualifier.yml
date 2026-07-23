@@ -4,12 +4,15 @@ on:
   push:
     branches:
       - agent/increment-1b3-rebuild-promotion
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 concurrency:
-  group: b3-tombstone-source-${{ github.ref }}
+  group: b3-tombstone-source-${{ github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
