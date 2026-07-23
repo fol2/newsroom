@@ -26,25 +26,45 @@ jobs:
           persist-credentials: true
           show-progress: false
 
-      - name: Publish exact source transport
+      - name: Build exact source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git archive --format=tar.gz --output="${RUNNER_TEMP}/newsroom-source.tar.gz" HEAD
+          sha256sum "${RUNNER_TEMP}/newsroom-source.tar.gz" > "${RUNNER_TEMP}/sha256sum.txt"
+
+      - name: Upload exact source artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: newsroom-b3-reconcile-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/newsroom-source.tar.gz
+            ${{ runner.temp }}/sha256sum.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Publish artifact run identity
         shell: bash
         run: |
           set -euo pipefail
           expected_head="$(git rev-parse HEAD)"
-          test -z "$(git status --porcelain --untracked-files=all)"
-          archive="${RUNNER_TEMP}/newsroom-source.tar.gz"
-          git archive --format=tar.gz --output="${archive}" HEAD
           mkdir -p .sdlc
-          base64 -w 76 "${archive}" > .sdlc/b3-reconcile-source.tar.gz.b64
           {
+            printf 'run_id=%s\n' '${{ github.run_id }}'
+            printf 'run_attempt=%s\n' '${{ github.run_attempt }}'
             printf 'head=%s\n' "${expected_head}"
-            sha256sum "${archive}"
-          } > .sdlc/b3-reconcile-source.sha256
-          git add .sdlc/b3-reconcile-source.tar.gz.b64 .sdlc/b3-reconcile-source.sha256
+            cat "${RUNNER_TEMP}/sha256sum.txt"
+          } > .sdlc/b3-reconcile-export-run.txt
+          rm -f .sdlc/b3-reconcile-source.tar.gz.b64 .sdlc/b3-reconcile-source.sha256
+          git add -A
           git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'chore(b3): stage exact reconciliation source transport'
+          git commit -m 'chore(b3): record exact reconciliation artifact'
           remote_head="$(git ls-remote origin refs/heads/agent/increment-1b3-rebuild-promotion | cut -f1)"
           test "${remote_head}" = "${expected_head}"
           git push --force-with-lease=refs/heads/agent/increment-1b3-rebuild-promotion:${expected_head} origin HEAD:agent/increment-1b3-rebuild-promotion
