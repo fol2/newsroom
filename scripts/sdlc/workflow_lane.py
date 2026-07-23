@@ -61,6 +61,7 @@ _SERVICE_CONFIGURATION = {
     "NEWSROOM_NEO4J_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
 }
+_CORE_TESTS = ("newsroom/tests",)
 
 
 class WorkflowLaneError(ValueError):
@@ -265,6 +266,36 @@ def _service_environment() -> dict[str, str]:
     ):
         raise WorkflowLaneError("service_configuration")
     return dict(_SERVICE_CONFIGURATION)
+
+
+def _repository_service_tests(repo_root: Path) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            path.relative_to(repo_root).as_posix()
+            for path in (repo_root / "newsroom" / "tests").glob(
+                "test_projection_*_neo4j_service.py"
+            )
+            if path.is_file() and not path.is_symlink()
+        )
+    )
+
+
+def _validate_test_topology(
+    contract: SdlcContract,
+    route: Mapping[str, object],
+) -> None:
+    expected_service = (
+        _repository_service_tests(contract.repo_root)
+        if route["service_required"] is True
+        else ()
+    )
+    if (
+        tuple(route["core_tests"]) != _CORE_TESTS
+        or tuple(route["service_tests"]) != expected_service
+        or tuple(route["sentinels"]) != tuple(contract.sentinels)
+        or (route["service_required"] is True and not expected_service)
+    ):
+        raise WorkflowLaneError("test_topology")
 
 
 def _expected_spec(
@@ -499,6 +530,7 @@ def _context_route(
     if lane_id not in {"core", "service"} or context.job_id != lane_id:
         raise WorkflowLaneError("lane_identity")
     route = _validate_route(contract, _load_json(root, route_path))
+    _validate_test_topology(contract, route)
     if (
         route["head_sha"] != context.evaluated_sha
         or route["head_tree_sha"] != context.evaluated_tree_sha

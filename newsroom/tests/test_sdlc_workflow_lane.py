@@ -609,3 +609,55 @@ def test_failed_finalization_removes_derived_partial_files(
 def test_combined_run_cli_is_not_exposed() -> None:
     with pytest.raises(SystemExit):
         lane_module.main(("run",))
+
+
+
+@pytest.mark.parametrize(
+    ("service_required", "field", "value"),
+    [
+        (False, "core_tests", ["newsroom/tests/test_sdlc_workflow_lane.py"]),
+        (True, "service_tests", ["--collect-only"]),
+        (False, "sentinels", ["invented_sentinel"]),
+    ],
+)
+def test_route_test_topology_is_repository_owned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    service_required: bool,
+    field: str,
+    value: list[str],
+) -> None:
+    contract = _contract(tmp_path)
+    expected_service = (
+        ("newsroom/tests/test_projection_b2_neo4j_service.py",)
+        if service_required
+        else ()
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_repository_service_tests",
+        lambda _root: expected_service,
+    )
+    route = _route(service=service_required)
+    route["sentinels"] = list(contract.sentinels)
+    route[field] = value
+
+    with pytest.raises(WorkflowLaneError, match="test_topology"):
+        lane_module._validate_test_topology(contract, route)
+
+
+def test_exact_route_test_topology_is_accepted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract(tmp_path)
+    service_tests = ("newsroom/tests/test_projection_b2_neo4j_service.py",)
+    monkeypatch.setattr(
+        lane_module,
+        "_repository_service_tests",
+        lambda _root: service_tests,
+    )
+    route = _route(service=True)
+    route["sentinels"] = list(contract.sentinels)
+
+    lane_module._validate_test_topology(contract, route)
