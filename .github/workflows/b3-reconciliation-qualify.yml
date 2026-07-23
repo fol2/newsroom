@@ -91,6 +91,7 @@ jobs:
         run: |
           set -euo pipefail
           expected_head="$(git rev-parse HEAD)"
+          git restore --source=HEAD -- .github/workflows/projection-b2-neo4j.yml
           rm -f \
             .sdlc/b3-reconciliation.patch.gz.b64 \
             .sdlc/b3-reconcile-export-run.txt \
