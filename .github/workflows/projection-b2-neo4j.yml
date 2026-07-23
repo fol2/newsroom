@@ -163,9 +163,9 @@ jobs:
               if "test_projection_b3_neo4j_service"
               in case.attrib.get("classname", "")
           ]
-          if len(rebuild) < 2:
+          if len(rebuild) < 3:
               raise SystemExit(
-                  f"expected at least 2 B3 actual-service tests, found {len(rebuild)}"
+                  f"expected at least 3 B3 actual-service tests, found {len(rebuild)}"
               )
           if any(case.find("skipped") is not None for case in rebuild):
               raise SystemExit("B3 actual-service rebuild tests were skipped")
