@@ -1,4 +1,4 @@
-name: B3 Reconciliation Qualifier
+name: B3 Active Serving Qualifier
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: b3-reconciliation-qualify
+  group: b3-active-serving-qualify
   cancel-in-progress: true
 
 jobs:
@@ -48,29 +48,16 @@ jobs:
           cache-dependency-glob: .target/uv.lock
           github-token: ''
 
-      - name: Apply, qualify and publish exact B3 source
+      - name: Apply, qualify and publish active-serving source
         shell: bash
         working-directory: .target
         run: |
           set -euo pipefail
-          diagnostic="${RUNNER_TEMP}/b3-reconciliation-qualifier.log"
+          diagnostic="${RUNNER_TEMP}/b3-active-serving-qualifier.log"
           exec > >(tee "${diagnostic}") 2>&1
-          expected_head="8fd54ef97b877202de24223b24973a89007cdea2"
+          expected_head="fb4f82df5187821f2563b345118fcf86356295fe"
           echo stage=target-identity
           test "$(git rev-parse HEAD)" = "${expected_head}"
-
-          echo stage=apply-reconciliation
-          reconciliation_patch="${RUNNER_TEMP}/b3-reconciliation.patch"
-          gzip --decompress --stdout ../.qualifier/.sdlc/b3-reconciliation.patch.gz > "${reconciliation_patch}"
-          test "$(sha256sum "${reconciliation_patch}" | cut -d' ' -f1)" = 14a4a7929416fcf4a5d75055261586a5bbf8923ea999dd8f836e41c523a68788
-          git apply --check "${reconciliation_patch}"
-          git apply "${reconciliation_patch}"
-          git add -A
-          test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
-          git diff --cached --check
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix(projection): reconcile generation state before validation'
 
           echo stage=apply-active-serving
           active_b64=../.qualifier/.sdlc/b3-active-nonworkflow.patch.gz.b64
@@ -86,20 +73,19 @@ jobs:
           git add -A
           test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
           git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'feat(projection): serve only authority-selected active generation'
 
           echo stage=locked-environment
           uv lock --check
           uv sync --dev --locked
           uv run --no-sync python -m compileall -q newsroom scripts
-          echo stage=projection-tests
           uv run --no-sync python -m pytest -q \
             newsroom/tests/test_projection_b1_*.py \
             newsroom/tests/test_projection_b2_*.py \
             newsroom/tests/test_projection_b3_*.py
-          echo stage=full-tests
           uv run --no-sync python -m pytest -q newsroom/tests
-          echo stage=clustering
           uv run --no-sync python scripts/eval_clustering_metrics.py \
             --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
             --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
@@ -119,8 +105,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: b3-reconciliation-qualifier-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/b3-reconciliation-qualifier.log
+          name: b3-active-serving-qualifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/b3-active-serving-qualifier.log
           if-no-files-found: warn
           retention-days: 1
           compression-level: 0
