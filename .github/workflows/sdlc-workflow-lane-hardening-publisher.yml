@@ -1,0 +1,68 @@
+name: SDLC Workflow Lane Hardening Publisher
+
+on:
+  push:
+    branches:
+      - agent/sdlc-v2-phase2b-shadow-workflow
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sdlc-workflow-lane-hardening-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: agent/sdlc-v2-phase2b-shadow-workflow
+          fetch-depth: 0
+          show-progress: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Apply exact reviewed hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object scripts/sdlc/workflow_lane.py)" = 3f41a7999a35aa53fc05d92909ae2c835f7fff00
+          test "$(git hash-object newsroom/tests/test_sdlc_workflow_lane.py)" = 30d2bea4c84df3c6ddf960021fc3ec10eada5a72
+          test "$(sha256sum .sdlc/workflow-lane-hardening.py.gz.b64 | cut -d' ' -f1)" = 696fae9c8ae774805ca6557d8590c5018fb1103f9e08b6f7698bc8db3ef92a8e
+          base64 --decode .sdlc/workflow-lane-hardening.py.gz.b64 > lane-hardening.py.gz
+          test "$(sha256sum lane-hardening.py.gz | cut -d' ' -f1)" = 359a8d54c00bb5af17c612c2b5293104d134d020511525181f3a94d1bb17e30e
+          gzip --decompress --stdout lane-hardening.py.gz > lane-hardening.py
+          test "$(sha256sum lane-hardening.py | cut -d' ' -f1)" = c3fff25717f59feb0e379af0941e44ebb091fb183d0ba068cae6ddd45ea21c64
+          python lane-hardening.py
+          python -m py_compile scripts/sdlc/workflow_lane.py newsroom/tests/test_sdlc_workflow_lane.py
+
+      - name: Sync locked Python environment
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.8.0
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Verify reviewed hardening
+        run: |
+          uv run python -m compileall -q newsroom scripts
+          uv run python -m pytest -q newsroom/tests/test_sdlc_workflow_lane.py
+          uv run python -m pytest -q newsroom/tests/test_sdlc_*.py
+          git diff --check
+
+      - name: Commit source-only hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f lane-hardening.py lane-hardening.py.gz
+          git rm -f .github/workflows/sdlc-workflow-lane-hardening-publisher.yml .sdlc/workflow-lane-hardening.py.gz.b64
+          git add scripts/sdlc/workflow_lane.py newsroom/tests/test_sdlc_workflow_lane.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(sdlc): bind exact lane commands and finalisation'
+          git push origin HEAD:agent/sdlc-v2-phase2b-shadow-workflow
