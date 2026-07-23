@@ -540,3 +540,79 @@ def test_cli_always_emits_typed_failure_for_invalid_lane(
         )
     ) == 2
     assert output.read_bytes() == original
+
+
+
+def test_service_lanes_must_share_workflow_creation_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _route("R3_EXTERNAL_SERVICE_SECURITY")
+    core = _lane("core", route)
+    service = replace(
+        _lane("service", route),
+        run_created_at="2026-07-22T12:00:01.000Z",
+    )
+    _patch_lane_validator(monkeypatch, core, service)
+
+    with pytest.raises(ShadowDecisionError, match="run_created_at_mismatch"):
+        aggregate_shadow_decision(
+            context=_context(),
+            event=_event(),
+            core=core,  # type: ignore[arg-type]
+            service=service,  # type: ignore[arg-type]
+            contract=_contract(),
+        )
+
+
+def test_direct_record_construction_rechecks_shape_and_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _route()
+    core = _lane("core", route)
+    _patch_lane_validator(monkeypatch, core)
+    decision = aggregate_shadow_decision(
+        context=_context(),
+        event=_event(),
+        core=core,  # type: ignore[arg-type]
+        service=None,
+        contract=_contract(),
+    )
+
+    with pytest.raises(ShadowDecisionError, match="decision_identity"):
+        replace(decision, decision_identity="sha256:" + "0" * 64)
+    with pytest.raises(ShadowDecisionError, match="failure_record"):
+        replace(decision, event=None, lanes=())
+    with pytest.raises(ShadowDecisionError, match="lanes"):
+        replace(decision, lanes=(object(),))  # type: ignore[arg-type]
+
+
+def test_cli_contract_failure_after_context_is_typed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = tmp_path / "context.json"
+    context.write_text(json.dumps(_context().as_dict()), encoding="utf-8")
+
+    def reject_contract(_root):
+        raise decision_module.ContractError("contract")
+
+    monkeypatch.setattr(decision_module, "load_contract", reject_contract)
+    output = tmp_path / "decision.json"
+    assert decision_main(
+        (
+            "--repo-root",
+            str(tmp_path),
+            "--context",
+            str(context),
+            "--event",
+            "missing-event.json",
+            "--core",
+            "missing-core.json",
+            "--output",
+            "decision.json",
+        )
+    ) == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["result"] == "EVIDENCE_MISMATCH"
+    assert payload["result_reason"] == "EVIDENCE_MISMATCH:decision:invalid-input"
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600

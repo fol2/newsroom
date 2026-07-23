@@ -194,7 +194,37 @@ class ShadowDecision:
             raise ShadowDecisionError("context") from exc
         if self.context.job_id != "decision":
             raise ShadowDecisionError("decision_job")
-        _sha(self.decision_identity, "decision_identity")
+        if not isinstance(self.totals, DecisionTotals):
+            raise ShadowDecisionError("totals")
+        if self.event is not None and not isinstance(self.event, WorkflowEvent):
+            raise ShadowDecisionError("event")
+        if not isinstance(self.lanes, tuple) or len(self.lanes) > 2:
+            raise ShadowDecisionError("lanes")
+        try:
+            lane_ids = tuple(lane.lane_id for lane in self.lanes)
+        except AttributeError as exc:
+            raise ShadowDecisionError("lanes") from exc
+        if tuple(sorted(lane_ids)) != lane_ids or len(set(lane_ids)) != len(lane_ids):
+            raise ShadowDecisionError("lanes")
+        if self.first_failure is not None and not isinstance(
+            self.first_failure, FailureSummary
+        ):
+            raise ShadowDecisionError("first_failure")
+        if self.lanes:
+            if self.event is None or "core" not in set(lane_ids):
+                raise ShadowDecisionError("lane_event")
+            if (self.result == "PASS") is not (self.first_failure is None):
+                raise ShadowDecisionError("first_failure")
+        elif (
+            self.event is not None
+            or self.result == "PASS"
+            or self.first_failure is None
+            or self.first_failure.lane_id != "decision"
+        ):
+            raise ShadowDecisionError("failure_record")
+        identity = _sha(self.decision_identity, "decision_identity")
+        if identity != sha256_identity(_identity_inputs(self)):
+            raise ShadowDecisionError("decision_identity")
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -353,6 +383,8 @@ def _normalize_lanes(
         _lane_matches_context(normalized_service, context=context, event=event)
         if normalized_service.receipt.route.as_dict() != route.as_dict():
             raise ShadowDecisionError("route_mismatch")
+        if normalized_service.run_created_at != normalized_core.run_created_at:
+            raise ShadowDecisionError("run_created_at_mismatch")
         lanes.append(normalized_service)
     ordered = tuple(sorted(lanes, key=lambda item: item.lane_id))
     if len({lane.lane_identity for lane in ordered}) != len(ordered):
@@ -509,16 +541,19 @@ def _build(
     totals: DecisionTotals,
     first_failure: FailureSummary | None,
 ) -> ShadowDecision:
-    provisional = ShadowDecision(
-        result,
-        reason,
-        context,
-        event,
-        lanes,
-        totals,
-        first_failure,
-        "sha256:" + "0" * 64,
-    )
+    identity_inputs = {
+        "schema_version": SCHEMA_VERSION,
+        "policy_version": POLICY_VERSION,
+        "result": result,
+        "result_reason": reason,
+        "context": context.as_dict(),
+        "event": None if event is None else event.as_dict(),
+        "lanes": [lane.as_dict() for lane in lanes],
+        "totals": totals.as_dict(),
+        "first_failure": (
+            None if first_failure is None else first_failure.as_dict()
+        ),
+    }
     return ShadowDecision(
         result,
         reason,
@@ -527,7 +562,7 @@ def _build(
         lanes,
         totals,
         first_failure,
-        sha256_identity(_identity_inputs(provisional)),
+        sha256_identity(identity_inputs),
     )
 
 
@@ -816,13 +851,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     root = Path(arguments.repo_root).resolve()
     try:
-        contract = load_contract(root)
         try:
             context = _context_from_mapping(_load_json(root, arguments.context))
         except (ArtifactProvenanceError, ShadowDecisionError) as exc:
             print("EVIDENCE_MISMATCH:shadow-decision:context", file=sys.stderr)
             return 2
         try:
+            contract = load_contract(root)
             event = validate_workflow_event(_load_json(root, arguments.event))
             core = validate_shadow_lane_record(
                 _load_json(root, arguments.core), contract=contract
