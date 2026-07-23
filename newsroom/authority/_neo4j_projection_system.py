@@ -573,6 +573,9 @@ def _build_structural_batch(
         relations=tuple(
             sorted(relations, key=lambda value: value.relation_key)
         ),
+        tombstoned_object_admission_ids=(
+            source.tombstoned_object_admission_ids
+        ),
     )
 
 

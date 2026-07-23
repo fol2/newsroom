@@ -9,9 +9,20 @@ from typing import Any
 
 from ._capability import _AuthorizedCommandGrant
 from ._event_store import _EventAuthorityStore
-from .canonical import canonical_json_bytes, digest_bytes, digest_canonical
+from .canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+    validate_sha256_digest,
+)
 from .persistence import AuthorityPersistenceError, LedgerEventRecord
-from .types import EventId, TrustScope, UtcTimestamp
+from .types import (
+    EventId,
+    ObjectAdmissionId,
+    PayloadMode,
+    TrustScope,
+    UtcTimestamp,
+)
 
 from newsroom.projection.mapping import (
     StructuralEventMapping,
@@ -52,6 +63,7 @@ class _ProjectionDeliverySource:
     source_event_digest: str
     payload: Mapping[str, object]
     payload_is_mapping: bool
+    tombstoned_object_admission_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +127,70 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
     def __init__(self, *args: Any, contracts: ProjectionContractRegistry, **kwargs: Any) -> None:
         self._projection_contracts = contracts
         super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def _validate_object_admission_payload_record(
+        conn: sqlite3.Connection, row: sqlite3.Row
+    ) -> None:
+        """Validate an immutable A2b reference without reactivating current rights."""
+
+        if row["payload_bytes"] is not None:
+            raise AuthorityPersistenceError(
+                "object admission payload cannot embed bytes"
+            )
+        if row["object_admission_id"] is None:
+            raise AuthorityPersistenceError(
+                "object admission payload lacks admission identity"
+            )
+        admission_id = ObjectAdmissionId.parse(
+            str(row["object_admission_id"])
+        )
+        validate_sha256_digest(
+            str(row["payload_digest"]), field="object_payload_digest"
+        )
+        admission = conn.execute(
+            "SELECT a.blob_digest,v.state,v.event_id "
+            "FROM object_admissions a "
+            "JOIN object_admission_versions v "
+            "ON v.admission_id=a.admission_id "
+            "AND v.lifecycle_version=1 "
+            "WHERE a.admission_id=?",
+            (str(admission_id),),
+        ).fetchone()
+        if admission is None or str(admission["state"]) != "ACTIVE":
+            raise AuthorityPersistenceError(
+                "object admission payload lacks immutable activation authority"
+            )
+        if admission["event_id"] is None:
+            raise AuthorityPersistenceError(
+                "object admission activation lacks authority event identity"
+            )
+        if str(admission["blob_digest"]) != str(row["payload_digest"]):
+            raise AuthorityPersistenceError(
+                "object payload digest differs from admitted blob"
+            )
+        contract = conn.execute(
+            "SELECT schema_version,payload_mode,contract_version,"
+            "canonicalizer_implementation_version "
+            "FROM payload_schema_contracts WHERE contract_digest=?",
+            (str(row["schema_contract_digest"]),),
+        ).fetchone()
+        if contract is None:
+            raise AuthorityPersistenceError(
+                "object payload schema contract is missing"
+            )
+        if (
+            str(contract["schema_version"]) != str(row["schema_version"])
+            or str(contract["payload_mode"])
+            != PayloadMode.OBJECT_ADMISSION.value
+            or str(contract["contract_version"])
+            != str(row["schema_contract_version"])
+            or str(contract["canonicalizer_implementation_version"])
+            != str(row["canonicalizer_implementation_version"])
+        ):
+            raise AuthorityPersistenceError(
+                "object payload does not match its immutable schema contract"
+            )
 
     def _migrate_or_validate(self) -> None:
         super()._migrate_or_validate()
@@ -2349,6 +2425,15 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 raise AuthorityPersistenceError(
                     "projection source payload metadata is inconsistent"
                 )
+            retained_admission_id = (
+                None
+                if row["object_admission_id"] is None
+                else str(row["object_admission_id"])
+            )
+            if retained_admission_id != event.object_admission_id:
+                raise AuthorityPersistenceError(
+                    "projection source object admission identity is inconsistent"
+                )
             payload: Mapping[str, object]
             payload_is_mapping = False
             if event.payload_mode == "INLINE":
@@ -2370,6 +2455,68 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     payload = MappingProxyType({})
             else:
                 payload = MappingProxyType({})
+
+            tombstoned_admission_ids: tuple[str, ...] = ()
+            if event.event_type == "governed_blob.deletion.tombstoned":
+                expected_fields = {
+                    "operation_id",
+                    "deletion_id",
+                    "blob_digest",
+                    "reason_code",
+                }
+                if (
+                    event.aggregate_type != "governed_object_lifecycle"
+                    or not payload_is_mapping
+                    or set(payload) != expected_fields
+                    or any(not isinstance(payload[field], str) for field in expected_fields)
+                    or str(payload["deletion_id"]) != event.aggregate_id
+                ):
+                    raise AuthorityPersistenceError(
+                        "projection tombstone source shape is inconsistent"
+                    )
+                blob_digest = str(payload["blob_digest"])
+                try:
+                    if validate_sha256_digest(
+                        blob_digest, field="blob_digest"
+                    ) != blob_digest:
+                        raise ValueError("non-canonical digest")
+                except ValueError as exc:
+                    raise AuthorityPersistenceError(
+                        "projection tombstone blob digest is invalid"
+                    ) from exc
+                deletion = conn.execute(
+                    "SELECT d.blob_digest,d.reason_code,v.lifecycle_version,"
+                    "v.state,v.operation_id,v.event_id "
+                    "FROM object_deletions d JOIN object_deletion_versions v "
+                    "ON v.deletion_id=d.deletion_id "
+                    "WHERE d.deletion_id=? AND v.event_id=?",
+                    (event.aggregate_id, event.event_id),
+                ).fetchone()
+                if (
+                    deletion is None
+                    or str(deletion["blob_digest"]) != blob_digest
+                    or str(deletion["reason_code"]) != str(payload["reason_code"])
+                    or str(deletion["operation_id"]) != str(payload["operation_id"])
+                    or str(deletion["state"]) != "TOMBSTONED"
+                    or int(deletion["lifecycle_version"]) != event.aggregate_version
+                    or str(deletion["event_id"]) != event.event_id
+                ):
+                    raise AuthorityPersistenceError(
+                        "projection tombstone authority record is inconsistent"
+                    )
+                admissions = conn.execute(
+                    "SELECT admission_id FROM object_admissions WHERE blob_digest=? "
+                    "ORDER BY admission_id",
+                    (blob_digest,),
+                ).fetchall()
+                tombstoned_admission_ids = tuple(
+                    str(item["admission_id"]) for item in admissions
+                )
+                if not tombstoned_admission_ids:
+                    raise AuthorityPersistenceError(
+                        "projection tombstone lacks covered object admissions"
+                    )
+
             return _ProjectionDeliverySource(
                 generation=generation,
                 family=family,
@@ -2379,6 +2526,7 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 source_event_digest=source_event_digest,
                 payload=payload,
                 payload_is_mapping=payload_is_mapping,
+                tombstoned_object_admission_ids=tombstoned_admission_ids,
             )
 
     def projection_generation_metadata(

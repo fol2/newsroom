@@ -1,2 +1,0 @@
-trigger=2026-07-23T18:30:00Z
-base_head=f43de049b9e0a95f7d38fe26e6c8491385eb673e

@@ -155,6 +155,36 @@ RETURN count(value) AS deleted_count
 """
 
 
+_TOMBSTONE_RELATIONS_QUERY = """
+MATCH (source:NewsroomProjectionNode {generation_id: $generation_id})
+      -[relation]->
+      (target:NewsroomProjectionNode {generation_id: $generation_id})
+WHERE relation.generation_id = $generation_id
+  AND type(relation) IN $relation_types
+  AND relation.object_admission_id IN $object_admission_ids
+WITH collect(DISTINCT relation.relation_key) AS relation_keys,
+     collect(DISTINCT source.canonical_id)
+       + collect(DISTINCT target.canonical_id) AS canonical_ids,
+     collect(relation) AS relations
+FOREACH (item IN relations | DELETE item)
+RETURN relation_keys, canonical_ids, size(relations) AS deleted_count
+"""
+_TOMBSTONE_RELATION_IDENTITIES_QUERY = """
+MATCH (identity:NewsroomProjectionRelationIdentity {generation_id: $generation_id})
+WHERE identity.relation_key IN $relation_keys
+WITH collect(identity) AS identities
+FOREACH (item IN identities | DELETE item)
+RETURN size(identities) AS deleted_count
+"""
+_TOMBSTONE_ORPHAN_NODES_QUERY = """
+MATCH (node:NewsroomProjectionNode {generation_id: $generation_id})
+WHERE node.canonical_id IN $canonical_ids AND NOT (node)--()
+WITH collect(node) AS nodes
+FOREACH (item IN nodes | DELETE item)
+RETURN size(nodes) AS deleted_count
+"""
+
+
 _NODE_PROPERTY_KEYS = frozenset(
     {
         "generation_id",
@@ -399,8 +429,10 @@ class _Neo4jAdapter:
                 allowed_keys=_DELIVERY_PROPERTY_KEYS,
                 identity="Neo4j delivery marker",
             )
+            _apply_tombstone_cleanup(transaction, batch)
             return Neo4jApplyOutcome.DUPLICATE
 
+        _apply_tombstone_cleanup(transaction, batch)
         node_by_id = {item.canonical_id: item for item in batch.nodes}
         for canonical_id in sorted(node_by_id):
             node = node_by_id[canonical_id]
@@ -489,6 +521,63 @@ class _Neo4jAdapter:
             identity="Neo4j delivery marker",
         )
         return Neo4jApplyOutcome.APPLIED
+
+
+def _apply_tombstone_cleanup(transaction: Any, batch: StructuralBatch) -> None:
+    if not batch.tombstoned_object_admission_ids:
+        return
+    record = transaction.run(
+        _TOMBSTONE_RELATIONS_QUERY,
+        {
+            "generation_id": str(batch.generation_id),
+            "relation_types": [item.value for item in ProjectionRelationType],
+            "object_admission_ids": list(
+                batch.tombstoned_object_admission_ids
+            ),
+        },
+    ).single()
+    if record is None:
+        raise Neo4jIdentityConflict(
+            "Neo4j tombstone cleanup returned no exact relation state"
+        )
+    try:
+        relation_keys = tuple(
+            sorted({str(item) for item in (record["relation_keys"] or [])})
+        )
+        canonical_ids = tuple(
+            sorted({str(item) for item in (record["canonical_ids"] or [])})
+        )
+        int(record["deleted_count"])
+    except Exception:
+        raise Neo4jIdentityConflict(
+            "Neo4j tombstone cleanup returned malformed relation state"
+        ) from None
+    if relation_keys:
+        identities = transaction.run(
+            _TOMBSTONE_RELATION_IDENTITIES_QUERY,
+            {
+                "generation_id": str(batch.generation_id),
+                "relation_keys": list(relation_keys),
+            },
+        ).single()
+        if identities is None or int(identities["deleted_count"]) != len(
+            relation_keys
+        ):
+            raise Neo4jIdentityConflict(
+                "Neo4j tombstone relation identity state is incomplete"
+            )
+    if canonical_ids:
+        orphans = transaction.run(
+            _TOMBSTONE_ORPHAN_NODES_QUERY,
+            {
+                "generation_id": str(batch.generation_id),
+                "canonical_ids": list(canonical_ids),
+            },
+        ).single()
+        if orphans is None:
+            raise Neo4jIdentityConflict(
+                "Neo4j tombstone orphan cleanup returned no exact state"
+            )
 
 
 def _open_neo4j_adapter(config: Neo4jProjectorConfig) -> _Neo4jAdapter:

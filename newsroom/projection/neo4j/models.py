@@ -8,7 +8,13 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from newsroom.authority.canonical import digest_canonical, validate_sha256_digest
-from newsroom.authority.types import EventId, TrustScope, UtcTimestamp, require_token
+from newsroom.authority.types import (
+    EventId,
+    ObjectAdmissionId,
+    TrustScope,
+    UtcTimestamp,
+    require_token,
+)
 from newsroom.projection.models import (
     ProjectionContractError,
     ProjectionGenerationId,
@@ -232,6 +238,7 @@ class StructuralBatch:
     source_event_digest: str
     nodes: tuple[StructuralNode, ...]
     relations: tuple[StructuralRelation, ...]
+    tombstoned_object_admission_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.generation_id, ProjectionGenerationId):
@@ -254,6 +261,35 @@ class StructuralBatch:
         _require_text(self.source_event_id, field="source_event_id")
         require_token(self.source_event_type, field="source_event_type")
         validate_sha256_digest(self.source_event_digest, field="source_event_digest")
+        if (
+            not isinstance(self.tombstoned_object_admission_ids, tuple)
+            or len(self.tombstoned_object_admission_ids) > 1024
+        ):
+            raise ProjectionContractError(
+                "tombstoned object admission identities must be a bounded tuple"
+            )
+        try:
+            tombstoned = tuple(
+                str(ObjectAdmissionId.parse(item))
+                for item in self.tombstoned_object_admission_ids
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProjectionContractError(
+                "tombstoned object admission identity is invalid"
+            ) from exc
+        if tombstoned != tuple(sorted(set(tombstoned))):
+            raise ProjectionContractError(
+                "tombstoned object admission identities must be sorted and unique"
+            )
+        if bool(tombstoned) != (
+            self.source_event_type == "governed_blob.deletion.tombstoned"
+        ):
+            raise ProjectionContractError(
+                "tombstone deletion scope must match the authoritative event type"
+            )
+        object.__setattr__(
+            self, "tombstoned_object_admission_ids", tombstoned
+        )
         if not isinstance(self.nodes, tuple) or not self.nodes:
             raise ProjectionContractError("Neo4j structural batch requires nodes")
         if not isinstance(self.relations, tuple) or not self.relations:
@@ -325,6 +361,9 @@ class StructuralBatch:
                     }
                     for item in self.relations
                 ],
+                "tombstoned_object_admission_ids": list(
+                    self.tombstoned_object_admission_ids
+                ),
             }
         )
 

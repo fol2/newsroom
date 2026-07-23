@@ -448,6 +448,29 @@ def native_structural_mapping_v1(ontology: OntologyContract) -> StructuralMappin
                 _relation(ProjectionRelationType.PROJECTED_FROM_EVENT, "candidate", "event"),
             ),
         ),
+        StructuralEventMapping(
+            "governed_blob.deletion.tombstoned",
+            True,
+            (
+                _node(
+                    "deletion",
+                    ProjectionNodeType.AUTHORITY_AGGREGATE,
+                    ProjectionIdentitySource.AGGREGATE,
+                ),
+                _node(
+                    "event",
+                    ProjectionNodeType.LEDGER_EVENT,
+                    ProjectionIdentitySource.EVENT,
+                ),
+            ),
+            (
+                _relation(
+                    ProjectionRelationType.PROJECTED_FROM_EVENT,
+                    "deletion",
+                    "event",
+                ),
+            ),
+        ),
     )
     contract = StructuralMappingContract(
         mapping_id="newsroom.structural",

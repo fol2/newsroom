@@ -231,3 +231,124 @@ def test_actual_service_rebuild_cleanup_cannot_cross_generation_namespace(
             restarted.close()
     finally:
         _cleanup(config, *generations)
+
+
+def test_actual_service_tombstone_does_not_resurrect_after_wipe_rebuild(
+    tmp_path: Path,
+) -> None:
+    from newsroom.projection import (
+        ProjectionIdentitySource,
+        ProjectionNodeType,
+        StructuralNodeBinding,
+    )
+    from .projection_b3_tombstone_helpers import (
+        create_tombstoned_structural_history,
+        open_tombstone_service_system,
+    )
+
+    config = _service_config()
+    authority_path = tmp_path / "authority.sqlite3"
+    commands, schemas, history = create_tombstoned_structural_history(
+        authority_path,
+        tmp_path / "objects",
+    )
+    generation_id: ProjectionGenerationId | None = None
+    request: StructuralRebuildRequest | None = None
+
+    def canonical(event, node_type, identity_source):
+        return canonical_node_id(
+            StructuralNodeBinding("fixture", node_type, identity_source),
+            StructuralIdentityContext(
+                aggregate_type=event.aggregate_type,
+                aggregate_id=event.aggregate_id,
+                aggregate_version=event.aggregate_version,
+                event_id=event.event_id,
+                payload_id=event.payload_id,
+                payload={},
+            ),
+        )
+
+    original_id = canonical(
+        history.source_event,
+        ProjectionNodeType.AUTHORITY_AGGREGATE,
+        ProjectionIdentitySource.AGGREGATE,
+    )
+    deletion_id = canonical(
+        history.tombstone_event,
+        ProjectionNodeType.AUTHORITY_AGGREGATE,
+        ProjectionIdentitySource.AGGREGATE,
+    )
+    tombstone_event_id = canonical(
+        history.tombstone_event,
+        ProjectionNodeType.LEDGER_EVENT,
+        ProjectionIdentitySource.EVENT,
+    )
+    canonical_ids = (original_id, deletion_id, tombstone_event_id)
+
+    system = open_tombstone_service_system(
+        authority_path,
+        config,
+        commands,
+        schemas,
+    )
+    try:
+        _register(system)
+        generation = _create_generation(system, suffix="tombstone")
+        generation_id = generation.generation_id
+        current = next(
+            item
+            for item in system.projections.generations(FAMILY_ID, proof=proof())
+            if item.generation_id == generation_id
+        )
+        request = StructuralRebuildRequest(
+            generation_id=generation_id,
+            expected_authority_version=current.authority_aggregate_version,
+            through_ledger_seq=history.tombstone_event.ledger_seq,
+            reason_code="B3_ACTUAL_SERVICE_TOMBSTONE",
+            idempotency_key="b3-service-tombstone-rebuild",
+        )
+        first = system.structural.rebuild(request, proof=proof())
+        assert first.recorded_delivery_count == 2
+        initial = _read(system, generation_id, canonical_ids)
+        assert original_id not in {item.canonical_id for item in initial.nodes}
+        assert all(
+            item.object_admission_id != str(history.admission_id)
+            for item in initial.relations
+        )
+        assert any(
+            item.source_event_type == "governed_blob.deletion.tombstoned"
+            for item in initial.relations
+        )
+    finally:
+        system.close()
+
+    assert generation_id is not None
+    assert request is not None
+    try:
+        _cleanup(config, generation_id)
+        restarted = open_tombstone_service_system(
+            authority_path,
+            config,
+            commands,
+            schemas,
+        )
+        try:
+            replay = restarted.structural.rebuild(request, proof=proof())
+            assert replay.authority_command_replayed is True
+            assert replay.reapplied_delivery_count == 2
+            rebuilt = _read(restarted, generation_id, canonical_ids)
+            assert original_id not in {
+                item.canonical_id for item in rebuilt.nodes
+            }
+            assert all(
+                item.object_admission_id != str(history.admission_id)
+                for item in rebuilt.relations
+            )
+            assert any(
+                item.source_event_type == "governed_blob.deletion.tombstoned"
+                for item in rebuilt.relations
+            )
+        finally:
+            restarted.close()
+    finally:
+        _cleanup(config, generation_id)
