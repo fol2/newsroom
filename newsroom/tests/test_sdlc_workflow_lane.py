@@ -694,6 +694,10 @@ def test_cache_evidence_is_exact_and_fail_closed(
     with pytest.raises(WorkflowLaneError, match="cache_environment"):
         lane_module._cache_evidence()
 
+    monkeypatch.setenv("NEWSROOM_SDLC_CACHE_KEY", "x" * 513)
+    with pytest.raises(WorkflowLaneError, match="cache_environment"):
+        lane_module._cache_evidence()
+
 
 def test_gate_evidence_records_exact_cache_metadata(
     tmp_path: Path,

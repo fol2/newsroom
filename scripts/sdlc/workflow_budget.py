@@ -163,7 +163,7 @@ def _child_environment(
             value = source.get(name)
             if value:
                 environment[name] = _text(
-                    value, "cache_environment", maximum=2048
+                    value, "cache_environment", maximum=512
                 )
     else:
         temporary = source.get("RUNNER_TEMP", "/tmp")
