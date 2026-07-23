@@ -4,12 +4,15 @@ on:
   push:
     branches:
       - agent/sdlc-v2-phase2b-evidence-workflow-release
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 concurrency:
-  group: sdlc-shadow-venv-fix-${{ github.ref }}
+  group: sdlc-shadow-venv-fix-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -67,7 +70,8 @@ jobs:
           set -euo pipefail
           git rm -f \
             .github/workflows/sdlc-shadow-venv-publisher.yml \
-            .sdlc/fix-shadow-venv-execution.py
+            .sdlc/fix-shadow-venv-execution.py \
+            .sdlc/fix-shadow-venv-execution.trigger
           git add \
             scripts/sdlc/workflow_lane.py \
             newsroom/tests/test_sdlc_workflow_lane.py
