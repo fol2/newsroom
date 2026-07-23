@@ -4,6 +4,7 @@ from pathlib import Path
 
 SOURCE = Path("scripts/sdlc/workflow_lane.py")
 TEST = Path("newsroom/tests/test_sdlc_workflow_lane.py")
+WORKFLOW_TEST = Path("newsroom/tests/test_sdlc_evidence_workflow.py")
 
 source = SOURCE.read_text(encoding="utf-8")
 
@@ -161,3 +162,11 @@ def test_uv_command_uses_the_locked_project_environment() -> None:
     assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
 '''
 TEST.write_text(tests, encoding="utf-8")
+
+workflow_tests = WORKFLOW_TEST.read_text(encoding="utf-8")
+old_assertion = '    assert "secrets." not in rendered\n'
+new_assertion = '    assert "${{ secrets." not in rendered\n'
+if workflow_tests.count(old_assertion) != 1:
+    raise SystemExit("GitHub secrets assertion mismatch")
+workflow_tests = workflow_tests.replace(old_assertion, new_assertion)
+WORKFLOW_TEST.write_text(workflow_tests, encoding="utf-8")
