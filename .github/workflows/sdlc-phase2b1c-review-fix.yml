@@ -34,18 +34,18 @@ jobs:
           set -euo pipefail
           test "$(git hash-object scripts/sdlc/shadow_decision.py)" = c1f0defe68f700e1c9833b911e28933de045bb79
           test "$(git hash-object newsroom/tests/test_sdlc_shadow_decision.py)" = c7895806f7105a58f9ff178be9c6862f961ca049
-          test "$(sha256sum .sdlc/shadow-decision-review.part-00 | cut -d' ' -f1)" = d2238394b2b6ba242e341a65f12403f689df127221b8bcc42422b209b402f660
-          test "$(sha256sum .sdlc/shadow-decision-review.part-01 | cut -d' ' -f1)" = bb92c12f50f7eed4c68cbc847e1725854e4314bbc63a6b22b4ea549065360ad4
-          test "$(sha256sum .sdlc/shadow-decision-review.part-02 | cut -d' ' -f1)" = bc370daefa6b4411a9516231b9543eefaf2efec28ff30351dea2c77444e37db7
+          test "$(sha256sum .sdlc/shadow-decision-review.part-00 | cut -d' ' -f1)" = 7ead72d40e2c823875492722132ce9b68ceea3c9653c6aa45f4dab9a0ae9fddd
+          test "$(sha256sum .sdlc/shadow-decision-review.part-01 | cut -d' ' -f1)" = a234323420c134eb72b31e6b6c2ea042bac005f34feb9449aaf15909fe5d228f
+          test "$(sha256sum .sdlc/shadow-decision-review.part-02 | cut -d' ' -f1)" = 7118d84e74d5b194aacd842e0ff7ddc20eac16189a6f48500241b34f45c959f3
           cat .sdlc/shadow-decision-review.part-* > review-fix.patch.gz.b64
-          test "$(sha256sum review-fix.patch.gz.b64 | cut -d' ' -f1)" = bf60a0624bc01bd56867762aa10a666de03c7e7622aef6a23c27c9d3a079a4c4
+          test "$(sha256sum review-fix.patch.gz.b64 | cut -d' ' -f1)" = 0d294688c6786b5aa5cc7cfa11453f75531164388e5ae5553e046050538c2a8d
           base64 --decode review-fix.patch.gz.b64 > review-fix.patch.gz
-          test "$(sha256sum review-fix.patch.gz | cut -d' ' -f1)" = 9f3ffb109a42c50ecfe501566243aae3c46fd20fa8a5b025a72f1b3d97414bc7
+          test "$(sha256sum review-fix.patch.gz | cut -d' ' -f1)" = 7216479e31a2567e4729a516e8b3bec26d228d01bcbadf95e8e7cd334db5d49d
           gzip --decompress --stdout review-fix.patch.gz > review-fix.patch
-          test "$(sha256sum review-fix.patch | cut -d' ' -f1)" = 77ac1ebb9b769f875b1f55cbb60c072477c5a6bf100acb38d895350dbe94d6f4
+          test "$(sha256sum review-fix.patch | cut -d' ' -f1)" = e14fcc043dfcfec38d442fa5f12e5be62ac9c56a922c47f91b44d25ea1771978
           git apply --check review-fix.patch
           git apply review-fix.patch
-          test "$(sha256sum scripts/sdlc/shadow_decision.py | cut -d' ' -f1)" = 398d82c3ff5ce5404bc05563761a900023127c2ba8cb33368280823cce001f58
+          test "$(sha256sum scripts/sdlc/shadow_decision.py | cut -d' ' -f1)" = f32cf572c8616f4e53d01ce8a6a4b64fb20cd3e5294186c0f7ec5e5bc3c3c087
           test "$(sha256sum newsroom/tests/test_sdlc_shadow_decision.py | cut -d' ' -f1)" = d0464dd6cde93027fb7a01bb08bf85d6327baf39dcd53795622e30494416baec
 
       - name: Sync locked Python environment
