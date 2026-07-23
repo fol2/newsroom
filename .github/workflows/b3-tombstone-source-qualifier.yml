@@ -1,0 +1,97 @@
+name: B3 Tombstone Source Qualifier
+
+on:
+  push:
+    branches:
+      - agent/increment-1b3-rebuild-promotion
+
+permissions:
+  contents: read
+
+concurrency:
+  group: b3-tombstone-source-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/increment-1b3-rebuild-promotion
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          github-token: ''
+
+      - name: Verify input and apply deterministic transform
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = f43de049b9e0a95f7d38fe26e6c8491385eb673e
+          test "$(git hash-object .sdlc/add-b3-tombstone-projection.py)" = d7dc92ae8d5b92ae028c64d8bae22a21e2af606a
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python .sdlc/add-b3-tombstone-projection.py
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_authority_a2b_lifecycle.py \
+            newsroom/tests/test_authority_a2b_object_commands.py \
+            newsroom/tests/test_projection_b1_contracts.py \
+            newsroom/tests/test_projection_b2_adapter_unit.py \
+            newsroom/tests/test_projection_b3_rebuild.py \
+            newsroom/tests/test_projection_b3_neo4j_service.py \
+            newsroom/tests/test_sdlc_classifier.py \
+            newsroom/tests/test_sdlc_workflow_lane.py
+          uv run --no-sync python -m pytest -q newsroom/tests
+          git diff --check
+
+      - name: Build exact source artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/b3-tombstone-source"
+          mkdir -p "${out}/files"
+          git diff --name-status --no-renames HEAD > "${out}/name-status.txt"
+          git diff --name-only --diff-filter=ACMRTUXB --no-renames HEAD > "${out}/paths.txt"
+          test -s "${out}/paths.txt"
+          while IFS= read -r path; do
+            test -f "${path}"
+            mkdir -p "${out}/files/$(dirname "${path}")"
+            cp -- "${path}" "${out}/files/${path}"
+          done < "${out}/paths.txt"
+          (
+            cd "${out}/files"
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+          ) > "${out}/sha256sum.txt"
+          printf '%s\n' \
+            'base_head=f43de049b9e0a95f7d38fe26e6c8491385eb673e' \
+            'transform_blob=d7dc92ae8d5b92ae028c64d8bae22a21e2af606a' \
+            'python=3.12' \
+            'uv=0.8.0' > "${out}/qualification.txt"
+
+      - name: Upload exact verified source
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: newsroom-b3-tombstone-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/b3-tombstone-source
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
