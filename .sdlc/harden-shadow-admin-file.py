@@ -46,15 +46,15 @@ if workflow.count(old_wait) != 1:
     raise SystemExit("credential split wait mismatch")
 workflow = workflow.replace(old_wait, new_wait)
 
-wait_end = '''           finally:
-               projector.close()
-           PY
+wait_end = '''          finally:
+              projector.close()
+          PY
 
       - name: Execute evidence lane
 '''
-wait_end_new = '''           finally:
-               projector.close()
-           PY
+wait_end_new = '''          finally:
+              projector.close()
+          PY
           rm -f "${admin_file}"
 
       - name: Execute evidence lane
@@ -96,18 +96,21 @@ workflow = workflow.replace(old_cleanup, new_cleanup)
 WORKFLOW.write_text(workflow, encoding="utf-8")
 
 tests = TEST.read_text(encoding="utf-8")
-tests = tests.replace(
-    "        '${RUNNER_TEMP}/newsroom-sdlc-neo4j.env',\n        'chmod 600 \"${credential_file}\"',\n",
-    "        '${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env',\n        '${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env',\n        'chmod 600 \"${admin_file}\" \"${projector_file}\"',\n",
-)
-tests = tests.replace(
-    "    assert 'source \"${credential_file}\"' in wait\n    execute = _step(\"service\", \"Execute evidence lane\")[\"run\"]\n    assert 'source \"${credential_file}\"' in execute\n",
-    "    assert 'source \"${admin_file}\"' in wait\n    assert 'source \"${projector_file}\"' in wait\n    assert 'rm -f \"${admin_file}\"' in wait\n    execute = _step(\"service\", \"Execute evidence lane\")[\"run\"]\n    assert 'source \"${projector_file}\"' in execute\n    assert 'source \"${admin_file}\"' not in execute\n    assert 'test ! -e \"${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env\"' in execute\n",
-)
-tests = tests.replace(
-    "    assert 'rm -f \"${RUNNER_TEMP}/newsroom-sdlc-neo4j.env\"' in cleanup[\"run\"]\n",
-    "    assert '${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env' in cleanup[\"run\"]\n    assert '${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env' in cleanup[\"run\"]\n",
-)
+old = "        '${RUNNER_TEMP}/newsroom-sdlc-neo4j.env',\n        'chmod 600 \"${credential_file}\"',\n"
+new = "        '${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env',\n        '${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env',\n        'chmod 600 \"${admin_file}\" \"${projector_file}\"',\n"
+if tests.count(old) != 1:
+    raise SystemExit("credential generation test mismatch")
+tests = tests.replace(old, new)
+old = "    assert 'source \"${credential_file}\"' in wait\n    execute = _step(\"service\", \"Execute evidence lane\")[\"run\"]\n    assert 'source \"${credential_file}\"' in execute\n"
+new = "    assert 'source \"${admin_file}\"' in wait\n    assert 'source \"${projector_file}\"' in wait\n    assert 'rm -f \"${admin_file}\"' in wait\n    execute = _step(\"service\", \"Execute evidence lane\")[\"run\"]\n    assert 'source \"${projector_file}\"' in execute\n    assert 'source \"${admin_file}\"' not in execute\n    assert 'test ! -e \"${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env\"' in execute\n"
+if tests.count(old) != 1:
+    raise SystemExit("credential execution test mismatch")
+tests = tests.replace(old, new)
+old = "    assert 'rm -f \"${RUNNER_TEMP}/newsroom-sdlc-neo4j.env\"' in cleanup[\"run\"]\n"
+new = "    assert '${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env' in cleanup[\"run\"]\n    assert '${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env' in cleanup[\"run\"]\n"
+if tests.count(old) != 1:
+    raise SystemExit("credential cleanup test mismatch")
+tests = tests.replace(old, new)
 old_final_test = '''    credential_file = "${RUNNER_TEMP}/newsroom-sdlc-neo4j.env"
     assert rendered.count(credential_file) == 4
 '''
