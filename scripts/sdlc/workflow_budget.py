@@ -132,6 +132,7 @@ def _child_environment(
     *,
     ambient: Mapping[str, str] | None = None,
     service: bool,
+    preserve_lane_static: bool,
 ) -> dict[str, str]:
     source = os.environ if ambient is None else ambient
     if any(
@@ -139,18 +140,34 @@ def _child_environment(
         for name, value in source.items()
     ):
         raise WorkflowBudgetError("ambient_environment")
-    environment = {
-        "CI": "true",
-        "LANG": source.get("LANG", "C.UTF-8"),
-        "LC_ALL": source.get("LC_ALL", "C.UTF-8"),
-        "PATH": source.get("PATH", "/usr/bin:/bin"),
-        "PYTHONHASHSEED": "0",
-        "PYTHONUTF8": "1",
-    }
-    for name in _OPTIONAL_STATIC_ENVIRONMENT:
-        value = source.get(name)
-        if value:
-            environment[name] = value
+    if service and not preserve_lane_static:
+        raise WorkflowBudgetError("service_environment")
+    if preserve_lane_static:
+        environment = {
+            "CI": "true",
+            "LANG": source.get("LANG", "C.UTF-8"),
+            "LC_ALL": source.get("LC_ALL", "C.UTF-8"),
+            "PATH": source.get("PATH", "/usr/bin:/bin"),
+            "PYTHONHASHSEED": "0",
+            "PYTHONUTF8": "1",
+        }
+        for name in _OPTIONAL_STATIC_ENVIRONMENT:
+            value = source.get(name)
+            if value:
+                environment[name] = value
+    else:
+        temporary = source.get("RUNNER_TEMP", "/tmp")
+        environment = {
+            "CI": "true",
+            "HOME": temporary,
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+            "PYTHONHASHSEED": "0",
+            "PYTHONUTF8": "1",
+            "RUNNER_TEMP": temporary,
+            "TMPDIR": temporary,
+        }
     for name in _GITHUB_CONTEXT_ENVIRONMENT:
         value = source.get(name)
         if not value:
@@ -311,7 +328,7 @@ def run_bounded_route(
         ),
         deadline=deadline,
         cwd=root,
-        env=_child_environment(service=False),
+        env=_child_environment(service=False, preserve_lane_static=False),
         output_limit_bytes=65_536,
         termination_grace_seconds=0.25,
     )
@@ -418,7 +435,9 @@ def run_bounded_lane_finalization(
         ),
         deadline=deadline,
         cwd=root,
-        env=_child_environment(service=lane_id == "service"),
+        env=_child_environment(
+            service=lane_id == "service", preserve_lane_static=True
+        ),
         output_limit_bytes=65_536,
         termination_grace_seconds=0.25,
     )

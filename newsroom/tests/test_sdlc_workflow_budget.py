@@ -149,7 +149,7 @@ def _run(gate_id: str, phase: str, result: str = "PASS") -> GateRunResult:
 
 def test_child_environment_is_minimal_and_preserves_exact_static_inputs() -> None:
     environment = budget._child_environment(
-        ambient=_ambient("core"), service=False
+        ambient=_ambient("core"), service=False, preserve_lane_static=True
     )
 
     assert environment["CI"] == "true"
@@ -163,7 +163,9 @@ def test_child_environment_is_minimal_and_preserves_exact_static_inputs() -> Non
 
 def test_service_child_environment_requires_exact_nonsecret_configuration() -> None:
     environment = budget._child_environment(
-        ambient=_ambient("service", service=True), service=True
+        ambient=_ambient("service", service=True),
+        service=True,
+        preserve_lane_static=True,
     )
     assert all(
         environment[name] == value
@@ -174,14 +176,18 @@ def test_service_child_environment_requires_exact_nonsecret_configuration() -> N
     wrong = _ambient("service", service=True)
     wrong["NEWSROOM_NEO4J_URI"] = "bolt://remote.example:7687"
     with pytest.raises(budget.WorkflowBudgetError, match="service_environment"):
-        budget._child_environment(ambient=wrong, service=True)
+        budget._child_environment(
+            ambient=wrong, service=True, preserve_lane_static=True
+        )
 
 
 def test_missing_github_context_fails_closed() -> None:
     ambient = _ambient("route")
     ambient.pop("GITHUB_RUN_ATTEMPT")
     with pytest.raises(budget.WorkflowBudgetError, match="github_environment"):
-        budget._child_environment(ambient=ambient, service=False)
+        budget._child_environment(
+            ambient=ambient, service=False, preserve_lane_static=False
+        )
 
 
 def test_route_bundle_is_cross_bound_to_event_context_and_identity(
@@ -417,3 +423,27 @@ def test_cli_returns_typed_budget_exit_code(
     payload = json.loads(capsys.readouterr().out)
     assert payload["result"] == "BUDGET_EXCEEDED"
     assert payload["schema_version"] == "newsroom.sdlc.gate-run.v1"
+
+
+
+def test_route_child_environment_is_fixed_and_drops_uv_cache() -> None:
+    environment = budget._child_environment(
+        ambient=_ambient("route"),
+        service=False,
+        preserve_lane_static=False,
+    )
+
+    assert environment["PATH"] == "/usr/bin:/bin"
+    assert environment["HOME"] == "/tmp/runner"
+    assert environment["TMPDIR"] == "/tmp/runner"
+    assert "UV_CACHE_DIR" not in environment
+    assert "GITHUB_TOKEN" not in environment
+
+
+def test_service_profile_cannot_use_route_environment() -> None:
+    with pytest.raises(budget.WorkflowBudgetError, match="service_environment"):
+        budget._child_environment(
+            ambient=_ambient("service", service=True),
+            service=True,
+            preserve_lane_static=False,
+        )
