@@ -52,9 +52,11 @@ jobs:
             set -euo pipefail
             git merge-base --is-ancestor f43de049b9e0a95f7d38fe26e6c8491385eb673e HEAD
             test "$(git hash-object .sdlc/add-b3-tombstone-projection-v2.py)" = 478a55ac79f796b61292f2a90667923c9c91befb
+            test "$(git hash-object .sdlc/fix-b3-tombstone-v2-output.py)" = 879b6eea80a09627839b826cfe949729d061fc7b
             uv lock --check
             uv sync --dev --locked
             uv run --no-sync python .sdlc/add-b3-tombstone-projection-v2.py
+            uv run --no-sync python .sdlc/fix-b3-tombstone-v2-output.py
             uv run --no-sync python -m compileall -q newsroom scripts
             uv run --no-sync python -m pytest -q \
               newsroom/tests/test_authority_a2b_lifecycle.py \
@@ -109,6 +111,7 @@ jobs:
           printf '%s\n' \
             'base_head=f43de049b9e0a95f7d38fe26e6c8491385eb673e' \
             'transform_blob=478a55ac79f796b61292f2a90667923c9c91befb' \
+            'repair_blob=879b6eea80a09627839b826cfe949729d061fc7b' \
             'python=3.12' \
             'uv=0.8.0' > "${out}/qualification.txt"
 
