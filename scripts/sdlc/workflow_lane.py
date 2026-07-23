@@ -13,6 +13,7 @@ from typing import Mapping, Sequence
 
 from .artifact_envelope import (
     ArtifactProvenanceError,
+    _safe_machine_file,
     _unique_object,
     _validate_json_depth,
     artifact_name,
@@ -54,6 +55,12 @@ _OPTIONAL_CORE_TEST_IDS = (
     "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_requires_explicit_authentication_configuration",
     "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_wrong_projector_credential_fails_closed_without_secret",
 )
+_SERVICE_CONFIGURATION = {
+    "NEWSROOM_NEO4J_DATABASE": "neo4j",
+    "NEWSROOM_NEO4J_PROJECTOR_USERNAME": "newsroom_projector",
+    "NEWSROOM_NEO4J_SERVICE_REQUIRED": "1",
+    "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
+}
 
 
 class WorkflowLaneError(ValueError):
@@ -101,23 +108,23 @@ class LaneOutput:
 def service_compatibility_digest() -> str:
     return sha256_identity(
         {
+            "database": _SERVICE_CONFIGURATION["NEWSROOM_NEO4J_DATABASE"],
             "driver_version": _SERVICE_DRIVER,
             "edition": "community",
             "image": _SERVICE_IMAGE,
+            "projector_username": _SERVICE_CONFIGURATION[
+                "NEWSROOM_NEO4J_PROJECTOR_USERNAME"
+            ],
             "server_version": _SERVICE_SERVER,
+            "uri": _SERVICE_CONFIGURATION["NEWSROOM_NEO4J_URI"],
         }
     )
 
 
 def _load_json(root: Path, value: str | Path) -> object:
     candidate = Path(value)
-    path = candidate if candidate.is_absolute() else root / candidate
-    absolute = path if path.is_absolute() else path.absolute()
-    current = Path(absolute.anchor)
-    for part in absolute.parts[1:]:
-        current /= part
-        if current.is_symlink():
-            raise WorkflowLaneError("input_path")
+    absolute = candidate if candidate.is_absolute() else root / candidate
+    absolute = absolute if absolute.is_absolute() else absolute.absolute()
     try:
         resolved = absolute.resolve(strict=True)
     except OSError as exc:
@@ -125,23 +132,22 @@ def _load_json(root: Path, value: str | Path) -> object:
     if not resolved.is_relative_to(root):
         raise WorkflowLaneError("input_path")
     try:
-        payload = path.read_bytes()
-    except OSError as exc:
-        raise WorkflowLaneError("input_file") from exc
-    if not payload or len(payload) > _MAX_JSON_BYTES:
-        raise WorkflowLaneError("input_file")
-    try:
-        value = json.loads(
+        payload = _safe_machine_file(
+            absolute, maximum=_MAX_JSON_BYTES, code="input_file"
+        )
+        parsed = json.loads(
             payload.decode("utf-8"), object_pairs_hook=_unique_object
         )
-        _validate_json_depth(value)
-        return value
+        _validate_json_depth(parsed)
     except (
         ArtifactProvenanceError,
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
         raise WorkflowLaneError("input_json") from exc
+    if payload != canonical_json_bytes(parsed) + b"\n":
+        raise WorkflowLaneError("input_canonical")
+    return parsed
 
 
 def _private_write(path: Path, value: object) -> None:
@@ -252,6 +258,95 @@ def _spec(
     return parse_command_spec(value, contract=contract)
 
 
+def _service_environment() -> dict[str, str]:
+    if any(
+        os.environ.get(name) != value
+        for name, value in _SERVICE_CONFIGURATION.items()
+    ):
+        raise WorkflowLaneError("service_configuration")
+    return dict(_SERVICE_CONFIGURATION)
+
+
+def _expected_spec(
+    *,
+    root: Path,
+    artifact_root: Path,
+    contract: SdlcContract,
+    route: Mapping[str, object],
+    gate_id: str,
+    phase: str,
+) -> CommandSpec:
+    key = (gate_id, phase)
+    environment = _static_environment()
+    pass_env: Sequence[str] = ()
+    if key == ("source-integrity", "source"):
+        argv: list[str] = [
+            sys.executable,
+            "-m",
+            "scripts.sdlc.workflow_lane",
+            "source-check",
+            "--repo-root",
+            ".",
+            "--base-sha",
+            str(route["base_sha"]),
+            "--head-sha",
+            str(route["head_sha"]),
+        ]
+    elif key == ("core-deterministic", "tests"):
+        report = (
+            artifact_root
+            / "gates"
+            / gate_id
+            / phase
+            / "reports"
+            / "pytest.xml"
+        )
+        argv = [
+            sys.executable,
+            "-m",
+            "scripts.sdlc.workflow_lane",
+            "core-tests",
+            "--repo-root",
+            ".",
+            "--report",
+            report.relative_to(root).as_posix(),
+        ]
+        if route["clustering_required"]:
+            argv.append("--clustering")
+    elif key == ("service-neo4j", "tests"):
+        report = (
+            artifact_root
+            / "gates"
+            / gate_id
+            / phase
+            / "reports"
+            / "pytest.xml"
+        )
+        environment.update(_service_environment())
+        pass_env = ("NEWSROOM_NEO4J_PROJECTOR_PASSWORD",)
+        argv = [
+            sys.executable,
+            "-m",
+            "scripts.sdlc.workflow_lane",
+            "service-tests",
+            "--repo-root",
+            ".",
+            "--report",
+            report.relative_to(root).as_posix(),
+            *[str(item) for item in route["service_tests"]],
+        ]
+    else:
+        raise WorkflowLaneError("gate_identity")
+    return _spec(
+        contract=contract,
+        gate_id=gate_id,
+        phase=phase,
+        argv=argv,
+        static_env=environment,
+        pass_env=pass_env,
+    )
+
+
 def _execute(
     *,
     contract: SdlcContract,
@@ -343,56 +438,28 @@ def _run_core(
     test_dir = _gate_directory(artifact_root, "core-deterministic", "tests")
     reports = test_dir / "reports"
     reports.mkdir(mode=0o700)
-    report = reports / "pytest.xml"
     deadline = start_lane_deadline(contract, "source-integrity")
-    base_env = _static_environment()
-    source_spec = _spec(
+    source_spec = _expected_spec(
+        root=root,
+        artifact_root=artifact_root,
         contract=contract,
+        route=route,
         gate_id="source-integrity",
         phase="source",
-        argv=(
-            sys.executable,
-            "-m",
-            "scripts.sdlc.workflow_lane",
-            "source-check",
-            "--repo-root",
-            ".",
-            "--base-sha",
-            str(route["base_sha"]),
-            "--head-sha",
-            str(route["head_sha"]),
-        ),
-        static_env=base_env,
     )
     source_run = _execute(contract=contract, spec=source_spec, deadline=deadline)
-    test_argv = [
-        sys.executable,
-        "-m",
-        "scripts.sdlc.workflow_lane",
-        "core-tests",
-        "--repo-root",
-        ".",
-        "--report",
-        report.relative_to(root).as_posix(),
-    ]
-    if route["clustering_required"]:
-        test_argv.append("--clustering")
-    test_spec = _spec(
+    test_spec = _expected_spec(
+        root=root,
+        artifact_root=artifact_root,
         contract=contract,
+        route=route,
         gate_id="core-deterministic",
         phase="tests",
-        argv=test_argv,
-        static_env=base_env,
     )
     test_run = _execute(contract=contract, spec=test_spec, deadline=deadline)
-    summary = _report_summary(
-        repo_root=root,
-        report=report,
-        optional_test_ids=_OPTIONAL_CORE_TEST_IDS,
-    )
     return (
         ("source-integrity", "source", source_run, None, source_dir),
-        ("core-deterministic", "tests", test_run, summary, test_dir),
+        ("core-deterministic", "tests", test_run, None, test_dir),
     )
 
 
@@ -408,39 +475,17 @@ def _run_service(
     gate_dir = _gate_directory(artifact_root, "service-neo4j", "tests")
     reports = gate_dir / "reports"
     reports.mkdir(mode=0o700)
-    report = reports / "pytest.xml"
-    required_service = {
-        "NEWSROOM_NEO4J_DATABASE": "neo4j",
-        "NEWSROOM_NEO4J_PROJECTOR_USERNAME": "newsroom_projector",
-        "NEWSROOM_NEO4J_SERVICE_REQUIRED": "1",
-        "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
-    }
-    if any(os.environ.get(name) != value for name, value in required_service.items()):
-        raise WorkflowLaneError("service_configuration")
-    static_env = _static_environment()
-    static_env.update(required_service)
-    spec = _spec(
+    spec = _expected_spec(
+        root=root,
+        artifact_root=artifact_root,
         contract=contract,
+        route=route,
         gate_id="service-neo4j",
         phase="tests",
-        argv=(
-            sys.executable,
-            "-m",
-            "scripts.sdlc.workflow_lane",
-            "service-tests",
-            "--repo-root",
-            ".",
-            "--report",
-            report.relative_to(root).as_posix(),
-            *[str(item) for item in route["service_tests"]],
-        ),
-        static_env=static_env,
-        pass_env=("NEWSROOM_NEO4J_PROJECTOR_PASSWORD",),
     )
     deadline = start_lane_deadline(contract, "service-neo4j")
     run = _execute(contract=contract, spec=spec, deadline=deadline)
-    summary = _report_summary(repo_root=root, report=report, optional_test_ids=())
-    return (("service-neo4j", "tests", run, summary, gate_dir),)
+    return (("service-neo4j", "tests", run, None, gate_dir),)
 
 
 def _context_route(
@@ -559,6 +604,7 @@ def finalize_lane(
     files: list[tuple[str, str]] = [("route", "route.json")]
     gate_results: list[tuple[str, str, str]] = []
     optional = _OPTIONAL_CORE_TEST_IDS if lane_id == "core" else ()
+    prepared: list[tuple[Path, object]] = []
     for gate_id, phase, run_path, report in _layout(output, lane_id):
         try:
             command_run = _validate_command_run(_load_json(root, run_path))
@@ -567,13 +613,23 @@ def finalize_lane(
         gate_run = command_run["gate_run"]
         if gate_run["gate_id"] != gate_id or gate_run["phase"] != phase:
             raise WorkflowLaneError("command_run_identity")
+        expected = _expected_spec(
+            root=root,
+            artifact_root=output,
+            contract=contract,
+            route=route,
+            gate_id=gate_id,
+            phase=phase,
+        )
+        if command_run["command_spec_digest"] != expected.digest:
+            raise WorkflowLaneError("command_spec_digest")
         files.append(("command_run", run_path.relative_to(output).as_posix()))
         summary = _report_summary(
             repo_root=root, report=report, optional_test_ids=optional
         )
         if summary is not None:
             summary_path = run_path.parent / "junit-summary.json"
-            _private_write(summary_path, summary.as_dict())
+            prepared.append((summary_path, summary.as_dict()))
             files.append(("junit_summary", summary_path.relative_to(output).as_posix()))
         evidence = _evidence(
             repo_root=root,
@@ -587,41 +643,32 @@ def finalize_lane(
             ),
         )
         evidence_path = run_path.parent / "gate-evidence.json"
-        _private_write(evidence_path, evidence)
+        prepared.append((evidence_path, evidence))
         files.append(("gate_evidence", evidence_path.relative_to(output).as_posix()))
         gate_results.append((gate_id, phase, str(evidence["result"])))
-    envelope = create_envelope(
-        repo_root=root, artifact_root=output, context=context, files=files
-    )
-    validate_envelope(envelope.as_dict())
-    _private_write(output / "envelope.json", envelope.as_dict())
-    return LaneOutput(
-        lane_id,
-        artifact_name(context),
-        envelope.envelope_identity,
-        tuple(sorted(gate_results)),
-    )
 
-
-def run_lane(
-    *,
-    repo_root: str | Path,
-    route_path: str | Path,
-    lane_id: str,
-    artifact_root: str | Path,
-) -> LaneOutput:
-    execute_lane(
-        repo_root=repo_root,
-        route_path=route_path,
-        lane_id=lane_id,
-        artifact_root=artifact_root,
-    )
-    return finalize_lane(
-        repo_root=repo_root,
-        route_path=route_path,
-        lane_id=lane_id,
-        artifact_root=artifact_root,
-    )
+    created: list[Path] = []
+    try:
+        for path, value in prepared:
+            _private_write(path, value)
+            created.append(path)
+        envelope = create_envelope(
+            repo_root=root, artifact_root=output, context=context, files=files
+        )
+        validate_envelope(envelope.as_dict())
+        envelope_path = output / "envelope.json"
+        _private_write(envelope_path, envelope.as_dict())
+        created.append(envelope_path)
+        return LaneOutput(
+            lane_id,
+            artifact_name(context),
+            envelope.envelope_identity,
+            tuple(sorted(gate_results)),
+        )
+    except Exception:
+        for path in reversed(created):
+            path.unlink(missing_ok=True)
+        raise
 
 
 def _run_subprocess(argv: Sequence[str]) -> int:
@@ -701,7 +748,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run exact Newsroom SDLC shadow lane")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for command in ("execute", "finalize", "run"):
+    for command in ("execute", "finalize"):
         lane_parser = subparsers.add_parser(command)
         lane_parser.add_argument("--repo-root", default=".")
         lane_parser.add_argument("--route", required=True)
@@ -726,7 +773,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     arguments = parser.parse_args(argv)
     try:
-        if arguments.command in {"execute", "finalize", "run"}:
+        if arguments.command in {"execute", "finalize"}:
             if arguments.command == "execute":
                 result = execute_lane(
                     repo_root=arguments.repo_root,
@@ -734,15 +781,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     lane_id=arguments.lane,
                     artifact_root=arguments.artifact_root,
                 )
-            elif arguments.command == "finalize":
-                result = finalize_lane(
-                    repo_root=arguments.repo_root,
-                    route_path=arguments.route,
-                    lane_id=arguments.lane,
-                    artifact_root=arguments.artifact_root,
-                )
             else:
-                result = run_lane(
+                result = finalize_lane(
                     repo_root=arguments.repo_root,
                     route_path=arguments.route,
                     lane_id=arguments.lane,
@@ -785,6 +825,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         JUnitEvidenceError,
         WorkflowLaneError,
         OSError,
+        SyntaxError,
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:

@@ -97,7 +97,7 @@ def _run(gate_id: str, phase: str, result: str = "PASS") -> CommandRun:
 
 def test_service_compatibility_digest_is_fixed() -> None:
     assert service_compatibility_digest() == (
-        "sha256:c3d391e503495d5d240d6ea49666c7de04389761c53eae3d5967e354a5b34ec8"
+        "sha256:54ea1c6f4b99a7318abd756506b031c97e30133fef65e9a457c66152401dcb2d"
     )
 
 
@@ -356,7 +356,7 @@ def test_main_returns_typed_error_for_invalid_lane(
 ) -> None:
     assert lane_module.main(
         (
-            "run",
+            "execute",
             "--repo-root",
             str(tmp_path),
             "--route",
@@ -458,3 +458,154 @@ def test_execute_and_finalize_are_distinct_cli_phases(
             )
         ) == 0
     assert [name for name, _ in calls] == ["execute", "finalize"]
+
+
+
+def test_route_loader_requires_canonical_json(tmp_path: Path) -> None:
+    route = tmp_path / "route-noncanonical.json"
+    route.write_text('{"value": 1}\n', encoding="utf-8")
+    with pytest.raises(WorkflowLaneError, match="input_canonical"):
+        lane_module._load_json(tmp_path, route)
+
+
+def test_execute_phase_does_not_parse_junit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract(tmp_path)
+    artifact = tmp_path / "artifact-no-finalize"
+    artifact.mkdir()
+    monkeypatch.setattr(
+        lane_module, "start_lane_deadline", lambda *_args: LaneDeadline(1, 55_000)
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_expected_spec",
+        lambda **kwargs: SimpleNamespace(
+            gate_id=kwargs["gate_id"], phase=kwargs["phase"]
+        ),
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_execute",
+        lambda *, contract, spec, deadline: _run(spec.gate_id, spec.phase),
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_report_summary",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("finalization only")),
+    )
+    records = _run_core(
+        root=tmp_path,
+        artifact_root=artifact,
+        contract=contract,
+        route=_route(),
+    )
+    assert all(summary is None for _, _, _, summary, _ in records)
+
+
+def test_finalizer_rejects_unexpected_command_spec_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract(tmp_path)
+    route = _route()
+    artifact = tmp_path / "artifact"
+    run_path = artifact / "gates/source-integrity/source/command-run.json"
+    run_path.parent.mkdir(parents=True)
+    report = run_path.parent / "reports/pytest.xml"
+    context = SimpleNamespace(runner_environment="github-hosted")
+    command = _run("source-integrity", "source").as_dict()
+    monkeypatch.setattr(
+        lane_module, "_context_route", lambda **_kwargs: (contract, context, route)
+    )
+    monkeypatch.setattr(lane_module, "_existing_artifact_root", lambda *_args: artifact)
+    monkeypatch.setattr(
+        lane_module, "_validate_route", lambda _contract, value: route
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_load_json",
+        lambda _root, value: route if Path(value).name == "route.json" else command,
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_layout",
+        lambda *_args: (("source-integrity", "source", run_path, report),),
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_expected_spec",
+        lambda **_kwargs: SimpleNamespace(digest="sha256:" + "3" * 64),
+    )
+    with pytest.raises(WorkflowLaneError, match="command_spec_digest"):
+        lane_module.finalize_lane(
+            repo_root=tmp_path,
+            route_path="route.json",
+            lane_id="core",
+            artifact_root="artifact",
+        )
+
+
+def test_failed_finalization_removes_derived_partial_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract(tmp_path)
+    route = _route()
+    artifact = tmp_path / "artifact-cleanup"
+    run_path = artifact / "gates/source-integrity/source/command-run.json"
+    run_path.parent.mkdir(parents=True)
+    report = run_path.parent / "reports/pytest.xml"
+    context = SimpleNamespace(runner_environment="github-hosted")
+    command = _run("source-integrity", "source").as_dict()
+    monkeypatch.setattr(
+        lane_module, "_context_route", lambda **_kwargs: (contract, context, route)
+    )
+    monkeypatch.setattr(lane_module, "_existing_artifact_root", lambda *_args: artifact)
+    monkeypatch.setattr(
+        lane_module, "_validate_route", lambda _contract, value: route
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_load_json",
+        lambda _root, value: route if Path(value).name == "route.json" else command,
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_layout",
+        lambda *_args: (("source-integrity", "source", run_path, report),),
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_expected_spec",
+        lambda **_kwargs: SimpleNamespace(digest=command["command_spec_digest"]),
+    )
+    monkeypatch.setattr(lane_module, "_report_summary", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        lane_module,
+        "_evidence",
+        lambda **_kwargs: {
+            "schema_version": "newsroom.sdlc.evidence.v1",
+            "result": "PASS",
+        },
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "create_envelope",
+        lambda **_kwargs: (_ for _ in ()).throw(WorkflowLaneError("envelope")),
+    )
+    with pytest.raises(WorkflowLaneError, match="envelope"):
+        lane_module.finalize_lane(
+            repo_root=tmp_path,
+            route_path="route.json",
+            lane_id="core",
+            artifact_root="artifact-cleanup",
+        )
+    assert not (run_path.parent / "gate-evidence.json").exists()
+    assert not (artifact / "envelope.json").exists()
+
+
+def test_combined_run_cli_is_not_exposed() -> None:
+    with pytest.raises(SystemExit):
+        lane_module.main(("run",))
