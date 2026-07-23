@@ -650,9 +650,12 @@ def run_bounded_decision(
         decision: ShadowDecision
         if run.result == "PASS" and child.is_file():
             try:
-                decision = validate_shadow_decision(
+                candidate = validate_shadow_decision(
                     _canonical_load(child), contract=contract
                 )
+                if candidate.context != context:
+                    raise WorkflowOrchestratorError("decision_context")
+                decision = candidate
             except (WorkflowOrchestratorError, ShadowDecisionError):
                 decision = failure_shadow_decision(
                     context=context, code="invalid-decision-output"

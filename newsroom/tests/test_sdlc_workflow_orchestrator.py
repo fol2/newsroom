@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 
@@ -633,3 +633,50 @@ def test_decision_child_rejects_symlinked_output_parent(
             collection_path="collection.json",
             output_path=linked / "decision.json",
         )
+
+
+
+def test_parent_rejects_child_decision_for_another_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = _context()
+    _write(tmp_path / "context.json", context.as_dict())
+    _write(tmp_path / "collection.json", {"ignored": True})
+    monkeypatch.setattr(orchestrator, "load_contract", lambda _root: object())
+    monkeypatch.setattr(
+        orchestrator,
+        "start_lane_deadline",
+        lambda *_args: LaneDeadline(1, 5_000),
+    )
+
+    def run(**kwargs):
+        argv = list(kwargs["argv"])
+        child = Path(argv[argv.index("--output") + 1])
+        other = replace(context, run_id=context.run_id + 1)
+        decision = failure_shadow_decision(context=other, code="other-run")
+        _write(child, decision.as_dict())
+        return GateRunResult(
+            "evidence-finalize",
+            "decision",
+            "PASS",
+            "PASS:evidence-finalize:decision",
+            0,
+            1,
+            "",
+            "",
+            False,
+            False,
+        )
+
+    monkeypatch.setattr(orchestrator, "run_configured_gate", run)
+
+    decision = orchestrator.run_bounded_decision(
+        repo_root=tmp_path,
+        context_path="context.json",
+        collection_path="collection.json",
+        output_path="decision.json",
+    )
+
+    assert decision.context == context
+    assert decision.result == "EVIDENCE_MISMATCH"
+    assert decision.result_reason == "EVIDENCE_MISMATCH:decision:invalid-decision-output"
