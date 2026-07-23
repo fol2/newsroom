@@ -1,0 +1,490 @@
+name: SDLC Evidence Shadow
+
+on:
+  pull_request:
+  merge_group:
+    types:
+      - checks_requested
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Optional exact base commit for a manual comparison
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: newsroom-sdlc-evidence-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  route:
+    name: route
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    outputs:
+      service_required: ${{ steps.route_output.outputs.service_required }}
+    steps:
+      - name: Checkout evaluated head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Prepare route workspace
+        shell: bash
+        run: mkdir -p .sdlc-run
+
+      - name: Classify exact change
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.sdlc.workflow_budget route \
+            --output-directory .sdlc-run/route \
+            > "${RUNNER_TEMP}/route-gate.json"
+          cat "${RUNNER_TEMP}/route-gate.json"
+
+      - name: Publish route outputs
+        id: route_output
+        shell: bash
+        run: |
+          set -euo pipefail
+          service_required="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          value = json.loads(Path('.sdlc-run/route/route-output.json').read_text())
+          if value.get('schema_version') != 'newsroom.sdlc.workflow-route-output.v1':
+              raise SystemExit('unexpected route output schema')
+          selected = value.get('service_required')
+          if not isinstance(selected, bool):
+              raise SystemExit('service_required is not boolean')
+          print('true' if selected else 'false')
+          PY
+          )"
+          echo "service_required=${service_required}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload route evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: newsroom-sdlc-route-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          path: .sdlc-run/route
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+          archive: true
+
+  core:
+    name: core
+    needs:
+      - route
+    if: needs.route.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout evaluated head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv with shared cache
+        id: setup_uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' }}
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+
+      - name: Download exact route evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: newsroom-sdlc-route-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          path: .sdlc-run/route
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Sync locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python - <<'PY'
+          import platform
+          import sys
+
+          assert sys.version_info[:2] == (3, 12), sys.version
+          assert platform.python_implementation() == 'CPython'
+          PY
+
+      - name: Execute evidence lane
+        shell: bash
+        env:
+          NEWSROOM_SDLC_CACHE_KEY: ${{ steps.setup_uv.outputs.cache-key }}
+          NEWSROOM_SDLC_CACHE_HIT: ${{ steps.setup_uv.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m scripts.sdlc.workflow_lane execute \
+            --route .sdlc-run/route/route.json \
+            --lane core \
+            --artifact-root .sdlc-run/core \
+            --output .sdlc-run/core-execution.json
+
+      - name: Finalize evidence
+        if: always()
+        shell: bash
+        env:
+          NEWSROOM_SDLC_CACHE_KEY: ${{ steps.setup_uv.outputs.cache-key }}
+          NEWSROOM_SDLC_CACHE_HIT: ${{ steps.setup_uv.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m scripts.sdlc.workflow_budget finalize-lane \
+            --route .sdlc-run/route/route.json \
+            --lane core \
+            --artifact-root .sdlc-run/core \
+            --output .sdlc-run/core-lane.json \
+            > "${RUNNER_TEMP}/core-finalize-gate.json"
+          cat "${RUNNER_TEMP}/core-finalize-gate.json"
+
+      - name: Upload core lane evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: newsroom-sdlc-${{ github.run_id }}-${{ github.run_attempt }}-core-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          path: .sdlc-run/core
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+          archive: true
+
+  service:
+    name: service
+    needs:
+      - route
+    if: needs.route.result == 'success' && needs.route.outputs.service_required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      NEO4J_B2_IMAGE: neo4j:2026.06.0-community-trixie
+      NEO4J_URI: bolt://localhost:7687
+      NEO4J_ADMIN_USERNAME: neo4j
+      NEWSROOM_NEO4J_DATABASE: neo4j
+      NEWSROOM_NEO4J_PROJECTOR_USERNAME: newsroom_projector
+      NEWSROOM_NEO4J_SERVICE_REQUIRED: '1'
+      NEWSROOM_NEO4J_URI: bolt://localhost:7687
+    steps:
+      - name: Checkout evaluated head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv with shared cache
+        id: setup_uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+
+      - name: Download exact route evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: newsroom-sdlc-route-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          path: .sdlc-run/route
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Sync locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python - <<'PY'
+          import neo4j
+          import sys
+
+          assert sys.version_info[:2] == (3, 12), sys.version
+          assert neo4j.__version__ == '6.2.0', neo4j.__version__
+          PY
+
+      - name: Generate masked credentials and start Neo4j
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEO4J_ADMIN_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          NEWSROOM_NEO4J_PROJECTOR_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          echo "::add-mask::${NEO4J_ADMIN_PASSWORD}"
+          echo "::add-mask::${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+          admin_file="${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env"
+          projector_file="${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env"
+          umask 077
+          printf 'NEO4J_ADMIN_PASSWORD=%s\n' "${NEO4J_ADMIN_PASSWORD}" > "${admin_file}"
+          printf 'NEWSROOM_NEO4J_PROJECTOR_PASSWORD=%s\n' "${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}" > "${projector_file}"
+          chmod 600 "${admin_file}" "${projector_file}"
+          timeout --signal=TERM --kill-after=5s 55s \
+            docker pull "${NEO4J_B2_IMAGE}"
+          timeout --signal=TERM --kill-after=2s 10s \
+            docker run --detach --pull=never \
+              --name newsroom-sdlc-neo4j \
+              --publish 127.0.0.1:7687:7687 \
+              --env "NEO4J_AUTH=neo4j/${NEO4J_ADMIN_PASSWORD}" \
+              "${NEO4J_B2_IMAGE}"
+
+      - name: Wait for authenticated Neo4j
+        shell: bash
+        run: |
+          set -euo pipefail
+          admin_file="${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env"
+          projector_file="${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env"
+          test -f "${admin_file}"
+          test -f "${projector_file}"
+          set -a
+          source "${admin_file}"
+          source "${projector_file}"
+          set +a
+          uv run --no-sync python - <<'PY'
+          import os
+          import time
+
+          from neo4j import GraphDatabase
+
+          uri = os.environ['NEO4J_URI']
+          admin_auth = (
+              os.environ['NEO4J_ADMIN_USERNAME'],
+              os.environ['NEO4J_ADMIN_PASSWORD'],
+          )
+          deadline = time.monotonic() + 25.0
+          last_error = None
+          driver = None
+          while time.monotonic() < deadline:
+              try:
+                  driver = GraphDatabase.driver(
+                      uri,
+                      auth=admin_auth,
+                      connection_timeout=1.0,
+                  )
+                  driver.verify_connectivity()
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  if driver is not None:
+                      driver.close()
+                  driver = None
+                  time.sleep(0.25)
+          else:
+              raise RuntimeError('authenticated Neo4j readiness timed out') from last_error
+
+          assert driver is not None
+          try:
+              with driver.session(database='system') as session:
+                  session.run(
+                      'CREATE USER newsroom_projector IF NOT EXISTS '
+                      'SET PLAINTEXT PASSWORD $password CHANGE NOT REQUIRED',
+                      password=os.environ['NEWSROOM_NEO4J_PROJECTOR_PASSWORD'],
+                  ).consume()
+          finally:
+              driver.close()
+
+          projector = GraphDatabase.driver(
+              uri,
+              auth=(
+                  os.environ['NEWSROOM_NEO4J_PROJECTOR_USERNAME'],
+                  os.environ['NEWSROOM_NEO4J_PROJECTOR_PASSWORD'],
+              ),
+              connection_timeout=1.0,
+          )
+          try:
+              projector.verify_connectivity()
+          finally:
+              projector.close()
+          PY
+          rm -f "${admin_file}"
+
+      - name: Execute evidence lane
+        shell: bash
+        env:
+          NEWSROOM_SDLC_CACHE_KEY: ${{ steps.setup_uv.outputs.cache-key }}
+          NEWSROOM_SDLC_CACHE_HIT: ${{ steps.setup_uv.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          projector_file="${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env"
+          test -f "${projector_file}"
+          test ! -e "${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env"
+          set -a
+          source "${projector_file}"
+          set +a
+          uv run --no-sync python -m scripts.sdlc.workflow_lane execute \
+            --route .sdlc-run/route/route.json \
+            --lane service \
+            --artifact-root .sdlc-run/service \
+            --output .sdlc-run/service-execution.json
+
+      - name: Remove disposable Neo4j state
+        if: always()
+        shell: bash
+        run: |
+          rm -f \
+            "${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env" \
+            "${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env"
+          timeout --signal=TERM --kill-after=2s 10s docker rm --force newsroom-sdlc-neo4j || true
+
+      - name: Finalize evidence
+        if: always()
+        shell: bash
+        env:
+          NEWSROOM_SDLC_CACHE_KEY: ${{ steps.setup_uv.outputs.cache-key }}
+          NEWSROOM_SDLC_CACHE_HIT: ${{ steps.setup_uv.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m scripts.sdlc.workflow_budget finalize-lane \
+            --route .sdlc-run/route/route.json \
+            --lane service \
+            --artifact-root .sdlc-run/service \
+            --output .sdlc-run/service-lane.json \
+            > "${RUNNER_TEMP}/service-finalize-gate.json"
+          cat "${RUNNER_TEMP}/service-finalize-gate.json"
+
+      - name: Upload service lane evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: newsroom-sdlc-${{ github.run_id }}-${{ github.run_attempt }}-service-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          path: .sdlc-run/service
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+          archive: true
+
+  decision:
+    name: decision
+    needs:
+      - route
+      - core
+      - service
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout evaluated head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Prepare decision workspace
+        shell: bash
+        run: mkdir -p .sdlc-run
+
+      - name: Collect exact lane evidence
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          set +e
+          timeout --signal=TERM --kill-after=2s 55s \
+            python -m scripts.sdlc.workflow_orchestrator collect \
+              --output-directory .sdlc-run/decision-input \
+              > "${RUNNER_TEMP}/collection-result.json"
+          status="$?"
+          set -e
+          cat "${RUNNER_TEMP}/collection-result.json" || true
+          exit "${status}"
+
+      - name: Finalize decision
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.sdlc.workflow_orchestrator decide \
+            --context .sdlc-run/decision-input/context.json \
+            --collection .sdlc-run/decision-input/collection.json \
+            --output .sdlc-run/decision.json \
+            > "${RUNNER_TEMP}/decision-result.json"
+          cat "${RUNNER_TEMP}/decision-result.json"
+
+      - name: Upload final decision evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: newsroom-sdlc-decision-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          path: |
+            .sdlc-run/decision-input/context.json
+            .sdlc-run/decision-input/collection.json
+            .sdlc-run/decision.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+          archive: true
+
+      - name: Report decision
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.sdlc.workflow_orchestrator enforce \
+            --decision .sdlc-run/decision.json
