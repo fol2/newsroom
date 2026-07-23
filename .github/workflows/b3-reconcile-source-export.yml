@@ -1,0 +1,51 @@
+name: B3 Reconciliation Source Export
+
+on:
+  push:
+    branches:
+      - agent/increment-1b3-rebuild-promotion
+
+permissions:
+  contents: read
+
+concurrency:
+  group: b3-reconcile-source-export-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  export:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/increment-1b3-rebuild-promotion
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Build exact source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --short
+          test -z "$(git status --porcelain --untracked-files=all)"
+          printf '%s\n' "$(git rev-parse HEAD)" > "${RUNNER_TEMP}/HEAD.txt"
+          git archive --format=tar.gz --output="${RUNNER_TEMP}/newsroom-source.tar.gz" HEAD
+          sha256sum "${RUNNER_TEMP}/newsroom-source.tar.gz" > "${RUNNER_TEMP}/sha256sum.txt"
+
+      - name: Upload exact source
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: newsroom-b3-reconcile-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/HEAD.txt
+            ${{ runner.temp }}/newsroom-source.tar.gz
+            ${{ runner.temp }}/sha256sum.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
