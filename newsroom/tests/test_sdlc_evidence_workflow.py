@@ -172,6 +172,7 @@ def test_uv_cache_is_exact_observable_and_untrusted_prs_cannot_save() -> None:
     assert len(core) == len(service) == 1
     common = {
         "version": "0.8.0",
+        "github-token": "",
         "enable-cache": "true",
         "cache-dependency-glob": "uv.lock",
         "restore-cache": "true",
@@ -297,9 +298,13 @@ def test_service_boundary_is_exact_authenticated_loopback_and_bounded() -> None:
     assert not any("PASSWORD" in name or "TOKEN" in name for name in job["env"])
 
     start = _step("service", "Generate masked credentials and start Neo4j")["run"]
+    assert "GITHUB_ENV" not in start
     for required in (
         "::add-mask::${NEO4J_ADMIN_PASSWORD}",
         "::add-mask::${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}",
+        '${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env',
+        '${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env',
+        'chmod 600 "${admin_file}" "${projector_file}"',
         "--publish 127.0.0.1:7687:7687",
         "--pull=never",
         "timeout --signal=TERM --kill-after=5s 55s",
@@ -308,6 +313,15 @@ def test_service_boundary_is_exact_authenticated_loopback_and_bounded() -> None:
         assert required in start
 
     wait = _step("service", "Wait for authenticated Neo4j")["run"]
+    assert 'source "${admin_file}"' in wait
+    assert 'source "${projector_file}"' in wait
+    assert 'rm -f "${admin_file}"' in wait
+    execute = _step("service", "Execute evidence lane")["run"]
+    assert 'source "${projector_file}"' in execute
+    assert 'source "${admin_file}"' not in execute
+    assert 'test ! -e "${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env"' in execute
+    assert "NEO4J_ADMIN_PASSWORD" not in _step("service", "Upload service lane evidence").get("env", {})
+    assert "NEWSROOM_NEO4J_PROJECTOR_PASSWORD" not in _step("service", "Upload service lane evidence").get("env", {})
     for required in (
         "time.monotonic() + 25.0",
         "connection_timeout=1.0",
@@ -318,8 +332,14 @@ def test_service_boundary_is_exact_authenticated_loopback_and_bounded() -> None:
 
     cleanup = _step("service", "Remove disposable Neo4j state")
     assert cleanup["if"] == "always()"
+    assert '${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env' in cleanup["run"]
+    assert '${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env' in cleanup["run"]
     assert "docker rm --force newsroom-sdlc-neo4j" in cleanup["run"]
     assert "kill-after=2s 10s" in cleanup["run"]
+    service_names = [step["name"] for step in _steps("service")]
+    assert service_names.index("Execute evidence lane") < service_names.index("Remove disposable Neo4j state")
+    assert service_names.index("Remove disposable Neo4j state") < service_names.index("Finalize evidence")
+    assert service_names.index("Finalize evidence") < service_names.index("Upload service lane evidence")
 
 
 def test_repository_owned_gate_budgets_drive_route_lane_and_decision() -> None:
@@ -374,3 +394,45 @@ def test_workflow_never_invokes_prohibited_product_runtime() -> None:
         "production activation",
     ):
         assert forbidden not in rendered
+
+
+def test_setup_uv_never_receives_the_github_token() -> None:
+    for job_id in ("core", "service"):
+        setup = _uses_steps(job_id, SETUP_UV)
+        assert len(setup) == 1
+        assert setup[0]["with"]["github-token"] == ""
+
+
+def test_service_credentials_are_removed_before_untrusted_finalization_or_actions() -> None:
+    rendered = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "GITHUB_ENV" not in rendered
+    admin_file = "${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env"
+    projector_file = "${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env"
+    assert rendered.count(admin_file) == 4
+    assert rendered.count(projector_file) == 4
+    service_steps = _steps("service")
+    cleanup_index = next(
+        index for index, step in enumerate(service_steps)
+        if step["name"] == "Remove disposable Neo4j state"
+    )
+    assert cleanup_index < next(
+        index for index, step in enumerate(service_steps)
+        if step["name"] == "Finalize evidence"
+    )
+    assert cleanup_index < next(
+        index for index, step in enumerate(service_steps)
+        if step["name"] == "Upload service lane evidence"
+    )
+    assert all(
+        "PASSWORD" not in str(name) and "TOKEN" not in str(name)
+        for step in service_steps
+        if step.get("uses")
+        for name in step.get("env", {})
+    )
+
+
+def test_service_test_child_has_no_admin_credential_file() -> None:
+    execute = _step("service", "Execute evidence lane")["run"]
+    assert 'source "${projector_file}"' in execute
+    assert 'source "${admin_file}"' not in execute
+    assert 'test ! -e "${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env"' in execute
