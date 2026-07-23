@@ -152,3 +152,66 @@ jobs:
           compression-level: 0
           overwrite: false
           include-hidden-files: true
+
+  publish:
+    needs: qualify
+    if: github.event_name == 'push' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout exact branch for source-only publication
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/increment-1b3-rebuild-promotion
+          fetch-depth: 0
+          persist-credentials: true
+          show-progress: false
+
+      - name: Download exact qualified source
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: newsroom-b3-tombstone-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/qualified
+
+      - name: Commit qualified non-workflow source
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_head="$(git rev-parse HEAD)"
+          qualified="${RUNNER_TEMP}/qualified"
+          test "$(grep -c '^' "${qualified}/paths.txt")" -eq 11
+          (
+            cd "${qualified}/files"
+            sha256sum -c "${qualified}/sha256sum.txt"
+          )
+          while IFS= read -r path; do
+            if test "${path}" = '.github/workflows/projection-b2-neo4j.yml'; then
+              continue
+            fi
+            mkdir -p "$(dirname "${path}")"
+            cp -- "${qualified}/files/${path}" "${path}"
+          done < "${qualified}/paths.txt"
+          rm -f \
+            .sdlc/add-b3-tombstone-projection.py \
+            .sdlc/add-b3-tombstone-projection-v2.py \
+            .sdlc/fix-b3-tombstone-v2-output.py \
+            .sdlc/fix-b3-tombstone-v2-output-2.py \
+            .sdlc/fix-b3-tombstone-v2-output-3.py \
+            .sdlc/fix-b3-tombstone-v2-output-4.py \
+            .sdlc/b3-tombstone-source-qualifier.trigger
+          git add -A
+          if git diff --cached --name-only | grep -q '^.github/workflows/'; then
+            echo 'temporary publisher attempted a workflow mutation' >&2
+            exit 1
+          fi
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(projection): enforce tombstone non-resurrection'
+          remote_head="$(git ls-remote origin refs/heads/agent/increment-1b3-rebuild-promotion | cut -f1)"
+          test "${remote_head}" = "${expected_head}"
+          git push \
+            --force-with-lease=refs/heads/agent/increment-1b3-rebuild-promotion:${expected_head} \
+            origin HEAD:agent/increment-1b3-rebuild-promotion
