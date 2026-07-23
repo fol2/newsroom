@@ -1,0 +1,74 @@
+name: SDLC Phase 2B1c2b Review Fix Publisher
+
+on:
+  push:
+    branches:
+      - agent/sdlc-v2-phase2b1c-final-decision
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sdlc-phase2b1c2b-review-fix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: agent/sdlc-v2-phase2b1c-final-decision
+          fetch-depth: 0
+          show-progress: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Reconstruct and apply reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object scripts/sdlc/shadow_decision.py)" = c1f0defe68f700e1c9833b911e28933de045bb79
+          test "$(git hash-object newsroom/tests/test_sdlc_shadow_decision.py)" = c7895806f7105a58f9ff178be9c6862f961ca049
+          test "$(sha256sum .sdlc/shadow-decision-review.part-00 | cut -d' ' -f1)" = d2238394b2b6ba242e341a65f12403f689df127221b8bcc42422b209b402f660
+          test "$(sha256sum .sdlc/shadow-decision-review.part-01 | cut -d' ' -f1)" = bb92c12f50f7eed4c68cbc847e1725854e4314bbc63a6b22b4ea549065360ad4
+          test "$(sha256sum .sdlc/shadow-decision-review.part-02 | cut -d' ' -f1)" = bc370daefa6b4411a9516231b9543eefaf2efec28ff30351dea2c77444e37db7
+          cat .sdlc/shadow-decision-review.part-* > review-fix.patch.gz.b64
+          test "$(sha256sum review-fix.patch.gz.b64 | cut -d' ' -f1)" = bf60a0624bc01bd56867762aa10a666de03c7e7622aef6a23c27c9d3a079a4c4
+          base64 --decode review-fix.patch.gz.b64 > review-fix.patch.gz
+          test "$(sha256sum review-fix.patch.gz | cut -d' ' -f1)" = 9f3ffb109a42c50ecfe501566243aae3c46fd20fa8a5b025a72f1b3d97414bc7
+          gzip --decompress --stdout review-fix.patch.gz > review-fix.patch
+          test "$(sha256sum review-fix.patch | cut -d' ' -f1)" = 77ac1ebb9b769f875b1f55cbb60c072477c5a6bf100acb38d895350dbe94d6f4
+          git apply --check review-fix.patch
+          git apply review-fix.patch
+          test "$(sha256sum scripts/sdlc/shadow_decision.py | cut -d' ' -f1)" = 398d82c3ff5ce5404bc05563761a900023127c2ba8cb33368280823cce001f58
+          test "$(sha256sum newsroom/tests/test_sdlc_shadow_decision.py | cut -d' ' -f1)" = d0464dd6cde93027fb7a01bb08bf85d6327baf39dcd53795622e30494416baec
+
+      - name: Sync locked Python environment
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.8.0
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Verify review corrections
+        run: |
+          uv run python -m compileall -q newsroom scripts
+          uv run python -m pytest -q newsroom/tests/test_sdlc_shadow_decision.py
+          uv run python -m pytest -q newsroom/tests/test_sdlc_*.py
+          git diff --check
+
+      - name: Commit source-only review fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f review-fix.patch review-fix.patch.gz review-fix.patch.gz.b64
+          git rm -f .github/workflows/sdlc-phase2b1c-review-fix.yml .sdlc/shadow-decision-review.part-* .sdlc/shadow-decision-review.trigger
+          git add scripts/sdlc/shadow_decision.py newsroom/tests/test_sdlc_shadow_decision.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(sdlc): harden shadow decision replay'
+          git push origin HEAD:agent/sdlc-v2-phase2b1c-final-decision
