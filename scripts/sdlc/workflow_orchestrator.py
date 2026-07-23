@@ -67,6 +67,7 @@ _RESULTS = frozenset(
     }
 )
 _MAX_JSON_BYTES = 64 * 1024 * 1024
+_GITHUB_REQUEST_TIMEOUT_SECONDS = 5.0
 
 
 class WorkflowOrchestratorError(ValueError):
@@ -389,7 +390,9 @@ def collect_decision_inputs(
         try:
             contract = load_contract(root)
             event = derive_workflow_event(root)
-            client = GitHubActionsClient.from_environment()
+            client = GitHubActionsClient.from_environment(
+                timeout_seconds=_GITHUB_REQUEST_TIMEOUT_SECONDS
+            )
             core_name = artifact_name(_producer_context(context, "core"))
             fetch_artifact_bundle(
                 client=client,
@@ -456,7 +459,26 @@ def collect_decision_inputs(
             failure_result=failure_result,
             failure_code=failure_code,
         )
-        normalized = validate_collection(collection, contract=contract)
+        try:
+            normalized = validate_collection(collection, contract=contract)
+        except (
+            WorkflowOrchestratorError,
+            WorkflowEvidenceError,
+            ShadowLaneError,
+            ArtifactProvenanceError,
+        ):
+            normalized = validate_collection(
+                _collection_value(
+                    context=context,
+                    event=None,
+                    core=None,
+                    service=None,
+                    status="ERROR",
+                    failure_result="EVIDENCE_MISMATCH",
+                    failure_code="collection-validation",
+                ),
+                contract=None,
+            )
         _private_write(target / "collection.json", normalized)
         return normalized
     except Exception:
@@ -568,7 +590,7 @@ def run_bounded_decision(
     output = _safe_target(root, output_path, suffix=".json")
     try:
         contract = load_contract(root)
-    except ContractError:
+    except (ContractError, OSError, UnicodeError):
         decision = failure_shadow_decision(
             context=context, code="contract-load", result="EVIDENCE_MISMATCH"
         )
@@ -656,14 +678,13 @@ def _decision_child(
 ) -> ShadowDecision:
     root = Path(repo_root).resolve()
     output = Path(output_path)
-    if (
-        not output.is_absolute()
-        or output.exists()
-        or output.is_symlink()
-        or not output.parent.is_dir()
-        or not output.parent.resolve().is_relative_to(root)
-    ):
+    if not output.is_absolute():
         raise WorkflowOrchestratorError("child_output")
+    try:
+        relative_output = output.relative_to(root)
+        output = _safe_target(root, relative_output, suffix=".json")
+    except (ValueError, WorkflowOrchestratorError) as exc:
+        raise WorkflowOrchestratorError("child_output") from exc
     decision = decision_from_collection(
         repo_root=root,
         context_path=context_path,

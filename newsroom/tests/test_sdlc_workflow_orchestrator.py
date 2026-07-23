@@ -175,7 +175,7 @@ def _patch_collection_dependencies(
     monkeypatch.setattr(
         orchestrator.GitHubActionsClient,
         "from_environment",
-        classmethod(lambda cls: client),
+        classmethod(lambda cls, **kwargs: client),
     )
 
     def fetch(**kwargs):
@@ -267,7 +267,7 @@ def test_transport_error_is_redacted_to_stable_failure_code(
     monkeypatch.setattr(
         orchestrator.GitHubActionsClient,
         "from_environment",
-        classmethod(lambda cls: _FakeClient()),
+        classmethod(lambda cls, **kwargs: _FakeClient()),
     )
     monkeypatch.setattr(
         orchestrator,
@@ -525,3 +525,111 @@ def test_final_decision_environment_is_fixed_and_secret_free(
         "PYTHONHASHSEED": "0",
         "PYTHONUTF8": "1",
     }
+
+
+
+def test_collection_uses_bounded_github_request_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed = {}
+    client = _FakeClient()
+    monkeypatch.setattr(orchestrator, "context_from_environment", lambda _root: _context())
+    monkeypatch.setattr(orchestrator, "derive_workflow_event", lambda _root: _event())
+    monkeypatch.setattr(orchestrator, "load_contract", lambda _root: object())
+    monkeypatch.setattr(
+        orchestrator.GitHubActionsClient,
+        "from_environment",
+        classmethod(
+            lambda cls, **kwargs: observed.update(kwargs) or client
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "fetch_artifact_bundle",
+        lambda **_kwargs: (_ for _ in ()).throw(GitHubTransportError("missing")),
+    )
+
+    orchestrator.collect_decision_inputs(
+        repo_root=tmp_path, output_directory="decision-input"
+    )
+
+    assert observed == {"timeout_seconds": 5.0}
+
+
+def test_collection_validation_failure_becomes_typed_error_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = _FakeLane("core", False)
+    client = _FakeClient()
+    monkeypatch.setattr(orchestrator, "context_from_environment", lambda _root: _context())
+    monkeypatch.setattr(orchestrator, "derive_workflow_event", lambda _root: _event())
+    monkeypatch.setattr(orchestrator, "load_contract", lambda _root: object())
+    monkeypatch.setattr(
+        orchestrator.GitHubActionsClient,
+        "from_environment",
+        classmethod(lambda cls, **kwargs: client),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "fetch_artifact_bundle",
+        lambda **kwargs: Path(kwargs["output_parent"], kwargs["output_name"]).mkdir(),
+    )
+    monkeypatch.setattr(orchestrator, "verify_shadow_lane", lambda **_kwargs: core)
+    real_validate = orchestrator.validate_collection
+    calls = 0
+
+    def validate(value, *, contract):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise orchestrator.WorkflowOrchestratorError("collection_evidence")
+        return real_validate(value, contract=contract)
+
+    monkeypatch.setattr(orchestrator, "validate_collection", validate)
+
+    value = orchestrator.collect_decision_inputs(
+        repo_root=tmp_path, output_directory="decision-input"
+    )
+
+    assert value["status"] == "ERROR"
+    assert value["failure_code"] == "collection-validation"
+    assert (tmp_path / "decision-input/context.json").is_file()
+    assert (tmp_path / "decision-input/collection.json").is_file()
+
+
+def test_contract_filesystem_failure_after_context_is_typed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / "context.json", _context().as_dict())
+    _write(tmp_path / "collection.json", {"ignored": True})
+    monkeypatch.setattr(
+        orchestrator,
+        "load_contract",
+        lambda _root: (_ for _ in ()).throw(OSError("unavailable")),
+    )
+
+    decision = orchestrator.run_bounded_decision(
+        repo_root=tmp_path,
+        context_path="context.json",
+        collection_path="collection.json",
+        output_path="decision.json",
+    )
+
+    assert decision.result == "EVIDENCE_MISMATCH"
+    assert decision.result_reason == "EVIDENCE_MISMATCH:decision:contract-load"
+
+
+def test_decision_child_rejects_symlinked_output_parent(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(real, target_is_directory=True)
+    with pytest.raises(orchestrator.WorkflowOrchestratorError, match="child_output"):
+        orchestrator._decision_child(
+            repo_root=tmp_path,
+            context_path="context.json",
+            collection_path="collection.json",
+            output_path=linked / "decision.json",
+        )
