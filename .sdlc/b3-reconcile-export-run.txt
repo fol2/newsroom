@@ -1,4 +1,0 @@
-run_id=30050349657
-run_attempt=1
-head=726d48e0424678e499ee14c509df83da74d66d88
-ad90d186daece46b51580fa5e89db2193f5cd4c3fa36144cd2c317012f8ceebe  /home/runner/work/_temp/newsroom-source.tar.gz

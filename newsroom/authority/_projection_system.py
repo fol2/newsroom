@@ -54,6 +54,13 @@ _READ_SCHEMA_DIGEST = digest_canonical(
         "golden_vectors": [{"name": "empty", "size": 0}],
     }
 )
+_MANAGEMENT_SCHEMA_DIGEST = digest_canonical(
+    {
+        "contract": "projection-management-authorization-v1",
+        "payload_mode": "NO_PAYLOAD",
+        "golden_vectors": [{"name": "empty", "size": 0}],
+    }
+)
 
 
 class NativeProjections:
@@ -455,12 +462,109 @@ class _ProjectionBoundary:
             reason_code=request.reason_code,
         )
 
-    def _authenticate_read(self, proof: AuthenticationProof):
+    def _authenticate(self, proof: AuthenticationProof):
         now = self._clock()
         authentication = self._authenticator.authenticate(proof, now=now)
         authentication.require_current(now)
+        return now, authentication
+
+    def _authenticate_read(self, proof: AuthenticationProof):
+        now, authentication = self._authenticate(proof)
         self._read_policy.require_principal(authentication.principal_id)
         return now, authentication
+
+    def _authorize_management_operation(
+        self,
+        *,
+        family_id: str,
+        aggregate_id: str,
+        operation: str,
+        semantic_value: dict[str, object],
+        authenticated: tuple[UtcTimestamp, Any],
+    ) -> None:
+        now, authentication = authenticated
+        definition = self._store.projection_family_definition(family_id)
+        required_scope = "authority.projection.manage"
+        contract_digest = digest_canonical(
+            {
+                "contract": "projection-management-authorization-v1",
+                "family_definition_digest": definition.digest,
+            }
+        )
+        stable_digest = digest_canonical(
+            {
+                "management_contract_digest": contract_digest,
+                "operation": operation,
+                "semantic_value": semantic_value,
+            }
+        )
+        operation_type = f"manage:projection:{operation}"
+        unsigned = {
+            "authentication_context_id": str(
+                authentication.authentication_context_id
+            ),
+            "principal_id": authentication.principal_id,
+            "authority_domain": authentication.authority_domain,
+            "operation_type": operation_type,
+            "required_scope": required_scope,
+            "stable_semantic_request_digest": stable_digest,
+            "command_definition_digest": contract_digest,
+            "aggregate_type": "projection_generation",
+            "aggregate_id": aggregate_id,
+            "event_type": "projection.management.authorized",
+            "event_schema_version": 1,
+            "payload_mode": "NO_PAYLOAD",
+            "payload_schema_version": "projection_management_v1",
+            "payload_schema_contract_version": (
+                "projection-management-authorization-v1"
+            ),
+            "payload_schema_contract_digest": _MANAGEMENT_SCHEMA_DIGEST,
+            "payload_canonicalizer_version": "projection-management-none-v1",
+            "trust_scope": "ADMITTED",
+            "security_scope": definition.security_scope,
+            "retention_scope": definition.retention_scope,
+            "object_class": None,
+            "allowed_use": None,
+        }
+        request = _AuthorizationRequest(
+            authentication_context_id=authentication.authentication_context_id,
+            principal_id=authentication.principal_id,
+            authority_domain=authentication.authority_domain,
+            operation_type=operation_type,
+            required_scope=required_scope,
+            stable_semantic_request_digest=stable_digest,
+            command_definition_digest=contract_digest,
+            aggregate_type="projection_generation",
+            aggregate_id=aggregate_id,
+            event_type="projection.management.authorized",
+            event_schema_version=1,
+            payload_mode="NO_PAYLOAD",
+            payload_schema_version="projection_management_v1",
+            payload_schema_contract_version=(
+                "projection-management-authorization-v1"
+            ),
+            payload_schema_contract_digest=_MANAGEMENT_SCHEMA_DIGEST,
+            payload_canonicalizer_version="projection-management-none-v1",
+            trust_scope="ADMITTED",
+            security_scope=definition.security_scope,
+            retention_scope=definition.retention_scope,
+            object_class=None,
+            allowed_use=None,
+            request_digest=digest_canonical(unsigned),
+        )
+        decision = self._authorizer.authorize(authentication, request, now=now)
+        if (
+            decision.authentication_context_id
+            != authentication.authentication_context_id
+        ):
+            raise PermissionError(
+                "projection management authorization context mismatch"
+            )
+        if decision.authorization_request_digest != request.request_digest:
+            raise PermissionError(
+                "projection management authorization request mismatch"
+            )
+        decision.require_allowed()
 
     def _authorize_read(
         self,

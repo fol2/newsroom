@@ -34,6 +34,10 @@ from newsroom.projection.neo4j import (
     StructuralGraphRelationView,
 )
 
+from newsroom.projection.neo4j._state import (
+    _expected_projection_state_digest,
+)
+
 from .authority_event_helpers import payload_schemas
 from .authority_helpers import FIXED_NOW
 from .projection_b1_helpers import (
@@ -47,12 +51,14 @@ from .projection_b1_helpers import (
 @dataclass
 class MemoryNeo4jAdapter:
     fail_writes: bool = False
+    reconciliation_mismatch: bool = False
 
     def __post_init__(self) -> None:
         self.deliveries: dict[tuple[str, int], StructuralBatch] = {}
         self.bootstrap_count = 0
         self.apply_count = 0
         self.cleanup_count = 0
+        self.reconcile_count = 0
         self.closed = False
 
     def verify_compatibility(self) -> Neo4jCompatibility:
@@ -163,6 +169,22 @@ class MemoryNeo4jAdapter:
             nodes=tuple(nodes[key] for key in sorted(nodes))[:limit],
             relations=tuple(relations[:limit]),
         )
+
+    def reconcile_generation(
+        self,
+        *,
+        generation_id: str,
+        expected_batches: tuple[StructuralBatch, ...],
+    ) -> str:
+        self.reconcile_count += 1
+        digest = _expected_projection_state_digest(
+            generation_id, expected_batches
+        )
+        if self.reconciliation_mismatch:
+            raise Neo4jIdentityConflict(
+                "fake graph state differs from retained authority"
+            )
+        return digest
 
     def cleanup_generation(self, generation_id: str) -> int:
         self.cleanup_count += 1

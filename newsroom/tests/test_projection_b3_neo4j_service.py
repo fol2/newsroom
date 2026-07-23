@@ -13,7 +13,9 @@ from newsroom.projection import (
     canonical_node_id,
 )
 from newsroom.projection.neo4j import (
+    Neo4jIdentityConflict,
     Neo4jProjectorConfig,
+    StructuralGenerationValidationRequest,
     StructuralReadRequest,
     StructuralRebuildRequest,
 )
@@ -165,6 +167,25 @@ def test_actual_service_graph_loss_and_process_restart_rebuild_from_authority(
             missing = _read(restarted, generation_id, canonical_ids)
             assert missing.nodes == ()
             assert missing.relations == ()
+            current = next(
+                item
+                for item in restarted.projections.generations(
+                    FAMILY_ID, proof=proof()
+                )
+                if item.generation_id == generation_id
+            )
+            validation_request = StructuralGenerationValidationRequest(
+                generation_id=current.generation_id,
+                expected_authority_version=current.authority_aggregate_version,
+                checkpoint_ledger_seq=missing.metadata.contiguous_ledger_seq,
+                reason_code="B3_ACTUAL_SERVICE_RECONCILE",
+                idempotency_key="b3-service-loss-validation",
+            )
+            with pytest.raises(Neo4jIdentityConflict, match="differs"):
+                restarted.structural.validate_generation(
+                    validation_request,
+                    proof=proof(),
+                )
 
             replay = restarted.structural.rebuild(request, proof=proof())
             assert replay.authority_command_replayed is True
@@ -175,6 +196,13 @@ def test_actual_service_graph_loss_and_process_restart_rebuild_from_authority(
             restored = _read(restarted, generation_id, canonical_ids)
             assert restored.nodes == initial.nodes
             assert restored.relations == initial.relations
+            validation = restarted.structural.validate_generation(
+                validation_request,
+                proof=proof(),
+            )
+            assert validation.checkpoint_ledger_seq == (
+                restored.metadata.contiguous_ledger_seq
+            )
         finally:
             restarted.close()
     finally:

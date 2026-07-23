@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from threading import RLock
 from typing import Any
 
 from newsroom.authority.types import TrustScope, UtcTimestamp
@@ -23,7 +24,18 @@ from .models import (
     StructuralGraphNodeView,
     StructuralGraphRelationView,
 )
-
+from ._state import (
+    _DELIVERY_PROPERTY_KEYS,
+    _NODE_PROPERTY_KEYS,
+    _RELATION_IDENTITY_PROPERTY_KEYS,
+    _RELATION_PROPERTY_KEYS,
+    _actual_projection_state_digest,
+    _delivery_properties,
+    _expected_projection_state_digest,
+    _node_properties,
+    _relation_identity_properties,
+    _relation_properties,
+)
 
 _COMPONENT_QUERY = """
 CALL dbms.components() YIELD name, versions, edition
@@ -144,6 +156,26 @@ ORDER BY r.ledger_seq, r.relation_key
 LIMIT $limit
 """
 
+
+_STATE_NODES_QUERY = """
+MATCH (value)
+WHERE value.generation_id = $generation_id
+RETURN labels(value) AS labels, properties(value) AS properties
+"""
+
+_STATE_RELATIONSHIPS_QUERY = """
+MATCH (source)-[relation]->(target)
+WHERE source.generation_id = $generation_id
+   OR target.generation_id = $generation_id
+   OR relation.generation_id = $generation_id
+RETURN labels(source) AS source_labels,
+       properties(source) AS source_properties,
+       type(relation) AS relation_type,
+       properties(relation) AS relation_properties,
+       labels(target) AS target_labels,
+       properties(target) AS target_properties
+"""
+
 _CLEANUP_GENERATION_QUERY = """
 MATCH (value)
 WHERE value.generation_id = $generation_id
@@ -185,89 +217,19 @@ RETURN size(nodes) AS deleted_count
 """
 
 
-_NODE_PROPERTY_KEYS = frozenset(
-    {
-        "generation_id",
-        "canonical_id",
-        "entity_type",
-        "identity_source",
-        "identity_reference_digest",
-        "family_id",
-        "family_definition_version",
-        "projector_version",
-        "ontology_contract_digest",
-        "mapping_contract_digest",
-        "first_ledger_seq",
-        "first_source_event_id",
-        "first_source_event_digest",
-    }
-)
-
-_RELATION_PROPERTY_KEYS = frozenset(
-    {
-        "generation_id",
-        "relation_key",
-        "relation_type",
-        "source_canonical_id",
-        "target_canonical_id",
-        "ledger_seq",
-        "source_event_id",
-        "source_event_type",
-        "source_event_digest",
-        "aggregate_type",
-        "aggregate_id",
-        "aggregate_version",
-        "payload_id",
-        "payload_digest",
-        "object_admission_id",
-        "principal_id",
-        "trust_scope",
-        "security_scope",
-        "retention_scope",
-        "recorded_at",
-    }
-)
-
-_RELATION_IDENTITY_PROPERTY_KEYS = frozenset(
-    {
-        "generation_id",
-        "relation_key",
-        "relation_type",
-        "source_canonical_id",
-        "target_canonical_id",
-        "ledger_seq",
-        "source_event_id",
-        "source_event_digest",
-    }
-)
-
-_DELIVERY_PROPERTY_KEYS = frozenset(
-    {
-        "generation_id",
-        "ledger_seq",
-        "source_event_id",
-        "source_event_type",
-        "source_event_digest",
-        "family_id",
-        "family_definition_version",
-        "projector_version",
-        "ontology_contract_digest",
-        "mapping_contract_digest",
-        "batch_digest",
-    }
-)
 
 
 class _Neo4jAdapter:
     """Private fixed-query adapter. It is never returned by a public facade."""
 
-    __slots__ = ("_driver", "_config", "_driver_version", "_closed")
+    __slots__ = ("_driver", "_config", "_driver_version", "_closed", "_lock")
 
     def __init__(self, *, driver: Any, config: Neo4jProjectorConfig, driver_version: str) -> None:
         self._driver = driver
         self._config = config
         self._driver_version = driver_version
         self._closed = False
+        self._lock = RLock()
 
     def verify_compatibility(self) -> Neo4jCompatibility:
         self._require_open()
@@ -294,11 +256,17 @@ class _Neo4jAdapter:
             driver_version=self._driver_version,
         )
         if compatibility.server_version != NEO4J_B2_SERVER_VERSION:
-            raise Neo4jCompatibilityError("Neo4j server is not the exact B2 qualification target")
+            raise Neo4jCompatibilityError(
+                "Neo4j server is not the exact B2 qualification target"
+            )
         if compatibility.edition != "community":
-            raise Neo4jCompatibilityError("Neo4j edition is not the exact Community qualification target")
+            raise Neo4jCompatibilityError(
+                "Neo4j edition is not the exact Community qualification target"
+            )
         if compatibility.driver_version != NEO4J_B2_DRIVER_VERSION:
-            raise Neo4jCompatibilityError("Neo4j driver is not the exact B2 qualification target")
+            raise Neo4jCompatibilityError(
+                "Neo4j driver is not the exact B2 qualification target"
+            )
         return compatibility
 
     def bootstrap_schema(self) -> None:
@@ -316,13 +284,14 @@ class _Neo4jAdapter:
         self._require_open()
         if not isinstance(batch, StructuralBatch):
             raise TypeError("Neo4j structural apply requires a typed batch")
-        try:
-            with self._driver.session(database=self._config.database) as session:
-                outcome = session.execute_write(self._apply_transaction, batch)
-        except Neo4jIdentityConflict:
-            raise
-        except Exception:
-            raise Neo4jWriteError("Neo4j structural transaction failed") from None
+        with self._lock:
+            try:
+                with self._driver.session(database=self._config.database) as session:
+                    outcome = session.execute_write(self._apply_transaction, batch)
+            except Neo4jIdentityConflict:
+                raise
+            except Exception:
+                raise Neo4jWriteError("Neo4j structural transaction failed") from None
         return Neo4jApplyResult(
             outcome=outcome,
             generation_id=batch.generation_id,
@@ -387,21 +356,85 @@ class _Neo4jAdapter:
             relations=tuple(relations),
         )
 
+    def reconcile_generation(
+        self,
+        *,
+        generation_id: str,
+        expected_batches: tuple[StructuralBatch, ...],
+    ) -> str:
+        """Compare one exact generation snapshot with retained SQLite authority."""
+
+        self._require_open()
+        expected_digest = _expected_projection_state_digest(
+            generation_id, expected_batches
+        )
+        with self._lock:
+            try:
+                with self._driver.session(database=self._config.database) as session:
+                    node_rows, relationship_rows = session.execute_read(
+                        self._state_transaction,
+                        generation_id,
+                    )
+                actual_digest = _actual_projection_state_digest(
+                    generation_id,
+                    node_records=tuple(
+                        (
+                            _record_labels(row, "labels"),
+                            _record_mapping(row, "properties"),
+                        )
+                        for row in node_rows
+                    ),
+                    relationship_records=tuple(
+                        (
+                            _record_labels(row, "source_labels"),
+                            _record_mapping(row, "source_properties"),
+                            str(row["relation_type"]),
+                            _record_mapping(row, "relation_properties"),
+                            _record_labels(row, "target_labels"),
+                            _record_mapping(row, "target_properties"),
+                        )
+                        for row in relationship_rows
+                    ),
+                )
+            except Neo4jIdentityConflict:
+                raise
+            except Exception:
+                raise Neo4jReadError(
+                    "Neo4j generation reconciliation failed"
+                ) from None
+        if actual_digest != expected_digest:
+            raise Neo4jIdentityConflict(
+                "Neo4j generation state differs from retained authority"
+            )
+        return actual_digest
+
+    @staticmethod
+    def _state_transaction(
+        transaction: Any,
+        generation_id: str,
+    ) -> tuple[list[Any], list[Any]]:
+        parameters = {"generation_id": generation_id}
+        return (
+            list(transaction.run(_STATE_NODES_QUERY, parameters)),
+            list(transaction.run(_STATE_RELATIONSHIPS_QUERY, parameters)),
+        )
+
     def cleanup_generation(self, generation_id: str) -> int:
         """Private deterministic cleanup for disposable development/CI state."""
 
         self._require_open()
-        try:
-            with self._driver.session(database=self._config.database) as session:
-                record = session.execute_write(
-                    lambda transaction: transaction.run(
-                        _CLEANUP_GENERATION_QUERY,
-                        {"generation_id": generation_id},
-                    ).single()
-                )
-            return 0 if record is None else int(record["deleted_count"])
-        except Exception:
-            raise Neo4jWriteError("Neo4j generation cleanup failed") from None
+        with self._lock:
+            try:
+                with self._driver.session(database=self._config.database) as session:
+                    record = session.execute_write(
+                        lambda transaction: transaction.run(
+                            _CLEANUP_GENERATION_QUERY,
+                            {"generation_id": generation_id},
+                        ).single()
+                    )
+                return 0 if record is None else int(record["deleted_count"])
+            except Exception:
+                raise Neo4jWriteError("Neo4j generation cleanup failed") from None
 
     def close(self) -> None:
         if not self._closed:
@@ -600,69 +633,20 @@ def _open_neo4j_adapter(config: Neo4jProjectorConfig) -> _Neo4jAdapter:
     )
 
 
-def _node_properties(batch: StructuralBatch, node: Any) -> dict[str, object]:
-    return {
-        "generation_id": str(batch.generation_id),
-        "canonical_id": node.canonical_id,
-        "entity_type": node.node_type.value,
-        "identity_source": node.identity_source,
-        "identity_reference_digest": node.identity_reference_digest,
-        "family_id": batch.family_id,
-        "family_definition_version": batch.family_definition_version,
-        "projector_version": batch.projector_version,
-        "ontology_contract_digest": batch.ontology_contract_digest,
-        "mapping_contract_digest": batch.mapping_contract_digest,
-        "first_ledger_seq": node.first_ledger_seq,
-        "first_source_event_id": node.first_source_event_id,
-        "first_source_event_digest": node.first_source_event_digest,
-    }
 
-
-def _relation_identity_properties(batch: StructuralBatch, relation: Any) -> dict[str, object]:
-    return {
-        "generation_id": str(batch.generation_id),
-        "relation_key": relation.relation_key,
-        "relation_type": relation.relation_type.value,
-        "source_canonical_id": relation.source_canonical_id,
-        "target_canonical_id": relation.target_canonical_id,
-        "ledger_seq": relation.ledger_seq,
-        "source_event_id": relation.source_event_id,
-        "source_event_digest": relation.source_event_digest,
-    }
-
-
-def _relation_properties(batch: StructuralBatch, relation: Any) -> dict[str, object]:
-    return {
-        **_relation_identity_properties(batch, relation),
-        "source_event_type": relation.source_event_type,
-        "aggregate_type": relation.aggregate_type,
-        "aggregate_id": relation.aggregate_id,
-        "aggregate_version": relation.aggregate_version,
-        "payload_id": relation.payload_id,
-        "payload_digest": relation.payload_digest,
-        "object_admission_id": relation.object_admission_id or "",
-        "principal_id": relation.principal_id,
-        "trust_scope": relation.trust_scope.value,
-        "security_scope": relation.security_scope,
-        "retention_scope": relation.retention_scope,
-        "recorded_at": relation.recorded_at.to_text(),
-    }
-
-
-def _delivery_properties(batch: StructuralBatch) -> dict[str, object]:
-    return {
-        "generation_id": str(batch.generation_id),
-        "ledger_seq": batch.ledger_seq,
-        "source_event_id": batch.source_event_id,
-        "source_event_type": batch.source_event_type,
-        "source_event_digest": batch.source_event_digest,
-        "family_id": batch.family_id,
-        "family_definition_version": batch.family_definition_version,
-        "projector_version": batch.projector_version,
-        "ontology_contract_digest": batch.ontology_contract_digest,
-        "mapping_contract_digest": batch.mapping_contract_digest,
-        "batch_digest": batch.batch_digest,
-    }
+def _record_labels(record: Any, key: str) -> tuple[str, ...]:
+    try:
+        value = record[key]
+    except Exception:
+        raise Neo4jReadError(
+            "Neo4j record is missing fixed projection labels"
+        ) from None
+    if isinstance(value, (str, bytes)):
+        raise Neo4jReadError("Neo4j projection labels are malformed")
+    try:
+        return tuple(str(item) for item in value)
+    except Exception:
+        raise Neo4jReadError("Neo4j projection labels are malformed") from None
 
 
 def _record_mapping(record: Any, key: str) -> Mapping[str, object]:
@@ -785,4 +769,10 @@ def _relation_view(
     )
 
 
-__all__ = ["_Neo4jAdapter", "_open_neo4j_adapter"]
+__all__ = [
+    "_Neo4jAdapter",
+    "_expected_projection_state_digest",
+    "_node_properties",
+    "_open_neo4j_adapter",
+    "_relation_properties",
+]

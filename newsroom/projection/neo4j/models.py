@@ -478,6 +478,40 @@ class StructuralRebuildRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class StructuralGenerationValidationRequest:
+    generation_id: ProjectionGenerationId
+    expected_authority_version: int
+    checkpoint_ledger_seq: int
+    reason_code: str
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_id, ProjectionGenerationId):
+            raise ProjectionContractError(
+                "structural validation generation identity must be typed"
+            )
+        _require_positive_int(
+            self.expected_authority_version,
+            field="expected_authority_version",
+        )
+        _require_non_negative_int(
+            self.checkpoint_ledger_seq,
+            field="checkpoint_ledger_seq",
+        )
+        require_token(
+            self.reason_code, field="structural_validation_reason_code"
+        )
+        if (
+            not isinstance(self.idempotency_key, str)
+            or not self.idempotency_key.strip()
+            or len(self.idempotency_key.encode("utf-8")) > 256
+        ):
+            raise ProjectionContractError(
+                "structural validation idempotency key is invalid"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class StructuralRebuildResult:
     generation_id: ProjectionGenerationId
     through_ledger_seq: int

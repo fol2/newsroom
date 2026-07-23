@@ -11,7 +11,6 @@ from newsroom.projection import (
     ProjectionGenerationCreateRequest,
     ProjectionGenerationId,
     ProjectionGenerationPromotionRequest,
-    ProjectionGenerationValidationRequest,
     ProjectionIdentitySource,
     ProjectionNodeType,
     ProjectionRelationType,
@@ -21,6 +20,7 @@ from newsroom.projection import (
 )
 from newsroom.projection.neo4j import (
     Neo4jIdentityConflict,
+    StructuralGenerationValidationRequest,
     StructuralReadRequest,
     StructuralRebuildRequest,
 )
@@ -35,10 +35,6 @@ from .projection_b3_tombstone_helpers import (
     open_tombstone_memory_system,
 )
 
-
-SERVICE_DIGEST = digest_canonical(
-    {"neo4j_server": "2026.06.0", "edition": "community", "driver": "6.2.0"}
-)
 
 
 def _canonical_id(event, node_type, identity_source) -> str:
@@ -160,19 +156,11 @@ def test_tombstone_survives_wipe_rebuild_duplicate_and_promotion(
             for item in system.projections.generations(FAMILY_ID, proof=proof())
             if item.generation_id == generation.generation_id
         )
-        state_digest = digest_canonical(
-            {
-                "nodes": [item.canonical_id for item in rebuilt.nodes],
-                "relations": [item.relation_key for item in rebuilt.relations],
-            }
-        )
-        validation = system.projections.validate_generation(
-            ProjectionGenerationValidationRequest(
+        validation = system.structural.validate_generation(
+            StructuralGenerationValidationRequest(
                 current.generation_id,
                 current.authority_aggregate_version,
                 rebuilt.metadata.contiguous_ledger_seq,
-                SERVICE_DIGEST,
-                state_digest,
                 "B3_TOMBSTONE_VALIDATE",
                 "b3-tombstone-validate",
             ),

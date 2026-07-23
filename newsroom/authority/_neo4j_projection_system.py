@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any, Protocol
 
 from ._capability import _CapabilityIssuer
@@ -34,7 +35,10 @@ from newsroom.projection.models import (
     ProjectionContractError,
     ProjectionDeliveryOutcome,
     ProjectionDeliveryRequest,
+    ProjectionGenerationId,
     ProjectionGenerationState,
+    ProjectionGenerationValidationRequest,
+    ProjectionGenerationValidationView,
     ProjectionReadPolicy,
     ProjectionStateError,
 )
@@ -50,6 +54,7 @@ from newsroom.projection.neo4j.models import (
     Neo4jWriteError,
     StructuralBatch,
     StructuralDeliveryRequest,
+    StructuralGenerationValidationRequest,
     StructuralNode,
     StructuralRebuildRequest,
     StructuralRebuildResult,
@@ -57,6 +62,9 @@ from newsroom.projection.neo4j.models import (
     StructuralReadRequest,
     StructuralReadResponse,
     StructuralRelation,
+)
+from newsroom.projection.neo4j.qualification import (
+    neo4j_compatibility_digest,
 )
 from newsroom.projection.policy import (
     PROJECTION_COMMAND_TYPES,
@@ -85,6 +93,14 @@ class _StructuralGraphAdapter(Protocol):
     ) -> Neo4jStructuralRead:
         ...
 
+    def reconcile_generation(
+        self,
+        *,
+        generation_id: str,
+        expected_batches: tuple[StructuralBatch, ...],
+    ) -> str:
+        ...
+
     def cleanup_generation(self, generation_id: str) -> int:
         ...
 
@@ -95,7 +111,7 @@ class _StructuralGraphAdapter(Protocol):
 class Neo4jStructuralProjector:
     """Public B2 facade: exact delivery plus bounded non-authoritative read."""
 
-    __slots__ = ("__deliver", "__read", "__rebuild")
+    __slots__ = ("__deliver", "__read", "__rebuild", "__validate")
 
     def __init__(
         self,
@@ -112,10 +128,15 @@ class Neo4jStructuralProjector:
             [StructuralRebuildRequest, AuthenticationProof],
             StructuralRebuildResult,
         ],
+        validate_generation: Callable[
+            [StructuralGenerationValidationRequest, AuthenticationProof],
+            ProjectionGenerationValidationView,
+        ],
     ) -> None:
         self.__deliver = deliver
         self.__read = read
         self.__rebuild = rebuild
+        self.__validate = validate_generation
 
     def deliver(
         self,
@@ -140,6 +161,14 @@ class Neo4jStructuralProjector:
         proof: AuthenticationProof,
     ) -> StructuralRebuildResult:
         return self.__rebuild(request, proof)
+
+    def validate_generation(
+        self,
+        request: StructuralGenerationValidationRequest,
+        *,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationValidationView:
+        return self.__validate(request, proof)
 
 
 class Neo4jProjectionAuthoritySystem:
@@ -192,8 +221,17 @@ class _Neo4jProjectionBoundary:
         self._projection_boundary = projection_boundary
         self._adapter = adapter
         self._clock = clock
+        self._operation_lock = RLock()
 
     def deliver(
+        self,
+        request: StructuralDeliveryRequest,
+        proof: AuthenticationProof,
+    ) -> DeliveryRecordView:
+        with self._operation_lock:
+            return self._deliver_locked(request, proof)
+
+    def _deliver_locked(
         self,
         request: StructuralDeliveryRequest,
         proof: AuthenticationProof,
@@ -301,6 +339,14 @@ class _Neo4jProjectionBoundary:
         request: StructuralRebuildRequest,
         proof: AuthenticationProof,
     ) -> StructuralRebuildResult:
+        with self._operation_lock:
+            return self._rebuild_locked(request, proof)
+
+    def _rebuild_locked(
+        self,
+        request: StructuralRebuildRequest,
+        proof: AuthenticationProof,
+    ) -> StructuralRebuildResult:
         if not isinstance(request, StructuralRebuildRequest):
             raise TypeError("structural rebuild requires a typed request")
         receipt = self._projection_boundary._begin_rebuild(request, proof)
@@ -385,6 +431,137 @@ class _Neo4jProjectionBoundary:
             blocked_delivery_count=blocked,
             serving_time=metadata.serving_time,
         )
+
+    def reject_direct_validation(
+        self,
+        request: ProjectionGenerationValidationRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationValidationView:
+        if not isinstance(request, ProjectionGenerationValidationRequest):
+            raise TypeError("projection validation requires a typed request")
+        self._projection_boundary._authenticate(proof)
+        raise ProjectionStateError(
+            "Neo4j generation validation requires structural reconciliation"
+        )
+
+    def validate_generation(
+        self,
+        request: StructuralGenerationValidationRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationValidationView:
+        with self._operation_lock:
+            return self._validate_generation_locked(request, proof)
+
+    def _validate_generation_locked(
+        self,
+        request: StructuralGenerationValidationRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationValidationView:
+        if not isinstance(request, StructuralGenerationValidationRequest):
+            raise TypeError("structural validation requires a typed request")
+        authenticated = self._projection_boundary._authenticate(proof)
+        metadata = self._store.projection_generation_metadata(
+            request.generation_id
+        )
+        self._projection_boundary._authorize_management_operation(
+            family_id=metadata.family.family_id,
+            aggregate_id=str(request.generation_id),
+            operation="neo4j-generation-reconcile",
+            semantic_value={
+                "generation_id": str(request.generation_id),
+                "checkpoint_ledger_seq": request.checkpoint_ledger_seq,
+                "reason_code": request.reason_code,
+            },
+            authenticated=authenticated,
+        )
+        if metadata.generation.state not in {
+            ProjectionGenerationState.BUILDING,
+            ProjectionGenerationState.VALIDATING,
+        }:
+            raise ProjectionStateError(
+                "only building or validating generations can be reconciled"
+            )
+        if metadata.contiguous_ledger_seq != request.checkpoint_ledger_seq:
+            raise ProjectionStateError(
+                "structural validation must bind the exact authority checkpoint"
+            )
+        if metadata.open_gap_count or metadata.dead_letter_count:
+            raise ProjectionStateError(
+                "structural validation requires zero gaps and dead letters"
+            )
+        batches = self._expected_validation_batches(
+            request.generation_id,
+            request.checkpoint_ledger_seq,
+        )
+        compatibility = self._adapter.verify_compatibility()
+        compatibility_digest = neo4j_compatibility_digest(compatibility)
+        state_digest = self._adapter.reconcile_generation(
+            generation_id=str(request.generation_id),
+            expected_batches=batches,
+        )
+        authoritative_request = ProjectionGenerationValidationRequest(
+            generation_id=request.generation_id,
+            expected_authority_version=request.expected_authority_version,
+            checkpoint_ledger_seq=request.checkpoint_ledger_seq,
+            service_compatibility_digest=compatibility_digest,
+            projection_state_digest=state_digest,
+            reason_code=request.reason_code,
+            idempotency_key=request.idempotency_key,
+        )
+        return self._projection_boundary.validate_generation(
+            authoritative_request,
+            proof,
+        )
+
+    def _expected_validation_batches(
+        self,
+        generation_id: ProjectionGenerationId,
+        checkpoint_ledger_seq: int,
+    ) -> tuple[StructuralBatch, ...]:
+        batches: list[StructuralBatch] = []
+        for ledger_seq in range(1, checkpoint_ledger_seq + 1):
+            source = self._store.projection_delivery_source(
+                generation_id,
+                ledger_seq,
+            )
+            state = self._store.projection_rebuild_delivery_state(
+                generation_id,
+                ledger_seq,
+            )
+            if state is None:
+                if source.mapping is None:
+                    continue
+                raise ProjectionStateError(
+                    "authoritative checkpoint lacks a structural delivery state"
+                )
+            if (
+                str(state.source_event_id) != source.event.event_id
+                or state.source_event_digest != source.source_event_digest
+            ):
+                raise ProjectionStateError(
+                    "structural delivery provenance differs from retained authority"
+                )
+            if not state.finalized:
+                raise ProjectionStateError(
+                    "structural validation encountered an unfinished delivery"
+                )
+            if state.outcome is ProjectionDeliveryOutcome.APPLIED:
+                if source.mapping is None:
+                    raise ProjectionStateError(
+                        "applied delivery has no retained structural mapping"
+                    )
+                batches.append(_build_structural_batch(source))
+                continue
+            if state.outcome is ProjectionDeliveryOutcome.IGNORED_OPTIONAL:
+                if source.mapping is not None and source.mapping.required:
+                    raise ProjectionStateError(
+                        "required structural mapping was ignored"
+                    )
+                continue
+            raise ProjectionStateError(
+                "structural validation encountered a failed delivery"
+            )
+        return tuple(batches)
 
     def read(
         self,
@@ -688,7 +865,7 @@ def _open_with_adapter(
                 transition_generation=(
                     projection_boundary.transition_generation
                 ),
-                validate_generation=projection_boundary.validate_generation,
+                validate_generation=graph_boundary.reject_direct_validation,
                 promote_generation=projection_boundary.promote_generation,
                 record_delivery=projection_boundary.record_delivery,
                 resolve_gap=projection_boundary.resolve_gap,
@@ -703,6 +880,7 @@ def _open_with_adapter(
                 deliver=graph_boundary.deliver,
                 read=graph_boundary.read,
                 rebuild=graph_boundary.rebuild,
+                validate_generation=graph_boundary.validate_generation,
             ),
             compatibility=compatibility,
             close=close,
