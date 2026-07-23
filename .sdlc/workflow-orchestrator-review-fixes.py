@@ -91,13 +91,26 @@ source = source.replace(old_child, new_child)
 SOURCE.write_text(source, encoding="utf-8")
 
 tests = TEST.read_text(encoding="utf-8")
-old_client_patch = '''        classmethod(lambda cls: client),
-'''
-new_client_patch = '''        classmethod(lambda cls, **kwargs: client),
-'''
-if tests.count(old_client_patch) != 1:
-    raise SystemExit("client fixture replacement mismatch")
-tests = tests.replace(old_client_patch, new_client_patch)
+replacements = (
+    (
+        '''        classmethod(lambda cls: client),
+''',
+        '''        classmethod(lambda cls, **kwargs: client),
+''',
+        "client fixture replacement mismatch",
+    ),
+    (
+        '''        classmethod(lambda cls: _FakeClient()),
+''',
+        '''        classmethod(lambda cls, **kwargs: _FakeClient()),
+''',
+        "transport fixture replacement mismatch",
+    ),
+)
+for old, new, failure in replacements:
+    if tests.count(old) != 1:
+        raise SystemExit(failure)
+    tests = tests.replace(old, new)
 marker = "def test_collection_uses_bounded_github_request_timeout("
 if marker in tests:
     raise SystemExit("review-fix tests already present")
