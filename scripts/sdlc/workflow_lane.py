@@ -13,11 +13,14 @@ from typing import Mapping, Sequence
 
 from .artifact_envelope import (
     ArtifactProvenanceError,
+    _unique_object,
+    _validate_json_depth,
     artifact_name,
     context_from_environment,
     create_envelope,
     validate_envelope,
 )
+from .artifact_receipt import ArtifactReceiptError, _validate_command_run
 from .classify_change import GitRouteError
 from .command_spec import (
     CommandRun,
@@ -55,6 +58,24 @@ _OPTIONAL_CORE_TEST_IDS = (
 
 class WorkflowLaneError(ValueError):
     """Raised when a workflow lane cannot produce exact evidence."""
+
+
+@dataclass(frozen=True)
+class LaneExecutionOutput:
+    lane_id: str
+    artifact_name: str
+    gate_results: tuple[tuple[str, str, str], ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": "newsroom.sdlc.workflow-lane-execution.v1",
+            "lane_id": self.lane_id,
+            "artifact_name": self.artifact_name,
+            "gate_results": [
+                {"gate_id": gate, "phase": phase, "result": result}
+                for gate, phase, result in self.gate_results
+            ],
+        }
 
 
 @dataclass(frozen=True)
@@ -110,8 +131,16 @@ def _load_json(root: Path, value: str | Path) -> object:
     if not payload or len(payload) > _MAX_JSON_BYTES:
         raise WorkflowLaneError("input_file")
     try:
-        return json.loads(payload.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        value = json.loads(
+            payload.decode("utf-8"), object_pairs_hook=_unique_object
+        )
+        _validate_json_depth(value)
+        return value
+    except (
+        ArtifactProvenanceError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as exc:
         raise WorkflowLaneError("input_json") from exc
 
 
@@ -276,24 +305,29 @@ def _evidence(
     repo_root: Path,
     contract: SdlcContract,
     route: object,
-    run: CommandRun,
+    command_run: Mapping[str, object],
     summary: JUnitSummary | None,
+    runner_kind: str,
     service_digest: str | None,
 ) -> dict[str, object]:
+    gate_run = command_run.get("gate_run")
+    command_digest = command_run.get("command_spec_digest")
+    if not isinstance(gate_run, dict) or not isinstance(command_digest, str):
+        raise WorkflowLaneError("command_run")
     return build_gate_evidence(
         repo_root=repo_root,
         contract=contract,
         route=route,
-        gate_run=run.gate_run.as_dict(),
+        gate_run=gate_run,
         junit_summary=None if summary is None else summary.as_dict(),
-        runner_kind="github-hosted",
+        runner_kind=runner_kind,
         queue_ms=0,
         bootstrap_ms=0,
         finalize_ms=0,
         cache_key=None,
         cache_hit=False,
         uv_version=installed_uv_version(),
-        command_spec_digest=run.command_spec_digest,
+        command_spec_digest=command_digest,
         service_compatibility_digest=service_digest,
     )
 
@@ -375,21 +409,16 @@ def _run_service(
     reports = gate_dir / "reports"
     reports.mkdir(mode=0o700)
     report = reports / "pytest.xml"
+    required_service = {
+        "NEWSROOM_NEO4J_DATABASE": "neo4j",
+        "NEWSROOM_NEO4J_PROJECTOR_USERNAME": "newsroom_projector",
+        "NEWSROOM_NEO4J_SERVICE_REQUIRED": "1",
+        "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
+    }
+    if any(os.environ.get(name) != value for name, value in required_service.items()):
+        raise WorkflowLaneError("service_configuration")
     static_env = _static_environment()
-    static_env.update(
-        {
-            "NEWSROOM_NEO4J_DATABASE": os.environ.get(
-                "NEWSROOM_NEO4J_DATABASE", "neo4j"
-            ),
-            "NEWSROOM_NEO4J_PROJECTOR_USERNAME": os.environ.get(
-                "NEWSROOM_NEO4J_PROJECTOR_USERNAME", "newsroom_projector"
-            ),
-            "NEWSROOM_NEO4J_SERVICE_REQUIRED": "1",
-            "NEWSROOM_NEO4J_URI": os.environ.get(
-                "NEWSROOM_NEO4J_URI", "bolt://localhost:7687"
-            ),
-        }
-    )
+    static_env.update(required_service)
     spec = _spec(
         contract=contract,
         gate_id="service-neo4j",
@@ -414,14 +443,12 @@ def _run_service(
     return (("service-neo4j", "tests", run, summary, gate_dir),)
 
 
-def run_lane(
+def _context_route(
     *,
-    repo_root: str | Path,
+    root: Path,
     route_path: str | Path,
     lane_id: str,
-    artifact_root: str | Path,
-) -> LaneOutput:
-    root = Path(repo_root).resolve()
+) -> tuple[SdlcContract, object, dict[str, object]]:
     contract = load_contract(root)
     context = context_from_environment(root)
     if lane_id not in {"core", "service"} or context.job_id != lane_id:
@@ -432,67 +459,169 @@ def run_lane(
         or route["head_tree_sha"] != context.evaluated_tree_sha
     ):
         raise WorkflowLaneError("route_identity")
+    return contract, context, route
+
+
+def _existing_artifact_root(repo_root: Path, relative: str | Path) -> Path:
+    candidate = Path(relative)
+    if (
+        candidate.is_absolute()
+        or not candidate.parts
+        or ".." in candidate.parts
+        or "\\" in str(relative)
+    ):
+        raise WorkflowLaneError("artifact_root")
+    current = repo_root
+    for part in candidate.parts:
+        current /= part
+        if current.is_symlink():
+            raise WorkflowLaneError("artifact_root")
+    resolved = current.resolve()
+    if not resolved.is_relative_to(repo_root) or not resolved.is_dir():
+        raise WorkflowLaneError("artifact_root")
+    return resolved
+
+
+def _layout(artifact_root: Path, lane_id: str) -> tuple[tuple[str, str, Path, Path], ...]:
+    if lane_id == "core":
+        values = (
+            ("source-integrity", "source", False),
+            ("core-deterministic", "tests", True),
+        )
+    elif lane_id == "service":
+        values = (("service-neo4j", "tests", True),)
+    else:
+        raise WorkflowLaneError("lane_identity")
+    return tuple(
+        (
+            gate_id,
+            phase,
+            artifact_root / "gates" / gate_id / phase / "command-run.json",
+            artifact_root / "gates" / gate_id / phase / "reports" / "pytest.xml",
+        )
+        for gate_id, phase, _ in values
+    )
+
+
+def execute_lane(
+    *,
+    repo_root: str | Path,
+    route_path: str | Path,
+    lane_id: str,
+    artifact_root: str | Path,
+) -> LaneExecutionOutput:
+    root = Path(repo_root).resolve()
+    contract, context, route = _context_route(
+        root=root, route_path=route_path, lane_id=lane_id
+    )
     output = _prepare_artifact_root(root, artifact_root)
     complete = False
     try:
         _private_write(output / "route.json", route)
         selected = (
             _run_core(
-                root=root,
-                artifact_root=output,
-                contract=contract,
-                route=route,
+                root=root, artifact_root=output, contract=contract, route=route
             )
             if lane_id == "core"
             else _run_service(
-                root=root,
-                artifact_root=output,
-                contract=contract,
-                route=route,
+                root=root, artifact_root=output, contract=contract, route=route
             )
         )
-        files: list[tuple[str, str]] = [("route", "route.json")]
         gate_results: list[tuple[str, str, str]] = []
-        for gate_id, phase, run, summary, gate_dir in selected:
+        for gate_id, phase, run, _summary, gate_dir in selected:
             run_path = gate_dir / "command-run.json"
             _private_write(run_path, run.as_dict())
-            files.append(("command_run", run_path.relative_to(output).as_posix()))
-            if summary is not None:
-                summary_path = gate_dir / "junit-summary.json"
-                _private_write(summary_path, summary.as_dict())
-                files.append(("junit_summary", summary_path.relative_to(output).as_posix()))
-            evidence = _evidence(
-                repo_root=root,
-                contract=contract,
-                route=route,
-                run=run,
-                summary=summary,
-                service_digest=(
-                    service_compatibility_digest() if lane_id == "service" else None
-                ),
-            )
-            evidence_path = gate_dir / "gate-evidence.json"
-            _private_write(evidence_path, evidence)
-            files.append(("gate_evidence", evidence_path.relative_to(output).as_posix()))
-            gate_results.append((gate_id, phase, str(evidence["result"])))
-        envelope = create_envelope(
-            repo_root=root,
-            artifact_root=output,
-            context=context,
-            files=files,
-        )
-        validate_envelope(envelope.as_dict())
-        _private_write(output / "envelope.json", envelope.as_dict())
+            gate_results.append((gate_id, phase, run.gate_run.result))
         complete = True
-        return LaneOutput(
-            lane_id,
-            artifact_name(context),
-            envelope.envelope_identity,
-            tuple(sorted(gate_results)),
+        return LaneExecutionOutput(
+            lane_id, artifact_name(context), tuple(sorted(gate_results))
         )
     finally:
         if not complete:
             shutil.rmtree(output, ignore_errors=True)
+
+
+def finalize_lane(
+    *,
+    repo_root: str | Path,
+    route_path: str | Path,
+    lane_id: str,
+    artifact_root: str | Path,
+) -> LaneOutput:
+    root = Path(repo_root).resolve()
+    contract, context, route = _context_route(
+        root=root, route_path=route_path, lane_id=lane_id
+    )
+    output = _existing_artifact_root(root, artifact_root)
+    retained_route = _validate_route(contract, _load_json(root, output / "route.json"))
+    if retained_route != route:
+        raise WorkflowLaneError("route_changed")
+    files: list[tuple[str, str]] = [("route", "route.json")]
+    gate_results: list[tuple[str, str, str]] = []
+    optional = _OPTIONAL_CORE_TEST_IDS if lane_id == "core" else ()
+    for gate_id, phase, run_path, report in _layout(output, lane_id):
+        try:
+            command_run = _validate_command_run(_load_json(root, run_path))
+        except ArtifactReceiptError as exc:
+            raise WorkflowLaneError("command_run") from exc
+        gate_run = command_run["gate_run"]
+        if gate_run["gate_id"] != gate_id or gate_run["phase"] != phase:
+            raise WorkflowLaneError("command_run_identity")
+        files.append(("command_run", run_path.relative_to(output).as_posix()))
+        summary = _report_summary(
+            repo_root=root, report=report, optional_test_ids=optional
+        )
+        if summary is not None:
+            summary_path = run_path.parent / "junit-summary.json"
+            _private_write(summary_path, summary.as_dict())
+            files.append(("junit_summary", summary_path.relative_to(output).as_posix()))
+        evidence = _evidence(
+            repo_root=root,
+            contract=contract,
+            route=route,
+            command_run=command_run,
+            summary=summary,
+            runner_kind=context.runner_environment,
+            service_digest=(
+                service_compatibility_digest() if lane_id == "service" else None
+            ),
+        )
+        evidence_path = run_path.parent / "gate-evidence.json"
+        _private_write(evidence_path, evidence)
+        files.append(("gate_evidence", evidence_path.relative_to(output).as_posix()))
+        gate_results.append((gate_id, phase, str(evidence["result"])))
+    envelope = create_envelope(
+        repo_root=root, artifact_root=output, context=context, files=files
+    )
+    validate_envelope(envelope.as_dict())
+    _private_write(output / "envelope.json", envelope.as_dict())
+    return LaneOutput(
+        lane_id,
+        artifact_name(context),
+        envelope.envelope_identity,
+        tuple(sorted(gate_results)),
+    )
+
+
+def run_lane(
+    *,
+    repo_root: str | Path,
+    route_path: str | Path,
+    lane_id: str,
+    artifact_root: str | Path,
+) -> LaneOutput:
+    execute_lane(
+        repo_root=repo_root,
+        route_path=route_path,
+        lane_id=lane_id,
+        artifact_root=artifact_root,
+    )
+    return finalize_lane(
+        repo_root=repo_root,
+        route_path=route_path,
+        lane_id=lane_id,
+        artifact_root=artifact_root,
+    )
 
 
 def _run_subprocess(argv: Sequence[str]) -> int:
@@ -572,12 +701,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run exact Newsroom SDLC shadow lane")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = subparsers.add_parser("run")
-    run_parser.add_argument("--repo-root", default=".")
-    run_parser.add_argument("--route", required=True)
-    run_parser.add_argument("--lane", choices=("core", "service"), required=True)
-    run_parser.add_argument("--artifact-root", required=True)
-    run_parser.add_argument("--output")
+    for command in ("execute", "finalize", "run"):
+        lane_parser = subparsers.add_parser(command)
+        lane_parser.add_argument("--repo-root", default=".")
+        lane_parser.add_argument("--route", required=True)
+        lane_parser.add_argument("--lane", choices=("core", "service"), required=True)
+        lane_parser.add_argument("--artifact-root", required=True)
+        lane_parser.add_argument("--output")
 
     source_parser = subparsers.add_parser("source-check")
     source_parser.add_argument("--repo-root", default=".")
@@ -596,13 +726,28 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     arguments = parser.parse_args(argv)
     try:
-        if arguments.command == "run":
-            result = run_lane(
-                repo_root=arguments.repo_root,
-                route_path=arguments.route,
-                lane_id=arguments.lane,
-                artifact_root=arguments.artifact_root,
-            )
+        if arguments.command in {"execute", "finalize", "run"}:
+            if arguments.command == "execute":
+                result = execute_lane(
+                    repo_root=arguments.repo_root,
+                    route_path=arguments.route,
+                    lane_id=arguments.lane,
+                    artifact_root=arguments.artifact_root,
+                )
+            elif arguments.command == "finalize":
+                result = finalize_lane(
+                    repo_root=arguments.repo_root,
+                    route_path=arguments.route,
+                    lane_id=arguments.lane,
+                    artifact_root=arguments.artifact_root,
+                )
+            else:
+                result = run_lane(
+                    repo_root=arguments.repo_root,
+                    route_path=arguments.route,
+                    lane_id=arguments.lane,
+                    artifact_root=arguments.artifact_root,
+                )
             rendered = canonical_json_bytes(result.as_dict()) + b"\n"
             if arguments.output:
                 root = Path(arguments.repo_root).resolve()

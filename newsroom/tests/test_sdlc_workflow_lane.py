@@ -205,6 +205,12 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
     artifact.mkdir()
     captured = {}
     monkeypatch.setenv("NEWSROOM_NEO4J_PROJECTOR_PASSWORD", "secret")
+    monkeypatch.setenv("NEWSROOM_NEO4J_SERVICE_REQUIRED", "1")
+    monkeypatch.setenv("NEWSROOM_NEO4J_URI", "bolt://localhost:7687")
+    monkeypatch.setenv("NEWSROOM_NEO4J_DATABASE", "neo4j")
+    monkeypatch.setenv(
+        "NEWSROOM_NEO4J_PROJECTOR_USERNAME", "newsroom_projector"
+    )
     monkeypatch.setattr(
         lane_module,
         "_spec",
@@ -332,8 +338,9 @@ def test_evidence_uses_zero_producer_timing_and_service_digest(
         repo_root=tmp_path,
         contract=contract,
         route=_route(service=True),
-        run=run,
+        command_run=run.as_dict(),
         summary=summary,
+        runner_kind="github-hosted",
         service_digest=service_compatibility_digest(),
     )
 
@@ -361,3 +368,93 @@ def test_main_returns_typed_error_for_invalid_lane(
         )
     ) == 2
     assert capsys.readouterr().err.startswith("EVIDENCE_MISMATCH:workflow-lane:")
+
+
+
+def test_route_loader_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    route = tmp_path / "route.json"
+    route.write_text('{"schema_version":"x","schema_version":"y"}', encoding="utf-8")
+    with pytest.raises(WorkflowLaneError, match="input_json"):
+        lane_module._load_json(tmp_path, route)
+
+
+def test_service_configuration_is_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract(tmp_path)
+    artifact = tmp_path / "artifact-exact"
+    artifact.mkdir()
+    monkeypatch.setenv("NEWSROOM_NEO4J_SERVICE_REQUIRED", "1")
+    monkeypatch.setenv("NEWSROOM_NEO4J_URI", "bolt://remote.example:7687")
+    monkeypatch.setenv("NEWSROOM_NEO4J_DATABASE", "neo4j")
+    monkeypatch.setenv("NEWSROOM_NEO4J_PROJECTOR_USERNAME", "newsroom_projector")
+    with pytest.raises(WorkflowLaneError, match="service_configuration"):
+        _run_service(
+            root=tmp_path,
+            artifact_root=artifact,
+            contract=contract,
+            route=_route(service=True),
+        )
+
+
+def test_evidence_runner_kind_is_not_hard_coded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract(tmp_path)
+    captured = {}
+    monkeypatch.setattr(lane_module, "installed_uv_version", lambda: "0.8.0")
+    monkeypatch.setattr(
+        lane_module,
+        "build_gate_evidence",
+        lambda **kwargs: captured.update(kwargs) or {"result": "PASS"},
+    )
+    lane_module._evidence(
+        repo_root=tmp_path,
+        contract=contract,
+        route=_route(),
+        command_run=_run("source-integrity", "source").as_dict(),
+        summary=None,
+        runner_kind="self-hosted",
+        service_digest=None,
+    )
+    assert captured["runner_kind"] == "self-hosted"
+
+
+def test_execute_and_finalize_are_distinct_cli_phases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    execution = lane_module.LaneExecutionOutput(
+        "core", "artifact", (("source-integrity", "source", "PASS"),)
+    )
+    final = lane_module.LaneOutput(
+        "core", "artifact", "sha256:" + "5" * 64, (("source-integrity", "source", "PASS"),)
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "execute_lane",
+        lambda **kwargs: calls.append(("execute", kwargs)) or execution,
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "finalize_lane",
+        lambda **kwargs: calls.append(("finalize", kwargs)) or final,
+    )
+    for command in ("execute", "finalize"):
+        assert lane_module.main(
+            (
+                command,
+                "--repo-root",
+                str(tmp_path),
+                "--route",
+                "route.json",
+                "--lane",
+                "core",
+                "--artifact-root",
+                "artifact",
+            )
+        ) == 0
+    assert [name for name, _ in calls] == ["execute", "finalize"]
