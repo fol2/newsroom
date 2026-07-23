@@ -57,12 +57,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uv run --no-sync python -m compileall -q newsroom scripts
-          uv run --no-sync python -m pytest -q \
-            newsroom/tests/test_sdlc_workflow_lane.py \
-            newsroom/tests/test_sdlc_evidence_workflow.py
-          uv run --no-sync python -m pytest -q newsroom/tests/test_sdlc_*.py
-          git diff --check
+          if ! {
+            uv run --no-sync python -m compileall -q newsroom scripts &&
+            uv run --no-sync python -m pytest -q \
+              newsroom/tests/test_sdlc_workflow_lane.py \
+              newsroom/tests/test_sdlc_evidence_workflow.py &&
+            uv run --no-sync python -m pytest -q newsroom/tests/test_sdlc_*.py &&
+            git diff --check
+          } > .sdlc/venv-fix-diagnostic.txt 2>&1; then
+            sed -n '1,240p' .sdlc/venv-fix-diagnostic.txt
+            git add .sdlc/venv-fix-diagnostic.txt
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'chore(sdlc): record virtualenv fix diagnostic'
+            git push origin HEAD:agent/sdlc-v2-phase2b-evidence-workflow-release
+            exit 1
+          fi
+          rm -f .sdlc/venv-fix-diagnostic.txt
 
       - name: Commit source-only correction
         shell: bash
