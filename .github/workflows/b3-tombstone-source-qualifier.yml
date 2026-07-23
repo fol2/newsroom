@@ -100,9 +100,27 @@ jobs:
           set -euo pipefail
           out="${RUNNER_TEMP}/b3-tombstone-source"
           mkdir -p "${out}/files"
-          git diff --name-status --no-renames HEAD > "${out}/name-status.txt"
-          git diff --name-only --diff-filter=ACMRTUXB --no-renames HEAD > "${out}/paths.txt"
-          test -s "${out}/paths.txt"
+          cat > "${out}/expected-paths.txt" <<'EOF'
+          .github/workflows/projection-b2-neo4j.yml
+          newsroom/authority/_neo4j_projection_system.py
+          newsroom/authority/_projection_store.py
+          newsroom/projection/mapping.py
+          newsroom/projection/neo4j/_adapter.py
+          newsroom/projection/neo4j/models.py
+          newsroom/tests/projection_b3_tombstone_helpers.py
+          newsroom/tests/test_projection_b3_neo4j_service.py
+          newsroom/tests/test_projection_b3_tombstone.py
+          newsroom/tests/test_sdlc_workflow_lane.py
+          scripts/sdlc/workflow_lane.py
+          EOF
+          {
+            git diff --name-only --diff-filter=ACMRTUXB --no-renames HEAD
+            git ls-files --others --exclude-standard
+          } | LC_ALL=C sort -u > "${out}/paths.txt"
+          LC_ALL=C sort -o "${out}/expected-paths.txt" "${out}/expected-paths.txt"
+          cmp "${out}/expected-paths.txt" "${out}/paths.txt"
+          test -z "$(git diff --name-only --diff-filter=D --no-renames HEAD)"
+          git status --short --untracked-files=all > "${out}/status.txt"
           while IFS= read -r path; do
             test -f "${path}"
             mkdir -p "${out}/files/$(dirname "${path}")"
