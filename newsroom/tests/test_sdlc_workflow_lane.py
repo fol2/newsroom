@@ -726,3 +726,58 @@ def test_gate_evidence_records_exact_cache_metadata(
 
     assert captured["cache_key"] == "uv-cache-exact-key"
     assert captured["cache_hit"] is True
+
+
+
+def test_expected_spec_uses_uv_run_to_preserve_locked_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract(tmp_path)
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(lane_module.shutil, "which", lambda name: "/opt/uv/bin/uv")
+    monkeypatch.setattr(
+        lane_module,
+        "_spec",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(),
+    )
+
+    lane_module._expected_spec(
+        root=tmp_path,
+        artifact_root=artifact,
+        contract=contract,
+        route=_route(),
+        gate_id="core-deterministic",
+        phase="tests",
+    )
+
+    assert captured["argv"][:6] == [
+        "/opt/uv/bin/uv",
+        "run",
+        "--no-sync",
+        "python",
+        "-m",
+        "scripts.sdlc.workflow_lane",
+    ]
+
+
+def test_uv_command_fails_closed_when_uv_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(lane_module.shutil, "which", lambda name: None)
+    with pytest.raises(WorkflowLaneError, match="uv_executable"):
+        lane_module._uv_command("-c", "print('never')")
+
+
+def test_uv_command_uses_the_locked_project_environment() -> None:
+    completed = lane_module.subprocess.run(
+        lane_module._uv_command("-c", "import pytest"),
+        cwd=REPO_ROOT,
+        check=False,
+        stdout=lane_module.subprocess.PIPE,
+        stderr=lane_module.subprocess.PIPE,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")

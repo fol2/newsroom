@@ -260,6 +260,16 @@ def _cache_evidence(
     return key, hit
 
 
+def _uv_command(*arguments: str) -> list[str]:
+    executable = shutil.which("uv")
+    if executable is None:
+        raise WorkflowLaneError("uv_executable")
+    path = Path(executable)
+    if not path.is_absolute():
+        raise WorkflowLaneError("uv_executable")
+    return [path.as_posix(), "run", "--no-sync", "python", *arguments]
+
+
 def _spec(
     *,
     contract: SdlcContract,
@@ -338,8 +348,7 @@ def _expected_spec(
     environment = _static_environment()
     pass_env: Sequence[str] = ()
     if key == ("source-integrity", "source"):
-        argv: list[str] = [
-            sys.executable,
+        argv: list[str] = _uv_command(
             "-m",
             "scripts.sdlc.workflow_lane",
             "source-check",
@@ -349,7 +358,7 @@ def _expected_spec(
             str(route["base_sha"]),
             "--head-sha",
             str(route["head_sha"]),
-        ]
+        )
     elif key == ("core-deterministic", "tests"):
         report = (
             artifact_root
@@ -359,8 +368,7 @@ def _expected_spec(
             / "reports"
             / "pytest.xml"
         )
-        argv = [
-            sys.executable,
+        argv = _uv_command(
             "-m",
             "scripts.sdlc.workflow_lane",
             "core-tests",
@@ -368,7 +376,7 @@ def _expected_spec(
             ".",
             "--report",
             report.relative_to(root).as_posix(),
-        ]
+        )
         if route["clustering_required"]:
             argv.append("--clustering")
     elif key == ("service-neo4j", "tests"):
@@ -382,8 +390,7 @@ def _expected_spec(
         )
         environment.update(_service_environment())
         pass_env = ("NEWSROOM_NEO4J_PROJECTOR_PASSWORD",)
-        argv = [
-            sys.executable,
+        argv = _uv_command(
             "-m",
             "scripts.sdlc.workflow_lane",
             "service-tests",
@@ -392,7 +399,7 @@ def _expected_spec(
             "--report",
             report.relative_to(root).as_posix(),
             *[str(item) for item in route["service_tests"]],
-        ]
+        )
     else:
         raise WorkflowLaneError("gate_identity")
     return _spec(

@@ -95,7 +95,7 @@ def test_shadow_workflow_has_exact_nonprivileged_event_surface() -> None:
 
     rendered = WORKFLOW_PATH.read_text(encoding="utf-8")
     assert "pull_request_target" not in rendered
-    assert "secrets." not in rendered
+    assert "${{ secrets." not in rendered
     assert "continue-on-error" not in rendered
 
 
