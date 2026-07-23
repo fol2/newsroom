@@ -43,6 +43,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          expected_head="$(git rev-parse HEAD)"
           diagnostic="${RUNNER_TEMP}/b3-reconciliation.log"
           set +e
           (
@@ -84,7 +85,15 @@ jobs:
           status="$?"
           set -e
           if test "${status}" -ne 0; then
-            tail -n 260 "${diagnostic}"
+            git reset --hard "${expected_head}"
+            tail -n 260 "${diagnostic}" | sed -E 's/(password|token|secret|credential)=([^[:space:]]+)/\1=<redacted>/Ig' > .sdlc/b3-reconciliation-diagnostic.txt
+            git add .sdlc/b3-reconciliation-diagnostic.txt
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'chore(b3): record reconciliation qualification failure'
+            remote_head="$(git ls-remote origin refs/heads/agent/increment-1b3-rebuild-promotion | cut -f1)"
+            test "${remote_head}" = "${expected_head}"
+            git push --force-with-lease=refs/heads/agent/increment-1b3-rebuild-promotion:${expected_head} origin HEAD:agent/increment-1b3-rebuild-promotion
             exit "${status}"
           fi
 
@@ -97,7 +106,8 @@ jobs:
             .sdlc/b3-reconciliation.patch.gz.b64 \
             .sdlc/b3-reconcile-export-run.txt \
             .sdlc/b3-reconcile-source.tar.gz.b64 \
-            .sdlc/b3-reconcile-source.sha256
+            .sdlc/b3-reconcile-source.sha256 \
+            .sdlc/b3-reconciliation-diagnostic.txt
           git add -A
           test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
           cat > "${RUNNER_TEMP}/expected-files.txt" <<'EOF'
