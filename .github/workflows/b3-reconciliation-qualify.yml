@@ -56,6 +56,9 @@ jobs:
         working-directory: .target
         run: |
           set -euo pipefail
+          diagnostic="${RUNNER_TEMP}/b3-reconciliation-qualifier.log"
+          exec > >(tee "${diagnostic}") 2>&1
+          echo stage=target-identity
           test "$(git rev-parse HEAD)" = 8fd54ef97b877202de24223b24973a89007cdea2
           test "$(git hash-object newsroom/authority/_neo4j_projection_system.py)" = 49ffd8663e2289fc2a8277e14d13a0dd953ca333
           test "$(git hash-object newsroom/authority/_projection_system.py)" = 63f522df6598d47a4edb1da860f3e2f462d5c3e1
@@ -66,24 +69,44 @@ jobs:
           test "$(git hash-object newsroom/tests/test_projection_b2_boundaries.py)" = 4ce93e7dfb3dc35d09f8122cbda1255f74c463ba
           test "$(git hash-object newsroom/tests/test_projection_b3_neo4j_service.py)" = 7f0be2aaea58710b9486d4dd2663e9e780f52c9d
           test "$(git hash-object newsroom/tests/test_projection_b3_tombstone.py)" = bda0e6bd4bc3bd543e424049dac41bf49d58e89f
+          echo stage=decode-patch
           patch="${RUNNER_TEMP}/b3-reconciliation.patch"
           gzip --decompress --stdout ../.qualifier/.sdlc/b3-reconciliation.patch.gz > "${patch}"
           test "$(sha256sum "${patch}" | cut -d' ' -f1)" = 14a4a7929416fcf4a5d75055261586a5bbf8923ea999dd8f836e41c523a68788
+          echo stage=apply-patch
           git apply --check "${patch}"
           git apply "${patch}"
+          echo stage=locked-environment
           uv lock --check
           uv sync --dev --locked
+          echo stage=compile
           uv run --no-sync python -m compileall -q newsroom scripts
+          echo stage=projection-tests
           uv run --no-sync python -m pytest -q \
             newsroom/tests/test_projection_b1_*.py \
             newsroom/tests/test_projection_b2_*.py \
             newsroom/tests/test_projection_b3_*.py
+          echo stage=full-tests
           uv run --no-sync python -m pytest -q newsroom/tests
+          echo stage=clustering
           uv run --no-sync python scripts/eval_clustering_metrics.py \
             --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
             --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
             --fail-on-regression
           git diff --check
+          echo stage=qualified
+
+      - name: Upload qualifier diagnostic
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: b3-reconciliation-qualifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/b3-reconciliation-qualifier.log
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
 
       - name: Commit exact source-only reconciliation
         shell: bash
