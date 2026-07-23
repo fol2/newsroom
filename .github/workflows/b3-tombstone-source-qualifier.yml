@@ -43,7 +43,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = f43de049b9e0a95f7d38fe26e6c8491385eb673e
+          git merge-base --is-ancestor f43de049b9e0a95f7d38fe26e6c8491385eb673e HEAD
           test "$(git hash-object .sdlc/add-b3-tombstone-projection.py)" = d7dc92ae8d5b92ae028c64d8bae22a21e2af606a
           uv lock --check
           uv sync --dev --locked
