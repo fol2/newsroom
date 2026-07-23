@@ -48,12 +48,13 @@ jobs:
           set -euo pipefail
           diagnostic="${RUNNER_TEMP}/b3-tombstone-qualification.log"
           set +e
-          {
+          (
+            set -euo pipefail
             git merge-base --is-ancestor f43de049b9e0a95f7d38fe26e6c8491385eb673e HEAD
-            test "$(git hash-object .sdlc/add-b3-tombstone-projection.py)" = d7dc92ae8d5b92ae028c64d8bae22a21e2af606a
+            test "$(git hash-object .sdlc/add-b3-tombstone-projection-v2.py)" = 478a55ac79f796b61292f2a90667923c9c91befb
             uv lock --check
             uv sync --dev --locked
-            uv run --no-sync python .sdlc/add-b3-tombstone-projection.py
+            uv run --no-sync python .sdlc/add-b3-tombstone-projection-v2.py
             uv run --no-sync python -m compileall -q newsroom scripts
             uv run --no-sync python -m pytest -q \
               newsroom/tests/test_authority_a2b_lifecycle.py \
@@ -61,16 +62,17 @@ jobs:
               newsroom/tests/test_projection_b1_contracts.py \
               newsroom/tests/test_projection_b2_adapter_unit.py \
               newsroom/tests/test_projection_b3_rebuild.py \
+              newsroom/tests/test_projection_b3_tombstone.py \
               newsroom/tests/test_projection_b3_neo4j_service.py \
               newsroom/tests/test_sdlc_classifier.py \
               newsroom/tests/test_sdlc_workflow_lane.py
             uv run --no-sync python -m pytest -q newsroom/tests
             git diff --check
-          } > "${diagnostic}" 2>&1
+          ) > "${diagnostic}" 2>&1
           status="$?"
           set -e
           if test "${status}" -ne 0; then
-            tail -n 180 "${diagnostic}"
+            tail -n 220 "${diagnostic}"
             exit "${status}"
           fi
 
@@ -106,7 +108,7 @@ jobs:
           ) > "${out}/sha256sum.txt"
           printf '%s\n' \
             'base_head=f43de049b9e0a95f7d38fe26e6c8491385eb673e' \
-            'transform_blob=d7dc92ae8d5b92ae028c64d8bae22a21e2af606a' \
+            'transform_blob=478a55ac79f796b61292f2a90667923c9c91befb' \
             'python=3.12' \
             'uv=0.8.0' > "${out}/qualification.txt"
 
@@ -119,4 +121,4 @@ jobs:
           retention-days: 1
           compression-level: 0
           overwrite: false
-          include-hidden-files: false
+          include-hidden-files: true
