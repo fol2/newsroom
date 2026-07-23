@@ -62,6 +62,9 @@ _SERVICE_CONFIGURATION = {
     "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
 }
 _CORE_TESTS = ("newsroom/tests",)
+_CACHE_KEY_ENV = "NEWSROOM_SDLC_CACHE_KEY"
+_CACHE_HIT_ENV = "NEWSROOM_SDLC_CACHE_HIT"
+_MAX_CACHE_KEY_CHARS = 2048
 
 
 class WorkflowLaneError(ValueError):
@@ -231,6 +234,30 @@ def _static_environment() -> dict[str, str]:
         if value:
             values[name] = value
     return values
+
+
+def _cache_evidence(
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str | None, bool]:
+    source = os.environ if environment is None else environment
+    if any(
+        not isinstance(name, str) or not isinstance(value, str)
+        for name, value in source.items()
+    ):
+        raise WorkflowLaneError("cache_environment")
+    raw_key = source.get(_CACHE_KEY_ENV, "")
+    raw_hit = source.get(_CACHE_HIT_ENV, "false")
+    if (
+        len(raw_key) > _MAX_CACHE_KEY_CHARS
+        or any(ord(character) < 32 or ord(character) == 127 for character in raw_key)
+        or raw_hit not in {"true", "false"}
+    ):
+        raise WorkflowLaneError("cache_environment")
+    key = raw_key or None
+    hit = raw_hit == "true"
+    if hit and key is None:
+        raise WorkflowLaneError("cache_environment")
+    return key, hit
 
 
 def _spec(
@@ -440,6 +467,7 @@ def _evidence(
     command_digest = command_run.get("command_spec_digest")
     if not isinstance(gate_run, dict) or not isinstance(command_digest, str):
         raise WorkflowLaneError("command_run")
+    cache_key, cache_hit = _cache_evidence()
     return build_gate_evidence(
         repo_root=repo_root,
         contract=contract,
@@ -450,8 +478,8 @@ def _evidence(
         queue_ms=0,
         bootstrap_ms=0,
         finalize_ms=0,
-        cache_key=None,
-        cache_hit=False,
+        cache_key=cache_key,
+        cache_hit=cache_hit,
         uv_version=installed_uv_version(),
         command_spec_digest=command_digest,
         service_compatibility_digest=service_digest,

@@ -75,6 +75,10 @@ _OPTIONAL_STATIC_ENVIRONMENT = (
     "TMPDIR",
     "UV_CACHE_DIR",
 )
+_CACHE_TELEMETRY_ENVIRONMENT = (
+    "NEWSROOM_SDLC_CACHE_KEY",
+    "NEWSROOM_SDLC_CACHE_HIT",
+)
 _ROUTE_OUTPUT_KEYS = frozenset(
     {
         "schema_version",
@@ -155,6 +159,12 @@ def _child_environment(
             value = source.get(name)
             if value:
                 environment[name] = value
+        for name in _CACHE_TELEMETRY_ENVIRONMENT:
+            value = source.get(name)
+            if value:
+                environment[name] = _text(
+                    value, "cache_environment", maximum=2048
+                )
     else:
         temporary = source.get("RUNNER_TEMP", "/tmp")
         environment = {

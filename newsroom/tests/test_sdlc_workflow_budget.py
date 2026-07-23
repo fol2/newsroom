@@ -92,6 +92,8 @@ def _ambient(job_id: str, *, service: bool = False) -> dict[str, str]:
         "HOME": "/home/runner",
         "RUNNER_TEMP": "/tmp/runner",
         "UV_CACHE_DIR": "/tmp/uv-cache",
+        "NEWSROOM_SDLC_CACHE_KEY": "uv-linux-py312-lock",
+        "NEWSROOM_SDLC_CACHE_HIT": "true",
         "GITHUB_TOKEN": "must-not-pass",
         "NEO4J_ADMIN_PASSWORD": "must-not-pass",
         "NEWSROOM_NEO4J_PROJECTOR_PASSWORD": "must-not-pass",
@@ -156,6 +158,8 @@ def test_child_environment_is_minimal_and_preserves_exact_static_inputs() -> Non
     assert environment["PATH"] == "/opt/uv:/usr/bin:/bin"
     assert environment["HOME"] == "/home/runner"
     assert environment["GITHUB_JOB"] == "core"
+    assert environment["NEWSROOM_SDLC_CACHE_KEY"] == "uv-linux-py312-lock"
+    assert environment["NEWSROOM_SDLC_CACHE_HIT"] == "true"
     assert "GITHUB_TOKEN" not in environment
     assert "NEO4J_ADMIN_PASSWORD" not in environment
     assert "NEWSROOM_NEO4J_PROJECTOR_PASSWORD" not in environment
@@ -437,6 +441,8 @@ def test_route_child_environment_is_fixed_and_drops_uv_cache() -> None:
     assert environment["HOME"] == "/tmp/runner"
     assert environment["TMPDIR"] == "/tmp/runner"
     assert "UV_CACHE_DIR" not in environment
+    assert "NEWSROOM_SDLC_CACHE_KEY" not in environment
+    assert "NEWSROOM_SDLC_CACHE_HIT" not in environment
     assert "GITHUB_TOKEN" not in environment
 
 
@@ -494,4 +500,16 @@ def test_lane_output_cannot_be_written_inside_artifact_root(
             lane_id="core",
             artifact_root="artifact",
             output_path="artifact/lane-output.json",
+        )
+
+
+
+def test_lane_cache_telemetry_rejects_control_characters() -> None:
+    ambient = _ambient("core")
+    ambient["NEWSROOM_SDLC_CACHE_KEY"] = "bad\nkey"
+    with pytest.raises(budget.WorkflowBudgetError, match="cache_environment"):
+        budget._child_environment(
+            ambient=ambient,
+            service=False,
+            preserve_lane_static=True,
         )

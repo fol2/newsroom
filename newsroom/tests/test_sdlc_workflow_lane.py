@@ -347,6 +347,8 @@ def test_evidence_uses_zero_producer_timing_and_service_digest(
     assert captured["queue_ms"] == 0
     assert captured["bootstrap_ms"] == 0
     assert captured["finalize_ms"] == 0
+    assert captured["cache_key"] is None
+    assert captured["cache_hit"] is False
     assert captured["service_compatibility_digest"] == service_compatibility_digest()
 
 
@@ -661,3 +663,62 @@ def test_exact_route_test_topology_is_accepted(
     route["sentinels"] = list(contract.sentinels)
 
     lane_module._validate_test_topology(contract, route)
+
+
+
+def test_cache_evidence_is_exact_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NEWSROOM_SDLC_CACHE_KEY", raising=False)
+    monkeypatch.delenv("NEWSROOM_SDLC_CACHE_HIT", raising=False)
+    assert lane_module._cache_evidence() == (None, False)
+
+    monkeypatch.setenv("NEWSROOM_SDLC_CACHE_KEY", "uv-linux-py312-lock")
+    monkeypatch.setenv("NEWSROOM_SDLC_CACHE_HIT", "false")
+    assert lane_module._cache_evidence() == ("uv-linux-py312-lock", False)
+
+    monkeypatch.setenv("NEWSROOM_SDLC_CACHE_HIT", "true")
+    assert lane_module._cache_evidence() == ("uv-linux-py312-lock", True)
+
+    monkeypatch.delenv("NEWSROOM_SDLC_CACHE_KEY")
+    with pytest.raises(WorkflowLaneError, match="cache_environment"):
+        lane_module._cache_evidence()
+
+    monkeypatch.setenv("NEWSROOM_SDLC_CACHE_KEY", "key")
+    monkeypatch.setenv("NEWSROOM_SDLC_CACHE_HIT", "maybe")
+    with pytest.raises(WorkflowLaneError, match="cache_environment"):
+        lane_module._cache_evidence()
+
+    monkeypatch.setenv("NEWSROOM_SDLC_CACHE_KEY", "bad\nkey")
+    monkeypatch.setenv("NEWSROOM_SDLC_CACHE_HIT", "false")
+    with pytest.raises(WorkflowLaneError, match="cache_environment"):
+        lane_module._cache_evidence()
+
+
+def test_gate_evidence_records_exact_cache_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract(tmp_path)
+    captured = {}
+    monkeypatch.setenv("NEWSROOM_SDLC_CACHE_KEY", "uv-cache-exact-key")
+    monkeypatch.setenv("NEWSROOM_SDLC_CACHE_HIT", "true")
+    monkeypatch.setattr(lane_module, "installed_uv_version", lambda: "0.8.0")
+    monkeypatch.setattr(
+        lane_module,
+        "build_gate_evidence",
+        lambda **kwargs: captured.update(kwargs) or {"result": "PASS"},
+    )
+
+    lane_module._evidence(
+        repo_root=tmp_path,
+        contract=contract,
+        route=_route(),
+        command_run=_run("source-integrity", "source").as_dict(),
+        summary=None,
+        runner_kind="github-hosted",
+        service_digest=None,
+    )
+
+    assert captured["cache_key"] == "uv-cache-exact-key"
+    assert captured["cache_hit"] is True
