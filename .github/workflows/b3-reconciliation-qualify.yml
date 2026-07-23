@@ -4,12 +4,15 @@ on:
   push:
     branches:
       - agent/b3-reconciliation-qualify
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 concurrency:
-  group: b3-reconciliation-qualify
+  group: b3-reconciliation-qualify-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -30,6 +33,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           ref: agent/increment-1b3-rebuild-promotion
+          path: .target
           fetch-depth: 0
           persist-credentials: true
           show-progress: false
@@ -44,11 +48,12 @@ jobs:
         with:
           version: '0.8.0'
           enable-cache: true
-          cache-dependency-glob: uv.lock
+          cache-dependency-glob: .target/uv.lock
           github-token: ''
 
       - name: Apply and qualify exact reconciliation source
         shell: bash
+        working-directory: .target
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = 8fd54ef97b877202de24223b24973a89007cdea2
@@ -62,7 +67,7 @@ jobs:
           test "$(git hash-object newsroom/tests/test_projection_b3_neo4j_service.py)" = 7f0be2aaea58710b9486d4dd2663e9e780f52c9d
           test "$(git hash-object newsroom/tests/test_projection_b3_tombstone.py)" = bda0e6bd4bc3bd543e424049dac41bf49d58e89f
           patch="${RUNNER_TEMP}/b3-reconciliation.patch"
-          gzip --decompress --stdout .qualifier/.sdlc/b3-reconciliation.patch.gz > "${patch}"
+          gzip --decompress --stdout ../.qualifier/.sdlc/b3-reconciliation.patch.gz > "${patch}"
           test "$(sha256sum "${patch}" | cut -d' ' -f1)" = 14a4a7929416fcf4a5d75055261586a5bbf8923ea999dd8f836e41c523a68788
           git apply --check "${patch}"
           git apply "${patch}"
@@ -82,6 +87,7 @@ jobs:
 
       - name: Commit exact source-only reconciliation
         shell: bash
+        working-directory: .target
         run: |
           set -euo pipefail
           expected_head="$(git rev-parse HEAD)"
@@ -91,7 +97,6 @@ jobs:
             .sdlc/b3-reconcile-source.tar.gz.b64 \
             .sdlc/b3-reconcile-source.sha256 \
             .sdlc/b3-reconciliation-diagnostic.txt
-          rm -rf .qualifier
           git add -A
           test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
           git diff --cached --check
