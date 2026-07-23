@@ -254,6 +254,13 @@ def validate_route_bundle(
 ) -> RouteOutput:
     root = Path(repo_root).resolve()
     _, directory = _relative_existing_directory(root, output_directory)
+    entries = tuple(sorted(directory.iterdir(), key=lambda path: path.name))
+    if (
+        tuple(path.name for path in entries)
+        != ("event.json", "route-output.json", "route.json")
+        or any(path.is_symlink() or not path.is_file() for path in entries)
+    ):
+        raise WorkflowBudgetError("route_inventory")
     try:
         route = _validate_route(contract, _canonical_load(directory / "route.json"))
         event = validate_workflow_event(_canonical_load(directory / "event.json"))
@@ -411,6 +418,8 @@ def run_bounded_lane_finalization(
     route_relative, _ = _relative_existing_file(root, route_path)
     artifact_relative, artifact_directory = _relative_existing_directory(root, artifact_root)
     output = _safe_target(root, output_path, suffix=".json")
+    if output.is_relative_to(artifact_directory):
+        raise WorkflowBudgetError("output_path")
     output_relative = output.relative_to(root).as_posix()
     deadline = start_lane_deadline(contract, "evidence-finalize")
     run = run_configured_gate(

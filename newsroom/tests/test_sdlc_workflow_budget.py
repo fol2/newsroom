@@ -447,3 +447,51 @@ def test_service_profile_cannot_use_route_environment() -> None:
             service=True,
             preserve_lane_static=False,
         )
+
+
+
+def test_route_bundle_rejects_unlisted_inventory(tmp_path: Path) -> None:
+    contract = _contract(tmp_path)
+    context = _context("route")
+    event = _event()
+    route = _route(contract)
+    directory = tmp_path / "route-extra"
+    directory.mkdir()
+    output = RouteOutput(
+        artifact_name=budget._route_artifact_name(context),
+        service_required=False,
+        route_identity=sha256_identity(route),
+        event_identity=str(event.as_dict()["event_identity"]),
+    )
+    _write(directory / "route.json", route)
+    _write(directory / "event.json", event.as_dict())
+    _write(directory / "route-output.json", output.as_dict())
+    (directory / "unlisted.txt").write_text("unexpected", encoding="utf-8")
+
+    with pytest.raises(budget.WorkflowBudgetError, match="route_inventory"):
+        budget.validate_route_bundle(
+            repo_root=tmp_path,
+            output_directory="route-extra",
+            context=context,
+            contract=contract,
+        )
+
+
+def test_lane_output_cannot_be_written_inside_artifact_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = _context("core")
+    contract = _contract(tmp_path)
+    _write(tmp_path / "route.json", {"route": True})
+    (tmp_path / "artifact").mkdir()
+    monkeypatch.setattr(budget, "context_from_environment", lambda _root: context)
+    monkeypatch.setattr(budget, "load_contract", lambda _root: contract)
+
+    with pytest.raises(budget.WorkflowBudgetError, match="output_path"):
+        budget.run_bounded_lane_finalization(
+            repo_root=tmp_path,
+            route_path="route.json",
+            lane_id="core",
+            artifact_root="artifact",
+            output_path="artifact/lane-output.json",
+        )
