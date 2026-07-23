@@ -37,100 +37,8 @@ jobs:
           set -euo pipefail
           test "$(git hash-object scripts/sdlc/shadow_decision.py)" = 5667e7895546e25498de7809a90e4d1e2442b522
           test "$(git hash-object newsroom/tests/test_sdlc_shadow_decision.py)" = 80f6cf5844ac282ef7dbeb102e89c54c4af76cee
-          python - <<'PY'
-          from pathlib import Path
-
-          source_path = Path('scripts/sdlc/shadow_decision.py')
-          source = source_path.read_text(encoding='utf-8')
-          old = '''        if self.lanes:
-              if self.event is None or "core" not in set(lane_ids):
-                  raise ShadowDecisionError("lane_event")
-              if (self.result == "PASS") is not (self.first_failure is None):
-                  raise ShadowDecisionError("first_failure")
-          elif (
-              self.event is not None
-              or self.result == "PASS"
-              or self.first_failure is None
-              or self.first_failure.lane_id != "decision"
-          ):
-              raise ShadowDecisionError("failure_record")
-          '''
-          new = '''        if self.lanes:
-              if self.event is None or "core" not in set(lane_ids):
-                  raise ShadowDecisionError("lane_event")
-              if (self.result == "PASS") is not (self.first_failure is None):
-                  raise ShadowDecisionError("first_failure")
-              if self.first_failure is not None:
-                  if self.first_failure.result != self.result:
-                      raise ShadowDecisionError("first_failure")
-                  expected_reason = (
-                      f"{self.result}:decision:{self.first_failure.lane_id}:"
-                      f"{self.first_failure.gate_id}:{self.first_failure.phase}"
-                  )
-                  if self.result_reason != expected_reason:
-                      raise ShadowDecisionError("first_failure")
-          elif (
-              self.event is not None
-              or self.result == "PASS"
-              or self.first_failure is None
-              or self.first_failure.lane_id != "decision"
-              or self.first_failure.result != self.result
-              or self.first_failure.result_reason != self.result_reason
-          ):
-              raise ShadowDecisionError("failure_record")
-          '''
-          if source.count(old) != 1:
-              raise SystemExit('source semantic replacement mismatch')
-          source_path.write_text(source.replace(old, new), encoding='utf-8')
-
-          test_path = Path('newsroom/tests/test_sdlc_shadow_decision.py')
-          tests = test_path.read_text(encoding='utf-8')
-          marker = 'def test_direct_failure_summary_must_match_top_level_decision('
-          if marker in tests:
-              raise SystemExit('semantic test already present')
-          tests += '''
-
-
-          def test_direct_failure_summary_must_match_top_level_decision(
-              monkeypatch: pytest.MonkeyPatch,
-          ) -> None:
-              route = _route()
-              failed_lane = _lane(
-                  "core",
-                  route,
-                  gates=(
-                      _gate("source-integrity", "source"),
-                      _gate("core-deterministic", "tests", required_skip=True),
-                  ),
-              )
-              _patch_lane_validator(monkeypatch, failed_lane)
-              decision = aggregate_shadow_decision(
-                  context=_context(),
-                  event=_event(),
-                  core=failed_lane,  # type: ignore[arg-type]
-                  service=None,
-                  contract=_contract(),
-              )
-              assert decision.first_failure is not None
-              mismatched = replace(
-                  decision.first_failure,
-                  result="ENVIRONMENT_ERROR",
-                  result_reason="ENVIRONMENT_ERROR:core:job",
-              )
-              with pytest.raises(ShadowDecisionError, match="first_failure"):
-                  replace(decision, first_failure=mismatched)
-
-              typed = failure_shadow_decision(context=_context(), code="missing-core")
-              assert typed.first_failure is not None
-              changed = replace(
-                  typed.first_failure,
-                  result_reason="EVIDENCE_MISMATCH:decision:other",
-              )
-              with pytest.raises(ShadowDecisionError, match="failure_record"):
-                  replace(typed, first_failure=changed)
-          '''
-          test_path.write_text(tests, encoding='utf-8')
-          PY
+          test "$(git hash-object .sdlc/apply-shadow-decision-semantics.py)" = 34d7588d58acb99a9256ef971bf3994c2fdc107e
+          python .sdlc/apply-shadow-decision-semantics.py
           python -m py_compile scripts/sdlc/shadow_decision.py newsroom/tests/test_sdlc_shadow_decision.py
 
       - name: Sync locked Python environment
@@ -150,7 +58,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git rm -f .github/workflows/sdlc-phase2b1c-semantic-fix.yml
+          git rm -f .github/workflows/sdlc-phase2b1c-semantic-fix.yml .sdlc/apply-shadow-decision-semantics.py
           git add scripts/sdlc/shadow_decision.py newsroom/tests/test_sdlc_shadow_decision.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
