@@ -155,7 +155,7 @@ jobs:
 
   publish:
     needs: qualify
-    if: github.event_name == 'push' && github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
