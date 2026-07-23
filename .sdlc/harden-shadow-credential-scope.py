@@ -86,21 +86,42 @@ if workflow.count(execute_marker) != 1:
     raise SystemExit("execute credential scope mismatch")
 workflow = workflow.replace(execute_marker, execute_replacement)
 
-cleanup_marker = '''      - name: Remove disposable Neo4j state
+old_cleanup = '''      - name: Remove disposable Neo4j state
         if: always()
         shell: bash
         run: timeout --signal=TERM --kill-after=2s 10s docker rm --force newsroom-sdlc-neo4j || true
 '''
-cleanup_replacement = '''      - name: Remove disposable Neo4j state
+cleanup = '''      - name: Remove disposable Neo4j state
         if: always()
         shell: bash
         run: |
           rm -f "${RUNNER_TEMP}/newsroom-sdlc-neo4j.env"
           timeout --signal=TERM --kill-after=2s 10s docker rm --force newsroom-sdlc-neo4j || true
+
 '''
-if workflow.count(cleanup_marker) != 1:
+if workflow.count(old_cleanup) != 1:
     raise SystemExit("credential cleanup mismatch")
-workflow = workflow.replace(cleanup_marker, cleanup_replacement)
+workflow = workflow.replace(old_cleanup, "")
+
+service_finalize = '''      - name: Finalize evidence
+        if: always()
+        shell: bash
+        env:
+          NEWSROOM_SDLC_CACHE_KEY: ${{ steps.setup_uv.outputs.cache-key }}
+          NEWSROOM_SDLC_CACHE_HIT: ${{ steps.setup_uv.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m scripts.sdlc.workflow_budget finalize-lane \\
+            --route .sdlc-run/route/route.json \\
+            --lane service \\
+            --artifact-root .sdlc-run/service \\
+            --output .sdlc-run/service-lane.json \\
+            > "${RUNNER_TEMP}/service-finalize-gate.json"
+          cat "${RUNNER_TEMP}/service-finalize-gate.json"
+'''
+if workflow.count(service_finalize) != 1:
+    raise SystemExit("service finalization position mismatch")
+workflow = workflow.replace(service_finalize, cleanup + service_finalize)
 WORKFLOW.write_text(workflow, encoding="utf-8")
 
 tests = TEST.read_text(encoding="utf-8")
@@ -151,6 +172,10 @@ cleanup_assertion = '''    assert "docker rm --force newsroom-sdlc-neo4j" in cle
 cleanup_replacement = '''    assert 'rm -f "${RUNNER_TEMP}/newsroom-sdlc-neo4j.env"' in cleanup["run"]
     assert "docker rm --force newsroom-sdlc-neo4j" in cleanup["run"]
     assert "kill-after=2s 10s" in cleanup["run"]
+    service_names = [step["name"] for step in _steps("service")]
+    assert service_names.index("Execute evidence lane") < service_names.index("Remove disposable Neo4j state")
+    assert service_names.index("Remove disposable Neo4j state") < service_names.index("Finalize evidence")
+    assert service_names.index("Finalize evidence") < service_names.index("Upload service lane evidence")
 '''
 if tests.count(cleanup_assertion) != 1:
     raise SystemExit("credential cleanup test mismatch")
@@ -168,14 +193,27 @@ def test_setup_uv_never_receives_the_github_token() -> None:
         assert setup[0]["with"]["github-token"] == ""
 
 
-def test_service_credentials_are_step_scoped_and_never_reach_actions() -> None:
+def test_service_credentials_are_removed_before_untrusted_finalization_or_actions() -> None:
     rendered = WORKFLOW_PATH.read_text(encoding="utf-8")
     assert "GITHUB_ENV" not in rendered
     credential_file = "${RUNNER_TEMP}/newsroom-sdlc-neo4j.env"
     assert rendered.count(credential_file) == 4
+    service_steps = _steps("service")
+    cleanup_index = next(
+        index for index, step in enumerate(service_steps)
+        if step["name"] == "Remove disposable Neo4j state"
+    )
+    assert cleanup_index < next(
+        index for index, step in enumerate(service_steps)
+        if step["name"] == "Finalize evidence"
+    )
+    assert cleanup_index < next(
+        index for index, step in enumerate(service_steps)
+        if step["name"] == "Upload service lane evidence"
+    )
     assert all(
         "PASSWORD" not in str(name) and "TOKEN" not in str(name)
-        for step in _steps("service")
+        for step in service_steps
         if step.get("uses")
         for name in step.get("env", {})
     )
