@@ -4,12 +4,15 @@ on:
   push:
     branches:
       - agent/sdlc-v2-phase2b-shadow-workflow
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 concurrency:
-  group: sdlc-workflow-lane-hardening-${{ github.ref }}
+  group: sdlc-workflow-lane-hardening-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
