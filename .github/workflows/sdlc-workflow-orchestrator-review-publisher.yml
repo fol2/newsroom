@@ -34,7 +34,7 @@ jobs:
           set -euo pipefail
           test "$(git hash-object scripts/sdlc/workflow_orchestrator.py)" = df75c94f849b14c22ce67d99c9c9703d4ffa7ae5
           test "$(git hash-object newsroom/tests/test_sdlc_workflow_orchestrator.py)" = ebc136ddaf0094901f6fc1e71bdc8e1cb45932d4
-          test "$(git hash-object .sdlc/workflow-orchestrator-review-fixes.py)" = cd60fc42f3be05f95b9d75ec9064b70c24b43b77
+          test "$(git hash-object .sdlc/workflow-orchestrator-review-fixes.py)" = b9856248248a19456b8b52a2d0886beaf479762a
           python .sdlc/workflow-orchestrator-review-fixes.py
           python -m py_compile \
             scripts/sdlc/workflow_orchestrator.py \
