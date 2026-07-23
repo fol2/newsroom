@@ -1,0 +1,467 @@
+............................F...........                                 [100%]
+=================================== FAILURES ===================================
+__________ test_shadow_workflow_has_exact_nonprivileged_event_surface __________
+
+    def test_shadow_workflow_has_exact_nonprivileged_event_surface() -> None:
+        workflow = _workflow()
+        assert set(workflow) == {"name", "on", "permissions", "concurrency", "jobs"}
+        assert workflow["name"] == "SDLC Evidence Shadow"
+    
+        events = workflow["on"]
+        assert isinstance(events, dict)
+        assert set(events) == {"pull_request", "merge_group", "workflow_dispatch"}
+        assert "push" not in events
+        assert events["merge_group"] == {"types": ["checks_requested"]}
+        manual = events["workflow_dispatch"]
+        assert isinstance(manual, dict)
+        assert manual["inputs"]["base_sha"]["required"] == "false"
+        assert manual["inputs"]["base_sha"]["type"] == "string"
+    
+        assert workflow["permissions"] == {"contents": "read"}
+        assert workflow["concurrency"] == {
+            "group": (
+                "newsroom-sdlc-evidence-${{ github.event.pull_request.number || "
+                "github.event.merge_group.head_sha || github.ref }}"
+            ),
+            "cancel-in-progress": "true",
+        }
+    
+        rendered = WORKFLOW_PATH.read_text(encoding="utf-8")
+        assert "pull_request_target" not in rendered
+>       assert "secrets." not in rendered
+E       assert 'secrets.' not in 'name: SDLC ...ision.json\n'
+E         
+E         'secrets.' is contained here:
+E               print(secrets.token_urlsafe(32))
+E         ?           ++++++++
+E                     PY
+E                     )"
+E                     NEWSROOM_NEO4J_PROJECTOR_PASSWORD="$(python - <<'PY'
+E                     import secrets
+E                     print(secrets.token_urlsafe(32))
+E                     PY
+E                     )"
+E                     echo "::add-mask::${NEO4J_ADMIN_PASSWORD}"
+E                     echo "::add-mask::${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+E                     {
+E                       echo "NEO4J_ADMIN_PASSWORD=${NEO4J_ADMIN_PASSWORD}"
+E                       echo "NEWSROOM_NEO4J_PROJECTOR_PASSWORD=${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+E                     } >> "${GITHUB_ENV}"
+E                     timeout --signal=TERM --kill-after=5s 55s \
+E                       docker pull "${NEO4J_B2_IMAGE}"
+E                     timeout --signal=TERM --kill-after=2s 10s \
+E                       docker run --detach --pull=never \
+E                         --name newsroom-sdlc-neo4j \
+E                         --publish 127.0.0.1:7687:7687 \
+E                         --env "NEO4J_AUTH=neo4j/${NEO4J_ADMIN_PASSWORD}" \
+E                         "${NEO4J_B2_IMAGE}"
+E           
+E                 - name: Wait for authenticated Neo4j
+E                   shell: bash
+E                   run: |
+E                     set -euo pipefail
+E                     uv run --no-sync python - <<'PY'
+E                     import os
+E                     import time
+E           
+E                     from neo4j import GraphDatabase
+E           
+E                     uri = os.environ['NEO4J_URI']
+E                     admin_auth = (
+E                         os.environ['NEO4J_ADMIN_USERNAME'],
+E                         os.environ['NEO4J_ADMIN_PASSWORD'],
+E                     )
+E                     deadline = time.monotonic() + 25.0
+E                     last_error = None
+E                     driver = None
+E                     while time.monotonic() < deadline:
+E                         try:
+E                             driver = GraphDatabase.driver(
+E                                 uri,
+E                                 auth=admin_auth,
+E                                 connection_timeout=1.0,
+E                             )
+E                             driver.verify_connectivity()
+E                             break
+E                         except Exception as exc:
+E                             last_error = exc
+E                             if driver is not None:
+E                                 driver.close()
+E                             driver = None
+E                             time.sleep(0.25)
+E                     else:
+E                         raise RuntimeError('authenticated Neo4j readiness timed out') from last_error
+E           
+E                     assert driver is not None
+E                     try:
+E                         with driver.session(database='system') as session:
+E                             session.run(
+E                                 'CREATE USER newsroom_projector IF NOT EXISTS '
+E                                 'SET PLAINTEXT PASSWORD $password CHANGE NOT REQUIRED',
+E                                 password=os.environ['NEWSROOM_NEO4J_PROJECTOR_PASSWORD'],
+E                             ).consume()
+E                     finally:
+E                         driver.close()
+E           
+E                     projector = GraphDatabase.driver(
+E                         uri,
+E                         auth=(
+E                             os.environ['NEWSROOM_NEO4J_PROJECTOR_USERNAME'],
+E                             os.environ['NEWSROOM_NEO4J_PROJECTOR_PASSWORD'],
+E                         ),
+E                         connection_timeout=1.0,
+E                     )
+E                     try:
+E                         projector.verify_connectivity()
+E                     finally:
+E                         projector.close()
+E                     PY
+E           
+E                 - name: Execute evidence lane
+E                   shell: bash
+E                   env:
+E                     NEWSROOM_SDLC_CACHE_KEY: ${{ steps.setup_uv.outputs.cache-key }}
+E                     NEWSROOM_SDLC_CACHE_HIT: ${{ steps.setup_uv.outputs.cache-hit }}
+E                   run: |
+E                     set -euo pipefail
+E                     uv run --no-sync python -m scripts.sdlc.workflow_lane execute \
+E                       --route .sdlc-run/route/route.json \
+E                       --lane service \
+E                       --artifact-root .sdlc-run/service \
+E                       --output .sdlc-run/service-execution.json
+E           
+E                 - name: Finalize evidence
+E                   if: always()
+E                   shell: bash
+E                   env:
+E                     NEWSROOM_SDLC_CACHE_KEY: ${{ steps.setup_uv.outputs.cache-key }}
+E                     NEWSROOM_SDLC_CACHE_HIT: ${{ steps.setup_uv.outputs.cache-hit }}
+E                   run: |
+E                     set -euo pipefail
+E                     uv run --no-sync python -m scripts.sdlc.workflow_budget finalize-lane \
+E                       --route .sdlc-run/route/route.json \
+E                       --lane service \
+E                       --artifact-root .sdlc-run/service \
+E                       --output .sdlc-run/service-lane.json \
+E                       > "${RUNNER_TEMP}/service-finalize-gate.json"
+E                     cat "${RUNNER_TEMP}/service-finalize-gate.json"
+E           
+E                 - name: Upload service lane evidence
+E                   if: always()
+E                   uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+E                   with:
+E                     name: newsroom-sdlc-${{ github.run_id }}-${{ github.run_attempt }}-service-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+E                     path: .sdlc-run/service
+E                     if-no-files-found: error
+E                     retention-days: 30
+E                     compression-level: 0
+E                     overwrite: false
+E                     include-hidden-files: false
+E                     archive: true
+E           
+E                 - name: Remove disposable Neo4j state
+E                   if: always()
+E                   shell: bash
+E                   run: timeout --signal=TERM --kill-after=2s 10s docker rm --force newsroom-sdlc-neo4j || true
+E           
+E             decision:
+E               name: decision
+E               needs:
+E                 - route
+E                 - core
+E                 - service
+E               if: always()
+E               runs-on: ubuntu-24.04
+E               timeout-minutes: 5
+E               permissions:
+E                 actions: read
+E                 contents: read
+E               steps:
+E                 - name: Checkout evaluated head
+E                   uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+E                   with:
+E                     ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+E                     fetch-depth: 0
+E                     persist-credentials: false
+E                     show-progress: false
+E           
+E                 - name: Set up Python 3.12
+E                   uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+E                   with:
+E                     python-version: '3.12'
+E           
+E                 - name: Prepare decision workspace
+E                   shell: bash
+E                   run: mkdir -p .sdlc-run
+E           
+E                 - name: Collect exact lane evidence
+E                   shell: bash
+E                   env:
+E                     GITHUB_TOKEN: ${{ github.token }}
+E                   run: |
+E                     set -uo pipefail
+E                     set +e
+E                     timeout --signal=TERM --kill-after=2s 55s \
+E                       python -m scripts.sdlc.workflow_orchestrator collect \
+E                         --output-directory .sdlc-run/decision-input \
+E                         > "${RUNNER_TEMP}/collection-result.json"
+E                     status="$?"
+E                     set -e
+E                     cat "${RUNNER_TEMP}/collection-result.json" || true
+E                     exit "${status}"
+E           
+E                 - name: Finalize decision
+E                   if: always()
+E                   shell: bash
+E                   run: |
+E                     set -euo pipefail
+E                     python -m scripts.sdlc.workflow_orchestrator decide \
+E                       --context .sdlc-run/decision-input/context.json \
+E                       --collection .sdlc-run/decision-input/collection.json \
+E                       --output .sdlc-run/decision.json \
+E                       > "${RUNNER_TEMP}/decision-result.json"
+E                     cat "${RUNNER_TEMP}/decision-result.json"
+E           
+E                 - name: Upload final decision evidence
+E                   if: always()
+E                   uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+E                   with:
+E                     name: newsroom-sdlc-decision-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+E                     path: |
+E                       .sdlc-run/decision-input/context.json
+E                       .sdlc-run/decision-input/collection.json
+E                       .sdlc-run/decision.json
+E                     if-no-files-found: error
+E                     retention-days: 30
+E                     compression-level: 0
+E                     overwrite: false
+E                     include-hidden-files: false
+E                     archive: true
+E           
+E                 - name: Report decision
+E                   if: always()
+E                   shell: bash
+E                   run: |
+E                     set -euo pipefail
+E                     python -m scripts.sdlc.workflow_orchestrator enforce \
+E                       --decision .sdlc-run/decision.json
+
+newsroom/tests/test_sdlc_evidence_workflow.py:98: AssertionError
+=========================== short test summary info ============================
+FAILED newsroom/tests/test_sdlc_evidence_workflow.py::test_shadow_workflow_has_exact_nonprivileged_event_surface - assert 'secrets.' not in 'name: SDLC ...ision.json\n'
+  
+  'secrets.' is contained here:
+        print(secrets.token_urlsafe(32))
+  ?           ++++++++
+              PY
+              )"
+              NEWSROOM_NEO4J_PROJECTOR_PASSWORD="$(python - <<'PY'
+              import secrets
+              print(secrets.token_urlsafe(32))
+              PY
+              )"
+              echo "::add-mask::${NEO4J_ADMIN_PASSWORD}"
+              echo "::add-mask::${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+              {
+                echo "NEO4J_ADMIN_PASSWORD=${NEO4J_ADMIN_PASSWORD}"
+                echo "NEWSROOM_NEO4J_PROJECTOR_PASSWORD=${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+              } >> "${GITHUB_ENV}"
+              timeout --signal=TERM --kill-after=5s 55s \
+                docker pull "${NEO4J_B2_IMAGE}"
+              timeout --signal=TERM --kill-after=2s 10s \
+                docker run --detach --pull=never \
+                  --name newsroom-sdlc-neo4j \
+                  --publish 127.0.0.1:7687:7687 \
+                  --env "NEO4J_AUTH=neo4j/${NEO4J_ADMIN_PASSWORD}" \
+                  "${NEO4J_B2_IMAGE}"
+    
+          - name: Wait for authenticated Neo4j
+            shell: bash
+            run: |
+              set -euo pipefail
+              uv run --no-sync python - <<'PY'
+              import os
+              import time
+    
+              from neo4j import GraphDatabase
+    
+              uri = os.environ['NEO4J_URI']
+              admin_auth = (
+                  os.environ['NEO4J_ADMIN_USERNAME'],
+                  os.environ['NEO4J_ADMIN_PASSWORD'],
+              )
+              deadline = time.monotonic() + 25.0
+              last_error = None
+              driver = None
+              while time.monotonic() < deadline:
+                  try:
+                      driver = GraphDatabase.driver(
+                          uri,
+                          auth=admin_auth,
+                          connection_timeout=1.0,
+                      )
+                      driver.verify_connectivity()
+                      break
+                  except Exception as exc:
+                      last_error = exc
+                      if driver is not None:
+                          driver.close()
+                      driver = None
+                      time.sleep(0.25)
+              else:
+                  raise RuntimeError('authenticated Neo4j readiness timed out') from last_error
+    
+              assert driver is not None
+              try:
+                  with driver.session(database='system') as session:
+                      session.run(
+                          'CREATE USER newsroom_projector IF NOT EXISTS '
+                          'SET PLAINTEXT PASSWORD $password CHANGE NOT REQUIRED',
+                          password=os.environ['NEWSROOM_NEO4J_PROJECTOR_PASSWORD'],
+                      ).consume()
+              finally:
+                  driver.close()
+    
+              projector = GraphDatabase.driver(
+                  uri,
+                  auth=(
+                      os.environ['NEWSROOM_NEO4J_PROJECTOR_USERNAME'],
+                      os.environ['NEWSROOM_NEO4J_PROJECTOR_PASSWORD'],
+                  ),
+                  connection_timeout=1.0,
+              )
+              try:
+                  projector.verify_connectivity()
+              finally:
+                  projector.close()
+              PY
+    
+          - name: Execute evidence lane
+            shell: bash
+            env:
+              NEWSROOM_SDLC_CACHE_KEY: ${{ steps.setup_uv.outputs.cache-key }}
+              NEWSROOM_SDLC_CACHE_HIT: ${{ steps.setup_uv.outputs.cache-hit }}
+            run: |
+              set -euo pipefail
+              uv run --no-sync python -m scripts.sdlc.workflow_lane execute \
+                --route .sdlc-run/route/route.json \
+                --lane service \
+                --artifact-root .sdlc-run/service \
+                --output .sdlc-run/service-execution.json
+    
+          - name: Finalize evidence
+            if: always()
+            shell: bash
+            env:
+              NEWSROOM_SDLC_CACHE_KEY: ${{ steps.setup_uv.outputs.cache-key }}
+              NEWSROOM_SDLC_CACHE_HIT: ${{ steps.setup_uv.outputs.cache-hit }}
+            run: |
+              set -euo pipefail
+              uv run --no-sync python -m scripts.sdlc.workflow_budget finalize-lane \
+                --route .sdlc-run/route/route.json \
+                --lane service \
+                --artifact-root .sdlc-run/service \
+                --output .sdlc-run/service-lane.json \
+                > "${RUNNER_TEMP}/service-finalize-gate.json"
+              cat "${RUNNER_TEMP}/service-finalize-gate.json"
+    
+          - name: Upload service lane evidence
+            if: always()
+            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+            with:
+              name: newsroom-sdlc-${{ github.run_id }}-${{ github.run_attempt }}-service-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+              path: .sdlc-run/service
+              if-no-files-found: error
+              retention-days: 30
+              compression-level: 0
+              overwrite: false
+              include-hidden-files: false
+              archive: true
+    
+          - name: Remove disposable Neo4j state
+            if: always()
+            shell: bash
+            run: timeout --signal=TERM --kill-after=2s 10s docker rm --force newsroom-sdlc-neo4j || true
+    
+      decision:
+        name: decision
+        needs:
+          - route
+          - core
+          - service
+        if: always()
+        runs-on: ubuntu-24.04
+        timeout-minutes: 5
+        permissions:
+          actions: read
+          contents: read
+        steps:
+          - name: Checkout evaluated head
+            uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            with:
+              ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+              fetch-depth: 0
+              persist-credentials: false
+              show-progress: false
+    
+          - name: Set up Python 3.12
+            uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+            with:
+              python-version: '3.12'
+    
+          - name: Prepare decision workspace
+            shell: bash
+            run: mkdir -p .sdlc-run
+    
+          - name: Collect exact lane evidence
+            shell: bash
+            env:
+              GITHUB_TOKEN: ${{ github.token }}
+            run: |
+              set -uo pipefail
+              set +e
+              timeout --signal=TERM --kill-after=2s 55s \
+                python -m scripts.sdlc.workflow_orchestrator collect \
+                  --output-directory .sdlc-run/decision-input \
+                  > "${RUNNER_TEMP}/collection-result.json"
+              status="$?"
+              set -e
+              cat "${RUNNER_TEMP}/collection-result.json" || true
+              exit "${status}"
+    
+          - name: Finalize decision
+            if: always()
+            shell: bash
+            run: |
+              set -euo pipefail
+              python -m scripts.sdlc.workflow_orchestrator decide \
+                --context .sdlc-run/decision-input/context.json \
+                --collection .sdlc-run/decision-input/collection.json \
+                --output .sdlc-run/decision.json \
+                > "${RUNNER_TEMP}/decision-result.json"
+              cat "${RUNNER_TEMP}/decision-result.json"
+    
+          - name: Upload final decision evidence
+            if: always()
+            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+            with:
+              name: newsroom-sdlc-decision-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+              path: |
+                .sdlc-run/decision-input/context.json
+                .sdlc-run/decision-input/collection.json
+                .sdlc-run/decision.json
+              if-no-files-found: error
+              retention-days: 30
+              compression-level: 0
+              overwrite: false
+              include-hidden-files: false
+              archive: true
+    
+          - name: Report decision
+            if: always()
+            shell: bash
+            run: |
+              set -euo pipefail
+              python -m scripts.sdlc.workflow_orchestrator enforce \
+                --decision .sdlc-run/decision.json
+1 failed, 39 passed in 1.77s
