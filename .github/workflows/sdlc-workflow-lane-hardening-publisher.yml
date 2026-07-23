@@ -42,7 +42,16 @@ jobs:
           test "$(sha256sum lane-hardening.py.gz | cut -d' ' -f1)" = 359a8d54c00bb5af17c612c2b5293104d134d020511525181f3a94d1bb17e30e
           gzip --decompress --stdout lane-hardening.py.gz > lane-hardening.py
           test "$(sha256sum lane-hardening.py | cut -d' ' -f1)" = c3fff25717f59feb0e379af0941e44ebb091fb183d0ba068cae6ddd45ea21c64
-          python lane-hardening.py
+          if ! python lane-hardening.py > .sdlc/lane-hardening-diagnostic.txt 2>&1; then
+            sed -n '1,20p' .sdlc/lane-hardening-diagnostic.txt
+            git add .sdlc/lane-hardening-diagnostic.txt
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'chore(sdlc): record lane transform diagnostic'
+            git push origin HEAD:agent/sdlc-v2-phase2b-shadow-workflow
+            exit 1
+          fi
+          rm -f .sdlc/lane-hardening-diagnostic.txt
           python -m py_compile scripts/sdlc/workflow_lane.py newsroom/tests/test_sdlc_workflow_lane.py
 
       - name: Sync locked Python environment
@@ -63,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -f lane-hardening.py lane-hardening.py.gz
-          git rm -f .github/workflows/sdlc-workflow-lane-hardening-publisher.yml .sdlc/workflow-lane-hardening.py.gz.b64
+          git rm -f .github/workflows/sdlc-workflow-lane-hardening-publisher.yml .sdlc/workflow-lane-hardening.py.gz.b64 .sdlc/workflow-lane-hardening.trigger
           git add scripts/sdlc/workflow_lane.py newsroom/tests/test_sdlc_workflow_lane.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
