@@ -215,11 +215,22 @@ class ShadowDecision:
                 raise ShadowDecisionError("lane_event")
             if (self.result == "PASS") is not (self.first_failure is None):
                 raise ShadowDecisionError("first_failure")
+            if self.first_failure is not None:
+                if self.first_failure.result != self.result:
+                    raise ShadowDecisionError("first_failure")
+                expected_reason = (
+                    f"{self.result}:decision:{self.first_failure.lane_id}:"
+                    f"{self.first_failure.gate_id}:{self.first_failure.phase}"
+                )
+                if self.result_reason != expected_reason:
+                    raise ShadowDecisionError("first_failure")
         elif (
             self.event is not None
             or self.result == "PASS"
             or self.first_failure is None
             or self.first_failure.lane_id != "decision"
+            or self.first_failure.result != self.result
+            or self.first_failure.result_reason != self.result_reason
         ):
             raise ShadowDecisionError("failure_record")
         identity = _sha(self.decision_identity, "decision_identity")

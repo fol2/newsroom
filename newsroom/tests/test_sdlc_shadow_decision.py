@@ -616,3 +616,43 @@ def test_cli_contract_failure_after_context_is_typed(
     assert payload["result"] == "EVIDENCE_MISMATCH"
     assert payload["result_reason"] == "EVIDENCE_MISMATCH:decision:invalid-input"
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
+
+
+
+def test_direct_failure_summary_must_match_top_level_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _route()
+    failed_lane = _lane(
+        "core",
+        route,
+        gates=(
+            _gate("source-integrity", "source"),
+            _gate("core-deterministic", "tests", required_skip=True),
+        ),
+    )
+    _patch_lane_validator(monkeypatch, failed_lane)
+    decision = aggregate_shadow_decision(
+        context=_context(),
+        event=_event(),
+        core=failed_lane,  # type: ignore[arg-type]
+        service=None,
+        contract=_contract(),
+    )
+    assert decision.first_failure is not None
+    mismatched = replace(
+        decision.first_failure,
+        result="ENVIRONMENT_ERROR",
+        result_reason="ENVIRONMENT_ERROR:core:job",
+    )
+    with pytest.raises(ShadowDecisionError, match="first_failure"):
+        replace(decision, first_failure=mismatched)
+
+    typed = failure_shadow_decision(context=_context(), code="missing-core")
+    assert typed.first_failure is not None
+    changed = replace(
+        typed.first_failure,
+        result_reason="EVIDENCE_MISMATCH:decision:other",
+    )
+    with pytest.raises(ShadowDecisionError, match="failure_record"):
+        replace(typed, first_failure=changed)
