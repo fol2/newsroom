@@ -450,3 +450,78 @@ def test_route_and_decision_artifact_names_are_attempt_scoped() -> None:
     assert "-12345-2-" in route
     assert core != service
     assert HEAD in core and HEAD in service
+
+
+
+def test_canonical_loader_rejects_symlink_input(tmp_path: Path) -> None:
+    target = tmp_path / "target.json"
+    _write(target, {"value": 1})
+    link = tmp_path / "link.json"
+    link.symlink_to(target)
+    with pytest.raises(orchestrator.WorkflowOrchestratorError, match="machine_json"):
+        orchestrator._canonical_load(link)
+
+
+def test_missing_collection_after_context_yields_typed_decision_without_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / "context.json", _context().as_dict())
+    monkeypatch.setattr(orchestrator, "load_contract", lambda _root: object())
+    monkeypatch.setattr(
+        orchestrator,
+        "run_configured_gate",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("child must not run")),
+    )
+
+    decision = orchestrator.run_bounded_decision(
+        repo_root=tmp_path,
+        context_path="context.json",
+        collection_path="missing.json",
+        output_path="decision.json",
+    )
+
+    assert decision.result == "EVIDENCE_MISMATCH"
+    assert decision.result_reason == "EVIDENCE_MISMATCH:decision:invalid-collection"
+
+
+def test_watchdog_environment_failure_is_typed_after_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / "context.json", _context().as_dict())
+    _write(tmp_path / "collection.json", {"ignored": True})
+    monkeypatch.setattr(orchestrator, "load_contract", lambda _root: object())
+    monkeypatch.setattr(
+        orchestrator,
+        "start_lane_deadline",
+        lambda *_args: LaneDeadline(1, 5_000),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_configured_gate",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("unavailable")),
+    )
+
+    decision = orchestrator.run_bounded_decision(
+        repo_root=tmp_path,
+        context_path="context.json",
+        collection_path="collection.json",
+        output_path="decision.json",
+    )
+
+    assert decision.result == "ENVIRONMENT_ERROR"
+    assert decision.result_reason == "ENVIRONMENT_ERROR:decision:finalization-environment"
+
+
+def test_final_decision_environment_is_fixed_and_secret_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANG", "attacker-controlled")
+    monkeypatch.setenv("PATH", "/tmp/untrusted")
+    monkeypatch.setenv("GITHUB_TOKEN", "secret")
+    assert orchestrator._decision_environment() == {
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+        "PYTHONHASHSEED": "0",
+        "PYTHONUTF8": "1",
+    }

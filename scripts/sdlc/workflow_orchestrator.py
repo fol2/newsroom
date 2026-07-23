@@ -111,7 +111,8 @@ def _result(value: object, code: str) -> str:
 
 def _canonical_load(path: Path, *, maximum: int = _MAX_JSON_BYTES) -> object:
     try:
-        payload = _safe_machine_file(path.resolve(), maximum=maximum, code="machine_file")
+        absolute = path if path.is_absolute() else path.absolute()
+        payload = _safe_machine_file(absolute, maximum=maximum, code="machine_file")
         value = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object)
         _validate_json_depth(value)
     except (ArtifactProvenanceError, UnicodeError, json.JSONDecodeError) as exc:
@@ -537,9 +538,9 @@ def decision_from_collection(
 
 def _decision_environment() -> dict[str, str]:
     return {
-        "LANG": os.environ.get("LANG", "C.UTF-8"),
-        "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
         "PYTHONHASHSEED": "0",
         "PYTHONUTF8": "1",
     }
@@ -573,34 +574,57 @@ def run_bounded_decision(
         )
         _private_write(output, decision.as_dict())
         return decision
+    try:
+        collection_input = _safe_input(root, collection_path)
+    except WorkflowOrchestratorError:
+        decision = failure_shadow_decision(
+            context=context, code="invalid-collection", result="EVIDENCE_MISMATCH"
+        )
+        decision = validate_shadow_decision(decision.as_dict(), contract=contract)
+        _private_write(output, decision.as_dict())
+        return decision
     temporary = Path(tempfile.mkdtemp(prefix=".shadow-decision.", dir=output.parent))
     try:
         child = temporary / "decision.json"
-        deadline = start_lane_deadline(contract, "evidence-finalize")
-        run = run_configured_gate(
-            contract=contract,
-            gate_id="evidence-finalize",
-            phase="decision",
-            argv=(
-                sys.executable,
-                "-m",
-                "scripts.sdlc.workflow_orchestrator",
-                "decision-child",
-                "--repo-root",
-                str(root),
-                "--context",
-                str(_safe_input(root, context_path)),
-                "--collection",
-                str(_safe_input(root, collection_path)),
-                "--output",
-                str(child),
-            ),
-            deadline=deadline,
-            cwd=root,
-            env=_decision_environment(),
-            output_limit_bytes=65_536,
-            termination_grace_seconds=0.25,
-        )
+        try:
+            deadline = start_lane_deadline(contract, "evidence-finalize")
+            run = run_configured_gate(
+                contract=contract,
+                gate_id="evidence-finalize",
+                phase="decision",
+                argv=(
+                    sys.executable,
+                    "-m",
+                    "scripts.sdlc.workflow_orchestrator",
+                    "decision-child",
+                    "--repo-root",
+                    str(root),
+                    "--context",
+                    str(_safe_input(root, context_path)),
+                    "--collection",
+                    str(collection_input),
+                    "--output",
+                    str(child),
+                ),
+                deadline=deadline,
+                cwd=root,
+                env=_decision_environment(),
+                output_limit_bytes=65_536,
+                termination_grace_seconds=0.25,
+            )
+        except (GateRunError, OSError):
+            run = GateRunResult(
+                "evidence-finalize",
+                "decision",
+                "ENVIRONMENT_ERROR",
+                "ENVIRONMENT_ERROR:evidence-finalize:decision:watchdog",
+                None,
+                0,
+                "",
+                "",
+                False,
+                False,
+            )
         decision: ShadowDecision
         if run.result == "PASS" and child.is_file():
             try:
