@@ -1,0 +1,77 @@
+name: SDLC Shadow Virtualenv Fix Publisher
+
+on:
+  push:
+    branches:
+      - agent/sdlc-v2-phase2b-evidence-workflow-release
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sdlc-shadow-venv-fix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/sdlc-v2-phase2b-evidence-workflow-release
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+
+      - name: Apply exact virtualenv execution correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object scripts/sdlc/workflow_lane.py)" = 9cbd465e71359e43ed7064217fc6c1ed18116516
+          test "$(git hash-object newsroom/tests/test_sdlc_workflow_lane.py)" = 9bbb4f75069728c6956bc6a6e6ad2ca85d631f2a
+          test "$(git hash-object .sdlc/fix-shadow-venv-execution.py)" = 74ec249ae09aa8f154bbd29b3bff8b618692f665
+          python .sdlc/fix-shadow-venv-execution.py
+          python -m py_compile \
+            scripts/sdlc/workflow_lane.py \
+            newsroom/tests/test_sdlc_workflow_lane.py
+
+      - name: Sync locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check uv==0.8.0
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Verify exact correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            newsroom/tests/test_sdlc_evidence_workflow.py
+          uv run --no-sync python -m pytest -q newsroom/tests/test_sdlc_*.py
+          git diff --check
+
+      - name: Commit source-only correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm -f \
+            .github/workflows/sdlc-shadow-venv-publisher.yml \
+            .sdlc/fix-shadow-venv-execution.py
+          git add \
+            scripts/sdlc/workflow_lane.py \
+            newsroom/tests/test_sdlc_workflow_lane.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(sdlc): execute gates through locked uv environment'
+          git push origin HEAD:agent/sdlc-v2-phase2b-evidence-workflow-release
