@@ -4,15 +4,12 @@ on:
   push:
     branches:
       - agent/b3-reconciliation-qualify
-  pull_request:
-    branches:
-      - main
 
 permissions:
   contents: write
 
 concurrency:
-  group: b3-reconciliation-qualify-${{ github.event.pull_request.number || github.ref }}
+  group: b3-reconciliation-qualify
   cancel-in-progress: true
 
 jobs:
@@ -51,35 +48,49 @@ jobs:
           cache-dependency-glob: .target/uv.lock
           github-token: ''
 
-      - name: Apply and qualify exact reconciliation source
+      - name: Apply, qualify and publish exact B3 source
         shell: bash
         working-directory: .target
         run: |
           set -euo pipefail
           diagnostic="${RUNNER_TEMP}/b3-reconciliation-qualifier.log"
           exec > >(tee "${diagnostic}") 2>&1
+          expected_head="8fd54ef97b877202de24223b24973a89007cdea2"
           echo stage=target-identity
-          test "$(git rev-parse HEAD)" = 8fd54ef97b877202de24223b24973a89007cdea2
-          test "$(git hash-object newsroom/authority/_neo4j_projection_system.py)" = 49ffd8663e2289fc2a8277e14d13a0dd953ca333
-          test "$(git hash-object newsroom/authority/_projection_system.py)" = 63f522df6598d47a4edb1da860f3e2f462d5c3e1
-          test "$(git hash-object newsroom/projection/neo4j/__init__.py)" = 107a8a47930b717f9a778c70c9efaba1e23628a6
-          test "$(git hash-object newsroom/projection/neo4j/_adapter.py)" = ea26b5959deb32c98381cf6d8861823b881a2bbe
-          test "$(git hash-object newsroom/projection/neo4j/models.py)" = bc9cdd1ad5013d1992ebba2e1309189a6488ef64
-          test "$(git hash-object newsroom/tests/projection_b2_helpers.py)" = d3856cda8e05a38eca22835a429a1cd6de9ea580
-          test "$(git hash-object newsroom/tests/test_projection_b2_boundaries.py)" = 4ce93e7dfb3dc35d09f8122cbda1255f74c463ba
-          test "$(git hash-object newsroom/tests/test_projection_b3_neo4j_service.py)" = 7f0be2aaea58710b9486d4dd2663e9e780f52c9d
-          test "$(git hash-object newsroom/tests/test_projection_b3_tombstone.py)" = bda0e6bd4bc3bd543e424049dac41bf49d58e89f
-          echo stage=decode-patch
-          patch="${RUNNER_TEMP}/b3-reconciliation.patch"
-          gzip --decompress --stdout ../.qualifier/.sdlc/b3-reconciliation.patch.gz > "${patch}"
-          test "$(sha256sum "${patch}" | cut -d' ' -f1)" = 14a4a7929416fcf4a5d75055261586a5bbf8923ea999dd8f836e41c523a68788
-          echo stage=apply-patch
-          git apply --check "${patch}"
-          git apply "${patch}"
+          test "$(git rev-parse HEAD)" = "${expected_head}"
+
+          echo stage=apply-reconciliation
+          reconciliation_patch="${RUNNER_TEMP}/b3-reconciliation.patch"
+          gzip --decompress --stdout ../.qualifier/.sdlc/b3-reconciliation.patch.gz > "${reconciliation_patch}"
+          test "$(sha256sum "${reconciliation_patch}" | cut -d' ' -f1)" = 14a4a7929416fcf4a5d75055261586a5bbf8923ea999dd8f836e41c523a68788
+          git apply --check "${reconciliation_patch}"
+          git apply "${reconciliation_patch}"
+          git add -A
+          test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(projection): reconcile generation state before validation'
+
+          echo stage=apply-active-serving
+          active_b64=../.qualifier/.sdlc/b3-active-nonworkflow.patch.gz.b64
+          test "$(sha256sum "${active_b64}" | cut -d' ' -f1)" = bf8a1cbd195ebbe8e56a25100801ba96b6ed5ce148fc2b348ae0397831e517ac
+          active_gz="${RUNNER_TEMP}/b3-active-nonworkflow.patch.gz"
+          active_patch="${RUNNER_TEMP}/b3-active-nonworkflow.patch"
+          base64 --decode "${active_b64}" > "${active_gz}"
+          test "$(sha256sum "${active_gz}" | cut -d' ' -f1)" = 5e7585b7c023ff7e6b889e77eb6b1ff61e3bc8aee7508f97be1be5bfa71efe6d
+          gzip --decompress --stdout "${active_gz}" > "${active_patch}"
+          test "$(sha256sum "${active_patch}" | cut -d' ' -f1)" = 979d7a97f9317ee554070fcb1214fc466dd4a9be1e08eeb6566a01c280560b3e
+          git apply --check "${active_patch}"
+          git apply "${active_patch}"
+          git add -A
+          test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
+          git diff --cached --check
+          git commit -m 'feat(projection): serve only authority-selected active generation'
+
           echo stage=locked-environment
           uv lock --check
           uv sync --dev --locked
-          echo stage=compile
           uv run --no-sync python -m compileall -q newsroom scripts
           echo stage=projection-tests
           uv run --no-sync python -m pytest -q \
@@ -93,8 +104,16 @@ jobs:
             --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
             --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
             --fail-on-regression
-          git diff --check
-          echo stage=qualified
+          git diff --check "${expected_head}" HEAD
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+          echo stage=publish
+          remote_head="$(git ls-remote origin refs/heads/agent/increment-1b3-rebuild-promotion | cut -f1)"
+          test "${remote_head}" = "${expected_head}"
+          git push \
+            --force-with-lease=refs/heads/agent/increment-1b3-rebuild-promotion:${expected_head} \
+            origin HEAD:agent/increment-1b3-rebuild-promotion
+          echo stage=published
 
       - name: Upload qualifier diagnostic
         if: always()
@@ -107,26 +126,3 @@ jobs:
           compression-level: 0
           overwrite: false
           include-hidden-files: false
-
-      - name: Commit exact source-only reconciliation
-        shell: bash
-        working-directory: .target
-        run: |
-          set -euo pipefail
-          expected_head="$(git rev-parse HEAD)"
-          git restore --source=HEAD -- .github/workflows/projection-b2-neo4j.yml
-          rm -f \
-            .sdlc/b3-reconciliation.patch.gz.b64 \
-            .sdlc/b3-reconcile-export-run.txt \
-            .sdlc/b3-reconcile-source.tar.gz.b64 \
-            .sdlc/b3-reconcile-source.sha256 \
-            .sdlc/b3-reconciliation-diagnostic.txt
-          git add -A
-          test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
-          git diff --cached --check
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix(projection): reconcile generation state before validation'
-          remote_head="$(git ls-remote origin refs/heads/agent/increment-1b3-rebuild-promotion | cut -f1)"
-          test "${remote_head}" = "${expected_head}"
-          git push --force-with-lease=refs/heads/agent/increment-1b3-rebuild-promotion:${expected_head} origin HEAD:agent/increment-1b3-rebuild-promotion
