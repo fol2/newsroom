@@ -46,23 +46,45 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git merge-base --is-ancestor f43de049b9e0a95f7d38fe26e6c8491385eb673e HEAD
-          test "$(git hash-object .sdlc/add-b3-tombstone-projection.py)" = d7dc92ae8d5b92ae028c64d8bae22a21e2af606a
-          uv lock --check
-          uv sync --dev --locked
-          uv run --no-sync python .sdlc/add-b3-tombstone-projection.py
-          uv run --no-sync python -m compileall -q newsroom scripts
-          uv run --no-sync python -m pytest -q \
-            newsroom/tests/test_authority_a2b_lifecycle.py \
-            newsroom/tests/test_authority_a2b_object_commands.py \
-            newsroom/tests/test_projection_b1_contracts.py \
-            newsroom/tests/test_projection_b2_adapter_unit.py \
-            newsroom/tests/test_projection_b3_rebuild.py \
-            newsroom/tests/test_projection_b3_neo4j_service.py \
-            newsroom/tests/test_sdlc_classifier.py \
-            newsroom/tests/test_sdlc_workflow_lane.py
-          uv run --no-sync python -m pytest -q newsroom/tests
-          git diff --check
+          diagnostic="${RUNNER_TEMP}/b3-tombstone-qualification.log"
+          set +e
+          {
+            git merge-base --is-ancestor f43de049b9e0a95f7d38fe26e6c8491385eb673e HEAD
+            test "$(git hash-object .sdlc/add-b3-tombstone-projection.py)" = d7dc92ae8d5b92ae028c64d8bae22a21e2af606a
+            uv lock --check
+            uv sync --dev --locked
+            uv run --no-sync python .sdlc/add-b3-tombstone-projection.py
+            uv run --no-sync python -m compileall -q newsroom scripts
+            uv run --no-sync python -m pytest -q \
+              newsroom/tests/test_authority_a2b_lifecycle.py \
+              newsroom/tests/test_authority_a2b_object_commands.py \
+              newsroom/tests/test_projection_b1_contracts.py \
+              newsroom/tests/test_projection_b2_adapter_unit.py \
+              newsroom/tests/test_projection_b3_rebuild.py \
+              newsroom/tests/test_projection_b3_neo4j_service.py \
+              newsroom/tests/test_sdlc_classifier.py \
+              newsroom/tests/test_sdlc_workflow_lane.py
+            uv run --no-sync python -m pytest -q newsroom/tests
+            git diff --check
+          } > "${diagnostic}" 2>&1
+          status="$?"
+          set -e
+          if test "${status}" -ne 0; then
+            tail -n 180 "${diagnostic}"
+            exit "${status}"
+          fi
+
+      - name: Upload qualification diagnostic
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: newsroom-b3-tombstone-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/b3-tombstone-qualification.log
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
 
       - name: Build exact source artifact
         shell: bash
