@@ -1,0 +1,103 @@
+name: B3 Reconciliation Qualifier
+
+on:
+  push:
+    branches:
+      - agent/b3-reconciliation-qualify
+
+permissions:
+  contents: write
+
+concurrency:
+  group: b3-reconciliation-qualify
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout qualification material
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/b3-reconciliation-qualify
+          path: .qualifier
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+
+      - name: Checkout exact B3 branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/increment-1b3-rebuild-promotion
+          fetch-depth: 0
+          persist-credentials: true
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          github-token: ''
+
+      - name: Apply and qualify exact reconciliation source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 8fd54ef97b877202de24223b24973a89007cdea2
+          test "$(git hash-object newsroom/authority/_neo4j_projection_system.py)" = 49ffd8663e2289fc2a8277e14d13a0dd953ca333
+          test "$(git hash-object newsroom/authority/_projection_system.py)" = 63f522df6598d47a4edb1da860f3e2f462d5c3e1
+          test "$(git hash-object newsroom/projection/neo4j/__init__.py)" = 107a8a47930b717f9a778c70c9efaba1e23628a6
+          test "$(git hash-object newsroom/projection/neo4j/_adapter.py)" = ea26b5959deb32c98381cf6d8861823b881a2bbe
+          test "$(git hash-object newsroom/projection/neo4j/models.py)" = bc9cdd1ad5013d1992ebba2e1309189a6488ef64
+          test "$(git hash-object newsroom/tests/projection_b2_helpers.py)" = d3856cda8e05a38eca22835a429a1cd6de9ea580
+          test "$(git hash-object newsroom/tests/test_projection_b2_boundaries.py)" = 4ce93e7dfb3dc35d09f8122cbda1255f74c463ba
+          test "$(git hash-object newsroom/tests/test_projection_b3_neo4j_service.py)" = 7f0be2aaea58710b9486d4dd2663e9e780f52c9d
+          test "$(git hash-object newsroom/tests/test_projection_b3_tombstone.py)" = bda0e6bd4bc3bd543e424049dac41bf49d58e89f
+          patch="${RUNNER_TEMP}/b3-reconciliation.patch"
+          gzip --decompress --stdout .qualifier/.sdlc/b3-reconciliation.patch.gz > "${patch}"
+          test "$(sha256sum "${patch}" | cut -d' ' -f1)" = 14a4a7929416fcf4a5d75055261586a5bbf8923ea999dd8f836e41c523a68788
+          git apply --check "${patch}"
+          git apply "${patch}"
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_projection_b1_*.py \
+            newsroom/tests/test_projection_b2_*.py \
+            newsroom/tests/test_projection_b3_*.py
+          uv run --no-sync python -m pytest -q newsroom/tests
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+          git diff --check
+
+      - name: Commit exact source-only reconciliation
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_head="$(git rev-parse HEAD)"
+          rm -f \
+            .sdlc/b3-reconciliation.patch.gz.b64 \
+            .sdlc/b3-reconcile-export-run.txt \
+            .sdlc/b3-reconcile-source.tar.gz.b64 \
+            .sdlc/b3-reconcile-source.sha256 \
+            .sdlc/b3-reconciliation-diagnostic.txt
+          rm -rf .qualifier
+          git add -A
+          test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(projection): reconcile generation state before validation'
+          remote_head="$(git ls-remote origin refs/heads/agent/increment-1b3-rebuild-promotion | cut -f1)"
+          test "${remote_head}" = "${expected_head}"
+          git push --force-with-lease=refs/heads/agent/increment-1b3-rebuild-promotion:${expected_head} origin HEAD:agent/increment-1b3-rebuild-promotion
