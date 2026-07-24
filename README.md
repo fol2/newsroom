@@ -1,48 +1,103 @@
-# openclaw-newsroom
+# Newsroom
 
-Automated AI newsroom -- LLM clustering, multi-source news pool, Discord publishing.
+Newsroom contains both the accepted authority/GraphRAG foundation and the older
+OpenClaw Discord newsroom runtime. They are not the same product boundary.
 
-## Architecture Overview
+## Current Repository Status
 
-openclaw-newsroom is a pipeline that transforms raw news links into polished, clustered stories published to Discord. The pipeline has four stages:
+Increment 1 is complete. The merged foundation proves one synthetic,
+deterministic path through authenticated command authority, the SQLite ledger,
+governed-object hydration, an authority-selected Neo4j structural projection,
+and SQLite-authoritative Candidate admission.
 
-1. **News pool ingestion** -- Multiple source adapters (Brave News API, GDELT DOC 2.0, curated RSS/Atom feeds) continuously fetch links and upsert them into a local SQLite news pool database with deduplication and TTL expiry.
+The foundation establishes these rules:
 
-2. **Clustering and deduplication** -- An LLM-powered event manager (Gemini Flash) clusters incoming links into coherent events using one-link-per-prompt calls. Token-based and cross-lingual entity matching provides fast pre-filtering before LLM classification. A post-clustering merge pass collapses near-duplicate events.
+- SQLite ledger records, retained contracts, governed objects, Retrieval Context
+  records, and Candidate tables are authoritative.
+- Neo4j is a disposable, rebuildable projection. It never creates or repairs
+  ledger, governed-object, or Candidate authority.
+- GraphRAG is mandatory for qualifying production, evaluation, and complete
+  live-shadow profiles; a missing, fake, disabled, stale, or graph-free variant
+  fails closed.
+- Models, extractors, Graphiti, similarity, and ranking may propose. Only
+  deterministic or authorised controllers may commit authority.
+- Graph loss is recovered from SQLite and governed-object authority, and
+  deletion or tombstone state cannot be resurrected by rebuild.
 
-3. **LLM story writing** -- Selected events are handed to Gemini (Flash primary, Pro fallback) with category-aware prompt routing. The runner produces structured JSON output (headline, body, sources, images) validated against JSON schemas, with automatic result repair for malformed LLM responses.
+This is a foundation proof, not production admission. It authorises no live
+source access, Graphiti/model/embedding execution, publication, product shadow,
+canary, production activation, spending, or public effect.
 
-4. **Discord publishing** -- Finished stories are published to Discord channels via the OpenClaw Gateway, including embedded images, charts, and source attribution. The system supports both hourly breaking-news runs and daily digest runs with category balancing.
+Start with these records:
+
+- [Increment 1C operating and rollback guide](docs/operations/increment-1c-integrated-foundation.md)
+- [Neo4j B2 qualification guide](docs/operations/neo4j-b2-qualification.md)
+- [Neo4j B3 rebuild and promotion guide](docs/operations/neo4j-b3-rebuild-promotion.md)
+- [SDLC v2 specification](docs/specs/sdlc/high-performance-evidence-sdlc.md)
+- [SDLC v2 owner acceptance record](docs/specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md)
+- [Machine gate contract](.sdlc/gates.toml)
+
+## Legacy OpenClaw Runtime
+
+The older runtime remains in the repository as implementation and migration
+material. It ingests links, clusters them with an LLM, writes stories, and can
+publish to Discord through the OpenClaw Gateway. Its existence does not make it
+the accepted new authority architecture or a production-admitted path.
+
+The remainder of this README documents that legacy runtime and its local
+development commands.
+
+## Legacy Architecture Overview
+
+The legacy OpenClaw runtime transforms raw news links into clustered stories and
+Discord posts. It has four stages:
+
+1. **News pool ingestion** -- Multiple source adapters (Brave News API, GDELT
+   DOC 2.0, curated RSS/Atom feeds) fetch links and upsert them into a local
+   SQLite news pool database with deduplication and TTL expiry.
+2. **Clustering and deduplication** -- An LLM-powered event manager groups links
+   into events. Token-based and cross-lingual entity matching provides a fast
+   pre-filter before LLM classification, followed by a merge pass.
+3. **LLM story writing** -- Selected events are sent to Gemini with
+   category-aware prompt routing. Structured output is validated and repaired.
+4. **Discord publishing** -- Finished stories can be sent to Discord through
+   the OpenClaw Gateway with images, charts, and source attribution.
 
 ## Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) -- Detailed technical architecture, data flow diagrams, and component deep-dives
-- [AGENTS.md](AGENTS.md) -- Cron agent system, planner/runner architecture, job file formats
-- [PROMPTS.md](PROMPTS.md) -- Prompt template system, category routing, validators
-- [CONTRIBUTING.md](CONTRIBUTING.md) -- How to add news sources, prompts, and validators
-- [docs/evaluation/clustering_eval_dataset_v1.md](docs/evaluation/clustering_eval_dataset_v1.md) -- Labelled clustering evaluation dataset schema, criteria, build, and replay workflow
+- [ARCHITECTURE.md](ARCHITECTURE.md) -- Detailed legacy runtime architecture and
+  component internals
+- [AGENTS.md](AGENTS.md) -- Legacy cron agent system, planner/runner architecture,
+  and job formats
+- [PROMPTS.md](PROMPTS.md) -- Prompt templates, category routing, and validators
+- [CONTRIBUTING.md](CONTRIBUTING.md) -- Development guidance
+- [docs/evaluation/clustering_eval_dataset_v1.md](docs/evaluation/clustering_eval_dataset_v1.md)
+  -- Labelled clustering evaluation dataset and replay workflow
 
 ## Prerequisites
 
 - **Python 3.12+**
-- **OpenClaw Gateway** -- The newsroom publishes to Discord through the OpenClaw Gateway HTTP API. The gateway is a separate service (not included in this repository) that provides authenticated Discord access via a token-based tool invocation interface. The newsroom works in dry-run mode without a running gateway.
-- **[uv](https://docs.astral.sh/uv/)** -- Package manager used for dependency management and virtual environment setup.
+- **[uv](https://docs.astral.sh/uv/)** for dependency and environment management
+- **OpenClaw Gateway**, only for the legacy Discord publishing path. The Gateway
+  is a separate service and is not included in this repository. Local dry-run
+  development does not require it.
 
 ## Installation
 
 ```bash
-git clone https://github.com/fol2/openclaw-newsroom.git openclaw-newsroom
-cd openclaw-newsroom
-uv sync
+git clone https://github.com/fol2/newsroom.git
+cd newsroom
+uv sync --dev --locked
 ```
 
-This creates a virtual environment and installs all dependencies from `pyproject.toml`.
-To include optional chart dependencies (Pillow): `uv sync --extra charts`.
-To include dev dependencies (pytest, pytest-cov): `uv sync --dev`.
+This creates a virtual environment and installs the locked development
+dependencies. To include optional chart dependencies, run
+`uv sync --extra charts --locked`.
 
-## Configuration
+## Legacy Runtime Configuration
 
-Copy `.env.example` to `.env` and fill in the required values:
+Copy `.env.example` to `.env` and provide only the credentials needed for the
+legacy command being exercised:
 
 ```bash
 cp .env.example .env
@@ -50,37 +105,44 @@ cp .env.example .env
 
 | Variable | Required | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | Yes | Google Gemini API key for LLM calls (clustering, story writing). |
-| `BRAVE_SEARCH_API_KEYS` | Recommended | Multiple Brave Search API keys (comma/newline separated). Supports `label:key` entries for rotation. |
-| `BRAVE_SEARCH_API_KEY` | Yes (if `BRAVE_SEARCH_API_KEYS` unset) | Single Brave Search API key (legacy). |
-| `OPENCLAW_GATEWAY_TOKEN` | Yes | Bearer token for the OpenClaw Gateway HTTP API (Discord publishing). |
-| `OPENCLAW_HOME` | No | Override the OpenClaw home directory. Defaults to `~/.openclaw`. |
-| `OPENCLAW_GATEWAY_HTTP_URL` | No | Gateway HTTP endpoint. Defaults to `http://127.0.0.1:3000`. |
-| `GEMINI_PROFILE_ORDER` | No | Comma-separated list of google-gemini-cli OAuth profile names for round-robin rotation. |
-| `GEMINI_AUTH_PROFILES` | No | Path to `auth-profiles.json` for OAuth-based Gemini access (alternative to API key). |
-| `GEMINI_API_KEY_ONLY_UNTIL` | No | ISO 8601 timestamp after which the system switches from API key to OAuth profiles. |
-| `NANO_BANANA_SCRIPT` | No | Path to an image generation script invoked via `uv run`. |
+| `GEMINI_API_KEY` | Legacy LLM path | Google Gemini API key for clustering and story writing. |
+| `BRAVE_SEARCH_API_KEYS` | Legacy Brave ingestion | Multiple Brave Search API keys, comma/newline separated; supports `label:key`. |
+| `BRAVE_SEARCH_API_KEY` | Legacy fallback | Single Brave Search API key when the multi-key variable is unset. |
+| `OPENCLAW_GATEWAY_TOKEN` | Legacy publishing only | Bearer token for the OpenClaw Gateway. |
+| `OPENCLAW_HOME` | No | Override the OpenClaw home directory. |
+| `OPENCLAW_GATEWAY_HTTP_URL` | No | Gateway endpoint; defaults to `http://127.0.0.1:3000`. |
+| `GEMINI_PROFILE_ORDER` | No | Gemini CLI OAuth profile order. |
+| `GEMINI_AUTH_PROFILES` | No | Path to `auth-profiles.json`. |
+| `GEMINI_API_KEY_ONLY_UNTIL` | No | Timestamp controlling API-key/OAuth preference. |
+| `NANO_BANANA_SCRIPT` | No | Optional image-generation script invoked through `uv run`. |
 
-### RSS Feeds (Optional)
+Credentials are capabilities. Do not place production credentials in tests,
+fixtures, documentation, artifacts, or the accepted foundation proof.
 
-To override the built-in RSS/Atom feed list, copy the example config to `newsroom/rss_feeds.yaml`:
+### RSS Feeds
+
+To override the built-in legacy RSS/Atom feed list:
 
 ```bash
 cp newsroom/examples/rss_feeds.example.yaml newsroom/rss_feeds.yaml
 ```
 
-## Quick Start
+## Legacy Runtime Quick Start
 
-Run the newsroom in dry-run mode (no Discord publishing, no API keys needed for the runner itself):
+Use a disposable database and dry-run mode. These commands exercise the legacy
+runtime; they do not constitute foundation qualification or production
+admission.
 
 ```bash
-# 1. Populate the news pool with Brave News results
-uv run python scripts/news_pool_update.py --db data/newsroom/news_pool.sqlite3
+# 1. Populate a disposable news pool.
+uv run python scripts/news_pool_update.py \
+  --db data/newsroom/news_pool.sandbox.sqlite3
 
-# 2. Run the hourly planner (cluster + select events)
-uv run python scripts/newsroom_hourly_inputs.py --db data/newsroom/news_pool.sqlite3
+# 2. Cluster and select hourly inputs.
+uv run python scripts/newsroom_hourly_inputs.py \
+  --db data/newsroom/news_pool.sandbox.sqlite3
 
-# 3. Run the story writer + publisher in dry-run mode
+# 3. Run the story writer without Discord publication.
 uv run python scripts/newsroom_runner.py --dry-run
 ```
 
@@ -88,90 +150,79 @@ uv run python scripts/newsroom_runner.py --dry-run
 
 | Script | Description |
 |---|---|
-| `newsroom_runner.py` | Main entry point -- discovers pending story jobs, runs the LLM write pipeline, publishes to Discord. Supports `--dry-run`. |
-| `newsroom_hourly_inputs.py` | Hourly planner -- fetches pool links, LLM-clusters into events, selects 1-3 events for the hourly run. |
-| `newsroom_daily_inputs.py` | Daily planner -- same clustering pipeline, selects 10-15 events with category balance and HK guarantee. |
-| `newsroom_write_run_job.py` | Creates a story job JSON file from event data (used by hourly/daily planners). |
-| `news_pool_update.py` | Fetches news from Brave News API and upserts links into the pool database. |
-| `gdelt_pool_update.py` | Fetches articles from GDELT DOC 2.0 API (free, no auth) and upserts into the pool. |
-| `rss_pool_update.py` | Fetches articles from curated RSS/Atom feeds and upserts into the pool. |
-| `news_pool_status.py` | Diagnostic tool -- shows pool statistics, cluster counts, and link freshness. |
-| `newsroom_clustering_decisions.py` | Decision log inspector -- audits clustering decisions by decision/link/event with similarity and outlier hints. |
-| `news_pool_dump_jsonl.py` | Dumps a consistent snapshot of `links` + `events` to JSONL for sandbox rebuilds. |
-| `news_pool_restore_jsonl.py` | Restores a JSONL dump into a fresh SQLite DB (refuses to overwrite without `--overwrite`). |
-| `build_clustering_eval_dataset.py` | Builds a reproducible labelled clustering evaluation dataset from `clustering_decisions`. |
-| `replay_clustering_eval_dataset.py` | Replays dataset rows through parser logic and reports label consistency metrics. |
-| `eval_clustering_metrics.py` | Computes clustering quality metrics and enforces baseline regression thresholds for CI/local checks. |
+| `newsroom_runner.py` | Legacy story-job runner and optional Discord publisher; supports `--dry-run`. |
+| `newsroom_hourly_inputs.py` | Legacy hourly planner and clustering path. |
+| `newsroom_daily_inputs.py` | Legacy daily planner with category balancing. |
+| `newsroom_write_run_job.py` | Creates a legacy story job JSON file. |
+| `news_pool_update.py` | Fetches Brave News results into the legacy pool. |
+| `gdelt_pool_update.py` | Fetches GDELT DOC 2.0 results into the legacy pool. |
+| `rss_pool_update.py` | Fetches curated RSS/Atom results into the legacy pool. |
+| `news_pool_status.py` | Displays pool and clustering diagnostics. |
+| `newsroom_clustering_decisions.py` | Inspects clustering decision evidence. |
+| `news_pool_dump_jsonl.py` | Dumps a consistent pool snapshot for sandbox rebuilds. |
+| `news_pool_restore_jsonl.py` | Restores a JSONL dump into a fresh SQLite database. |
+| `build_clustering_eval_dataset.py` | Builds the labelled clustering evaluation dataset. |
+| `replay_clustering_eval_dataset.py` | Replays labelled rows through parser logic. |
+| `eval_clustering_metrics.py` | Enforces clustering quality regression thresholds. |
 
-All scripts live in the `scripts/` directory and are invoked as standalone Python scripts.
+All scripts live in `scripts/`.
 
-## DB Sandbox Rebuild (JSONL Dump/Restore)
+## DB Sandbox Rebuild
 
-When experimenting with clustering changes, avoid touching the production SQLite DB.
-You can export a snapshot of recent pool data to JSONL, restore it into a separate
-DB file, and run the planner/clustering scripts against the sandbox.
+Do not experiment against a production or operator-owned SQLite database. Export
+and restore a snapshot into a disposable path:
 
 ```bash
-# Dump into a timestamped folder (UTC)
 uv run python scripts/news_pool_dump_jsonl.py \
   --db data/newsroom/news_pool.sqlite3 \
   --out-dir data/newsroom/db_dumps/$(date -u +%Y%m%dT%H%M%SZ)
 
-# Restore into a sandbox DB (will refuse to overwrite unless --overwrite is set)
 uv run python scripts/news_pool_restore_jsonl.py \
   --dump-dir data/newsroom/db_dumps/<TIMESTAMP> \
   --db data/newsroom/news_pool.sandbox.sqlite3
-
-# Run the hourly inputs pipeline against the sandbox DB
-uv run python scripts/newsroom_hourly_inputs.py --db data/newsroom/news_pool.sandbox.sqlite3
 ```
 
-By default the dump includes links seen in the last 48 hours and events created in
-the last 168 hours, plus any events referenced by those links (and their parents).
+The dump defaults to recent links and events, including referenced parent
+events. Restore refuses to overwrite unless explicitly authorised.
 
-## Testing
+## Testing and Evidence
+
+Run the locked deterministic suite:
 
 ```bash
-uv run python -m pytest newsroom/tests/ -v
+uv lock --check
+uv sync --dev --locked
+uv run --no-sync python -m pytest -q newsroom/tests
 ```
 
-Run the clustering eval regression gate locally:
+Run the clustering regression gate:
 
 ```bash
-uv run python scripts/eval_clustering_metrics.py \
+uv run --no-sync python scripts/eval_clustering_metrics.py \
   --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
   --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
   --fail-on-regression
 ```
 
-## Key Modules
+Changes to authority, persistence, Neo4j integration, workflows, or SDLC
+contracts are routed through the repository-owned risk classifier and may
+require the authenticated actual-service lane. See `.sdlc/gates.toml` rather
+than weakening or bypassing the selected evidence.
 
-| Module | Description |
+## Key Areas
+
+| Area | Purpose |
 |---|---|
-| `runner.py` | Core newsroom runner -- job discovery, LLM story generation, Discord posting, dedup against recent titles. |
-| `event_manager.py` | Event-centric LLM clustering -- groups pool links into events using Gemini Flash one-link-per-prompt calls, with a post-clustering merge pass. |
-| `gemini_client.py` | Lightweight Gemini REST client -- OAuth profile round-robin, Flash/Pro fallback, rate-limit handling. |
-| `news_pool_db.py` | SQLite news pool database -- link storage, TTL expiry, source tracking, pool run logging. |
-| `brave_news.py` | Brave News API adapter -- search, URL normalization, multi-key rotation, rate-limit recording. |
-| `gdelt_news.py` | GDELT DOC 2.0 API adapter -- article fetching and normalization. |
-| `rss_news.py` | RSS/Atom feed parser -- feed config loading, article extraction via lxml. |
-| `gateway_client.py` | OpenClaw Gateway HTTP client -- tool invocation for Discord message/embed posting. |
-| `story_index.py` | Token-based clustering and ranking -- Jaccard similarity, CJK-aware tokenization, anchor term extraction. |
-| `dedupe.py` | Cross-lingual deduplication -- English proper-noun matching across Cantonese/English titles. |
-| `source_pack.py` | Source aggregation -- collects and deduplicates article metadata, OG image extraction for embeds. |
-| `prompt_policy.py` | Category-to-prompt routing -- maps story categories (finance, general, etc.) to prompt template IDs. |
-| `result_repair.py` | LLM output repair -- fixes malformed JSON, truncated responses, and schema violations from Gemini output. |
-| `charts.py` | Pure-Python PNG chart renderer -- line charts for market data embeds (no matplotlib dependency). |
-| `image_fetch.py` | OG image extractor and downloader -- HTML meta parsing, content-type validation, caching. |
-| `market_data.py` | Market data fetcher -- stock/crypto ticker extraction and price lookup for finance stories. |
-| `job_store.py` | Job file I/O -- atomic JSON writes, file locking, path jailing, timestamp utilities. |
-| `validators/` | JSON schema validation for LLM output and job files. |
-
-## GatewayClient Dependency
-
-The newsroom publishes stories to Discord via `GatewayClient`, which talks to the OpenClaw Gateway over HTTP. The gateway is a separate process that manages Discord bot connections and exposes a tool invocation API.
-
-If the gateway is not running or `OPENCLAW_GATEWAY_TOKEN` is not set, the newsroom still functions in dry-run mode: stories are generated and written to job files but not posted to Discord. This makes local development and testing straightforward without needing the full OpenClaw infrastructure.
+| `newsroom/authority/` | Authenticated commands, SQLite event authority, governed objects, and projection authority. |
+| `newsroom/projection/` | Structural ontology, mappings, projection contracts, and Neo4j adapter. |
+| `newsroom/integrated/` | Synthetic authority-to-GraphRAG-to-Candidate foundation proof. |
+| `scripts/sdlc/` | Exact-tree routing, watchdog, evidence, transport, telemetry, and decision tooling. |
+| `.github/workflows/evidence.yml` | Permanent always-reporting SDLC evidence shadow. |
+| `newsroom/event_manager.py` | Legacy event-centric LLM clustering. |
+| `newsroom/news_pool_db.py` | Legacy news-pool SQLite storage. |
+| `newsroom/runner.py` | Legacy story-writing and publishing runtime. |
+| `newsroom/gateway_client.py` | Legacy OpenClaw Gateway client. |
+| `newsroom/story_index.py` | Deterministic clustering and ranking helpers. |
 
 ## License
 
