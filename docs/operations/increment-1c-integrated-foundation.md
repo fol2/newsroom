@@ -121,6 +121,8 @@ The permanent actual-service test `test_actual_service_integrated_foundation_rep
 
 The public integrated surface exposes typed commands and fixed structural operations only. It exposes no Neo4j driver, session, arbitrary Cypher, caller labels, caller relationship types, unrestricted properties or administrative cleanup command.
 
+Candidate reconciliation derives the one exact family from the retained `ProjectionReadPolicy` and rejects a caller-supplied different family before any SQLite metadata lookup.
+
 The permanent service gate creates runtime-generated masked credentials, rejects the bootstrap administrator identity for projection use, creates the dedicated `newsroom_projector` identity and exposes Bolt only on runner loopback.
 
 ## Permanent qualification
