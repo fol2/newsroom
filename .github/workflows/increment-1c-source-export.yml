@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   export:
@@ -45,3 +46,10 @@ jobs:
           retention-days: 1
           compression-level: 0
           overwrite: false
+
+      - name: Publish temporary source-export locator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue comment 82 --repo "${GITHUB_REPOSITORY}" --body \
+            "Temporary 1C source export: run \`${GITHUB_RUN_ID}\`, head \`${GITHUB_SHA}\`, artifact \`increment-1c-source-${GITHUB_SHA}\`. This is transport-only and will be removed before completion."
