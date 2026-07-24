@@ -93,8 +93,10 @@ class TestRunnerDryRun(unittest.TestCase):
             run_dir = Path(td) / "discord-multi-2026-02-04-07-00"
             run_dir.mkdir(parents=True, exist_ok=True)
 
-            # Write run.json.
+            # Write run.json. This test verifies mutation safety, not provider pacing,
+            # so use the schema-valid zero-stagger setting instead of waiting 10 seconds.
             run_job = dict(run_example)
+            run_job["runner"] = {**run_job["runner"], "stagger_seconds": 0}
             run_job["run"] = {"run_id": run_dir.name, "trigger": "cron_daily", "run_time_uk": "2026-02-04 07:00"}
             run_job_path = run_dir / "run.json"
             atomic_write_json(run_job_path, run_job)
