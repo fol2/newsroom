@@ -91,7 +91,7 @@ jobs:
 
           echo stage=apply-active-revalidation
           patch=../.qualifier/.sdlc/b3-active-revalidation.patch
-          test "$(git -C ../.qualifier hash-object .sdlc/b3-active-revalidation.patch)" = 7d6a8d5eb78f70e69f86af90a2db1f124e90d84e
+          test "$(git -C ../.qualifier hash-object .sdlc/b3-active-revalidation.patch)" = 3bfe1751a55fde015ca4ca5d61bb7296be6c0ebc
           git apply --recount --check --verbose "${patch}"
           git apply --recount --verbose "${patch}"
 
