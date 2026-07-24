@@ -39,7 +39,7 @@ diff --git a/newsroom/authority/_projection_store.py b/newsroom/authority/_proje
                  or int(version["authority_aggregate_version"])
                  != int(row["authority_aggregate_version"])
                  or int(version["validated_through_ledger_seq"])
-@@ -1160,11 +1188,12 @@ class _ProjectionAuthorityStore:
+@@ -1160,11 +1188,16 @@ class _ProjectionAuthorityStore:
              state = ProjectionGenerationState(str(current["state"]))
              if state not in {
                  ProjectionGenerationState.BUILDING,
@@ -50,19 +50,23 @@ diff --git a/newsroom/authority/_projection_store.py b/newsroom/authority/_proje
 -                    "only building or validating generations can be validated"
 +                    "only building, validating or active generations can be validated"
                  )
-+            validation_state = state if state is ProjectionGenerationState.ACTIVE else ProjectionGenerationState.VALIDATING
++            validation_state = (
++                state
++                if state is ProjectionGenerationState.ACTIVE
++                else ProjectionGenerationState.VALIDATING
++            )
              checkpoint = self._checkpoint_seq(conn, str(generation_id))
              if checkpoint_ledger_seq != checkpoint:
                  raise ProjectionStateError(
-@@ -1214,7 +1243,7 @@ class _ProjectionAuthorityStore:
-                 "WHERE generation_id=?",
+@@ -1208,7 +1241,7 @@ class _ProjectionAuthorityStore:
+                 "updated_event_id=?,updated_at=? WHERE generation_id=?",
                  (
 -                    ProjectionGenerationState.VALIDATING.value,
 +                    validation_state.value,
                      lifecycle_version,
                      result.aggregate_version,
                      checkpoint_ledger_seq,
-@@ -1233,7 +1262,7 @@ class _ProjectionAuthorityStore:
+@@ -1225,7 +1258,7 @@ class _ProjectionAuthorityStore:
                  (
                      str(generation_id),
                      lifecycle_version,
@@ -71,7 +75,7 @@ diff --git a/newsroom/authority/_projection_store.py b/newsroom/authority/_proje
                      result.aggregate_version,
                      checkpoint_ledger_seq,
                      reason_code,
-@@ -2208,14 +2237,16 @@ class _ProjectionAuthorityStore:
+@@ -2208,14 +2241,16 @@ class _ProjectionAuthorityStore:
          return ProjectionGenerationPromotionView(
              promotion_digest=str(row["promotion_digest"]),
              family_id=str(row["family_id"]),
