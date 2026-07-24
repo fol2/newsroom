@@ -22,13 +22,31 @@ from .models import (
     StoryCandidateId,
     StoryCandidateVersionId,
 )
+from .policy import (
+    CANDIDATE_ADMISSION_COMMAND,
+    INTEGRATED_COMMAND_TYPES,
+    INTEGRATED_FIXTURE_COMMAND,
+    integrated_command_definitions,
+    integrated_payload_contracts,
+    merge_integrated_authority_registries,
+)
+from .service import (
+    CandidateAdmissions,
+    IntegratedCandidateAuthoritySystem,
+    open_candidate_admission_authority_system,
+)
 
 __all__ = [
+    "CANDIDATE_ADMISSION_COMMAND",
     "CandidateAdmissionDecisionId",
     "CandidateAdmissionOutcome",
     "CandidateAdmissionRequest",
     "CandidateAdmissionView",
+    "CandidateAdmissions",
     "CandidateRoute",
+    "INTEGRATED_COMMAND_TYPES",
+    "INTEGRATED_FIXTURE_COMMAND",
+    "IntegratedCandidateAuthoritySystem",
     "IntegratedContractError",
     "IntegratedExactIndexEntry",
     "IntegratedFixtureId",
@@ -44,4 +62,8 @@ __all__ = [
     "IntegratedUrgency",
     "StoryCandidateId",
     "StoryCandidateVersionId",
+    "integrated_command_definitions",
+    "integrated_payload_contracts",
+    "merge_integrated_authority_registries",
+    "open_candidate_admission_authority_system",
 ]
