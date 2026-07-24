@@ -18,7 +18,7 @@ def test_permanent_neo4j_gate_executes_the_exact_increment_1c_proof() -> None:
         "C1 actual-service proof was skipped",
         "C1 actual-service proof failed",
         "projection-b2-b3-c1-neo4j-evidence",
-        "runtime-generated",
+        "Generate masked disposable credentials and start Neo4j",
     )
     for statement in required:
         assert statement in text
