@@ -337,72 +337,44 @@ def test_generation_validation_cannot_cross_required_gap(
         system.close()
 
 
-def test_one_active_generation_per_family_is_enforced_before_commit(
+def test_direct_active_transition_requires_authority_promotion_before_commit(
     tmp_path: Path,
 ) -> None:
     system = open_projection_system(tmp_path / "authority.sqlite3")
     try:
-        system.projections.register_family(
-            ProjectionFamilyRegistrationRequest(FAMILY_ID, "family-register"),
-            proof=proof(),
-        )
-        first = system.projections.create_generation(
-            ProjectionGenerationCreateRequest(
-                ProjectionGenerationId.new(), FAMILY_ID, "FIRST", "gen-first"
-            ),
-            proof=proof(),
-        )
-        second = system.projections.create_generation(
-            ProjectionGenerationCreateRequest(
-                ProjectionGenerationId.new(), FAMILY_ID, "SECOND", "gen-second"
-            ),
-            proof=proof(),
-        )
-        first_validating = system.projections.transition_generation(
+        _, generation = _register_and_create(system)
+        validating = system.projections.transition_generation(
             ProjectionGenerationTransitionRequest(
-                first.generation_id,
-                first.authority_aggregate_version,
+                generation.generation_id,
+                generation.authority_aggregate_version,
                 ProjectionGenerationState.VALIDATING,
-                "FIRST_VALID",
-                "first-validating",
+                "LEGACY_VALIDATING",
+                "legacy-validating",
                 validated_through_ledger_seq=0,
             ),
             proof=proof(),
         )
-        system.projections.transition_generation(
-            ProjectionGenerationTransitionRequest(
-                first.generation_id,
-                first_validating.authority_aggregate_version,
-                ProjectionGenerationState.ACTIVE,
-                "FIRST_ACTIVE",
-                "first-active",
-                validated_through_ledger_seq=0,
-            ),
-            proof=proof(),
-        )
-        second_validating = system.projections.transition_generation(
-            ProjectionGenerationTransitionRequest(
-                second.generation_id,
-                second.authority_aggregate_version,
-                ProjectionGenerationState.VALIDATING,
-                "SECOND_VALID",
-                "second-validating",
-                validated_through_ledger_seq=0,
-            ),
-            proof=proof(),
-        )
-        with pytest.raises(ProjectionStateError, match="already has an active"):
+        before_events = system.events.after(0, limit=100, proof=proof())
+
+        with pytest.raises(ProjectionStateError, match="authority promotion"):
             system.projections.transition_generation(
                 ProjectionGenerationTransitionRequest(
-                    second.generation_id,
-                    second_validating.authority_aggregate_version,
+                    generation.generation_id,
+                    validating.authority_aggregate_version,
                     ProjectionGenerationState.ACTIVE,
-                    "SECOND_ACTIVE",
-                    "second-active",
+                    "DIRECT_ACTIVE_FORBIDDEN",
+                    "direct-active-forbidden",
                     validated_through_ledger_seq=0,
                 ),
                 proof=proof(),
             )
+
+        assert system.events.after(0, limit=100, proof=proof()) == before_events
+        current = system.projections.generations(FAMILY_ID, proof=proof())[0]
+        assert current.state is ProjectionGenerationState.VALIDATING
+        assert current.authority_aggregate_version == (
+            validating.authority_aggregate_version
+        )
     finally:
         system.close()
 
@@ -518,41 +490,27 @@ def test_generation_transition_replay_returns_historical_result_after_later_stat
         validating = system.projections.transition_generation(
             validating_request, proof=proof()
         )
-        active_request = ProjectionGenerationTransitionRequest(
-            generation.generation_id,
-            validating.authority_aggregate_version,
-            ProjectionGenerationState.ACTIVE,
-            "ACTIVATE_EMPTY_BUILD",
-            "generation-active-replay",
-            validated_through_ledger_seq=0,
-        )
-        active = system.projections.transition_generation(
-            active_request, proof=proof()
-        )
-        retired = system.projections.transition_generation(
+        failed = system.projections.transition_generation(
             ProjectionGenerationTransitionRequest(
                 generation.generation_id,
-                active.authority_aggregate_version,
-                ProjectionGenerationState.RETIRED,
-                "REPLACED",
-                "generation-retired",
+                validating.authority_aggregate_version,
+                ProjectionGenerationState.FAILED,
+                "VALIDATION_ABORTED",
+                "generation-failed",
+                validated_through_ledger_seq=0,
             ),
             proof=proof(),
         )
-        assert retired.validated_through_ledger_seq == 0
+        assert failed.state is ProjectionGenerationState.FAILED
+        assert failed.validated_through_ledger_seq == 0
 
         historical_validating = system.projections.transition_generation(
             validating_request, proof=proof()
         )
-        historical_active = system.projections.transition_generation(
-            active_request, proof=proof()
-        )
         assert historical_validating.state is ProjectionGenerationState.VALIDATING
         assert historical_validating.lifecycle_version == validating.lifecycle_version
-        assert historical_active.state is ProjectionGenerationState.ACTIVE
-        assert historical_active.lifecycle_version == active.lifecycle_version
         assert system.projections.generations(FAMILY_ID, proof=proof())[0].state is (
-            ProjectionGenerationState.RETIRED
+            ProjectionGenerationState.FAILED
         )
     finally:
         system.close()
@@ -719,78 +677,6 @@ def test_family_registration_rejects_authority_change_between_lookup_and_commit(
         ]
     finally:
         reopened.close()
-
-
-def test_active_generation_requires_validation_through_current_checkpoint(
-    tmp_path: Path,
-) -> None:
-    system = open_projection_system(tmp_path / "authority.sqlite3")
-    try:
-        _, generation = _register_and_create(system)
-        system.commands.execute(
-            _source_command(key="activation-validation-source"), proof=proof()
-        )
-        source = [
-            item
-            for item in system.events.after(0, limit=100, proof=proof())
-            if item.event_type == "source.item.versioned"
-        ][0]
-        current = system.projections.generations(FAMILY_ID, proof=proof())[0]
-        system.projections.record_delivery(
-            ProjectionDeliveryRequest(
-                generation.generation_id,
-                current.authority_aggregate_version,
-                source.ledger_seq,
-                ProjectionDeliveryOutcome.APPLIED,
-                "activation-validation-delivery",
-            ),
-            proof=proof(),
-        )
-        checkpoint = system.projections.status(
-            FAMILY_ID, proof=proof()
-        ).contiguous_ledger_seq
-        assert checkpoint > 0
-        current = system.projections.generations(FAMILY_ID, proof=proof())[0]
-        validating = system.projections.transition_generation(
-            ProjectionGenerationTransitionRequest(
-                generation.generation_id,
-                current.authority_aggregate_version,
-                ProjectionGenerationState.VALIDATING,
-                "PARTIAL_VALIDATION",
-                "partial-validation",
-                validated_through_ledger_seq=checkpoint - 1,
-            ),
-            proof=proof(),
-        )
-        before = system.events.after(0, limit=1000, proof=proof())
-        with pytest.raises(ProjectionStateError, match="current contiguous checkpoint"):
-            system.projections.transition_generation(
-                ProjectionGenerationTransitionRequest(
-                    generation.generation_id,
-                    validating.authority_aggregate_version,
-                    ProjectionGenerationState.ACTIVE,
-                    "PARTIAL_ACTIVATION",
-                    "partial-activation",
-                    validated_through_ledger_seq=checkpoint - 1,
-                ),
-                proof=proof(),
-            )
-        assert system.events.after(0, limit=1000, proof=proof()) == before
-        active = system.projections.transition_generation(
-            ProjectionGenerationTransitionRequest(
-                generation.generation_id,
-                validating.authority_aggregate_version,
-                ProjectionGenerationState.ACTIVE,
-                "COMPLETE_ACTIVATION",
-                "complete-activation",
-                validated_through_ledger_seq=checkpoint,
-            ),
-            proof=proof(),
-        )
-        assert active.state is ProjectionGenerationState.ACTIVE
-        assert active.validated_through_ledger_seq == checkpoint
-    finally:
-        system.close()
 
 
 def test_optional_delivery_can_be_explicitly_ignored_after_retry_exhaustion(

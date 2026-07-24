@@ -1,4 +1,4 @@
-"""Typed B2 Neo4j projection contracts without a public driver or Cypher API."""
+"""Typed B2/B3 Neo4j projection contracts without public driver or Cypher APIs."""
 
 from .models import (
     NEO4J_B2_DRIVER_VERSION,
@@ -17,20 +17,39 @@ from .models import (
     Neo4jReadError,
     Neo4jStructuralRead,
     Neo4jWriteError,
+    StructuralActiveReadRequest,
     StructuralBatch,
     StructuralDeliveryRequest,
     StructuralGraphNodeView,
     StructuralGraphRelationView,
+    StructuralGenerationValidationRequest,
     StructuralNode,
+    StructuralRebuildRequest,
+    StructuralRebuildResult,
+    StructuralReadAuthoritySelection,
     StructuralReadMetadata,
     StructuralReadRequest,
     StructuralReadResponse,
     StructuralRelation,
 )
+from .qualification import (
+    GraphRAGQualificationError,
+    GraphRAGQualificationEvidence,
+    GraphRAGQualificationReceipt,
+    GraphRAGRuntimeConfig,
+    GraphRuntimeKind,
+    QUALIFYING_PROFILES,
+    RuntimeProfile,
+    neo4j_compatibility_digest,
+    require_qualified_graphrag,
+)
 from .traceability import (
     INCREMENT_1B2_DEFERRED,
     INCREMENT_1B2_EXCLUSIONS,
     INCREMENT_1B2_TRACEABILITY,
+    INCREMENT_1B3_DEFERRED,
+    INCREMENT_1B3_EXCLUSIONS,
+    INCREMENT_1B3_TRACEABILITY,
 )
 
 
@@ -47,9 +66,21 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "require_qualified_graphrag",
+    "neo4j_compatibility_digest",
+    "RuntimeProfile",
+    "QUALIFYING_PROFILES",
+    "GraphRuntimeKind",
+    "GraphRAGRuntimeConfig",
+    "GraphRAGQualificationReceipt",
+    "GraphRAGQualificationEvidence",
+    "GraphRAGQualificationError",
     "INCREMENT_1B2_DEFERRED",
     "INCREMENT_1B2_EXCLUSIONS",
     "INCREMENT_1B2_TRACEABILITY",
+    "INCREMENT_1B3_DEFERRED",
+    "INCREMENT_1B3_EXCLUSIONS",
+    "INCREMENT_1B3_TRACEABILITY",
     "NEO4J_B2_DRIVER_VERSION",
     "NEO4J_B2_IMAGE",
     "NEO4J_B2_SERVER_VERSION",
@@ -68,11 +99,16 @@ __all__ = [
     "Neo4jStructuralProjector",
     "Neo4jStructuralRead",
     "Neo4jWriteError",
+    "StructuralActiveReadRequest",
     "StructuralBatch",
     "StructuralDeliveryRequest",
     "StructuralGraphNodeView",
     "StructuralGraphRelationView",
+    "StructuralGenerationValidationRequest",
     "StructuralNode",
+    "StructuralRebuildRequest",
+    "StructuralRebuildResult",
+    "StructuralReadAuthoritySelection",
     "StructuralReadMetadata",
     "StructuralReadRequest",
     "StructuralReadResponse",

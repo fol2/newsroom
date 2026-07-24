@@ -8,7 +8,13 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from newsroom.authority.canonical import digest_canonical, validate_sha256_digest
-from newsroom.authority.types import TrustScope, UtcTimestamp, require_token
+from newsroom.authority.types import (
+    EventId,
+    ObjectAdmissionId,
+    TrustScope,
+    UtcTimestamp,
+    require_token,
+)
 from newsroom.projection.models import (
     ProjectionContractError,
     ProjectionGenerationId,
@@ -57,6 +63,11 @@ class Neo4jAuthorityCommitPending(Neo4jProjectionError):
 class Neo4jApplyOutcome(StrEnum):
     APPLIED = "APPLIED"
     DUPLICATE = "DUPLICATE"
+
+
+class StructuralReadAuthoritySelection(StrEnum):
+    EXACT_GENERATION = "exact-generation"
+    AUTHORITY_SELECTED_ACTIVE = "authority-selected-active"
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -232,6 +243,7 @@ class StructuralBatch:
     source_event_digest: str
     nodes: tuple[StructuralNode, ...]
     relations: tuple[StructuralRelation, ...]
+    tombstoned_object_admission_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.generation_id, ProjectionGenerationId):
@@ -254,6 +266,35 @@ class StructuralBatch:
         _require_text(self.source_event_id, field="source_event_id")
         require_token(self.source_event_type, field="source_event_type")
         validate_sha256_digest(self.source_event_digest, field="source_event_digest")
+        if (
+            not isinstance(self.tombstoned_object_admission_ids, tuple)
+            or len(self.tombstoned_object_admission_ids) > 1024
+        ):
+            raise ProjectionContractError(
+                "tombstoned object admission identities must be a bounded tuple"
+            )
+        try:
+            tombstoned = tuple(
+                str(ObjectAdmissionId.parse(item))
+                for item in self.tombstoned_object_admission_ids
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProjectionContractError(
+                "tombstoned object admission identity is invalid"
+            ) from exc
+        if tombstoned != tuple(sorted(set(tombstoned))):
+            raise ProjectionContractError(
+                "tombstoned object admission identities must be sorted and unique"
+            )
+        if bool(tombstoned) != (
+            self.source_event_type == "governed_blob.deletion.tombstoned"
+        ):
+            raise ProjectionContractError(
+                "tombstone deletion scope must match the authoritative event type"
+            )
+        object.__setattr__(
+            self, "tombstoned_object_admission_ids", tombstoned
+        )
         if not isinstance(self.nodes, tuple) or not self.nodes:
             raise ProjectionContractError("Neo4j structural batch requires nodes")
         if not isinstance(self.relations, tuple) or not self.relations:
@@ -325,6 +366,9 @@ class StructuralBatch:
                     }
                     for item in self.relations
                 ],
+                "tombstoned_object_admission_ids": list(
+                    self.tombstoned_object_admission_ids
+                ),
             }
         )
 
@@ -407,6 +451,145 @@ class StructuralDeliveryRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class StructuralRebuildRequest:
+    generation_id: ProjectionGenerationId
+    expected_authority_version: int
+    through_ledger_seq: int
+    reason_code: str
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_id, ProjectionGenerationId):
+            raise ProjectionContractError(
+                "structural rebuild generation identity must be typed"
+            )
+        _require_positive_int(
+            self.expected_authority_version,
+            field="expected_authority_version",
+        )
+        _require_non_negative_int(
+            self.through_ledger_seq,
+            field="through_ledger_seq",
+        )
+        require_token(self.reason_code, field="structural_rebuild_reason_code")
+        if (
+            not isinstance(self.idempotency_key, str)
+            or not self.idempotency_key.strip()
+            or len(self.idempotency_key.encode("utf-8")) > 256
+        ):
+            raise ProjectionContractError(
+                "structural rebuild idempotency key is invalid"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralGenerationValidationRequest:
+    generation_id: ProjectionGenerationId
+    expected_authority_version: int
+    checkpoint_ledger_seq: int
+    reason_code: str
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_id, ProjectionGenerationId):
+            raise ProjectionContractError(
+                "structural validation generation identity must be typed"
+            )
+        _require_positive_int(
+            self.expected_authority_version,
+            field="expected_authority_version",
+        )
+        _require_non_negative_int(
+            self.checkpoint_ledger_seq,
+            field="checkpoint_ledger_seq",
+        )
+        require_token(
+            self.reason_code, field="structural_validation_reason_code"
+        )
+        if (
+            not isinstance(self.idempotency_key, str)
+            or not self.idempotency_key.strip()
+            or len(self.idempotency_key.encode("utf-8")) > 256
+        ):
+            raise ProjectionContractError(
+                "structural validation idempotency key is invalid"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralRebuildResult:
+    generation_id: ProjectionGenerationId
+    through_ledger_seq: int
+    checkpoint_ledger_seq: int
+    rebuild_authority_event_id: EventId
+    authority_command_replayed: bool
+    deleted_graph_record_count: int
+    reapplied_delivery_count: int
+    recorded_delivery_count: int
+    ignored_optional_count: int
+    blocked_delivery_count: int
+    serving_time: UtcTimestamp
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_id, ProjectionGenerationId):
+            raise ProjectionContractError(
+                "structural rebuild result generation identity must be typed"
+            )
+        for field, value in (
+            ("through_ledger_seq", self.through_ledger_seq),
+            ("checkpoint_ledger_seq", self.checkpoint_ledger_seq),
+            ("deleted_graph_record_count", self.deleted_graph_record_count),
+            ("reapplied_delivery_count", self.reapplied_delivery_count),
+            ("recorded_delivery_count", self.recorded_delivery_count),
+            ("ignored_optional_count", self.ignored_optional_count),
+            ("blocked_delivery_count", self.blocked_delivery_count),
+        ):
+            _require_non_negative_int(value, field=field)
+        if not isinstance(self.rebuild_authority_event_id, EventId):
+            raise ProjectionContractError(
+                "structural rebuild authority event identity must be typed"
+            )
+        if not isinstance(self.authority_command_replayed, bool):
+            raise ProjectionContractError(
+                "structural rebuild replay flag must be boolean"
+            )
+        if not isinstance(self.serving_time, UtcTimestamp):
+            raise ProjectionContractError(
+                "structural rebuild serving time must be UtcTimestamp"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralActiveReadRequest:
+    family_id: str
+    canonical_ids: tuple[str, ...]
+    query_valid_time: UtcTimestamp
+    limit: int = 100
+
+    def __post_init__(self) -> None:
+        require_token(self.family_id, field="projection_family_id")
+        if not isinstance(self.canonical_ids, tuple) or not self.canonical_ids:
+            raise ProjectionContractError(
+                "active structural read requires canonical IDs"
+            )
+        if len(self.canonical_ids) > 1000:
+            raise ProjectionContractError(
+                "active structural read canonical ID window is too large"
+            )
+        for item in self.canonical_ids:
+            _require_canonical_id(item)
+        if len(set(self.canonical_ids)) != len(self.canonical_ids):
+            raise ProjectionContractError(
+                "active structural read canonical IDs must be unique"
+            )
+        if not isinstance(self.query_valid_time, UtcTimestamp):
+            raise ProjectionContractError(
+                "query_valid_time must be UtcTimestamp"
+            )
+        _require_positive_int(self.limit, field="active_structural_read_limit")
+
+
+@dataclass(frozen=True, slots=True)
 class StructuralReadRequest:
     generation_id: ProjectionGenerationId
     canonical_ids: tuple[str, ...]
@@ -438,6 +621,7 @@ class StructuralReadMetadata:
     mapping_contract_digest: str
     generation_id: ProjectionGenerationId
     generation_state: ProjectionGenerationState
+    authority_selection: StructuralReadAuthoritySelection
     contiguous_ledger_seq: int
     open_gap_count: int
     dead_letter_count: int
@@ -446,6 +630,12 @@ class StructuralReadMetadata:
     serving_time: UtcTimestamp
     authoritative_system: str = "sqlite-ledger-and-governed-objects"
     graph_role: str = "non-authoritative-rebuildable-context"
+
+    def __post_init__(self) -> None:
+        if not isinstance(
+            self.authority_selection, StructuralReadAuthoritySelection
+        ):
+            raise ProjectionContractError("structural read authority selection must be typed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,6 +681,12 @@ def _require_text(value: str, *, field: str) -> str:
     return value
 
 
+def _require_non_negative_int(value: int, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ProjectionContractError(f"{field} must be a non-negative integer")
+    return value
+
+
 def _require_positive_int(value: int, *, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ProjectionContractError(f"{field} must be a positive integer")
@@ -519,6 +715,9 @@ __all__ = [
     "StructuralGraphNodeView",
     "StructuralGraphRelationView",
     "StructuralNode",
+    "StructuralRebuildRequest",
+    "StructuralRebuildResult",
+    "StructuralReadAuthoritySelection",
     "StructuralReadMetadata",
     "StructuralReadRequest",
     "StructuralReadResponse",

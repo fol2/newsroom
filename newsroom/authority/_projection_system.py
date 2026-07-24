@@ -30,7 +30,11 @@ from newsroom.projection.models import (
     ProjectionGapView,
     ProjectionGenerationCreateRequest,
     ProjectionGenerationId,
+    ProjectionGenerationPromotionRequest,
+    ProjectionGenerationPromotionView,
     ProjectionGenerationTransitionRequest,
+    ProjectionGenerationValidationRequest,
+    ProjectionGenerationValidationView,
     ProjectionGenerationView,
     ProjectionReadPolicy,
     ProjectionStatusMetadata,
@@ -50,6 +54,13 @@ _READ_SCHEMA_DIGEST = digest_canonical(
         "golden_vectors": [{"name": "empty", "size": 0}],
     }
 )
+_MANAGEMENT_SCHEMA_DIGEST = digest_canonical(
+    {
+        "contract": "projection-management-authorization-v1",
+        "payload_mode": "NO_PAYLOAD",
+        "golden_vectors": [{"name": "empty", "size": 0}],
+    }
+)
 
 
 class NativeProjections:
@@ -59,10 +70,14 @@ class NativeProjections:
         "__register_family",
         "__create_generation",
         "__transition_generation",
+        "__validate_generation",
+        "__promote_generation",
         "__record_delivery",
         "__resolve_gap",
         "__status",
         "__generations",
+        "__validation",
+        "__promotions",
         "__gaps",
         "__dead_letters",
     )
@@ -73,20 +88,28 @@ class NativeProjections:
         register_family: Callable[[ProjectionFamilyRegistrationRequest, AuthenticationProof], ProjectionFamilyView],
         create_generation: Callable[[ProjectionGenerationCreateRequest, AuthenticationProof], ProjectionGenerationView],
         transition_generation: Callable[[ProjectionGenerationTransitionRequest, AuthenticationProof], ProjectionGenerationView],
+        validate_generation: Callable[[ProjectionGenerationValidationRequest, AuthenticationProof], ProjectionGenerationValidationView],
+        promote_generation: Callable[[ProjectionGenerationPromotionRequest, AuthenticationProof], ProjectionGenerationPromotionView],
         record_delivery: Callable[[ProjectionDeliveryRequest, AuthenticationProof], DeliveryRecordView],
         resolve_gap: Callable[[ProjectionGapResolutionRequest, AuthenticationProof], ProjectionGapView],
         status: Callable[[str, AuthenticationProof], ProjectionStatusMetadata],
         generations: Callable[[str, int, AuthenticationProof], tuple[ProjectionGenerationView, ...]],
+        validation: Callable[[ProjectionGenerationId, AuthenticationProof], ProjectionGenerationValidationView],
+        promotions: Callable[[str, int, AuthenticationProof], tuple[ProjectionGenerationPromotionView, ...]],
         gaps: Callable[[ProjectionGenerationId, int, AuthenticationProof], tuple[ProjectionGapView, ...]],
         dead_letters: Callable[[ProjectionGenerationId, int, AuthenticationProof], tuple[ProjectionDeadLetterView, ...]],
     ) -> None:
         self.__register_family = register_family
         self.__create_generation = create_generation
         self.__transition_generation = transition_generation
+        self.__validate_generation = validate_generation
+        self.__promote_generation = promote_generation
         self.__record_delivery = record_delivery
         self.__resolve_gap = resolve_gap
         self.__status = status
         self.__generations = generations
+        self.__validation = validation
+        self.__promotions = promotions
         self.__gaps = gaps
         self.__dead_letters = dead_letters
 
@@ -99,6 +122,12 @@ class NativeProjections:
     def transition_generation(self, request: ProjectionGenerationTransitionRequest, *, proof: AuthenticationProof) -> ProjectionGenerationView:
         return self.__transition_generation(request, proof)
 
+    def validate_generation(self, request: ProjectionGenerationValidationRequest, *, proof: AuthenticationProof) -> ProjectionGenerationValidationView:
+        return self.__validate_generation(request, proof)
+
+    def promote_generation(self, request: ProjectionGenerationPromotionRequest, *, proof: AuthenticationProof) -> ProjectionGenerationPromotionView:
+        return self.__promote_generation(request, proof)
+
     def record_delivery(self, request: ProjectionDeliveryRequest, *, proof: AuthenticationProof) -> DeliveryRecordView:
         return self.__record_delivery(request, proof)
 
@@ -110,6 +139,12 @@ class NativeProjections:
 
     def generations(self, family_id: str, *, limit: int = 100, proof: AuthenticationProof) -> tuple[ProjectionGenerationView, ...]:
         return self.__generations(family_id, limit, proof)
+
+    def validation(self, generation_id: ProjectionGenerationId, *, proof: AuthenticationProof) -> ProjectionGenerationValidationView:
+        return self.__validation(generation_id, proof)
+
+    def promotions(self, family_id: str, *, limit: int = 100, proof: AuthenticationProof) -> tuple[ProjectionGenerationPromotionView, ...]:
+        return self.__promotions(family_id, limit, proof)
 
     def gaps(self, generation_id: ProjectionGenerationId, *, limit: int = 100, proof: AuthenticationProof) -> tuple[ProjectionGapView, ...]:
         return self.__gaps(generation_id, limit, proof)
@@ -261,6 +296,135 @@ class _ProjectionBoundary:
             reason_code=request.reason_code,
         )
 
+    def validate_generation(
+        self,
+        request: ProjectionGenerationValidationRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationValidationView:
+        grant = self._grant(
+            command_type="projection.generation.validate",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "checkpoint_ledger_seq": request.checkpoint_ledger_seq,
+                "service_compatibility_digest": (
+                    request.service_compatibility_digest
+                ),
+                "projection_state_digest": request.projection_state_digest,
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
+        return self._store.validate_generation(
+            grant,
+            generation_id=request.generation_id,
+            checkpoint_ledger_seq=request.checkpoint_ledger_seq,
+            service_compatibility_digest=(
+                request.service_compatibility_digest
+            ),
+            projection_state_digest=request.projection_state_digest,
+            reason_code=request.reason_code,
+        )
+
+    def _authorize_promotion(
+        self,
+        request: ProjectionGenerationPromotionRequest,
+        proof: AuthenticationProof,
+    ) -> tuple[Any, Any | None]:
+        target_grant = self._grant(
+            command_type="projection.generation.promote",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "checkpoint_ledger_seq": request.checkpoint_ledger_seq,
+                "validation_digest": request.validation_digest,
+                "prior_generation_id": (
+                    None
+                    if request.prior_generation_id is None
+                    else str(request.prior_generation_id)
+                ),
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
+        prior_grant = None
+        if request.prior_generation_id is not None:
+            prior_key = "promotion-prior:" + digest_canonical(
+                {
+                    "promotion_idempotency_key": request.idempotency_key,
+                    "generation_id": str(request.generation_id),
+                    "prior_generation_id": str(request.prior_generation_id),
+                }
+            )
+            prior_grant = self._grant(
+                command_type="projection.generation.transition",
+                aggregate_id=request.prior_generation_id.as_aggregate_id(),
+                expected_version=request.expected_prior_authority_version,
+                payload={
+                    "generation_id": str(request.prior_generation_id),
+                    "target_state": "RETIRED",
+                    "validated_through_ledger_seq": None,
+                    "reason_code": request.reason_code,
+                },
+                idempotency_key=prior_key,
+                proof=proof,
+            )
+        return target_grant, prior_grant
+
+    def _commit_promotion(
+        self,
+        target_grant: Any,
+        prior_grant: Any | None,
+        request: ProjectionGenerationPromotionRequest,
+    ) -> ProjectionGenerationPromotionView:
+        return self._store.promote_generation(
+            target_grant,
+            prior_grant,
+            generation_id=request.generation_id,
+            checkpoint_ledger_seq=request.checkpoint_ledger_seq,
+            validation_digest=request.validation_digest,
+            prior_generation_id=request.prior_generation_id,
+            reason_code=request.reason_code,
+        )
+
+    def promote_generation(
+        self,
+        request: ProjectionGenerationPromotionRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationPromotionView:
+        target_grant, prior_grant = self._authorize_promotion(
+            request,
+            proof,
+        )
+        return self._commit_promotion(target_grant, prior_grant, request)
+
+    def _begin_rebuild(
+        self,
+        request: Any,
+        proof: AuthenticationProof,
+    ):
+        grant = self._grant(
+            command_type="projection.generation.rebuild",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "through_ledger_seq": request.through_ledger_seq,
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
+        return self._store.begin_projection_rebuild(
+            grant,
+            generation_id=request.generation_id,
+            through_ledger_seq=request.through_ledger_seq,
+        )
+
     def _authorize_delivery(
         self,
         request: ProjectionDeliveryRequest,
@@ -317,12 +481,109 @@ class _ProjectionBoundary:
             reason_code=request.reason_code,
         )
 
-    def _authenticate_read(self, proof: AuthenticationProof):
+    def _authenticate(self, proof: AuthenticationProof):
         now = self._clock()
         authentication = self._authenticator.authenticate(proof, now=now)
         authentication.require_current(now)
+        return now, authentication
+
+    def _authenticate_read(self, proof: AuthenticationProof):
+        now, authentication = self._authenticate(proof)
         self._read_policy.require_principal(authentication.principal_id)
         return now, authentication
+
+    def _authorize_management_operation(
+        self,
+        *,
+        family_id: str,
+        aggregate_id: str,
+        operation: str,
+        semantic_value: dict[str, object],
+        authenticated: tuple[UtcTimestamp, Any],
+    ) -> None:
+        now, authentication = authenticated
+        definition = self._store.projection_family_definition(family_id)
+        required_scope = "authority.projection.manage"
+        contract_digest = digest_canonical(
+            {
+                "contract": "projection-management-authorization-v1",
+                "family_definition_digest": definition.digest,
+            }
+        )
+        stable_digest = digest_canonical(
+            {
+                "management_contract_digest": contract_digest,
+                "operation": operation,
+                "semantic_value": semantic_value,
+            }
+        )
+        operation_type = f"manage:projection:{operation}"
+        unsigned = {
+            "authentication_context_id": str(
+                authentication.authentication_context_id
+            ),
+            "principal_id": authentication.principal_id,
+            "authority_domain": authentication.authority_domain,
+            "operation_type": operation_type,
+            "required_scope": required_scope,
+            "stable_semantic_request_digest": stable_digest,
+            "command_definition_digest": contract_digest,
+            "aggregate_type": "projection_generation",
+            "aggregate_id": aggregate_id,
+            "event_type": "projection.management.authorized",
+            "event_schema_version": 1,
+            "payload_mode": "NO_PAYLOAD",
+            "payload_schema_version": "projection_management_v1",
+            "payload_schema_contract_version": (
+                "projection-management-authorization-v1"
+            ),
+            "payload_schema_contract_digest": _MANAGEMENT_SCHEMA_DIGEST,
+            "payload_canonicalizer_version": "projection-management-none-v1",
+            "trust_scope": "ADMITTED",
+            "security_scope": definition.security_scope,
+            "retention_scope": definition.retention_scope,
+            "object_class": None,
+            "allowed_use": None,
+        }
+        request = _AuthorizationRequest(
+            authentication_context_id=authentication.authentication_context_id,
+            principal_id=authentication.principal_id,
+            authority_domain=authentication.authority_domain,
+            operation_type=operation_type,
+            required_scope=required_scope,
+            stable_semantic_request_digest=stable_digest,
+            command_definition_digest=contract_digest,
+            aggregate_type="projection_generation",
+            aggregate_id=aggregate_id,
+            event_type="projection.management.authorized",
+            event_schema_version=1,
+            payload_mode="NO_PAYLOAD",
+            payload_schema_version="projection_management_v1",
+            payload_schema_contract_version=(
+                "projection-management-authorization-v1"
+            ),
+            payload_schema_contract_digest=_MANAGEMENT_SCHEMA_DIGEST,
+            payload_canonicalizer_version="projection-management-none-v1",
+            trust_scope="ADMITTED",
+            security_scope=definition.security_scope,
+            retention_scope=definition.retention_scope,
+            object_class=None,
+            allowed_use=None,
+            request_digest=digest_canonical(unsigned),
+        )
+        decision = self._authorizer.authorize(authentication, request, now=now)
+        if (
+            decision.authentication_context_id
+            != authentication.authentication_context_id
+        ):
+            raise PermissionError(
+                "projection management authorization context mismatch"
+            )
+        if decision.authorization_request_digest != request.request_digest:
+            raise PermissionError(
+                "projection management authorization request mismatch"
+            )
+        decision.require_allowed()
 
     def _authorize_read(
         self,
@@ -421,6 +682,33 @@ class _ProjectionBoundary:
             proof=proof,
         )
         return self._store.projection_generations(family_id, limit)
+
+    def validation(
+        self,
+        generation_id: ProjectionGenerationId,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationValidationView:
+        authenticated = self._authenticate_read(proof)
+        generation = self._store.projection_generation(generation_id)
+        self._authorize_read(
+            family_id=generation.family_id,
+            operation="validation",
+            semantic_value={"generation_id": str(generation_id)},
+            authenticated=authenticated,
+        )
+        return self._store.projection_generation_validation(generation_id)
+
+    def promotions(
+        self, family_id: str, limit: int, proof: AuthenticationProof
+    ) -> tuple[ProjectionGenerationPromotionView, ...]:
+        self._read_policy.require_limit(limit)
+        self._authorize_read(
+            family_id=family_id,
+            operation="promotions",
+            semantic_value={"family_id": family_id, "limit": limit},
+            proof=proof,
+        )
+        return self._store.projection_promotions(family_id, limit)
 
     def gaps(self, generation_id: ProjectionGenerationId, limit: int, proof: AuthenticationProof) -> tuple[ProjectionGapView, ...]:
         self._read_policy.require_limit(limit)
@@ -525,10 +813,14 @@ def open_native_projection_authority_system(
                 register_family=projection_boundary.register_family,
                 create_generation=projection_boundary.create_generation,
                 transition_generation=projection_boundary.transition_generation,
+                validate_generation=projection_boundary.validate_generation,
+                promote_generation=projection_boundary.promote_generation,
                 record_delivery=projection_boundary.record_delivery,
                 resolve_gap=projection_boundary.resolve_gap,
                 status=projection_boundary.status,
                 generations=projection_boundary.generations,
+                validation=projection_boundary.validation,
+                promotions=projection_boundary.promotions,
                 gaps=projection_boundary.gaps,
                 dead_letters=projection_boundary.dead_letters,
             ),

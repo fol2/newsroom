@@ -1,4 +1,4 @@
-name: Projection B2 Neo4j
+name: Projection B2/B3 Neo4j
 
 on:
   push:
@@ -118,7 +118,7 @@ jobs:
               projector.close()
           PY
 
-      - name: Focused B1 and B2 tests against actual service
+      - name: Focused B1, B2 and B3 tests against actual service
         id: focused
         continue-on-error: true
         env:
@@ -128,7 +128,8 @@ jobs:
           uv run python -m pytest -q \
             newsroom/tests/test_projection_b1_*.py \
             newsroom/tests/test_projection_b2_*.py \
-            --junitxml=projection-b2-neo4j-results.xml
+            newsroom/tests/test_projection_b3_*.py \
+            --junitxml=projection-b2-b3-neo4j-results.xml
 
       - name: Prove actual-service tests executed
         if: always()
@@ -137,7 +138,7 @@ jobs:
           from pathlib import Path
           import xml.etree.ElementTree as ET
 
-          report = Path("projection-b2-neo4j-results.xml")
+          report = Path("projection-b2-b3-neo4j-results.xml")
           if not report.is_file():
               raise SystemExit("actual-service JUnit report is absent")
           root = ET.parse(report).getroot()
@@ -156,20 +157,48 @@ jobs:
               for case in actual
           ):
               raise SystemExit("actual-service tests reported failure or error")
+          rebuild = [
+              case
+              for case in cases
+              if "test_projection_b3_neo4j_service"
+              in case.attrib.get("classname", "")
+          ]
+          if len(rebuild) < 6:
+              raise SystemExit(
+                  f"expected at least 6 B3 actual-service tests, found {len(rebuild)}"
+              )
+          if any(case.find("skipped") is not None for case in rebuild):
+              raise SystemExit("B3 actual-service rebuild tests were skipped")
+          if any(
+              case.find("failure") is not None or case.find("error") is not None
+              for case in rebuild
+          ):
+              raise SystemExit("B3 actual-service rebuild tests failed")
+          required_b3_tests = {
+              "test_actual_service_active_read_resolves_only_authority_promoted_generation",
+              "test_actual_service_active_generation_revalidates_after_incremental_delivery",
+              "test_actual_service_promotion_rejects_graph_loss_after_validation",
+          }
+          executed_names = [case.attrib.get("name") for case in rebuild]
+          for test_name in sorted(required_b3_tests):
+              if executed_names.count(test_name) != 1:
+                  raise SystemExit(
+                      f"required B3 actual-service test did not execute exactly once: {test_name}"
+                  )
           PY
 
-      - name: Upload B2 actual-service evidence
+      - name: Upload B2/B3 actual-service evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: projection-b2-neo4j-evidence
-          path: projection-b2-neo4j-results.xml
+          name: projection-b2-b3-neo4j-evidence
+          path: projection-b2-b3-neo4j-results.xml
           if-no-files-found: error
 
       - name: Remove disposable Neo4j state
         if: always()
         run: docker rm --force newsroom-b2-neo4j || true
 
-      - name: Enforce B2 actual-service gate
+      - name: Enforce B2/B3 actual-service gate
         if: steps.focused.outcome != 'success'
         run: exit 1

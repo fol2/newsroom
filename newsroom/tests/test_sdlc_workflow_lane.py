@@ -298,14 +298,20 @@ def test_core_test_command_runs_full_suite_and_conditional_clustering(
 
 
 def test_optional_core_skips_are_exact_actual_service_cases() -> None:
-    assert lane_module._OPTIONAL_CORE_TEST_IDS == tuple(
-        sorted(lane_module._OPTIONAL_CORE_TEST_IDS)
+    expected = (
+        "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_private_adapter_exact_duplicate_and_digest_conflict",
+        "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_public_round_trip_duplicate_and_generation_isolation",
+        "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_requires_explicit_authentication_configuration",
+        "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_wrong_projector_credential_fails_closed_without_secret",
+        "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_active_generation_revalidates_after_incremental_delivery",
+        "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_active_read_resolves_only_authority_promoted_generation",
+        "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_graph_loss_and_process_restart_rebuild_from_authority",
+        "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_promotion_rejects_graph_loss_after_validation",
+        "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_rebuild_cleanup_cannot_cross_generation_namespace",
+        "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_tombstone_does_not_resurrect_after_wipe_rebuild",
     )
-    assert len(lane_module._OPTIONAL_CORE_TEST_IDS) == 4
-    assert all(
-        value.startswith("newsroom.tests.test_projection_b2_neo4j_service::")
-        for value in lane_module._OPTIONAL_CORE_TEST_IDS
-    )
+    assert lane_module._OPTIONAL_CORE_TEST_IDS == expected
+    assert lane_module._OPTIONAL_CORE_TEST_IDS == tuple(sorted(expected))
 
 
 def test_evidence_uses_zero_producer_timing_and_service_digest(

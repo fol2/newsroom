@@ -30,6 +30,9 @@ PROJECTION_COMMAND_TYPES = frozenset(
         "projection.family.register",
         "projection.generation.create",
         "projection.generation.transition",
+        "projection.generation.validate",
+        "projection.generation.promote",
+        "projection.generation.rebuild",
         "projection.delivery.record",
         "projection.gap.resolve",
     }
@@ -52,6 +55,40 @@ _PAYLOAD_SPECS: tuple[tuple[str, frozenset[str]], ...] = (
                 "generation_id",
                 "target_state",
                 "validated_through_ledger_seq",
+                "reason_code",
+            }
+        ),
+    ),
+    (
+        "projection_generation_validate_v1",
+        frozenset(
+            {
+                "generation_id",
+                "checkpoint_ledger_seq",
+                "service_compatibility_digest",
+                "projection_state_digest",
+                "reason_code",
+            }
+        ),
+    ),
+    (
+        "projection_generation_promote_v1",
+        frozenset(
+            {
+                "generation_id",
+                "checkpoint_ledger_seq",
+                "validation_digest",
+                "prior_generation_id",
+                "reason_code",
+            }
+        ),
+    ),
+    (
+        "projection_generation_rebuild_v1",
+        frozenset(
+            {
+                "generation_id",
+                "through_ledger_seq",
                 "reason_code",
             }
         ),
@@ -91,6 +128,24 @@ _COMMAND_SPECS: tuple[tuple[str, str, str, str], ...] = (
         "projection.generation.transition",
         "projection.generation.transitioned",
         "projection_generation_transition_v1",
+        "authority.projection.manage",
+    ),
+    (
+        "projection.generation.validate",
+        "projection.generation.validated",
+        "projection_generation_validate_v1",
+        "authority.projection.manage",
+    ),
+    (
+        "projection.generation.promote",
+        "projection.generation.promoted",
+        "projection_generation_promote_v1",
+        "authority.projection.manage",
+    ),
+    (
+        "projection.generation.rebuild",
+        "projection.generation.rebuild.started",
+        "projection_generation_rebuild_v1",
         "authority.projection.manage",
     ),
     (

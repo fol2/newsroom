@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any, Protocol
 
 from ._capability import _CapabilityIssuer
@@ -34,7 +35,12 @@ from newsroom.projection.models import (
     ProjectionContractError,
     ProjectionDeliveryOutcome,
     ProjectionDeliveryRequest,
+    ProjectionGenerationId,
+    ProjectionGenerationPromotionRequest,
+    ProjectionGenerationPromotionView,
     ProjectionGenerationState,
+    ProjectionGenerationValidationRequest,
+    ProjectionGenerationValidationView,
     ProjectionReadPolicy,
     ProjectionStateError,
 )
@@ -48,13 +54,21 @@ from newsroom.projection.neo4j.models import (
     Neo4jReadError,
     Neo4jStructuralRead,
     Neo4jWriteError,
+    StructuralActiveReadRequest,
     StructuralBatch,
     StructuralDeliveryRequest,
+    StructuralGenerationValidationRequest,
     StructuralNode,
+    StructuralRebuildRequest,
+    StructuralRebuildResult,
+    StructuralReadAuthoritySelection,
     StructuralReadMetadata,
     StructuralReadRequest,
     StructuralReadResponse,
     StructuralRelation,
+)
+from newsroom.projection.neo4j.qualification import (
+    neo4j_compatibility_digest,
 )
 from newsroom.projection.policy import (
     PROJECTION_COMMAND_TYPES,
@@ -83,6 +97,17 @@ class _StructuralGraphAdapter(Protocol):
     ) -> Neo4jStructuralRead:
         ...
 
+    def reconcile_generation(
+        self,
+        *,
+        generation_id: str,
+        expected_batches: tuple[StructuralBatch, ...],
+    ) -> str:
+        ...
+
+    def cleanup_generation(self, generation_id: str) -> int:
+        ...
+
     def close(self) -> None:
         ...
 
@@ -90,7 +115,13 @@ class _StructuralGraphAdapter(Protocol):
 class Neo4jStructuralProjector:
     """Public B2 facade: exact delivery plus bounded non-authoritative read."""
 
-    __slots__ = ("__deliver", "__read")
+    __slots__ = (
+        "__deliver",
+        "__read",
+        "__read_active",
+        "__rebuild",
+        "__validate",
+    )
 
     def __init__(
         self,
@@ -103,9 +134,24 @@ class Neo4jStructuralProjector:
             [StructuralReadRequest, AuthenticationProof],
             StructuralReadResponse,
         ],
+        read_active: Callable[
+            [StructuralActiveReadRequest, AuthenticationProof],
+            StructuralReadResponse,
+        ],
+        rebuild: Callable[
+            [StructuralRebuildRequest, AuthenticationProof],
+            StructuralRebuildResult,
+        ],
+        validate_generation: Callable[
+            [StructuralGenerationValidationRequest, AuthenticationProof],
+            ProjectionGenerationValidationView,
+        ],
     ) -> None:
         self.__deliver = deliver
         self.__read = read
+        self.__read_active = read_active
+        self.__rebuild = rebuild
+        self.__validate = validate_generation
 
     def deliver(
         self,
@@ -122,6 +168,30 @@ class Neo4jStructuralProjector:
         proof: AuthenticationProof,
     ) -> StructuralReadResponse:
         return self.__read(request, proof)
+
+    def read_active(
+        self,
+        request: StructuralActiveReadRequest,
+        *,
+        proof: AuthenticationProof,
+    ) -> StructuralReadResponse:
+        return self.__read_active(request, proof)
+
+    def rebuild(
+        self,
+        request: StructuralRebuildRequest,
+        *,
+        proof: AuthenticationProof,
+    ) -> StructuralRebuildResult:
+        return self.__rebuild(request, proof)
+
+    def validate_generation(
+        self,
+        request: StructuralGenerationValidationRequest,
+        *,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationValidationView:
+        return self.__validate(request, proof)
 
 
 class Neo4jProjectionAuthoritySystem:
@@ -174,8 +244,17 @@ class _Neo4jProjectionBoundary:
         self._projection_boundary = projection_boundary
         self._adapter = adapter
         self._clock = clock
+        self._operation_lock = RLock()
 
     def deliver(
+        self,
+        request: StructuralDeliveryRequest,
+        proof: AuthenticationProof,
+    ) -> DeliveryRecordView:
+        with self._operation_lock:
+            return self._deliver_locked(request, proof)
+
+    def _deliver_locked(
         self,
         request: StructuralDeliveryRequest,
         proof: AuthenticationProof,
@@ -278,6 +357,331 @@ class _Neo4jProjectionBoundary:
                 "Neo4j delivery committed but B1 authority transition is pending"
             ) from None
 
+    def rebuild(
+        self,
+        request: StructuralRebuildRequest,
+        proof: AuthenticationProof,
+    ) -> StructuralRebuildResult:
+        with self._operation_lock:
+            return self._rebuild_locked(request, proof)
+
+    def _rebuild_locked(
+        self,
+        request: StructuralRebuildRequest,
+        proof: AuthenticationProof,
+    ) -> StructuralRebuildResult:
+        if not isinstance(request, StructuralRebuildRequest):
+            raise TypeError("structural rebuild requires a typed request")
+        receipt = self._projection_boundary._begin_rebuild(request, proof)
+        if receipt.generation.state is not ProjectionGenerationState.BUILDING:
+            raise ProjectionStateError(
+                "only a building generation can be destructively rebuilt"
+            )
+
+        deleted = self._adapter.cleanup_generation(str(request.generation_id))
+        reapplied = 0
+        recorded = 0
+        ignored = 0
+        blocked = 0
+        for ledger_seq in range(1, request.through_ledger_seq + 1):
+            source = self._store.projection_delivery_source(
+                request.generation_id, ledger_seq
+            )
+            state = self._store.projection_rebuild_delivery_state(
+                request.generation_id, ledger_seq
+            )
+            if source.mapping is None:
+                ignored += 1
+                continue
+            if state is not None:
+                if (
+                    state.finalized
+                    and state.outcome is ProjectionDeliveryOutcome.APPLIED
+                ):
+                    self._adapter.apply(_build_structural_batch(source))
+                    reapplied += 1
+                    continue
+                if state.outcome is ProjectionDeliveryOutcome.IGNORED_OPTIONAL:
+                    ignored += 1
+                    continue
+                if state.finalized:
+                    blocked += 1
+                    continue
+                attempt_number = state.attempt_count + 1
+            else:
+                attempt_number = 1
+
+            current = self._store.projection_generation(request.generation_id)
+            delivery_key = "rebuild-delivery:" + digest_canonical(
+                {
+                    "rebuild_idempotency_key": request.idempotency_key,
+                    "generation_id": str(request.generation_id),
+                    "ledger_seq": ledger_seq,
+                    "attempt_number": attempt_number,
+                }
+            )
+            result = self.deliver(
+                StructuralDeliveryRequest(
+                    generation_id=request.generation_id,
+                    expected_authority_version=(
+                        current.authority_aggregate_version
+                    ),
+                    ledger_seq=ledger_seq,
+                    idempotency_key=delivery_key,
+                ),
+                proof,
+            )
+            if result.outcome is ProjectionDeliveryOutcome.APPLIED:
+                recorded += 1
+            elif result.outcome is ProjectionDeliveryOutcome.IGNORED_OPTIONAL:
+                ignored += 1
+            else:
+                blocked += 1
+
+        metadata = self._store.projection_generation_metadata(
+            request.generation_id
+        )
+        return StructuralRebuildResult(
+            generation_id=request.generation_id,
+            through_ledger_seq=request.through_ledger_seq,
+            checkpoint_ledger_seq=metadata.contiguous_ledger_seq,
+            rebuild_authority_event_id=receipt.authority_event_id,
+            authority_command_replayed=receipt.replayed,
+            deleted_graph_record_count=deleted,
+            reapplied_delivery_count=reapplied,
+            recorded_delivery_count=recorded,
+            ignored_optional_count=ignored,
+            blocked_delivery_count=blocked,
+            serving_time=metadata.serving_time,
+        )
+
+    def promote_generation(
+        self,
+        request: ProjectionGenerationPromotionRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationPromotionView:
+        with self._operation_lock:
+            return self._promote_generation_locked(request, proof)
+
+    def _promote_generation_locked(
+        self,
+        request: ProjectionGenerationPromotionRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationPromotionView:
+        if not isinstance(request, ProjectionGenerationPromotionRequest):
+            raise TypeError("projection promotion requires a typed request")
+        target_grant, prior_grant = (
+            self._projection_boundary._authorize_promotion(request, proof)
+        )
+        metadata = self._store.projection_generation_metadata(
+            request.generation_id
+        )
+        replaying = target_grant.replay_of_command_id is not None
+        if replaying:
+            if metadata.generation.state not in {
+                ProjectionGenerationState.ACTIVE,
+                ProjectionGenerationState.RETIRED,
+            }:
+                raise ProjectionStateError(
+                    "promotion replay requires an active or retired generation"
+                )
+            checkpoint_ledger_seq = metadata.contiguous_ledger_seq
+        else:
+            if metadata.generation.state is not ProjectionGenerationState.VALIDATING:
+                raise ProjectionStateError(
+                    "only a validating generation can be promoted"
+                )
+            if metadata.contiguous_ledger_seq != request.checkpoint_ledger_seq:
+                raise ProjectionStateError(
+                    "promotion must bind the exact authority checkpoint"
+                )
+            checkpoint_ledger_seq = request.checkpoint_ledger_seq
+        if metadata.open_gap_count or metadata.dead_letter_count:
+            raise ProjectionStateError(
+                "promotion requires zero gaps and dead letters"
+            )
+        validation = self._store.projection_generation_validation(
+            request.generation_id
+        )
+        if replaying:
+            if (
+                validation.checkpoint_ledger_seq != checkpoint_ledger_seq
+                or metadata.generation.validated_through_ledger_seq
+                != checkpoint_ledger_seq
+            ):
+                raise ProjectionStateError(
+                    "promotion replay requires validation through the current authority checkpoint"
+                )
+        else:
+            if validation.validation_digest != request.validation_digest:
+                raise ProjectionStateError(
+                    "promotion requires the exact retained validation evidence"
+                )
+            if validation.checkpoint_ledger_seq != request.checkpoint_ledger_seq:
+                raise ProjectionStateError(
+                    "promotion validation checkpoint is stale"
+                )
+
+        compatibility_digest = neo4j_compatibility_digest(
+            self._adapter.verify_compatibility()
+        )
+        if (
+            compatibility_digest
+            != validation.service_compatibility_digest
+        ):
+            raise Neo4jIdentityConflict(
+                "Neo4j compatibility differs from retained validation"
+            )
+        batches = self._expected_validation_batches(
+            request.generation_id,
+            checkpoint_ledger_seq,
+        )
+        state_digest = self._adapter.reconcile_generation(
+            generation_id=str(request.generation_id),
+            expected_batches=batches,
+        )
+        if state_digest != validation.projection_state_digest:
+            raise Neo4jIdentityConflict(
+                "Neo4j graph state differs from retained validation"
+            )
+        return self._projection_boundary._commit_promotion(
+            target_grant,
+            prior_grant,
+            request,
+        )
+
+    def reject_direct_validation(
+        self,
+        request: ProjectionGenerationValidationRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationValidationView:
+        if not isinstance(request, ProjectionGenerationValidationRequest):
+            raise TypeError("projection validation requires a typed request")
+        self._projection_boundary._authenticate(proof)
+        raise ProjectionStateError(
+            "Neo4j generation validation requires structural reconciliation"
+        )
+
+    def validate_generation(
+        self,
+        request: StructuralGenerationValidationRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationValidationView:
+        with self._operation_lock:
+            return self._validate_generation_locked(request, proof)
+
+    def _validate_generation_locked(
+        self,
+        request: StructuralGenerationValidationRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationValidationView:
+        if not isinstance(request, StructuralGenerationValidationRequest):
+            raise TypeError("structural validation requires a typed request")
+        authenticated = self._projection_boundary._authenticate(proof)
+        metadata = self._store.projection_generation_metadata(
+            request.generation_id
+        )
+        self._projection_boundary._authorize_management_operation(
+            family_id=metadata.family.family_id,
+            aggregate_id=str(request.generation_id),
+            operation="neo4j-generation-reconcile",
+            semantic_value={
+                "generation_id": str(request.generation_id),
+                "checkpoint_ledger_seq": request.checkpoint_ledger_seq,
+                "reason_code": request.reason_code,
+            },
+            authenticated=authenticated,
+        )
+        if metadata.generation.state not in {
+            ProjectionGenerationState.BUILDING,
+            ProjectionGenerationState.VALIDATING,
+            ProjectionGenerationState.ACTIVE,
+        }:
+            raise ProjectionStateError(
+                "only building, validating or active generations can be reconciled"
+            )
+        if metadata.contiguous_ledger_seq != request.checkpoint_ledger_seq:
+            raise ProjectionStateError(
+                "structural validation must bind the exact authority checkpoint"
+            )
+        if metadata.open_gap_count or metadata.dead_letter_count:
+            raise ProjectionStateError(
+                "structural validation requires zero gaps and dead letters"
+            )
+        batches = self._expected_validation_batches(
+            request.generation_id,
+            request.checkpoint_ledger_seq,
+        )
+        compatibility = self._adapter.verify_compatibility()
+        compatibility_digest = neo4j_compatibility_digest(compatibility)
+        state_digest = self._adapter.reconcile_generation(
+            generation_id=str(request.generation_id),
+            expected_batches=batches,
+        )
+        authoritative_request = ProjectionGenerationValidationRequest(
+            generation_id=request.generation_id,
+            expected_authority_version=request.expected_authority_version,
+            checkpoint_ledger_seq=request.checkpoint_ledger_seq,
+            service_compatibility_digest=compatibility_digest,
+            projection_state_digest=state_digest,
+            reason_code=request.reason_code,
+            idempotency_key=request.idempotency_key,
+        )
+        return self._projection_boundary.validate_generation(
+            authoritative_request,
+            proof,
+        )
+
+    def _expected_validation_batches(
+        self,
+        generation_id: ProjectionGenerationId,
+        checkpoint_ledger_seq: int,
+    ) -> tuple[StructuralBatch, ...]:
+        batches: list[StructuralBatch] = []
+        for ledger_seq in range(1, checkpoint_ledger_seq + 1):
+            source = self._store.projection_delivery_source(
+                generation_id,
+                ledger_seq,
+            )
+            state = self._store.projection_rebuild_delivery_state(
+                generation_id,
+                ledger_seq,
+            )
+            if state is None:
+                if source.mapping is None:
+                    continue
+                raise ProjectionStateError(
+                    "authoritative checkpoint lacks a structural delivery state"
+                )
+            if (
+                str(state.source_event_id) != source.event.event_id
+                or state.source_event_digest != source.source_event_digest
+            ):
+                raise ProjectionStateError(
+                    "structural delivery provenance differs from retained authority"
+                )
+            if not state.finalized:
+                raise ProjectionStateError(
+                    "structural validation encountered an unfinished delivery"
+                )
+            if state.outcome is ProjectionDeliveryOutcome.APPLIED:
+                if source.mapping is None:
+                    raise ProjectionStateError(
+                        "applied delivery has no retained structural mapping"
+                    )
+                batches.append(_build_structural_batch(source))
+                continue
+            if state.outcome is ProjectionDeliveryOutcome.IGNORED_OPTIONAL:
+                if source.mapping is not None and source.mapping.required:
+                    raise ProjectionStateError(
+                        "required structural mapping was ignored"
+                    )
+                continue
+            raise ProjectionStateError(
+                "structural validation encountered a failed delivery"
+            )
+        return tuple(batches)
+
     def read(
         self,
         request: StructuralReadRequest,
@@ -290,26 +694,88 @@ class _Neo4jProjectionBoundary:
         metadata = self._store.projection_generation_metadata(
             request.generation_id
         )
+        return self._read_with_metadata(
+            metadata=metadata,
+            canonical_ids=request.canonical_ids,
+            query_valid_time=request.query_valid_time,
+            limit=request.limit,
+            operation="neo4j-structural",
+            authenticated=authenticated,
+            authority_selection=(
+                StructuralReadAuthoritySelection.EXACT_GENERATION
+            ),
+        )
+
+    def read_active(
+        self,
+        request: StructuralActiveReadRequest,
+        proof: AuthenticationProof,
+    ) -> StructuralReadResponse:
+        if not isinstance(request, StructuralActiveReadRequest):
+            raise TypeError("active structural read requires a typed request")
+        with self._operation_lock:
+            self._projection_boundary._read_policy.require_limit(request.limit)
+            authenticated = self._projection_boundary._authenticate_read(proof)
+            # Authorize the family-scoped selection before resolving whether an
+            # ACTIVE generation exists.  This prevents the serving facade from
+            # becoming an existence oracle for callers without read authority.
+            self._projection_boundary._authorize_read(
+                family_id=request.family_id,
+                operation="neo4j-structural-active-select",
+                semantic_value={
+                    "family_id": request.family_id,
+                    "canonical_ids": list(request.canonical_ids),
+                    "query_valid_time": request.query_valid_time.to_text(),
+                    "limit": request.limit,
+                },
+                authenticated=authenticated,
+            )
+            metadata = self._store.projection_active_generation_metadata(
+                request.family_id
+            )
+            return self._read_with_metadata(
+                metadata=metadata,
+                canonical_ids=request.canonical_ids,
+                query_valid_time=request.query_valid_time,
+                limit=request.limit,
+                operation="neo4j-structural-active",
+                authenticated=authenticated,
+                authority_selection=(
+                    StructuralReadAuthoritySelection.AUTHORITY_SELECTED_ACTIVE
+                ),
+            )
+
+    def _read_with_metadata(
+        self,
+        *,
+        metadata: Any,
+        canonical_ids: tuple[str, ...],
+        query_valid_time: UtcTimestamp,
+        limit: int,
+        operation: str,
+        authenticated: tuple[UtcTimestamp, Any],
+        authority_selection: StructuralReadAuthoritySelection,
+    ) -> StructuralReadResponse:
         self._projection_boundary._authorize_read(
             family_id=metadata.family.family_id,
-            operation="neo4j-structural",
+            operation=operation,
             semantic_value={
-                "generation_id": str(request.generation_id),
-                "canonical_ids": list(request.canonical_ids),
-                "query_valid_time": request.query_valid_time.to_text(),
-                "limit": request.limit,
+                "generation_id": str(metadata.generation.generation_id),
+                "canonical_ids": list(canonical_ids),
+                "query_valid_time": query_valid_time.to_text(),
+                "limit": limit,
             },
             authenticated=authenticated,
         )
-        if request.query_valid_time.value > metadata.serving_time.value:
+        if query_valid_time.value > metadata.serving_time.value:
             raise ProjectionContractError(
                 "query_valid_time cannot be later than serving_time"
             )
         graph = self._adapter.read(
-            generation_id=str(request.generation_id),
-            canonical_ids=request.canonical_ids,
+            generation_id=str(metadata.generation.generation_id),
+            canonical_ids=canonical_ids,
             maximum_ledger_seq=metadata.contiguous_ledger_seq,
-            limit=request.limit,
+            limit=limit,
         )
         if any(
             relation.ledger_seq > metadata.contiguous_ledger_seq
@@ -321,9 +787,7 @@ class _Neo4jProjectionBoundary:
         return StructuralReadResponse(
             metadata=StructuralReadMetadata(
                 family_id=metadata.family.family_id,
-                family_definition_version=(
-                    metadata.family.definition_version
-                ),
+                family_definition_version=metadata.family.definition_version,
                 projector_version=metadata.family.projector_version,
                 ontology_contract_digest=(
                     metadata.family.ontology_contract_digest
@@ -333,11 +797,12 @@ class _Neo4jProjectionBoundary:
                 ),
                 generation_id=metadata.generation.generation_id,
                 generation_state=metadata.generation.state,
+                authority_selection=authority_selection,
                 contiguous_ledger_seq=metadata.contiguous_ledger_seq,
                 open_gap_count=metadata.open_gap_count,
                 dead_letter_count=metadata.dead_letter_count,
                 trust_scope=TrustScope.ADMITTED,
-                query_valid_time=request.query_valid_time,
+                query_valid_time=query_valid_time,
                 serving_time=metadata.serving_time,
             ),
             nodes=graph.nodes,
@@ -465,6 +930,9 @@ def _build_structural_batch(
         relations=tuple(
             sorted(relations, key=lambda value: value.relation_key)
         ),
+        tombstoned_object_admission_ids=(
+            source.tombstoned_object_admission_ids
+        ),
     )
 
 
@@ -577,16 +1045,23 @@ def _open_with_adapter(
                 transition_generation=(
                     projection_boundary.transition_generation
                 ),
+                validate_generation=graph_boundary.reject_direct_validation,
+                promote_generation=graph_boundary.promote_generation,
                 record_delivery=projection_boundary.record_delivery,
                 resolve_gap=projection_boundary.resolve_gap,
                 status=projection_boundary.status,
                 generations=projection_boundary.generations,
+                validation=projection_boundary.validation,
+                promotions=projection_boundary.promotions,
                 gaps=projection_boundary.gaps,
                 dead_letters=projection_boundary.dead_letters,
             ),
             structural=Neo4jStructuralProjector(
                 deliver=graph_boundary.deliver,
                 read=graph_boundary.read,
+                read_active=graph_boundary.read_active,
+                rebuild=graph_boundary.rebuild,
+                validate_generation=graph_boundary.validate_generation,
             ),
             compatibility=compatibility,
             close=close,
