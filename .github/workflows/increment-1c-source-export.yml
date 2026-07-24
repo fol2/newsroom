@@ -1,0 +1,47 @@
+name: Increment 1C Source Export
+
+on:
+  push:
+    branches:
+      - agent/increment-1c-integrated-foundation
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    if: github.repository == 'fol2/newsroom'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact branch head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Build source-only archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          tar \
+            --exclude=.git \
+            --exclude=.venv \
+            --exclude='**/__pycache__' \
+            -czf "${RUNNER_TEMP}/increment-1c-source.tar.gz" .
+          sha256sum "${RUNNER_TEMP}/increment-1c-source.tar.gz" \
+            > "${RUNNER_TEMP}/increment-1c-source.tar.gz.sha256"
+
+      - name: Upload exact source archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: increment-1c-source-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/increment-1c-source.tar.gz
+            ${{ runner.temp }}/increment-1c-source.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
