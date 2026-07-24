@@ -88,3 +88,183 @@ jobs:
           test "$FOCUSED_OUTCOME" = success
           test "$REGRESSION_OUTCOME" = success
           test "$FAULT_OUTCOME" = success
+
+  increment-1c-read-completeness-publish:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.head_ref == 'agent/increment-1c-read-completeness-qualify' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.repository == 'fol2/newsroom'
+    needs: governed-object-authority
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout qualification branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1c-read-completeness-qualify
+          path: .qualifier
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout exact Increment 1C target
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1c-integrated-foundation
+          path: .target
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.0"
+          enable-cache: true
+          cache-dependency-glob: .target/uv.lock
+
+      - name: Correct, qualify and publish read completeness
+        shell: bash
+        working-directory: .target
+        run: |
+          set -euxo pipefail
+          diagnostic="${RUNNER_TEMP}/increment-1c-read-completeness.log"
+          exec > >(tee "${diagnostic}") 2>&1
+          expected_head="7abc652d09e5b2fa622ba3bee9537e7f16e64788"
+          test "$(git rev-parse HEAD)" = "${expected_head}"
+          python ../.qualifier/.sdlc/increment_1c_read_completeness_qualify.py
+
+          actual_files="$({
+            git diff --name-only
+            git ls-files --others --exclude-standard
+          } | sort)"
+          expected_files="$(printf '%s\n' \
+            newsroom/authority/_integrated_system.py \
+            newsroom/tests/test_integrated_c1_read_completeness.py | sort)"
+          test "${actual_files}" = "${expected_files}"
+          git diff --check
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_integrated_c1_read_completeness.py \
+            newsroom/tests/test_integrated_c1_context_semantics.py \
+            newsroom/tests/test_integrated_c1_candidate_authority.py \
+            newsroom/tests/test_integrated_c1_recovery_integrity.py \
+            newsroom/tests/test_integrated_c1_temporal_authority.py
+          uv run --no-sync python -m pytest -q newsroom/tests
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+          NEO4J_ADMIN_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          NEWSROOM_NEO4J_PROJECTOR_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          export NEO4J_ADMIN_PASSWORD NEWSROOM_NEO4J_PROJECTOR_PASSWORD
+          export NEWSROOM_NEO4J_URI="bolt://localhost:7687"
+          export NEWSROOM_NEO4J_DATABASE="neo4j"
+          export NEWSROOM_NEO4J_PROJECTOR_USERNAME="newsroom_projector"
+          export NEWSROOM_NEO4J_SERVICE_REQUIRED="1"
+          echo "::add-mask::${NEO4J_ADMIN_PASSWORD}"
+          echo "::add-mask::${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+          docker run --detach \
+            --name newsroom-c1-read-neo4j \
+            --publish 127.0.0.1:7687:7687 \
+            --env "NEO4J_AUTH=neo4j/${NEO4J_ADMIN_PASSWORD}" \
+            neo4j:2026.06.0-community-trixie
+          trap 'docker rm --force newsroom-c1-read-neo4j || true' EXIT
+          uv run --no-sync python - <<'PY'
+          import os
+          import time
+          from neo4j import GraphDatabase
+
+          uri = os.environ["NEWSROOM_NEO4J_URI"]
+          admin = ("neo4j", os.environ["NEO4J_ADMIN_PASSWORD"])
+          last_error = None
+          for _ in range(120):
+              driver = None
+              try:
+                  driver = GraphDatabase.driver(uri, auth=admin)
+                  driver.verify_connectivity()
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  if driver is not None:
+                      driver.close()
+                  time.sleep(2)
+          else:
+              raise RuntimeError("authenticated Neo4j readiness timed out") from last_error
+          try:
+              with driver.session(database="system") as session:
+                  session.run(
+                      "CREATE USER newsroom_projector IF NOT EXISTS "
+                      "SET PLAINTEXT PASSWORD $password CHANGE NOT REQUIRED",
+                      password=os.environ["NEWSROOM_NEO4J_PROJECTOR_PASSWORD"],
+                  ).consume()
+          finally:
+              driver.close()
+          projector = GraphDatabase.driver(
+              uri,
+              auth=(
+                  os.environ["NEWSROOM_NEO4J_PROJECTOR_USERNAME"],
+                  os.environ["NEWSROOM_NEO4J_PROJECTOR_PASSWORD"],
+              ),
+          )
+          try:
+              projector.verify_connectivity()
+          finally:
+              projector.close()
+          PY
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_integrated_c1_neo4j_service.py::test_actual_service_integrated_foundation_replay_recovery_and_tombstone \
+            --junitxml=increment-1c-read-neo4j.xml
+          uv run --no-sync python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("increment-1c-read-neo4j.xml").getroot()
+          cases = root.findall(".//testcase")
+          if len(cases) != 1:
+              raise SystemExit(f"expected one C1 read case, found {len(cases)}")
+          case = cases[0]
+          if case.find("skipped") is not None:
+              raise SystemExit("C1 read case was skipped")
+          if case.find("failure") is not None or case.find("error") is not None:
+              raise SystemExit("C1 read case failed")
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            newsroom/authority/_integrated_system.py \
+            newsroom/tests/test_integrated_c1_read_completeness.py
+          git commit -m 'fix(integrated): prevent bounded graph truncation'
+
+          remote_head="$(git ls-remote origin refs/heads/agent/increment-1c-integrated-foundation | cut -f1)"
+          test "${remote_head}" = "${expected_head}"
+          git push \
+            --force-with-lease=refs/heads/agent/increment-1c-integrated-foundation:${expected_head} \
+            origin HEAD:agent/increment-1c-integrated-foundation
+
+      - name: Upload read-completeness qualifier diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-1c-read-completeness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/increment-1c-read-completeness.log
+            .target/increment-1c-read-neo4j.xml
+          if-no-files-found: warn
+          retention-days: 1
