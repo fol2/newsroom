@@ -9,12 +9,16 @@ from newsroom.projection import (
     ProjectionFamilyRegistrationRequest,
     ProjectionGenerationCreateRequest,
     ProjectionGenerationId,
+    ProjectionGenerationPromotionRequest,
+    ProjectionGenerationState,
+    ProjectionStateError,
     StructuralIdentityContext,
     canonical_node_id,
 )
 from newsroom.projection.neo4j import (
     Neo4jIdentityConflict,
     Neo4jProjectorConfig,
+    StructuralActiveReadRequest,
     StructuralGenerationValidationRequest,
     StructuralReadRequest,
     StructuralRebuildRequest,
@@ -126,6 +130,93 @@ def _cleanup(config: Neo4jProjectorConfig, *generation_ids: ProjectionGeneration
     finally:
         adapter.close()
 
+
+
+def test_actual_service_active_read_resolves_only_authority_promoted_generation(
+    tmp_path: Path,
+) -> None:
+    config = _service_config()
+    authority_path = tmp_path / "authority.sqlite3"
+    generations: list[ProjectionGenerationId] = []
+    system = open_b2_service_system(authority_path, config)
+    try:
+        source = _source_event(system, key="b3-service-active-source")
+        canonical_ids = _canonical_ids_for_source_event(source)
+        _register(system)
+        active = _create_generation(system, suffix="active-serving")
+        generations.append(active.generation_id)
+        rebuilt = system.structural.rebuild(
+            _rebuild_request(
+                system,
+                active,
+                key="b3-service-active-rebuild",
+            ),
+            proof=proof(),
+        )
+        request = StructuralActiveReadRequest(
+            family_id=FAMILY_ID,
+            canonical_ids=canonical_ids,
+            query_valid_time=FIXED_NOW,
+            limit=100,
+        )
+
+        with pytest.raises(
+            ProjectionStateError,
+            match="no authority-selected active generation",
+        ):
+            system.structural.read_active(request, proof=proof())
+
+        current = next(
+            item
+            for item in system.projections.generations(FAMILY_ID, proof=proof())
+            if item.generation_id == active.generation_id
+        )
+        validation = system.structural.validate_generation(
+            StructuralGenerationValidationRequest(
+                generation_id=current.generation_id,
+                expected_authority_version=current.authority_aggregate_version,
+                checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
+                reason_code="B3_ACTUAL_SERVICE_ACTIVE_VALIDATE",
+                idempotency_key="b3-service-active-validate",
+            ),
+            proof=proof(),
+        )
+        validating = next(
+            item
+            for item in system.projections.generations(FAMILY_ID, proof=proof())
+            if item.generation_id == active.generation_id
+        )
+        promoted = system.projections.promote_generation(
+            ProjectionGenerationPromotionRequest(
+                generation_id=validating.generation_id,
+                expected_authority_version=(
+                    validating.authority_aggregate_version
+                ),
+                checkpoint_ledger_seq=validation.checkpoint_ledger_seq,
+                validation_digest=validation.validation_digest,
+                reason_code="B3_ACTUAL_SERVICE_ACTIVE_PROMOTE",
+                idempotency_key="b3-service-active-promote",
+            ),
+            proof=proof(),
+        )
+        assert promoted.generation.state is ProjectionGenerationState.ACTIVE
+
+        response = system.structural.read_active(request, proof=proof())
+        assert response.metadata.generation_id == active.generation_id
+        assert response.metadata.generation_state is ProjectionGenerationState.ACTIVE
+        assert response.nodes
+        assert response.relations
+
+        newer = _create_generation(system, suffix="newer-building")
+        generations.append(newer.generation_id)
+        assert newer.state is ProjectionGenerationState.BUILDING
+        still_active = system.structural.read_active(request, proof=proof())
+        assert still_active.metadata.generation_id == active.generation_id
+        assert still_active == response
+    finally:
+        system.close()
+        if generations:
+            _cleanup(config, *generations)
 
 def test_actual_service_graph_loss_and_process_restart_rebuild_from_authority(
     tmp_path: Path,

@@ -36,6 +36,8 @@ from newsroom.projection.models import (
     ProjectionDeliveryOutcome,
     ProjectionDeliveryRequest,
     ProjectionGenerationId,
+    ProjectionGenerationPromotionRequest,
+    ProjectionGenerationPromotionView,
     ProjectionGenerationState,
     ProjectionGenerationValidationRequest,
     ProjectionGenerationValidationView,
@@ -52,6 +54,7 @@ from newsroom.projection.neo4j.models import (
     Neo4jReadError,
     Neo4jStructuralRead,
     Neo4jWriteError,
+    StructuralActiveReadRequest,
     StructuralBatch,
     StructuralDeliveryRequest,
     StructuralGenerationValidationRequest,
@@ -111,7 +114,13 @@ class _StructuralGraphAdapter(Protocol):
 class Neo4jStructuralProjector:
     """Public B2 facade: exact delivery plus bounded non-authoritative read."""
 
-    __slots__ = ("__deliver", "__read", "__rebuild", "__validate")
+    __slots__ = (
+        "__deliver",
+        "__read",
+        "__read_active",
+        "__rebuild",
+        "__validate",
+    )
 
     def __init__(
         self,
@@ -122,6 +131,10 @@ class Neo4jStructuralProjector:
         ],
         read: Callable[
             [StructuralReadRequest, AuthenticationProof],
+            StructuralReadResponse,
+        ],
+        read_active: Callable[
+            [StructuralActiveReadRequest, AuthenticationProof],
             StructuralReadResponse,
         ],
         rebuild: Callable[
@@ -135,6 +148,7 @@ class Neo4jStructuralProjector:
     ) -> None:
         self.__deliver = deliver
         self.__read = read
+        self.__read_active = read_active
         self.__rebuild = rebuild
         self.__validate = validate_generation
 
@@ -153,6 +167,14 @@ class Neo4jStructuralProjector:
         proof: AuthenticationProof,
     ) -> StructuralReadResponse:
         return self.__read(request, proof)
+
+    def read_active(
+        self,
+        request: StructuralActiveReadRequest,
+        *,
+        proof: AuthenticationProof,
+    ) -> StructuralReadResponse:
+        return self.__read_active(request, proof)
 
     def rebuild(
         self,
@@ -432,6 +454,14 @@ class _Neo4jProjectionBoundary:
             serving_time=metadata.serving_time,
         )
 
+    def promote_generation(
+        self,
+        request: ProjectionGenerationPromotionRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationPromotionView:
+        with self._operation_lock:
+            return self._projection_boundary.promote_generation(request, proof)
+
     def reject_direct_validation(
         self,
         request: ProjectionGenerationValidationRequest,
@@ -575,26 +605,81 @@ class _Neo4jProjectionBoundary:
         metadata = self._store.projection_generation_metadata(
             request.generation_id
         )
+        return self._read_with_metadata(
+            metadata=metadata,
+            canonical_ids=request.canonical_ids,
+            query_valid_time=request.query_valid_time,
+            limit=request.limit,
+            operation="neo4j-structural",
+            authenticated=authenticated,
+        )
+
+    def read_active(
+        self,
+        request: StructuralActiveReadRequest,
+        proof: AuthenticationProof,
+    ) -> StructuralReadResponse:
+        if not isinstance(request, StructuralActiveReadRequest):
+            raise TypeError("active structural read requires a typed request")
+        with self._operation_lock:
+            self._projection_boundary._read_policy.require_limit(request.limit)
+            authenticated = self._projection_boundary._authenticate_read(proof)
+            # Authorize the family-scoped selection before resolving whether an
+            # ACTIVE generation exists.  This prevents the serving facade from
+            # becoming an existence oracle for callers without read authority.
+            self._projection_boundary._authorize_read(
+                family_id=request.family_id,
+                operation="neo4j-structural-active-select",
+                semantic_value={
+                    "family_id": request.family_id,
+                    "canonical_ids": list(request.canonical_ids),
+                    "query_valid_time": request.query_valid_time.to_text(),
+                    "limit": request.limit,
+                },
+                authenticated=authenticated,
+            )
+            metadata = self._store.projection_active_generation_metadata(
+                request.family_id
+            )
+            return self._read_with_metadata(
+                metadata=metadata,
+                canonical_ids=request.canonical_ids,
+                query_valid_time=request.query_valid_time,
+                limit=request.limit,
+                operation="neo4j-structural-active",
+                authenticated=authenticated,
+            )
+
+    def _read_with_metadata(
+        self,
+        *,
+        metadata: Any,
+        canonical_ids: tuple[str, ...],
+        query_valid_time: UtcTimestamp,
+        limit: int,
+        operation: str,
+        authenticated: tuple[UtcTimestamp, Any],
+    ) -> StructuralReadResponse:
         self._projection_boundary._authorize_read(
             family_id=metadata.family.family_id,
-            operation="neo4j-structural",
+            operation=operation,
             semantic_value={
-                "generation_id": str(request.generation_id),
-                "canonical_ids": list(request.canonical_ids),
-                "query_valid_time": request.query_valid_time.to_text(),
-                "limit": request.limit,
+                "generation_id": str(metadata.generation.generation_id),
+                "canonical_ids": list(canonical_ids),
+                "query_valid_time": query_valid_time.to_text(),
+                "limit": limit,
             },
             authenticated=authenticated,
         )
-        if request.query_valid_time.value > metadata.serving_time.value:
+        if query_valid_time.value > metadata.serving_time.value:
             raise ProjectionContractError(
                 "query_valid_time cannot be later than serving_time"
             )
         graph = self._adapter.read(
-            generation_id=str(request.generation_id),
-            canonical_ids=request.canonical_ids,
+            generation_id=str(metadata.generation.generation_id),
+            canonical_ids=canonical_ids,
             maximum_ledger_seq=metadata.contiguous_ledger_seq,
-            limit=request.limit,
+            limit=limit,
         )
         if any(
             relation.ledger_seq > metadata.contiguous_ledger_seq
@@ -606,9 +691,7 @@ class _Neo4jProjectionBoundary:
         return StructuralReadResponse(
             metadata=StructuralReadMetadata(
                 family_id=metadata.family.family_id,
-                family_definition_version=(
-                    metadata.family.definition_version
-                ),
+                family_definition_version=metadata.family.definition_version,
                 projector_version=metadata.family.projector_version,
                 ontology_contract_digest=(
                     metadata.family.ontology_contract_digest
@@ -622,7 +705,7 @@ class _Neo4jProjectionBoundary:
                 open_gap_count=metadata.open_gap_count,
                 dead_letter_count=metadata.dead_letter_count,
                 trust_scope=TrustScope.ADMITTED,
-                query_valid_time=request.query_valid_time,
+                query_valid_time=query_valid_time,
                 serving_time=metadata.serving_time,
             ),
             nodes=graph.nodes,
@@ -866,7 +949,7 @@ def _open_with_adapter(
                     projection_boundary.transition_generation
                 ),
                 validate_generation=graph_boundary.reject_direct_validation,
-                promote_generation=projection_boundary.promote_generation,
+                promote_generation=graph_boundary.promote_generation,
                 record_delivery=projection_boundary.record_delivery,
                 resolve_gap=projection_boundary.resolve_gap,
                 status=projection_boundary.status,
@@ -879,6 +962,7 @@ def _open_with_adapter(
             structural=Neo4jStructuralProjector(
                 deliver=graph_boundary.deliver,
                 read=graph_boundary.read,
+                read_active=graph_boundary.read_active,
                 rebuild=graph_boundary.rebuild,
                 validate_generation=graph_boundary.validate_generation,
             ),

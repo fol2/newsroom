@@ -2529,6 +2529,29 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 tombstoned_object_admission_ids=tombstoned_admission_ids,
             )
 
+    def projection_active_generation_metadata(
+        self, family_id: str
+    ) -> _ProjectionGenerationMetadata:
+        with self._lock:
+            self._registered_family_definition(self._connection, family_id)
+            rows = self._connection.execute(
+                "SELECT generation_id FROM projection_generations "
+                "WHERE family_id=? AND state='ACTIVE' "
+                "ORDER BY generation_id LIMIT 2",
+                (family_id,),
+            ).fetchall()
+            if not rows:
+                raise ProjectionStateError(
+                    "projection family has no authority-selected active generation"
+                )
+            if len(rows) != 1:
+                raise AuthorityPersistenceError(
+                    "projection family has multiple active generations"
+                )
+            return self.projection_generation_metadata(
+                ProjectionGenerationId.parse(str(rows[0]["generation_id"]))
+            )
+
     def projection_generation_metadata(
         self, generation_id: ProjectionGenerationId
     ) -> _ProjectionGenerationMetadata:

@@ -555,6 +555,36 @@ class StructuralRebuildResult:
 
 
 @dataclass(frozen=True, slots=True)
+class StructuralActiveReadRequest:
+    family_id: str
+    canonical_ids: tuple[str, ...]
+    query_valid_time: UtcTimestamp
+    limit: int = 100
+
+    def __post_init__(self) -> None:
+        require_token(self.family_id, field="projection_family_id")
+        if not isinstance(self.canonical_ids, tuple) or not self.canonical_ids:
+            raise ProjectionContractError(
+                "active structural read requires canonical IDs"
+            )
+        if len(self.canonical_ids) > 1000:
+            raise ProjectionContractError(
+                "active structural read canonical ID window is too large"
+            )
+        for item in self.canonical_ids:
+            _require_canonical_id(item)
+        if len(set(self.canonical_ids)) != len(self.canonical_ids):
+            raise ProjectionContractError(
+                "active structural read canonical IDs must be unique"
+            )
+        if not isinstance(self.query_valid_time, UtcTimestamp):
+            raise ProjectionContractError(
+                "query_valid_time must be UtcTimestamp"
+            )
+        _require_positive_int(self.limit, field="active_structural_read_limit")
+
+
+@dataclass(frozen=True, slots=True)
 class StructuralReadRequest:
     generation_id: ProjectionGenerationId
     canonical_ids: tuple[str, ...]

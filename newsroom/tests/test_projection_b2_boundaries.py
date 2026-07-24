@@ -13,6 +13,7 @@ from newsroom.projection import neo4j as public_neo4j
 from newsroom.projection.neo4j import (
     INCREMENT_1B2_TRACEABILITY,
     Neo4jProjectorConfig,
+    StructuralActiveReadRequest,
     StructuralBatch,
     StructuralDeliveryRequest,
     StructuralGraphNodeView,
@@ -64,10 +65,17 @@ def test_public_projector_exposes_only_bounded_structural_operations() -> None:
         for name, value in vars(Neo4jStructuralProjector).items()
         if not name.startswith("_") and callable(value)
     }
-    assert methods == {"deliver", "read", "rebuild", "validate_generation"}
+    assert methods == {
+        "deliver",
+        "read",
+        "read_active",
+        "rebuild",
+        "validate_generation",
+    }
     assert set(Neo4jStructuralProjector.__slots__) == {
         "__deliver",
         "__read",
+        "__read_active",
         "__rebuild",
         "__validate",
     }
@@ -103,6 +111,7 @@ def test_public_package_exposes_no_low_level_writer_or_arbitrary_cypher() -> Non
 def test_public_typed_contracts_contain_no_internal_identity_or_property_maps() -> None:
     contracts = (
         Neo4jProjectorConfig,
+        StructuralActiveReadRequest,
         StructuralBatch,
         StructuralDeliveryRequest,
         StructuralGraphNodeView,
