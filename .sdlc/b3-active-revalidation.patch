@@ -1,0 +1,574 @@
+diff --git a/newsroom/authority/_projection_store.py b/newsroom/authority/_projection_store.py
+--- a/newsroom/authority/_projection_store.py
++++ b/newsroom/authority/_projection_store.py
+@@ -500,6 +500,34 @@ class _ProjectionAuthorityStore:
+                     int(row["authority_aggregate_version"]),
+                 ),
+             ).fetchone()
++            previous = conn.execute(
++                "SELECT state FROM projection_generation_versions "
++                "WHERE generation_id=? AND lifecycle_version=?",
++                (
++                    str(row["generation_id"]),
++                    int(row["lifecycle_version"]) - 1,
++                ),
++            ).fetchone()
++            validation_state = (
++                None
++                if version is None
++                else ProjectionGenerationState(str(version["state"]))
++            )
++            valid_predecessors = {
++                ProjectionGenerationState.VALIDATING: {
++                    ProjectionGenerationState.BUILDING,
++                    ProjectionGenerationState.VALIDATING,
++                },
++                ProjectionGenerationState.ACTIVE: {
++                    ProjectionGenerationState.ACTIVE,
++                },
++            }.get(validation_state)
+             if (
+                 version is None
+                 or event is None
+-                or str(version["state"])
+-                != ProjectionGenerationState.VALIDATING.value
++                or previous is None
++                or valid_predecessors is None
++                or ProjectionGenerationState(str(previous["state"]))
++                not in valid_predecessors
+                 or int(version["authority_aggregate_version"])
+                 != int(row["authority_aggregate_version"])
+                 or int(version["validated_through_ledger_seq"])
+@@ -1160,11 +1188,12 @@ class _ProjectionAuthorityStore:
+             state = ProjectionGenerationState(str(current["state"]))
+             if state not in {
+                 ProjectionGenerationState.BUILDING,
+                 ProjectionGenerationState.VALIDATING,
++                ProjectionGenerationState.ACTIVE,
+             }:
+                 raise ProjectionStateError(
+-                    "only building or validating generations can be validated"
++                    "only building, validating or active generations can be validated"
+                 )
++            validation_state = state if state is ProjectionGenerationState.ACTIVE else ProjectionGenerationState.VALIDATING
+             checkpoint = self._checkpoint_seq(conn, str(generation_id))
+             if checkpoint_ledger_seq != checkpoint:
+                 raise ProjectionStateError(
+@@ -1214,7 +1243,7 @@ class _ProjectionAuthorityStore:
+                 "WHERE generation_id=?",
+                 (
+-                    ProjectionGenerationState.VALIDATING.value,
++                    validation_state.value,
+                     lifecycle_version,
+                     result.aggregate_version,
+                     checkpoint_ledger_seq,
+@@ -1233,7 +1262,7 @@ class _ProjectionAuthorityStore:
+                 (
+                     str(generation_id),
+                     lifecycle_version,
+-                    ProjectionGenerationState.VALIDATING.value,
++                    validation_state.value,
+                     result.aggregate_version,
+                     checkpoint_ledger_seq,
+                     reason_code,
+@@ -2208,14 +2237,16 @@ class _ProjectionAuthorityStore:
+         return ProjectionGenerationPromotionView(
+             promotion_digest=str(row["promotion_digest"]),
+             family_id=str(row["family_id"]),
+-            generation=self._generation_view(
+-                conn, str(row["generation_id"])
++            generation=self._generation_version_for_event(
++                conn,
++                str(row["target_authority_event_id"]),
+             ),
+             prior_generation=(
+                 None
+                 if prior_id is None
+-                else self._generation_view(conn, str(prior_id))
++                else self._generation_version_for_event(
++                    conn,
++                    str(row["prior_authority_event_id"]),
++                )
+             ),
+             checkpoint_ledger_seq=int(row["checkpoint_ledger_seq"]),
+             validation_digest=str(row["validation_digest"]),
+diff --git a/newsroom/authority/_neo4j_projection_system.py b/newsroom/authority/_neo4j_projection_system.py
+--- a/newsroom/authority/_neo4j_projection_system.py
++++ b/newsroom/authority/_neo4j_projection_system.py
+@@ -478,29 +478,45 @@ class _Neo4jProjectionBoundary:
+         )
+         replaying = target_grant.replay_of_command_id is not None
+-        if metadata.generation.state is ProjectionGenerationState.ACTIVE:
+-            if not replaying:
++        if replaying:
++            if metadata.generation.state not in {
++                ProjectionGenerationState.ACTIVE,
++                ProjectionGenerationState.RETIRED,
++            }:
+                 raise ProjectionStateError(
+-                    "only a validating generation can be promoted"
++                    "promotion replay requires an active or retired generation"
+                 )
+-        elif metadata.generation.state is not ProjectionGenerationState.VALIDATING:
+-            raise ProjectionStateError(
+-                "only a validating generation can be promoted"
+-            )
+-        if metadata.contiguous_ledger_seq != request.checkpoint_ledger_seq:
+-            raise ProjectionStateError(
+-                "promotion must bind the exact authority checkpoint"
+-            )
++            checkpoint_ledger_seq = metadata.contiguous_ledger_seq
++        else:
++            if metadata.generation.state is not ProjectionGenerationState.VALIDATING:
++                raise ProjectionStateError(
++                    "only a validating generation can be promoted"
++                )
++            if metadata.contiguous_ledger_seq != request.checkpoint_ledger_seq:
++                raise ProjectionStateError(
++                    "promotion must bind the exact authority checkpoint"
++                )
++            checkpoint_ledger_seq = request.checkpoint_ledger_seq
+         if metadata.open_gap_count or metadata.dead_letter_count:
+             raise ProjectionStateError(
+                 "promotion requires zero gaps and dead letters"
+             )
+         validation = self._store.projection_generation_validation(
+             request.generation_id
+         )
+-        if validation.validation_digest != request.validation_digest:
+-            raise ProjectionStateError(
+-                "promotion requires the exact retained validation evidence"
+-            )
+-        if validation.checkpoint_ledger_seq != request.checkpoint_ledger_seq:
+-            raise ProjectionStateError(
+-                "promotion validation checkpoint is stale"
+-            )
++        if replaying:
++            if (
++                validation.checkpoint_ledger_seq != checkpoint_ledger_seq
++                or metadata.generation.validated_through_ledger_seq
++                != checkpoint_ledger_seq
++            ):
++                raise ProjectionStateError(
++                    "promotion replay requires validation through the current authority checkpoint"
++                )
++        else:
++            if validation.validation_digest != request.validation_digest:
++                raise ProjectionStateError(
++                    "promotion requires the exact retained validation evidence"
++                )
++            if validation.checkpoint_ledger_seq != request.checkpoint_ledger_seq:
++                raise ProjectionStateError(
++                    "promotion validation checkpoint is stale"
++                )
+ 
+         compatibility_digest = neo4j_compatibility_digest(
+             self._adapter.verify_compatibility()
+@@ -517,7 +533,7 @@ class _Neo4jProjectionBoundary:
+             )
+         batches = self._expected_validation_batches(
+             request.generation_id,
+-            request.checkpoint_ledger_seq,
++            checkpoint_ledger_seq,
+         )
+         state_digest = self._adapter.reconcile_generation(
+             generation_id=str(request.generation_id),
+@@ -573,10 +589,11 @@ class _Neo4jProjectionBoundary:
+         if metadata.generation.state not in {
+             ProjectionGenerationState.BUILDING,
+             ProjectionGenerationState.VALIDATING,
++            ProjectionGenerationState.ACTIVE,
+         }:
+             raise ProjectionStateError(
+-                "only building or validating generations can be reconciled"
++                "only building, validating or active generations can be reconciled"
+             )
+         if metadata.contiguous_ledger_seq != request.checkpoint_ledger_seq:
+             raise ProjectionStateError(
+diff --git a/newsroom/tests/test_projection_b3_active_serving.py b/newsroom/tests/test_projection_b3_active_serving.py
+--- a/newsroom/tests/test_projection_b3_active_serving.py
++++ b/newsroom/tests/test_projection_b3_active_serving.py
+@@ -18,6 +18,7 @@ from newsroom.projection.neo4j import (
+     Neo4jIdentityConflict,
+     StructuralActiveReadRequest,
++    StructuralDeliveryRequest,
+     StructuralGenerationValidationRequest,
+     StructuralRebuildRequest,
+ )
+@@ -244,6 +245,126 @@ def test_promotion_reconciles_current_graph_and_exact_replay(
+         system.close()
+ 
+ 
++def test_active_generation_revalidates_after_incremental_delivery_and_restart(
++    tmp_path: Path,
++) -> None:
++    authority_path = tmp_path / "authority.sqlite3"
++    adapter = MemoryNeo4jAdapter()
++    system = open_b2_system(authority_path, adapter)
++    try:
++        _register(system)
++        system.commands.execute(
++            source_command(key="b3-active-revalidation-initial-source"),
++            proof=proof(),
++        )
++        generation = _create(system, suffix="active-revalidation")
++        rebuilt = _rebuild(
++            system,
++            generation,
++            key="b3-active-revalidation-rebuild",
++        )
++        initial_validation = _validate(
++            system,
++            generation.generation_id,
++            rebuilt.checkpoint_ledger_seq,
++            key="b3-active-revalidation-initial-validate",
++        )
++        validating = _generation(system, generation.generation_id)
++        promotion_request = ProjectionGenerationPromotionRequest(
++            generation_id=generation.generation_id,
++            expected_authority_version=(
++                validating.authority_aggregate_version
++            ),
++            checkpoint_ledger_seq=initial_validation.checkpoint_ledger_seq,
++            validation_digest=initial_validation.validation_digest,
++            reason_code="B3_ACTIVE_REVALIDATION_PROMOTE",
++            idempotency_key="b3-active-revalidation-promote",
++        )
++        promotion = system.projections.promote_generation(
++            promotion_request,
++            proof=proof(),
++        )
++        assert promotion.generation.state is ProjectionGenerationState.ACTIVE
++
++        command = system.commands.execute(
++            source_command(key="b3-active-revalidation-incremental-source"),
++            proof=proof(),
++        )
++        source = next(
++            event
++            for event in system.events.after(0, limit=1000, proof=proof())
++            if event.command_id == str(command.command_id)
++        )
++        current = _generation(system, generation.generation_id)
++        system.structural.deliver(
++            StructuralDeliveryRequest(
++                generation_id=generation.generation_id,
++                expected_authority_version=(
++                    current.authority_aggregate_version
++                ),
++                ledger_seq=source.ledger_seq,
++                idempotency_key="b3-active-revalidation-delivery",
++            ),
++            proof=proof(),
++        )
++        status = system.projections.status(FAMILY_ID, proof=proof())
++        assert status.generation_state is ProjectionGenerationState.ACTIVE
++        assert status.contiguous_ledger_seq > (
++            initial_validation.checkpoint_ledger_seq
++        )
++        assert system.projections.validation(
++            generation.generation_id,
++            proof=proof(),
++        ) == initial_validation
++
++        with pytest.raises(
++            ProjectionStateError,
++            match="current authority checkpoint",
++        ):
++            system.projections.promote_generation(
++                promotion_request,
++                proof=proof(),
++            )
++
++        refreshed = _validate(
++            system,
++            generation.generation_id,
++            status.contiguous_ledger_seq,
++            key="b3-active-revalidation-refresh",
++        )
++        refreshed_generation = _generation(
++            system,
++            generation.generation_id,
++        )
++        assert refreshed.validation_version == (
++            initial_validation.validation_version + 1
++        )
++        assert refreshed_generation.state is ProjectionGenerationState.ACTIVE
++        assert refreshed_generation.validated_through_ledger_seq == (
++            status.contiguous_ledger_seq
++        )
++        assert system.projections.validation(
++            generation.generation_id,
++            proof=proof(),
++        ) == refreshed
++
++        before_replay = system.events.after(0, limit=1000, proof=proof())
++        replay = system.projections.promote_generation(
++            promotion_request,
++            proof=proof(),
++        )
++        assert replay == promotion
++        assert system.events.after(
++            0,
++            limit=1000,
++            proof=proof(),
++        ) == before_replay
++        canonical_ids = _canonical_ids(adapter, generation.generation_id)
++        response = system.structural.read_active(
++            _active_request(canonical_ids),
++            proof=proof(),
++        )
++        assert response.metadata.generation_id == generation.generation_id
++        assert response.metadata.contiguous_ledger_seq == (
++            status.contiguous_ledger_seq
++        )
++    finally:
++        system.close()
++
++    restarted = open_b2_system(authority_path, adapter)
++    try:
++        assert _generation(
++            restarted,
++            generation.generation_id,
++        ).state is ProjectionGenerationState.ACTIVE
++        assert restarted.projections.validation(
++            generation.generation_id,
++            proof=proof(),
++        ) == refreshed
++        assert restarted.projections.promotions(
++            FAMILY_ID,
++            proof=proof(),
++        ) == (promotion,)
++    finally:
++        restarted.close()
++
++
+ def test_newer_building_generation_cannot_replace_active_serving_target(
+     tmp_path: Path,
+ ) -> None:
+diff --git a/newsroom/tests/test_projection_b3_neo4j_service.py b/newsroom/tests/test_projection_b3_neo4j_service.py
+--- a/newsroom/tests/test_projection_b3_neo4j_service.py
++++ b/newsroom/tests/test_projection_b3_neo4j_service.py
+@@ -8,6 +8,7 @@ import pytest
+ 
+ from newsroom.projection import (
++    ProjectionDeliveryOutcome,
+     ProjectionFamilyRegistrationRequest,
+     ProjectionGenerationCreateRequest,
+     ProjectionGenerationId,
+@@ -21,6 +22,7 @@ from newsroom.projection.neo4j import (
+     Neo4jIdentityConflict,
+     Neo4jProjectorConfig,
+     StructuralActiveReadRequest,
++    StructuralDeliveryRequest,
+     StructuralGenerationValidationRequest,
+     StructuralReadRequest,
+     StructuralRebuildRequest,
+@@ -221,6 +223,141 @@ def test_actual_service_active_read_resolves_only_authority_promoted_generation(
+             _cleanup(config, *generations)
+ 
+ 
++def test_actual_service_active_generation_revalidates_after_incremental_delivery(
++    tmp_path: Path,
++) -> None:
++    config = _service_config()
++    authority_path = tmp_path / "authority.sqlite3"
++    generation_id: ProjectionGenerationId | None = None
++    system = open_b2_service_system(authority_path, config)
++    try:
++        _source_event(
++            system,
++            key="b3-service-active-revalidation-initial-source",
++        )
++        _register(system)
++        generation = _create_generation(
++            system,
++            suffix="active-revalidation",
++        )
++        generation_id = generation.generation_id
++        rebuilt = system.structural.rebuild(
++            _rebuild_request(
++                system,
++                generation,
++                key="b3-service-active-revalidation-rebuild",
++            ),
++            proof=proof(),
++        )
++        current = next(
++            item
++            for item in system.projections.generations(
++                FAMILY_ID,
++                proof=proof(),
++            )
++            if item.generation_id == generation_id
++        )
++        initial_validation = system.structural.validate_generation(
++            StructuralGenerationValidationRequest(
++                generation_id=generation_id,
++                expected_authority_version=(
++                    current.authority_aggregate_version
++                ),
++                checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
++                reason_code="B3_ACTUAL_SERVICE_ACTIVE_REVALIDATION",
++                idempotency_key=(
++                    "b3-service-active-revalidation-initial-validate"
++                ),
++            ),
++            proof=proof(),
++        )
++        validating = next(
++            item
++            for item in system.projections.generations(
++                FAMILY_ID,
++                proof=proof(),
++            )
++            if item.generation_id == generation_id
++        )
++        promotion_request = ProjectionGenerationPromotionRequest(
++            generation_id=generation_id,
++            expected_authority_version=(
++                validating.authority_aggregate_version
++            ),
++            checkpoint_ledger_seq=initial_validation.checkpoint_ledger_seq,
++            validation_digest=initial_validation.validation_digest,
++            reason_code="B3_ACTUAL_SERVICE_ACTIVE_REVALIDATION",
++            idempotency_key="b3-service-active-revalidation-promote",
++        )
++        promotion = system.projections.promote_generation(
++            promotion_request,
++            proof=proof(),
++        )
++        assert promotion.generation.state is ProjectionGenerationState.ACTIVE
++
++        source = _source_event(
++            system,
++            key="b3-service-active-revalidation-incremental-source",
++        )
++        canonical_ids = _canonical_ids_for_source_event(source)
++        active = next(
++            item
++            for item in system.projections.generations(
++                FAMILY_ID,
++                proof=proof(),
++            )
++            if item.generation_id == generation_id
++        )
++        delivery = system.structural.deliver(
++            StructuralDeliveryRequest(
++                generation_id=generation_id,
++                expected_authority_version=(
++                    active.authority_aggregate_version
++                ),
++                ledger_seq=source.ledger_seq,
++                idempotency_key="b3-service-active-revalidation-delivery",
++            ),
++            proof=proof(),
++        )
++        assert delivery.outcome is ProjectionDeliveryOutcome.APPLIED
++        status = system.projections.status(FAMILY_ID, proof=proof())
++        assert status.generation_state is ProjectionGenerationState.ACTIVE
++        assert status.contiguous_ledger_seq > (
++            initial_validation.checkpoint_ledger_seq
++        )
++
++        with pytest.raises(
++            ProjectionStateError,
++            match="current authority checkpoint",
++        ):
++            system.projections.promote_generation(
++                promotion_request,
++                proof=proof(),
++            )
++
++        active = next(
++            item
++            for item in system.projections.generations(
++                FAMILY_ID,
++                proof=proof(),
++            )
++            if item.generation_id == generation_id
++        )
++        refreshed = system.structural.validate_generation(
++            StructuralGenerationValidationRequest(
++                generation_id=generation_id,
++                expected_authority_version=(
++                    active.authority_aggregate_version
++                ),
++                checkpoint_ledger_seq=status.contiguous_ledger_seq,
++                reason_code="B3_ACTUAL_SERVICE_ACTIVE_REVALIDATION",
++                idempotency_key="b3-service-active-revalidation-refresh",
++            ),
++            proof=proof(),
++        )
++        assert refreshed.validation_version == (
++            initial_validation.validation_version + 1
++        )
++        assert next(
++            item
++            for item in system.projections.generations(
++                FAMILY_ID,
++                proof=proof(),
++            )
++            if item.generation_id == generation_id
++        ).state is ProjectionGenerationState.ACTIVE
++        assert system.projections.validation(
++            generation_id,
++            proof=proof(),
++        ) == refreshed
++        assert system.projections.promote_generation(
++            promotion_request,
++            proof=proof(),
++        ) == promotion
++
++        response = system.structural.read_active(
++            StructuralActiveReadRequest(
++                family_id=FAMILY_ID,
++                canonical_ids=canonical_ids,
++                query_valid_time=FIXED_NOW,
++                limit=100,
++            ),
++            proof=proof(),
++        )
++        assert response.metadata.generation_id == generation_id
++        assert response.metadata.contiguous_ledger_seq == (
++            status.contiguous_ledger_seq
++        )
++        assert response.nodes
++        assert response.relations
++    finally:
++        system.close()
++        if generation_id is not None:
++            _cleanup(config, generation_id)
++
++
+ def test_actual_service_promotion_rejects_graph_loss_after_validation(
+     tmp_path: Path,
+ ) -> None:
+diff --git a/scripts/sdlc/workflow_lane.py b/scripts/sdlc/workflow_lane.py
+--- a/scripts/sdlc/workflow_lane.py
++++ b/scripts/sdlc/workflow_lane.py
+@@ -56,8 +56,10 @@ _OPTIONAL_CORE_TEST_IDS = (
+     "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_public_round_trip_duplicate_and_generation_isolation",
+     "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_requires_explicit_authentication_configuration",
+     "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_wrong_projector_credential_fails_closed_without_secret",
++    "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_active_generation_revalidates_after_incremental_delivery",
+     "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_active_read_resolves_only_authority_promoted_generation",
+     "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_graph_loss_and_process_restart_rebuild_from_authority",
++    "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_promotion_rejects_graph_loss_after_validation",
+     "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_rebuild_cleanup_cannot_cross_generation_namespace",
+     "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_tombstone_does_not_resurrect_after_wipe_rebuild",
+ )
+diff --git a/newsroom/tests/test_sdlc_workflow_lane.py b/newsroom/tests/test_sdlc_workflow_lane.py
+--- a/newsroom/tests/test_sdlc_workflow_lane.py
++++ b/newsroom/tests/test_sdlc_workflow_lane.py
+@@ -306,8 +306,10 @@ def test_optional_core_skips_are_exact_actual_service_cases() -> None:
+         "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_public_round_trip_duplicate_and_generation_isolation",
+         "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_requires_explicit_authentication_configuration",
+         "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_wrong_projector_credential_fails_closed_without_secret",
++        "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_active_generation_revalidates_after_incremental_delivery",
+         "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_active_read_resolves_only_authority_promoted_generation",
+         "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_graph_loss_and_process_restart_rebuild_from_authority",
++        "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_promotion_rejects_graph_loss_after_validation",
+         "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_rebuild_cleanup_cannot_cross_generation_namespace",
+         "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_tombstone_does_not_resurrect_after_wipe_rebuild",
+     )
