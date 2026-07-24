@@ -4,7 +4,7 @@
 **Owner:** Product owner  
 **Prepared:** 2026-07-24  
 **Canonical language:** English  
-**Base:** `main@843f6baddd3bf44a0f993c3f2e54df6d4746a059`  
+**Review base:** `main@5fcd8bc862e552961b6b147572879e79c7266931`
 **Parent programme:** [`2026-07-16-005-native-graphrag-production-implementation.md`](2026-07-16-005-native-graphrag-production-implementation.md)  
 **Immediate predecessor package:** [`2026-07-24-008-increment-2-complete-fixture-readiness.md`](2026-07-24-008-increment-2-complete-fixture-readiness.md)  
 **Canonical specification map:** [`../specs/editorial-automation/README.md`](../specs/editorial-automation/README.md)  

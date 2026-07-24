@@ -4,7 +4,7 @@
 **Owner:** Product owner  
 **Prepared:** 2026-07-24  
 **Canonical language:** English  
-**Base:** `main@843f6baddd3bf44a0f993c3f2e54df6d4746a059`  
+**Review base:** `main@5fcd8bc862e552961b6b147572879e79c7266931`
 **Parent programme:** [`2026-07-16-005-native-graphrag-production-implementation.md`](2026-07-16-005-native-graphrag-production-implementation.md), Increment 2  
 **Completed dependency:** issue #79 / Increment 1  
 **Accepted specifications:** [`../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md`](../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md), [`../specs/editorial-automation/graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md), [`../specs/editorial-automation/discovery-record-semantics.md`](../specs/editorial-automation/discovery-record-semantics.md), [`../specs/editorial-automation/discovery-triage-and-event-grouping.md`](../specs/editorial-automation/discovery-triage-and-event-grouping.md), and [`../specs/editorial-automation/discovery-workflow.md`](../specs/editorial-automation/discovery-workflow.md)  

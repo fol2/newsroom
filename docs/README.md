@@ -51,7 +51,7 @@ A link does not make an entire reference or research document normative. A merge
 - [`research/2026-07-21-sdlc-v2-substantive-review.md`](research/2026-07-21-sdlc-v2-substantive-review.md) records the completed design review and corrected P2 findings.
 - [`plans/2026-07-21-007-sdlc-v2-migration.md`](plans/2026-07-21-007-sdlc-v2-migration.md) is the adopted reversible migration plan from historical increment workflows to one always-reporting router, one cached core lane and one conditional actual-service lane.
 - [`../.sdlc/gates.toml`](../.sdlc/gates.toml), [`../.sdlc/route.schema.json`](../.sdlc/route.schema.json), [`../.sdlc/evidence.schema.json`](../.sdlc/evidence.schema.json) and [`../.sdlc/baselines/2026-07-21-b3.json`](../.sdlc/baselines/2026-07-21-b3.json) are the accepted machine-readable contract and exact baseline evidence.
-- Issue #98 and PR #99 are the acceptance boundary. Existing required workflows remain unchanged until reversible Phase 1/2 shadow controls are merged; B3 product expansion remains preserved on Draft PR #97 until those minimum controls exist.
+- Issue #98 is closed completed. PR #99 accepted the SDLC v2 specification and PR #119 merged the reversible Phase 1/2 **SDLC Evidence Shadow** implementation. Legacy required workflows remain during burn-in; evidence remains regression evidence rather than owner approval.
 
 ## Current-system documentation
 
