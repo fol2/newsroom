@@ -1,0 +1,269 @@
+diff --git a/newsroom/projection/neo4j/models.py b/newsroom/projection/neo4j/models.py
+--- a/newsroom/projection/neo4j/models.py
++++ b/newsroom/projection/neo4j/models.py
+@@ -67,6 +67,11 @@ class Neo4jApplyOutcome(StrEnum):
+     DUPLICATE = "DUPLICATE"
+ 
+ 
++class StructuralReadAuthoritySelection(StrEnum):
++    EXACT_GENERATION = "exact-generation"
++    AUTHORITY_SELECTED_ACTIVE = "authority-selected-active"
++
++
+ @dataclass(frozen=True, slots=True, repr=False)
+ class Neo4jProjectorConfig:
+     uri: str
+@@ -618,6 +623,7 @@ class StructuralReadMetadata:
+     mapping_contract_digest: str
+     generation_id: ProjectionGenerationId
+     generation_state: ProjectionGenerationState
++    authority_selection: StructuralReadAuthoritySelection
+     contiguous_ledger_seq: int
+     open_gap_count: int
+     dead_letter_count: int
+@@ -627,6 +633,12 @@ class StructuralReadMetadata:
+     authoritative_system: str = "sqlite-ledger-and-governed-objects"
+     graph_role: str = "non-authoritative-rebuildable-context"
+ 
++    def __post_init__(self) -> None:
++        if not isinstance(
++            self.authority_selection, StructuralReadAuthoritySelection
++        ):
++            raise ProjectionContractError("structural read authority selection must be typed")
++
+ 
+ @dataclass(frozen=True, slots=True)
+ class StructuralReadResponse:
+@@ -705,6 +717,7 @@ __all__ = [
+     "StructuralRebuildRequest",
+     "StructuralRebuildResult",
++    "StructuralReadAuthoritySelection",
+     "StructuralReadMetadata",
+     "StructuralReadRequest",
+     "StructuralReadResponse",
+diff --git a/newsroom/authority/_neo4j_projection_system.py b/newsroom/authority/_neo4j_projection_system.py
+--- a/newsroom/authority/_neo4j_projection_system.py
++++ b/newsroom/authority/_neo4j_projection_system.py
+@@ -63,6 +63,7 @@ from newsroom.projection.neo4j.models import (
+     StructuralNode,
+     StructuralRebuildRequest,
+     StructuralRebuildResult,
++    StructuralReadAuthoritySelection,
+     StructuralReadMetadata,
+     StructuralReadRequest,
+     StructuralReadResponse,
+@@ -700,6 +701,9 @@ class _Neo4jProjectionBoundary:
+             operation="neo4j-structural",
+             authenticated=authenticated,
++            authority_selection=(
++                StructuralReadAuthoritySelection.EXACT_GENERATION
++            ),
+         )
+ 
+     def read_active(
+@@ -736,6 +740,9 @@ class _Neo4jProjectionBoundary:
+                 operation="neo4j-structural-active",
+                 authenticated=authenticated,
++                authority_selection=(
++                    StructuralReadAuthoritySelection.AUTHORITY_SELECTED_ACTIVE
++                ),
+             )
+ 
+     def _read_with_metadata(
+@@ -749,6 +756,7 @@ class _Neo4jProjectionBoundary:
+         limit: int,
+         operation: str,
+         authenticated: tuple[UtcTimestamp, Any],
++        authority_selection: StructuralReadAuthoritySelection,
+     ) -> StructuralReadResponse:
+         self._projection_boundary._authorize_read(
+             family_id=metadata.family.family_id,
+@@ -788,6 +796,7 @@ class _Neo4jProjectionBoundary:
+                 ),
+                 generation_id=metadata.generation.generation_id,
+                 generation_state=metadata.generation.state,
++                authority_selection=authority_selection,
+                 contiguous_ledger_seq=metadata.contiguous_ledger_seq,
+                 open_gap_count=metadata.open_gap_count,
+                 dead_letter_count=metadata.dead_letter_count,
+diff --git a/newsroom/authority/_projection_store.py b/newsroom/authority/_projection_store.py
+--- a/newsroom/authority/_projection_store.py
++++ b/newsroom/authority/_projection_store.py
+@@ -2632,11 +2632,24 @@ class _ProjectionAuthorityStore:
+             if family is None:
+                 raise ProjectionStateError("projection family is not registered")
+-            generation = self._connection.execute(
+-                "SELECT * FROM projection_generations WHERE family_id=? "
+-                "ORDER BY CASE state WHEN 'ACTIVE' THEN 0 ELSE 1 END,"
+-                "updated_at DESC LIMIT 1",
++            active_generations = self._connection.execute(
++                "SELECT * FROM projection_generations "
++                "WHERE family_id=? AND state='ACTIVE' "
++                "ORDER BY generation_id LIMIT 2",
+                 (family_id,),
+-            ).fetchone()
++            ).fetchall()
++            if len(active_generations) > 1:
++                raise AuthorityPersistenceError(
++                    "projection family has multiple active generations"
++                )
++            if active_generations:
++                generation = active_generations[0]
++            else:
++                generation = self._connection.execute(
++                    "SELECT * FROM projection_generations WHERE family_id=? "
++                    "ORDER BY updated_at DESC LIMIT 1",
++                    (family_id,),
++                ).fetchone()
+             if generation is None:
+                 generation_id = None
+                 generation_state = None
+diff --git a/newsroom/projection/neo4j/__init__.py b/newsroom/projection/neo4j/__init__.py
+--- a/newsroom/projection/neo4j/__init__.py
++++ b/newsroom/projection/neo4j/__init__.py
+@@ -28,6 +28,7 @@ from .models import (
+     StructuralNode,
+     StructuralRebuildRequest,
+     StructuralRebuildResult,
++    StructuralReadAuthoritySelection,
+     StructuralReadMetadata,
+     StructuralReadRequest,
+     StructuralReadResponse,
+@@ -103,6 +104,7 @@ __all__ = [
+     "StructuralNode",
+     "StructuralRebuildRequest",
+     "StructuralRebuildResult",
++    "StructuralReadAuthoritySelection",
+     "StructuralReadMetadata",
+     "StructuralReadRequest",
+     "StructuralReadResponse",
+diff --git a/newsroom/projection/neo4j/qualification.py b/newsroom/projection/neo4j/qualification.py
+--- a/newsroom/projection/neo4j/qualification.py
++++ b/newsroom/projection/neo4j/qualification.py
+@@ -18,6 +18,7 @@ from .models import (
+     NEO4J_B2_SERVER_VERSION,
+     Neo4jCompatibility,
+     Neo4jProjectorConfig,
++    StructuralReadAuthoritySelection,
+     StructuralReadMetadata,
+ )
+@@ -243,6 +244,11 @@ def require_qualified_graphrag(
+         raise GraphRAGQualificationError(
+             "qualifying profile requires a current bounded graph read"
+         )
++    if (
++        metadata.authority_selection
++        is not StructuralReadAuthoritySelection.AUTHORITY_SELECTED_ACTIVE
++    ):
++        raise GraphRAGQualificationError(
++            "qualifying profile requires an authority-selected ACTIVE read"
++        )
+     if (
+         metadata.generation_id != status.generation_id
+         or metadata.generation_state is not ProjectionGenerationState.ACTIVE
+diff --git a/newsroom/tests/test_projection_b3_qualification.py b/newsroom/tests/test_projection_b3_qualification.py
+--- a/newsroom/tests/test_projection_b3_qualification.py
++++ b/newsroom/tests/test_projection_b3_qualification.py
+@@ -26,6 +26,7 @@ from newsroom.projection.neo4j import (
+     Neo4jConfigurationError,
+     Neo4jProjectorConfig,
+     RuntimeProfile,
++    StructuralReadAuthoritySelection,
+     StructuralReadMetadata,
+     neo4j_compatibility_digest,
+     require_qualified_graphrag,
+@@ -107,6 +108,9 @@ def evidence() -> GraphRAGQualificationEvidence:
+         mapping_contract_digest=MAPPING_DIGEST,
+         generation_id=GENERATION_ID,
+         generation_state=ProjectionGenerationState.ACTIVE,
++        authority_selection=(
++            StructuralReadAuthoritySelection.AUTHORITY_SELECTED_ACTIVE
++        ),
+         contiguous_ledger_seq=42,
+         open_gap_count=0,
+         dead_letter_count=0,
+@@ -252,6 +256,20 @@ def test_changed_service_or_graph_digest_invalidates_validation() -> None:
+         require_qualified_graphrag(config(), changed_graph)
+ 
+ 
++def test_exact_generation_read_cannot_qualify_as_active_serving_evidence() -> None:
++    current = evidence()
++    assert current.read_metadata is not None
++    exact_generation = replace(
++        current.read_metadata,
++        authority_selection=(
++            StructuralReadAuthoritySelection.EXACT_GENERATION
++        ),
++    )
++    with pytest.raises(
++        GraphRAGQualificationError,
++        match="authority-selected ACTIVE read",
++    ):
++        require_qualified_graphrag(
++            config(), replace(current, read_metadata=exact_generation)
++        )
++
++
+ def test_graph_read_must_match_active_authority_and_remain_non_authoritative() -> None:
+     current = evidence()
+     assert current.read_metadata is not None
+diff --git a/newsroom/tests/test_projection_b3_active_serving_adversarial.py b/newsroom/tests/test_projection_b3_active_serving_adversarial.py
+--- a/newsroom/tests/test_projection_b3_active_serving_adversarial.py
++++ b/newsroom/tests/test_projection_b3_active_serving_adversarial.py
+@@ -20,8 +20,10 @@ from newsroom.projection import (
+ )
+ from newsroom.projection.neo4j import (
+     Neo4jStructuralRead,
+     StructuralActiveReadRequest,
+     StructuralGenerationValidationRequest,
++    StructuralReadAuthoritySelection,
++    StructuralReadRequest,
+     StructuralRebuildRequest,
+ )
+@@ -329,6 +331,21 @@ def test_active_read_fails_closed_if_authority_is_corrupted_to_two_active_generations(
+                 (str(other.generation_id),),
+             )
+ 
++        with pytest.raises(
++            AuthorityPersistenceError,
++            match="multiple active generations",
++        ):
++            system.projections.status(FAMILY_ID, proof=proof())
++
++        exact = system.structural.read(
++            StructuralReadRequest(
++                generation_id=active.generation_id,
++                canonical_ids=canonical_ids,
++                query_valid_time=FIXED_NOW,
++                limit=100,
++            ),
++            proof=proof(),
++        )
++        assert exact.metadata.authority_selection is (
++            StructuralReadAuthoritySelection.EXACT_GENERATION
++        )
+         with pytest.raises(
+             AuthorityPersistenceError,
+             match="multiple active generations",
+diff --git a/newsroom/tests/test_projection_b3_neo4j_service.py b/newsroom/tests/test_projection_b3_neo4j_service.py
+--- a/newsroom/tests/test_projection_b3_neo4j_service.py
++++ b/newsroom/tests/test_projection_b3_neo4j_service.py
+@@ -23,6 +23,7 @@ from newsroom.projection.neo4j import (
+     Neo4jProjectorConfig,
+     StructuralActiveReadRequest,
+     StructuralDeliveryRequest,
+     StructuralGenerationValidationRequest,
++    StructuralReadAuthoritySelection,
+     StructuralReadRequest,
+     StructuralRebuildRequest,
+ )
+@@ -207,6 +208,9 @@ def test_actual_service_active_read_resolves_only_authority_promoted_generation(
+ 
+         response = system.structural.read_active(request, proof=proof())
+         assert response.metadata.generation_id == active.generation_id
++        assert response.metadata.authority_selection is (
++            StructuralReadAuthoritySelection.AUTHORITY_SELECTED_ACTIVE
++        )
+         assert response.metadata.generation_state is ProjectionGenerationState.ACTIVE
+         assert response.nodes
+         assert response.relations
