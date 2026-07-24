@@ -34,3 +34,160 @@ jobs:
             --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
             --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
             --fail-on-regression
+
+  increment-1c-temporal-publish:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.head_ref == 'agent/increment-1c-temporal-qualify' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.repository == 'fol2/newsroom'
+    needs: test
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout qualification branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1c-temporal-qualify
+          path: .qualifier
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout exact Increment 1C target
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1c-integrated-foundation
+          path: .target
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.0"
+          enable-cache: true
+          cache-dependency-glob: .target/uv.lock
+
+      - name: Correct, qualify and publish serving-time semantics
+        shell: bash
+        working-directory: .target
+        run: |
+          set -euxo pipefail
+          diagnostic="${RUNNER_TEMP}/increment-1c-temporal-qualifier.log"
+          exec > >(tee "${diagnostic}") 2>&1
+          expected_head="b553f9760d6c4d4dbde81e75566b0762a8910827"
+          test "$(git rev-parse HEAD)" = "${expected_head}"
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("newsroom/authority/_integrated_system.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''        expected_metadata = (
+            metadata.family.family_id,
+            metadata.family.definition_version,
+            metadata.family.projector_version,
+            metadata.family.ontology_contract_digest,
+            metadata.family.mapping_contract_digest,
+            metadata.generation.generation_id,
+            metadata.generation.state,
+            metadata.contiguous_ledger_seq,
+            metadata.open_gap_count,
+            metadata.dead_letter_count,
+            metadata.serving_time,
+        )
+        retained_metadata = (
+            context.metadata.family_id,
+            context.metadata.family_definition_version,
+            context.metadata.projector_version,
+            context.metadata.ontology_contract_digest,
+            context.metadata.mapping_contract_digest,
+            context.metadata.generation_id,
+            context.metadata.generation_state,
+            context.metadata.contiguous_ledger_seq,
+            context.metadata.open_gap_count,
+            context.metadata.dead_letter_count,
+            context.metadata.serving_time,
+        )
+        if expected_metadata != retained_metadata:
+            raise IntegratedStateError(
+                "retrieval context is stale against active projection authority"
+            )'''
+          new = '''        expected_metadata = (
+            metadata.family.family_id,
+            metadata.family.definition_version,
+            metadata.family.projector_version,
+            metadata.family.ontology_contract_digest,
+            metadata.family.mapping_contract_digest,
+            metadata.generation.generation_id,
+            metadata.generation.state,
+            metadata.contiguous_ledger_seq,
+            metadata.open_gap_count,
+            metadata.dead_letter_count,
+        )
+        retained_metadata = (
+            context.metadata.family_id,
+            context.metadata.family_definition_version,
+            context.metadata.projector_version,
+            context.metadata.ontology_contract_digest,
+            context.metadata.mapping_contract_digest,
+            context.metadata.generation_id,
+            context.metadata.generation_state,
+            context.metadata.contiguous_ledger_seq,
+            context.metadata.open_gap_count,
+            context.metadata.dead_letter_count,
+        )
+        if (
+            expected_metadata != retained_metadata
+            or metadata.serving_time.value
+            < context.metadata.serving_time.value
+        ):
+            raise IntegratedStateError(
+                "retrieval context is stale against active projection authority"
+            )'''
+          if text.count(old) != 1 or new in text:
+              raise SystemExit("integrated serving-time source differs from expected")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+
+          test "$(git diff --name-only)" = "newsroom/authority/_integrated_system.py"
+          git diff --check
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_integrated_c1_temporal_integrity.py \
+            newsroom/tests/test_integrated_c1_candidate_authority.py \
+            newsroom/tests/test_integrated_c1_proof_integrity.py
+          uv run --no-sync python -m pytest -q newsroom/tests
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add newsroom/authority/_integrated_system.py
+          git commit -m 'fix(integrated): validate serving time monotonically'
+
+          remote_head="$(git ls-remote origin refs/heads/agent/increment-1c-integrated-foundation | cut -f1)"
+          test "${remote_head}" = "${expected_head}"
+          git push \
+            --force-with-lease=refs/heads/agent/increment-1c-integrated-foundation:${expected_head} \
+            origin HEAD:agent/increment-1c-integrated-foundation
+
+      - name: Upload qualifier diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-1c-temporal-qualifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/increment-1c-temporal-qualifier.log
+          if-no-files-found: warn
+          retention-days: 1
