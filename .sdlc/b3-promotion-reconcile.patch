@@ -1,0 +1,324 @@
+diff --git a/newsroom/authority/_projection_system.py b/newsroom/authority/_projection_system.py
+--- a/newsroom/authority/_projection_system.py
++++ b/newsroom/authority/_projection_system.py
+@@ -330,11 +330,11 @@ class _ProjectionBoundary:
+             reason_code=request.reason_code,
+         )
+ 
+-    def promote_generation(
++    def _authorize_promotion(
+         self,
+         request: ProjectionGenerationPromotionRequest,
+         proof: AuthenticationProof,
+-    ) -> ProjectionGenerationPromotionView:
++    ) -> tuple[Any, Any | None]:
+         target_grant = self._grant(
+             command_type="projection.generation.promote",
+             aggregate_id=request.generation_id.as_aggregate_id(),
+@@ -374,6 +374,16 @@ class _ProjectionBoundary:
+                 idempotency_key=prior_key,
+                 proof=proof,
+             )
++        return target_grant, prior_grant
++
++    def _commit_promotion(
++        self,
++        target_grant: Any,
++        prior_grant: Any | None,
++        request: ProjectionGenerationPromotionRequest,
++    ) -> ProjectionGenerationPromotionView:
+         return self._store.promote_generation(
+             target_grant,
+             prior_grant,
+@@ -384,6 +394,17 @@ class _ProjectionBoundary:
+             reason_code=request.reason_code,
+         )
+ 
++    def promote_generation(
++        self,
++        request: ProjectionGenerationPromotionRequest,
++        proof: AuthenticationProof,
++    ) -> ProjectionGenerationPromotionView:
++        target_grant, prior_grant = self._authorize_promotion(
++            request,
++            proof,
++        )
++        return self._commit_promotion(target_grant, prior_grant, request)
++
+     def _begin_rebuild(
+         self,
+         request: Any,
+diff --git a/newsroom/authority/_neo4j_projection_system.py b/newsroom/authority/_neo4j_projection_system.py
+--- a/newsroom/authority/_neo4j_projection_system.py
++++ b/newsroom/authority/_neo4j_projection_system.py
+@@ -451,7 +451,73 @@ class _Neo4jProjectionBoundary:
+         proof: AuthenticationProof,
+     ) -> ProjectionGenerationPromotionView:
+         with self._operation_lock:
+-            return self._projection_boundary.promote_generation(request, proof)
++            return self._promote_generation_locked(request, proof)
++
++    def _promote_generation_locked(
++        self,
++        request: ProjectionGenerationPromotionRequest,
++        proof: AuthenticationProof,
++    ) -> ProjectionGenerationPromotionView:
++        if not isinstance(request, ProjectionGenerationPromotionRequest):
++            raise TypeError("projection promotion requires a typed request")
++        target_grant, prior_grant = (
++            self._projection_boundary._authorize_promotion(request, proof)
++        )
++        metadata = self._store.projection_generation_metadata(
++            request.generation_id
++        )
++        replaying = target_grant.replay_of_command_id is not None
++        if metadata.generation.state is ProjectionGenerationState.ACTIVE:
++            if not replaying:
++                raise ProjectionStateError(
++                    "only a validating generation can be promoted"
++                )
++        elif metadata.generation.state is not ProjectionGenerationState.VALIDATING:
++            raise ProjectionStateError(
++                "only a validating generation can be promoted"
++            )
++        if metadata.contiguous_ledger_seq != request.checkpoint_ledger_seq:
++            raise ProjectionStateError(
++                "promotion must bind the exact authority checkpoint"
++            )
++        if metadata.open_gap_count or metadata.dead_letter_count:
++            raise ProjectionStateError(
++                "promotion requires zero gaps and dead letters"
++            )
++        validation = self._store.projection_generation_validation(
++            request.generation_id
++        )
++        if validation.validation_digest != request.validation_digest:
++            raise ProjectionStateError(
++                "promotion requires the exact retained validation evidence"
++            )
++        if validation.checkpoint_ledger_seq != request.checkpoint_ledger_seq:
++            raise ProjectionStateError(
++                "promotion validation checkpoint is stale"
++            )
++
++        compatibility_digest = neo4j_compatibility_digest(
++            self._adapter.verify_compatibility()
++        )
++        if (
++            compatibility_digest
++            != validation.service_compatibility_digest
++        ):
++            raise Neo4jIdentityConflict(
++                "Neo4j compatibility differs from retained validation"
++            )
++        batches = self._expected_validation_batches(
++            request.generation_id,
++            request.checkpoint_ledger_seq,
++        )
++        state_digest = self._adapter.reconcile_generation(
++            generation_id=str(request.generation_id),
++            expected_batches=batches,
++        )
++        if state_digest != validation.projection_state_digest:
++            raise Neo4jIdentityConflict(
++                "Neo4j graph state differs from retained validation"
++            )
++        return self._projection_boundary._commit_promotion(
++            target_grant,
++            prior_grant,
++            request,
++        )
+ 
+     def reject_direct_validation(
+         self,
+diff --git a/newsroom/tests/test_projection_b3_active_serving.py b/newsroom/tests/test_projection_b3_active_serving.py
+--- a/newsroom/tests/test_projection_b3_active_serving.py
++++ b/newsroom/tests/test_projection_b3_active_serving.py
+@@ -16,6 +16,7 @@ from newsroom.projection import (
+     ProjectionStateError,
+ )
+ from newsroom.projection.neo4j import (
++    Neo4jIdentityConflict,
+     StructuralActiveReadRequest,
+     StructuralGenerationValidationRequest,
+     StructuralRebuildRequest,
+@@ -175,6 +176,73 @@ def test_active_read_fails_closed_until_authority_promotion(tmp_path: Path) -> None:
+     finally:
+         system.close()
+ 
++
++def test_promotion_reconciles_current_graph_and_exact_replay(
++    tmp_path: Path,
++) -> None:
++    adapter = MemoryNeo4jAdapter()
++    system = open_b2_system(tmp_path / "authority.sqlite3", adapter)
++    try:
++        _register(system)
++        system.commands.execute(
++            source_command(key="b3-promotion-reconcile-source"),
++            proof=proof(),
++        )
++        generation = _create(system, suffix="promotion-reconcile")
++        rebuilt = _rebuild(
++            system,
++            generation,
++            key="b3-promotion-reconcile-rebuild",
++        )
++        validation = _validate(
++            system,
++            generation.generation_id,
++            rebuilt.checkpoint_ledger_seq,
++            key="b3-promotion-reconcile-validate",
++        )
++        validating = _generation(system, generation.generation_id)
++        request = ProjectionGenerationPromotionRequest(
++            generation_id=generation.generation_id,
++            expected_authority_version=(
++                validating.authority_aggregate_version
++            ),
++            checkpoint_ledger_seq=validation.checkpoint_ledger_seq,
++            validation_digest=validation.validation_digest,
++            reason_code="B3_PROMOTION_RECONCILE",
++            idempotency_key="b3-promotion-reconcile-promote",
++        )
++
++        adapter.reconciliation_mismatch = True
++        with pytest.raises(Neo4jIdentityConflict, match="differs"):
++            system.projections.promote_generation(request, proof=proof())
++        assert (
++            _generation(system, generation.generation_id).state
++            is ProjectionGenerationState.VALIDATING
++        )
++
++        adapter.reconciliation_mismatch = False
++        promoted = system.projections.promote_generation(
++            request,
++            proof=proof(),
++        )
++        assert promoted.generation.state is ProjectionGenerationState.ACTIVE
++        retained_events = system.events.after(0, limit=1000, proof=proof())
++
++        adapter.reconciliation_mismatch = True
++        with pytest.raises(Neo4jIdentityConflict, match="differs"):
++            system.projections.promote_generation(request, proof=proof())
++        assert system.events.after(
++            0,
++            limit=1000,
++            proof=proof(),
++        ) == retained_events
++        assert (
++            _generation(system, generation.generation_id).state
++            is ProjectionGenerationState.ACTIVE
++        )
++    finally:
++        system.close()
++
+ 
+ def test_newer_building_generation_cannot_replace_active_serving_target(
+     tmp_path: Path,
+diff --git a/newsroom/tests/test_projection_b3_neo4j_service.py b/newsroom/tests/test_projection_b3_neo4j_service.py
+--- a/newsroom/tests/test_projection_b3_neo4j_service.py
++++ b/newsroom/tests/test_projection_b3_neo4j_service.py
+@@ -220,6 +220,84 @@ def test_actual_service_active_read_resolves_only_authority_promoted_generation(
+         if generations:
+             _cleanup(config, *generations)
+ 
++
++def test_actual_service_promotion_rejects_graph_loss_after_validation(
++    tmp_path: Path,
++) -> None:
++    config = _service_config()
++    authority_path = tmp_path / "authority.sqlite3"
++    generation_id: ProjectionGenerationId | None = None
++    system = open_b2_service_system(authority_path, config)
++    try:
++        source = _source_event(
++            system,
++            key="b3-service-promotion-reconcile-source",
++        )
++        canonical_ids = _canonical_ids_for_source_event(source)
++        _register(system)
++        generation = _create_generation(
++            system,
++            suffix="promotion-reconcile",
++        )
++        generation_id = generation.generation_id
++        rebuilt = system.structural.rebuild(
++            _rebuild_request(
++                system,
++                generation,
++                key="b3-service-promotion-reconcile-rebuild",
++            ),
++            proof=proof(),
++        )
++        current = next(
++            item
++            for item in system.projections.generations(
++                FAMILY_ID,
++                proof=proof(),
++            )
++            if item.generation_id == generation_id
++        )
++        validation = system.structural.validate_generation(
++            StructuralGenerationValidationRequest(
++                generation_id=generation_id,
++                expected_authority_version=(
++                    current.authority_aggregate_version
++                ),
++                checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
++                reason_code="B3_ACTUAL_SERVICE_PROMOTION_RECONCILE",
++                idempotency_key="b3-service-promotion-reconcile-validate",
++            ),
++            proof=proof(),
++        )
++        validating = next(
++            item
++            for item in system.projections.generations(
++                FAMILY_ID,
++                proof=proof(),
++            )
++            if item.generation_id == generation_id
++        )
++        request = ProjectionGenerationPromotionRequest(
++            generation_id=generation_id,
++            expected_authority_version=(
++                validating.authority_aggregate_version
++            ),
++            checkpoint_ledger_seq=validation.checkpoint_ledger_seq,
++            validation_digest=validation.validation_digest,
++            reason_code="B3_ACTUAL_SERVICE_PROMOTION_RECONCILE",
++            idempotency_key="b3-service-promotion-reconcile-promote",
++        )
++
++        _cleanup(config, generation_id)
++        with pytest.raises(Neo4jIdentityConflict, match="differs"):
++            system.projections.promote_generation(request, proof=proof())
++        assert next(
++            item
++            for item in system.projections.generations(
++                FAMILY_ID,
++                proof=proof(),
++            )
++            if item.generation_id == generation_id
++        ).state is ProjectionGenerationState.VALIDATING
++        with pytest.raises(
++            ProjectionStateError,
++            match="no authority-selected active generation",
++        ):
++            system.structural.read_active(
++                StructuralActiveReadRequest(
++                    family_id=FAMILY_ID,
++                    canonical_ids=canonical_ids,
++                    query_valid_time=FIXED_NOW,
++                ),
++                proof=proof(),
++            )
++    finally:
++        system.close()
++        if generation_id is not None:
++            _cleanup(config, generation_id)
++
++
+ def test_actual_service_graph_loss_and_process_restart_rebuild_from_authority(
+     tmp_path: Path,
+ ) -> None:
