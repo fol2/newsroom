@@ -1,0 +1,87 @@
+diff --git a/newsroom/authority/migrations.py b/newsroom/authority/migrations.py
+index bb00b67..07388b8 100644
+--- a/newsroom/authority/migrations.py
++++ b/newsroom/authority/migrations.py
+@@ -5,6 +5,13 @@ import sqlite3
+ from typing import Iterable
+ 
+ from .canonical import digest_canonical
++from .integrated_migrations import (
++    INTEGRATED_FOUNDATION_MIGRATION,
++    INTEGRATED_FOUNDATION_MIGRATION_CHECKSUM,
++    INTEGRATED_FOUNDATION_MIGRATION_NAME,
++    INTEGRATED_FOUNDATION_MIGRATION_STATEMENTS,
++    INTEGRATED_FOUNDATION_SCHEMA_VERSION,
++)
+ from .object_migrations import (
+     OBJECT_MIGRATION,
+     OBJECT_MIGRATION_CHECKSUM,
+@@ -28,7 +35,7 @@ from .projection_promotion_migrations import (
+ )
+ 
+ BASE_SCHEMA_VERSION = 1
+-SCHEMA_VERSION = PROJECTION_PROMOTION_SCHEMA_VERSION
++SCHEMA_VERSION = INTEGRATED_FOUNDATION_SCHEMA_VERSION
+ MIGRATION_NAME = "authority_event_foundation_v1"
+ 
+ 
+@@ -560,6 +567,20 @@ def apply_pending_migrations(
+                 ),
+             )
+             current = PROJECTION_PROMOTION_SCHEMA_VERSION
++        if current == PROJECTION_PROMOTION_SCHEMA_VERSION:
++            for statement in INTEGRATED_FOUNDATION_MIGRATION_STATEMENTS:
++                conn.execute(statement)
++            conn.execute(
++                "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
++                "VALUES(?,?,?,?)",
++                (
++                    INTEGRATED_FOUNDATION_SCHEMA_VERSION,
++                    INTEGRATED_FOUNDATION_MIGRATION_NAME,
++                    INTEGRATED_FOUNDATION_MIGRATION_CHECKSUM,
++                    applied_at,
++                ),
++            )
++            current = INTEGRATED_FOUNDATION_SCHEMA_VERSION
+         conn.execute(f"PRAGMA user_version={current}")
+         conn.execute("COMMIT")
+     except Exception:
+@@ -573,6 +594,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
+     OBJECT_MIGRATION,
+     PROJECTION_MIGRATION,
+     PROJECTION_PROMOTION_MIGRATION,
++    INTEGRATED_FOUNDATION_MIGRATION,
+ )
+ 
+ def _expected_fingerprint() -> str:
+@@ -601,4 +623,9 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
+         PROJECTION_PROMOTION_MIGRATION_NAME,
+         PROJECTION_PROMOTION_MIGRATION_CHECKSUM,
+     ),
++    (
++        INTEGRATED_FOUNDATION_SCHEMA_VERSION,
++        INTEGRATED_FOUNDATION_MIGRATION_NAME,
++        INTEGRATED_FOUNDATION_MIGRATION_CHECKSUM,
++    ),
+ )
+diff --git a/newsroom/tests/test_projection_b1_migrations.py b/newsroom/tests/test_projection_b1_migrations.py
+index fbf2ddb..8f6f71f 100644
+--- a/newsroom/tests/test_projection_b1_migrations.py
++++ b/newsroom/tests/test_projection_b1_migrations.py
+@@ -48,7 +48,7 @@ def test_projection_migration_history_contracts_and_schema_are_exact(
+     _seed(database)
+     conn = sqlite3.connect(database)
+     try:
+-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
++        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+         history = conn.execute(
+             "SELECT version,name FROM authority_migrations ORDER BY version"
+         ).fetchall()
+@@ -57,6 +57,7 @@ def test_projection_migration_history_contracts_and_schema_are_exact(
+             (2, "governed_object_authority_v2"),
+             (3, "projection_authority_v3"),
+             (4, "projection_generation_promotion_v4"),
++            (5, "integrated_foundation_proof_v5"),
+         ]
+         assert conn.execute(
+             "SELECT COUNT(*) FROM projection_ontology_contracts"
