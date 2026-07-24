@@ -163,9 +163,9 @@ jobs:
               if "test_projection_b3_neo4j_service"
               in case.attrib.get("classname", "")
           ]
-          if len(rebuild) < 3:
+          if len(rebuild) < 4:
               raise SystemExit(
-                  f"expected at least 3 B3 actual-service tests, found {len(rebuild)}"
+                  f"expected at least 4 B3 actual-service tests, found {len(rebuild)}"
               )
           if any(case.find("skipped") is not None for case in rebuild):
               raise SystemExit("B3 actual-service rebuild tests were skipped")
@@ -174,6 +174,16 @@ jobs:
               for case in rebuild
           ):
               raise SystemExit("B3 actual-service rebuild tests failed")
+          active_serving = [
+              case
+              for case in rebuild
+              if case.attrib.get("name")
+              == "test_actual_service_active_read_resolves_only_authority_promoted_generation"
+          ]
+          if len(active_serving) != 1:
+              raise SystemExit(
+                  "authority-selected ACTIVE-serving actual-service test did not execute exactly once"
+              )
           PY
 
       - name: Upload B2/B3 actual-service evidence
