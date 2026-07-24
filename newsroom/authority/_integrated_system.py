@@ -24,6 +24,7 @@ from newsroom.integrated.models import (
     CandidateAdmissionView,
     IntegratedFixtureManifest,
     IntegratedRetrievalContext,
+    IntegratedRetrievalContextId,
     IntegratedStateError,
 )
 from newsroom.integrated.policy import (
@@ -80,7 +81,7 @@ class _IntegratedGraphAdapter(Protocol):
 class CandidateAdmissions:
     """Authenticated deterministic Candidate authority; no model write path."""
 
-    __slots__ = ("__admit",)
+    __slots__ = ("__admit", "__context")
 
     def __init__(
         self,
@@ -93,8 +94,13 @@ class CandidateAdmissions:
             ],
             CandidateAdmissionView,
         ],
+        context: Callable[
+            [IntegratedRetrievalContextId, AuthenticationProof],
+            IntegratedRetrievalContext,
+        ],
     ) -> None:
         self.__admit = admit
+        self.__context = context
 
     def admit(
         self,
@@ -105,6 +111,14 @@ class CandidateAdmissions:
         proof: AuthenticationProof,
     ) -> CandidateAdmissionView:
         return self.__admit(request, context, manifest, proof)
+
+    def context(
+        self,
+        context_id: IntegratedRetrievalContextId,
+        *,
+        proof: AuthenticationProof,
+    ) -> IntegratedRetrievalContext:
+        return self.__context(context_id, proof)
 
 
 class IntegratedCandidateAuthoritySystem:
@@ -153,6 +167,30 @@ class _CandidateAdmissionBoundary:
         self._adapter = adapter
         self._clock = clock
         self._operation_lock = RLock()
+
+    def context(
+        self,
+        context_id: IntegratedRetrievalContextId,
+        proof: AuthenticationProof,
+    ) -> IntegratedRetrievalContext:
+        if not isinstance(context_id, IntegratedRetrievalContextId):
+            raise TypeError("retrieval context identity must be typed")
+        authenticated = self._projection_boundary._authenticate_read(proof)
+        context = self._store.retrieval_context(context_id)
+        self._projection_boundary._authorize_read(
+            family_id=context.metadata.family_id,
+            operation="integrated-retained-context-read",
+            semantic_value={
+                "context_id": str(context.context_id),
+                "context_digest": context.context_digest,
+                "generation_id": str(context.metadata.generation_id),
+                "authority_watermark": (
+                    context.metadata.contiguous_ledger_seq
+                ),
+            },
+            authenticated=authenticated,
+        )
+        return context
 
     def admit(
         self,
@@ -457,7 +495,7 @@ def _open_candidate_with_adapter(
                 provenance=read_boundary.provenance,
                 result=read_boundary.command_result,
             ),
-            candidates=CandidateAdmissions(boundary.admit),
+            candidates=CandidateAdmissions(boundary.admit, boundary.context),
             compatibility=compatibility,
             close=close,
         )

@@ -36,7 +36,7 @@ Serving time is a canonical observation of the original read. A later current re
 
 ## Graph loss and recovery
 
-Graph loss, graph-state mismatch or a read that lacks exact fixture provenance must fail closed. It must never be interpreted as “no prior match.”
+Graph loss, graph-state mismatch or a read that lacks exact fixture provenance must fail closed. It must never be interpreted as “no prior match”.
 
 Recovery uses a new generation:
 

@@ -12,8 +12,15 @@ from newsroom.authority.canonical import (
     digest_canonical,
     validate_sha256_digest,
 )
+from newsroom.authority.objects import ObjectAccessDecisionId
 from newsroom.authority.persistence import AuthorityPersistenceError
-from newsroom.authority.types import EventId, ObjectAdmissionId, UtcTimestamp
+from newsroom.authority.types import (
+    AggregateId,
+    EventId,
+    ObjectAdmissionId,
+    TrustScope,
+    UtcTimestamp,
+)
 from newsroom.integrated.models import (
     CandidateAdmissionDecisionId,
     CandidateAdmissionOutcome,
@@ -21,6 +28,8 @@ from newsroom.integrated.models import (
     CandidateAdmissionView,
     CandidateRoute,
     IntegratedContractError,
+    IntegratedExactIndexEntry,
+    IntegratedFixtureId,
     IntegratedFixtureManifest,
     IntegratedRetrievalContext,
     IntegratedRetrievalContextId,
@@ -29,7 +38,20 @@ from newsroom.integrated.models import (
     StoryCandidateId,
     StoryCandidateVersionId,
 )
-from newsroom.projection.models import ProjectionGenerationState
+from newsroom.projection.models import (
+    ProjectionGenerationId,
+    ProjectionGenerationState,
+)
+from newsroom.projection.neo4j.models import (
+    StructuralGraphNodeView,
+    StructuralGraphRelationView,
+    StructuralReadAuthoritySelection,
+    StructuralReadMetadata,
+)
+from newsroom.projection.ontology import (
+    ProjectionNodeType,
+    ProjectionRelationType,
+)
 
 from newsroom.integrated.policy import CANDIDATE_ADMISSION_COMMAND
 
@@ -75,6 +97,201 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
                 f"{identity} canonical digest is inconsistent"
             )
         return cls._decode_integrated_canonical(canonical, identity=identity)
+
+    @classmethod
+    def _context_from_row(
+        cls,
+        row: sqlite3.Row,
+    ) -> IntegratedRetrievalContext:
+        value = cls._canonical_row_value(
+            row, identity="integrated retrieval context"
+        )
+        try:
+            metadata_value = value["metadata"]
+            nodes_value = value["nodes"]
+            relations_value = value["relations"]
+            index_value = value["exact_index"]
+            omissions_value = value["known_omissions"]
+            if (
+                not isinstance(metadata_value, dict)
+                or not isinstance(nodes_value, list)
+                or not isinstance(relations_value, list)
+                or not isinstance(index_value, list)
+                or not isinstance(omissions_value, list)
+            ):
+                raise TypeError("retrieval context collections are malformed")
+            context = IntegratedRetrievalContext(
+                context_id=IntegratedRetrievalContextId.parse(
+                    str(row["context_id"])
+                ),
+                fixture_id=IntegratedFixtureId.parse(
+                    str(value["fixture_id"])
+                ),
+                fixture_aggregate_id=AggregateId.parse(
+                    str(value["fixture_aggregate_id"])
+                ),
+                fixture_event_id=EventId.parse(
+                    str(value["fixture_event_id"])
+                ),
+                admission_id=ObjectAdmissionId.parse(
+                    str(value["admission_id"])
+                ),
+                metadata=StructuralReadMetadata(
+                    family_id=str(metadata_value["family_id"]),
+                    family_definition_version=str(
+                        metadata_value["family_definition_version"]
+                    ),
+                    projector_version=str(
+                        metadata_value["projector_version"]
+                    ),
+                    ontology_contract_digest=str(
+                        metadata_value["ontology_contract_digest"]
+                    ),
+                    mapping_contract_digest=str(
+                        metadata_value["mapping_contract_digest"]
+                    ),
+                    generation_id=ProjectionGenerationId.parse(
+                        str(metadata_value["generation_id"])
+                    ),
+                    generation_state=ProjectionGenerationState(
+                        str(metadata_value["generation_state"])
+                    ),
+                    authority_selection=StructuralReadAuthoritySelection(
+                        str(metadata_value["authority_selection"])
+                    ),
+                    contiguous_ledger_seq=int(
+                        metadata_value["contiguous_ledger_seq"]
+                    ),
+                    open_gap_count=int(metadata_value["open_gap_count"]),
+                    dead_letter_count=int(
+                        metadata_value["dead_letter_count"]
+                    ),
+                    trust_scope=TrustScope(
+                        str(metadata_value["trust_scope"])
+                    ),
+                    query_valid_time=UtcTimestamp.parse(
+                        str(metadata_value["query_valid_time"])
+                    ),
+                    serving_time=UtcTimestamp.parse(
+                        str(metadata_value["serving_time"])
+                    ),
+                    authoritative_system=str(
+                        metadata_value["authoritative_system"]
+                    ),
+                    graph_role=str(metadata_value["graph_role"]),
+                ),
+                nodes=tuple(
+                    StructuralGraphNodeView(
+                        canonical_id=str(item["canonical_id"]),
+                        node_type=ProjectionNodeType(
+                            str(item["node_type"])
+                        ),
+                        identity_source=str(item["identity_source"]),
+                        identity_reference_digest=str(
+                            item["identity_reference_digest"]
+                        ),
+                        first_ledger_seq=int(item["first_ledger_seq"]),
+                        first_source_event_id=str(
+                            item["first_source_event_id"]
+                        ),
+                        first_source_event_digest=str(
+                            item["first_source_event_digest"]
+                        ),
+                    )
+                    for item in nodes_value
+                ),
+                relations=tuple(
+                    StructuralGraphRelationView(
+                        relation_key=str(item["relation_key"]),
+                        relation_type=ProjectionRelationType(
+                            str(item["relation_type"])
+                        ),
+                        source_canonical_id=str(
+                            item["source_canonical_id"]
+                        ),
+                        target_canonical_id=str(
+                            item["target_canonical_id"]
+                        ),
+                        ledger_seq=int(item["ledger_seq"]),
+                        source_event_id=str(item["source_event_id"]),
+                        source_event_type=str(item["source_event_type"]),
+                        source_event_digest=str(
+                            item["source_event_digest"]
+                        ),
+                        aggregate_type=str(item["aggregate_type"]),
+                        aggregate_id=str(item["aggregate_id"]),
+                        aggregate_version=int(item["aggregate_version"]),
+                        payload_id=str(item["payload_id"]),
+                        payload_digest=str(item["payload_digest"]),
+                        object_admission_id=(
+                            None
+                            if item["object_admission_id"] is None
+                            else str(item["object_admission_id"])
+                        ),
+                        principal_id=str(item["principal_id"]),
+                        trust_scope=TrustScope(str(item["trust_scope"])),
+                        security_scope=str(item["security_scope"]),
+                        retention_scope=str(item["retention_scope"]),
+                        recorded_at=UtcTimestamp.parse(
+                            str(item["recorded_at"])
+                        ),
+                    )
+                    for item in relations_value
+                ),
+                exact_index=tuple(
+                    IntegratedExactIndexEntry(
+                        canonical_id=str(item["canonical_id"]),
+                        node_type=ProjectionNodeType(
+                            str(item["node_type"])
+                        ),
+                        first_ledger_seq=int(item["first_ledger_seq"]),
+                        first_source_event_id=str(
+                            item["first_source_event_id"]
+                        ),
+                        first_source_event_digest=str(
+                            item["first_source_event_digest"]
+                        ),
+                    )
+                    for item in index_value
+                ),
+                hydrated_blob_digest=str(value["hydrated_blob_digest"]),
+                hydration_policy_contract_digest=str(
+                    value["hydration_policy_contract_digest"]
+                ),
+                hydration_access_decision_id=ObjectAccessDecisionId.parse(
+                    str(row["hydration_access_decision_id"])
+                ),
+                manifest_digest=str(value["manifest_digest"]),
+                retrieval_version=str(value["retrieval_version"]),
+                query_digest=str(value["query_digest"]),
+                known_omissions=tuple(str(item) for item in omissions_value),
+                recorded_at=UtcTimestamp.parse(str(row["recorded_at"])),
+            )
+        except (KeyError, TypeError, ValueError, IntegratedStateError) as exc:
+            raise AuthorityPersistenceError(
+                "integrated retrieval context cannot be rehydrated"
+            ) from exc
+        if context.context_digest != str(row["context_digest"]):
+            raise AuthorityPersistenceError(
+                "rehydrated retrieval context digest is inconsistent"
+            )
+        return context
+
+    def retrieval_context(
+        self,
+        context_id: IntegratedRetrievalContextId,
+    ) -> IntegratedRetrievalContext:
+        if not isinstance(context_id, IntegratedRetrievalContextId):
+            raise TypeError("retrieval context identity must be typed")
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM integrated_retrieval_contexts WHERE context_id=?",
+                (str(context_id),),
+            ).fetchone()
+            if row is None:
+                raise KeyError(str(context_id))
+            self._validate_context_row(self._connection, row)
+            return self._context_from_row(row)
 
     @staticmethod
     def semantic_collision_digest(

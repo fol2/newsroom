@@ -613,6 +613,34 @@ class IntegratedFoundationProofController:
             recorded_at=hydrated.decision.decided_at,
         )
 
+    def retained_context(
+        self,
+        context_id: IntegratedRetrievalContextId,
+        *,
+        proof: AuthenticationProof,
+    ) -> IntegratedRetrievalContext | None:
+        if not isinstance(context_id, IntegratedRetrievalContextId):
+            raise TypeError("integrated retrieval-context identity must be typed")
+        system = open_candidate_admission_authority_system(
+            path=self._environment.path,
+            registry=self._commands,
+            payload_schemas=self._schemas,
+            contracts=self._environment.projection_contracts,
+            authenticator=self._environment.authenticator,
+            authorizer=self._environment.authorizer,
+            event_read_policy=self._environment.event_read_policy,
+            projection_read_policy=self._environment.projection_read_policy,
+            neo4j_config=self._environment.neo4j_config,
+            clock=self._environment.clock,
+        )
+        try:
+            try:
+                return system.candidates.context(context_id, proof=proof)
+            except KeyError:
+                return None
+        finally:
+            system.close()
+
     def admit_candidate(
         self,
         request: CandidateAdmissionRequest,
@@ -666,13 +694,30 @@ class IntegratedFoundationProofController:
             proof=proof,
             keys=keys,
         )
-        context = self.build_context(
-            fixture,
-            manifest,
-            projection,
-            context_id=context_id,
-            proof=proof,
-        )
+        context = self.retained_context(context_id, proof=proof)
+        if context is None:
+            context = self.build_context(
+                fixture,
+                manifest,
+                projection,
+                context_id=context_id,
+                proof=proof,
+            )
+        elif (
+            context.fixture_id != fixture.fixture_id
+            or context.fixture_aggregate_id != fixture.fixture_aggregate_id
+            or context.fixture_event_id != fixture.fixture_event_id
+            or context.admission_id != fixture.admission_id
+            or context.manifest_digest != manifest.manifest_digest
+            or context.metadata.generation_id
+            != projection.generation.generation_id
+            or context.metadata.contiguous_ledger_seq
+            != projection.response.metadata.contiguous_ledger_seq
+            or context.metadata.query_valid_time != query_valid_time
+        ):
+            raise IntegratedStateError(
+                "retrieval context identity belongs to different proof evidence"
+            )
         candidate = self.admit_candidate(
             CandidateAdmissionRequest(
                 proposal_id=proposal_id,
