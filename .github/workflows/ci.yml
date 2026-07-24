@@ -82,7 +82,7 @@ jobs:
         shell: bash
         working-directory: .target
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           diagnostic="${RUNNER_TEMP}/b3-active-serving-qualifier.log"
           exec > >(tee "${diagnostic}") 2>&1
           expected_head="fb4f82df5187821f2563b345118fcf86356295fe"
@@ -98,8 +98,8 @@ jobs:
           test "$(sha256sum "${active_gz}" | cut -d' ' -f1)" = 5e7585b7c023ff7e6b889e77eb6b1ff61e3bc8aee7508f97be1be5bfa71efe6d
           gzip --decompress --stdout "${active_gz}" > "${active_patch}"
           test "$(sha256sum "${active_patch}" | cut -d' ' -f1)" = 979d7a97f9317ee554070fcb1214fc466dd4a9be1e08eeb6566a01c280560b3e
-          git apply --check "${active_patch}"
-          git apply "${active_patch}"
+          git apply --check --verbose "${active_patch}"
+          git apply --verbose "${active_patch}"
 
           echo stage=repair-active-serving-import
           python - <<'PY'
