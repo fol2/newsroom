@@ -1,11 +1,11 @@
 # Owner acceptance — Increments 2–11 readiness and Increment 2 implementation
 
-**Status:** Accepted  
-**Owner:** Product owner  
-**Accepted by owner:** 2026-07-24  
-**Canonical language:** English  
-**Accepted review boundary:** PR #140  
-**Immediate implementation issue:** #142  
+**Status:** Accepted
+**Owner:** Product owner
+**Accepted by owner:** 2026-07-24
+**Canonical language:** English
+**Accepted review boundary:** PR #140
+**Immediate implementation issue:** #142
 **Reviewed base before merge:** `main@5fcd8bc862e552961b6b147572879e79c7266931`
 
 ## Decision
