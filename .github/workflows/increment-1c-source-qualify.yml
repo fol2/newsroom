@@ -58,9 +58,9 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          path = Path("newsroom/authority/_integrated_store.py")
-          text = path.read_text(encoding="utf-8")
-          replacements = (
+          store_path = Path("newsroom/authority/_integrated_store.py")
+          store_text = store_path.read_text(encoding="utf-8")
+          store_replacements = (
               (
                   "from .policy import CANDIDATE_ADMISSION_COMMAND",
                   "from newsroom.integrated.policy import CANDIDATE_ADMISSION_COMMAND",
@@ -74,14 +74,66 @@ jobs:
                   "return cls._decode_integrated_canonical(canonical, identity=identity)",
               ),
           )
-          for old, new in replacements:
-              if text.count(old) != 1 or new in text:
+          for old, new in store_replacements:
+              if store_text.count(old) != 1 or new in store_text:
                   raise SystemExit(f"integrated store source mismatch: {old}")
-              text = text.replace(old, new)
-          path.write_text(text, encoding="utf-8")
+              store_text = store_text.replace(old, new)
+          store_path.write_text(store_text, encoding="utf-8")
+
+          graph_path = Path("newsroom/authority/_neo4j_projection_system.py")
+          graph_text = graph_path.read_text(encoding="utf-8")
+          graph_anchor = '''    def close(self) -> None:
+                  ...
+
+
+          class Neo4jStructuralProjector:'''.replace("          ", "")
+          graph_replacement = '''    def close(self) -> None:
+                  ...
+
+
+          def _open_structural_graph_adapter(
+              config: Neo4jProjectorConfig,
+          ) -> _StructuralGraphAdapter:
+              return _open_neo4j_adapter(config)
+
+
+          class Neo4jStructuralProjector:'''.replace("          ", "")
+          if graph_text.count(graph_anchor) != 1 or "def _open_structural_graph_adapter(" in graph_text:
+              raise SystemExit("Neo4j adapter factory anchor differs from expected source")
+          graph_path.write_text(
+              graph_text.replace(graph_anchor, graph_replacement),
+              encoding="utf-8",
+          )
+
+          system_path = Path("newsroom/authority/_integrated_system.py")
+          system_text = system_path.read_text(encoding="utf-8")
+          system_replacements = (
+              (
+                  "from ._neo4j_projection_system import _build_structural_batch",
+                  "from ._neo4j_projection_system import (\n    _build_structural_batch,\n    _open_structural_graph_adapter,\n)",
+              ),
+              (
+                  "from newsroom.projection.neo4j._adapter import _open_neo4j_adapter\n",
+                  "",
+              ),
+              (
+                  "adapter = _open_neo4j_adapter(neo4j_config)",
+                  "adapter = _open_structural_graph_adapter(neo4j_config)",
+              ),
+          )
+          for old, new in system_replacements:
+              if system_text.count(old) != 1 or (new and new in system_text):
+                  raise SystemExit(f"integrated system source mismatch: {old}")
+              system_text = system_text.replace(old, new)
+          system_path.write_text(system_text, encoding="utf-8")
           PY
 
-          test "$(git diff --name-only)" = "newsroom/authority/_integrated_store.py"
+          actual_files="$(git diff --name-only | sort)"
+          expected_files="$(printf '%s\n' \
+            newsroom/authority/_integrated_store.py \
+            newsroom/authority/_integrated_system.py \
+            newsroom/authority/_neo4j_projection_system.py | sort)"
+          test "${actual_files}" = "${expected_files}"
           git diff --check
           uv lock --check
           uv sync --dev --locked
@@ -89,7 +141,8 @@ jobs:
           uv run --no-sync python -m pytest -q \
             newsroom/tests/test_integrated_c1_contracts.py \
             newsroom/tests/test_integrated_c1_policy.py \
-            newsroom/tests/test_integrated_c1_candidate_authority.py
+            newsroom/tests/test_integrated_c1_candidate_authority.py \
+            newsroom/tests/test_projection_b2_boundaries.py
           uv run --no-sync python -m pytest -q newsroom/tests
           uv run --no-sync python scripts/eval_clustering_metrics.py \
             --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
@@ -98,8 +151,11 @@ jobs:
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add newsroom/authority/_integrated_store.py
-          git commit -m 'fix(integrated): isolate candidate store helpers'
+          git add \
+            newsroom/authority/_integrated_store.py \
+            newsroom/authority/_integrated_system.py \
+            newsroom/authority/_neo4j_projection_system.py
+          git commit -m 'fix(integrated): preserve adapter import boundary'
 
           remote_head="$(git ls-remote origin refs/heads/agent/increment-1c-integrated-foundation | cut -f1)"
           test "${remote_head}" = "${expected_head}"
