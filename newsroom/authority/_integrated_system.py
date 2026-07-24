@@ -261,8 +261,20 @@ class _CandidateAdmissionBoundary:
         self._projection_read_policy.require_principal(
             grant.authentication.principal_id
         )
+        family_ids = tuple(
+            sorted(self._projection_read_policy.allowed_family_ids)
+        )
+        if len(family_ids) != 1:
+            raise IntegratedStateError(
+                "Candidate admission requires one exact family policy"
+            )
+        family_id = family_ids[0]
+        if context.metadata.family_id != family_id:
+            raise IntegratedStateError(
+                "Candidate context belongs to another projection family"
+            )
         self._projection_boundary._authorize_read(
-            family_id=context.metadata.family_id,
+            family_id=family_id,
             operation="integrated-candidate-context-reconcile",
             semantic_value={
                 "context_id": str(context.context_id),
@@ -279,7 +291,7 @@ class _CandidateAdmissionBoundary:
         )
 
         metadata = self._store.projection_active_generation_metadata(
-            context.metadata.family_id
+            family_id
         )
         expected_metadata = (
             metadata.family.family_id,
