@@ -206,6 +206,10 @@ def test_actual_service_integrated_foundation_replay_recovery_and_tombstone(
         assert deduplicated.outcome is CandidateAdmissionOutcome.DEDUPLICATED
         assert deduplicated.candidate_id == initial.candidate.candidate_id
         assert recovered_context.metadata.generation_id == recovery_generation
+        assert controller.retained_context(
+            recovered_context.context_id,
+            proof=proof(),
+        ) == recovered_context
 
         rights, hydration, admissions = _policy_registries()
         object_system = open_object_system(

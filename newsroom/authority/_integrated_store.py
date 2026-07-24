@@ -367,7 +367,7 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             (str(row["candidate_id"]),),
         ).fetchall()
         if (
-            not versions
+            len(versions) != 1
             or int(versions[0]["version_number"]) != 1
             or len(admitted) != 1
             or str(admitted[0]["candidate_version_id"])
@@ -740,16 +740,36 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             (str(row["candidate_id"]),),
         ).fetchone()
         version = conn.execute(
-            "SELECT candidate_id,fixture_id,route,retrieval_context_id,"
+            "SELECT candidate_id,fixture_id,signal_id,lead_id,"
+            "hypothesis_version_id,route,retrieval_context_id,"
             "manifest_digest FROM story_candidate_versions "
             "WHERE candidate_version_id=?",
             (str(row["candidate_version_id"]),),
         ).fetchone()
         context = conn.execute(
-            "SELECT context_digest FROM integrated_retrieval_contexts "
-            "WHERE context_id=?",
+            "SELECT fixture_id,fixture_event_id,context_digest,manifest_digest "
+            "FROM integrated_retrieval_contexts WHERE context_id=?",
             (str(row["retrieval_context_id"]),),
         ).fetchone()
+        outcome = CandidateAdmissionOutcome(str(row["outcome"]))
+        expected_collision = (
+            None
+            if version is None or context is None
+            else digest_canonical(
+                {
+                    "contract": _COLLISION_CONTRACT,
+                    "fixture_id": str(context["fixture_id"]),
+                    "fixture_event_id": str(context["fixture_event_id"]),
+                    "signal_id": str(version["signal_id"]),
+                    "lead_id": str(version["lead_id"]),
+                    "hypothesis_version_id": str(
+                        version["hypothesis_version_id"]
+                    ),
+                    "route": str(version["route"]),
+                    "manifest_digest": str(context["manifest_digest"]),
+                }
+            )
+        )
         if (
             candidate is None
             or version is None
@@ -759,12 +779,19 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             or str(version["candidate_id"]) != str(row["candidate_id"])
             or str(version["fixture_id"]) != str(row["fixture_id"])
             or str(version["route"]) != str(row["route"])
-            or str(version["retrieval_context_id"])
-            != str(row["retrieval_context_id"])
             or str(version["manifest_digest"])
+            != str(row["manifest_digest"])
+            or str(context["fixture_id"]) != str(row["fixture_id"])
+            or str(context["manifest_digest"])
             != str(row["manifest_digest"])
             or str(context["context_digest"])
             != str(row["retrieval_context_digest"])
+            or expected_collision != str(row["semantic_collision_digest"])
+            or (
+                outcome is CandidateAdmissionOutcome.ADMITTED
+                and str(version["retrieval_context_id"])
+                != str(row["retrieval_context_id"])
+            )
         ):
             raise AuthorityPersistenceError(
                 "candidate admission decision cross-record identity is inconsistent"
@@ -773,7 +800,7 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
         event = conn.execute(
             "SELECT event_type,aggregate_type,aggregate_id,aggregate_version,"
             "payload_digest,object_admission_id,trust_scope,security_scope,"
-            "retention_scope FROM ledger_events WHERE event_id=?",
+            "retention_scope,recorded_at FROM ledger_events WHERE event_id=?",
             (str(row["authority_event_id"]),),
         ).fetchone()
         event_payload_digest = digest_canonical(
@@ -803,6 +830,7 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             or str(event["trust_scope"]) != "ADMITTED"
             or str(event["security_scope"]) != "authority.integrated"
             or str(event["retention_scope"]) != "authority.audit"
+            or str(event["recorded_at"]) != str(row["recorded_at"])
         ):
             raise AuthorityPersistenceError(
                 "candidate admission decision lacks exact authority event"
