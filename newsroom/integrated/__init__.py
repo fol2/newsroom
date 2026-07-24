@@ -30,6 +30,11 @@ from .policy import (
     integrated_payload_contracts,
     merge_integrated_authority_registries,
 )
+from .traceability import (
+    INCREMENT_1C_DEFERRED,
+    INCREMENT_1C_EXCLUSIONS,
+    INCREMENT_1C_TRACEABILITY,
+)
 
 _AUTHORITY_FACADE_NAMES = {
     "CandidateAdmissions",
@@ -66,6 +71,9 @@ __all__ = [
     "CandidateAdmissionView",
     "CandidateAdmissions",
     "CandidateRoute",
+    "INCREMENT_1C_DEFERRED",
+    "INCREMENT_1C_EXCLUSIONS",
+    "INCREMENT_1C_TRACEABILITY",
     "INTEGRATED_COMMAND_TYPES",
     "INTEGRATED_FIXTURE_COMMAND",
     "IntegratedCandidateAuthoritySystem",
