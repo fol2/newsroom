@@ -60,11 +60,25 @@ jobs:
 
           path = Path("newsroom/authority/_integrated_store.py")
           text = path.read_text(encoding="utf-8")
-          old = "from .policy import CANDIDATE_ADMISSION_COMMAND"
-          new = "from newsroom.integrated.policy import CANDIDATE_ADMISSION_COMMAND"
-          if text.count(old) != 1 or new in text:
-              raise SystemExit("integrated store import does not match exact expected source")
-          path.write_text(text.replace(old, new), encoding="utf-8")
+          replacements = (
+              (
+                  "from .policy import CANDIDATE_ADMISSION_COMMAND",
+                  "from newsroom.integrated.policy import CANDIDATE_ADMISSION_COMMAND",
+              ),
+              (
+                  "def _decode_canonical(data: bytes, *, identity: str) -> dict[str, Any]:",
+                  "def _decode_integrated_canonical(data: bytes, *, identity: str) -> dict[str, Any]:",
+              ),
+              (
+                  "return cls._decode_canonical(canonical, identity=identity)",
+                  "return cls._decode_integrated_canonical(canonical, identity=identity)",
+              ),
+          )
+          for old, new in replacements:
+              if text.count(old) != 1 or new in text:
+                  raise SystemExit(f"integrated store source mismatch: {old}")
+              text = text.replace(old, new)
+          path.write_text(text, encoding="utf-8")
           PY
 
           test "$(git diff --name-only)" = "newsroom/authority/_integrated_store.py"
@@ -85,7 +99,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add newsroom/authority/_integrated_store.py
-          git commit -m 'fix(integrated): resolve candidate command policy'
+          git commit -m 'fix(integrated): isolate candidate store helpers'
 
           remote_head="$(git ls-remote origin refs/heads/agent/increment-1c-integrated-foundation | cut -f1)"
           test "${remote_head}" = "${expected_head}"
