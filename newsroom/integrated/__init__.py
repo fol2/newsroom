@@ -30,11 +30,19 @@ from .policy import (
     integrated_payload_contracts,
     merge_integrated_authority_registries,
 )
-from .service import (
-    CandidateAdmissions,
-    IntegratedCandidateAuthoritySystem,
-    open_candidate_admission_authority_system,
-)
+
+
+def __getattr__(name: str):
+    if name in {
+        "CandidateAdmissions",
+        "IntegratedCandidateAuthoritySystem",
+        "open_candidate_admission_authority_system",
+    }:
+        from newsroom.authority import integrated_system as _system
+
+        return getattr(_system, name)
+    raise AttributeError(name)
+
 
 __all__ = [
     "CANDIDATE_ADMISSION_COMMAND",

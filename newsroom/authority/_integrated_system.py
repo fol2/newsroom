@@ -4,28 +4,26 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from newsroom.authority._capability import _CapabilityIssuer
-from newsroom.authority._event_system import _ReadBoundary
-from newsroom.authority.auth import AuthenticationProof
-from newsroom.authority.models import InlinePayload, SemanticCommand
-from newsroom.authority.persistence import AuthorityEvents, EventReadPolicy
-from newsroom.authority.policy import CommandRegistry, PayloadSchemaRegistry
-from newsroom.authority.service import CommandService
-from newsroom.authority.types import UtcTimestamp
-from newsroom.projection.policy import ProjectionContractRegistry
-
-from ._store import _IntegratedCandidateStore
-from .models import (
+from ._capability import _CapabilityIssuer
+from ._event_system import _ReadBoundary
+from ._integrated_store import _IntegratedCandidateStore
+from .auth import AuthenticationProof
+from .models import InlinePayload, SemanticCommand
+from .persistence import AuthorityEvents, EventReadPolicy
+from .policy import CommandRegistry, PayloadSchemaRegistry
+from .service import CommandService
+from .types import UtcTimestamp
+from newsroom.integrated.models import (
     CandidateAdmissionRequest,
     CandidateAdmissionView,
     IntegratedFixtureManifest,
     IntegratedRetrievalContext,
 )
-from .policy import (
+from newsroom.integrated.policy import (
     CANDIDATE_ADMISSION_COMMAND,
-    INTEGRATED_COMMAND_TYPES,
     merge_integrated_authority_registries,
 )
+from newsroom.projection.policy import ProjectionContractRegistry
 
 
 class CandidateAdmissions:
@@ -104,9 +102,13 @@ class _CandidateAdmissionBoundary:
         if not isinstance(request, CandidateAdmissionRequest):
             raise TypeError("candidate admission requires a typed request")
         if not isinstance(context, IntegratedRetrievalContext):
-            raise TypeError("candidate admission requires a typed retrieval context")
+            raise TypeError(
+                "candidate admission requires a typed retrieval context"
+            )
         if not isinstance(manifest, IntegratedFixtureManifest):
-            raise TypeError("candidate admission requires a typed fixture manifest")
+            raise TypeError(
+                "candidate admission requires a typed fixture manifest"
+            )
 
         collision_digest = self._store.semantic_collision_digest(
             request,
