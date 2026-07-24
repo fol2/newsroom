@@ -90,7 +90,8 @@ jobs:
           expected_files="$(printf '%s\n' \
             newsroom/authority/_integrated_store.py \
             newsroom/integrated/models.py \
-            newsroom/integrated/proof.py | sort)"
+            newsroom/integrated/proof.py \
+            newsroom/tests/test_integrated_c1_proof_integrity.py | sort)"
           test "${actual_files}" = "${expected_files}"
           git diff --check
           uv lock --check
@@ -112,7 +113,8 @@ jobs:
           git add \
             newsroom/authority/_integrated_store.py \
             newsroom/integrated/models.py \
-            newsroom/integrated/proof.py
+            newsroom/integrated/proof.py \
+            newsroom/tests/test_integrated_c1_proof_integrity.py
           git commit -m 'fix(integrated): bind proof authority state'
 
           remote_head="$(git ls-remote origin refs/heads/agent/increment-1c-integrated-foundation | cut -f1)"
