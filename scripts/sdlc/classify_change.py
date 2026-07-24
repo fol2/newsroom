@@ -122,7 +122,7 @@ def _service_tests(repo_root: Path) -> tuple[str, ...]:
         sorted(
             path.relative_to(repo_root).as_posix()
             for path in (repo_root / "newsroom" / "tests").glob(
-                "test_projection_*_neo4j_service.py"
+                "test_*_neo4j_service.py"
             )
             if path.is_file()
         )

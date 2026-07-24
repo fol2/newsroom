@@ -50,7 +50,13 @@ def _route(*, service: bool = False, clustering: bool = False) -> dict[str, obje
         "owner_authority_required": False,
         "core_tests": ["newsroom/tests"],
         "service_tests": (
-            ["newsroom/tests/test_projection_b2_neo4j_service.py"] if service else []
+            [
+                "newsroom/tests/test_integrated_c1_neo4j_service.py",
+                "newsroom/tests/test_projection_b2_neo4j_service.py",
+                "newsroom/tests/test_projection_b3_neo4j_service.py",
+            ]
+            if service
+            else []
         ),
         "sentinels": ["workflow_gate_contract_integrity"],
         "selected_test_manifest_digest": "sha256:" + "1" * 64,
@@ -299,6 +305,7 @@ def test_core_test_command_runs_full_suite_and_conditional_clustering(
 
 def test_optional_core_skips_are_exact_actual_service_cases() -> None:
     expected = (
+        "newsroom.tests.test_integrated_c1_neo4j_service::test_actual_service_integrated_foundation_replay_recovery_and_tombstone",
         "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_private_adapter_exact_duplicate_and_digest_conflict",
         "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_public_round_trip_duplicate_and_generation_isolation",
         "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_requires_explicit_authentication_configuration",
@@ -659,7 +666,11 @@ def test_exact_route_test_topology_is_accepted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     contract = _contract(tmp_path)
-    service_tests = ("newsroom/tests/test_projection_b2_neo4j_service.py",)
+    service_tests = (
+        "newsroom/tests/test_integrated_c1_neo4j_service.py",
+        "newsroom/tests/test_projection_b2_neo4j_service.py",
+        "newsroom/tests/test_projection_b3_neo4j_service.py",
+    )
     monkeypatch.setattr(
         lane_module,
         "_repository_service_tests",
