@@ -1,10 +1,10 @@
 # Increment 1B3 Neo4j rebuild, validation and promotion operations
 
-**Role:** Current implementation and rollback guide for Increment 1B3  
-**Status:** Implementation documentation for PR #97  
-**Owner:** Newsroom repository maintainers  
-**Last updated:** 2026-07-24  
-**Canonical language:** English  
+**Role:** Current implementation and rollback guide for Increment 1B3
+**Status:** Implementation documentation for PR #97
+**Owner:** Newsroom repository maintainers
+**Last updated:** 2026-07-24
+**Canonical language:** English
 **Runtime authority:** None. This document does not authorize source access, Graphiti execution, model or embedding calls, publication, shadow operation, canary, production activation, spending or public effects.
 
 ## Fixed authority boundary
