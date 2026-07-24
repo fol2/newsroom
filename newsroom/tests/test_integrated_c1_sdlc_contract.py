@@ -50,15 +50,20 @@ def test_increment_1c_native_graph_paths_require_actual_service_evidence() -> No
         assert route["service_tests"] == expected_tests
 
 
-def test_increment_1c_contract_models_are_stateful_even_without_service_execution() -> None:
+def test_increment_1c_contract_models_are_stateful_and_service_qualified() -> None:
     for path in (
         "newsroom/integrated/models.py",
         "newsroom/integrated/policy.py",
         "newsroom/integrated/traceability.py",
     ):
         route = _route(path)
-        assert route["risk_tier"] == "R2_STATEFUL_CONTRACT"
+        assert route["risk_tier"] == "R3_EXTERNAL_SERVICE_SECURITY"
         assert route["core_required"] is True
+        assert route["service_required"] is True
+        assert (
+            f"path:{path}:stateful_contract:R2_STATEFUL_CONTRACT"
+            in route["reasons"]
+        )
 
 
 def test_integrated_actual_service_case_is_the_only_new_optional_core_skip() -> None:

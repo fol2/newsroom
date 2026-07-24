@@ -50,6 +50,7 @@ _SERVICE_SERVER = "2026.06.0"
 _SERVICE_DRIVER = "6.2.0"
 _MAX_JSON_BYTES = 8 * 1024 * 1024
 _OPTIONAL_CORE_TEST_IDS = (
+    "newsroom.tests.test_integrated_c1_neo4j_service::test_actual_service_integrated_foundation_replay_recovery_and_tombstone",
     "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_private_adapter_exact_duplicate_and_digest_conflict",
     "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_public_round_trip_duplicate_and_generation_isolation",
     "newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_requires_explicit_authentication_configuration",
@@ -316,7 +317,7 @@ def _repository_service_tests(repo_root: Path) -> tuple[str, ...]:
         sorted(
             path.relative_to(repo_root).as_posix()
             for path in (repo_root / "newsroom" / "tests").glob(
-                "test_projection_*_neo4j_service.py"
+                "test_*_neo4j_service.py"
             )
             if path.is_file() and not path.is_symlink()
         )

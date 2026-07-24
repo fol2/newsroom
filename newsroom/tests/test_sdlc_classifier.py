@@ -79,6 +79,10 @@ def test_classifier_source_tests_policy_and_workflows_require_service() -> None:
         "scripts/sdlc/classify_change.py",
         "newsroom/tests/test_sdlc_classifier.py",
         "newsroom/projection/policy.py",
+        "newsroom/authority/_integrated_system.py",
+        "newsroom/authority/integrated_system.py",
+        "newsroom/integrated/proof.py",
+        "newsroom/tests/test_integrated_c1_neo4j_service.py",
         ".github/workflows/evidence.yml",
     )
 
@@ -87,6 +91,7 @@ def test_classifier_source_tests_policy_and_workflows_require_service() -> None:
         assert route["risk_tier"] == "R3_EXTERNAL_SERVICE_SECURITY"
         assert route["service_required"] is True
         assert route["service_tests"] == [
+            "newsroom/tests/test_integrated_c1_neo4j_service.py",
             "newsroom/tests/test_projection_b2_neo4j_service.py",
             "newsroom/tests/test_projection_b3_neo4j_service.py",
         ]
