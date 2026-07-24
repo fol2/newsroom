@@ -1,0 +1,63 @@
+name: Temporary Increments Readiness Whitespace Qualifier
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: >-
+      github.head_ref == 'agent/increments-readiness-whitespace-qualify' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.repository == 'fol2/newsroom'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact readiness branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increments-2-11-readiness
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Remove trailing whitespace and publish
+        shell: bash
+        run: |
+          set -euxo pipefail
+          expected_head="ae3932545d0295581257adc0e11303d7a8d38575"
+          test "$(git rev-parse HEAD)" = "${expected_head}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          python - <<'PY'
+          from pathlib import Path
+
+          paths = (
+              Path("docs/plans/2026-07-24-008-increment-2-complete-fixture-readiness.md"),
+              Path("docs/plans/2026-07-24-009-increments-3-11-readiness-ladder.md"),
+          )
+          changed = []
+          for path in paths:
+              text = path.read_text(encoding="utf-8")
+              cleaned = "\n".join(line.rstrip() for line in text.splitlines()) + "\n"
+              if cleaned == text:
+                  raise SystemExit(f"expected trailing whitespace was absent: {path}")
+              path.write_text(cleaned, encoding="utf-8")
+              changed.append(path)
+          if len(changed) != len(paths):
+              raise SystemExit("not every readiness plan was cleaned")
+          PY
+
+          git diff --check
+          git add \
+            docs/plans/2026-07-24-008-increment-2-complete-fixture-readiness.md \
+            docs/plans/2026-07-24-009-increments-3-11-readiness-ladder.md
+          git commit -m 'docs: make readiness plans source-integrity clean'
+
+          remote_head="$(git ls-remote origin refs/heads/agent/increments-2-11-readiness | cut -f1)"
+          test "${remote_head}" = "${expected_head}"
+          git push \
+            --force-with-lease=refs/heads/agent/increments-2-11-readiness:${expected_head} \
+            origin HEAD:agent/increments-2-11-readiness
