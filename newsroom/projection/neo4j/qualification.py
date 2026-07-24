@@ -16,6 +16,7 @@ from .models import (
     NEO4J_B2_SERVER_VERSION,
     Neo4jCompatibility,
     Neo4jProjectorConfig,
+    StructuralReadAuthoritySelection,
     StructuralReadMetadata,
 )
 
@@ -240,6 +241,13 @@ def require_qualified_graphrag(
     if metadata is None:
         raise GraphRAGQualificationError(
             "qualifying profile requires a current bounded graph read"
+        )
+    if (
+        metadata.authority_selection
+        is not StructuralReadAuthoritySelection.AUTHORITY_SELECTED_ACTIVE
+    ):
+        raise GraphRAGQualificationError(
+            "qualifying profile requires an authority-selected ACTIVE read"
         )
     if (
         metadata.generation_id != status.generation_id

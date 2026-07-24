@@ -24,6 +24,7 @@ from newsroom.projection.neo4j import (
     Neo4jConfigurationError,
     Neo4jProjectorConfig,
     RuntimeProfile,
+    StructuralReadAuthoritySelection,
     StructuralReadMetadata,
     neo4j_compatibility_digest,
     require_qualified_graphrag,
@@ -105,6 +106,9 @@ def evidence() -> GraphRAGQualificationEvidence:
         mapping_contract_digest=MAPPING_DIGEST,
         generation_id=GENERATION_ID,
         generation_state=ProjectionGenerationState.ACTIVE,
+        authority_selection=(
+            StructuralReadAuthoritySelection.AUTHORITY_SELECTED_ACTIVE
+        ),
         contiguous_ledger_seq=42,
         open_gap_count=0,
         dead_letter_count=0,
@@ -248,6 +252,24 @@ def test_changed_service_or_graph_digest_invalidates_validation() -> None:
     )
     with pytest.raises(GraphRAGQualificationError, match="another graph state"):
         require_qualified_graphrag(config(), changed_graph)
+
+
+def test_exact_generation_read_cannot_qualify_as_active_serving_evidence() -> None:
+    current = evidence()
+    assert current.read_metadata is not None
+    exact_generation = replace(
+        current.read_metadata,
+        authority_selection=(
+            StructuralReadAuthoritySelection.EXACT_GENERATION
+        ),
+    )
+    with pytest.raises(
+        GraphRAGQualificationError,
+        match="authority-selected ACTIVE read",
+    ):
+        require_qualified_graphrag(
+            config(), replace(current, read_metadata=exact_generation)
+        )
 
 
 def test_graph_read_must_match_active_authority_and_remain_non_authoritative() -> None:

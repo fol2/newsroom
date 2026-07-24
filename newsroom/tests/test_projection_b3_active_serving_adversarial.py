@@ -19,6 +19,8 @@ from newsroom.projection.neo4j import (
     Neo4jStructuralRead,
     StructuralActiveReadRequest,
     StructuralGenerationValidationRequest,
+    StructuralReadAuthoritySelection,
+    StructuralReadRequest,
     StructuralRebuildRequest,
 )
 
@@ -327,6 +329,24 @@ def test_active_read_fails_closed_if_authority_is_corrupted_to_two_active_genera
                 (str(other.generation_id),),
             )
 
+        with pytest.raises(
+            AuthorityPersistenceError,
+            match="multiple active generations",
+        ):
+            system.projections.status(FAMILY_ID, proof=proof())
+
+        exact = system.structural.read(
+            StructuralReadRequest(
+                generation_id=active.generation_id,
+                canonical_ids=canonical_ids,
+                query_valid_time=FIXED_NOW,
+                limit=100,
+            ),
+            proof=proof(),
+        )
+        assert exact.metadata.authority_selection is (
+            StructuralReadAuthoritySelection.EXACT_GENERATION
+        )
         with pytest.raises(
             AuthorityPersistenceError,
             match="multiple active generations",

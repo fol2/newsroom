@@ -2638,12 +2638,24 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
             ).fetchone()
             if family is None:
                 raise ProjectionStateError("projection family is not registered")
-            generation = self._connection.execute(
-                "SELECT * FROM projection_generations WHERE family_id=? "
-                "ORDER BY CASE state WHEN 'ACTIVE' THEN 0 ELSE 1 END,"
-                "updated_at DESC LIMIT 1",
+            active_generations = self._connection.execute(
+                "SELECT * FROM projection_generations "
+                "WHERE family_id=? AND state='ACTIVE' "
+                "ORDER BY generation_id LIMIT 2",
                 (family_id,),
-            ).fetchone()
+            ).fetchall()
+            if len(active_generations) > 1:
+                raise AuthorityPersistenceError(
+                    "projection family has multiple active generations"
+                )
+            if active_generations:
+                generation = active_generations[0]
+            else:
+                generation = self._connection.execute(
+                    "SELECT * FROM projection_generations WHERE family_id=? "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (family_id,),
+                ).fetchone()
             if generation is None:
                 generation_id = None
                 generation_state = None

@@ -22,6 +22,7 @@ from newsroom.projection.neo4j import (
     StructuralActiveReadRequest,
     StructuralDeliveryRequest,
     StructuralGenerationValidationRequest,
+    StructuralReadAuthoritySelection,
     StructuralReadRequest,
     StructuralRebuildRequest,
 )
@@ -205,6 +206,9 @@ def test_actual_service_active_read_resolves_only_authority_promoted_generation(
 
         response = system.structural.read_active(request, proof=proof())
         assert response.metadata.generation_id == active.generation_id
+        assert response.metadata.authority_selection is (
+            StructuralReadAuthoritySelection.AUTHORITY_SELECTED_ACTIVE
+        )
         assert response.metadata.generation_state is ProjectionGenerationState.ACTIVE
         assert response.nodes
         assert response.relations

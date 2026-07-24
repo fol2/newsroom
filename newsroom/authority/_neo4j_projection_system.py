@@ -61,6 +61,7 @@ from newsroom.projection.neo4j.models import (
     StructuralNode,
     StructuralRebuildRequest,
     StructuralRebuildResult,
+    StructuralReadAuthoritySelection,
     StructuralReadMetadata,
     StructuralReadRequest,
     StructuralReadResponse,
@@ -700,6 +701,9 @@ class _Neo4jProjectionBoundary:
             limit=request.limit,
             operation="neo4j-structural",
             authenticated=authenticated,
+            authority_selection=(
+                StructuralReadAuthoritySelection.EXACT_GENERATION
+            ),
         )
 
     def read_active(
@@ -736,6 +740,9 @@ class _Neo4jProjectionBoundary:
                 limit=request.limit,
                 operation="neo4j-structural-active",
                 authenticated=authenticated,
+                authority_selection=(
+                    StructuralReadAuthoritySelection.AUTHORITY_SELECTED_ACTIVE
+                ),
             )
 
     def _read_with_metadata(
@@ -747,6 +754,7 @@ class _Neo4jProjectionBoundary:
         limit: int,
         operation: str,
         authenticated: tuple[UtcTimestamp, Any],
+        authority_selection: StructuralReadAuthoritySelection,
     ) -> StructuralReadResponse:
         self._projection_boundary._authorize_read(
             family_id=metadata.family.family_id,
@@ -789,6 +797,7 @@ class _Neo4jProjectionBoundary:
                 ),
                 generation_id=metadata.generation.generation_id,
                 generation_state=metadata.generation.state,
+                authority_selection=authority_selection,
                 contiguous_ledger_seq=metadata.contiguous_ledger_seq,
                 open_gap_count=metadata.open_gap_count,
                 dead_letter_count=metadata.dead_letter_count,

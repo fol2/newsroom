@@ -65,6 +65,11 @@ class Neo4jApplyOutcome(StrEnum):
     DUPLICATE = "DUPLICATE"
 
 
+class StructuralReadAuthoritySelection(StrEnum):
+    EXACT_GENERATION = "exact-generation"
+    AUTHORITY_SELECTED_ACTIVE = "authority-selected-active"
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class Neo4jProjectorConfig:
     uri: str
@@ -616,6 +621,7 @@ class StructuralReadMetadata:
     mapping_contract_digest: str
     generation_id: ProjectionGenerationId
     generation_state: ProjectionGenerationState
+    authority_selection: StructuralReadAuthoritySelection
     contiguous_ledger_seq: int
     open_gap_count: int
     dead_letter_count: int
@@ -624,6 +630,12 @@ class StructuralReadMetadata:
     serving_time: UtcTimestamp
     authoritative_system: str = "sqlite-ledger-and-governed-objects"
     graph_role: str = "non-authoritative-rebuildable-context"
+
+    def __post_init__(self) -> None:
+        if not isinstance(
+            self.authority_selection, StructuralReadAuthoritySelection
+        ):
+            raise ProjectionContractError("structural read authority selection must be typed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -705,6 +717,7 @@ __all__ = [
     "StructuralNode",
     "StructuralRebuildRequest",
     "StructuralRebuildResult",
+    "StructuralReadAuthoritySelection",
     "StructuralReadMetadata",
     "StructuralReadRequest",
     "StructuralReadResponse",
