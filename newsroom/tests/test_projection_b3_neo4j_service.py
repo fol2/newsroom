@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from newsroom.projection import (
+    ProjectionDeliveryOutcome,
     ProjectionFamilyRegistrationRequest,
     ProjectionGenerationCreateRequest,
     ProjectionGenerationId,
@@ -19,6 +20,7 @@ from newsroom.projection.neo4j import (
     Neo4jIdentityConflict,
     Neo4jProjectorConfig,
     StructuralActiveReadRequest,
+    StructuralDeliveryRequest,
     StructuralGenerationValidationRequest,
     StructuralReadRequest,
     StructuralRebuildRequest,
@@ -217,6 +219,179 @@ def test_actual_service_active_read_resolves_only_authority_promoted_generation(
         system.close()
         if generations:
             _cleanup(config, *generations)
+
+
+def test_actual_service_active_generation_revalidates_after_incremental_delivery(
+    tmp_path: Path,
+) -> None:
+    config = _service_config()
+    authority_path = tmp_path / "authority.sqlite3"
+    generation_id: ProjectionGenerationId | None = None
+    system = open_b2_service_system(authority_path, config)
+    try:
+        _source_event(
+            system,
+            key="b3-service-active-revalidation-initial-source",
+        )
+        _register(system)
+        generation = _create_generation(
+            system,
+            suffix="active-revalidation",
+        )
+        generation_id = generation.generation_id
+        rebuilt = system.structural.rebuild(
+            _rebuild_request(
+                system,
+                generation,
+                key="b3-service-active-revalidation-rebuild",
+            ),
+            proof=proof(),
+        )
+        current = next(
+            item
+            for item in system.projections.generations(
+                FAMILY_ID,
+                proof=proof(),
+            )
+            if item.generation_id == generation_id
+        )
+        initial_validation = system.structural.validate_generation(
+            StructuralGenerationValidationRequest(
+                generation_id=generation_id,
+                expected_authority_version=(
+                    current.authority_aggregate_version
+                ),
+                checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
+                reason_code="B3_ACTUAL_SERVICE_ACTIVE_REVALIDATION",
+                idempotency_key=(
+                    "b3-service-active-revalidation-initial-validate"
+                ),
+            ),
+            proof=proof(),
+        )
+        validating = next(
+            item
+            for item in system.projections.generations(
+                FAMILY_ID,
+                proof=proof(),
+            )
+            if item.generation_id == generation_id
+        )
+        promotion_request = ProjectionGenerationPromotionRequest(
+            generation_id=generation_id,
+            expected_authority_version=(
+                validating.authority_aggregate_version
+            ),
+            checkpoint_ledger_seq=initial_validation.checkpoint_ledger_seq,
+            validation_digest=initial_validation.validation_digest,
+            reason_code="B3_ACTUAL_SERVICE_ACTIVE_REVALIDATION",
+            idempotency_key="b3-service-active-revalidation-promote",
+        )
+        promotion = system.projections.promote_generation(
+            promotion_request,
+            proof=proof(),
+        )
+        assert promotion.generation.state is ProjectionGenerationState.ACTIVE
+
+        source = _source_event(
+            system,
+            key="b3-service-active-revalidation-incremental-source",
+        )
+        canonical_ids = _canonical_ids_for_source_event(source)
+        active = next(
+            item
+            for item in system.projections.generations(
+                FAMILY_ID,
+                proof=proof(),
+            )
+            if item.generation_id == generation_id
+        )
+        delivery = system.structural.deliver(
+            StructuralDeliveryRequest(
+                generation_id=generation_id,
+                expected_authority_version=(
+                    active.authority_aggregate_version
+                ),
+                ledger_seq=source.ledger_seq,
+                idempotency_key="b3-service-active-revalidation-delivery",
+            ),
+            proof=proof(),
+        )
+        assert delivery.outcome is ProjectionDeliveryOutcome.APPLIED
+        status = system.projections.status(FAMILY_ID, proof=proof())
+        assert status.generation_state is ProjectionGenerationState.ACTIVE
+        assert status.contiguous_ledger_seq > (
+            initial_validation.checkpoint_ledger_seq
+        )
+
+        with pytest.raises(
+            ProjectionStateError,
+            match="current authority checkpoint",
+        ):
+            system.projections.promote_generation(
+                promotion_request,
+                proof=proof(),
+            )
+
+        active = next(
+            item
+            for item in system.projections.generations(
+                FAMILY_ID,
+                proof=proof(),
+            )
+            if item.generation_id == generation_id
+        )
+        refreshed = system.structural.validate_generation(
+            StructuralGenerationValidationRequest(
+                generation_id=generation_id,
+                expected_authority_version=(
+                    active.authority_aggregate_version
+                ),
+                checkpoint_ledger_seq=status.contiguous_ledger_seq,
+                reason_code="B3_ACTUAL_SERVICE_ACTIVE_REVALIDATION",
+                idempotency_key="b3-service-active-revalidation-refresh",
+            ),
+            proof=proof(),
+        )
+        assert refreshed.validation_version == (
+            initial_validation.validation_version + 1
+        )
+        assert next(
+            item
+            for item in system.projections.generations(
+                FAMILY_ID,
+                proof=proof(),
+            )
+            if item.generation_id == generation_id
+        ).state is ProjectionGenerationState.ACTIVE
+        assert system.projections.validation(
+            generation_id,
+            proof=proof(),
+        ) == refreshed
+        assert system.projections.promote_generation(
+            promotion_request,
+            proof=proof(),
+        ) == promotion
+
+        response = system.structural.read_active(
+            StructuralActiveReadRequest(
+                family_id=FAMILY_ID,
+                canonical_ids=canonical_ids,
+                query_valid_time=FIXED_NOW,
+                limit=100,
+            ),
+            proof=proof(),
+        )
+        assert response.metadata.generation_id == generation_id
+        assert response.metadata.contiguous_ledger_seq == (
+            status.contiguous_ledger_seq
+        )
+        assert response.nodes
+        assert response.relations
+    finally:
+        system.close()
+        if generation_id is not None:
+            _cleanup(config, generation_id)
 
 
 def test_actual_service_promotion_rejects_graph_loss_after_validation(

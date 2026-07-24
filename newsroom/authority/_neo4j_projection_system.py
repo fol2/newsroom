@@ -476,19 +476,25 @@ class _Neo4jProjectionBoundary:
             request.generation_id
         )
         replaying = target_grant.replay_of_command_id is not None
-        if metadata.generation.state is ProjectionGenerationState.ACTIVE:
-            if not replaying:
+        if replaying:
+            if metadata.generation.state not in {
+                ProjectionGenerationState.ACTIVE,
+                ProjectionGenerationState.RETIRED,
+            }:
+                raise ProjectionStateError(
+                    "promotion replay requires an active or retired generation"
+                )
+            checkpoint_ledger_seq = metadata.contiguous_ledger_seq
+        else:
+            if metadata.generation.state is not ProjectionGenerationState.VALIDATING:
                 raise ProjectionStateError(
                     "only a validating generation can be promoted"
                 )
-        elif metadata.generation.state is not ProjectionGenerationState.VALIDATING:
-            raise ProjectionStateError(
-                "only a validating generation can be promoted"
-            )
-        if metadata.contiguous_ledger_seq != request.checkpoint_ledger_seq:
-            raise ProjectionStateError(
-                "promotion must bind the exact authority checkpoint"
-            )
+            if metadata.contiguous_ledger_seq != request.checkpoint_ledger_seq:
+                raise ProjectionStateError(
+                    "promotion must bind the exact authority checkpoint"
+                )
+            checkpoint_ledger_seq = request.checkpoint_ledger_seq
         if metadata.open_gap_count or metadata.dead_letter_count:
             raise ProjectionStateError(
                 "promotion requires zero gaps and dead letters"
@@ -496,14 +502,24 @@ class _Neo4jProjectionBoundary:
         validation = self._store.projection_generation_validation(
             request.generation_id
         )
-        if validation.validation_digest != request.validation_digest:
-            raise ProjectionStateError(
-                "promotion requires the exact retained validation evidence"
-            )
-        if validation.checkpoint_ledger_seq != request.checkpoint_ledger_seq:
-            raise ProjectionStateError(
-                "promotion validation checkpoint is stale"
-            )
+        if replaying:
+            if (
+                validation.checkpoint_ledger_seq != checkpoint_ledger_seq
+                or metadata.generation.validated_through_ledger_seq
+                != checkpoint_ledger_seq
+            ):
+                raise ProjectionStateError(
+                    "promotion replay requires validation through the current authority checkpoint"
+                )
+        else:
+            if validation.validation_digest != request.validation_digest:
+                raise ProjectionStateError(
+                    "promotion requires the exact retained validation evidence"
+                )
+            if validation.checkpoint_ledger_seq != request.checkpoint_ledger_seq:
+                raise ProjectionStateError(
+                    "promotion validation checkpoint is stale"
+                )
 
         compatibility_digest = neo4j_compatibility_digest(
             self._adapter.verify_compatibility()
@@ -517,7 +533,7 @@ class _Neo4jProjectionBoundary:
             )
         batches = self._expected_validation_batches(
             request.generation_id,
-            request.checkpoint_ledger_seq,
+            checkpoint_ledger_seq,
         )
         state_digest = self._adapter.reconcile_generation(
             generation_id=str(request.generation_id),
@@ -578,9 +594,10 @@ class _Neo4jProjectionBoundary:
         if metadata.generation.state not in {
             ProjectionGenerationState.BUILDING,
             ProjectionGenerationState.VALIDATING,
+            ProjectionGenerationState.ACTIVE,
         }:
             raise ProjectionStateError(
-                "only building or validating generations can be reconciled"
+                "only building, validating or active generations can be reconciled"
             )
         if metadata.contiguous_ledger_seq != request.checkpoint_ledger_seq:
             raise ProjectionStateError(

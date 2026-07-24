@@ -16,6 +16,7 @@ from newsroom.projection import (
 from newsroom.projection.neo4j import (
     Neo4jIdentityConflict,
     StructuralActiveReadRequest,
+    StructuralDeliveryRequest,
     StructuralGenerationValidationRequest,
     StructuralRebuildRequest,
 )
@@ -240,6 +241,150 @@ def test_promotion_reconciles_current_graph_and_exact_replay(
         )
     finally:
         system.close()
+
+
+def test_active_generation_revalidates_after_incremental_delivery_and_restart(
+    tmp_path: Path,
+) -> None:
+    authority_path = tmp_path / "authority.sqlite3"
+    adapter = MemoryNeo4jAdapter()
+    system = open_b2_system(authority_path, adapter)
+    try:
+        _register(system)
+        system.commands.execute(
+            source_command(key="b3-active-revalidation-initial-source"),
+            proof=proof(),
+        )
+        generation = _create(system, suffix="active-revalidation")
+        rebuilt = _rebuild(
+            system,
+            generation,
+            key="b3-active-revalidation-rebuild",
+        )
+        initial_validation = _validate(
+            system,
+            generation.generation_id,
+            rebuilt.checkpoint_ledger_seq,
+            key="b3-active-revalidation-initial-validate",
+        )
+        validating = _generation(system, generation.generation_id)
+        promotion_request = ProjectionGenerationPromotionRequest(
+            generation_id=generation.generation_id,
+            expected_authority_version=(
+                validating.authority_aggregate_version
+            ),
+            checkpoint_ledger_seq=initial_validation.checkpoint_ledger_seq,
+            validation_digest=initial_validation.validation_digest,
+            reason_code="B3_ACTIVE_REVALIDATION_PROMOTE",
+            idempotency_key="b3-active-revalidation-promote",
+        )
+        promotion = system.projections.promote_generation(
+            promotion_request,
+            proof=proof(),
+        )
+        assert promotion.generation.state is ProjectionGenerationState.ACTIVE
+
+        command = system.commands.execute(
+            source_command(key="b3-active-revalidation-incremental-source"),
+            proof=proof(),
+        )
+        source = next(
+            event
+            for event in system.events.after(0, limit=1000, proof=proof())
+            if event.command_id == str(command.command_id)
+        )
+        current = _generation(system, generation.generation_id)
+        system.structural.deliver(
+            StructuralDeliveryRequest(
+                generation_id=generation.generation_id,
+                expected_authority_version=(
+                    current.authority_aggregate_version
+                ),
+                ledger_seq=source.ledger_seq,
+                idempotency_key="b3-active-revalidation-delivery",
+            ),
+            proof=proof(),
+        )
+        status = system.projections.status(FAMILY_ID, proof=proof())
+        assert status.generation_state is ProjectionGenerationState.ACTIVE
+        assert status.contiguous_ledger_seq > (
+            initial_validation.checkpoint_ledger_seq
+        )
+        assert system.projections.validation(
+            generation.generation_id,
+            proof=proof(),
+        ) == initial_validation
+
+        with pytest.raises(
+            ProjectionStateError,
+            match="current authority checkpoint",
+        ):
+            system.projections.promote_generation(
+                promotion_request,
+                proof=proof(),
+            )
+
+        refreshed = _validate(
+            system,
+            generation.generation_id,
+            status.contiguous_ledger_seq,
+            key="b3-active-revalidation-refresh",
+        )
+        refreshed_generation = _generation(
+            system,
+            generation.generation_id,
+        )
+        assert refreshed.validation_version == (
+            initial_validation.validation_version + 1
+        )
+        assert refreshed_generation.state is ProjectionGenerationState.ACTIVE
+        assert refreshed_generation.validated_through_ledger_seq == (
+            status.contiguous_ledger_seq
+        )
+        assert system.projections.validation(
+            generation.generation_id,
+            proof=proof(),
+        ) == refreshed
+
+        before_replay = system.events.after(0, limit=1000, proof=proof())
+        replay = system.projections.promote_generation(
+            promotion_request,
+            proof=proof(),
+        )
+        assert replay == promotion
+        assert system.events.after(
+            0,
+            limit=1000,
+            proof=proof(),
+        ) == before_replay
+        canonical_ids = _canonical_ids(adapter, generation.generation_id)
+        response = system.structural.read_active(
+            _active_request(canonical_ids),
+            proof=proof(),
+        )
+        assert response.metadata.generation_id == generation.generation_id
+        assert response.metadata.contiguous_ledger_seq == (
+            status.contiguous_ledger_seq
+        )
+    finally:
+        system.close()
+
+    restarted = open_b2_system(authority_path, adapter)
+    try:
+        assert _generation(
+            restarted,
+            generation.generation_id,
+        ).state is ProjectionGenerationState.ACTIVE
+        assert restarted.projections.validation(
+            generation.generation_id,
+            proof=proof(),
+        ) == refreshed
+        assert restarted.projections.promotions(
+            FAMILY_ID,
+            proof=proof(),
+        ) == (promotion,)
+    finally:
+        restarted.close()
 
 
 def test_newer_building_generation_cannot_replace_active_serving_target(

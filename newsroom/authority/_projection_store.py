@@ -517,11 +517,35 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     int(row["authority_aggregate_version"]),
                 ),
             ).fetchone()
+            previous = conn.execute(
+                "SELECT state FROM projection_generation_versions "
+                "WHERE generation_id=? AND lifecycle_version=?",
+                (
+                    str(row["generation_id"]),
+                    int(row["lifecycle_version"]) - 1,
+                ),
+            ).fetchone()
+            validation_state = (
+                None
+                if version is None
+                else ProjectionGenerationState(str(version["state"]))
+            )
+            valid_predecessors = {
+                ProjectionGenerationState.VALIDATING: {
+                    ProjectionGenerationState.BUILDING,
+                    ProjectionGenerationState.VALIDATING,
+                },
+                ProjectionGenerationState.ACTIVE: {
+                    ProjectionGenerationState.ACTIVE,
+                },
+            }.get(validation_state)
             if (
                 version is None
                 or event is None
-                or str(version["state"])
-                != ProjectionGenerationState.VALIDATING.value
+                or previous is None
+                or valid_predecessors is None
+                or ProjectionGenerationState(str(previous["state"]))
+                not in valid_predecessors
                 or int(version["authority_aggregate_version"])
                 != int(row["authority_aggregate_version"])
                 or int(version["validated_through_ledger_seq"])
@@ -1162,10 +1186,16 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
             if state not in {
                 ProjectionGenerationState.BUILDING,
                 ProjectionGenerationState.VALIDATING,
+                ProjectionGenerationState.ACTIVE,
             }:
                 raise ProjectionStateError(
-                    "only building or validating generations can be validated"
+                    "only building, validating or active generations can be validated"
                 )
+            validation_state = (
+                state
+                if state is ProjectionGenerationState.ACTIVE
+                else ProjectionGenerationState.VALIDATING
+            )
             checkpoint = self._checkpoint_seq(conn, str(generation_id))
             if checkpoint_ledger_seq != checkpoint:
                 raise ProjectionStateError(
@@ -1213,7 +1243,7 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 "authority_aggregate_version=?,validated_through_ledger_seq=?,"
                 "updated_event_id=?,updated_at=? WHERE generation_id=?",
                 (
-                    ProjectionGenerationState.VALIDATING.value,
+                    validation_state.value,
                     lifecycle_version,
                     result.aggregate_version,
                     checkpoint_ledger_seq,
@@ -1230,7 +1260,7 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 (
                     str(generation_id),
                     lifecycle_version,
-                    ProjectionGenerationState.VALIDATING.value,
+                    validation_state.value,
                     result.aggregate_version,
                     checkpoint_ledger_seq,
                     reason_code,
@@ -2242,13 +2272,17 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
         return ProjectionGenerationPromotionView(
             promotion_digest=str(row["promotion_digest"]),
             family_id=str(row["family_id"]),
-            generation=self._generation_view(
-                conn, str(row["generation_id"])
+            generation=self._generation_version_for_event(
+                conn,
+                str(row["target_authority_event_id"]),
             ),
             prior_generation=(
                 None
                 if prior_id is None
-                else self._generation_view(conn, str(prior_id))
+                else self._generation_version_for_event(
+                    conn,
+                    str(row["prior_authority_event_id"]),
+                )
             ),
             checkpoint_ledger_seq=int(row["checkpoint_ledger_seq"]),
             validation_digest=str(row["validation_digest"]),
