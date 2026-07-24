@@ -136,7 +136,7 @@ jobs:
           set -euxo pipefail
           diagnostic="${RUNNER_TEMP}/increment-1c-derived-qualifier.log"
           exec > >(tee "${diagnostic}") 2>&1
-          expected_head="34f983b549d1d23406357696176256bd05e28a54"
+          expected_head="a71d29273f17d709cfe637bc392c4140931ea410"
           test "$(git rev-parse HEAD)" = "${expected_head}"
           python ../.qualifier/.sdlc/increment_1c_derived_qualify.py
 
