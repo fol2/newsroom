@@ -30,6 +30,14 @@ from .policy import (
     integrated_payload_contracts,
     merge_integrated_authority_registries,
 )
+from .proof import (
+    IntegratedFixtureAuthority,
+    IntegratedFoundationProofController,
+    IntegratedFoundationProofResult,
+    IntegratedProjectionAuthority,
+    IntegratedProofEnvironment,
+    IntegratedProofKeys,
+)
 
 
 def __getattr__(name: str):
@@ -57,11 +65,17 @@ __all__ = [
     "IntegratedCandidateAuthoritySystem",
     "IntegratedContractError",
     "IntegratedExactIndexEntry",
+    "IntegratedFixtureAuthority",
     "IntegratedFixtureId",
     "IntegratedFixtureManifest",
     "IntegratedFoundationError",
+    "IntegratedFoundationProofController",
+    "IntegratedFoundationProofResult",
     "IntegratedHypothesisVersionId",
     "IntegratedLeadId",
+    "IntegratedProjectionAuthority",
+    "IntegratedProofEnvironment",
+    "IntegratedProofKeys",
     "IntegratedRetrievalContext",
     "IntegratedRetrievalContextId",
     "IntegratedSignalId",
