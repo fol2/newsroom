@@ -88,3 +88,102 @@ jobs:
           test "$FOCUSED_OUTCOME" = success
           test "$REGRESSION_OUTCOME" = success
           test "$FAULT_OUTCOME" = success
+
+  increment-1c-sdlc-publish:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.head_ref == 'agent/increment-1c-sdlc-qualify' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.repository == 'fol2/newsroom'
+    needs: governed-object-authority
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout qualification branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1c-sdlc-qualify
+          path: .qualifier
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout exact Increment 1C target
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1c-integrated-foundation
+          path: .target
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.0"
+          enable-cache: true
+          cache-dependency-glob: .target/uv.lock
+
+      - name: Correct, qualify and publish C1 SDLC topology
+        shell: bash
+        working-directory: .target
+        run: |
+          set -euxo pipefail
+          diagnostic="${RUNNER_TEMP}/increment-1c-sdlc-qualifier.log"
+          exec > >(tee "${diagnostic}") 2>&1
+          expected_head="42a01379b89be81fdf769b72b0f588f8fc66bdff"
+          test "$(git rev-parse HEAD)" = "${expected_head}"
+          python ../.qualifier/.sdlc/increment_1c_sdlc_qualify.py
+
+          actual_files="$(git diff --name-only | sort)"
+          expected_files="$(printf '%s\n' \
+            .sdlc/gates.toml \
+            newsroom/tests/test_sdlc_classifier.py \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            scripts/sdlc/classify_change.py \
+            scripts/sdlc/workflow_lane.py | sort)"
+          test "${actual_files}" = "${expected_files}"
+          git diff --check
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_integrated_c1_sdlc_contract.py \
+            newsroom/tests/test_sdlc_classifier.py \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            newsroom/tests/test_sdlc_evidence.py
+          uv run --no-sync python -m pytest -q newsroom/tests
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            .sdlc/gates.toml \
+            newsroom/tests/test_sdlc_classifier.py \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            scripts/sdlc/classify_change.py \
+            scripts/sdlc/workflow_lane.py
+          git commit -m 'fix(sdlc): route Increment 1C actual service'
+
+          remote_head="$(git ls-remote origin refs/heads/agent/increment-1c-integrated-foundation | cut -f1)"
+          test "${remote_head}" = "${expected_head}"
+          git push \
+            --force-with-lease=refs/heads/agent/increment-1c-integrated-foundation:${expected_head} \
+            origin HEAD:agent/increment-1c-integrated-foundation
+
+      - name: Upload C1 SDLC qualifier diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-1c-sdlc-qualifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/increment-1c-sdlc-qualifier.log
+          if-no-files-found: warn
+          retention-days: 1
