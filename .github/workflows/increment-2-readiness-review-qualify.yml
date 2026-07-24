@@ -1,0 +1,64 @@
+name: Temporary Increment 2 Readiness Review Qualifier
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: >-
+      github.head_ref == 'agent/increment-2-readiness-review-qualify' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.repository == 'fol2/newsroom'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact readiness branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increments-2-11-readiness
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Correct authority wording and publish
+        shell: bash
+        run: |
+          set -euxo pipefail
+          expected_head="83364576a8caa64483c33647724020e22f20c4cc"
+          test "$(git rev-parse HEAD)" = "${expected_head}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("docs/plans/2026-07-24-008-increment-2-complete-fixture-readiness.md")
+          text = path.read_text(encoding="utf-8")
+          replacements = (
+              (
+                  "Approve Increment 2 as the next implementation boundary and authorise focused code work only after this readiness package is accepted.",
+                  "Approve Increment 2 as the next proposed implementation boundary. Acceptance of this package still does not authorise code; focused implementation begins only through a separate owner-authorised issue that records the then-current `main` head and exact review units.",
+              ),
+              (
+                  "The implementation uses a rights-free repository-owned fixture family named `integrated_fixture_v2`. It contains no copied news expression and no personal data.",
+                  "The implementation uses a repository-owned synthetic fixture family named `integrated_fixture_v2` under an explicit retained repository-permitted rights decision. It contains no copied news expression and no personal data.",
+              ),
+          )
+          for old, new in replacements:
+              if text.count(old) != 1 or new in text:
+                  raise SystemExit(f"Increment 2 review source mismatch: {old}")
+              text = text.replace(old, new)
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          git diff --check
+          git add docs/plans/2026-07-24-008-increment-2-complete-fixture-readiness.md
+          git commit -m 'docs: preserve Increment 2 authority boundaries'
+
+          remote_head="$(git ls-remote origin refs/heads/agent/increments-2-11-readiness | cut -f1)"
+          test "${remote_head}" = "${expected_head}"
+          git push \
+            --force-with-lease=refs/heads/agent/increments-2-11-readiness:${expected_head} \
+            origin HEAD:agent/increments-2-11-readiness
