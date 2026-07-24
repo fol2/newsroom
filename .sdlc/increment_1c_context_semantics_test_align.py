@@ -3,10 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def main() -> None:
-    path = Path("newsroom/tests/test_integrated_c1_proof_integrity.py")
+def replace_exact(path: Path, old: str, new: str, *, identity: str) -> None:
     text = path.read_text(encoding="utf-8")
-    old = '''def test_context_digest_binds_authoritative_serving_time() -> None:
+    if text.count(old) != 1 or new in text:
+        raise SystemExit(f"{identity} source mismatch")
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def main() -> None:
+    replace_exact(
+        Path("newsroom/tests/test_integrated_c1_proof_integrity.py"),
+        '''def test_context_digest_binds_authoritative_serving_time() -> None:
     current = context()
     changed = replace(
         current,
@@ -18,8 +25,8 @@ def main() -> None:
         ),
     )
     assert changed.context_digest != current.context_digest
-'''
-    new = '''def test_context_digest_binds_authoritative_serving_time() -> None:
+''',
+        '''def test_context_digest_binds_authoritative_serving_time() -> None:
     current = context()
     serving_time = UtcTimestamp.parse(
         "2026-07-24T08:01:00.000000Z"
@@ -33,10 +40,23 @@ def main() -> None:
         recorded_at=serving_time,
     )
     assert changed.context_digest != current.context_digest
-'''
-    if text.count(old) != 1 or new in text:
-        raise SystemExit("proof-integrity serving-time test source mismatch")
-    path.write_text(text.replace(old, new), encoding="utf-8")
+''',
+        identity="proof-integrity serving-time test",
+    )
+    replace_exact(
+        Path("newsroom/integrated/models.py"),
+        '''        if any(
+            relation.recorded_at.value
+            > self.metadata.query_valid_time.value
+            for relation in self.relations
+        ):
+            raise IntegratedStateError(
+                "integrated graph relation postdates query-valid time"
+            )
+''',
+        "",
+        identity="business-valid relation semantics",
+    )
 
 
 if __name__ == "__main__":
