@@ -120,6 +120,7 @@ def test_increment_1c_operation_guide_preserves_final_authority_rules() -> None:
         "A recovered equivalent proposal must deduplicate to the retained Candidate",
         "must never be interpreted as “no prior match”",
         "a later graph rebuild cannot restore covered fixture relations",
+        "rejects a caller-supplied different family before any SQLite metadata lookup",
         "runtime-generated masked credentials",
         "runner-loopback Bolt exposure",
         "test_actual_service_integrated_foundation_replay_recovery_and_tombstone",
