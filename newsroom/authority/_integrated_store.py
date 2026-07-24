@@ -458,6 +458,11 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
         value = self._canonical_row_value(
             row, identity="story candidate version"
         )
+        manifest = value.get("manifest")
+        if not isinstance(manifest, dict):
+            raise AuthorityPersistenceError(
+                "story candidate version lacks a canonical fixture manifest"
+            )
         if (
             value.get("contract") != _CANDIDATE_VERSION_CONTRACT
             or value.get("candidate_id") != str(row["candidate_id"])
@@ -470,6 +475,8 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             or value.get("hypothesis_version_id")
             != str(row["hypothesis_version_id"])
             or value.get("route") != str(row["route"])
+            or value.get("hypothesis_trust_scope")
+            != str(row["hypothesis_trust_scope"])
             or value.get("retrieval_context_id")
             != str(row["retrieval_context_id"])
             or value.get("manifest_digest") != str(row["manifest_digest"])
@@ -477,6 +484,45 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             raise AuthorityPersistenceError(
                 "story candidate version columns differ from canonical evidence"
             )
+
+        context = conn.execute(
+            "SELECT fixture_id,fixture_event_id,admission_id,context_digest,"
+            "manifest_digest FROM integrated_retrieval_contexts "
+            "WHERE context_id=?",
+            (str(row["retrieval_context_id"]),),
+        ).fetchone()
+        if (
+            context is None
+            or str(context["fixture_id"]) != str(row["fixture_id"])
+            or str(context["manifest_digest"])
+            != str(row["manifest_digest"])
+            or value.get("fixture_event_id")
+            != str(context["fixture_event_id"])
+            or value.get("admission_id") != str(context["admission_id"])
+            or value.get("retrieval_context_digest")
+            != str(context["context_digest"])
+        ):
+            raise AuthorityPersistenceError(
+                "story candidate version differs from retained retrieval context"
+            )
+
+        manifest_digest = digest_canonical(manifest)
+        if (
+            manifest.get("contract")
+            != "newsroom-integrated-fixture-manifest-v1"
+            or manifest_digest != str(row["manifest_digest"])
+            or manifest.get("fixture_id") != str(row["fixture_id"])
+            or manifest.get("signal_id") != str(row["signal_id"])
+            or manifest.get("lead_id") != str(row["lead_id"])
+            or manifest.get("hypothesis_version_id")
+            != str(row["hypothesis_version_id"])
+            or manifest.get("hypothesis_trust_scope") != "PROPOSED"
+            or value.get("hypothesis_trust_scope") != "PROPOSED"
+        ):
+            raise AuthorityPersistenceError(
+                "story candidate version manifest identity is inconsistent"
+            )
+
         candidate = conn.execute(
             "SELECT semantic_collision_digest FROM story_candidates "
             "WHERE candidate_id=?",
@@ -486,10 +532,27 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             raise AuthorityPersistenceError(
                 "story candidate version lacks stable candidate identity"
             )
+        expected_collision = digest_canonical(
+            {
+                "contract": _COLLISION_CONTRACT,
+                "fixture_id": str(row["fixture_id"]),
+                "fixture_event_id": str(context["fixture_event_id"]),
+                "signal_id": str(row["signal_id"]),
+                "lead_id": str(row["lead_id"]),
+                "hypothesis_version_id": str(row["hypothesis_version_id"]),
+                "route": str(row["route"]),
+                "manifest_digest": str(row["manifest_digest"]),
+            }
+        )
+        collision = str(candidate["semantic_collision_digest"])
         validate_sha256_digest(
-            str(candidate["semantic_collision_digest"]),
+            collision,
             field="candidate_semantic_collision_digest",
         )
+        if collision != expected_collision:
+            raise AuthorityPersistenceError(
+                "story candidate semantic collision differs from immutable version"
+            )
 
     def _validate_decision_row(
         self,
@@ -526,11 +589,63 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             raise AuthorityPersistenceError(
                 "candidate admission decision columns differ from canonical evidence"
             )
+
+        candidate = conn.execute(
+            "SELECT semantic_collision_digest FROM story_candidates "
+            "WHERE candidate_id=?",
+            (str(row["candidate_id"]),),
+        ).fetchone()
+        version = conn.execute(
+            "SELECT candidate_id,fixture_id,route,retrieval_context_id,"
+            "manifest_digest FROM story_candidate_versions "
+            "WHERE candidate_version_id=?",
+            (str(row["candidate_version_id"]),),
+        ).fetchone()
+        context = conn.execute(
+            "SELECT context_digest FROM integrated_retrieval_contexts "
+            "WHERE context_id=?",
+            (str(row["retrieval_context_id"]),),
+        ).fetchone()
+        if (
+            candidate is None
+            or version is None
+            or context is None
+            or str(candidate["semantic_collision_digest"])
+            != str(row["semantic_collision_digest"])
+            or str(version["candidate_id"]) != str(row["candidate_id"])
+            or str(version["fixture_id"]) != str(row["fixture_id"])
+            or str(version["route"]) != str(row["route"])
+            or str(version["retrieval_context_id"])
+            != str(row["retrieval_context_id"])
+            or str(version["manifest_digest"])
+            != str(row["manifest_digest"])
+            or str(context["context_digest"])
+            != str(row["retrieval_context_digest"])
+        ):
+            raise AuthorityPersistenceError(
+                "candidate admission decision cross-record identity is inconsistent"
+            )
+
         event = conn.execute(
-            "SELECT event_type,aggregate_type,aggregate_id,aggregate_version "
-            "FROM ledger_events WHERE event_id=?",
+            "SELECT event_type,aggregate_type,aggregate_id,aggregate_version,"
+            "payload_digest,object_admission_id,trust_scope,security_scope,"
+            "retention_scope FROM ledger_events WHERE event_id=?",
             (str(row["authority_event_id"]),),
         ).fetchone()
+        event_payload_digest = digest_canonical(
+            {
+                "proposal_id": str(row["proposal_id"]),
+                "route": str(row["route"]),
+                "fixture_id": str(row["fixture_id"]),
+                "retrieval_context_digest": str(
+                    row["retrieval_context_digest"]
+                ),
+                "manifest_digest": str(row["manifest_digest"]),
+                "semantic_collision_digest": str(
+                    row["semantic_collision_digest"]
+                ),
+            }
+        )
         if (
             event is None
             or str(event["event_type"]) != "candidate.admission.decided"
@@ -539,6 +654,11 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             or str(event["aggregate_id"]) != str(row["proposal_id"])
             or int(event["aggregate_version"])
             != int(row["authority_aggregate_version"])
+            or str(event["payload_digest"]) != event_payload_digest
+            or event["object_admission_id"] is not None
+            or str(event["trust_scope"]) != "ADMITTED"
+            or str(event["security_scope"]) != "authority.integrated"
+            or str(event["retention_scope"]) != "authority.audit"
         ):
             raise AuthorityPersistenceError(
                 "candidate admission decision lacks exact authority event"
