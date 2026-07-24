@@ -77,6 +77,7 @@ INCREMENT_1C_TRACEABILITY = {
         "newsroom.projection.neo4j.qualification",
         "newsroom.tests.test_projection_b3_qualification",
         "newsroom.tests.test_integrated_c1_candidate_authority",
+        "newsroom.tests.test_integrated_c1_candidate_family_authorization",
         "newsroom.tests.test_integrated_c1_context_semantics",
         ".github.workflows.projection-b2-neo4j",
     ),
