@@ -1,14 +1,14 @@
 # Increment 2 complete-fixture implementation readiness
 
-**Status:** Proposed — owner review required  
-**Owner:** Product owner  
-**Prepared:** 2026-07-24  
-**Canonical language:** English  
+**Status:** Proposed — owner review required
+**Owner:** Product owner
+**Prepared:** 2026-07-24
+**Canonical language:** English
 **Review base:** `main@5fcd8bc862e552961b6b147572879e79c7266931`
-**Parent programme:** [`2026-07-16-005-native-graphrag-production-implementation.md`](2026-07-16-005-native-graphrag-production-implementation.md), Increment 2  
-**Completed dependency:** issue #79 / Increment 1  
-**Accepted specifications:** [`../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md`](../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md), [`../specs/editorial-automation/graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md), [`../specs/editorial-automation/discovery-record-semantics.md`](../specs/editorial-automation/discovery-record-semantics.md), [`../specs/editorial-automation/discovery-triage-and-event-grouping.md`](../specs/editorial-automation/discovery-triage-and-event-grouping.md), and [`../specs/editorial-automation/discovery-workflow.md`](../specs/editorial-automation/discovery-workflow.md)  
-**Architecture decisions:** ADR 0001, ADR 0002, ADR 0004 and ADR 0005  
+**Parent programme:** [`2026-07-16-005-native-graphrag-production-implementation.md`](2026-07-16-005-native-graphrag-production-implementation.md), Increment 2
+**Completed dependency:** issue #79 / Increment 1
+**Accepted specifications:** [`../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md`](../specs/editorial-automation/governed-graphrag-and-knowledge-projection.md), [`../specs/editorial-automation/graphrag-native-production-deployment.md`](../specs/editorial-automation/graphrag-native-production-deployment.md), [`../specs/editorial-automation/discovery-record-semantics.md`](../specs/editorial-automation/discovery-record-semantics.md), [`../specs/editorial-automation/discovery-triage-and-event-grouping.md`](../specs/editorial-automation/discovery-triage-and-event-grouping.md), and [`../specs/editorial-automation/discovery-workflow.md`](../specs/editorial-automation/discovery-workflow.md)
+**Architecture decisions:** ADR 0001, ADR 0002, ADR 0004 and ADR 0005
 **Implementation authority:** None. Merging or accepting this document does not start code, Neo4j, Graphiti, an embedding or model call, source access, spending, shadow, canary or production. A separate owner-authorised implementation issue and exact-head review remain required.
 
 ## 1. Decision requested

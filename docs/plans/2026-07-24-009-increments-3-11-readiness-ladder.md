@@ -1,13 +1,13 @@
 # Increments 3–11 blocked readiness ladder
 
-**Status:** Proposed — owner review required  
-**Owner:** Product owner  
-**Prepared:** 2026-07-24  
-**Canonical language:** English  
+**Status:** Proposed — owner review required
+**Owner:** Product owner
+**Prepared:** 2026-07-24
+**Canonical language:** English
 **Review base:** `main@5fcd8bc862e552961b6b147572879e79c7266931`
-**Parent programme:** [`2026-07-16-005-native-graphrag-production-implementation.md`](2026-07-16-005-native-graphrag-production-implementation.md)  
-**Immediate predecessor package:** [`2026-07-24-008-increment-2-complete-fixture-readiness.md`](2026-07-24-008-increment-2-complete-fixture-readiness.md)  
-**Canonical specification map:** [`../specs/editorial-automation/README.md`](../specs/editorial-automation/README.md)  
+**Parent programme:** [`2026-07-16-005-native-graphrag-production-implementation.md`](2026-07-16-005-native-graphrag-production-implementation.md)
+**Immediate predecessor package:** [`2026-07-24-008-increment-2-complete-fixture-readiness.md`](2026-07-24-008-increment-2-complete-fixture-readiness.md)
+**Canonical specification map:** [`../specs/editorial-automation/README.md`](../specs/editorial-automation/README.md)
 **Implementation authority:** None. This document prepares dependency, review, evidence and stop boundaries. It does not authorise code, source access, Graphiti, models, embeddings, search, spending, shadow, canary, publication, production activation or legacy retirement.
 
 ## 1. Purpose
@@ -64,8 +64,8 @@ The accepted programme permits carefully justified overlap after shared contract
 
 # Increment 3 — Source adapters and discovery lineage
 
-**Readiness state:** Prepared and dependency-blocked  
-**Dependency:** Increment 2 completed on `main`  
+**Readiness state:** Prepared and dependency-blocked
+**Dependency:** Increment 2 completed on `main`
 **Runtime authority:** Fixtures and approved replay only; named live sources remain disabled
 
 ## Objective
@@ -165,8 +165,8 @@ Do not begin Increment 4 until Increment 3 has a complete deterministic Source R
 
 # Increment 4 — Extraction, entity resolution and relation admission
 
-**Readiness state:** Prepared and dependency-blocked  
-**Dependency:** Increment 3 completed on `main`  
+**Readiness state:** Prepared and dependency-blocked
+**Dependency:** Increment 3 completed on `main`
 **Runtime authority:** Deterministic fake extraction first; real Graphiti/model execution requires a separate rights, cost and Evaluation Plan decision
 
 ## Objective
@@ -248,8 +248,8 @@ Do not begin production hybrid retrieval in Increment 5 until admitted entity an
 
 # Increment 5 — Production hybrid retrieval and named tools
 
-**Readiness state:** Prepared and dependency-blocked with evidence-dependent choices  
-**Dependency:** Increment 4 completed on `main`  
+**Readiness state:** Prepared and dependency-blocked with evidence-dependent choices
+**Dependency:** Increment 4 completed on `main`
 **Runtime authority:** No production embedding or protected-content index until exact rights, model, cost and Evaluation Plan decisions exist
 
 ## Objective
@@ -326,8 +326,8 @@ Do not begin full triage in Increment 6 until retrieval returns stable, bounded,
 
 # Increment 6 — Full triage, Hypotheses, Candidates and Handoff
 
-**Readiness state:** Prepared and dependency-blocked  
-**Dependency:** Increment 5 completed on `main`  
+**Readiness state:** Prepared and dependency-blocked
+**Dependency:** Increment 5 completed on `main`
 **Runtime authority:** Evaluation Evidence Intake sink only; no evidence acquisition or publication
 
 ## Objective
@@ -385,8 +385,8 @@ Do not begin Agenda/search/local-watch runtime work in Increment 7 until the nor
 
 # Increment 7 — Agenda, bounded search and Event-Scoped Local Watch
 
-**Readiness state:** Prepared and dependency-blocked with provider and locality decisions deferred  
-**Dependency:** Increment 6 completed on `main`  
+**Readiness state:** Prepared and dependency-blocked with provider and locality decisions deferred
+**Dependency:** Increment 6 completed on `main`
 **Runtime authority:** Providers and named localities remain disabled until exact rights, budget, evaluation and operations decisions
 
 ## Objective
@@ -450,8 +450,8 @@ Do not begin Increment 8 release qualification until Agenda, search, Gap and loc
 
 # Increment 8 — Evaluation, operations, recovery and security
 
-**Readiness state:** Prepared and dependency-blocked with numerical objectives deferred  
-**Dependency:** Increment 7 completed on `main`  
+**Readiness state:** Prepared and dependency-blocked with numerical objectives deferred
+**Dependency:** Increment 7 completed on `main`
 **Runtime authority:** Qualification infrastructure only; no live shadow until a separate owner-approved Increment 9 plan
 
 ## Objective
@@ -510,8 +510,8 @@ Do not run production-equivalent live shadow until Increment 8 completes and a s
 
 # Increment 9 — Production-equivalent integrated shadow
 
-**Readiness state:** Prepared with mandatory owner-decision gate  
-**Dependency:** Increment 8 completed on `main`  
+**Readiness state:** Prepared with mandatory owner-decision gate
+**Dependency:** Increment 8 completed on `main`
 **Runtime authority:** None until a separate immutable owner-approved Evaluation Plan and shadow execution plan exist
 
 ## Objective
@@ -577,8 +577,8 @@ Do not begin Increment 10 until the exact system receives the required shadow an
 
 # Increment 10 — Governed Evidence Intake canary
 
-**Readiness state:** Prepared with normative and owner-decision blockers  
-**Dependency:** Increment 9 completed with qualifying outcome  
+**Readiness state:** Prepared with normative and owner-decision blockers
+**Dependency:** Increment 9 completed with qualifying outcome
 **Normative blocker:** Downstream evidence, rights, sensitive-content and publication specifications in the editorial suite remain Draft unless separately accepted or explicitly authorised
 
 ## Objective
@@ -646,9 +646,9 @@ Do not begin production activation or legacy retirement until Increment 10 close
 
 # Increment 11 — Production activation and legacy retirement
 
-**Readiness state:** Activation checklist prepared; implementation and activation blocked  
-**Dependency:** Increment 10 completed with qualifying outcome  
-**Normative blocker:** Publication-facing specifications remain Draft unless separately accepted or explicitly authorised  
+**Readiness state:** Activation checklist prepared; implementation and activation blocked
+**Dependency:** Increment 10 completed with qualifying outcome
+**Normative blocker:** Publication-facing specifications remain Draft unless separately accepted or explicitly authorised
 **Owner gate:** One explicit activation decision binding every mandatory relational and GraphRAG version
 
 ## Objective
