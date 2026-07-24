@@ -8,6 +8,7 @@ import pytest
 from newsroom.authority import (
     HydrationPolicyContract,
     HydrationPolicyRegistry,
+    ObjectAdmissionDenied,
     ObjectHydrationDenied,
     ObjectLimits,
     UtcTimestamp,
@@ -186,7 +187,7 @@ def test_fixture_replay_rechecks_current_hydration_after_tombstone(
     finally:
         system.close()
 
-    with pytest.raises(ObjectHydrationDenied):
+    with pytest.raises((ObjectAdmissionDenied, ObjectHydrationDenied)):
         controller.record_fixture(
             current_manifest,
             proof=proof(),

@@ -286,6 +286,14 @@ class IntegratedFoundationProofController:
                 raise IntegratedStateError(
                     "fixture event differs from committed governed authority"
                 )
+            hydrated = system.objects.hydrate(
+                HydrationRequest(
+                    admission.admission.admission_id,
+                    self._environment.fixture_hydration_purpose,
+                ),
+                proof=proof,
+            )
+            self._require_hydrated_manifest(hydrated, manifest)
             return IntegratedFixtureAuthority(
                 fixture_id=manifest.fixture_id,
                 fixture_aggregate_id=aggregate_id,
@@ -347,7 +355,7 @@ class IntegratedFoundationProofController:
             system.projections.register_family(
                 ProjectionFamilyRegistrationRequest(
                     self._environment.family_id,
-                    keys.value("family-register"),
+                    f"integrated-family-register:{self._environment.family_id}",
                 ),
                 proof=proof,
             )

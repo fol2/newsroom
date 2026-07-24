@@ -476,6 +476,11 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
         access_value = self._canonical_row_value(
             access, identity="candidate hydration decision"
         )
+        access_cutoff = access_value.get("state_cutoff")
+        if not isinstance(access_cutoff, dict):
+            raise IntegratedStateError(
+                "hydration decision lacks an exact authority state cutoff"
+            )
         if (
             str(access["admission_id"]) != str(context.admission_id)
             or str(access["hydration_policy_contract_digest"])
@@ -485,6 +490,15 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             or access_value.get("admission_id") != str(context.admission_id)
             or access_value.get("policy_contract_digest")
             != context.hydration_policy_contract_digest
+            or access_cutoff.get("admission_id")
+            != str(context.admission_id)
+            or access_cutoff.get("blob_digest") != manifest.manifest_digest
+            or access_cutoff.get("admission_state") != "ACTIVE"
+            or access_cutoff.get("blob_state") != "ACTIVE"
+            or access_cutoff.get("blob_integrity_state") != "VERIFIED"
+            or access_cutoff.get("deletion_state") is not None
+            or access_cutoff.get("offset") != 0
+            or access_cutoff.get("length") != int(access["allowed_bytes"])
         ):
             raise IntegratedStateError(
                 "hydration decision differs from retrieval context"

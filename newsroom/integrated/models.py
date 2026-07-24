@@ -441,6 +441,7 @@ class IntegratedRetrievalContext:
             "dead_letter_count": self.metadata.dead_letter_count,
             "trust_scope": self.metadata.trust_scope.value,
             "query_valid_time": self.metadata.query_valid_time.to_text(),
+            "serving_time": self.metadata.serving_time.to_text(),
             "authoritative_system": self.metadata.authoritative_system,
             "graph_role": self.metadata.graph_role,
         }
