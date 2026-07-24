@@ -91,7 +91,8 @@ jobs:
 
           echo stage=apply-promotion-reconciliation
           patch=../.qualifier/.sdlc/b3-promotion-reconcile.patch
-          test "$(sha256sum "${patch}" | cut -d' ' -f1)" = 6664d52861b4acbebb81778c19721f45a77418a2f06185a4468ccf486dc52ec5
+          test "$(git -C ../.qualifier hash-object .sdlc/b3-promotion-reconcile.patch)" = f551088212b76de941f9390319676d9e62954ce1
+          test "$(sha256sum "${patch}" | cut -d' ' -f1)" = c810f749190cc22c6d9c6c46759e5cc801dcc92dc0f5e3ac9e839ed81334a708
           git apply --recount --check --verbose "${patch}"
           git apply --recount --verbose "${patch}"
 
