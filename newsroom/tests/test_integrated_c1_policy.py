@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from newsroom.authority import (
+    AggregateId,
     InlinePayload,
     ObjectAdmissionId,
     ObjectAdmissionPayload,
@@ -100,11 +101,7 @@ def test_integrated_registry_merge_is_idempotent_and_retains_payload_modes() -> 
     assert isinstance(
         SemanticCommand(
             command_type=fixture.command_type,
-            aggregate_id=source_command_registry()
-            .resolve("source.item.write")
-            .aggregate_type
-            and __import__("newsroom.authority", fromlist=["AggregateId"])
-            .AggregateId.new(),
+            aggregate_id=AggregateId.new(),
             expected_aggregate_version=0,
             payload=ObjectAdmissionPayload(
                 ObjectAdmissionId.parse(
@@ -118,8 +115,7 @@ def test_integrated_registry_merge_is_idempotent_and_retains_payload_modes() -> 
     assert isinstance(
         SemanticCommand(
             command_type=candidate.command_type,
-            aggregate_id=__import__("newsroom.authority", fromlist=["AggregateId"])
-            .AggregateId.new(),
+            aggregate_id=AggregateId.new(),
             expected_aggregate_version=0,
             payload=InlinePayload(
                 {
