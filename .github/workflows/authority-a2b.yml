@@ -139,6 +139,7 @@ jobs:
           expected_head="946eee62849103d707f4a271f23836a6db8521d3"
           test "$(git rev-parse HEAD)" = "${expected_head}"
           python ../.qualifier/.sdlc/increment_1c_context_semantics_qualify.py
+          python ../.qualifier/.sdlc/increment_1c_context_semantics_test_align.py
 
           actual_files="$({
             git diff --name-only
@@ -152,6 +153,7 @@ jobs:
             newsroom/tests/test_integrated_c1_context_history.py \
             newsroom/tests/test_integrated_c1_context_semantics.py \
             newsroom/tests/test_integrated_c1_contracts.py \
+            newsroom/tests/test_integrated_c1_proof_integrity.py \
             newsroom/tests/test_integrated_c1_temporal_integrity.py | sort)"
           test "${actual_files}" = "${expected_files}"
           git diff --check
@@ -264,6 +266,7 @@ jobs:
             newsroom/tests/test_integrated_c1_context_history.py \
             newsroom/tests/test_integrated_c1_context_semantics.py \
             newsroom/tests/test_integrated_c1_contracts.py \
+            newsroom/tests/test_integrated_c1_proof_integrity.py \
             newsroom/tests/test_integrated_c1_temporal_integrity.py
           git commit -m 'fix(integrated): bind complete context semantics'
 
