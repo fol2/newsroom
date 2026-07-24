@@ -110,7 +110,18 @@ def test_retained_context_accepts_post_promotion_active_revalidation(
         relations=response.relations,
         exact_index=exact_index,
         query_digest=digest_canonical(
-            {"canonical_ids": list(canonical_ids)}
+            {
+                "contract": "newsroom-integrated-query-v1",
+                "family_id": response.metadata.family_id,
+                "generation_id": str(response.metadata.generation_id),
+                "canonical_ids": list(canonical_ids),
+                "query_valid_time": (
+                    response.metadata.query_valid_time.to_text()
+                ),
+                "authority_watermark": (
+                    response.metadata.contiguous_ledger_seq
+                ),
+            }
         ),
         recorded_at=response.metadata.serving_time,
     )

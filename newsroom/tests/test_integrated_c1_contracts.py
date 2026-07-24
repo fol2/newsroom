@@ -78,7 +78,19 @@ PAYLOAD_DIGEST = digest_canonical({"fixture": str(FIXTURE_ID)})
 ONTOLOGY_DIGEST = digest_canonical({"ontology": "v1"})
 MAPPING_DIGEST = digest_canonical({"mapping": "v1"})
 POLICY_DIGEST = digest_canonical({"hydration": "v1"})
-QUERY_DIGEST = digest_canonical({"canonical_ids": ["aggregate", "event"]})
+QUERY_DIGEST = digest_canonical(
+    {
+        "contract": "newsroom-integrated-query-v1",
+        "family_id": "native-structural",
+        "generation_id": str(GENERATION_ID),
+        "canonical_ids": [
+            "npid:v1:authority-aggregate:fixture",
+            "npid:v1:ledger-event:fixture",
+        ],
+        "query_valid_time": NOW.to_text(),
+        "authority_watermark": 1,
+    }
+)
 
 
 def manifest() -> IntegratedFixtureManifest:
@@ -219,7 +231,8 @@ def context() -> IntegratedRetrievalContext:
         retrieval_version=current_manifest.retrieval_version,
         query_digest=QUERY_DIGEST,
         known_omissions=(
-            "No vector, full-text, model or live-source retrieval was executed.",
+            "No vector, full-text, Graphiti, model, embedding or "
+            "live-source retrieval was executed.",
         ),
         recorded_at=NOW,
     )

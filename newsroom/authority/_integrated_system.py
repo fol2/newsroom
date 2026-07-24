@@ -175,21 +175,26 @@ class _CandidateAdmissionBoundary:
     ) -> IntegratedRetrievalContext:
         if not isinstance(context_id, IntegratedRetrievalContextId):
             raise TypeError("retrieval context identity must be typed")
+        family_ids = tuple(
+            sorted(self._projection_read_policy.allowed_family_ids)
+        )
+        if len(family_ids) != 1:
+            raise IntegratedStateError(
+                "retained context reads require one exact family policy"
+            )
+        family_id = family_ids[0]
         authenticated = self._projection_boundary._authenticate_read(proof)
-        context = self._store.retrieval_context(context_id)
         self._projection_boundary._authorize_read(
-            family_id=context.metadata.family_id,
+            family_id=family_id,
             operation="integrated-retained-context-read",
-            semantic_value={
-                "context_id": str(context.context_id),
-                "context_digest": context.context_digest,
-                "generation_id": str(context.metadata.generation_id),
-                "authority_watermark": (
-                    context.metadata.contiguous_ledger_seq
-                ),
-            },
+            semantic_value={"context_id": str(context_id)},
             authenticated=authenticated,
         )
+        context = self._store.retrieval_context(context_id)
+        if context.metadata.family_id != family_id:
+            raise IntegratedStateError(
+                "retained context belongs to another projection family"
+            )
         return context
 
     def admit(
@@ -334,6 +339,25 @@ class _CandidateAdmissionBoundary:
             context.metadata.generation_id,
             context.metadata.contiguous_ledger_seq,
         )
+        fixture_batches = tuple(
+            batch
+            for batch in batches
+            if batch.source_event_id == str(context.fixture_event_id)
+        )
+        if len(fixture_batches) != 1:
+            raise IntegratedStateError(
+                "retrieval context lacks one exact fixture structural batch"
+            )
+        expected_canonical_ids = tuple(
+            sorted(node.canonical_id for node in fixture_batches[0].nodes)
+        )
+        retained_canonical_ids = tuple(
+            node.canonical_id for node in context.nodes
+        )
+        if retained_canonical_ids != expected_canonical_ids:
+            raise IntegratedStateError(
+                "retrieval context must cover the complete fixture structural mapping"
+            )
         state_digest = self._adapter.reconcile_generation(
             generation_id=str(context.metadata.generation_id),
             expected_batches=batches,

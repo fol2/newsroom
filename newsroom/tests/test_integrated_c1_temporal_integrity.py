@@ -20,14 +20,16 @@ def test_candidate_admission_rejects_context_from_future_serving_time(
     tmp_path: Path,
 ) -> None:
     database, state, graph = _seed(tmp_path)
+    future_time = type(FIXED_NOW)(
+        FIXED_NOW.value + timedelta(minutes=1)
+    )
     future = replace(
         graph.context,
         metadata=replace(
             graph.context.metadata,
-            serving_time=type(FIXED_NOW)(
-                FIXED_NOW.value + timedelta(minutes=1)
-            ),
+            serving_time=future_time,
         ),
+        recorded_at=future_time,
     )
     system = _open_candidate_system(database, state, graph)
     try:

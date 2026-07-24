@@ -448,10 +448,22 @@ def build_active_graph_context(
         manifest_digest=state.manifest.manifest_digest,
         retrieval_version=state.manifest.retrieval_version,
         query_digest=digest_canonical(
-            {"canonical_ids": list(canonical_ids)}
+            {
+                "contract": "newsroom-integrated-query-v1",
+                "family_id": response.metadata.family_id,
+                "generation_id": str(response.metadata.generation_id),
+                "canonical_ids": list(canonical_ids),
+                "query_valid_time": (
+                    response.metadata.query_valid_time.to_text()
+                ),
+                "authority_watermark": (
+                    response.metadata.contiguous_ledger_seq
+                ),
+            }
         ),
         known_omissions=(
-            "No vector, full-text, model or live-source retrieval was executed.",
+            "No vector, full-text, Graphiti, model, embedding or "
+            "live-source retrieval was executed.",
         ),
         recorded_at=hydrated.decision.decided_at,
     )

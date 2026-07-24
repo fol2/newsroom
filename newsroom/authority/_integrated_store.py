@@ -631,7 +631,7 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
 
         context = conn.execute(
             "SELECT fixture_id,fixture_event_id,admission_id,context_digest,"
-            "manifest_digest FROM integrated_retrieval_contexts "
+            "manifest_digest,retrieval_version FROM integrated_retrieval_contexts "
             "WHERE context_id=?",
             (str(row["retrieval_context_id"]),),
         ).fetchone()
@@ -661,6 +661,8 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             or manifest.get("hypothesis_version_id")
             != str(row["hypothesis_version_id"])
             or manifest.get("hypothesis_trust_scope") != "PROPOSED"
+            or manifest.get("retrieval_version")
+            != str(context["retrieval_version"])
             or value.get("hypothesis_trust_scope") != "PROPOSED"
         ):
             raise AuthorityPersistenceError(
@@ -852,6 +854,10 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
         if manifest.manifest_digest != context.manifest_digest:
             raise IntegratedStateError(
                 "retrieval context belongs to another fixture manifest"
+            )
+        if context.retrieval_version != manifest.retrieval_version:
+            raise IntegratedStateError(
+                "retrieval context version differs from fixture manifest"
             )
         if context.hydrated_blob_digest != manifest.manifest_digest:
             raise IntegratedStateError(

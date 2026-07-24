@@ -357,6 +357,13 @@ class IntegratedRetrievalContext:
             raise IntegratedStateError(
                 "integrated context must return to non-graph authority"
             )
+        if (
+            self.metadata.query_valid_time.value
+            > self.metadata.serving_time.value
+        ):
+            raise IntegratedStateError(
+                "integrated query-valid time exceeds serving time"
+            )
         if not isinstance(self.nodes, tuple) or not self.nodes:
             raise IntegratedContractError("integrated context requires graph nodes")
         node_ids = tuple(item.canonical_id for item in self.nodes)
@@ -440,6 +447,24 @@ class IntegratedRetrievalContext:
             raise IntegratedStateError(
                 "integrated hydrated blob must equal the canonical manifest"
             )
+        expected_query_digest = digest_canonical(
+            {
+                "contract": "newsroom-integrated-query-v1",
+                "family_id": self.metadata.family_id,
+                "generation_id": str(self.metadata.generation_id),
+                "canonical_ids": list(node_ids),
+                "query_valid_time": (
+                    self.metadata.query_valid_time.to_text()
+                ),
+                "authority_watermark": (
+                    self.metadata.contiguous_ledger_seq
+                ),
+            }
+        )
+        if self.query_digest != expected_query_digest:
+            raise IntegratedStateError(
+                "integrated query digest differs from exact graph request"
+            )
         if not isinstance(
             self.hydration_access_decision_id, ObjectAccessDecisionId
         ):
@@ -456,8 +481,20 @@ class IntegratedRetrievalContext:
                 allow_empty=True,
             ),
         )
+        expected_omissions = (
+            "No vector, full-text, Graphiti, model, embedding or "
+            "live-source retrieval was executed.",
+        )
+        if self.known_omissions != expected_omissions:
+            raise IntegratedStateError(
+                "integrated context must retain exact negative execution evidence"
+            )
         if not isinstance(self.recorded_at, UtcTimestamp):
             raise IntegratedContractError("retrieval context time must be typed")
+        if self.metadata.serving_time.value > self.recorded_at.value:
+            raise IntegratedStateError(
+                "integrated context cannot be recorded before serving time"
+            )
 
     def _metadata_value(self) -> dict[str, object]:
         return {

@@ -95,14 +95,16 @@ def _environment(
 
 def test_context_digest_binds_authoritative_serving_time() -> None:
     current = context()
+    serving_time = UtcTimestamp.parse(
+        "2026-07-24T08:01:00.000000Z"
+    )
     changed = replace(
         current,
         metadata=replace(
             current.metadata,
-            serving_time=UtcTimestamp.parse(
-                "2026-07-24T08:01:00.000000Z"
-            ),
+            serving_time=serving_time,
         ),
+        recorded_at=serving_time,
     )
     assert changed.context_digest != current.context_digest
 
