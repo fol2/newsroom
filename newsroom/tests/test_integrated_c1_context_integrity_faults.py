@@ -151,6 +151,6 @@ def test_reopen_rejects_context_hydration_policy_and_blob_rebinding(
 
     with pytest.raises(
         AuthorityPersistenceError,
-        match="hydration|blob|fixture authority",
+        match="rehydrated|hydration|blob|fixture authority",
     ):
         _open_candidate_system(database, state, graph)
