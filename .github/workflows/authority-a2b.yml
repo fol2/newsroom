@@ -139,10 +139,12 @@ jobs:
           expected_head="42a01379b89be81fdf769b72b0f588f8fc66bdff"
           test "$(git rev-parse HEAD)" = "${expected_head}"
           python ../.qualifier/.sdlc/increment_1c_sdlc_qualify.py
+          python ../.qualifier/.sdlc/increment_1c_sdlc_test_fix.py
 
           actual_files="$(git diff --name-only | sort)"
           expected_files="$(printf '%s\n' \
             .sdlc/gates.toml \
+            newsroom/tests/test_integrated_c1_sdlc_contract.py \
             newsroom/tests/test_sdlc_classifier.py \
             newsroom/tests/test_sdlc_workflow_lane.py \
             scripts/sdlc/classify_change.py \
@@ -167,6 +169,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add \
             .sdlc/gates.toml \
+            newsroom/tests/test_integrated_c1_sdlc_contract.py \
             newsroom/tests/test_sdlc_classifier.py \
             newsroom/tests/test_sdlc_workflow_lane.py \
             scripts/sdlc/classify_change.py \
