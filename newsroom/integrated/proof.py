@@ -92,6 +92,7 @@ class IntegratedProofEnvironment:
     neo4j_config: Neo4jProjectorConfig = field(repr=False)
     family_id: str
     fixture_admission_type: str
+    fixture_hydration_purpose: str
     clock: Callable[[], UtcTimestamp] = UtcTimestamp.now
 
     def __post_init__(self) -> None:
@@ -127,11 +128,22 @@ class IntegratedProofEnvironment:
                 "integrated proof family does not resolve exactly"
             )
         try:
-            self.admission_registry.resolve(self.fixture_admission_type)
+            definition = self.admission_registry.resolve(
+                self.fixture_admission_type
+            )
+            hydration = self.hydration_policies.resolve_for_purpose(
+                self.fixture_hydration_purpose
+            )
         except Exception as exc:
             raise IntegratedStateError(
-                "integrated fixture admission type is not registered"
+                "integrated fixture admission or hydration policy is not registered"
             ) from exc
+        if hydration.contract_digest not in (
+            definition.hydration_policy_contract_digests
+        ):
+            raise IntegratedStateError(
+                "integrated fixture hydration policy is outside the admission contract"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,7 +544,7 @@ class IntegratedFoundationProofController:
             hydrated = system.objects.hydrate(
                 HydrationRequest(
                     fixture.admission_id,
-                    manifest.hydration_purpose,
+                    self._environment.fixture_hydration_purpose,
                 ),
                 proof=proof,
             )
