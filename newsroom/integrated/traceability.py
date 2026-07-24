@@ -69,9 +69,13 @@ INCREMENT_1C_TRACEABILITY = {
     ),
     "C1-12-OPERATING-EVIDENCE-AND-FIXED-BOUNDARIES/GRPROD-031-GRPROD-032": (
         ".github.workflows.projection-b2-neo4j",
-        "newsroom.tests.test_integrated_c1_traceability",
         "docs.operations.increment-1c-integrated-foundation",
         "newsroom.integrated.traceability",
+        "newsroom.tests.test_integrated_c1_sdlc_contract",
+        "newsroom.tests.test_integrated_c1_traceability",
+        "newsroom.tests.test_integrated_c1_workflow_contract",
+        "scripts.sdlc.classify_change",
+        "scripts.sdlc.workflow_lane",
     ),
 }
 
