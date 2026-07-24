@@ -14,6 +14,7 @@ from newsroom.projection import (
     ProjectionStateError,
 )
 from newsroom.projection.neo4j import (
+    Neo4jIdentityConflict,
     StructuralActiveReadRequest,
     StructuralGenerationValidationRequest,
     StructuralRebuildRequest,
@@ -170,6 +171,73 @@ def test_active_read_fails_closed_until_authority_promotion(tmp_path: Path) -> N
         assert response.metadata.generation_state is ProjectionGenerationState.ACTIVE
         assert response.nodes
         assert response.relations
+    finally:
+        system.close()
+
+
+def test_promotion_reconciles_current_graph_and_exact_replay(
+    tmp_path: Path,
+) -> None:
+    adapter = MemoryNeo4jAdapter()
+    system = open_b2_system(tmp_path / "authority.sqlite3", adapter)
+    try:
+        _register(system)
+        system.commands.execute(
+            source_command(key="b3-promotion-reconcile-source"),
+            proof=proof(),
+        )
+        generation = _create(system, suffix="promotion-reconcile")
+        rebuilt = _rebuild(
+            system,
+            generation,
+            key="b3-promotion-reconcile-rebuild",
+        )
+        validation = _validate(
+            system,
+            generation.generation_id,
+            rebuilt.checkpoint_ledger_seq,
+            key="b3-promotion-reconcile-validate",
+        )
+        validating = _generation(system, generation.generation_id)
+        request = ProjectionGenerationPromotionRequest(
+            generation_id=generation.generation_id,
+            expected_authority_version=(
+                validating.authority_aggregate_version
+            ),
+            checkpoint_ledger_seq=validation.checkpoint_ledger_seq,
+            validation_digest=validation.validation_digest,
+            reason_code="B3_PROMOTION_RECONCILE",
+            idempotency_key="b3-promotion-reconcile-promote",
+        )
+
+        adapter.reconciliation_mismatch = True
+        with pytest.raises(Neo4jIdentityConflict, match="differs"):
+            system.projections.promote_generation(request, proof=proof())
+        assert (
+            _generation(system, generation.generation_id).state
+            is ProjectionGenerationState.VALIDATING
+        )
+
+        adapter.reconciliation_mismatch = False
+        promoted = system.projections.promote_generation(
+            request,
+            proof=proof(),
+        )
+        assert promoted.generation.state is ProjectionGenerationState.ACTIVE
+        retained_events = system.events.after(0, limit=1000, proof=proof())
+
+        adapter.reconciliation_mismatch = True
+        with pytest.raises(Neo4jIdentityConflict, match="differs"):
+            system.projections.promote_generation(request, proof=proof())
+        assert system.events.after(
+            0,
+            limit=1000,
+            proof=proof(),
+        ) == retained_events
+        assert (
+            _generation(system, generation.generation_id).state
+            is ProjectionGenerationState.ACTIVE
+        )
     finally:
         system.close()
 

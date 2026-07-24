@@ -460,7 +460,78 @@ class _Neo4jProjectionBoundary:
         proof: AuthenticationProof,
     ) -> ProjectionGenerationPromotionView:
         with self._operation_lock:
-            return self._projection_boundary.promote_generation(request, proof)
+            return self._promote_generation_locked(request, proof)
+
+    def _promote_generation_locked(
+        self,
+        request: ProjectionGenerationPromotionRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationPromotionView:
+        if not isinstance(request, ProjectionGenerationPromotionRequest):
+            raise TypeError("projection promotion requires a typed request")
+        target_grant, prior_grant = (
+            self._projection_boundary._authorize_promotion(request, proof)
+        )
+        metadata = self._store.projection_generation_metadata(
+            request.generation_id
+        )
+        replaying = target_grant.replay_of_command_id is not None
+        if metadata.generation.state is ProjectionGenerationState.ACTIVE:
+            if not replaying:
+                raise ProjectionStateError(
+                    "only a validating generation can be promoted"
+                )
+        elif metadata.generation.state is not ProjectionGenerationState.VALIDATING:
+            raise ProjectionStateError(
+                "only a validating generation can be promoted"
+            )
+        if metadata.contiguous_ledger_seq != request.checkpoint_ledger_seq:
+            raise ProjectionStateError(
+                "promotion must bind the exact authority checkpoint"
+            )
+        if metadata.open_gap_count or metadata.dead_letter_count:
+            raise ProjectionStateError(
+                "promotion requires zero gaps and dead letters"
+            )
+        validation = self._store.projection_generation_validation(
+            request.generation_id
+        )
+        if validation.validation_digest != request.validation_digest:
+            raise ProjectionStateError(
+                "promotion requires the exact retained validation evidence"
+            )
+        if validation.checkpoint_ledger_seq != request.checkpoint_ledger_seq:
+            raise ProjectionStateError(
+                "promotion validation checkpoint is stale"
+            )
+
+        compatibility_digest = neo4j_compatibility_digest(
+            self._adapter.verify_compatibility()
+        )
+        if (
+            compatibility_digest
+            != validation.service_compatibility_digest
+        ):
+            raise Neo4jIdentityConflict(
+                "Neo4j compatibility differs from retained validation"
+            )
+        batches = self._expected_validation_batches(
+            request.generation_id,
+            request.checkpoint_ledger_seq,
+        )
+        state_digest = self._adapter.reconcile_generation(
+            generation_id=str(request.generation_id),
+            expected_batches=batches,
+        )
+        if state_digest != validation.projection_state_digest:
+            raise Neo4jIdentityConflict(
+                "Neo4j graph state differs from retained validation"
+            )
+        return self._projection_boundary._commit_promotion(
+            target_grant,
+            prior_grant,
+            request,
+        )
 
     def reject_direct_validation(
         self,

@@ -328,11 +328,11 @@ class _ProjectionBoundary:
             reason_code=request.reason_code,
         )
 
-    def promote_generation(
+    def _authorize_promotion(
         self,
         request: ProjectionGenerationPromotionRequest,
         proof: AuthenticationProof,
-    ) -> ProjectionGenerationPromotionView:
+    ) -> tuple[Any, Any | None]:
         target_grant = self._grant(
             command_type="projection.generation.promote",
             aggregate_id=request.generation_id.as_aggregate_id(),
@@ -373,6 +373,14 @@ class _ProjectionBoundary:
                 idempotency_key=prior_key,
                 proof=proof,
             )
+        return target_grant, prior_grant
+
+    def _commit_promotion(
+        self,
+        target_grant: Any,
+        prior_grant: Any | None,
+        request: ProjectionGenerationPromotionRequest,
+    ) -> ProjectionGenerationPromotionView:
         return self._store.promote_generation(
             target_grant,
             prior_grant,
@@ -382,6 +390,17 @@ class _ProjectionBoundary:
             prior_generation_id=request.prior_generation_id,
             reason_code=request.reason_code,
         )
+
+    def promote_generation(
+        self,
+        request: ProjectionGenerationPromotionRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationPromotionView:
+        target_grant, prior_grant = self._authorize_promotion(
+            request,
+            proof,
+        )
+        return self._commit_promotion(target_grant, prior_grant, request)
 
     def _begin_rebuild(
         self,
