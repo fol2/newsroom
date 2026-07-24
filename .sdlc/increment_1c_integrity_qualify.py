@@ -93,6 +93,21 @@ def main() -> None:
                 "hydration decision differs from retrieval context"
             )''',
     )
+    replace_exact(
+        "newsroom/tests/test_integrated_c1_proof_integrity.py",
+        '''    HydrationPolicyRegistry,
+    ObjectHydrationDenied,
+    ObjectLimits,''',
+        '''    HydrationPolicyRegistry,
+    ObjectAdmissionDenied,
+    ObjectHydrationDenied,
+    ObjectLimits,''',
+    )
+    replace_exact(
+        "newsroom/tests/test_integrated_c1_proof_integrity.py",
+        "    with pytest.raises(ObjectHydrationDenied):",
+        "    with pytest.raises((ObjectAdmissionDenied, ObjectHydrationDenied)):",
+    )
 
 
 if __name__ == "__main__":
