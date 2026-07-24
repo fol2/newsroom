@@ -112,6 +112,12 @@ class _StructuralGraphAdapter(Protocol):
         ...
 
 
+def _open_structural_graph_adapter(
+    config: Neo4jProjectorConfig,
+) -> _StructuralGraphAdapter:
+    return _open_neo4j_adapter(config)
+
+
 class Neo4jStructuralProjector:
     """Public B2 facade: exact delivery plus bounded non-authoritative read."""
 

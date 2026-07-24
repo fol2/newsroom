@@ -8,7 +8,10 @@ from typing import Any, Protocol
 from ._capability import _CapabilityIssuer
 from ._event_system import _ReadBoundary
 from ._integrated_store import _IntegratedCandidateStore
-from ._neo4j_projection_system import _build_structural_batch
+from ._neo4j_projection_system import (
+    _build_structural_batch,
+    _open_structural_graph_adapter,
+)
 from ._projection_system import _ProjectionBoundary
 from .auth import AuthenticationProof
 from .models import InlinePayload, SemanticCommand
@@ -32,7 +35,6 @@ from newsroom.projection.models import (
     ProjectionReadPolicy,
     ProjectionStateError,
 )
-from newsroom.projection.neo4j._adapter import _open_neo4j_adapter
 from newsroom.projection.neo4j.models import (
     Neo4jCompatibility,
     Neo4jIdentityConflict,
@@ -483,7 +485,7 @@ def open_candidate_admission_authority_system(
 ) -> IntegratedCandidateAuthoritySystem:
     """Open Candidate authority with mandatory current native-Neo4j evidence."""
 
-    adapter = _open_neo4j_adapter(neo4j_config)
+    adapter = _open_structural_graph_adapter(neo4j_config)
     return _open_candidate_with_adapter(
         path=path,
         registry=registry,

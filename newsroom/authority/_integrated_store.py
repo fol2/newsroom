@@ -31,7 +31,7 @@ from newsroom.integrated.models import (
 )
 from newsroom.projection.models import ProjectionGenerationState
 
-from .policy import CANDIDATE_ADMISSION_COMMAND
+from newsroom.integrated.policy import CANDIDATE_ADMISSION_COMMAND
 
 
 _CONTEXT_CONTRACT = "newsroom-integrated-retrieval-context-v1"
@@ -48,7 +48,7 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
         self._validate_integrated_integrity()
 
     @staticmethod
-    def _decode_canonical(data: bytes, *, identity: str) -> dict[str, Any]:
+    def _decode_integrated_canonical(data: bytes, *, identity: str) -> dict[str, Any]:
         try:
             value = json.loads(data.decode("utf-8", errors="strict"))
         except (UnicodeError, json.JSONDecodeError) as exc:
@@ -74,7 +74,7 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             raise AuthorityPersistenceError(
                 f"{identity} canonical digest is inconsistent"
             )
-        return cls._decode_canonical(canonical, identity=identity)
+        return cls._decode_integrated_canonical(canonical, identity=identity)
 
     @staticmethod
     def semantic_collision_digest(
