@@ -37,7 +37,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          expected_head="5e1077409494f7299adb5683d93eb4050fbeabc6"
+          expected_head="${GITHUB_SHA}"
           test "$(git rev-parse HEAD)" = "${expected_head}"
 
           python - <<'PY'
