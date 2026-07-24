@@ -53,6 +53,7 @@ def test_increment_1c_traceability_covers_every_issue_82_deliverable() -> None:
         "newsroom.integrated.proof",
         "newsroom.projection.neo4j.qualification",
         "newsroom.tests.test_integrated_c1_candidate_authority",
+        "newsroom.tests.test_integrated_c1_candidate_family_authorization",
         "newsroom.tests.test_integrated_c1_context_history",
         "newsroom.tests.test_integrated_c1_context_integrity_faults",
         "newsroom.tests.test_integrated_c1_context_semantics",
