@@ -249,7 +249,6 @@ class _CandidateAdmissionBoundary:
             metadata.contiguous_ledger_seq,
             metadata.open_gap_count,
             metadata.dead_letter_count,
-            metadata.serving_time,
         )
         retained_metadata = (
             context.metadata.family_id,
@@ -262,9 +261,12 @@ class _CandidateAdmissionBoundary:
             context.metadata.contiguous_ledger_seq,
             context.metadata.open_gap_count,
             context.metadata.dead_letter_count,
-            context.metadata.serving_time,
         )
-        if expected_metadata != retained_metadata:
+        if (
+            expected_metadata != retained_metadata
+            or metadata.serving_time.value
+            < context.metadata.serving_time.value
+        ):
             raise IntegratedStateError(
                 "retrieval context is stale against active projection authority"
             )
