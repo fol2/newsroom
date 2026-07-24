@@ -392,6 +392,35 @@ class IntegratedRetrievalContext:
             raise IntegratedContractError(
                 "integrated exact index must cover the returned graph nodes exactly"
             )
+        graph_nodes = {item.canonical_id: item for item in self.nodes}
+        if any(
+            (
+                entry.node_type,
+                entry.first_ledger_seq,
+                entry.first_source_event_id,
+                entry.first_source_event_digest,
+            )
+            != (
+                graph_nodes[entry.canonical_id].node_type,
+                graph_nodes[entry.canonical_id].first_ledger_seq,
+                graph_nodes[entry.canonical_id].first_source_event_id,
+                graph_nodes[entry.canonical_id].first_source_event_digest,
+            )
+            for entry in self.exact_index
+        ):
+            raise IntegratedContractError(
+                "integrated exact index must match each returned graph node"
+            )
+        if any(
+            node.first_ledger_seq > self.metadata.contiguous_ledger_seq
+            for node in self.nodes
+        ) or any(
+            relation.ledger_seq > self.metadata.contiguous_ledger_seq
+            for relation in self.relations
+        ):
+            raise IntegratedStateError(
+                "integrated graph evidence exceeds the authority watermark"
+            )
         if not any(
             item.source_event_id == str(self.fixture_event_id)
             and item.object_admission_id == str(self.admission_id)
@@ -407,6 +436,10 @@ class IntegratedRetrievalContext:
             "query_digest",
         ):
             validate_sha256_digest(getattr(self, field_name), field=field_name)
+        if self.hydrated_blob_digest != self.manifest_digest:
+            raise IntegratedStateError(
+                "integrated hydrated blob must equal the canonical manifest"
+            )
         if not isinstance(
             self.hydration_access_decision_id, ObjectAccessDecisionId
         ):
