@@ -1,0 +1,117 @@
+name: Increment 1C Proof Qualifier
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/increment-1c-proof-qualify.yml
+
+permissions:
+  contents: write
+
+jobs:
+  qualify-and-publish:
+    if: >-
+      github.head_ref == 'agent/increment-1c-proof-qualify' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.repository == 'fol2/newsroom'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout qualification branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1c-proof-qualify
+          path: .qualifier
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout exact Increment 1C target
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1c-integrated-foundation
+          path: .target
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.0"
+          enable-cache: true
+          cache-dependency-glob: .target/uv.lock
+
+      - name: Bind, qualify and publish hydration policy
+        shell: bash
+        working-directory: .target
+        run: |
+          set -euxo pipefail
+          diagnostic="${RUNNER_TEMP}/increment-1c-proof-qualifier.log"
+          exec > >(tee "${diagnostic}") 2>&1
+          expected_head="fc4b5a1ba4d7ba5e1e03dca33a7e422ff1477a3b"
+          test "$(git rev-parse HEAD)" = "${expected_head}"
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("newsroom/integrated/proof.py")
+          text = path.read_text(encoding="utf-8")
+          replacements = (
+              (
+                  "    family_id: str\n    fixture_admission_type: str\n    clock: Callable[[], UtcTimestamp] = UtcTimestamp.now",
+                  "    family_id: str\n    fixture_admission_type: str\n    fixture_hydration_purpose: str\n    clock: Callable[[], UtcTimestamp] = UtcTimestamp.now",
+              ),
+              (
+                  '''        try:\n            self.admission_registry.resolve(self.fixture_admission_type)\n        except Exception as exc:\n            raise IntegratedStateError(\n                "integrated fixture admission type is not registered"\n            ) from exc''',
+                  '''        try:\n            definition = self.admission_registry.resolve(\n                self.fixture_admission_type\n            )\n            hydration = self.hydration_policies.resolve_for_purpose(\n                self.fixture_hydration_purpose\n            )\n        except Exception as exc:\n            raise IntegratedStateError(\n                "integrated fixture admission or hydration policy is not registered"\n            ) from exc\n        if hydration.contract_digest not in (\n            definition.hydration_policy_contract_digests\n        ):\n            raise IntegratedStateError(\n                "integrated fixture hydration policy is outside the admission contract"\n            )''',
+              ),
+              (
+                  "                    manifest.hydration_purpose,",
+                  "                    self._environment.fixture_hydration_purpose,",
+              ),
+          )
+          for old, new in replacements:
+              if text.count(old) != 1 or new in text:
+                  raise SystemExit(f"integrated proof source mismatch: {old}")
+              text = text.replace(old, new)
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          test "$(git diff --name-only)" = "newsroom/integrated/proof.py"
+          git diff --check
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_integrated_c1_contracts.py \
+            newsroom/tests/test_integrated_c1_policy.py \
+            newsroom/tests/test_integrated_c1_candidate_authority.py
+          uv run --no-sync python -m pytest -q newsroom/tests
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add newsroom/integrated/proof.py
+          git commit -m 'fix(integrated): bind fixture hydration policy'
+
+          remote_head="$(git ls-remote origin refs/heads/agent/increment-1c-integrated-foundation | cut -f1)"
+          test "${remote_head}" = "${expected_head}"
+          git push \
+            --force-with-lease=refs/heads/agent/increment-1c-integrated-foundation:${expected_head} \
+            origin HEAD:agent/increment-1c-integrated-foundation
+
+      - name: Upload qualifier diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-1c-proof-qualifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/increment-1c-proof-qualifier.log
+          if-no-files-found: warn
+          retention-days: 1
