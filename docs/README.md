@@ -24,6 +24,7 @@ A link does not make an entire reference or research document normative. A merge
 6. Keep target behaviour separate from current code and tests.
 7. Preserve provenance, versions, review status, supersession and explicit deferrals.
 8. Treat specification acceptance, implementation authority, Evaluation Plan, Operational Admission, canary and production activation as separate authorities.
+9. Keep committed documentation `git diff --check` clean; use blank lines or ordinary paragraphs instead of trailing-space Markdown hard breaks.
 
 ## Current discovery and GraphRAG documents
 
