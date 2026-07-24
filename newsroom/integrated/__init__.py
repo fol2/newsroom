@@ -30,25 +30,31 @@ from .policy import (
     integrated_payload_contracts,
     merge_integrated_authority_registries,
 )
-from .proof import (
-    IntegratedFixtureAuthority,
-    IntegratedFoundationProofController,
-    IntegratedFoundationProofResult,
-    IntegratedProjectionAuthority,
-    IntegratedProofEnvironment,
-    IntegratedProofKeys,
-)
+
+_AUTHORITY_FACADE_NAMES = {
+    "CandidateAdmissions",
+    "IntegratedCandidateAuthoritySystem",
+    "open_candidate_admission_authority_system",
+}
+_PROOF_FACADE_NAMES = {
+    "IntegratedFixtureAuthority",
+    "IntegratedFoundationProofController",
+    "IntegratedFoundationProofResult",
+    "IntegratedProjectionAuthority",
+    "IntegratedProofEnvironment",
+    "IntegratedProofKeys",
+}
 
 
 def __getattr__(name: str):
-    if name in {
-        "CandidateAdmissions",
-        "IntegratedCandidateAuthoritySystem",
-        "open_candidate_admission_authority_system",
-    }:
+    if name in _AUTHORITY_FACADE_NAMES:
         from newsroom.authority import integrated_system as _system
 
         return getattr(_system, name)
+    if name in _PROOF_FACADE_NAMES:
+        from . import proof as _proof
+
+        return getattr(_proof, name)
     raise AttributeError(name)
 
 
