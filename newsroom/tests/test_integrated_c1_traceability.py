@@ -31,7 +31,10 @@ def test_increment_1c_traceability_covers_every_issue_82_deliverable() -> None:
         "C1-12-OPERATING-EVIDENCE-AND-FIXED-BOUNDARIES/GRPROD-031-GRPROD-032",
     }
     assert set(INCREMENT_1C_TRACEABILITY) == expected
-    assert all(len(references) >= 4 for references in INCREMENT_1C_TRACEABILITY.values())
+    assert all(
+        len(references) >= 4
+        for references in INCREMENT_1C_TRACEABILITY.values()
+    )
 
     flattened = {
         reference
@@ -50,8 +53,17 @@ def test_increment_1c_traceability_covers_every_issue_82_deliverable() -> None:
         "newsroom.integrated.proof",
         "newsroom.projection.neo4j.qualification",
         "newsroom.tests.test_integrated_c1_candidate_authority",
+        "newsroom.tests.test_integrated_c1_context_history",
+        "newsroom.tests.test_integrated_c1_context_integrity_faults",
+        "newsroom.tests.test_integrated_c1_context_semantics",
+        "newsroom.tests.test_integrated_c1_derived_identity_faults",
+        "newsroom.tests.test_integrated_c1_hydration_commit",
+        "newsroom.tests.test_integrated_c1_integrity_faults",
         "newsroom.tests.test_integrated_c1_neo4j_service",
         "newsroom.tests.test_integrated_c1_proof_integrity",
+        "newsroom.tests.test_integrated_c1_read_completeness",
+        "newsroom.tests.test_integrated_c1_recovery_integrity",
+        "newsroom.tests.test_integrated_c1_temporal_authority",
         "newsroom.tests.test_integrated_c1_temporal_integrity",
     } <= flattened
 
@@ -90,17 +102,23 @@ def test_increment_1c_deferred_register_does_not_overclaim_product_readiness() -
     )
 
 
-def test_increment_1c_operation_guide_preserves_authority_and_recovery_rules() -> None:
+def test_increment_1c_operation_guide_preserves_final_authority_rules() -> None:
     text = _OPERATION_GUIDE.read_text(encoding="utf-8")
     required = (
         "Neo4j is a non-authoritative, rebuildable projection",
         "Never perform graph-to-ledger, graph-to-object or graph-to-Candidate recovery",
         "AUTHORITY_SELECTED_ACTIVE",
         "EXACT_GENERATION",
-        "Serving time is a canonical observation",
-        "Graph loss, graph-state mismatch or a read that lacks exact fixture provenance must fail closed",
+        "No vector, full-text, Graphiti, model, embedding or live-source retrieval was executed.",
+        "Query-valid time is business-valid time",
+        "The read limit comes from the trusted `ProjectionReadPolicy`",
+        "allowed bytes equal the immutable blob size",
+        "the hydration decision time equals the context record time",
+        "the selected generation was ACTIVE at serving time",
+        "Schema v5 permits exactly one immutable Candidate Version per Candidate",
+        "A recovered equivalent proposal must deduplicate to the retained Candidate",
         "must never be interpreted as “no prior match”",
-        "a later graph rebuild must not restore covered fixture relations",
+        "a later graph rebuild cannot restore covered fixture relations",
         "runtime-generated masked credentials",
         "runner-loopback Bolt exposure",
         "test_actual_service_integrated_foundation_replay_recovery_and_tombstone",
