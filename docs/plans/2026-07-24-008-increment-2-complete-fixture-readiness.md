@@ -13,7 +13,7 @@
 
 ## 1. Decision requested
 
-Approve Increment 2 as the next implementation boundary and authorise focused code work only after this readiness package is accepted.
+Approve Increment 2 as the next proposed implementation boundary. Acceptance of this package still does not authorise code; focused implementation begins only through a separate owner-authorised issue that records the then-current `main` head and exact review units.
 
 Increment 2 closes the deliberate gap between Increment 1C and the first complete graph-native fixture slice. Increment 1C proved authenticated SQLite and governed-object authority, structural Neo4j projection, authoritative hydration, exact structural retrieval and deterministic Candidate admission. It also retained exact negative evidence that no full-text, vector, Graphiti, model, embedding or live-source retrieval executed.
 
@@ -61,7 +61,7 @@ Increment 2 does not claim full implementation of source collection, extraction,
 
 ## 4. Exact synthetic fixture family
 
-The implementation uses a rights-free repository-owned fixture family named `integrated_fixture_v2`. It contains no copied news expression and no personal data.
+The implementation uses a repository-owned synthetic fixture family named `integrated_fixture_v2` under an explicit retained repository-permitted rights decision. It contains no copied news expression and no personal data.
 
 ### 4.1 Prior state
 
