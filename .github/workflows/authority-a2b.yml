@@ -140,7 +140,10 @@ jobs:
           test "$(git rev-parse HEAD)" = "${expected_head}"
           python ../.qualifier/.sdlc/increment_1c_recovery_qualify.py
 
-          actual_files="$(git diff --name-only | sort)"
+          actual_files="$({
+            git diff --name-only
+            git ls-files --others --exclude-standard
+          } | sort)"
           expected_files="$(printf '%s\n' \
             newsroom/authority/_integrated_store.py \
             newsroom/tests/test_integrated_c1_neo4j_service.py \
