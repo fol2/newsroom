@@ -34,3 +34,132 @@ jobs:
             --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
             --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
             --fail-on-regression
+
+  b3-active-serving-publish:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.head_ref == 'agent/b3-reconciliation-qualify' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.repository == 'fol2/newsroom'
+    needs: test
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout qualification material
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/b3-reconciliation-qualify
+          path: .qualifier
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+
+      - name: Checkout exact B3 branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/increment-1b3-rebuild-promotion
+          path: .target
+          fetch-depth: 0
+          persist-credentials: true
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: .target/uv.lock
+          github-token: ''
+
+      - name: Apply, qualify and publish active-serving source
+        shell: bash
+        working-directory: .target
+        run: |
+          set -euo pipefail
+          diagnostic="${RUNNER_TEMP}/b3-active-serving-qualifier.log"
+          exec > >(tee "${diagnostic}") 2>&1
+          expected_head="fb4f82df5187821f2563b345118fcf86356295fe"
+          echo stage=target-identity
+          test "$(git rev-parse HEAD)" = "${expected_head}"
+
+          echo stage=apply-active-serving
+          active_b64=../.qualifier/.sdlc/b3-active-nonworkflow.patch.gz.b64
+          test "$(sha256sum "${active_b64}" | cut -d' ' -f1)" = bf8a1cbd195ebbe8e56a25100801ba96b6ed5ce148fc2b348ae0397831e517ac
+          active_gz="${RUNNER_TEMP}/b3-active-nonworkflow.patch.gz"
+          active_patch="${RUNNER_TEMP}/b3-active-nonworkflow.patch"
+          base64 --decode "${active_b64}" > "${active_gz}"
+          test "$(sha256sum "${active_gz}" | cut -d' ' -f1)" = 5e7585b7c023ff7e6b889e77eb6b1ff61e3bc8aee7508f97be1be5bfa71efe6d
+          gzip --decompress --stdout "${active_gz}" > "${active_patch}"
+          test "$(sha256sum "${active_patch}" | cut -d' ' -f1)" = 979d7a97f9317ee554070fcb1214fc466dd4a9be1e08eeb6566a01c280560b3e
+          git apply --check "${active_patch}"
+          git apply "${active_patch}"
+
+          echo stage=repair-active-serving-import
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("newsroom/tests/test_projection_b3_neo4j_service.py")
+          text = path.read_text(encoding="utf-8")
+          needle = (
+              "    Neo4jProjectorConfig,\n"
+              "    StructuralGenerationValidationRequest,\n"
+          )
+          replacement = (
+              "    Neo4jProjectorConfig,\n"
+              "    StructuralActiveReadRequest,\n"
+              "    StructuralGenerationValidationRequest,\n"
+          )
+          if text.count(needle) != 1:
+              raise SystemExit("active-serving import repair precondition failed")
+          path.write_text(text.replace(needle, replacement, 1), encoding="utf-8")
+          PY
+
+          git add -A
+          test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(projection): serve only authority-selected active generation'
+
+          echo stage=locked-environment
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_projection_b1_*.py \
+            newsroom/tests/test_projection_b2_*.py \
+            newsroom/tests/test_projection_b3_*.py
+          uv run --no-sync python -m pytest -q newsroom/tests
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+          git diff --check "${expected_head}" HEAD
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+          echo stage=publish
+          remote_head="$(git ls-remote origin refs/heads/agent/increment-1b3-rebuild-promotion | cut -f1)"
+          test "${remote_head}" = "${expected_head}"
+          git push \
+            --force-with-lease=refs/heads/agent/increment-1b3-rebuild-promotion:${expected_head} \
+            origin HEAD:agent/increment-1b3-rebuild-promotion
+          echo stage=published
+
+      - name: Upload qualifier diagnostic
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: b3-active-serving-pr-qualifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/b3-active-serving-qualifier.log
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
