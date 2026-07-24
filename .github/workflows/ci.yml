@@ -34,3 +34,202 @@ jobs:
             --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
             --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
             --fail-on-regression
+
+  increment-1c-integrity-publish:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.head_ref == 'agent/increment-1c-integrity-qualify' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.repository == 'fol2/newsroom'
+    needs: test
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout qualification branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1c-integrity-qualify
+          path: .qualifier
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout exact Increment 1C target
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1c-integrated-foundation
+          path: .target
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.0"
+          enable-cache: true
+          cache-dependency-glob: .target/uv.lock
+
+      - name: Correct, qualify and publish integrity bindings
+        shell: bash
+        working-directory: .target
+        run: |
+          set -euxo pipefail
+          diagnostic="${RUNNER_TEMP}/increment-1c-integrity-qualifier.log"
+          exec > >(tee "${diagnostic}") 2>&1
+          expected_head="3c8dec9d66e9c794376a20e9ef839e285a341b2f"
+          test "$(git rev-parse HEAD)" = "${expected_head}"
+
+          python - <<'PY'
+          from pathlib import Path
+
+          proof_path = Path("newsroom/integrated/proof.py")
+          proof_text = proof_path.read_text(encoding="utf-8")
+          proof_replacements = (
+              (
+                  '''                raise IntegratedStateError(
+                    "fixture event differs from committed governed authority"
+                )
+            return IntegratedFixtureAuthority(''',
+                  '''                raise IntegratedStateError(
+                    "fixture event differs from committed governed authority"
+                )
+            hydrated = system.objects.hydrate(
+                HydrationRequest(
+                    admission.admission.admission_id,
+                    self._environment.fixture_hydration_purpose,
+                ),
+                proof=proof,
+            )
+            self._require_hydrated_manifest(hydrated, manifest)
+            return IntegratedFixtureAuthority(''',
+              ),
+              (
+                  '                    keys.value("family-register"),',
+                  '                    f"integrated-family-register:{self._environment.family_id}",',
+              ),
+          )
+          for old, new in proof_replacements:
+              if proof_text.count(old) != 1 or new in proof_text:
+                  raise SystemExit(f"integrated proof source mismatch: {old}")
+              proof_text = proof_text.replace(old, new)
+          proof_path.write_text(proof_text, encoding="utf-8")
+
+          models_path = Path("newsroom/integrated/models.py")
+          models_text = models_path.read_text(encoding="utf-8")
+          models_old = '''            "query_valid_time": self.metadata.query_valid_time.to_text(),
+            "authoritative_system": self.metadata.authoritative_system,'''
+          models_new = '''            "query_valid_time": self.metadata.query_valid_time.to_text(),
+            "serving_time": self.metadata.serving_time.to_text(),
+            "authoritative_system": self.metadata.authoritative_system,'''
+          if models_text.count(models_old) != 1 or models_new in models_text:
+              raise SystemExit("integrated metadata source differs from expected")
+          models_path.write_text(
+              models_text.replace(models_old, models_new),
+              encoding="utf-8",
+          )
+
+          store_path = Path("newsroom/authority/_integrated_store.py")
+          store_text = store_path.read_text(encoding="utf-8")
+          store_old = '''        access_value = self._canonical_row_value(
+            access, identity="candidate hydration decision"
+        )
+        if (
+            str(access["admission_id"]) != str(context.admission_id)
+            or str(access["hydration_policy_contract_digest"])
+            != context.hydration_policy_contract_digest
+            or int(access["byte_offset"]) != 0
+            or int(access["allowed_bytes"]) <= 0
+            or access_value.get("admission_id") != str(context.admission_id)
+            or access_value.get("policy_contract_digest")
+            != context.hydration_policy_contract_digest
+        ):
+            raise IntegratedStateError(
+                "hydration decision differs from retrieval context"
+            )'''
+          store_new = '''        access_value = self._canonical_row_value(
+            access, identity="candidate hydration decision"
+        )
+        access_cutoff = access_value.get("state_cutoff")
+        if not isinstance(access_cutoff, dict):
+            raise IntegratedStateError(
+                "hydration decision lacks an exact authority state cutoff"
+            )
+        if (
+            str(access["admission_id"]) != str(context.admission_id)
+            or str(access["hydration_policy_contract_digest"])
+            != context.hydration_policy_contract_digest
+            or int(access["byte_offset"]) != 0
+            or int(access["allowed_bytes"]) <= 0
+            or access_value.get("admission_id") != str(context.admission_id)
+            or access_value.get("policy_contract_digest")
+            != context.hydration_policy_contract_digest
+            or access_cutoff.get("admission_id")
+            != str(context.admission_id)
+            or access_cutoff.get("blob_digest") != manifest.manifest_digest
+            or access_cutoff.get("admission_state") != "ACTIVE"
+            or access_cutoff.get("blob_state") != "ACTIVE"
+            or access_cutoff.get("blob_integrity_state") != "VERIFIED"
+            or access_cutoff.get("deletion_state") is not None
+            or access_cutoff.get("offset") != 0
+            or access_cutoff.get("length") != int(access["allowed_bytes"])
+        ):
+            raise IntegratedStateError(
+                "hydration decision differs from retrieval context"
+            )'''
+          if store_text.count(store_old) != 1 or store_new in store_text:
+              raise SystemExit("integrated hydration source differs from expected")
+          store_path.write_text(
+              store_text.replace(store_old, store_new),
+              encoding="utf-8",
+          )
+          PY
+
+          actual_files="$(git diff --name-only | sort)"
+          expected_files="$(printf '%s\n' \
+            newsroom/authority/_integrated_store.py \
+            newsroom/integrated/models.py \
+            newsroom/integrated/proof.py | sort)"
+          test "${actual_files}" = "${expected_files}"
+          git diff --check
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_integrated_c1_contracts.py \
+            newsroom/tests/test_integrated_c1_policy.py \
+            newsroom/tests/test_integrated_c1_candidate_authority.py \
+            newsroom/tests/test_integrated_c1_proof_integrity.py
+          uv run --no-sync python -m pytest -q newsroom/tests
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            newsroom/authority/_integrated_store.py \
+            newsroom/integrated/models.py \
+            newsroom/integrated/proof.py
+          git commit -m 'fix(integrated): bind proof authority state'
+
+          remote_head="$(git ls-remote origin refs/heads/agent/increment-1c-integrated-foundation | cut -f1)"
+          test "${remote_head}" = "${expected_head}"
+          git push \
+            --force-with-lease=refs/heads/agent/increment-1c-integrated-foundation:${expected_head} \
+            origin HEAD:agent/increment-1c-integrated-foundation
+
+      - name: Upload qualifier diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-1c-integrity-qualifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/increment-1c-integrity-qualifier.log
+          if-no-files-found: warn
+          retention-days: 1
