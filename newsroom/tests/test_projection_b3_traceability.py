@@ -94,7 +94,7 @@ def test_b3_operation_guide_preserves_authority_recovery_and_serving_rules() -> 
         "Until this active revalidation succeeds, qualifying GraphRAG must fail closed",
         "runtime-generated masked credentials",
         "runner-loopback Bolt exposure",
-        "No live source access",
+        "live source/search access",
     )
     for statement in required:
         assert statement in text
