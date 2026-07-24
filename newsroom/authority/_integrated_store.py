@@ -989,11 +989,13 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             )
 
         admission = conn.execute(
-            "SELECT a.blob_digest,a.valid_from,a.valid_until,"
+            "SELECT a.blob_digest,b.size_bytes AS blob_size_bytes,"
+            "a.valid_from,a.valid_until,"
             "v.state AS admission_state,bv.state AS blob_state,"
             "bv.integrity_state,r.allowed AS rights_allowed,"
             "r.valid_from AS rights_valid_from,r.valid_until AS rights_valid_until "
             "FROM object_admissions a "
+            "JOIN blob_identities b ON b.blob_digest=a.blob_digest "
             "JOIN object_admission_heads h ON h.admission_id=a.admission_id "
             "JOIN object_admission_versions v "
             "ON v.admission_id=h.admission_id "
@@ -1056,7 +1058,11 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             or str(access["hydration_policy_contract_digest"])
             != context.hydration_policy_contract_digest
             or int(access["byte_offset"]) != 0
-            or int(access["allowed_bytes"]) <= 0
+            or int(access["allowed_bytes"])
+            != int(admission["blob_size_bytes"])
+            or str(access["decided_at"]) != context.recorded_at.to_text()
+            or access_value.get("decided_at")
+            != context.recorded_at.to_text()
             or access_value.get("admission_id") != str(context.admission_id)
             or access_value.get("policy_contract_digest")
             != context.hydration_policy_contract_digest
