@@ -79,6 +79,25 @@ import sqlite3''',
     )
     replace_exact(
         path,
+        '''        promotion = conn.execute(
+            "SELECT 1 FROM projection_generation_promotions "
+            "WHERE generation_id=? AND checkpoint_ledger_seq=? LIMIT 1",
+            (
+                str(row["generation_id"]),
+                int(row["projected_through_ledger_seq"]),
+            ),
+        ).fetchone()''',
+        '''        promotion = conn.execute(
+            "SELECT 1 FROM projection_generation_promotions "
+            "WHERE generation_id=? AND checkpoint_ledger_seq<=? LIMIT 1",
+            (
+                str(row["generation_id"]),
+                int(row["projected_through_ledger_seq"]),
+            ),
+        ).fetchone()''',
+    )
+    replace_exact(
+        path,
         '''            canonical_id = str(index_row["canonical_id"])
             if index_value != expected_index.get(canonical_id):
                 raise AuthorityPersistenceError(
