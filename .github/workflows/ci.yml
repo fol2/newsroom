@@ -91,10 +91,14 @@ jobs:
 
           echo stage=apply-active-serving
           active_b64=../.qualifier/.sdlc/b3-active-nonworkflow.patch.gz.b64
-          test "$(sha256sum "${active_b64}" | cut -d' ' -f1)" = bf8a1cbd195ebbe8e56a25100801ba96b6ed5ce148fc2b348ae0397831e517ac
+          test "$(sha256sum "${active_b64}" | cut -d' ' -f1)" = 0bede442198c3106afdc663bc5ff4fe6cc4ab7468793b9f69d39e0cdea3945e8
+          canonical_b64="${RUNNER_TEMP}/b3-active-nonworkflow.patch.gz.b64"
+          cp "${active_b64}" "${canonical_b64}"
+          printf '\n' >> "${canonical_b64}"
+          test "$(sha256sum "${canonical_b64}" | cut -d' ' -f1)" = bf8a1cbd195ebbe8e56a25100801ba96b6ed5ce148fc2b348ae0397831e517ac
           active_gz="${RUNNER_TEMP}/b3-active-nonworkflow.patch.gz"
           active_patch="${RUNNER_TEMP}/b3-active-nonworkflow.patch"
-          base64 --decode "${active_b64}" > "${active_gz}"
+          base64 --decode "${canonical_b64}" > "${active_gz}"
           test "$(sha256sum "${active_gz}" | cut -d' ' -f1)" = 5e7585b7c023ff7e6b889e77eb6b1ff61e3bc8aee7508f97be1be5bfa71efe6d
           gzip --decompress --stdout "${active_gz}" > "${active_patch}"
           test "$(sha256sum "${active_patch}" | cut -d' ' -f1)" = 979d7a97f9317ee554070fcb1214fc466dd4a9be1e08eeb6566a01c280560b3e
