@@ -26,6 +26,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          diagnostic="${RUNNER_TEMP}/increments-readiness-qualifier.log"
+          exec > >(tee "${diagnostic}") 2>&1
           expected_head="e412c1e5a8404b458e33a55bea8f5142f6f70440"
           expected_main="5fcd8bc862e552961b6b147572879e79c7266931"
           test "$(git rev-parse HEAD)" = "${expected_head}"
@@ -72,3 +74,16 @@ jobs:
           git push \
             --force-with-lease=refs/heads/agent/increments-2-11-readiness:${expected_head} \
             origin HEAD:agent/increments-2-11-readiness
+
+      - name: Upload qualifier diagnostic
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: increments-readiness-qualifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/increments-readiness-qualifier.log
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+          archive: true
