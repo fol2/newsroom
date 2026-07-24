@@ -1,0 +1,72 @@
+name: Temporary SDLC Core Profile
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    if: github.head_ref == 'agent/sdlc-core-profile'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact profiling head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+
+      - name: Sync locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Profile deterministic core suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v \
+            uv run --no-sync python -m pytest -q newsroom/tests \
+              --durations=100 \
+              --durations-min=0.01 \
+              --junitxml=sdlc-core-profile.xml \
+            2>&1 | tee sdlc-core-profile.log
+
+      - name: Upload temporary profile evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdlc-core-profile-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha }}
+          path: |
+            sdlc-core-profile.log
+            sdlc-core-profile.xml
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+          archive: true
