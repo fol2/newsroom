@@ -140,11 +140,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "${expected_head}"
           python ../.qualifier/.sdlc/increment_1c_derived_qualify.py
 
-          actual_files="$(git diff --name-only | sort)"
-          expected_files="$(printf '%s\n' \
-            newsroom/authority/_integrated_store.py \
-            newsroom/integrated/models.py | sort)"
-          test "${actual_files}" = "${expected_files}"
+          test "$(git diff --name-only)" = "newsroom/integrated/models.py"
           git diff --check
           uv lock --check
           uv sync --dev --locked
@@ -163,10 +159,8 @@ jobs:
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add \
-            newsroom/authority/_integrated_store.py \
-            newsroom/integrated/models.py
-          git commit -m 'fix(integrated): audit derived context identities'
+          git add newsroom/integrated/models.py
+          git commit -m 'fix(integrated): enforce Retrieval Context invariants'
 
           remote_head="$(git ls-remote origin refs/heads/agent/increment-1c-integrated-foundation | cut -f1)"
           test "${remote_head}" = "${expected_head}"
