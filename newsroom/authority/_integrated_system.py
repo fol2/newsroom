@@ -367,12 +367,30 @@ class _CandidateAdmissionBoundary:
                 "Neo4j graph state differs from retained validation"
             )
 
-        canonical_ids = tuple(item.canonical_id for item in context.nodes)
+        canonical_ids = expected_canonical_ids
+        selected_ids = set(canonical_ids)
+        relevant_relation_upper_bound = len(
+            {
+                relation.relation_key
+                for batch in batches
+                for relation in batch.relations
+                if relation.source_canonical_id in selected_ids
+                or relation.target_canonical_id in selected_ids
+            }
+        )
+        read_limit = self._projection_read_policy.max_results
+        if (
+            len(canonical_ids) >= read_limit
+            or relevant_relation_upper_bound >= read_limit
+        ):
+            raise IntegratedStateError(
+                "integrated fixture graph exceeds the bounded read policy"
+            )
         actual = self._adapter.read(
             generation_id=str(context.metadata.generation_id),
             canonical_ids=canonical_ids,
             maximum_ledger_seq=context.metadata.contiguous_ledger_seq,
-            limit=max(len(context.nodes), len(context.relations), 1),
+            limit=read_limit,
         )
         if actual.nodes != context.nodes or actual.relations != context.relations:
             raise Neo4jIdentityConflict(
