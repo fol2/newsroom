@@ -129,18 +129,22 @@ jobs:
           enable-cache: true
           cache-dependency-glob: .target/uv.lock
 
-      - name: Correct, qualify and publish derived identity audit
+      - name: Correct, qualify and publish derived context integrity
         shell: bash
         working-directory: .target
         run: |
           set -euxo pipefail
           diagnostic="${RUNNER_TEMP}/increment-1c-derived-qualifier.log"
           exec > >(tee "${diagnostic}") 2>&1
-          expected_head="6b14b3beb7680d6b414a019ff606bb88db30cf90"
+          expected_head="34f983b549d1d23406357696176256bd05e28a54"
           test "$(git rev-parse HEAD)" = "${expected_head}"
           python ../.qualifier/.sdlc/increment_1c_derived_qualify.py
 
-          test "$(git diff --name-only)" = "newsroom/authority/_integrated_store.py"
+          actual_files="$(git diff --name-only | sort)"
+          expected_files="$(printf '%s\n' \
+            newsroom/authority/_integrated_store.py \
+            newsroom/integrated/models.py | sort)"
+          test "${actual_files}" = "${expected_files}"
           git diff --check
           uv lock --check
           uv sync --dev --locked
@@ -149,7 +153,8 @@ jobs:
             newsroom/tests/test_integrated_c1_derived_identity_faults.py \
             newsroom/tests/test_integrated_c1_context_history.py \
             newsroom/tests/test_integrated_c1_context_integrity_faults.py \
-            newsroom/tests/test_integrated_c1_integrity_faults.py
+            newsroom/tests/test_integrated_c1_integrity_faults.py \
+            newsroom/tests/test_integrated_c1_model_integrity.py
           uv run --no-sync python -m pytest -q newsroom/tests
           uv run --no-sync python scripts/eval_clustering_metrics.py \
             --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
@@ -158,8 +163,10 @@ jobs:
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add newsroom/authority/_integrated_store.py
-          git commit -m 'fix(integrated): audit derived Candidate identities'
+          git add \
+            newsroom/authority/_integrated_store.py \
+            newsroom/integrated/models.py
+          git commit -m 'fix(integrated): audit derived context identities'
 
           remote_head="$(git ls-remote origin refs/heads/agent/increment-1c-integrated-foundation | cut -f1)"
           test "${remote_head}" = "${expected_head}"
