@@ -15,14 +15,6 @@ def main() -> None:
     store_path = "newsroom/authority/_integrated_store.py"
     replace_exact(
         store_path,
-        '''import json
-import sqlite3''',
-        '''from dataclasses import asdict
-import json
-import sqlite3''',
-    )
-    replace_exact(
-        store_path,
         '''            for row in conn.execute(
                 "SELECT * FROM candidate_admission_decisions"
             ).fetchall():
