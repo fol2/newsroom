@@ -5,7 +5,7 @@ from pathlib import Path
 
 def replace_exact(path: Path, old: str, new: str, *, identity: str) -> None:
     text = path.read_text(encoding="utf-8")
-    if text.count(old) != 1 or new in text:
+    if text.count(old) != 1 or (new and new in text):
         raise SystemExit(f"{identity} source mismatch")
     path.write_text(text.replace(old, new), encoding="utf-8")
 
