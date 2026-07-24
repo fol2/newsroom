@@ -9,22 +9,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install uv
         run: |
           python -m pip install --upgrade pip
           python -m pip install uv
-
       - name: Lockfile Check
         run: uv lock --check
-
       - name: Sync (Dev)
         run: uv sync --dev --locked
-
       - name: Focused A2b Tests
         id: focused
         continue-on-error: true
@@ -32,7 +27,6 @@ jobs:
           uv run python -m pytest -q \
             newsroom/tests/test_authority_a2b_*.py \
             --junitxml=a2b-focused-results.xml
-
       - name: Upload Focused A2b Evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -40,7 +34,6 @@ jobs:
           name: authority-a2b-focused-evidence
           path: a2b-focused-results.xml
           if-no-files-found: error
-
       - name: A1 and A2a Regression Tests
         id: regression
         continue-on-error: true
@@ -52,7 +45,6 @@ jobs:
           )
           uv run python -m pytest -q "${files[@]}" \
             --junitxml=a2b-regression-results.xml
-
       - name: Upload A1 and A2a Regression Evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -60,7 +52,6 @@ jobs:
           name: authority-a2b-regression-evidence
           path: a2b-regression-results.xml
           if-no-files-found: error
-
       - name: Independent A2b Fault Matrix
         id: faults
         continue-on-error: true
@@ -69,7 +60,6 @@ jobs:
             newsroom/tests/test_authority_a2b_integrity_faults.py \
             newsroom/tests/test_authority_a2b_fault_matrix.py \
             --junitxml=a2b-fault-matrix-results.xml
-
       - name: Upload A2b Fault Matrix Evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -77,7 +67,6 @@ jobs:
           name: authority-a2b-fault-matrix-evidence
           path: a2b-fault-matrix-results.xml
           if-no-files-found: error
-
       - name: Enforce A2b Gates
         if: always()
         env:
@@ -88,3 +77,166 @@ jobs:
           test "$FOCUSED_OUTCOME" = success
           test "$REGRESSION_OUTCOME" = success
           test "$FAULT_OUTCOME" = success
+
+  increment-1c-hydration-parity-publish:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.head_ref == 'agent/increment-1c-hydration-parity-qualify' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.repository == 'fol2/newsroom'
+    needs: governed-object-authority
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout qualification branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1c-hydration-parity-qualify
+          path: .qualifier
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout exact Increment 1C target
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-1c-integrated-foundation
+          path: .target
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.0"
+          enable-cache: true
+          cache-dependency-glob: .target/uv.lock
+      - name: Correct, qualify and publish hydration parity
+        shell: bash
+        working-directory: .target
+        run: |
+          set -euxo pipefail
+          diagnostic="${RUNNER_TEMP}/increment-1c-hydration-parity.log"
+          exec > >(tee "${diagnostic}") 2>&1
+          expected_head="75689474aaeb615d269217849fb3481b2e453e7e"
+          test "$(git rev-parse HEAD)" = "${expected_head}"
+          python ../.qualifier/.sdlc/increment_1c_hydration_parity_qualify.py
+
+          actual_files="$({
+            git diff --name-only
+            git ls-files --others --exclude-standard
+          } | sort)"
+          expected_files="$(printf '%s\n' \
+            newsroom/authority/_integrated_store.py \
+            newsroom/tests/test_integrated_c1_hydration_commit.py | sort)"
+          test "${actual_files}" = "${expected_files}"
+          git diff --check
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_integrated_c1_hydration_commit.py \
+            newsroom/tests/test_integrated_c1_candidate_authority.py \
+            newsroom/tests/test_integrated_c1_context_semantics.py \
+            newsroom/tests/test_integrated_c1_temporal_authority.py \
+            newsroom/tests/test_integrated_c1_recovery_integrity.py
+          uv run --no-sync python -m pytest -q newsroom/tests
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+          NEO4J_ADMIN_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          NEWSROOM_NEO4J_PROJECTOR_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          export NEO4J_ADMIN_PASSWORD NEWSROOM_NEO4J_PROJECTOR_PASSWORD
+          export NEWSROOM_NEO4J_URI="bolt://localhost:7687"
+          export NEWSROOM_NEO4J_DATABASE="neo4j"
+          export NEWSROOM_NEO4J_PROJECTOR_USERNAME="newsroom_projector"
+          export NEWSROOM_NEO4J_SERVICE_REQUIRED="1"
+          echo "::add-mask::${NEO4J_ADMIN_PASSWORD}"
+          echo "::add-mask::${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+          docker run --detach \
+            --name newsroom-c1-hydration-neo4j \
+            --publish 127.0.0.1:7687:7687 \
+            --env "NEO4J_AUTH=neo4j/${NEO4J_ADMIN_PASSWORD}" \
+            neo4j:2026.06.0-community-trixie
+          trap 'docker rm --force newsroom-c1-hydration-neo4j || true' EXIT
+          uv run --no-sync python - <<'PY'
+          import os
+          import time
+          from neo4j import GraphDatabase
+
+          uri = os.environ["NEWSROOM_NEO4J_URI"]
+          admin = ("neo4j", os.environ["NEO4J_ADMIN_PASSWORD"])
+          last_error = None
+          for _ in range(120):
+              driver = None
+              try:
+                  driver = GraphDatabase.driver(uri, auth=admin)
+                  driver.verify_connectivity()
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  if driver is not None:
+                      driver.close()
+                  time.sleep(2)
+          else:
+              raise RuntimeError("authenticated Neo4j readiness timed out") from last_error
+          try:
+              with driver.session(database="system") as session:
+                  session.run(
+                      "CREATE USER newsroom_projector IF NOT EXISTS "
+                      "SET PLAINTEXT PASSWORD $password CHANGE NOT REQUIRED",
+                      password=os.environ["NEWSROOM_NEO4J_PROJECTOR_PASSWORD"],
+                  ).consume()
+          finally:
+              driver.close()
+          projector = GraphDatabase.driver(
+              uri,
+              auth=(
+                  os.environ["NEWSROOM_NEO4J_PROJECTOR_USERNAME"],
+                  os.environ["NEWSROOM_NEO4J_PROJECTOR_PASSWORD"],
+              ),
+          )
+          try:
+              projector.verify_connectivity()
+          finally:
+              projector.close()
+          PY
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_integrated_c1_neo4j_service.py::test_actual_service_integrated_foundation_replay_recovery_and_tombstone \
+            --junitxml=increment-1c-hydration-neo4j.xml
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            newsroom/authority/_integrated_store.py \
+            newsroom/tests/test_integrated_c1_hydration_commit.py
+          git commit -m 'fix(integrated): require full hydration before Candidate commit'
+
+          remote_head="$(git ls-remote origin refs/heads/agent/increment-1c-integrated-foundation | cut -f1)"
+          test "${remote_head}" = "${expected_head}"
+          git push \
+            --force-with-lease=refs/heads/agent/increment-1c-integrated-foundation:${expected_head} \
+            origin HEAD:agent/increment-1c-integrated-foundation
+      - name: Upload hydration-parity qualifier diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-1c-hydration-parity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/increment-1c-hydration-parity.log
+            .target/increment-1c-hydration-neo4j.xml
+          if-no-files-found: warn
+          retention-days: 1
