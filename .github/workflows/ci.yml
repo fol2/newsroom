@@ -35,7 +35,7 @@ jobs:
             --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
             --fail-on-regression
 
-  b3-promotion-reconcile-publish:
+  b3-active-revalidation-publish:
     if: >-
       github.event_name == 'pull_request' &&
       github.head_ref == 'agent/b3-reconciliation-qualify' &&
@@ -78,30 +78,39 @@ jobs:
           cache-dependency-glob: .target/uv.lock
           github-token: ''
 
-      - name: Apply, qualify and publish promotion reconciliation
+      - name: Apply, qualify and publish active revalidation
         shell: bash
         working-directory: .target
         run: |
           set -euxo pipefail
-          diagnostic="${RUNNER_TEMP}/b3-promotion-reconcile-qualifier.log"
+          diagnostic="${RUNNER_TEMP}/b3-active-revalidation-qualifier.log"
           exec > >(tee "${diagnostic}") 2>&1
-          expected_head="f62cf7dd694a4ac0dea3f1a52d81a7252c99ae82"
+          expected_head="3d43df1bf2e9e15c7701ac33ed4b5153bea2973a"
           echo stage=target-identity
           test "$(git rev-parse HEAD)" = "${expected_head}"
 
-          echo stage=apply-promotion-reconciliation
-          patch=../.qualifier/.sdlc/b3-promotion-reconcile.patch
-          test "$(git -C ../.qualifier hash-object .sdlc/b3-promotion-reconcile.patch)" = f551088212b76de941f9390319676d9e62954ce1
-          test "$(sha256sum "${patch}" | cut -d' ' -f1)" = c810f749190cc22c6d9c6c46759e5cc801dcc92dc0f5e3ac9e839ed81334a708
+          echo stage=apply-active-revalidation
+          patch=../.qualifier/.sdlc/b3-active-revalidation.patch
+          test "$(git -C ../.qualifier hash-object .sdlc/b3-active-revalidation.patch)" = 7d6a8d5eb78f70e69f86af90a2db1f124e90d84e
           git apply --recount --check --verbose "${patch}"
           git apply --recount --verbose "${patch}"
 
           git add -A
-          test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
+          expected_files="$(cat <<'EOF'
+          newsroom/authority/_neo4j_projection_system.py
+          newsroom/authority/_projection_store.py
+          newsroom/tests/test_projection_b3_active_serving.py
+          newsroom/tests/test_projection_b3_neo4j_service.py
+          newsroom/tests/test_sdlc_workflow_lane.py
+          scripts/sdlc/workflow_lane.py
+          EOF
+          )"
+          actual_files="$(git diff --cached --name-only | sort)"
+          test "${actual_files}" = "${expected_files}"
           git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix(projection): reconcile graph state at promotion'
+          git commit -m 'fix(projection): refresh active validation after delivery'
 
           echo stage=locked-environment
           uv lock --check
@@ -131,8 +140,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: b3-promotion-reconcile-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/b3-promotion-reconcile-qualifier.log
+          name: b3-active-revalidation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/b3-active-revalidation-qualifier.log
           if-no-files-found: warn
           retention-days: 1
           compression-level: 0
