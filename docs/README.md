@@ -12,7 +12,7 @@ This repository is an automated, agentic newsroom system. Documentation authorit
 | [`research/`](research/) | Dated investigations and option studies | Non-normative evidence | Declared by each document |
 | [`adr/`](adr/) | Durable architecture decisions | Normative only when status is `accepted` | English |
 
-A link does not make an entire reference or research document normative. A merged pull request, passing test, committed Draft, Proposed plan or Proposed ADR does not imply owner acceptance.
+A link does not make an entire reference or research document normative. A merged pull request, passing test, committed Draft, Proposed plan or Proposed ADR does not imply owner acceptance. Proposed readiness plans may be merged for traceability while implementation remains blocked until a separate owner-authorised boundary exists.
 
 ## Development-agent rules
 
