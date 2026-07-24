@@ -33,7 +33,8 @@ Start with these records:
 - [Increment 1C operating and rollback guide](docs/operations/increment-1c-integrated-foundation.md)
 - [Neo4j B2 qualification guide](docs/operations/neo4j-b2-qualification.md)
 - [Neo4j B3 rebuild and promotion guide](docs/operations/neo4j-b3-rebuild-promotion.md)
-- [Accepted SDLC v2 specification](docs/specs/sdlc/high-performance-evidence-sdlc.md)
+- [SDLC v2 specification](docs/specs/sdlc/high-performance-evidence-sdlc.md)
+- [SDLC v2 owner acceptance record](docs/specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md)
 - [Machine gate contract](.sdlc/gates.toml)
 
 ## Legacy OpenClaw Runtime
@@ -90,8 +91,8 @@ uv sync --dev --locked
 ```
 
 This creates a virtual environment and installs the locked development
-dependencies. To include optional chart dependencies, run `uv sync --extra
-charts --locked`.
+dependencies. To include optional chart dependencies, run
+`uv sync --extra charts --locked`.
 
 ## Legacy Runtime Configuration
 
