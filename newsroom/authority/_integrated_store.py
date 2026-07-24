@@ -432,7 +432,7 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
 
         event = conn.execute(
             "SELECT event_type,aggregate_type,aggregate_id,object_admission_id,"
-            "payload_digest,trust_scope,security_scope,retention_scope "
+            "payload_digest,trust_scope,security_scope,retention_scope,recorded_at "
             "FROM ledger_events WHERE event_id=?",
             (str(row["fixture_event_id"]),),
         ).fetchone()
@@ -447,6 +447,8 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             or str(event["trust_scope"]) != "OBSERVED"
             or str(event["security_scope"]) != "authority.protected"
             or str(event["retention_scope"]) != "source.short"
+            or UtcTimestamp.parse(str(event["recorded_at"])).value
+            > context.metadata.serving_time.value
         ):
             raise AuthorityPersistenceError(
                 "integrated retrieval context lacks exact fixture authority"
@@ -468,15 +470,24 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             raise AuthorityPersistenceError(
                 "integrated hydration decision lacks an exact state cutoff"
             )
+        blob = conn.execute(
+            "SELECT b.size_bytes FROM object_admissions a "
+            "JOIN blob_identities b ON b.blob_digest=a.blob_digest "
+            "WHERE a.admission_id=?",
+            (str(row["admission_id"]),),
+        ).fetchone()
         if (
-            str(access["admission_id"]) != str(row["admission_id"])
+            blob is None
+            or str(access["admission_id"]) != str(row["admission_id"])
             or access_value.get("admission_id") != str(row["admission_id"])
             or str(access["hydration_policy_contract_digest"])
             != context.hydration_policy_contract_digest
             or access_value.get("policy_contract_digest")
             != context.hydration_policy_contract_digest
             or int(access["byte_offset"]) != 0
-            or int(access["allowed_bytes"]) <= 0
+            or int(access["allowed_bytes"]) != int(blob["size_bytes"])
+            or str(access["decided_at"]) != str(row["recorded_at"])
+            or access_value.get("decided_at") != str(row["recorded_at"])
             or cutoff.get("admission_id") != str(row["admission_id"])
             or cutoff.get("blob_digest") != context.hydrated_blob_digest
             or cutoff.get("admission_state") != "ACTIVE"
@@ -490,10 +501,12 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
                 "integrated hydration decision differs from retained context"
             )
 
+        serving_time = context.metadata.serving_time
+        serving_text = serving_time.to_text()
         generation = conn.execute(
-            "SELECT g.family_id,d.definition_version,d.projector_version,"
-            "d.ontology_contract_digest,d.mapping_contract_digest "
-            "FROM projection_generations g "
+            "SELECT g.family_id,f.definition_digest,d.definition_version,"
+            "d.projector_version,d.ontology_contract_digest,"
+            "d.mapping_contract_digest FROM projection_generations g "
             "JOIN projection_families f ON f.family_id=g.family_id "
             "JOIN projection_family_definitions d "
             "ON d.definition_digest=f.definition_digest "
@@ -501,37 +514,45 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             (str(row["generation_id"]),),
         ).fetchone()
         active_version = conn.execute(
-            "SELECT 1 FROM projection_generation_versions "
-            "WHERE generation_id=? AND state='ACTIVE' LIMIT 1",
-            (str(row["generation_id"]),),
+            "SELECT state,recorded_at FROM projection_generation_versions "
+            "WHERE generation_id=? AND recorded_at<=? "
+            "ORDER BY lifecycle_version DESC LIMIT 1",
+            (str(row["generation_id"]), serving_text),
         ).fetchone()
         checkpoint = conn.execute(
-            "SELECT 1 FROM projection_checkpoint_versions "
-            "WHERE generation_id=? AND contiguous_ledger_seq=? LIMIT 1",
+            "SELECT recorded_at FROM projection_checkpoint_versions "
+            "WHERE generation_id=? AND contiguous_ledger_seq=? "
+            "AND recorded_at<=? ORDER BY checkpoint_version DESC LIMIT 1",
             (
                 str(row["generation_id"]),
                 int(row["projected_through_ledger_seq"]),
+                serving_text,
             ),
         ).fetchone()
         validation = conn.execute(
-            "SELECT 1 FROM projection_generation_validations "
+            "SELECT recorded_at FROM projection_generation_validations "
             "WHERE generation_id=? AND checkpoint_ledger_seq=? "
-            "AND ontology_contract_digest=? AND mapping_contract_digest=? "
-            "AND projector_version=? LIMIT 1",
+            "AND definition_digest=? AND ontology_contract_digest=? "
+            "AND mapping_contract_digest=? AND projector_version=? "
+            "AND recorded_at<=? ORDER BY validation_version DESC LIMIT 1",
             (
                 str(row["generation_id"]),
                 int(row["projected_through_ledger_seq"]),
+                None if generation is None else str(generation["definition_digest"]),
                 context.metadata.ontology_contract_digest,
                 context.metadata.mapping_contract_digest,
                 context.metadata.projector_version,
+                serving_text,
             ),
         ).fetchone()
         promotion = conn.execute(
-            "SELECT 1 FROM projection_generation_promotions "
-            "WHERE generation_id=? AND checkpoint_ledger_seq<=? LIMIT 1",
+            "SELECT recorded_at FROM projection_generation_promotions "
+            "WHERE generation_id=? AND checkpoint_ledger_seq<=? "
+            "AND recorded_at<=? ORDER BY recorded_at DESC LIMIT 1",
             (
                 str(row["generation_id"]),
                 int(row["projected_through_ledger_seq"]),
+                serving_text,
             ),
         ).fetchone()
         if (
@@ -546,6 +567,8 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             or str(generation["mapping_contract_digest"])
             != context.metadata.mapping_contract_digest
             or active_version is None
+            or str(active_version["state"])
+            != ProjectionGenerationState.ACTIVE.value
             or checkpoint is None
             or validation is None
             or promotion is None
@@ -553,6 +576,11 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
             raise AuthorityPersistenceError(
                 "integrated retrieval context lacks retained ACTIVE projection evidence"
             )
+        for evidence in (active_version, checkpoint, validation, promotion):
+            if UtcTimestamp.parse(str(evidence["recorded_at"])).value > serving_time.value:
+                raise AuthorityPersistenceError(
+                    "integrated projection evidence postdates serving time"
+                )
 
         nodes = value.get("nodes")
         exact_index = value.get("exact_index")
@@ -589,9 +617,36 @@ class _IntegratedCandidateStore(_ProjectionAuthorityStore):
                 source.event_id != str(index_row["first_source_event_id"])
                 or digest_canonical(asdict(source))
                 != str(index_row["first_source_event_digest"])
+                or UtcTimestamp.parse(source.recorded_at).value
+                > serving_time.value
             ):
                 raise AuthorityPersistenceError(
                     "integrated exact index source event differs from ledger authority"
+                )
+
+        for relation in context.relations:
+            source = self._source_event(conn, relation.ledger_seq)
+            if (
+                source.event_id != relation.source_event_id
+                or source.event_type != relation.source_event_type
+                or digest_canonical(asdict(source))
+                != relation.source_event_digest
+                or source.aggregate_type != relation.aggregate_type
+                or source.aggregate_id != relation.aggregate_id
+                or source.aggregate_version != relation.aggregate_version
+                or source.payload_id != relation.payload_id
+                or source.payload_digest != relation.payload_digest
+                or source.object_admission_id != relation.object_admission_id
+                or source.principal_id != relation.principal_id
+                or source.trust_scope != relation.trust_scope.value
+                or source.security_scope != relation.security_scope
+                or source.retention_scope != relation.retention_scope
+                or source.recorded_at != relation.recorded_at.to_text()
+                or UtcTimestamp.parse(source.recorded_at).value
+                > serving_time.value
+            ):
+                raise AuthorityPersistenceError(
+                    "integrated graph relation differs from ledger authority"
                 )
 
     def _validate_candidate_version_row(
