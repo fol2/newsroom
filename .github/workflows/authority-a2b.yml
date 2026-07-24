@@ -136,7 +136,7 @@ jobs:
           set -euxo pipefail
           diagnostic="${RUNNER_TEMP}/increment-1c-derived-qualifier.log"
           exec > >(tee "${diagnostic}") 2>&1
-          expected_head="9abde8785ea50297edcc7ca023a12f93830d00e8"
+          expected_head="6b14b3beb7680d6b414a019ff606bb88db30cf90"
           test "$(git rev-parse HEAD)" = "${expected_head}"
           python ../.qualifier/.sdlc/increment_1c_derived_qualify.py
 
@@ -147,6 +147,7 @@ jobs:
           uv run --no-sync python -m compileall -q newsroom scripts
           uv run --no-sync python -m pytest -q \
             newsroom/tests/test_integrated_c1_derived_identity_faults.py \
+            newsroom/tests/test_integrated_c1_context_history.py \
             newsroom/tests/test_integrated_c1_context_integrity_faults.py \
             newsroom/tests/test_integrated_c1_integrity_faults.py
           uv run --no-sync python -m pytest -q newsroom/tests
