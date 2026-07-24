@@ -70,6 +70,27 @@ jobs:
           test "$(sha256sum "${active_patch}" | cut -d' ' -f1)" = 979d7a97f9317ee554070fcb1214fc466dd4a9be1e08eeb6566a01c280560b3e
           git apply --check "${active_patch}"
           git apply "${active_patch}"
+
+          echo stage=repair-active-serving-import
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("newsroom/tests/test_projection_b3_neo4j_service.py")
+          text = path.read_text(encoding="utf-8")
+          needle = (
+              "    Neo4jProjectorConfig,\n"
+              "    StructuralGenerationValidationRequest,\n"
+          )
+          replacement = (
+              "    Neo4jProjectorConfig,\n"
+              "    StructuralActiveReadRequest,\n"
+              "    StructuralGenerationValidationRequest,\n"
+          )
+          if text.count(needle) != 1:
+              raise SystemExit("active-serving import repair precondition failed")
+          path.write_text(text.replace(needle, replacement, 1), encoding="utf-8")
+          PY
+
           git add -A
           test -z "$(git diff --cached --name-only | grep '^.github/workflows/' || true)"
           git diff --cached --check
