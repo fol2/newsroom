@@ -12,7 +12,7 @@ This repository is an automated, agentic newsroom system. Documentation authorit
 | [`research/`](research/) | Dated investigations and option studies | Non-normative evidence | Declared by each document |
 | [`adr/`](adr/) | Durable architecture decisions | Normative only when status is `accepted` | English |
 
-A link does not make an entire reference or research document normative. A merged pull request, passing test, committed Draft, Proposed plan or Proposed ADR does not imply owner acceptance.
+A link does not make an entire reference or research document normative. A merged pull request, passing test, committed Draft, Proposed plan or Proposed ADR does not imply owner acceptance. Proposed readiness plans may be merged for traceability while implementation remains blocked until a separate owner-authorised boundary exists.
 
 ## Development-agent rules
 
@@ -24,6 +24,7 @@ A link does not make an entire reference or research document normative. A merge
 6. Keep target behaviour separate from current code and tests.
 7. Preserve provenance, versions, review status, supersession and explicit deferrals.
 8. Treat specification acceptance, implementation authority, Evaluation Plan, Operational Admission, canary and production activation as separate authorities.
+9. Keep committed documentation `git diff --check` clean; use blank lines or ordinary paragraphs instead of trailing-space Markdown hard breaks.
 
 ## Current discovery and GraphRAG documents
 
@@ -33,6 +34,9 @@ A link does not make an entire reference or research document normative. A merge
 - [`adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md), [`adr/0004-source-registry-first-change-driven-discovery.md`](adr/0004-source-registry-first-change-driven-discovery.md) and [`adr/0005-native-graphrag-production-deployment.md`](adr/0005-native-graphrag-production-deployment.md) are Accepted.
 - [`plans/2026-07-16-005-native-graphrag-production-implementation.md`](plans/2026-07-16-005-native-graphrag-production-implementation.md) is the Accepted Topic 13 implementation plan. Acceptance authorises no code or run.
 - [`plans/2026-07-16-006-increment-1-implementation-readiness.md`](plans/2026-07-16-006-increment-1-implementation-readiness.md) is the Completed owner-authorised post-merge audit, traceability matrix, Increment 1 technical design, PR #75 donor map and three-PR implementation-epic boundary. It is documentation-only and authorises no runtime action.
+- [`plans/2026-07-24-010-increments-2-11-owner-acceptance.md`](plans/2026-07-24-010-increments-2-11-owner-acceptance.md) is the **Accepted** owner decision for PR #140. It supersedes the two readiness documents’ pre-acceptance metadata, authorises only Increment 2 issue #142 after PR #140 merges and records the fixed exclusions and later-increment stop gates.
+- [`plans/2026-07-24-008-increment-2-complete-fixture-readiness.md`](plans/2026-07-24-008-increment-2-complete-fixture-readiness.md) is the accepted technical readiness package for the first complete structural/full-text/vector/graph fixture slice. Implementation authority is limited by the owner-acceptance record and issue #142.
+- [`plans/2026-07-24-009-increments-3-11-readiness-ladder.md`](plans/2026-07-24-009-increments-3-11-readiness-ladder.md) is the accepted dependency and decision map for Increments 3–11. It creates no present implementation or activation authority for those blocked increments.
 - [`operations/neo4j-b2-qualification.md`](operations/neo4j-b2-qualification.md) records the Increment 1B2 Neo4j Community target, fixed-query adapter, credential separation and actual-service qualification boundary.
 - [`operations/neo4j-b3-rebuild-promotion.md`](operations/neo4j-b3-rebuild-promotion.md) records the Increment 1B3 rebuild, reconciliation, active-generation serving, recovery and rollback procedure. It authorises no runtime activation.
 - [`plans/2026-07-16-003-discovery-implementation-and-migration.md`](plans/2026-07-16-003-discovery-implementation-and-migration.md) and [`plans/2026-07-16-004-integrated-discovery-graphrag-implementation.md`](plans/2026-07-16-004-integrated-discovery-graphrag-implementation.md) are superseded tombstones retained for decision history.
@@ -49,7 +53,7 @@ A link does not make an entire reference or research document normative. A merge
 - [`research/2026-07-21-sdlc-v2-substantive-review.md`](research/2026-07-21-sdlc-v2-substantive-review.md) records the completed design review and corrected P2 findings.
 - [`plans/2026-07-21-007-sdlc-v2-migration.md`](plans/2026-07-21-007-sdlc-v2-migration.md) is the adopted reversible migration plan from historical increment workflows to one always-reporting router, one cached core lane and one conditional actual-service lane.
 - [`../.sdlc/gates.toml`](../.sdlc/gates.toml), [`../.sdlc/route.schema.json`](../.sdlc/route.schema.json), [`../.sdlc/evidence.schema.json`](../.sdlc/evidence.schema.json) and [`../.sdlc/baselines/2026-07-21-b3.json`](../.sdlc/baselines/2026-07-21-b3.json) are the accepted machine-readable contract and exact baseline evidence.
-- Issue #98 and PR #99 are the acceptance boundary. Existing required workflows remain unchanged until reversible Phase 1/2 shadow controls are merged; B3 product expansion remains preserved on Draft PR #97 until those minimum controls exist.
+- Issue #98 is closed completed. PR #99 accepted the SDLC v2 specification and PR #119 merged the reversible Phase 1/2 **SDLC Evidence Shadow** implementation. Legacy required workflows remain during burn-in; evidence remains regression evidence rather than owner approval.
 
 ## Current-system documentation
 
