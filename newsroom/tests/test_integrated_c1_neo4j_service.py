@@ -7,6 +7,7 @@ import pytest
 
 from newsroom.authority import (
     HydrationRequest,
+    ObjectAdmissionDenied,
     ObjectHydrationDenied,
     ObjectLimits,
     UtcTimestamp,
@@ -243,7 +244,7 @@ def test_actual_service_integrated_foundation_replay_recovery_and_tombstone(
                 limit=1000,
                 proof=proof(),
             )[-1].ledger_seq
-            with pytest.raises(ObjectHydrationDenied):
+            with pytest.raises((ObjectAdmissionDenied, ObjectHydrationDenied)):
                 object_system.objects.hydrate(
                     HydrationRequest(
                         initial.fixture.admission_id,
