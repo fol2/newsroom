@@ -22,7 +22,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Materialize verified Increment 2B review corrections
+      - name: Reconstruct verified review patch
         shell: bash
         run: |
           set -euo pipefail
@@ -33,7 +33,12 @@ jobs:
             | sha256sum --check -
           gzip --decompress --stdout /tmp/increment2b-review-fix.patch.gz \
             > /tmp/increment2b-review-fix.patch
+          test -s /tmp/increment2b-review-fix.patch
 
+      - name: Apply review corrections to authorised parent
+        shell: bash
+        run: |
+          set -euo pipefail
           git checkout --detach "$AUTHORIZED_PARENT"
           git apply --check /tmp/increment2b-review-fix.patch
           git apply /tmp/increment2b-review-fix.patch
@@ -41,6 +46,10 @@ jobs:
           rm -f .github/workflows/agent-increment2b-review-fix-materialize.yml
           git add -A
 
+      - name: Verify exact review diff
+        shell: bash
+        run: |
+          set -euo pipefail
           cat > /tmp/expected-paths <<'EOF'
           docs/README.md
           docs/operations/increment-2b-complete-projection.md
@@ -64,13 +73,28 @@ jobs:
             > /tmp/actual-paths
           diff -u /tmp/expected-paths /tmp/actual-paths
           git diff --cached --check
+
+      - name: Compile corrected source
+        shell: bash
+        run: |
+          set -euo pipefail
           python -m compileall -q newsroom scripts
 
+      - name: Verify exact corrected tree
+        shell: bash
+        run: |
+          set -euo pipefail
           tree="$(git write-tree)"
           echo "TREE_SHA=$tree"
           test "$tree" = "$EXPECTED_TREE"
+
+      - name: Create and push corrected checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name "Newsroom Increment 2B Agent"
           git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
           commit="$(printf '%s\n\n%s\n' \
             'fix(projection): close Increment 2B review findings' \
             'Close one source-watermark P1 and seven P2 findings: atomic validation and promotion guards, complete raw/normalized qualification evidence, strict startup row binding, operations, traceability, exclusions, rollback and current-head review evidence.' \
