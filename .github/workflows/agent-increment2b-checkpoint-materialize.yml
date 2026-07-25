@@ -1,0 +1,120 @@
+name: agent-increment2b-checkpoint-materialize
+
+on:
+  push:
+    branches:
+      - agent/increment-2b-fulltext-vector-projection
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-increment2b-checkpoint-materialize
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check transfer completeness
+        id: ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f .github/increment2b-checkpoint-transfer/READY ]]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Materialize checked Increment 2B checkpoint
+        if: steps.ready.outputs.ready == 'true'
+        shell: bash
+        env:
+          AUTHORIZED_PARENT: 819883fb77eeabfb76d91aca531003d07932d5a7
+          TARGET_BRANCH: agent/increment-2b-fulltext-vector-projection
+          ARCHIVE_SHA256: 55a4ff6cb8167ae4adf89ad1e85d25f8dad1468b6a1e48903eca1d038f6d35db
+          EXPECTED_TREE: aa54cf28373ce3bd6c415edab7a19d6e0d352028
+        run: |
+          set -euo pipefail
+          test "$(cat .github/increment2b-checkpoint-transfer/READY)" = "$ARCHIVE_SHA256"
+          cat .github/increment2b-checkpoint-transfer/part-* \
+            | base64 --decode > /tmp/increment2b-checkpoint.tar.gz
+          echo "$ARCHIVE_SHA256  /tmp/increment2b-checkpoint.tar.gz" | sha256sum --check -
+
+          cat > /tmp/expected-paths <<'EOF'
+          newsroom/authority/_complete_projection_store.py
+          newsroom/authority/_complete_projection_system.py
+          newsroom/authority/_projection_store.py
+          newsroom/authority/complete_projection_migrations.py
+          newsroom/authority/complete_projection_system.py
+          newsroom/authority/migrations.py
+          newsroom/fixtures/integrated_fixture_v2_projection.json
+          newsroom/fixtures/integrated_fixture_v2_projection.schema.json
+          newsroom/projection/__init__.py
+          newsroom/projection/complete.py
+          newsroom/projection/fixture_v2_projection.py
+          newsroom/projection/models.py
+          newsroom/projection/neo4j/__init__.py
+          newsroom/projection/neo4j/_adapter.py
+          newsroom/projection/neo4j/_complete_adapter.py
+          newsroom/projection/neo4j/_complete_state.py
+          newsroom/projection/neo4j/complete_models.py
+          newsroom/projection/neo4j/complete_state.py
+          newsroom/projection/policy.py
+          newsroom/tests/complete_projection_2b_helpers.py
+          newsroom/tests/test_complete_projection_2b_adapter_unit.py
+          newsroom/tests/test_complete_projection_2b_authority.py
+          newsroom/tests/test_complete_projection_2b_contracts.py
+          newsroom/tests/test_complete_projection_2b_migrations.py
+          newsroom/tests/test_complete_projection_2b_source_store.py
+          newsroom/tests/test_complete_projection_2b_state.py
+          newsroom/tests/test_projection_b1_migrations.py
+          newsroom/tests/test_relation_2a_contracts.py
+          EOF
+          sed -i 's/^          //' /tmp/expected-paths
+          tar -tzf /tmp/increment2b-checkpoint.tar.gz | sort > /tmp/actual-archive-paths
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          diff -u /tmp/expected-paths /tmp/actual-archive-paths
+
+          python - <<'PY'
+          from pathlib import PurePosixPath
+          import tarfile
+
+          with tarfile.open('/tmp/increment2b-checkpoint.tar.gz', 'r:gz') as archive:
+              for member in archive.getmembers():
+                  path = PurePosixPath(member.name)
+                  if (
+                      path.is_absolute()
+                      or '..' in path.parts
+                      or member.issym()
+                      or member.islnk()
+                      or not member.isfile()
+                  ):
+                      raise SystemExit(f'unsafe archive member: {member.name!r}')
+          PY
+
+          tar -xzf /tmp/increment2b-checkpoint.tar.gz -C .
+          rm -rf .github/increment2b-checkpoint-transfer
+          rm -f .github/workflows/agent-increment2b-checkpoint-materialize.yml
+          git add -A
+          git diff --cached --name-only "$AUTHORIZED_PARENT" | sort > /tmp/actual-diff-paths
+          diff -u /tmp/expected-paths /tmp/actual-diff-paths
+          git diff --cached --check
+          python -m compileall -q newsroom scripts
+
+          git config user.name "Newsroom Increment 2B Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
+          test "$tree" = "$EXPECTED_TREE"
+          commit="$(printf '%s\n\n%s\n' \
+            'feat(projection): add complete fixture projection foundation' \
+            'Checkpoint owner-authorised Increment 2B contracts, SQLite schema v7, deterministic bilingual full-text/vector fixture evidence, complete generation authority, fixed Neo4j adapter, source-store derivation, orchestration and regression tests. No 2C retrieval or runtime activation is included.' \
+            | git commit-tree "$tree" -p "$AUTHORIZED_PARENT")"
+          git push --force origin "$commit:refs/heads/$TARGET_BRANCH"
+          echo "TREE_SHA=$tree"
+          echo "COMMIT_SHA=$commit"
