@@ -27,8 +27,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(cat .github/increment2b-review-fix/READY)" = "$PATCH_SHA256"
-          base64 --decode .github/increment2b-review-fix/fix.patch.gz.b64 \
-            > /tmp/increment2b-review-fix.patch.gz
+          cat .github/increment2b-review-fix/part-* \
+            | base64 --decode > /tmp/increment2b-review-fix.patch.gz
           echo "$PATCH_SHA256  /tmp/increment2b-review-fix.patch.gz" \
             | sha256sum --check -
           gzip --decompress --stdout /tmp/increment2b-review-fix.patch.gz \
