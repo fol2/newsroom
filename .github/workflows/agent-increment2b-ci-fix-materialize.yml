@@ -1,0 +1,84 @@
+name: agent-increment2b-ci-fix-materialize
+
+on:
+  push:
+    branches:
+      - agent/increment-2b-ci-fix-materialize
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-increment2b-ci-fix-materialize
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    env:
+      AUTHORIZED_PARENT: 86a08bc7ea615681c9dcf420c3d0026bc1a3ac08
+      TARGET_BRANCH: agent/increment-2b-fulltext-vector-projection
+      PATCH_SHA256: 7fc6ae61feb1709699fd81a06602b847e310862987c8cc4837fc954419fc84de
+      EXPECTED_TREE: bffbc87616e358edbc347359c1e25dedb1185b16
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check fix transfer completeness
+        id: ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f .github/increment2b-ci-fix/READY ]]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Materialize verified CI fix
+        if: steps.ready.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat .github/increment2b-ci-fix/READY)" = "$PATCH_SHA256"
+          base64 --decode .github/increment2b-ci-fix/fix.patch.gz.b64 \
+            > /tmp/increment2b-ci-fix.patch.gz
+          echo "$PATCH_SHA256  /tmp/increment2b-ci-fix.patch.gz" \
+            | sha256sum --check -
+          gzip --decompress --stdout /tmp/increment2b-ci-fix.patch.gz \
+            > /tmp/increment2b-ci-fix.patch
+
+          git checkout --detach "$AUTHORIZED_PARENT"
+          git apply --check /tmp/increment2b-ci-fix.patch
+          git apply /tmp/increment2b-ci-fix.patch
+          rm -rf .github/increment2b-ci-fix
+          rm -f .github/workflows/agent-increment2b-ci-fix-materialize.yml
+          git add -A
+
+          cat > /tmp/expected-paths <<'EOF'
+          .github/workflows/projection-b2-neo4j.yml
+          newsroom/projection/neo4j/_complete_state.py
+          newsroom/tests/test_complete_projection_2b_adapter_unit.py
+          newsroom/tests/test_integrated_c1_sdlc_contract.py
+          newsroom/tests/test_sdlc_classifier.py
+          EOF
+          sed -i 's/^          //' /tmp/expected-paths
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          git diff --cached --name-only "$AUTHORIZED_PARENT" | sort \
+            > /tmp/actual-paths
+          diff -u /tmp/expected-paths /tmp/actual-paths
+          git diff --cached --check
+          python -m compileall -q newsroom scripts
+
+          tree="$(git write-tree)"
+          test "$tree" = "$EXPECTED_TREE"
+          git config user.name "Newsroom Increment 2B Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          commit="$(printf '%s\n\n%s\n' \
+            'fix(projection): preserve nullable Neo4j contract state' \
+            'Omit nullable complete-projection properties under Neo4j null semantics, retain strict required/unknown-property validation, update exact service routing, and preserve the legacy B2/B3/C1 evidence artifact contract.' \
+            | git commit-tree "$tree" -p "$AUTHORIZED_PARENT")"
+          git push --force origin "$commit:refs/heads/$TARGET_BRANCH"
+          echo "TREE_SHA=$tree"
+          echo "COMMIT_SHA=$commit"
