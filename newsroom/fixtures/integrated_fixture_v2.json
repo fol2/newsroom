@@ -1,0 +1,142 @@
+{
+  "schema_version": "integrated_fixture_v2",
+  "fixture_id": "00000000-0000-4000-8000-000000002001",
+  "fixture_family": "integrated_fixture_v2",
+  "rights": {
+    "basis": "repository_owned_synthetic",
+    "contains_personal_data": false,
+    "contains_copied_news_expression": false,
+    "allowed_use": "project.discovery"
+  },
+  "formal_process": {
+    "canonical_process_id": "SYN-PROC-2042",
+    "jurisdiction": "synthetic_hong_kong",
+    "aliases": [
+      {
+        "language": "en-GB",
+        "value": "Synthetic Harbour Permit Renewal 2042"
+      },
+      {
+        "language": "zh-HK",
+        "value": "合成海港許可證續期程序二〇四二"
+      }
+    ]
+  },
+  "source_definition_version_id": "00000000-0000-4000-8000-000000002002",
+  "source_item_id": "00000000-0000-4000-8000-000000002003",
+  "revisions": [
+    {
+      "source_revision_id": "00000000-0000-4000-8000-000000002004",
+      "revision_number": 1,
+      "observed_at": "2042-03-01T09:00:00.000000Z",
+      "source_asserted_effective_at": "2042-04-01T00:00:00.000000Z",
+      "deadline": "2042-03-20",
+      "instruction": "Submit the synthetic renewal form through Counter A.",
+      "passages": [
+        {
+          "passage_id": "ifv2-prior-en",
+          "language": "en-GB",
+          "text": "For process SYN-PROC-2042, applicants must submit the synthetic renewal form through Counter A by 20 March 2042.",
+          "expected_lifecycle": "ACTIVE",
+          "eligible_for_relation_evidence": true
+        },
+        {
+          "passage_id": "ifv2-prior-zh-hk",
+          "language": "zh-HK",
+          "text": "就程序 SYN-PROC-2042，申請人須於二〇四二年三月二十日前到甲櫃位遞交合成續期表格。",
+          "expected_lifecycle": "ACTIVE",
+          "eligible_for_relation_evidence": true
+        }
+      ]
+    },
+    {
+      "source_revision_id": "00000000-0000-4000-8000-000000002005",
+      "revision_number": 2,
+      "observed_at": "2042-03-12T10:30:00.000000Z",
+      "source_asserted_effective_at": "2042-03-12T10:00:00.000000Z",
+      "deadline": "2042-03-27",
+      "instruction": "Submit the synthetic renewal form through the online portal.",
+      "passages": [
+        {
+          "passage_id": "ifv2-new-en",
+          "language": "en-GB",
+          "text": "Process SYN-PROC-2042 now requires submission through the synthetic online portal, and the deadline is 27 March 2042.",
+          "expected_lifecycle": "ACTIVE",
+          "eligible_for_relation_evidence": true
+        },
+        {
+          "passage_id": "ifv2-new-zh-hk",
+          "language": "zh-HK",
+          "text": "程序 SYN-PROC-2042 現改為經合成網上平台遞交，截止日期延至二〇四二年三月二十七日。",
+          "expected_lifecycle": "ACTIVE",
+          "eligible_for_relation_evidence": true
+        }
+      ]
+    }
+  ],
+  "signals": [
+    "00000000-0000-4000-8000-000000002006",
+    "00000000-0000-4000-8000-000000002007"
+  ],
+  "leads": [
+    "00000000-0000-4000-8000-000000002008",
+    "00000000-0000-4000-8000-000000002009"
+  ],
+  "event_hypotheses": {
+    "prior_version_id": "00000000-0000-4000-8000-000000002010",
+    "new_version_id": "00000000-0000-4000-8000-000000002011"
+  },
+  "prior_candidate_version_id": "00000000-0000-4000-8000-000000002012",
+  "governed_relation": {
+    "subject_type": "EVENT_HYPOTHESIS_VERSION",
+    "subject_id": "00000000-0000-4000-8000-000000002011",
+    "predicate": "DEVELOPMENT_OF",
+    "object_type": "EVENT_HYPOTHESIS_VERSION",
+    "object_id": "00000000-0000-4000-8000-000000002010",
+    "valid_from": "2042-03-12T10:00:00.000000Z",
+    "valid_until": null,
+    "producer_kind": "DETERMINISTIC_RULE",
+    "producer_id": "newsroom.integrated_fixture_v2",
+    "producer_version": "fixture-producer-v1",
+    "rule_version": "integrated-fixture-development-rule-v1",
+    "statement": "The second synthetic revision changes both the effective deadline and submission instruction for the same formal process.",
+    "uncertainties": [
+      "The fixture is synthetic and asserts no real-world fact."
+    ],
+    "evidence_passage_ids": [
+      "ifv2-new-en",
+      "ifv2-new-zh-hk",
+      "ifv2-prior-en",
+      "ifv2-prior-zh-hk"
+    ]
+  },
+  "proposal_only_distractor": {
+    "predicate": "SAME_EVENT_AS",
+    "subject_id": "00000000-0000-4000-8000-000000002011",
+    "object_id": "00000000-0000-4000-8000-000000002010",
+    "reason": "This proposal is deliberately unadmitted and must not enter the admitted projection surface."
+  },
+  "negative_passages": [
+    {
+      "passage_id": "ifv2-distinct-jurisdiction",
+      "language": "en-GB",
+      "text": "Synthetic process SYN-PROC-2042-NORTH belongs to a different jurisdiction and year.",
+      "expected_lifecycle": "ACTIVE",
+      "eligible_for_relation_evidence": false
+    },
+    {
+      "passage_id": "ifv2-incompatible-formal-id",
+      "language": "zh-HK",
+      "text": "名稱相近，但正式編號為 SYN-PROC-2402，並非 SYN-PROC-2042。",
+      "expected_lifecycle": "ACTIVE",
+      "eligible_for_relation_evidence": false
+    },
+    {
+      "passage_id": "ifv2-tombstoned-negative",
+      "language": "en-GB",
+      "text": "This synthetic passage is retained only to prove governed deletion and tombstone non-resurrection.",
+      "expected_lifecycle": "TOMBSTONED",
+      "eligible_for_relation_evidence": false
+    }
+  ]
+}

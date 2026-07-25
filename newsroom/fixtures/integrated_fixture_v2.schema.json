@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://newsroom.invalid/schemas/integrated_fixture_v2.schema.json",
+  "title": "Newsroom integrated_fixture_v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "fixture_id",
+    "fixture_family",
+    "rights",
+    "formal_process",
+    "source_definition_version_id",
+    "source_item_id",
+    "revisions",
+    "signals",
+    "leads",
+    "event_hypotheses",
+    "prior_candidate_version_id",
+    "governed_relation",
+    "proposal_only_distractor",
+    "negative_passages"
+  ],
+  "properties": {
+    "schema_version": {"const": "integrated_fixture_v2"},
+    "fixture_id": {"$ref": "#/$defs/uuidv4"},
+    "fixture_family": {"const": "integrated_fixture_v2"},
+    "rights": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis", "contains_personal_data", "contains_copied_news_expression", "allowed_use"],
+      "properties": {
+        "basis": {"const": "repository_owned_synthetic"},
+        "contains_personal_data": {"const": false},
+        "contains_copied_news_expression": {"const": false},
+        "allowed_use": {"const": "project.discovery"}
+      }
+    },
+    "formal_process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical_process_id", "jurisdiction", "aliases"],
+      "properties": {
+        "canonical_process_id": {"const": "SYN-PROC-2042"},
+        "jurisdiction": {"const": "synthetic_hong_kong"},
+        "aliases": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/localisedText"}
+        }
+      }
+    },
+    "source_definition_version_id": {"$ref": "#/$defs/uuidv4"},
+    "source_item_id": {"$ref": "#/$defs/uuidv4"},
+    "revisions": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/revision"}
+    },
+    "signals": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/uuidv4"}
+    },
+    "leads": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/uuidv4"}
+    },
+    "event_hypotheses": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prior_version_id", "new_version_id"],
+      "properties": {
+        "prior_version_id": {"$ref": "#/$defs/uuidv4"},
+        "new_version_id": {"$ref": "#/$defs/uuidv4"}
+      }
+    },
+    "prior_candidate_version_id": {"$ref": "#/$defs/uuidv4"},
+    "governed_relation": {"$ref": "#/$defs/relation"},
+    "proposal_only_distractor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["predicate", "subject_id", "object_id", "reason"],
+      "properties": {
+        "predicate": {"const": "SAME_EVENT_AS"},
+        "subject_id": {"$ref": "#/$defs/uuidv4"},
+        "object_id": {"$ref": "#/$defs/uuidv4"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "negative_passages": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"$ref": "#/$defs/passage"}
+    }
+  },
+  "$defs": {
+    "uuidv4": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"
+    },
+    "localisedText": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language", "value"],
+      "properties": {
+        "language": {"enum": ["en-GB", "zh-HK"]},
+        "value": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "passage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passage_id", "language", "text", "expected_lifecycle", "eligible_for_relation_evidence"],
+      "properties": {
+        "passage_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+        "language": {"enum": ["en-GB", "zh-HK"]},
+        "text": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "expected_lifecycle": {"enum": ["ACTIVE", "TOMBSTONED"]},
+        "eligible_for_relation_evidence": {"type": "boolean"}
+      }
+    },
+    "revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_revision_id", "revision_number", "observed_at", "source_asserted_effective_at", "deadline", "instruction", "passages"],
+      "properties": {
+        "source_revision_id": {"$ref": "#/$defs/uuidv4"},
+        "revision_number": {"type": "integer", "minimum": 1, "maximum": 2},
+        "observed_at": {"$ref": "#/$defs/timestamp"},
+        "source_asserted_effective_at": {"$ref": "#/$defs/timestamp"},
+        "deadline": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "instruction": {"type": "string", "minLength": 1, "maxLength": 512},
+        "passages": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/passage"}
+        }
+      }
+    },
+    "relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subject_type", "subject_id", "predicate", "object_type", "object_id", "valid_from", "valid_until", "producer_kind", "producer_id", "producer_version", "rule_version", "statement", "uncertainties", "evidence_passage_ids"],
+      "properties": {
+        "subject_type": {"const": "EVENT_HYPOTHESIS_VERSION"},
+        "subject_id": {"$ref": "#/$defs/uuidv4"},
+        "predicate": {"const": "DEVELOPMENT_OF"},
+        "object_type": {"const": "EVENT_HYPOTHESIS_VERSION"},
+        "object_id": {"$ref": "#/$defs/uuidv4"},
+        "valid_from": {"$ref": "#/$defs/timestamp"},
+        "valid_until": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"},
+        "producer_kind": {"const": "DETERMINISTIC_RULE"},
+        "producer_id": {"const": "newsroom.integrated_fixture_v2"},
+        "producer_version": {"const": "fixture-producer-v1"},
+        "rule_version": {"const": "integrated-fixture-development-rule-v1"},
+        "statement": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "uncertainties": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 512}},
+        "evidence_passage_ids": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"}}
+      }
+    }
+  }
+}

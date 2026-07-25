@@ -1,0 +1,127 @@
+"""Governed editorial-relation contracts for Increment 2A."""
+
+from .fixture_v2 import (
+    INTEGRATED_FIXTURE_V2,
+    INTEGRATED_FIXTURE_V2_DIGEST,
+    IntegratedFixtureV2,
+    IntegratedFixtureV2Passage,
+    IntegratedFixtureV2RelationTemplate,
+    load_integrated_fixture_v2,
+)
+from .models import (
+    FixturePassageLifecycleLink,
+    FixturePassageObject,
+    IntegratedFixtureV2Binding,
+    IntegratedFixtureV2BindingId,
+    IntegratedFixtureV2BindingRequest,
+    RelationAdmissionDecision,
+    RelationAdmissionDecisionId,
+    RelationAssertion,
+    RelationAssertionId,
+    RelationAuthorityError,
+    RelationConflict,
+    RelationContractError,
+    RelationCurrentState,
+    RelationDecisionAction,
+    RelationDecisionRequest,
+    RelationDecisionResult,
+    RelationEndpoint,
+    RelationPredicate,
+    RelationProducer,
+    RelationProducerKind,
+    RelationProjectionAction,
+    RelationProjectionEvent,
+    RelationProposal,
+    RelationProposalId,
+    RelationProposalRequest,
+    RelationReadPolicy,
+    RelationRecordType,
+    RelationSemanticCollision,
+    RelationStaleDecision,
+    RelationStateError,
+    RelationTemporalScope,
+    sorted_passage_objects,
+)
+from .policy import (
+    INTEGRATED_FIXTURE_V2_BIND_COMMAND,
+    RELATION_COMMAND_TYPES,
+    RELATION_DECISION_COMMAND,
+    RELATION_PROPOSAL_COMMAND,
+    merge_relation_authority_registries,
+    relation_command_definitions,
+    relation_payload_contracts,
+)
+from .traceability import (
+    INCREMENT_2A_DEFERRED,
+    INCREMENT_2A_EXCLUSIONS,
+    INCREMENT_2A_TRACEABILITY,
+)
+
+_AUTHORITY_FACADE_NAMES = {
+    "GovernedRelationAuthoritySystem",
+    "GovernedRelations",
+    "open_governed_relation_authority_system",
+}
+
+
+def __getattr__(name: str):
+    if name in _AUTHORITY_FACADE_NAMES:
+        from newsroom.authority import relation_system as _system
+
+        return getattr(_system, name)
+    raise AttributeError(name)
+
+
+__all__ = [
+    "FixturePassageLifecycleLink",
+    "FixturePassageObject",
+    "GovernedRelationAuthoritySystem",
+    "GovernedRelations",
+    "INTEGRATED_FIXTURE_V2",
+    "INTEGRATED_FIXTURE_V2_BIND_COMMAND",
+    "INTEGRATED_FIXTURE_V2_DIGEST",
+    "INCREMENT_2A_DEFERRED",
+    "INCREMENT_2A_EXCLUSIONS",
+    "INCREMENT_2A_TRACEABILITY",
+    "IntegratedFixtureV2",
+    "IntegratedFixtureV2Binding",
+    "IntegratedFixtureV2BindingId",
+    "IntegratedFixtureV2BindingRequest",
+    "IntegratedFixtureV2Passage",
+    "IntegratedFixtureV2RelationTemplate",
+    "RELATION_COMMAND_TYPES",
+    "RELATION_DECISION_COMMAND",
+    "RELATION_PROPOSAL_COMMAND",
+    "RelationAdmissionDecision",
+    "RelationAdmissionDecisionId",
+    "RelationAssertion",
+    "RelationAssertionId",
+    "RelationAuthorityError",
+    "RelationConflict",
+    "RelationContractError",
+    "RelationCurrentState",
+    "RelationDecisionAction",
+    "RelationDecisionRequest",
+    "RelationDecisionResult",
+    "RelationEndpoint",
+    "RelationPredicate",
+    "RelationProducer",
+    "RelationProducerKind",
+    "RelationProjectionAction",
+    "RelationProjectionEvent",
+    "RelationProposal",
+    "RelationProposalId",
+    "RelationProposalRequest",
+    "RelationReadPolicy",
+    "RelationRecordType",
+    "RelationSemanticCollision",
+    "RelationStaleDecision",
+    "RelationStateError",
+    "RelationTemporalScope",
+    "load_integrated_fixture_v2",
+    "merge_relation_authority_registries",
+    "open_governed_relation_authority_system",
+    "relation_command_definitions",
+    "relation_payload_contracts",
+    "sorted_passage_objects",
+]
