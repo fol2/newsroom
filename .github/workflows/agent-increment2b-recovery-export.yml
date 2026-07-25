@@ -1,9 +1,9 @@
 name: agent-increment2b-recovery-export
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/increment-2b-recovery-export
+      - main
 
 permissions:
   contents: read
