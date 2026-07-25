@@ -118,11 +118,12 @@ jobs:
               projector.close()
           PY
 
-      - name: Focused B1, B2, B3 and C1 tests against actual service
+      - name: Focused B1, B2, B3, C1 and complete 2B tests against actual service
         id: focused
         continue-on-error: true
         env:
           NEWSROOM_NEO4J_SERVICE_REQUIRED: "1"
+          NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED: "1"
           NEWSROOM_NEO4J_URI: ${{ env.NEO4J_URI }}
         run: |
           uv run python -m pytest -q \
@@ -130,7 +131,8 @@ jobs:
             newsroom/tests/test_projection_b2_*.py \
             newsroom/tests/test_projection_b3_*.py \
             newsroom/tests/test_integrated_c1_neo4j_service.py \
-            --junitxml=projection-b2-b3-c1-neo4j-results.xml
+            newsroom/tests/test_complete_projection_2b_neo4j_service.py \
+            --junitxml=projection-b2-b3-c1-complete-neo4j-results.xml
 
       - name: Prove actual-service tests executed
         if: always()
@@ -139,7 +141,7 @@ jobs:
           from pathlib import Path
           import xml.etree.ElementTree as ET
 
-          report = Path("projection-b2-b3-c1-neo4j-results.xml")
+          report = Path("projection-b2-b3-c1-complete-neo4j-results.xml")
           if not report.is_file():
               raise SystemExit("actual-service JUnit report is absent")
           root = ET.parse(report).getroot()
@@ -209,20 +211,52 @@ jobs:
               for case in integrated
           ):
               raise SystemExit("C1 actual-service proof failed")
+
+          complete = [
+              case
+              for case in cases
+              if "test_complete_projection_2b_neo4j_service"
+              in case.attrib.get("classname", "")
+          ]
+          if len(complete) != 8:
+              raise SystemExit(
+                  f"expected exactly 8 complete 2B actual-service cases, found {len(complete)}"
+              )
+          if any(case.find("skipped") is not None for case in complete):
+              raise SystemExit("complete 2B actual-service cases were skipped")
+          if any(
+              case.find("failure") is not None or case.find("error") is not None
+              for case in complete
+          ):
+              raise SystemExit("complete 2B actual-service cases failed")
+          complete_names = [case.attrib.get("name", "") for case in complete]
+          required_complete_prefixes = {
+              "test_actual_service_complete_generation_queries_and_promotes_exact_state",
+              "test_actual_service_partial_or_contract_mismatched_state_fails_closed",
+              "test_actual_service_wrong_watermark_generation_and_vector_dimension_fail_closed",
+              "test_actual_service_replacement_generation_recovers_from_authority_only",
+              "test_actual_service_revocation_and_tombstone_remove_current_derivatives",
+          }
+          for prefix in sorted(required_complete_prefixes):
+              if not any(name.startswith(prefix) for name in complete_names):
+                  raise SystemExit(
+                      "required complete 2B actual-service case did not execute: "
+                      + prefix
+                  )
           PY
 
-      - name: Upload B2/B3/C1 actual-service evidence
+      - name: Upload B2/B3/C1 and complete 2B actual-service evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: projection-b2-b3-c1-neo4j-evidence
-          path: projection-b2-b3-c1-neo4j-results.xml
+          name: projection-b2-b3-c1-complete-neo4j-evidence
+          path: projection-b2-b3-c1-complete-neo4j-results.xml
           if-no-files-found: error
 
       - name: Remove disposable Neo4j state
         if: always()
         run: docker rm --force newsroom-b2-neo4j || true
 
-      - name: Enforce B2/B3/C1 actual-service gate
+      - name: Enforce B2/B3/C1 and complete 2B actual-service gate
         if: steps.focused.outcome != 'success'
         run: exit 1

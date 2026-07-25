@@ -5,6 +5,13 @@ import sqlite3
 from typing import Iterable
 
 from .canonical import digest_canonical
+from .complete_projection_migrations import (
+    COMPLETE_PROJECTION_MIGRATION,
+    COMPLETE_PROJECTION_MIGRATION_CHECKSUM,
+    COMPLETE_PROJECTION_MIGRATION_NAME,
+    COMPLETE_PROJECTION_MIGRATION_STATEMENTS,
+    COMPLETE_PROJECTION_SCHEMA_VERSION,
+)
 from .integrated_migrations import (
     INTEGRATED_FOUNDATION_MIGRATION,
     INTEGRATED_FOUNDATION_MIGRATION_CHECKSUM,
@@ -42,7 +49,7 @@ from .relation_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = RELATION_SCHEMA_VERSION
+SCHEMA_VERSION = COMPLETE_PROJECTION_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -602,6 +609,20 @@ def apply_pending_migrations(
                 ),
             )
             current = RELATION_SCHEMA_VERSION
+        if current == RELATION_SCHEMA_VERSION:
+            for statement in COMPLETE_PROJECTION_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    COMPLETE_PROJECTION_SCHEMA_VERSION,
+                    COMPLETE_PROJECTION_MIGRATION_NAME,
+                    COMPLETE_PROJECTION_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = COMPLETE_PROJECTION_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -617,6 +638,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     PROJECTION_PROMOTION_MIGRATION,
     INTEGRATED_FOUNDATION_MIGRATION,
     RELATION_MIGRATION,
+    COMPLETE_PROJECTION_MIGRATION,
 )
 
 def _expected_fingerprint() -> str:
@@ -654,5 +676,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         RELATION_SCHEMA_VERSION,
         RELATION_MIGRATION_NAME,
         RELATION_MIGRATION_CHECKSUM,
+    ),
+    (
+        COMPLETE_PROJECTION_SCHEMA_VERSION,
+        COMPLETE_PROJECTION_MIGRATION_NAME,
+        COMPLETE_PROJECTION_MIGRATION_CHECKSUM,
     ),
 )

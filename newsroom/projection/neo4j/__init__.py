@@ -1,5 +1,31 @@
 """Typed B2/B3 Neo4j projection contracts without public driver or Cypher APIs."""
 
+from .complete_models import (
+    AdmittedRelationProjection,
+    CompleteDeliveryRequest,
+    CompleteDerivativeType,
+    CompleteGenerationNames,
+    CompleteGenerationQualificationRequest,
+    CompleteGenerationValidationRequest,
+    CompleteProjectionAction,
+    CompleteProjectionApplyResult,
+    CompleteProjectionBatch,
+    CompleteProjectionDeliveryRecord,
+    CompleteProjectionDocument,
+    CompleteProjectionIdentity,
+    CompleteProjectionQualification,
+    CompleteProjectionRemoval,
+    CompleteProjectionState,
+    CompleteQualificationResult,
+    CompleteQueryHit,
+    CompleteQueryKind,
+    CompleteRebuildRequest,
+    CompleteRebuildResult,
+    Neo4jIndexState,
+    Neo4jIndexType,
+    complete_generation_names,
+)
+from .complete_state import expected_complete_projection_state
 from .models import (
     NEO4J_B2_DRIVER_VERSION,
     NEO4J_B2_IMAGE,
@@ -55,6 +81,14 @@ from .traceability import (
 
 def __getattr__(name: str):
     if name in {
+        "CompleteNeo4jProjector",
+        "CompleteProjectionAuthoritySystem",
+        "open_complete_projection_authority_system",
+    }:
+        from newsroom.authority import complete_projection_system as _system
+
+        return getattr(_system, name)
+    if name in {
         "Neo4jProjectionAuthoritySystem",
         "Neo4jStructuralProjector",
         "open_neo4j_projection_authority_system",
@@ -66,15 +100,33 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    "require_qualified_graphrag",
-    "neo4j_compatibility_digest",
-    "RuntimeProfile",
-    "QUALIFYING_PROFILES",
-    "GraphRuntimeKind",
-    "GraphRAGRuntimeConfig",
-    "GraphRAGQualificationReceipt",
-    "GraphRAGQualificationEvidence",
+    "AdmittedRelationProjection",
+    "CompleteDeliveryRequest",
+    "CompleteDerivativeType",
+    "CompleteGenerationNames",
+    "CompleteGenerationQualificationRequest",
+    "CompleteGenerationValidationRequest",
+    "CompleteNeo4jProjector",
+    "CompleteProjectionAction",
+    "CompleteProjectionApplyResult",
+    "CompleteProjectionAuthoritySystem",
+    "CompleteProjectionBatch",
+    "CompleteProjectionDeliveryRecord",
+    "CompleteProjectionDocument",
+    "CompleteProjectionIdentity",
+    "CompleteProjectionQualification",
+    "CompleteProjectionRemoval",
+    "CompleteProjectionState",
+    "CompleteQualificationResult",
+    "CompleteQueryHit",
+    "CompleteQueryKind",
+    "CompleteRebuildRequest",
+    "CompleteRebuildResult",
     "GraphRAGQualificationError",
+    "GraphRAGQualificationEvidence",
+    "GraphRAGQualificationReceipt",
+    "GraphRAGRuntimeConfig",
+    "GraphRuntimeKind",
     "INCREMENT_1B2_DEFERRED",
     "INCREMENT_1B2_EXCLUSIONS",
     "INCREMENT_1B2_TRACEABILITY",
@@ -92,6 +144,8 @@ __all__ = [
     "Neo4jConfigurationError",
     "Neo4jConnectionError",
     "Neo4jIdentityConflict",
+    "Neo4jIndexState",
+    "Neo4jIndexType",
     "Neo4jProjectionAuthoritySystem",
     "Neo4jProjectionError",
     "Neo4jProjectorConfig",
@@ -99,6 +153,8 @@ __all__ = [
     "Neo4jStructuralProjector",
     "Neo4jStructuralRead",
     "Neo4jWriteError",
+    "QUALIFYING_PROFILES",
+    "RuntimeProfile",
     "StructuralActiveReadRequest",
     "StructuralBatch",
     "StructuralDeliveryRequest",
@@ -113,5 +169,10 @@ __all__ = [
     "StructuralReadRequest",
     "StructuralReadResponse",
     "StructuralRelation",
+    "complete_generation_names",
+    "expected_complete_projection_state",
+    "neo4j_compatibility_digest",
+    "open_complete_projection_authority_system",
     "open_neo4j_projection_authority_system",
+    "require_qualified_graphrag",
 ]

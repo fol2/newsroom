@@ -15,6 +15,7 @@ from newsroom.authority.policy import (
 )
 from newsroom.authority.types import PayloadMode, TrustScope
 
+from .complete import CompleteProjectionContractRegistry
 from .mapping import StructuralMappingRegistry
 from .models import (
     GraphitiProposalWorkspaceContract,
@@ -314,6 +315,7 @@ class ProjectionContractRegistry:
     mappings: StructuralMappingRegistry
     families: ProjectionFamilyRegistry
     graphiti_workspaces: tuple[GraphitiProposalWorkspaceContract, ...] = ()
+    complete_projections: CompleteProjectionContractRegistry | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.graphiti_workspaces, tuple):
@@ -327,6 +329,12 @@ class ProjectionContractRegistry:
         if len(keys) != len(set(keys)):
             raise ProjectionContractError(
                 "Graphiti workspace contracts must be unique"
+            )
+        if self.complete_projections is not None and not isinstance(
+            self.complete_projections, CompleteProjectionContractRegistry
+        ):
+            raise ProjectionContractError(
+                "complete projection contracts must use the typed registry"
             )
 
     def family(self, family_id: str) -> ProjectionFamilyDefinition:

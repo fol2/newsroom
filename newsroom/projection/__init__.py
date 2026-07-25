@@ -5,6 +5,31 @@ Neo4j and Graphiti execution adapters are intentionally absent from Increment
 facades and non-authoritative views only.
 """
 
+from .complete import (
+    CompleteProjectionContract,
+    CompleteProjectionContractRegistry,
+    CompleteProjectionProfile,
+    FixtureVectorDocumentContract,
+    FixtureVectorManifestContract,
+    FullTextIndexContract,
+    VectorIndexContract,
+    VectorProviderKind,
+    VectorQuantizationType,
+    VectorSimilarityFunction,
+)
+from .fixture_v2_projection import (
+    INTEGRATED_FIXTURE_V2_COMPLETE_FAMILY_AGGREGATE_ID,
+    INTEGRATED_FIXTURE_V2_COMPLETE_FAMILY_ID,
+    INTEGRATED_FIXTURE_V2_PROJECTION,
+    INTEGRATED_FIXTURE_V2_PROJECTION_DIGEST,
+    FixtureProjectionDocument,
+    FullTextQualificationQuery,
+    IntegratedFixtureV2Projection,
+    VectorQualificationQuery,
+    integrated_fixture_v2_complete_family,
+    load_integrated_fixture_v2_projection,
+    with_integrated_fixture_v2_complete_projection,
+)
 from .mapping import (
     ProjectionIdentitySource,
     StructuralEventMapping,
@@ -85,6 +110,27 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "CompleteProjectionContract",
+    "CompleteProjectionContractRegistry",
+    "CompleteProjectionProfile",
+    "FixtureProjectionDocument",
+    "FixtureVectorDocumentContract",
+    "FixtureVectorManifestContract",
+    "FullTextIndexContract",
+    "FullTextQualificationQuery",
+    "INTEGRATED_FIXTURE_V2_COMPLETE_FAMILY_AGGREGATE_ID",
+    "INTEGRATED_FIXTURE_V2_COMPLETE_FAMILY_ID",
+    "INTEGRATED_FIXTURE_V2_PROJECTION",
+    "INTEGRATED_FIXTURE_V2_PROJECTION_DIGEST",
+    "IntegratedFixtureV2Projection",
+    "VectorIndexContract",
+    "VectorProviderKind",
+    "VectorQualificationQuery",
+    "VectorQuantizationType",
+    "VectorSimilarityFunction",
+    "integrated_fixture_v2_complete_family",
+    "load_integrated_fixture_v2_projection",
+    "with_integrated_fixture_v2_complete_projection",
     "DeliveryRecordView",
     "GraphitiProposalWorkspaceContract",
     "GraphitiWorkspaceMode",

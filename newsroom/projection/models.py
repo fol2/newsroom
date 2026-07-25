@@ -94,6 +94,7 @@ class ProjectionFamilyDefinition:
     projector_version: str
     ontology_contract_digest: str
     mapping_contract_digest: str
+    complete_projection_contract_digest: str | None = None
     max_delivery_attempts: int = 3
     max_gap_span: int = 1000
     required_manage_scope: str = "authority.projection.manage"
@@ -117,6 +118,19 @@ class ProjectionFamilyDefinition:
             normalized = validate_sha256_digest(value, field=field)
             if normalized != value:
                 raise ProjectionContractError(f"{field} must be canonical lowercase")
+        if self.complete_projection_contract_digest is not None:
+            normalized = validate_sha256_digest(
+                self.complete_projection_contract_digest,
+                field="complete_projection_contract_digest",
+            )
+            if normalized != self.complete_projection_contract_digest:
+                raise ProjectionContractError(
+                    "complete projection contract digest must be canonical lowercase"
+                )
+            if self.family_kind is not ProjectionFamilyKind.GRAPH:
+                raise ProjectionContractError(
+                    "complete projection contracts require a GRAPH family"
+                )
         for field, value in (
             ("max_delivery_attempts", self.max_delivery_attempts),
             ("max_gap_span", self.max_gap_span),
@@ -130,7 +144,7 @@ class ProjectionFamilyDefinition:
         require_scope(self.retention_scope, field="retention_scope")
 
     def canonical_value(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "family_id": self.family_id,
             "authority_aggregate_id": str(self.authority_aggregate_id),
             "family_kind": self.family_kind.value,
@@ -146,6 +160,13 @@ class ProjectionFamilyDefinition:
             "security_scope": self.security_scope,
             "retention_scope": self.retention_scope,
         }
+        # Omit the optional key for pre-Increment-2B definitions so all retained
+        # Increment 1 family digests remain byte-for-byte stable.
+        if self.complete_projection_contract_digest is not None:
+            value["complete_projection_contract_digest"] = (
+                self.complete_projection_contract_digest
+            )
+        return value
 
     @property
     def digest(self) -> str:

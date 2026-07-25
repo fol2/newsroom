@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://newsroom.invalid/schemas/integrated_fixture_v2_projection_v1.schema.json",
+  "title": "Integrated Fixture V2 Complete Projection Contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "fixture_id",
+    "source_fixture_digest",
+    "component_scale",
+    "dimensions",
+    "documents",
+    "qualification_queries",
+    "expected_active_passage_ids",
+    "expected_tombstoned_passage_ids"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "integrated_fixture_v2_projection_v1"
+    },
+    "fixture_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f-]{36}$"
+    },
+    "source_fixture_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "component_scale": {
+      "const": 1000000
+    },
+    "dimensions": {
+      "const": 16
+    },
+    "documents": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "passage_id",
+          "blob_digest",
+          "language",
+          "revision_id",
+          "expected_lifecycle",
+          "components"
+        ],
+        "properties": {
+          "passage_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+          },
+          "blob_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "language": {
+            "enum": ["en-GB", "zh-HK"]
+          },
+          "revision_id": {
+            "type": ["string", "null"]
+          },
+          "expected_lifecycle": {
+            "enum": ["ACTIVE", "TOMBSTONED"]
+          },
+          "components": {
+            "type": "array",
+            "minItems": 16,
+            "maxItems": 16,
+            "items": {
+              "type": "integer",
+              "minimum": -1000000,
+              "maximum": 1000000
+            }
+          }
+        }
+      }
+    },
+    "qualification_queries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fulltext", "vector"],
+      "properties": {
+        "fulltext": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["query_id", "language", "query", "expected_first_passage_id"],
+            "properties": {
+              "query_id": {"type": "string"},
+              "language": {"enum": ["en-GB", "zh-HK"]},
+              "query": {"type": "string", "minLength": 1},
+              "expected_first_passage_id": {"type": "string"}
+            }
+          }
+        },
+        "vector": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["query_id", "passage_id", "expected_active_prefix"],
+            "properties": {
+              "query_id": {"type": "string"},
+              "passage_id": {"type": "string"},
+              "expected_active_prefix": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 4,
+                "items": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "expected_active_passage_ids": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {"type": "string"}
+    },
+    "expected_tombstoned_passage_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {"type": "string"}
+    }
+  }
+}
