@@ -248,7 +248,7 @@ def test_actual_service_complete_generation_queries_and_promotes_exact_state(
         )
         assert promoted.generation.state is ProjectionGenerationState.ACTIVE
         assert _admin_scalar(
-            "MATCH ()-[relation {generation_id:$generation_id}]->() "
+            "MATCH ()-[relation:DEVELOPMENT_OF {generation_id:$generation_id}]->() "
             "RETURN count(relation)",
             generation_id=str(generation.generation_id),
         ) == 1
@@ -424,6 +424,7 @@ def test_actual_service_replacement_generation_recovers_from_authority_only(
         replacement = register_complete_generation(
             system,
             suffix=f"replacement-{uuid4().hex}",
+            register_family=False,
         )
         recovered = _rebuild(
             system,
@@ -537,7 +538,10 @@ def test_actual_service_revocation_and_tombstone_remove_current_derivatives(
         adapter=_open_complete_neo4j_adapter(_service_config()),
     )
     try:
-        start = _current(system, generation.generation_id).contiguous_ledger_seq
+        start = system.projections.status(
+            INTEGRATED_FIXTURE_V2_COMPLETE_FAMILY_ID,
+            proof=proof(),
+        ).contiguous_ledger_seq
         target = _latest_source(database)
         for ledger_seq in range(start + 1, target + 1):
             current = _current(system, generation.generation_id)
@@ -557,7 +561,7 @@ def test_actual_service_revocation_and_tombstone_remove_current_derivatives(
             passage=active_passage.passage_id,
         ) == 0
         assert _admin_scalar(
-            "MATCH ()-[relation {generation_id:$generation_id}]->() "
+            "MATCH ()-[relation:DEVELOPMENT_OF {generation_id:$generation_id}]->() "
             "RETURN count(relation)",
             generation_id=str(generation.generation_id),
         ) == 0

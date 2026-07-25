@@ -554,20 +554,26 @@ def seed_complete_fixture_authority(
     return seeded, proposal, decision
 
 
-def register_complete_generation(system, *, suffix: str = "default"):
+def register_complete_generation(
+    system,
+    *,
+    suffix: str = "default",
+    register_family: bool = True,
+):
     from newsroom.projection import (
         INTEGRATED_FIXTURE_V2_COMPLETE_FAMILY_ID,
         ProjectionFamilyRegistrationRequest,
         ProjectionGenerationCreateRequest,
     )
 
-    system.projections.register_family(
-        ProjectionFamilyRegistrationRequest(
-            INTEGRATED_FIXTURE_V2_COMPLETE_FAMILY_ID,
-            f"complete-family-register-{suffix}",
-        ),
-        proof=proof(),
-    )
+    if register_family:
+        system.projections.register_family(
+            ProjectionFamilyRegistrationRequest(
+                INTEGRATED_FIXTURE_V2_COMPLETE_FAMILY_ID,
+                f"complete-family-register-{suffix}",
+            ),
+            proof=proof(),
+        )
     generation_id = (
         COMPLETE_GENERATION_ID
         if suffix == "default"
