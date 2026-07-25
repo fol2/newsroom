@@ -1,9 +1,9 @@
 name: agent-increment2a-ci-debug-export
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/increment-2a-ci-debug-export
+      - main
 
 permissions:
   contents: read
