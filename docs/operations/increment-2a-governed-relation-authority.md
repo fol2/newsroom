@@ -93,6 +93,15 @@ The command scopes are deliberately separate:
 
 Idempotency namespaces remain bound to authority domain, principal and command type. Reusing one idempotency key for different canonical semantics fails. Exact replay returns the retained immutable identity and creates no second event, proposal, decision or assertion.
 
+Read authority is split again by purpose:
+
+| Read surface | Scope | Permitted records |
+|---|---|---|
+| retained relation metadata | `authority.relation.metadata.read` | fixture bindings, Proposals and Admission Decisions |
+| admitted projector seam | `authority.relation.project` | current admitted assertions and current-state projection events only |
+
+A projector-only principal cannot read Proposal, binding or Decision metadata. A metadata reader cannot enumerate admitted assertions or projection events. Neither read scope grants mutation, SQLite, Neo4j driver or arbitrary query authority.
+
 ## Proposal identity, collision and conflict
 
 A proposal has three distinct identities:
@@ -127,9 +136,9 @@ Supported actions are:
 - `ADMIT` — creates one immutable Relation Assertion for the exact fixture proposal;
 - `INVALIDATE` — terminally invalidates the current proposal state;
 - `REVOKE` — terminally removes an admitted assertion from current projection state; and
-- `SUPERSEDE` — terminally links a compatible successor proposal while retaining both histories.
+- `SUPERSEDE` — terminally links a compatible successor proposal recorded strictly later in authority history while retaining both histories.
 
-A proposal can allocate at most one assertion. Revocation, invalidation and supersession do not delete that historical assertion; they change the rebuildable current-state head and emit removal state for projectors.
+A proposal can allocate at most one assertion. Revocation, invalidation and supersession do not delete that historical assertion; they change the rebuildable current-state head and emit removal state for projectors. A supersession successor must preserve the exact relation axis and must have been recorded later than the proposal it succeeds; backward or self-referential lifecycle edges fail before commit and are revalidated when the store opens.
 
 ## Admitted assertion and projection seam
 
@@ -145,17 +154,26 @@ The Relation Assertion reifies:
 - Proposal and Admission Decision identities; and
 - a deterministic engine-neutral relation key.
 
-The read authority is separate from proposal and admission mutation scopes. It exposes:
+The read authority is separate from proposal and admission mutation scopes. Metadata and projection reads are also separated from each other:
+
+- fixture-binding, Proposal and Decision metadata require `authority.relation.metadata.read`;
+- current admitted assertions and projection events require `authority.relation.project`.
+
+A projector holding only `authority.relation.project` cannot inspect Proposal, Decision or fixture-binding metadata. A metadata reader cannot consume the admitted projection seam. Neither read scope grants proposal or admission mutation authority.
+
+The read authority exposes:
 
 - bounded current admitted assertions; and
 - bounded projection events after a ledger cutoff.
 
-The current admitted view applies both current governed-object authority and relation valid time. A future-valid assertion remains immutable history but does not appear on the current admitted surface before `valid_from`.
+The current admitted view applies both current governed-object authority and relation valid time. Its result bound is applied after those checks, using stable keyset pagination, so an invalid or future assertion cannot consume the caller's complete result allowance. Both admitted and projection reads also enforce a server-owned hard current-state scan ceiling; if complete evaluation would exceed it, the read fails closed rather than returning a partial view. A future-valid assertion remains immutable history but does not appear on the current admitted surface before `valid_from`.
 
 Projection events contain only admitted assertion state:
 
 - `UPSERT` carries an admitted Relation Assertion;
 - `REMOVE` carries no assertion payload and identifies relation revocation, invalidation, supersession or the latest applicable governed-object lifecycle event.
+
+The seam is current-state-aware rather than a raw history replay. A fresh rebuild from ledger sequence zero emits no historical `UPSERT` for an assertion that is now revoked, invalidated, superseded or blocked by governed-object lifecycle. It emits only the applicable idempotent `REMOVE`; it never emits the earlier assertion `UPSERT` first. If current object authority is invalid but no ordered lifecycle event can justify removal, projection fails closed instead of leaving or recreating a stale derivative. Projection pagination never splits effects sharing one source ledger sequence; if one sequence group exceeds the caller limit, the read fails closed so advancing a ledger cursor cannot skip sibling relation effects. Immutable Proposal, Decision and Assertion history remains available from SQLite under the separate metadata boundary.
 
 Proposal-only records never appear in this seam. The `SAME_EVENT_AS` distractor is tested as retained proposal authority with zero admitted projection effect.
 
@@ -174,7 +192,9 @@ An admitted assertion ceases to appear on the current admitted surface when any 
 
 The projection seam associates removal with the latest exact lifecycle event and returns every invalid affected Object Admission ID in stable order. When several evidence objects are invalid, the reason code and source event are taken from the same latest event; they cannot be accidentally combined from different objects.
 
-Tombstone and physical-removal history cannot recreate authority. Reopening SQLite validates immutable object and lifecycle linkage but does not reactivate the relation. A later graph rebuild must consume this retained authority and must not infer relation state from Neo4j.
+A revocation or tombstone therefore prevents payload resurrection during rebuild: querying the seam from sequence zero returns a removal event with no Relation Assertion payload. A projector never has to materialise prohibited assertion content merely to remove it again.
+
+Tombstone and physical-removal history cannot recreate authority. Reopening SQLite validates immutable object and lifecycle linkage but does not reactivate the relation. A later graph rebuild must consume this retained authority, must not expose an invalid assertion payload even transiently and must not infer relation state from Neo4j.
 
 ## SQLite schema and startup validation
 
@@ -196,8 +216,9 @@ Every store open validates:
 - fixture manifest and passage equality with repository files;
 - historical ACTIVE and TOMBSTONED lifecycle links ordered before fixture binding;
 - Proposal columns, semantic digests and exact evidence mappings;
-- Decision predecessor chains, Proposal digest and authority-event mapping;
-- Assertion equality with the admitted Proposal and Decision;
+- Decision predecessor chains, allowed transition history, Proposal digest, exact ledger sequence and causal ordering;
+- forward-only supersession linkage to a compatible later-recorded Proposal;
+- Assertion equality with the admitted Proposal and Decision, including exact admission time;
 - assertion-evidence equality with Proposal evidence; and
 - current decision-head equality with the latest immutable Decision.
 

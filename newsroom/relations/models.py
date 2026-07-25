@@ -117,21 +117,34 @@ class RelationAssertionId(UUIDv4Id):
 class RelationReadPolicy:
     """Immutable authorization contract for governed-relation reads.
 
-    The policy is intentionally separate from the event-ledger read policy.
-    Projectors may read the admitted assertion seam without receiving proposal,
-    decision, SQLite, or graph mutation authority.
+    The policy is intentionally separate from the event-ledger read policy and
+    carries distinct metadata and projection scopes.  Projectors may read only
+    the admitted assertion seam without receiving proposal, decision, SQLite,
+    or graph mutation authority.
     """
 
     policy_id: str
     purpose: str
-    required_scope: str
+    metadata_required_scope: str
+    projection_required_scope: str
     allowed_principal_ids: frozenset[str]
     max_results: int = 1000
 
     def __post_init__(self) -> None:
         require_token(self.policy_id, field="relation_read_policy_id")
         require_token(self.purpose, field="relation_read_purpose")
-        require_scope(self.required_scope, field="relation_read_scope")
+        require_scope(
+            self.metadata_required_scope,
+            field="relation_metadata_read_scope",
+        )
+        require_scope(
+            self.projection_required_scope,
+            field="relation_projection_read_scope",
+        )
+        if self.metadata_required_scope == self.projection_required_scope:
+            raise RelationContractError(
+                "relation metadata and projection reads require distinct scopes"
+            )
         if (
             not isinstance(self.allowed_principal_ids, frozenset)
             or not self.allowed_principal_ids
@@ -155,7 +168,8 @@ class RelationReadPolicy:
         return {
             "policy_id": self.policy_id,
             "purpose": self.purpose,
-            "required_scope": self.required_scope,
+            "metadata_required_scope": self.metadata_required_scope,
+            "projection_required_scope": self.projection_required_scope,
             "allowed_principal_ids": sorted(self.allowed_principal_ids),
             "max_results": self.max_results,
         }

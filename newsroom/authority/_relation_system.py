@@ -302,13 +302,27 @@ class _RelationBoundary:
         aggregate_id: str,
         trust_scope: str,
         semantic_value: dict[str, object],
+        required_scope: str,
         proof: AuthenticationProof,
     ) -> None:
         now, authentication = self._authenticate_read(proof)
+        if required_scope == self._read_policy.metadata_required_scope:
+            aggregate_type = "governed_relation_metadata"
+            event_type = "relation.metadata.read"
+        elif required_scope == self._read_policy.projection_required_scope:
+            aggregate_type = "governed_relation_projection"
+            event_type = "relation.projection.read"
+        else:
+            raise PermissionError(
+                "relation read scope is outside the server-owned read policy"
+            )
         stable_digest = digest_canonical(
             {
                 "relation_read_policy_digest": self._read_policy.digest,
                 "operation": operation,
+                "required_scope": required_scope,
+                "aggregate_type": aggregate_type,
+                "event_type": event_type,
                 "semantic_value": semantic_value,
             }
         )
@@ -320,12 +334,12 @@ class _RelationBoundary:
             "principal_id": authentication.principal_id,
             "authority_domain": authentication.authority_domain,
             "operation_type": operation_type,
-            "required_scope": self._read_policy.required_scope,
+            "required_scope": required_scope,
             "stable_semantic_request_digest": stable_digest,
             "command_definition_digest": self._read_policy.digest,
-            "aggregate_type": "governed_relation_metadata",
+            "aggregate_type": aggregate_type,
             "aggregate_id": aggregate_id,
-            "event_type": "relation.metadata.read",
+            "event_type": event_type,
             "event_schema_version": 1,
             "payload_mode": "NO_PAYLOAD",
             "payload_schema_version": "governed_relation_read_v1",
@@ -345,12 +359,12 @@ class _RelationBoundary:
             principal_id=authentication.principal_id,
             authority_domain=authentication.authority_domain,
             operation_type=operation_type,
-            required_scope=self._read_policy.required_scope,
+            required_scope=required_scope,
             stable_semantic_request_digest=stable_digest,
             command_definition_digest=self._read_policy.digest,
-            aggregate_type="governed_relation_metadata",
+            aggregate_type=aggregate_type,
             aggregate_id=aggregate_id,
-            event_type="relation.metadata.read",
+            event_type=event_type,
             event_schema_version=1,
             payload_mode="NO_PAYLOAD",
             payload_schema_version="governed_relation_read_v1",
@@ -385,6 +399,7 @@ class _RelationBoundary:
             raise TypeError("fixture binding identity must be typed")
         self._authorize_read(
             operation="fixture-binding",
+            required_scope=self._read_policy.metadata_required_scope,
             aggregate_id=str(binding_id),
             trust_scope="OBSERVED",
             semantic_value={"binding_id": str(binding_id)},
@@ -401,6 +416,7 @@ class _RelationBoundary:
             raise TypeError("relation proposal identity must be typed")
         self._authorize_read(
             operation="proposal",
+            required_scope=self._read_policy.metadata_required_scope,
             aggregate_id=str(proposal_id),
             trust_scope="PROPOSED",
             semantic_value={"proposal_id": str(proposal_id)},
@@ -417,6 +433,7 @@ class _RelationBoundary:
             raise TypeError("relation decision identity must be typed")
         self._authorize_read(
             operation="decision",
+            required_scope=self._read_policy.metadata_required_scope,
             aggregate_id=str(decision_id),
             trust_scope="ADMITTED",
             semantic_value={"decision_id": str(decision_id)},
@@ -435,6 +452,7 @@ class _RelationBoundary:
             raise TypeError("admitted relation read time must be typed")
         self._authorize_read(
             operation="admitted-assertions",
+            required_scope=self._read_policy.projection_required_scope,
             aggregate_id=self._read_policy.policy_id,
             trust_scope="ADMITTED",
             semantic_value={
@@ -463,6 +481,7 @@ class _RelationBoundary:
             raise TypeError("projection event read time must be typed")
         self._authorize_read(
             operation="projection-events",
+            required_scope=self._read_policy.projection_required_scope,
             aggregate_id=self._read_policy.policy_id,
             trust_scope="ADMITTED",
             semantic_value={

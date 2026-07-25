@@ -66,6 +66,7 @@ _TERMINAL_STATES = {
     RelationCurrentState.REVOKED,
     RelationCurrentState.SUPERSEDED,
 }
+_MAX_RELATION_CURRENT_SCAN = 10_000
 
 
 class _RelationAuthorityStore(_EventAuthorityStore):
@@ -1165,7 +1166,7 @@ class _RelationAuthorityStore(_EventAuthorityStore):
         conn: sqlite3.Connection,
         proposal: RelationProposal,
         successor_id: RelationProposalId,
-    ) -> None:
+    ) -> RelationProposal:
         row = conn.execute(
             "SELECT * FROM relation_proposals WHERE proposal_id=?",
             (str(successor_id),),
@@ -1182,6 +1183,11 @@ class _RelationAuthorityStore(_EventAuthorityStore):
             raise RelationStateError(
                 "supersession successor must preserve exact relation axis"
             )
+        if successor.authority_ledger_seq <= proposal.authority_ledger_seq:
+            raise RelationStateError(
+                "supersession successor must be recorded later than its predecessor"
+            )
+        return successor
 
     def commit_relation_decision(
         self,
@@ -1714,20 +1720,61 @@ class _RelationAuthorityStore(_EventAuthorityStore):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > 1000:
             raise ValueError("admitted relation read limit is invalid")
         with self._lock:
-            rows = self._connection.execute(
-                "SELECT a.* FROM relation_assertions a "
-                "JOIN relation_decision_heads h ON h.proposal_id=a.proposal_id "
-                "WHERE h.current_state='ADMITTED' ORDER BY a.relation_key LIMIT ?",
-                (limit,),
-            ).fetchall()
             retained: list[RelationAssertion] = []
-            for row in rows:
-                assertion = self._assertion_from_row(self._connection, row)
-                current, _reason, _event, _ids = self._assertion_object_state(
-                    self._connection, assertion, now=now
-                )
-                if current and self._assertion_is_valid_at(assertion, now):
-                    retained.append(assertion)
+            after_relation_key: str | None = None
+            batch_size = min(max(limit * 2, 64), 1000)
+            max_scan = min(
+                max(limit * 16, 256),
+                _MAX_RELATION_CURRENT_SCAN,
+            )
+            scanned = 0
+            while len(retained) < limit:
+                remaining_scan = max_scan - scanned
+                page_limit = min(batch_size, remaining_scan + 1)
+                if after_relation_key is None:
+                    rows = self._connection.execute(
+                        "SELECT a.* FROM relation_assertions a "
+                        "JOIN relation_decision_heads h "
+                        "ON h.proposal_id=a.proposal_id "
+                        "WHERE h.current_state='ADMITTED' "
+                        "ORDER BY a.relation_key LIMIT ?",
+                        (page_limit,),
+                    ).fetchall()
+                else:
+                    rows = self._connection.execute(
+                        "SELECT a.* FROM relation_assertions a "
+                        "JOIN relation_decision_heads h "
+                        "ON h.proposal_id=a.proposal_id "
+                        "WHERE h.current_state='ADMITTED' "
+                        "AND a.relation_key>? "
+                        "ORDER BY a.relation_key LIMIT ?",
+                        (after_relation_key, page_limit),
+                    ).fetchall()
+                if not rows:
+                    break
+                if len(rows) > remaining_scan:
+                    raise RelationStateError(
+                        "admitted relation current-state scan exceeds its bound"
+                    )
+                scanned += len(rows)
+                for row in rows:
+                    after_relation_key = str(row["relation_key"])
+                    assertion = self._assertion_from_row(
+                        self._connection, row
+                    )
+                    current, _reason, _event, _ids = (
+                        self._assertion_object_state(
+                            self._connection,
+                            assertion,
+                            now=now,
+                        )
+                    )
+                    if current and self._assertion_is_valid_at(assertion, now):
+                        retained.append(assertion)
+                        if len(retained) == limit:
+                            break
+                if len(rows) < page_limit:
+                    break
             return tuple(retained)
 
     def projection_events_after(
@@ -1748,9 +1795,19 @@ class _RelationAuthorityStore(_EventAuthorityStore):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > 2000:
             raise ValueError("projection event limit is invalid")
         with self._lock:
+            max_scan = min(
+                max(limit * 16, 256),
+                _MAX_RELATION_CURRENT_SCAN,
+            )
             assertions = self._connection.execute(
-                "SELECT * FROM relation_assertions ORDER BY admitted_at,assertion_id"
+                "SELECT * FROM relation_assertions "
+                "ORDER BY admitted_at,assertion_id LIMIT ?",
+                (max_scan + 1,),
             ).fetchall()
+            if len(assertions) > max_scan:
+                raise RelationStateError(
+                    "relation projection current-state scan exceeds its bound"
+                )
             events: list[RelationProjectionEvent] = []
             for row in assertions:
                 assertion = self._assertion_from_row(self._connection, row)
@@ -1764,20 +1821,6 @@ class _RelationAuthorityStore(_EventAuthorityStore):
                         "relation assertion admission decision is missing"
                     )
                 admit_seq = int(admit_decision["authority_ledger_seq"])
-                if admit_seq > after_ledger_seq:
-                    events.append(
-                        RelationProjectionEvent(
-                            action=RelationProjectionAction.UPSERT,
-                            assertion_id=assertion.assertion_id,
-                            relation_key=assertion.relation_key,
-                            source_event_id=EventId.parse(
-                                str(admit_decision["authority_event_id"])
-                            ),
-                            source_ledger_seq=admit_seq,
-                            reason_code="RELATION_ADMITTED",
-                            assertion=assertion,
-                        )
-                    )
                 head = self._current_decision_head(
                     self._connection, str(assertion.proposal_id)
                 )
@@ -1806,7 +1849,11 @@ class _RelationAuthorityStore(_EventAuthorityStore):
                 current, reason, lifecycle_event, invalid_ids = self._assertion_object_state(
                     self._connection, assertion, now=now
                 )
-                if not current and lifecycle_event is not None:
+                if not current:
+                    if lifecycle_event is None:
+                        raise RelationStateError(
+                            "invalid admitted relation lacks an ordered lifecycle event"
+                        )
                     remove_seq, remove_event_id = lifecycle_event
                     if remove_seq > after_ledger_seq:
                         events.append(
@@ -1821,6 +1868,24 @@ class _RelationAuthorityStore(_EventAuthorityStore):
                                 tombstone_object_admission_ids=invalid_ids,
                             )
                         )
+                    # Historical admission remains immutable SQLite authority,
+                    # but a current-state rebuild seam must never re-expose an
+                    # assertion whose governed evidence is now unavailable.
+                    continue
+                if admit_seq > after_ledger_seq:
+                    events.append(
+                        RelationProjectionEvent(
+                            action=RelationProjectionAction.UPSERT,
+                            assertion_id=assertion.assertion_id,
+                            relation_key=assertion.relation_key,
+                            source_event_id=EventId.parse(
+                                str(admit_decision["authority_event_id"])
+                            ),
+                            source_ledger_seq=admit_seq,
+                            reason_code="RELATION_ADMITTED",
+                            assertion=assertion,
+                        )
+                    )
             events.sort(
                 key=lambda item: (
                     item.source_ledger_seq,
@@ -1828,7 +1893,26 @@ class _RelationAuthorityStore(_EventAuthorityStore):
                     item.action.value,
                 )
             )
-            return tuple(events[:limit])
+            page: list[RelationProjectionEvent] = []
+            index = 0
+            while index < len(events):
+                source_ledger_seq = events[index].source_ledger_seq
+                end = index + 1
+                while (
+                    end < len(events)
+                    and events[end].source_ledger_seq == source_ledger_seq
+                ):
+                    end += 1
+                group = events[index:end]
+                if len(group) > limit and not page:
+                    raise RelationStateError(
+                        "projection event limit would split one ledger sequence"
+                    )
+                if len(page) + len(group) > limit:
+                    break
+                page.extend(group)
+                index = end
+            return tuple(page)
 
     def _validate_relation_integrity(self) -> None:
         with self._lock:
@@ -2084,9 +2168,20 @@ class _RelationAuthorityStore(_EventAuthorityStore):
             recorded_at=str(row["recorded_at"]),
         )
         event = cls._event_row(conn, str(row["authority_event_id"]))
-        if int(event["ledger_seq"]) != int(row["authority_ledger_seq"]):
+        binding = conn.execute(
+            "SELECT authority_event_id FROM integrated_fixture_v2_bindings "
+            "WHERE binding_id=?",
+            (str(proposal.fixture_binding_id),),
+        ).fetchone()
+        if (
+            int(event["ledger_seq"]) != int(row["authority_ledger_seq"])
+            or binding is None
+            or cls._event_ledger_seq(
+                conn, str(binding["authority_event_id"])
+            ) >= int(event["ledger_seq"])
+        ):
             raise AuthorityPersistenceError(
-                "relation proposal ledger sequence is inconsistent"
+                "relation proposal ledger sequence or binding order is inconsistent"
             )
 
     @classmethod
@@ -2095,14 +2190,32 @@ class _RelationAuthorityStore(_EventAuthorityStore):
     ) -> None:
         decision = cls._decision_from_row(conn, row, replayed=False)
         value = cls._canonical_row_value(row, identity="relation admission decision")
-        proposal = conn.execute(
-            "SELECT proposal_digest FROM relation_proposals WHERE proposal_id=?",
+        proposal_row = conn.execute(
+            "SELECT * FROM relation_proposals WHERE proposal_id=?",
             (str(decision.proposal_id),),
         ).fetchone()
-        if proposal is None or str(proposal["proposal_digest"]) != decision.proposal_digest:
+        if proposal_row is None:
+            raise AuthorityPersistenceError(
+                "relation decision proposal is missing"
+            )
+        proposal = cls._proposal_from_row(conn, proposal_row, replayed=False)
+        if proposal.proposal_digest != decision.proposal_digest:
             raise AuthorityPersistenceError(
                 "relation decision proposal digest is inconsistent"
             )
+        successor: RelationProposal | None = None
+        if decision.action is RelationDecisionAction.SUPERSEDE:
+            assert decision.successor_proposal_id is not None
+            try:
+                successor = cls._require_successor(
+                    conn,
+                    proposal,
+                    decision.successor_proposal_id,
+                )
+            except RelationStateError as exc:
+                raise AuthorityPersistenceError(
+                    "relation supersession successor is inconsistent"
+                ) from exc
         expected = {
             "decision_id": str(decision.decision_id),
             "proposal_id": str(decision.proposal_id),
@@ -2138,10 +2251,12 @@ class _RelationAuthorityStore(_EventAuthorityStore):
             raise AuthorityPersistenceError(
                 "relation decision canonical evidence differs from columns"
             )
+        previous = None
+        prior_state: RelationCurrentState | None = None
         if decision.decision_version > 1:
             previous = conn.execute(
-                "SELECT proposal_id,decision_version FROM relation_admission_decisions "
-                "WHERE decision_id=?",
+                "SELECT proposal_id,decision_version,authority_ledger_seq,action "
+                "FROM relation_admission_decisions WHERE decision_id=?",
                 (str(decision.previous_decision_id),),
             ).fetchone()
             if (
@@ -2152,7 +2267,16 @@ class _RelationAuthorityStore(_EventAuthorityStore):
                 raise AuthorityPersistenceError(
                     "relation decision predecessor chain is inconsistent"
                 )
-        cls._validate_event(
+            prior_state = _STATE_BY_ACTION[
+                RelationDecisionAction(str(previous["action"]))
+            ]
+        try:
+            cls._require_transition(prior_state, decision.action)
+        except RelationStateError as exc:
+            raise AuthorityPersistenceError(
+                "relation decision transition history is inconsistent"
+            ) from exc
+        event = cls._validate_event(
             conn,
             event_id=str(row["authority_event_id"]),
             event_type="relation.admission.decided",
@@ -2182,6 +2306,22 @@ class _RelationAuthorityStore(_EventAuthorityStore):
             trust_scope="ADMITTED",
             recorded_at=str(row["recorded_at"]),
         )
+        event_ledger_seq = int(event["ledger_seq"])
+        if (
+            event_ledger_seq != decision.authority_ledger_seq
+            or proposal.authority_ledger_seq >= event_ledger_seq
+            or (
+                previous is not None
+                and int(previous["authority_ledger_seq"]) >= event_ledger_seq
+            )
+            or (
+                successor is not None
+                and successor.authority_ledger_seq >= event_ledger_seq
+            )
+        ):
+            raise AuthorityPersistenceError(
+                "relation decision ledger sequence or causal ordering is inconsistent"
+            )
         if int(row["authority_aggregate_version"]) != decision.decision_version:
             raise AuthorityPersistenceError(
                 "relation decision aggregate version is inconsistent"
@@ -2198,8 +2338,8 @@ class _RelationAuthorityStore(_EventAuthorityStore):
             (str(assertion.proposal_id),),
         ).fetchone()
         decision = conn.execute(
-            "SELECT action,assertion_id,proposal_id FROM relation_admission_decisions "
-            "WHERE decision_id=?",
+            "SELECT action,assertion_id,proposal_id,recorded_at "
+            "FROM relation_admission_decisions WHERE decision_id=?",
             (str(assertion.admission_decision_id),),
         ).fetchone()
         if proposal_row is None or decision is None:
@@ -2207,10 +2347,13 @@ class _RelationAuthorityStore(_EventAuthorityStore):
                 "relation assertion lacks proposal or decision authority"
             )
         proposal = cls._proposal_from_row(conn, proposal_row, replayed=False)
+        if str(decision["recorded_at"]) != assertion.admitted_at.to_text():
+            raise AuthorityPersistenceError(
+                "relation assertion admission time differs from its decision"
+            )
         if (
             value != assertion.canonical_value()
-            or
-            str(decision["action"]) != "ADMIT"
+            or str(decision["action"]) != "ADMIT"
             or str(decision["assertion_id"]) != str(assertion.assertion_id)
             or str(decision["proposal_id"]) != str(assertion.proposal_id)
             or assertion.subject != proposal.subject

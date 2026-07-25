@@ -14,6 +14,7 @@ from newsroom.relations import (
     RelationProducer,
     RelationProducerKind,
     RelationProposalId,
+    RelationStateError,
 )
 
 from .relation_2a_helpers import (
@@ -83,9 +84,9 @@ def test_relation_revocation_removes_projection_without_deleting_history(
         events = system.relations.projection_events_after(
             0, valid_at=RELATION_NOW, proof=proof()
         )
-        assert [item.action.value for item in events] == ["UPSERT", "REMOVE"]
-        assert events[-1].reason_code == "RELATION_REVOKED"
-        assert events[0].assertion == admitted.assertion
+        assert [item.action.value for item in events] == ["REMOVE"]
+        assert events[0].reason_code == "RELATION_REVOKED"
+        assert events[0].assertion is None
         assert system.relations.decision(
             admitted.decision.decision_id, proof=proof()
         ) == admitted.decision
@@ -184,6 +185,67 @@ def test_relation_supersession_links_successor_and_removes_prior_assertion(
         assert system.relations.proposal(successor.proposal_id, proof=proof()) == successor
 
 
+def test_supersession_successor_must_be_recorded_later(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    seeded = seed_fixture_objects(database, object_root=tmp_path / "objects")
+    predecessor = bind_fixture_and_propose(database, seeded)
+    later_request = INTEGRATED_FIXTURE_V2.relation.request(
+        proposal_id=SECOND_PROPOSAL_ID,
+        fixture_binding_id=BINDING_ID,
+        idempotency_key="later-proposal-for-backward-supersession",
+    )
+    later_request = later_request.__class__(
+        proposal_id=later_request.proposal_id,
+        fixture_binding_id=later_request.fixture_binding_id,
+        subject=later_request.subject,
+        predicate=later_request.predicate,
+        object=later_request.object,
+        temporal_scope=later_request.temporal_scope,
+        evidence_passage_ids=later_request.evidence_passage_ids,
+        producer=RelationProducer(
+            RelationProducerKind.AUTHORISED_OPERATOR,
+            "fixture-reviewer",
+            "fixture-reviewer-v3",
+            "fixture-backward-supersession-rule-v1",
+        ),
+        statement=(
+            "A later synthetic proposal cannot name an earlier proposal as "
+            "its supersession successor."
+        ),
+        uncertainties=later_request.uncertainties,
+        idempotency_key=later_request.idempotency_key,
+    )
+
+    with open_relation_system(database) as system:
+        later = system.relations.propose(later_request, proof=proof())
+        held = system.relations.decide(
+            decision_request(
+                later,
+                action=RelationDecisionAction.HOLD,
+                key="hold-later-proposal",
+            ),
+            proof=proof(),
+        )
+        with pytest.raises(RelationStateError, match="recorded later"):
+            system.relations.decide(
+                decision_request(
+                    later,
+                    action=RelationDecisionAction.SUPERSEDE,
+                    expected_version=1,
+                    previous_decision_id=held.decision.decision_id,
+                    successor_proposal_id=predecessor.proposal_id,
+                    key="reject-backward-supersession",
+                ),
+                proof=proof(),
+            )
+        assert system.relations.decision(
+            held.decision.decision_id,
+            proof=proof(),
+        ) == held.decision
+
+
 def test_governed_evidence_revocation_removes_relation_and_links_admission(
     tmp_path: Path,
 ) -> None:
@@ -204,6 +266,15 @@ def test_governed_evidence_revocation_removes_relation_and_links_admission(
         assert system.relations.admitted(
             valid_at=RELATION_NOW, proof=proof()
         ) == ()
+        rebuild_events = system.relations.projection_events_after(
+            0,
+            valid_at=RELATION_NOW,
+            proof=proof(),
+        )
+        assert len(rebuild_events) == 1
+        assert rebuild_events[0].action.value == "REMOVE"
+        assert rebuild_events[0].assertion is None
+        assert rebuild_events[0].source_event_id == revocation.event_id
         events = system.relations.projection_events_after(
             admitted.decision.authority_ledger_seq,
             valid_at=RELATION_NOW,
@@ -246,6 +317,15 @@ def test_governed_deletion_tombstone_is_latest_removal_and_never_resurrects(
         )
 
     with open_relation_system(database) as system:
+        rebuild_events = system.relations.projection_events_after(
+            0,
+            valid_at=RELATION_NOW,
+            proof=proof(),
+        )
+        assert len(rebuild_events) == 1
+        assert rebuild_events[0].action.value == "REMOVE"
+        assert rebuild_events[0].assertion is None
+        assert rebuild_events[0].source_event_id == tombstone.event_id
         events = system.relations.projection_events_after(
             admitted.decision.authority_ledger_seq,
             valid_at=RELATION_NOW,
@@ -384,6 +464,88 @@ def test_reopen_rejects_decision_head_rebinding(tmp_path: Path) -> None:
         conn.close()
 
     with pytest.raises(AuthorityPersistenceError, match="decision head"):
+        open_relation_system(database)
+
+
+def test_reopen_rejects_decision_ledger_sequence_rebinding(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    _seeded, _proposal, _admitted = _admit_fixture_relation(
+        database, tmp_path / "objects"
+    )
+
+    conn = sqlite3.connect(database)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM relation_admission_decisions WHERE action='ADMIT'"
+        ).fetchone()
+        assert row is not None
+        rebound_seq = int(row["authority_ledger_seq"]) + 1000
+        value = json.loads(bytes(row["canonical_bytes"]).decode("utf-8"))
+        value["authority_ledger_seq"] = rebound_seq
+        canonical = canonical_json_bytes(value)
+        trigger = _drop_trigger(conn, "immutable_relation_decision_update")
+        conn.execute(
+            "UPDATE relation_admission_decisions SET authority_ledger_seq=?,"
+            "canonical_bytes=?,canonical_digest=? WHERE decision_id=?",
+            (
+                rebound_seq,
+                canonical,
+                digest_bytes(canonical),
+                str(row["decision_id"]),
+            ),
+        )
+        conn.execute(trigger)
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(
+        AuthorityPersistenceError,
+        match="ledger sequence|causal ordering",
+    ):
+        open_relation_system(database)
+
+
+def test_reopen_rejects_assertion_admission_time_rebinding(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    _seeded, _proposal, _admitted = _admit_fixture_relation(
+        database, tmp_path / "objects"
+    )
+
+    conn = sqlite3.connect(database)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute("SELECT * FROM relation_assertions").fetchone()
+        assert row is not None
+        rebound_time = "2042-03-01T12:00:01.000000Z"
+        value = json.loads(bytes(row["canonical_bytes"]).decode("utf-8"))
+        value["admitted_at"] = rebound_time
+        canonical = canonical_json_bytes(value)
+        trigger = _drop_trigger(conn, "immutable_relation_assertion_update")
+        conn.execute(
+            "UPDATE relation_assertions SET admitted_at=?,canonical_bytes=?,"
+            "canonical_digest=? WHERE assertion_id=?",
+            (
+                rebound_time,
+                canonical,
+                digest_bytes(canonical),
+                str(row["assertion_id"]),
+            ),
+        )
+        conn.execute(trigger)
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(
+        AuthorityPersistenceError,
+        match="assertion admission time",
+    ):
         open_relation_system(database)
 
 

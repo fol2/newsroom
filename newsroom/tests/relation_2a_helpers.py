@@ -83,7 +83,8 @@ def scopes() -> frozenset[str]:
             "authority.fixture.v2.bind",
             "authority.relation.propose",
             "authority.relation.admit",
-            "authority.relation.read",
+            "authority.relation.metadata.read",
+            "authority.relation.project",
         }
     )
 
@@ -141,7 +142,8 @@ def relation_read_policy() -> RelationReadPolicy:
     return RelationReadPolicy(
         policy_id="relation-projector-v1",
         purpose="relation.projection",
-        required_scope="authority.relation.read",
+        metadata_required_scope="authority.relation.metadata.read",
+        projection_required_scope="authority.relation.project",
         allowed_principal_ids=frozenset({"principal.alpha"}),
         max_results=2000,
     )

@@ -14,6 +14,10 @@ _OPERATION_GUIDE = (
     _REPOSITORY_ROOT
     / "docs/operations/increment-2a-governed-relation-authority.md"
 )
+_SUBSTANTIVE_REVIEW = (
+    _REPOSITORY_ROOT
+    / "docs/research/2026-07-25-increment-2a-substantive-review.md"
+)
 
 
 def test_increment_2a_traceability_covers_issue_155_deliverables() -> None:
@@ -54,6 +58,7 @@ def test_increment_2a_traceability_covers_issue_155_deliverables() -> None:
         "newsroom.tests.test_relation_2a_contracts",
         "newsroom.tests.test_relation_2a_lifecycle_integrity",
         "docs.operations.increment-2a-governed-relation-authority",
+        "docs.research.2026-07-25-increment-2a-substantive-review",
     } <= flattened
 
 
@@ -96,9 +101,28 @@ def test_increment_2a_operations_guide_records_authority_and_rollback() -> None:
         "governed_relation_authority_v6",
         "governed_blob.deletion.tombstoned",
         "Proposal-only records never appear in this seam",
+        "authority.relation.metadata.read",
+        "authority.relation.project",
+        "it never emits the earlier assertion `UPSERT` first",
+        "hard current-state scan ceiling",
+        "recorded strictly later in authority history",
+        "exact admission time",
         "Do not perform an ad hoc down-migration",
         "Issue #156 remains blocked",
     ):
         assert required in text
     assert "arbitrary Cypher" in text
     assert "Increment 2B implementation" in text
+
+
+def test_increment_2a_substantive_review_records_zero_unresolved_p1_p2() -> None:
+    text = _SUBSTANTIVE_REVIEW.read_text(encoding="utf-8")
+    for required in (
+        "Reviewed pre-correction head: `d4877f47e9399964ebaea75bd7fc56daa09258c4`",
+        "P1 findings: 0",
+        "P2 findings: 7",
+        "Remaining unresolved P1/P2 after correction: 0",
+        "1,031 passed, 11 skipped, 0 failed",
+        "Issue #156 remains blocked",
+    ):
+        assert required in text

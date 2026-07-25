@@ -191,7 +191,8 @@ def test_relation_read_policy_is_server_owned_bounded_authority() -> None:
     policy = RelationReadPolicy(
         policy_id="relation-reader-v1",
         purpose="relation.projector",
-        required_scope="authority.relation.read",
+        metadata_required_scope="authority.relation.metadata.read",
+        projection_required_scope="authority.relation.project",
         allowed_principal_ids=frozenset({"principal.alpha"}),
         max_results=32,
     )
@@ -203,6 +204,15 @@ def test_relation_read_policy_is_server_owned_bounded_authority() -> None:
         policy.require_principal("principal.beta")
     with pytest.raises(PermissionError):
         policy.require_limit(33)
+    with pytest.raises(RelationContractError, match="distinct scopes"):
+        RelationReadPolicy(
+            policy_id="invalid-relation-reader-v1",
+            purpose="relation.projector",
+            metadata_required_scope="authority.relation.read",
+            projection_required_scope="authority.relation.read",
+            allowed_principal_ids=frozenset({"principal.alpha"}),
+            max_results=32,
+        )
 
 
 def test_relation_migration_is_checked_version_six() -> None:

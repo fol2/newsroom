@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from threading import RLock
 
 import pytest
 
@@ -11,8 +12,12 @@ from newsroom.authority import (
     IdempotencyIdentityConflict,
     UtcTimestamp,
 )
+import newsroom.authority._relation_store as relation_store_module
+from newsroom.authority._relation_store import _RelationAuthorityStore
 from newsroom.relations import (
     INTEGRATED_FIXTURE_V2,
+    RelationAdmissionDecisionId,
+    RelationAssertionId,
     RelationCurrentState,
     RelationDecisionAction,
     RelationPredicate,
@@ -117,6 +122,316 @@ def test_admitted_surface_applies_relation_valid_time_without_rewriting_history(
         assert system.relations.decision(
             admitted.decision.decision_id, proof=proof()
         ) == admitted.decision
+
+
+def test_admitted_limit_applies_after_current_authority_filtering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = (
+        {"relation_key": "relation:a", "assertion": "invalid"},
+        {"relation_key": "relation:b", "assertion": "valid"},
+    )
+
+    class _Cursor:
+        def fetchall(self):
+            return list(rows)
+
+    class _Connection:
+        def execute(self, sql: str, parameters: tuple[object, ...]):
+            assert "ORDER BY a.relation_key LIMIT ?" in sql
+            # The caller limit is one, but filtering happens after reading a
+            # bounded batch so an invalid first row cannot starve a valid row.
+            assert parameters == (64,)
+            return _Cursor()
+
+    store = object.__new__(_RelationAuthorityStore)
+    store._lock = RLock()
+    store._closed = False
+    store._conn = _Connection()
+    monkeypatch.setattr(
+        _RelationAuthorityStore,
+        "_assertion_from_row",
+        classmethod(lambda cls, conn, row: row["assertion"]),
+    )
+    monkeypatch.setattr(
+        _RelationAuthorityStore,
+        "_assertion_object_state",
+        classmethod(
+            lambda cls, conn, assertion, now: (
+                assertion == "valid",
+                "OBJECT_CURRENT",
+                None,
+                (),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        _RelationAuthorityStore,
+        "_assertion_is_valid_at",
+        staticmethod(lambda assertion, valid_at: True),
+    )
+
+    assert store.admitted_assertions(now=RELATION_NOW, limit=1) == ("valid",)
+
+
+def test_current_relation_reads_fail_closed_when_internal_scan_bound_is_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = (
+        {"relation_key": "relation:a"},
+        {"relation_key": "relation:b"},
+    )
+
+    class _Cursor:
+        def fetchall(self):
+            return list(rows)
+
+    class _Connection:
+        def execute(self, sql: str, parameters: tuple[object, ...] = ()):
+            assert parameters == (2,)
+            return _Cursor()
+
+    store = object.__new__(_RelationAuthorityStore)
+    store._lock = RLock()
+    store._closed = False
+    store._conn = _Connection()
+    monkeypatch.setattr(
+        relation_store_module,
+        "_MAX_RELATION_CURRENT_SCAN",
+        1,
+    )
+
+    with pytest.raises(
+        RelationStateError,
+        match="admitted relation current-state scan exceeds its bound",
+    ):
+        store.admitted_assertions(now=RELATION_NOW, limit=1)
+
+    with pytest.raises(
+        RelationStateError,
+        match="relation projection current-state scan exceeds its bound",
+    ):
+        store.projection_events_after(
+            after_ledger_seq=0,
+            now=RELATION_NOW,
+            limit=1,
+        )
+
+
+def test_projection_rebuild_fails_closed_without_ordered_lifecycle_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    seeded = seed_fixture_objects(database, object_root=tmp_path / "objects")
+    proposal = bind_fixture_and_propose(database, seeded)
+    with open_relation_system(database) as system:
+        result = system.relations.decide(
+            decision_request(
+                proposal,
+                action=RelationDecisionAction.ADMIT,
+                key="admit-before-missing-lifecycle-test",
+            ),
+            proof=proof(),
+        )
+    assertion = result.assertion
+    assert assertion is not None
+
+    class _Cursor:
+        def __init__(self, *, rows=(), row=None):
+            self._rows = tuple(rows)
+            self._row = row
+
+        def fetchall(self):
+            return list(self._rows)
+
+        def fetchone(self):
+            return self._row
+
+    class _Connection:
+        def execute(self, sql: str, parameters: tuple[object, ...] = ()):
+            if sql.startswith("SELECT * FROM relation_assertions"):
+                return _Cursor(rows=({"assertion": assertion},))
+            if "FROM relation_admission_decisions" in sql:
+                assert parameters == (str(assertion.admission_decision_id),)
+                return _Cursor(
+                    row={
+                        "authority_ledger_seq": 10,
+                        "authority_event_id": str(result.decision.authority_event_id),
+                    }
+                )
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    store = object.__new__(_RelationAuthorityStore)
+    store._lock = RLock()
+    store._closed = False
+    store._conn = _Connection()
+    monkeypatch.setattr(
+        _RelationAuthorityStore,
+        "_assertion_from_row",
+        classmethod(lambda cls, conn, row: row["assertion"]),
+    )
+    monkeypatch.setattr(
+        _RelationAuthorityStore,
+        "_current_decision_head",
+        classmethod(
+            lambda cls, conn, proposal_id: {
+                "current_state": RelationCurrentState.ADMITTED.value,
+                "authority_ledger_seq": 10,
+                "authority_event_id": str(result.decision.authority_event_id),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        _RelationAuthorityStore,
+        "_assertion_object_state",
+        classmethod(
+            lambda cls, conn, current_assertion, now: (
+                False,
+                "OBJECT_RIGHTS_DENIED",
+                None,
+                (current_assertion.evidence_admission_ids[0],),
+            )
+        ),
+    )
+
+    with pytest.raises(
+        RelationStateError,
+        match="invalid admitted relation lacks an ordered lifecycle event",
+    ):
+        store.projection_events_after(
+            after_ledger_seq=0,
+            now=RELATION_NOW,
+            limit=10,
+        )
+
+
+def test_projection_page_never_splits_one_ledger_sequence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    seeded = seed_fixture_objects(database, object_root=tmp_path / "objects")
+    proposal = bind_fixture_and_propose(database, seeded)
+    with open_relation_system(database) as system:
+        result = system.relations.decide(
+            decision_request(
+                proposal,
+                action=RelationDecisionAction.ADMIT,
+                key="admit-before-atomic-page-test",
+            ),
+            proof=proof(),
+        )
+    first = result.assertion
+    assert first is not None
+    second = replace(
+        first,
+        assertion_id=RelationAssertionId.parse(
+            "00000000-0000-4000-8000-000000000491"
+        ),
+        proposal_id=RelationProposalId.parse(
+            "00000000-0000-4000-8000-000000000492"
+        ),
+        admission_decision_id=RelationAdmissionDecisionId.parse(
+            "00000000-0000-4000-8000-000000000493"
+        ),
+        relation_key="sha256:" + "0" * 64,
+    )
+    invalid_id = first.evidence_objects[0].admission_id
+    lifecycle_event_id = result.decision.authority_event_id
+
+    class _Cursor:
+        def __init__(self, *, rows=(), row=None):
+            self._rows = tuple(rows)
+            self._row = row
+
+        def fetchall(self):
+            return list(self._rows)
+
+        def fetchone(self):
+            return self._row
+
+    assertions = {
+        str(first.assertion_id): first,
+        str(second.assertion_id): second,
+    }
+
+    class _Connection:
+        def execute(self, sql: str, parameters: tuple[object, ...] = ()):
+            if sql.startswith("SELECT * FROM relation_assertions"):
+                return _Cursor(
+                    rows=tuple(
+                        {"assertion_id": assertion_id}
+                        for assertion_id in assertions
+                    )
+                )
+            if "FROM relation_admission_decisions" in sql:
+                decision_id = str(parameters[0])
+                assert decision_id in {
+                    str(first.admission_decision_id),
+                    str(second.admission_decision_id),
+                }
+                return _Cursor(
+                    row={
+                        "authority_ledger_seq": 10,
+                        "authority_event_id": str(lifecycle_event_id),
+                    }
+                )
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    store = object.__new__(_RelationAuthorityStore)
+    store._lock = RLock()
+    store._closed = False
+    store._conn = _Connection()
+    monkeypatch.setattr(
+        _RelationAuthorityStore,
+        "_assertion_from_row",
+        classmethod(
+            lambda cls, conn, row: assertions[str(row["assertion_id"])]
+        ),
+    )
+    monkeypatch.setattr(
+        _RelationAuthorityStore,
+        "_current_decision_head",
+        classmethod(
+            lambda cls, conn, proposal_id: {
+                "current_state": RelationCurrentState.ADMITTED.value,
+                "authority_ledger_seq": 10,
+                "authority_event_id": str(lifecycle_event_id),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        _RelationAuthorityStore,
+        "_assertion_object_state",
+        classmethod(
+            lambda cls, conn, assertion, now: (
+                False,
+                "OBJECT_ADMISSION_REVOKED",
+                (99, lifecycle_event_id),
+                (invalid_id,),
+            )
+        ),
+    )
+
+    with pytest.raises(
+        RelationStateError,
+        match="limit would split one ledger sequence",
+    ):
+        store.projection_events_after(
+            after_ledger_seq=0,
+            now=RELATION_NOW,
+            limit=1,
+        )
+
+    page = store.projection_events_after(
+        after_ledger_seq=0,
+        now=RELATION_NOW,
+        limit=2,
+    )
+    assert len(page) == 2
+    assert {item.source_ledger_seq for item in page} == {99}
+    assert {item.action.value for item in page} == {"REMOVE"}
 
 
 def test_fixture_binding_records_exact_active_and_tombstoned_lifecycle_links(
@@ -442,12 +757,60 @@ def test_authentication_and_authorization_fail_before_relation_mutation(
             system.relations.bind_fixture(seeded.binding_request, proof=proof())
 
 
-def test_relation_read_requires_separate_read_scope(tmp_path: Path) -> None:
+def test_relation_metadata_and_projection_reads_require_distinct_scopes(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "authority.sqlite3"
     seeded = seed_fixture_objects(database, object_root=tmp_path / "objects")
     proposal = bind_fixture_and_propose(database, seeded)
+    with open_relation_system(database) as system:
+        admitted = system.relations.decide(
+            decision_request(
+                proposal,
+                action=RelationDecisionAction.ADMIT,
+                key="admit-before-read-scope-check",
+            ),
+            proof=proof(),
+        )
+    assert admitted.assertion is not None
 
-    missing_read = scopes() - {"authority.relation.read"}
-    with open_relation_system(database, granted_scopes=missing_read) as system:
+    projection_only = frozenset({"authority.relation.project"})
+    with open_relation_system(database, granted_scopes=projection_only) as system:
+        with pytest.raises(AuthorizationDenied):
+            system.relations.fixture_binding(BINDING_ID, proof=proof())
         with pytest.raises(AuthorizationDenied):
             system.relations.proposal(proposal.proposal_id, proof=proof())
+        with pytest.raises(AuthorizationDenied):
+            system.relations.decision(
+                admitted.decision.decision_id,
+                proof=proof(),
+            )
+        assert system.relations.admitted(
+            valid_at=RELATION_NOW,
+            proof=proof(),
+        ) == (admitted.assertion,)
+        projection = system.relations.projection_events_after(
+            0,
+            valid_at=RELATION_NOW,
+            proof=proof(),
+        )
+        assert len(projection) == 1
+        assert projection[0].assertion == admitted.assertion
+
+    metadata_only = frozenset({"authority.relation.metadata.read"})
+    with open_relation_system(database, granted_scopes=metadata_only) as system:
+        assert system.relations.proposal(
+            proposal.proposal_id,
+            proof=proof(),
+        ) == proposal
+        with pytest.raises(AuthorizationDenied):
+            system.relations.admitted(
+                valid_at=RELATION_NOW,
+                proof=proof(),
+            )
+        with pytest.raises(AuthorizationDenied):
+            system.relations.projection_events_after(
+                0,
+                valid_at=RELATION_NOW,
+                proof=proof(),
+            )

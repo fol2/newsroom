@@ -82,6 +82,7 @@ INCREMENT_2A_TRACEABILITY = {
     "2A-12-ROLLBACK-EXCLUSIONS-AND-STOP-BOUNDARY/GRPROD-020-GRPROD-023": (
         "newsroom.relations.traceability",
         "docs.operations.increment-2a-governed-relation-authority",
+        "docs.research.2026-07-25-increment-2a-substantive-review",
         "docs.plans.2026-07-24-008-increment-2-complete-fixture-readiness",
         "docs.plans.2026-07-24-010-increments-2-11-owner-acceptance",
         "newsroom.tests.test_relation_2a_traceability",
