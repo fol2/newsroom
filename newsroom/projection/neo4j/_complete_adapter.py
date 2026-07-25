@@ -11,7 +11,10 @@ from newsroom.projection.complete import (
     FullTextIndexContract,
     VectorIndexContract,
 )
-from newsroom.projection.fixture_v2_projection import IntegratedFixtureV2Projection
+from newsroom.projection.fixture_v2_projection import (
+    FullTextQualificationQuery,
+    IntegratedFixtureV2Projection,
+)
 from newsroom.projection.models import ProjectionContractError
 
 from ._adapter import _Neo4jAdapter, _open_neo4j_driver
@@ -55,6 +58,17 @@ from .models import (
     Neo4jReadError,
     Neo4jWriteError,
 )
+
+
+def _fulltext_qualification_queries(
+    query: FullTextQualificationQuery,
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    if not isinstance(query, FullTextQualificationQuery):
+        raise TypeError("full-text qualification query must be typed")
+    return (
+        (query.query_id, query.query),
+        (f"{query.query_id}.normalized", query.normalized_query),
+    )
 
 
 _COMPLETE_SCHEMA_QUERIES = (
@@ -491,33 +505,36 @@ class _CompleteNeo4jAdapter(_Neo4jAdapter):
         try:
             with self._driver.session(database=self._config.database) as session:
                 for query in fixture.fulltext_queries:
-                    rows = session.execute_read(
-                        lambda transaction, current=query: list(
-                            transaction.run(
-                                _FULLTEXT_QUERY,
-                                {
-                                    "index_name": names.fulltext_index_name,
-                                    "query": current.query,
-                                    "generation_id": str(identity.generation_id),
-                                    "limit": 8,
-                                },
+                    for query_id, query_text in _fulltext_qualification_queries(
+                        query
+                    ):
+                        rows = session.execute_read(
+                            lambda transaction, text=query_text: list(
+                                transaction.run(
+                                    _FULLTEXT_QUERY,
+                                    {
+                                        "index_name": names.fulltext_index_name,
+                                        "query": text,
+                                        "generation_id": str(identity.generation_id),
+                                        "limit": 8,
+                                    },
+                                )
                             )
                         )
-                    )
-                    hits = _query_hits(
-                        rows,
-                        query_id=query.query_id,
-                        query_kind=CompleteQueryKind.FULL_TEXT,
-                    )
-                    if (
-                        not hits
-                        or hits[0].passage_id
-                        != query.expected_first_passage_id
-                    ):
-                        raise Neo4jIdentityConflict(
-                            "Neo4j full-text qualification result differs from fixture"
+                        hits = _query_hits(
+                            rows,
+                            query_id=query_id,
+                            query_kind=CompleteQueryKind.FULL_TEXT,
                         )
-                    fulltext_hits.extend(hits)
+                        if (
+                            not hits
+                            or hits[0].passage_id
+                            != query.expected_first_passage_id
+                        ):
+                            raise Neo4jIdentityConflict(
+                                "Neo4j full-text qualification result differs from fixture"
+                            )
+                        fulltext_hits.extend(hits)
                 documents = fixture.document_by_id
                 for query in fixture.vector_queries:
                     source = documents[query.passage_id]

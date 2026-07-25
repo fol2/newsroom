@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import sqlite3
 
 import pytest
 
+from newsroom.authority import (
+    AggregateId,
+    AuthorityPersistenceError,
+    InlinePayload,
+    SemanticCommand,
+)
 from newsroom.projection import (
     CompleteProjectionProfile,
     INTEGRATED_FIXTURE_V2_PROJECTION,
@@ -84,6 +91,36 @@ def _current(system, generation_id):
     )
 
 
+def _tamper_immutable_row(
+    database: Path,
+    *,
+    trigger_name: str,
+    statement: str,
+) -> None:
+    with sqlite3.connect(database) as conn:
+        trigger_sql = str(
+            conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                (trigger_name,),
+            ).fetchone()[0]
+        )
+        conn.execute(f"DROP TRIGGER {trigger_name}")
+        conn.execute(statement)
+        conn.execute(trigger_sql)
+
+
+def _source_command(*, key: str) -> SemanticCommand:
+    return SemanticCommand(
+        command_type="source.item.write",
+        aggregate_id=AggregateId.new(),
+        expected_aggregate_version=0,
+        payload=InlinePayload(
+            {"headline": "Concurrent Increment 2B authority", "count": 1}
+        ),
+        idempotency_key=key,
+    )
+
+
 def test_complete_facade_exposes_only_complete_derivative_operations() -> None:
     from newsroom.authority._complete_projection_system import CompleteNeo4jProjector
 
@@ -157,7 +194,7 @@ def test_complete_rebuild_validate_qualify_and_promote_is_sqlite_authoritative(
         assert qualification.projection_state_digest == (
             validation.projection_state_digest
         )
-        assert len(qualification.fulltext_hits) == 2
+        assert len(qualification.fulltext_hits) == 4
         assert len(qualification.vector_hits) == 3
 
         validating = _current(system, generation.generation_id)
@@ -245,6 +282,252 @@ def test_rebuild_requires_exact_current_sqlite_watermark_before_cleanup(
         system.close()
 
 
+def test_validation_transaction_rejects_source_advance_during_reconciliation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    object_root = tmp_path / "objects"
+    seed_complete_fixture_authority(
+        database,
+        object_root=object_root,
+    )
+    adapter = MemoryCompleteNeo4jAdapter()
+    system = open_complete_test_system(
+        database,
+        object_root=object_root,
+        adapter=adapter,
+    )
+    generation = register_complete_generation(system)
+    try:
+        rebuilt = _rebuild(system, generation, database)
+        current = _current(system, generation.generation_id)
+        original = adapter.reconcile_complete_generation
+        advanced = False
+
+        def reconcile_and_advance(**kwargs):
+            nonlocal advanced
+            digest = original(**kwargs)
+            if not advanced:
+                advanced = True
+                system.commands.execute(
+                    _source_command(
+                        key="validation-concurrent-source-advance"
+                    ),
+                    proof=proof(),
+                )
+            return digest
+
+        adapter.reconcile_complete_generation = reconcile_and_advance
+        with pytest.raises(
+            ProjectionStateError,
+            match="source watermark changed before authority commit",
+        ):
+            system.complete.validate_generation(
+                CompleteGenerationValidationRequest(
+                    generation_id=generation.generation_id,
+                    expected_authority_version=(
+                        current.authority_aggregate_version
+                    ),
+                    checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
+                    reason_code="CONCURRENT_SOURCE_VALIDATE",
+                    idempotency_key="concurrent-source-validate",
+                ),
+                proof=proof(),
+            )
+        assert _current(system, generation.generation_id).state is (
+            ProjectionGenerationState.BUILDING
+        )
+    finally:
+        system.close()
+
+
+def test_promotion_transaction_rejects_source_advance_during_reconciliation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    object_root = tmp_path / "objects"
+    seed_complete_fixture_authority(
+        database,
+        object_root=object_root,
+    )
+    adapter = MemoryCompleteNeo4jAdapter()
+    system = open_complete_test_system(
+        database,
+        object_root=object_root,
+        adapter=adapter,
+    )
+    generation = register_complete_generation(system)
+    try:
+        rebuilt = _rebuild(system, generation, database)
+        building = _current(system, generation.generation_id)
+        validation = system.complete.validate_generation(
+            CompleteGenerationValidationRequest(
+                generation_id=generation.generation_id,
+                expected_authority_version=(
+                    building.authority_aggregate_version
+                ),
+                checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
+                reason_code="INCREMENT_2B_COMPLETE_VALIDATE",
+                idempotency_key="complete-validate-before-race",
+            ),
+            proof=proof(),
+        )
+        validating = _current(system, generation.generation_id)
+        original = adapter.reconcile_complete_generation
+        advanced = False
+
+        def reconcile_and_advance(**kwargs):
+            nonlocal advanced
+            digest = original(**kwargs)
+            if not advanced:
+                advanced = True
+                system.commands.execute(
+                    _source_command(
+                        key="promotion-concurrent-source-advance"
+                    ),
+                    proof=proof(),
+                )
+            return digest
+
+        adapter.reconcile_complete_generation = reconcile_and_advance
+        with pytest.raises(
+            ProjectionStateError,
+            match="source watermark changed before authority commit",
+        ):
+            system.projections.promote_generation(
+                ProjectionGenerationPromotionRequest(
+                    generation_id=generation.generation_id,
+                    expected_authority_version=(
+                        validating.authority_aggregate_version
+                    ),
+                    checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
+                    validation_digest=validation.validation_digest,
+                    reason_code="CONCURRENT_SOURCE_PROMOTE",
+                    idempotency_key="concurrent-source-promote",
+                ),
+                proof=proof(),
+            )
+        assert _current(system, generation.generation_id).state is (
+            ProjectionGenerationState.VALIDATING
+        )
+    finally:
+        system.close()
+
+
+def test_qualification_rejects_source_advance_during_query_evidence(
+    tmp_path: Path,
+) -> None:
+    database, _object_root, adapter, system, generation = _setup(tmp_path)
+    try:
+        rebuilt = _rebuild(system, generation, database)
+        building = _current(system, generation.generation_id)
+        system.complete.validate_generation(
+            CompleteGenerationValidationRequest(
+                generation_id=generation.generation_id,
+                expected_authority_version=(
+                    building.authority_aggregate_version
+                ),
+                checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
+                reason_code="INCREMENT_2B_COMPLETE_VALIDATE",
+                idempotency_key="complete-validate-before-qualification-race",
+            ),
+            proof=proof(),
+        )
+        original = adapter.qualify_complete_generation
+        advanced = False
+
+        def qualify_and_advance(**kwargs):
+            nonlocal advanced
+            qualification = original(**kwargs)
+            if not advanced:
+                advanced = True
+                system.commands.execute(
+                    _source_command(
+                        key="qualification-concurrent-source-advance"
+                    ),
+                    proof=proof(),
+                )
+            return qualification
+
+        adapter.qualify_complete_generation = qualify_and_advance
+        with pytest.raises(
+            ProjectionStateError,
+            match="exact current source watermark",
+        ):
+            system.complete.qualify_generation(
+                CompleteGenerationQualificationRequest(
+                    generation_id=generation.generation_id,
+                    checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
+                    profile=CompleteProjectionProfile.FIXTURE_QUALIFICATION,
+                ),
+                proof=proof(),
+            )
+    finally:
+        system.close()
+
+
+def test_store_open_rejects_complete_generation_binding_column_tamper(
+    tmp_path: Path,
+) -> None:
+    database, object_root, _adapter, system, _generation = _setup(tmp_path)
+    system.close()
+    _tamper_immutable_row(
+        database,
+        trigger_name="immutable_projection_generation_complete_update",
+        statement=(
+            "UPDATE projection_generation_complete_bindings "
+            "SET canonical_digest='sha256:" + "0" * 64 + "'"
+        ),
+    )
+
+    with pytest.raises(
+        AuthorityPersistenceError,
+        match="complete projection generation binding",
+    ):
+        open_complete_test_system(
+            database,
+            object_root=object_root,
+            adapter=MemoryCompleteNeo4jAdapter(),
+        )
+
+
+def test_store_open_rejects_complete_validation_binding_column_tamper(
+    tmp_path: Path,
+) -> None:
+    database, object_root, _adapter, system, generation = _setup(tmp_path)
+    rebuilt = _rebuild(system, generation, database)
+    current = _current(system, generation.generation_id)
+    system.complete.validate_generation(
+        CompleteGenerationValidationRequest(
+            generation_id=generation.generation_id,
+            expected_authority_version=current.authority_aggregate_version,
+            checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
+            reason_code="INCREMENT_2B_COMPLETE_VALIDATE",
+            idempotency_key="complete-validation-before-binding-tamper",
+        ),
+        proof=proof(),
+    )
+    system.close()
+    _tamper_immutable_row(
+        database,
+        trigger_name="immutable_projection_complete_validation_update",
+        statement=(
+            "UPDATE projection_generation_complete_validations "
+            "SET canonical_digest='sha256:" + "0" * 64 + "'"
+        ),
+    )
+
+    with pytest.raises(
+        AuthorityPersistenceError,
+        match="complete projection validation binding",
+    ):
+        open_complete_test_system(
+            database,
+            object_root=object_root,
+            adapter=MemoryCompleteNeo4jAdapter(),
+        )
+
+
 def test_exact_rebuild_replay_restores_derivatives_without_new_authority(
     tmp_path: Path,
 ) -> None:
@@ -276,6 +559,47 @@ def test_exact_rebuild_replay_restores_derivatives_without_new_authority(
         assert replay.reapplied_delivery_count == first.through_ledger_seq
         assert system.events.after(0, limit=1000, proof=proof()) == before
         assert len(adapter.deliveries) == first.through_ledger_seq
+    finally:
+        system.close()
+
+
+def test_boundary_rejects_incomplete_normalized_query_evidence(
+    tmp_path: Path,
+) -> None:
+    database, _objects, adapter, system, generation = _setup(tmp_path)
+    try:
+        rebuilt = _rebuild(system, generation, database)
+        current = _current(system, generation.generation_id)
+        original = adapter.qualify_complete_generation
+
+        def omit_normalized_evidence(**kwargs):
+            qualification = original(**kwargs)
+            return replace(
+                qualification,
+                fulltext_hits=tuple(
+                    hit
+                    for hit in qualification.fulltext_hits
+                    if not hit.query_id.endswith(".normalized")
+                ),
+            )
+
+        adapter.qualify_complete_generation = omit_normalized_evidence
+        with pytest.raises(
+            Neo4jIdentityConflict,
+            match="full-text query evidence is incomplete",
+        ):
+            system.complete.validate_generation(
+                CompleteGenerationValidationRequest(
+                    generation_id=generation.generation_id,
+                    expected_authority_version=(
+                        current.authority_aggregate_version
+                    ),
+                    checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
+                    reason_code="INCOMPLETE_NORMALIZED_QUERY_EVIDENCE",
+                    idempotency_key="incomplete-normalized-query-evidence",
+                ),
+                proof=proof(),
+            )
     finally:
         system.close()
 

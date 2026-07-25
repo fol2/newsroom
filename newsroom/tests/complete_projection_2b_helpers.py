@@ -464,15 +464,19 @@ class MemoryCompleteNeo4jAdapter:
                 if self.qualification_mismatch
                 else query.expected_first_passage_id
             )
-            fulltext_hits.append(
-                CompleteQueryHit(
-                    query_id=query.query_id,
-                    query_kind=CompleteQueryKind.FULL_TEXT,
-                    passage_id=passage_id,
-                    score=1.0,
-                    rank=1,
+            for query_id in (
+                query.query_id,
+                f"{query.query_id}.normalized",
+            ):
+                fulltext_hits.append(
+                    CompleteQueryHit(
+                        query_id=query_id,
+                        query_kind=CompleteQueryKind.FULL_TEXT,
+                        passage_id=passage_id,
+                        score=1.0,
+                        rank=1,
+                    )
                 )
-            )
         vector_hits = []
         for query in fixture.vector_queries:
             prefix = (

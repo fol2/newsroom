@@ -191,8 +191,12 @@ def _assert_exact_query_evidence(qualification) -> None:
     for hit in qualification.fulltext_hits:
         fulltext_first.setdefault(hit.query_id, hit.passage_id)
     assert fulltext_first == {
-        query.query_id: query.expected_first_passage_id
+        query_id: query.expected_first_passage_id
         for query in INTEGRATED_FIXTURE_V2_PROJECTION.fulltext_queries
+        for query_id in (
+            query.query_id,
+            f"{query.query_id}.normalized",
+        )
     }
     vector_by_query: dict[str, list[str]] = {}
     for hit in qualification.vector_hits:

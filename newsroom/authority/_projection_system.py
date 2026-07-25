@@ -300,6 +300,8 @@ class _ProjectionBoundary:
         self,
         request: ProjectionGenerationValidationRequest,
         proof: AuthenticationProof,
+        *,
+        required_source_ledger_seq: int | None = None,
     ) -> ProjectionGenerationValidationView:
         grant = self._grant(
             command_type="projection.generation.validate",
@@ -326,6 +328,7 @@ class _ProjectionBoundary:
             ),
             projection_state_digest=request.projection_state_digest,
             reason_code=request.reason_code,
+            required_source_ledger_seq=required_source_ledger_seq,
         )
 
     def _authorize_promotion(
@@ -380,6 +383,8 @@ class _ProjectionBoundary:
         target_grant: Any,
         prior_grant: Any | None,
         request: ProjectionGenerationPromotionRequest,
+        *,
+        required_source_ledger_seq: int | None = None,
     ) -> ProjectionGenerationPromotionView:
         return self._store.promote_generation(
             target_grant,
@@ -389,6 +394,7 @@ class _ProjectionBoundary:
             validation_digest=request.validation_digest,
             prior_generation_id=request.prior_generation_id,
             reason_code=request.reason_code,
+            required_source_ledger_seq=required_source_ledger_seq,
         )
 
     def promote_generation(

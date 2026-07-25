@@ -19,6 +19,7 @@ from newsroom.projection.neo4j._complete_adapter import (
     _CompleteNeo4jAdapter,
     _IndexInventory,
     _fulltext_index_create_query,
+    _fulltext_qualification_queries,
     _index_inventory,
     _merge_document_query,
     _merge_relation_query,
@@ -131,6 +132,17 @@ def _inventory_rows(*, fulltext_provider="fulltext-2.0", vector_provider="vector
         },
     ]
 
+
+
+def test_fulltext_qualification_executes_raw_and_normalized_contract_queries() -> None:
+    query = INTEGRATED_FIXTURE_V2_PROJECTION.fulltext_queries[0]
+
+    assert _fulltext_qualification_queries(query) == (
+        (query.query_id, query.query),
+        (f"{query.query_id}.normalized", query.normalized_query),
+    )
+    with pytest.raises(TypeError, match="must be typed"):
+        _fulltext_qualification_queries(object())  # type: ignore[arg-type]
 
 def test_generation_index_ddl_is_fixed_and_does_not_select_provider() -> None:
     identity = complete_identity()

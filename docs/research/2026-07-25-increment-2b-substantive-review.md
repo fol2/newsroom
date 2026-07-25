@@ -1,0 +1,167 @@
+# Increment 2B substantive implementation review
+
+- Role: Dated current-head review evidence
+- Status: Completed for the corrected source tree; exact-head GitHub evidence still required
+- Owner: Product owner
+- Canonical language: English
+- Date: 2026-07-25
+- Related issue: #156
+- Parent epic: #142
+- Related draft PR: #164
+- Authorised base: `main@819883fb77eeabfb76d91aca531003d07932d5a7`
+- Reviewed pre-correction head: `86a08bc7ea615681c9dcf420c3d0026bc1a3ac08`
+- Corrected review boundary: the commit containing this record; record the exact SHA on PR #164 after push
+
+## Scope
+
+The review covers only owner-authorised Increment 2B:
+
+- complete structural, admitted-relation, full-text and vector generation contracts;
+- deterministic bilingual fixture evidence and deterministic vectors;
+- checked SQLite schema version 7 and startup integrity;
+- fixed private Neo4j adapter and actual-service workflow;
+- ordered delivery, checkpoints, gaps and dead letters;
+- expected/actual reconciliation, validation, qualification and promotion;
+- rebuild, replacement generation, rights, deletion and tombstones;
+- compatibility, operations, traceability, exclusions and rollback.
+
+The review excludes Increment 2C, hybrid retrieval, Retrieval Context version 2, Graphiti, external models or embeddings, live sources, search, shadow, canary, production activation, publication, spending and public effect.
+
+## Result
+
+- P1 findings: 1
+- P2 findings: 7
+- Remaining unresolved P1/P2 after correction: 0
+
+Review submissions, inline threads and actionable top-level comments must be rechecked against the exact final PR head before merge.
+
+## Findings and corrections
+
+### P1-1 — A source event could arrive during reconciliation and stale authority could still commit
+
+The pre-correction complete boundary compared the requested checkpoint with the latest non-projection source watermark before Neo4j reconciliation. Validation and promotion did not repeat that comparison atomically inside their SQLite transactions. A new source event could therefore arrive during a slow graph reconciliation and the earlier generation could still receive validation or promotion authority.
+
+Correction:
+
+- compare the exact source watermark before validation, qualification and promotion;
+- compare it again after Neo4j reconciliation or query evidence;
+- pass the required source sequence into the SQLite validation and promotion stores;
+- inside `BEGIN IMMEDIATE`, compare the latest non-projection ledger sequence immediately before returning replay or creating authority;
+- reject a changed source watermark without creating validation or promotion authority; and
+- add adversarial tests that inject a source command during reconciliation, promotion authorization and qualification evidence collection.
+
+### P2-1 — Neo4j null semantics broke optional canonical-property equality
+
+The pre-correction adapter serialized optional values such as `revision_id=None` and `valid_until=None`. Neo4j removes a property assigned `null`, so a subsequent exact read returned an absent key and the strict decoder reported an identity conflict.
+
+Correction:
+
+- omit only typed nullable properties from Neo4j writes;
+- reconstruct their canonical value as `None` when absent;
+- retain exact required-property and unknown-property rejection; and
+- add unit and actual-service coverage for nullable round trips.
+
+### P2-2 — SDLC service routing and legacy artifact contracts drifted
+
+Increment 2B extended the permanent Neo4j workflow and service test set, but the accepted SDLC routing tests and legacy evidence artifact name still described the earlier B2/B3/C1 topology. Full CI and the SDLC decision failed even when the extended service tests executed.
+
+Correction:
+
+- update the exact service test allow-list in both SDLC contract tests;
+- retain the extended complete evidence artifact; and
+- upload the legacy B2/B3/C1 evidence alias for the accepted service lane.
+
+### P2-3 — Three actual-service tests asserted the wrong authority surface
+
+Three qualification cases failed for test-contract reasons rather than projection failures:
+
+- one counted every generation relationship instead of the governed `DEVELOPMENT_OF` relationship;
+- replacement recovery attempted to register an already retained family again; and
+- lifecycle evidence read a checkpoint from the rebuild receipt rather than the authoritative family projection status.
+
+Correction:
+
+- count only the governed relation type;
+- create replacement generations under the already retained family; and
+- read the current checkpoint from the family projection status view.
+
+The corrected cases retain the same fail-closed production assertions.
+
+### P2-4 — The normalized full-text query contract was retained but not executed
+
+`FullTextQualificationQuery` retained both original and normalized text, but the actual and memory adapters executed only the original query. This did not satisfy the required actual-service proof for exact and normalized full-text paths.
+
+Correction:
+
+- execute every full-text qualification as two separate query identities: the original ID and `<id>.normalized`;
+- execute the retained normalized text even when it is byte-equal to the original language form;
+- require the same exact first passage for both paths;
+- retain both result sets in qualification evidence; and
+- add unit, authority and actual-service assertions for both query identities.
+
+### P2-5 — Required operations, traceability and rollback evidence was absent
+
+The initial PR source checkpoint contained implementation and tests but no Increment 2B operations guide, dedicated traceability register, rollback contract or dated substantive-review record. Passing CI could not satisfy issue #156's completion gate without these records.
+
+Correction:
+
+- add `docs/operations/increment-2b-complete-projection.md`;
+- add this substantive-review record;
+- add exact Increment 2B traceability, exclusions and deferred-work constants;
+- add documentation-contract tests; and
+- update the documentation map.
+
+### P2-6 — The authority boundary trusted adapter query evidence completeness
+
+The adapter checked fixture query results, but the complete authority boundary accepted any typed `PASSED` qualification whose projection-state digest matched validation. A defective or substituted adapter could omit normalized full-text evidence, duplicate ranks or return an incomplete vector-query set without the boundary detecting the missing proof.
+
+Correction:
+
+- revalidate qualification identity and checkpoint against SQLite authority;
+- require the exact raw and normalized full-text query-ID set;
+- require contiguous ranks and the expected first passage for every full-text query;
+- require the exact vector query-ID set and expected active prefix;
+- require exact tombstone expectations and reject returned tombstoned passages; and
+- add an adversarial adapter test that removes normalized evidence after an otherwise successful reconciliation.
+
+### P2-7 — Startup integrity did not compare every normalized contract column
+
+The pre-correction startup pass re-derived canonical bytes and checked selected identity columns, but several normalized SQLite columns were not compared with the retained typed contracts. Raw-SQL tampering could alter fields such as full-text source property, vector label, fixture revision, provider mode or complete-contract projector version while leaving canonical bytes unchanged.
+
+Correction:
+
+- compare every normalized full-text contract field and boolean;
+- compare every normalized vector contract field, similarity, quantization, provider kind and fixture-only flag;
+- compare fixture manifest identity and every fixture-document metadata column;
+- compare every complete-contract, generation-binding and validation-binding column; and
+- add trigger-preserving raw-SQL tamper/reopen tests proving store open fails for normalized contract, generation-binding and validation-binding changes.
+
+## Local validation
+
+The corrected implementation and substantive-review additions passed a bounded complete repository run:
+
+```text
+1,092 passed, 19 skipped, 0 failed
+```
+
+Additional local checks passed:
+
+- targeted authority and normalized-query tests;
+- `python -m compileall -q newsroom scripts`;
+- `git diff --check`; and
+- clustering evaluation with `--fail-on-regression`.
+
+These results are local regression evidence. A local `uv lock --check` attempt was blocked by the configured internal package mirror returning HTTP 503 while fetching `pytest`; `pyproject.toml` and `uv.lock` are unchanged. The final exact GitHub head must rerun the complete lockfile and repository gates after this review record and traceability are committed.
+
+## Residual merge gates
+
+PR #164 must remain draft and unmerged until:
+
+1. CI passes on the exact final head;
+2. the authenticated actual-Neo4j workflow proves every required case without skip, failure or error;
+3. SDLC route, core, service and decision jobs pass on that same head;
+4. current-head review still has zero unresolved P1/P2 findings;
+5. review submissions, requested changes, unresolved threads and actionable comments are zero; and
+6. issue #156 records the exact final head and evidence.
+
+Issue #157 remains blocked. This review authorises no Increment 2C implementation or runtime activation.

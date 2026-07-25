@@ -650,12 +650,34 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
         ).fetchall():
             contract = registry.fulltext(str(row["contract_digest"]))
             canonical = canonical_json_bytes(contract.canonical_value())
+            text_fields = (
+                "contract_id",
+                "contract_version",
+                "implementation_version",
+                "index_name",
+                "node_label",
+                "source_field",
+                "retrieval_property",
+                "analyzer",
+                "provider",
+                "unicode_normalization",
+            )
+            boolean_fields = (
+                "casefold",
+                "collapse_whitespace",
+                "eventually_consistent",
+            )
             if (
                 bytes(row["canonical_bytes"]) != canonical
                 or digest_bytes(canonical) != str(row["contract_digest"])
-                or str(row["index_name"]) != contract.index_name
-                or str(row["analyzer"]) != contract.analyzer
-                or str(row["provider"]) != contract.provider
+                or any(
+                    str(row[field_name]) != str(getattr(contract, field_name))
+                    for field_name in text_fields
+                )
+                or any(
+                    bool(row[field_name]) is not getattr(contract, field_name)
+                    for field_name in boolean_fields
+                )
             ):
                 raise AuthorityPersistenceError(
                     "retained full-text projection contract is inconsistent"
@@ -665,12 +687,29 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
         ).fetchall():
             contract = registry.vector(str(row["contract_digest"]))
             canonical = canonical_json_bytes(contract.canonical_value())
+            text_fields = (
+                "contract_id",
+                "contract_version",
+                "implementation_version",
+                "index_name",
+                "node_label",
+                "vector_property",
+                "provider",
+            )
             if (
                 bytes(row["canonical_bytes"]) != canonical
                 or digest_bytes(canonical) != str(row["contract_digest"])
+                or any(
+                    str(row[field_name]) != str(getattr(contract, field_name))
+                    for field_name in text_fields
+                )
                 or int(row["dimensions"]) != contract.dimensions
                 or int(row["component_scale"]) != contract.component_scale
-                or str(row["provider"]) != contract.provider
+                or str(row["similarity_function"])
+                != contract.similarity_function.value
+                or str(row["quantization"]) != contract.quantization.value
+                or str(row["provider_kind"]) != contract.provider_kind.value
+                or bool(row["fixture_only"]) is not contract.fixture_only
             ):
                 raise AuthorityPersistenceError(
                     "retained vector projection contract is inconsistent"
@@ -683,6 +722,8 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 bytes(row["canonical_bytes"]) != manifest.canonical_bytes
                 or digest_bytes(manifest.canonical_bytes)
                 != str(row["manifest_digest"])
+                or str(row["schema_version"]) != manifest.schema_version
+                or str(row["fixture_id"]) != manifest.fixture_id
                 or str(row["source_fixture_digest"])
                 != manifest.source_fixture_digest
                 or int(row["dimensions"]) != manifest.dimensions
@@ -705,6 +746,13 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 components = canonical_json_bytes(list(document.components))
                 if (
                     str(vector_row["passage_id"]) != document.passage_id
+                    or str(vector_row["blob_digest"]) != document.blob_digest
+                    or str(vector_row["language"]) != document.language
+                    or vector_row["revision_id"] != document.revision_id
+                    or str(vector_row["expected_lifecycle"])
+                    != document.expected_lifecycle
+                    or str(vector_row["normalized_text_digest"])
+                    != document.normalized_text_digest
                     or bytes(vector_row["canonical_bytes"]) != canonical
                     or str(vector_row["canonical_digest"])
                     != digest_bytes(canonical)
@@ -723,6 +771,20 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
             if (
                 bytes(row["canonical_bytes"]) != canonical
                 or digest_bytes(canonical) != str(row["contract_digest"])
+                or str(row["contract_id"]) != contract.contract_id
+                or str(row["contract_version"]) != contract.contract_version
+                or str(row["implementation_version"])
+                != contract.implementation_version
+                or str(row["admitted_relation_projector_version"])
+                != contract.admitted_relation_projector_version
+                or str(row["source_fixture_digest"])
+                != contract.source_fixture_digest
+                or str(row["fixture_vector_manifest_digest"])
+                != contract.fixture_vector_manifest_digest
+                or str(row["fulltext_contract_digest"])
+                != contract.fulltext_contract_digest
+                or str(row["vector_contract_digest"])
+                != contract.vector_contract_digest
                 or bytes(row["required_derivatives_bytes"])
                 != canonical_json_bytes(list(contract.required_derivatives))
             ):
@@ -787,8 +849,16 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
             if (
                 bytes(binding["canonical_bytes"]) != canonical
                 or str(binding["canonical_digest"]) != digest_bytes(canonical)
+                or str(binding["definition_digest"])
+                != str(row["definition_digest"])
                 or str(binding["complete_contract_digest"])
                 != contract.contract_digest
+                or str(binding["fulltext_contract_digest"])
+                != contract.fulltext_contract_digest
+                or str(binding["vector_contract_digest"])
+                != contract.vector_contract_digest
+                or str(binding["fixture_vector_manifest_digest"])
+                != contract.fixture_vector_manifest_digest
             ):
                 raise AuthorityPersistenceError(
                     "complete projection generation binding is inconsistent"
@@ -830,6 +900,16 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 binding is None
                 or bytes(binding["canonical_bytes"]) != canonical
                 or str(binding["canonical_digest"]) != digest_bytes(canonical)
+                or str(binding["generation_id"])
+                != str(validation["generation_id"])
+                or str(binding["complete_contract_digest"])
+                != contract.contract_digest
+                or str(binding["fulltext_contract_digest"])
+                != contract.fulltext_contract_digest
+                or str(binding["vector_contract_digest"])
+                != contract.vector_contract_digest
+                or str(binding["fixture_vector_manifest_digest"])
+                != contract.fixture_vector_manifest_digest
                 or str(binding["recorded_at"]) != str(validation["recorded_at"])
             ):
                 raise AuthorityPersistenceError(
@@ -1642,10 +1722,16 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
         service_compatibility_digest: str,
         projection_state_digest: str,
         reason_code: str,
+        required_source_ledger_seq: int | None = None,
     ) -> ProjectionGenerationValidationView:
         with self._lock, self._transaction() as conn:
             result = self._commit_grant_in_transaction(
                 conn, grant, recorded_at=self._clock().to_text()
+            )
+            self._require_source_watermark(
+                conn,
+                checkpoint_ledger_seq=checkpoint_ledger_seq,
+                required_source_ledger_seq=required_source_ledger_seq,
             )
             if result.replayed:
                 return self._validation_for_authority_event(conn, result.event_id)
@@ -1817,6 +1903,7 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
         validation_digest: str,
         prior_generation_id: ProjectionGenerationId | None,
         reason_code: str,
+        required_source_ledger_seq: int | None = None,
     ) -> ProjectionGenerationPromotionView:
         with self._lock, self._transaction() as conn:
             recorded_at = self._clock().to_text()
@@ -1827,6 +1914,11 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 )
             target_result = self._commit_grant_in_transaction(
                 conn, target_grant, recorded_at=recorded_at
+            )
+            self._require_source_watermark(
+                conn,
+                checkpoint_ledger_seq=checkpoint_ledger_seq,
+                required_source_ledger_seq=required_source_ledger_seq,
             )
             if target_result.replayed:
                 if prior_result is not None and not prior_result.replayed:
@@ -2089,6 +2181,35 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     else EventId.parse(str(prior_result.event_id))
                 ),
                 recorded_at=UtcTimestamp.parse(recorded_at),
+            )
+
+    @staticmethod
+    def _require_source_watermark(
+        conn: sqlite3.Connection,
+        *,
+        checkpoint_ledger_seq: int,
+        required_source_ledger_seq: int | None,
+    ) -> None:
+        if required_source_ledger_seq is None:
+            return
+        if (
+            isinstance(required_source_ledger_seq, bool)
+            or not isinstance(required_source_ledger_seq, int)
+            or required_source_ledger_seq < 0
+        ):
+            raise ValueError("required source ledger sequence is invalid")
+        latest = int(
+            conn.execute(
+                "SELECT COALESCE(MAX(ledger_seq),0) FROM ledger_events "
+                "WHERE security_scope!='authority.projection'"
+            ).fetchone()[0]
+        )
+        if (
+            checkpoint_ledger_seq != required_source_ledger_seq
+            or latest != required_source_ledger_seq
+        ):
+            raise ProjectionStateError(
+                "complete generation source watermark changed before authority commit"
             )
 
     def begin_projection_rebuild(

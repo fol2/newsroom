@@ -170,4 +170,122 @@ __all__ = [
     "INCREMENT_1B3_DEFERRED",
     "INCREMENT_1B3_EXCLUSIONS",
     "INCREMENT_1B3_TRACEABILITY",
+    "INCREMENT_2B_DEFERRED",
+    "INCREMENT_2B_EXCLUSIONS",
+    "INCREMENT_2B_TRACEABILITY",
 ]
+
+INCREMENT_2B_TRACEABILITY = {
+    "2B-01-COMPLETE-GENERATION-CONTRACTS/GRAG-024/GRAG-027/GRPROD-013": (
+        "newsroom.projection.complete",
+        "newsroom.projection.fixture_v2_projection",
+        "newsroom.projection.neo4j.complete_models",
+        "newsroom.tests.test_complete_projection_2b_contracts",
+        "docs.operations.increment-2b-complete-projection",
+    ),
+    "2B-02-CHECKED-SQLITE-AUTHORITY/GRAG-024/GRAG-025/GRAG-027": (
+        "newsroom.authority.complete_projection_migrations",
+        "newsroom.authority._complete_projection_store",
+        "newsroom.authority._projection_store",
+        "newsroom.tests.test_complete_projection_2b_migrations",
+        "newsroom.tests.test_complete_projection_2b_authority",
+    ),
+    "2B-03-FIXED-PRIVATE-NEO4J-ADAPTER/GRAG-034/GRPROD-013/GRPROD-015": (
+        "newsroom.projection.neo4j._complete_adapter",
+        "newsroom.projection.neo4j._complete_state",
+        "newsroom.tests.test_complete_projection_2b_adapter_unit",
+        "newsroom.tests.test_complete_projection_2b_neo4j_service",
+        "docs.operations.increment-2b-complete-projection",
+    ),
+    "2B-04-BILINGUAL-FULLTEXT-AND-DETERMINISTIC-VECTOR/GRAG-031": (
+        "newsroom.fixtures.integrated_fixture_v2_projection",
+        "newsroom.projection.fixture_v2_projection",
+        "newsroom.projection.complete",
+        "newsroom.tests.test_complete_projection_2b_contracts",
+        "newsroom.tests.test_complete_projection_2b_neo4j_service",
+    ),
+    "2B-05-ORDERED-IDEMPOTENT-DELIVERY-GAPS-DEADLETTERS/GRAG-024/GRAG-025": (
+        "newsroom.authority._complete_projection_system",
+        "newsroom.authority._projection_store",
+        "newsroom.projection.neo4j._complete_adapter",
+        "newsroom.tests.test_complete_projection_2b_authority",
+        "newsroom.tests.test_complete_projection_2b_state",
+    ),
+    "2B-06-COMPLETE-RECONCILIATION-VALIDATION-PROMOTION/GRAG-027/GRPROD-015": (
+        "newsroom.authority._complete_projection_system",
+        "newsroom.projection.neo4j._complete_state",
+        "newsroom.projection.neo4j.complete_state",
+        "newsroom.tests.test_complete_projection_2b_authority",
+        "newsroom.tests.test_complete_projection_2b_neo4j_service",
+    ),
+    "2B-07-ATOMIC-SOURCE-WATERMARK-GUARD/GRAG-025/GRAG-043": (
+        "newsroom.authority._complete_projection_system",
+        "newsroom.authority._projection_store",
+        "newsroom.authority._projection_system",
+        "newsroom.tests.test_complete_projection_2b_authority",
+        "docs.research.2026-07-25-increment-2b-substantive-review",
+    ),
+    "2B-08-RAW-AND-NORMALIZED-FULLTEXT-EVIDENCE/GRAG-031/GRPROD-016": (
+        "newsroom.projection.neo4j._complete_adapter",
+        "newsroom.projection.fixture_v2_projection",
+        "newsroom.tests.complete_projection_2b_helpers",
+        "newsroom.tests.test_complete_projection_2b_adapter_unit",
+        "newsroom.tests.test_complete_projection_2b_neo4j_service",
+    ),
+    "2B-09-VECTOR-DIMENSION-SIMILARITY-PROVIDER-EVIDENCE/GRAG-031/GRPROD-015": (
+        "newsroom.projection.complete",
+        "newsroom.projection.neo4j._complete_adapter",
+        "newsroom.projection.neo4j.complete_models",
+        "newsroom.tests.test_complete_projection_2b_adapter_unit",
+        "newsroom.tests.test_complete_projection_2b_neo4j_service",
+    ),
+    "2B-10-RIGHTS-REVOCATION-DELETION-TOMBSTONE/GRAG-028": (
+        "newsroom.authority._complete_projection_store",
+        "newsroom.authority._complete_projection_system",
+        "newsroom.projection.neo4j._complete_adapter",
+        "newsroom.tests.test_complete_projection_2b_source_store",
+        "newsroom.tests.test_complete_projection_2b_neo4j_service",
+    ),
+    "2B-11-AUTHENTICATED-ACTUAL-SERVICE-EVIDENCE/GRPROD-016": (
+        ".github.workflows.projection-b2-neo4j",
+        "newsroom.tests.test_complete_projection_2b_neo4j_service",
+        "newsroom.tests.test_integrated_c1_sdlc_contract",
+        "newsroom.tests.test_sdlc_classifier",
+        "docs.operations.increment-2b-complete-projection",
+    ),
+    "2B-12-EXCLUSIONS-ROLLBACK-STOP-BOUNDARY/GRAG-034/GRPROD-024": (
+        "newsroom.projection.neo4j.traceability",
+        "newsroom.tests.test_complete_projection_2b_traceability",
+        "docs.operations.increment-2b-complete-projection",
+        "docs.research.2026-07-25-increment-2b-substantive-review",
+        "docs.plans.2026-07-24-008-increment-2-complete-fixture-readiness",
+    ),
+}
+
+INCREMENT_2B_EXCLUSIONS = frozenset(
+    {
+        "INCREMENT_2C_OR_LATER_IMPLEMENTATION",
+        "PUBLIC_DRIVER_ARBITRARY_CYPHER_OR_CALLER_SELECTED_GRAPH_MUTATION",
+        "CALLER_DEFINED_LABEL_RELATIONSHIP_INDEX_OR_ADMINISTRATION",
+        "GRAPHITI_RUNTIME_EXECUTION",
+        "EXTERNAL_MODEL_PROMPT_OR_EMBEDDING_CALL",
+        "LIVE_SOURCE_RSS_JSON_SEARCH_BRAVE_OR_GDELT_EXECUTION",
+        "PRODUCTION_PROTECTED_CONTENT_VECTOR_GENERATION",
+        "HYBRID_RETRIEVAL_FUSION_OR_RETRIEVAL_CONTEXT_V2",
+        "FULL_TRIAGE_CANDIDATE_OR_EVIDENCE_INTAKE",
+        "SCHEDULER_SHADOW_CANARY_OR_PRODUCTION_ACTIVATION",
+        "PUBLICATION_SPENDING_OR_PUBLIC_EFFECT",
+    }
+)
+
+INCREMENT_2B_DEFERRED = frozenset(
+    {
+        "BOUNDED_HYBRID_RETRIEVAL_AND_AUTHORITATIVE_CONTEXT_INCREMENT_2C",
+        "COMPLETE_ACTUAL_NEO4J_FIXTURE_PROOF_INCREMENT_2D",
+        "SOURCE_ADAPTERS_AND_DISCOVERY_LINEAGE_INCREMENT_3",
+        "GRAPHITI_ENTITY_RESOLUTION_AND_GENERIC_RELATION_ADMISSION_INCREMENT_4",
+        "PRODUCTION_EMBEDDING_PROVIDER_AND_RETRIEVAL_THRESHOLDS_INCREMENT_5",
+        "FULL_TRIAGE_HYPOTHESES_CANDIDATES_AND_HANDOFF_INCREMENT_6",
+        "EVALUATION_OPERATIONS_SHADOW_CANARY_AND_ACTIVATION_INCREMENTS_8_11",
+    }
+)

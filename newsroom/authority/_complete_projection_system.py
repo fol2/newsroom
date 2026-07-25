@@ -54,6 +54,7 @@ from newsroom.projection.neo4j.complete_models import (
     CompleteProjectionBatch,
     CompleteProjectionIdentity,
     CompleteProjectionQualification,
+    CompleteQueryKind,
     CompleteRebuildRequest,
     CompleteRebuildResult,
 )
@@ -167,6 +168,7 @@ class CompleteNeo4jProjector:
         qualify_generation: Callable[
             [CompleteGenerationQualificationRequest, AuthenticationProof],
             CompleteProjectionQualification,
+    CompleteQueryKind,
         ],
     ) -> None:
         self.__deliver = deliver
@@ -535,6 +537,9 @@ class _CompleteProjectionBoundary:
                 },
                 authenticated=authenticated,
             )
+            self._require_current_source_checkpoint(
+                request.checkpoint_ledger_seq
+            )
             if metadata.generation.state not in {
                 ProjectionGenerationState.BUILDING,
                 ProjectionGenerationState.VALIDATING,
@@ -568,6 +573,11 @@ class _CompleteProjectionBoundary:
                 profile=CompleteProjectionProfile.FIXTURE_QUALIFICATION,
                 recorded_at=self._clock(),
             )
+            self._require_exact_qualification_evidence(
+                qualification,
+                identity=identity,
+                checkpoint_ledger_seq=request.checkpoint_ledger_seq,
+            )
             if qualification.projection_state_digest != state_digest:
                 raise Neo4jIdentityConflict(
                     "complete qualification differs from reconciled generation state"
@@ -586,6 +596,7 @@ class _CompleteProjectionBoundary:
             return self._projection_boundary.validate_generation(
                 authoritative,
                 proof,
+                required_source_ledger_seq=request.checkpoint_ledger_seq,
             )
 
     def promote_generation(
@@ -598,6 +609,9 @@ class _CompleteProjectionBoundary:
                 raise TypeError("complete promotion requires a typed request")
             target_grant, prior_grant = (
                 self._projection_boundary._authorize_promotion(request, proof)
+            )
+            self._require_current_source_checkpoint(
+                request.checkpoint_ledger_seq
             )
             metadata = self._store.projection_generation_metadata(
                 request.generation_id
@@ -663,6 +677,7 @@ class _CompleteProjectionBoundary:
                 target_grant,
                 prior_grant,
                 request,
+                required_source_ledger_seq=checkpoint,
             )
 
     def qualify_generation(
@@ -687,6 +702,9 @@ class _CompleteProjectionBoundary:
                     "profile": request.profile.value,
                 },
                 authenticated=authenticated,
+            )
+            self._require_current_source_checkpoint(
+                request.checkpoint_ledger_seq
             )
             self._require_exact_checkpoint(metadata, request.checkpoint_ledger_seq)
             if metadata.generation.state not in {
@@ -717,6 +735,14 @@ class _CompleteProjectionBoundary:
                 fixture=INTEGRATED_FIXTURE_V2_PROJECTION,
                 profile=request.profile,
                 recorded_at=self._clock(),
+            )
+            self._require_current_source_checkpoint(
+                request.checkpoint_ledger_seq
+            )
+            self._require_exact_qualification_evidence(
+                qualification,
+                identity=identity,
+                checkpoint_ledger_seq=request.checkpoint_ledger_seq,
             )
             if (
                 qualification.projection_state_digest
@@ -760,6 +786,106 @@ class _CompleteProjectionBoundary:
         if metadata.open_gap_count or metadata.dead_letter_count:
             raise ProjectionStateError(
                 "complete operation requires zero gaps and dead letters"
+            )
+
+    @staticmethod
+    def _require_exact_qualification_evidence(
+        qualification: CompleteProjectionQualification,
+        *,
+        identity: CompleteProjectionIdentity,
+        checkpoint_ledger_seq: int,
+    ) -> None:
+        if qualification.identity != identity:
+            raise Neo4jIdentityConflict(
+                "complete qualification identity differs from authority"
+            )
+        if qualification.checkpoint_ledger_seq != checkpoint_ledger_seq:
+            raise Neo4jIdentityConflict(
+                "complete qualification checkpoint differs from authority"
+            )
+        fixture = INTEGRATED_FIXTURE_V2_PROJECTION
+        expected_tombstones = tuple(
+            sorted(fixture.expected_tombstoned_passage_ids)
+        )
+        if qualification.expected_tombstoned_passage_ids != expected_tombstones:
+            raise Neo4jIdentityConflict(
+                "complete qualification tombstone evidence differs from fixture"
+            )
+
+        fulltext_by_query: dict[str, list[Any]] = {}
+        for hit in qualification.fulltext_hits:
+            if hit.query_kind is not CompleteQueryKind.FULL_TEXT:
+                raise Neo4jIdentityConflict(
+                    "complete qualification full-text evidence has wrong kind"
+                )
+            fulltext_by_query.setdefault(hit.query_id, []).append(hit)
+        expected_fulltext = {
+            query_id: query.expected_first_passage_id
+            for query in fixture.fulltext_queries
+            for query_id in (
+                query.query_id,
+                f"{query.query_id}.normalized",
+            )
+        }
+        if set(fulltext_by_query) != set(expected_fulltext):
+            raise Neo4jIdentityConflict(
+                "complete qualification full-text query evidence is incomplete"
+            )
+        for query_id, expected_passage_id in expected_fulltext.items():
+            hits = sorted(fulltext_by_query[query_id], key=lambda item: item.rank)
+            if (
+                not hits
+                or [item.rank for item in hits]
+                != list(range(1, len(hits) + 1))
+                or hits[0].passage_id != expected_passage_id
+            ):
+                raise Neo4jIdentityConflict(
+                    "complete qualification full-text evidence differs from fixture"
+                )
+
+        vector_by_query: dict[str, list[Any]] = {}
+        for hit in qualification.vector_hits:
+            if hit.query_kind is not CompleteQueryKind.VECTOR:
+                raise Neo4jIdentityConflict(
+                    "complete qualification vector evidence has wrong kind"
+                )
+            vector_by_query.setdefault(hit.query_id, []).append(hit)
+        expected_vector = {
+            query.query_id: query.expected_active_prefix
+            for query in fixture.vector_queries
+        }
+        if set(vector_by_query) != set(expected_vector):
+            raise Neo4jIdentityConflict(
+                "complete qualification vector query evidence is incomplete"
+            )
+        for query_id, expected_prefix in expected_vector.items():
+            hits = sorted(vector_by_query[query_id], key=lambda item: item.rank)
+            if (
+                [item.rank for item in hits]
+                != list(range(1, len(hits) + 1))
+                or tuple(
+                    item.passage_id for item in hits[: len(expected_prefix)]
+                )
+                != expected_prefix
+            ):
+                raise Neo4jIdentityConflict(
+                    "complete qualification vector evidence differs from fixture"
+                )
+
+        returned_passages = {
+            hit.passage_id
+            for hit in (*qualification.fulltext_hits, *qualification.vector_hits)
+        }
+        if returned_passages & set(expected_tombstones):
+            raise Neo4jIdentityConflict(
+                "complete qualification returned tombstoned fixture material"
+            )
+
+    def _require_current_source_checkpoint(self, checkpoint: int) -> None:
+        latest = self._store.latest_complete_source_ledger_seq()
+        if latest != checkpoint:
+            raise ProjectionStateError(
+                "complete operation must bind the exact current source watermark"
             )
 
     def _expected_batches(
