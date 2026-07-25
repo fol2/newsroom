@@ -1,0 +1,23 @@
+name: agent-increment2a-ci-debug-export
+
+on:
+  push:
+    branches:
+      - agent/increment-2a-ci-debug-export
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: increment2a-final-source
+          path: |
+            .
+            !.git/**
+          include-hidden-files: true
+          retention-days: 1
