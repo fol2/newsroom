@@ -120,7 +120,8 @@ def test_increment_2a_substantive_review_records_zero_unresolved_p1_p2() -> None
     for required in (
         "Reviewed pre-correction head: `d4877f47e9399964ebaea75bd7fc56daa09258c4`",
         "P1 findings: 0",
-        "P2 findings: 7",
+        "P2 findings: 8",
+        "### P2-8 — Repeated fixture construction consumed the SDLC evidence margin",
         "Remaining unresolved P1/P2 after correction: 0",
         "1,031 passed, 11 skipped, 0 failed",
         "Issue #156 remains blocked",
