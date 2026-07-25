@@ -1,0 +1,22 @@
+name: agent-increment2b-recovery-export
+
+on:
+  push:
+    branches:
+      - agent/increment-2b-recovery-export
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload retained checkpoint chunks
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment2b-retained-checkpoint-chunks
+          path: .github/increment2b-checkpoint-transfer
+          include-hidden-files: true
+          retention-days: 1
