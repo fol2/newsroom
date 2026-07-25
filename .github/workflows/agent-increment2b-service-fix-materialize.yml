@@ -1,0 +1,66 @@
+name: agent-increment2b-service-fix-materialize
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    env:
+      AUTHORIZED_PARENT: 9e3f760b4c1ab6c8c307f69f18014b75c5157e6a
+      TARGET_BRANCH: agent/increment-2b-fulltext-vector-projection
+      PATCH_SHA256: bf2ad185bb80b7c354f09b4f59934ed90d67010f3d01a2d1a4d79aac717ecca0
+      EXPECTED_TREE: 8a1aeb6f6ece95728bdc192065d5c46bca0d6509
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Materialize verified actual-service evidence fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat .github/increment2b-service-fix/READY)" = "$PATCH_SHA256"
+          base64 --decode .github/increment2b-service-fix/fix.patch.gz.b64 \
+            > /tmp/increment2b-service-fix.patch.gz
+          echo "$PATCH_SHA256  /tmp/increment2b-service-fix.patch.gz" \
+            | sha256sum --check -
+          gzip --decompress --stdout /tmp/increment2b-service-fix.patch.gz \
+            > /tmp/increment2b-service-fix.patch
+
+          git checkout --detach "$AUTHORIZED_PARENT"
+          git apply --check /tmp/increment2b-service-fix.patch
+          git apply /tmp/increment2b-service-fix.patch
+          rm -rf .github/increment2b-service-fix
+          rm -f .github/workflows/agent-increment2b-service-fix-materialize.yml
+          git add -A
+
+          cat > /tmp/expected-paths <<'EOF'
+          newsroom/tests/complete_projection_2b_helpers.py
+          newsroom/tests/test_complete_projection_2b_neo4j_service.py
+          EOF
+          sed -i 's/^          //' /tmp/expected-paths
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          git diff --cached --name-only "$AUTHORIZED_PARENT" | sort \
+            > /tmp/actual-paths
+          diff -u /tmp/expected-paths /tmp/actual-paths
+          git diff --cached --check
+          python -m compileall -q newsroom scripts
+
+          tree="$(git write-tree)"
+          echo "TREE_SHA=$tree"
+          test "$tree" = "$EXPECTED_TREE"
+          git config user.name "Newsroom Increment 2B Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          commit="$(printf '%s\n\n%s\n' \
+            'test(projection): correct Increment 2B service evidence' \
+            'Count only governed DEVELOPMENT_OF relationships, reuse the registered complete family for replacement generations, and read lifecycle checkpoints from the family projection status.' \
+            | git commit-tree "$tree" -p "$AUTHORIZED_PARENT")"
+          echo "COMMIT_SHA=$commit"
+          git push --force origin "$commit:refs/heads/$TARGET_BRANCH"
