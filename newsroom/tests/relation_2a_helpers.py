@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import atexit
+
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
+import tempfile
+from threading import RLock
 from typing import Callable
 
 from newsroom.authority import (
@@ -64,6 +69,24 @@ class SeededFixtureObjects:
     tombstone_event_id: EventId | None
     commands: CommandRegistry
     schemas: PayloadSchemaRegistry
+
+
+_SEED_TEMPLATE_LOCK = RLock()
+_SEED_TEMPLATE_ROOT: Path | None = None
+_SEED_TEMPLATES: dict[bool, tuple[Path, Path, SeededFixtureObjects]] = {}
+
+
+def _cleanup_seed_templates() -> None:
+    global _SEED_TEMPLATE_ROOT
+    with _SEED_TEMPLATE_LOCK:
+        root = _SEED_TEMPLATE_ROOT
+        _SEED_TEMPLATES.clear()
+        _SEED_TEMPLATE_ROOT = None
+    if root is not None:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+atexit.register(_cleanup_seed_templates)
 
 
 def proof(*, credential: str = "token-1") -> AuthenticationProof:
@@ -181,7 +204,7 @@ def open_fixture_object_system(
     )
 
 
-def seed_fixture_objects(
+def _seed_fixture_objects_uncached(
     database: Path,
     *,
     object_root: Path,
@@ -268,6 +291,101 @@ def seed_fixture_objects(
         )
     finally:
         system.close()
+
+
+def _seed_template(
+    *, tombstone_negative: bool
+) -> tuple[Path, Path, SeededFixtureObjects]:
+    global _SEED_TEMPLATE_ROOT
+    with _SEED_TEMPLATE_LOCK:
+        existing = _SEED_TEMPLATES.get(tombstone_negative)
+        if existing is not None:
+            return existing
+        if _SEED_TEMPLATE_ROOT is None:
+            _SEED_TEMPLATE_ROOT = Path(
+                tempfile.mkdtemp(prefix="newsroom-relation-fixture-")
+            )
+        template_root = _SEED_TEMPLATE_ROOT / (
+            "with-tombstone" if tombstone_negative else "without-tombstone"
+        )
+        template_root.mkdir(mode=0o700)
+        database = template_root / "authority.sqlite3"
+        object_root = template_root / "objects"
+        seeded = _seed_fixture_objects_uncached(
+            database,
+            object_root=object_root,
+            tombstone_negative=tombstone_negative,
+        )
+        template = (database, object_root, seeded)
+        _SEED_TEMPLATES[tombstone_negative] = template
+        return template
+
+
+def _clone_seed_template(
+    database: Path,
+    *,
+    object_root: Path,
+    tombstone_negative: bool,
+) -> SeededFixtureObjects:
+    template_database, template_objects, seeded = _seed_template(
+        tombstone_negative=tombstone_negative
+    )
+    if database.exists() or database.is_symlink():
+        raise FileExistsError(database)
+    if object_root.exists() or object_root.is_symlink():
+        raise FileExistsError(object_root)
+    database.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copy2(template_database, database)
+        shutil.copytree(
+            template_objects,
+            object_root,
+            copy_function=shutil.copy2,
+        )
+    except Exception:
+        database.unlink(missing_ok=True)
+        shutil.rmtree(object_root, ignore_errors=True)
+        raise
+    return SeededFixtureObjects(
+        binding_request=seeded.binding_request,
+        admission_by_passage_id=dict(seeded.admission_by_passage_id),
+        manifest_admission_id=seeded.manifest_admission_id,
+        tombstone_event_id=seeded.tombstone_event_id,
+        commands=seeded.commands,
+        schemas=seeded.schemas,
+    )
+
+
+def seed_fixture_objects(
+    database: Path,
+    *,
+    object_root: Path,
+    clock: Callable[[], UtcTimestamp] | None = None,
+    tombstone_negative: bool = True,
+) -> SeededFixtureObjects:
+    """Create isolated relation fixture authority with a fast closed-store clone.
+
+    The default deterministic fixture has identical immutable authority in every
+    test. Build that authority once per test process, close it, and copy the
+    SQLite database plus governed-object directory into each test's private
+    ``tmp_path``. Every test still opens and validates its own database and can
+    mutate it independently. Tests with a custom clock continue through the
+    uncached construction path because their retained chronology is part of the
+    scenario under test.
+    """
+
+    if clock is not None:
+        return _seed_fixture_objects_uncached(
+            database,
+            object_root=object_root,
+            clock=clock,
+            tombstone_negative=tombstone_negative,
+        )
+    return _clone_seed_template(
+        database,
+        object_root=object_root,
+        tombstone_negative=tombstone_negative,
+    )
 
 
 def open_relation_system(
