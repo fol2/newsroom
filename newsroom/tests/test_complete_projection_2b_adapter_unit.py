@@ -266,6 +266,35 @@ def test_document_and_relation_properties_round_trip_exact_authority() -> None:
     assert relation_identity["relation_digest"] == relation.relation_digest
 
 
+def test_nullable_properties_follow_neo4j_absent_property_semantics() -> None:
+    identity = complete_identity()
+    document = complete_document(
+        "ifv2-distinct-jurisdiction",
+        identity=identity,
+    )
+    relation = admitted_relation(identity=identity)
+
+    document_properties = _document_properties(document)
+    relation_properties = _relation_properties(relation)
+
+    assert document.revision_id is None
+    assert "revision_id" not in document_properties
+    assert relation.temporal_scope.valid_until is None
+    assert "valid_until" not in relation_properties
+    assert _document_from_properties(identity, document_properties) == document
+    assert _relation_from_properties(identity, relation_properties) == relation
+
+    missing_required = dict(document_properties)
+    missing_required.pop("passage_id")
+    with pytest.raises(Neo4jIdentityConflict, match="fixed complete contract"):
+        _document_from_properties(identity, missing_required)
+
+    unexpected = dict(relation_properties)
+    unexpected["caller_selected_property"] = "forbidden"
+    with pytest.raises(Neo4jIdentityConflict, match="fixed complete contract"):
+        _relation_from_properties(identity, unexpected)
+
+
 def test_duplicate_complete_delivery_is_idempotent_without_later_writes() -> None:
     batch = complete_batch(documents=(complete_document(),))
     transaction = _DuplicateDeliveryTransaction(batch)

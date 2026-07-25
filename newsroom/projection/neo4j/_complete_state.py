@@ -46,6 +46,8 @@ _COMPLETE_DELIVERY_LABEL = "NewsroomCompleteProjectionDelivery"
 _ADMITTED_ENDPOINT_LABEL = "NewsroomAdmittedRelationEndpoint"
 _ADMITTED_RELATION_IDENTITY_LABEL = "NewsroomAdmittedRelationIdentity"
 
+_DOCUMENT_OPTIONAL_PROPERTY_KEYS = frozenset({"revision_id"})
+
 _DOCUMENT_PROPERTY_KEYS = frozenset(
     {
         "generation_id",
@@ -95,6 +97,8 @@ _RELATION_IDENTITY_PROPERTY_KEYS = frozenset(
         "relation_digest",
     }
 )
+
+_RELATION_OPTIONAL_PROPERTY_KEYS = frozenset({"valid_until"})
 
 _RELATION_PROPERTY_KEYS = frozenset(
     {
@@ -158,13 +162,12 @@ def _identity_properties(identity: CompleteProjectionIdentity) -> dict[str, obje
 
 
 def _document_properties(document: CompleteProjectionDocument) -> dict[str, object]:
-    return {
+    properties: dict[str, object] = {
         **_identity_properties(document.identity),
         "passage_id": document.passage_id,
         "admission_id": str(document.admission_id),
         "blob_digest": document.blob_digest,
         "language": document.language,
-        "revision_id": document.revision_id,
         "retrieval_text": document.retrieval_text,
         "normalized_text_digest": document.normalized_text_digest,
         "vector_components": list(document.vector_components),
@@ -177,6 +180,11 @@ def _document_properties(document: CompleteProjectionDocument) -> dict[str, obje
         "recorded_at": document.recorded_at.to_text(),
         "document_digest": document.document_digest,
     }
+    # Neo4j removes properties assigned null. Omit optional authority fields
+    # explicitly so create/read equality does not depend on null retention.
+    if document.revision_id is not None:
+        properties["revision_id"] = document.revision_id
+    return properties
 
 
 def _endpoint_properties(
@@ -208,7 +216,7 @@ def _relation_properties(
 ) -> dict[str, object]:
     temporal = relation.temporal_scope
     producer = relation.producer
-    return {
+    properties: dict[str, object] = {
         "generation_id": str(relation.identity.generation_id),
         "family_id": relation.identity.family_id,
         "family_definition_version": relation.identity.family_definition_version,
@@ -225,9 +233,6 @@ def _relation_properties(
         "object_record_id": relation.object.record_id,
         "trust_scope": relation.trust_scope.value,
         "valid_from": temporal.valid_from.to_text(),
-        "valid_until": (
-            None if temporal.valid_until is None else temporal.valid_until.to_text()
-        ),
         "temporal_precision": temporal.precision,
         "evidence_objects_json": canonical_json_bytes(
             [item.canonical_value() for item in relation.evidence_objects]
@@ -246,6 +251,9 @@ def _relation_properties(
         "recorded_at": relation.recorded_at.to_text(),
         "relation_digest": relation.relation_digest,
     }
+    if temporal.valid_until is not None:
+        properties["valid_until"] = temporal.valid_until.to_text()
+    return properties
 
 
 def _delivery_properties(batch: CompleteProjectionBatch) -> dict[str, object]:
@@ -387,8 +395,11 @@ def _document_from_properties(
     identity: CompleteProjectionIdentity,
     raw: Mapping[str, object],
 ) -> CompleteProjectionDocument:
-    value = _require_exact_properties(
-        raw, _DOCUMENT_PROPERTY_KEYS, "complete document"
+    value = _require_contract_properties(
+        raw,
+        _DOCUMENT_PROPERTY_KEYS,
+        _DOCUMENT_OPTIONAL_PROPERTY_KEYS,
+        "complete document",
     )
     _require_identity_properties(identity, value, "complete document")
     components = tuple(int(item) for item in _require_list(value["vector_components"]))
@@ -400,7 +411,9 @@ def _document_from_properties(
         blob_digest=str(value["blob_digest"]),
         language=str(value["language"]),
         revision_id=(
-            None if value["revision_id"] is None else str(value["revision_id"])
+            None
+            if value.get("revision_id") is None
+            else str(value["revision_id"])
         ),
         retrieval_text=str(value["retrieval_text"]),
         normalized_text_digest=str(value["normalized_text_digest"]),
@@ -427,8 +440,11 @@ def _relation_from_properties(
     identity: CompleteProjectionIdentity,
     raw: Mapping[str, object],
 ) -> AdmittedRelationProjection:
-    value = _require_exact_properties(
-        raw, _RELATION_PROPERTY_KEYS, "admitted relation"
+    value = _require_contract_properties(
+        raw,
+        _RELATION_PROPERTY_KEYS,
+        _RELATION_OPTIONAL_PROPERTY_KEYS,
+        "admitted relation",
     )
     for key, expected in (
         ("generation_id", str(identity.generation_id)),
@@ -478,7 +494,7 @@ def _relation_from_properties(
             valid_from=UtcTimestamp.parse(str(value["valid_from"])),
             valid_until=(
                 None
-                if value["valid_until"] is None
+                if value.get("valid_until") is None
                 else UtcTimestamp.parse(str(value["valid_until"]))
             ),
             precision=str(value["temporal_precision"]),
@@ -589,6 +605,22 @@ def _complete_state_digest_from_parts(
     return state.state_digest
 
 
+def _require_contract_properties(
+    value: Mapping[str, object],
+    expected: frozenset[str],
+    optional: frozenset[str],
+    identity: str,
+) -> dict[str, object]:
+    copied = dict(value)
+    actual_keys = set(copied)
+    required_keys = set(expected) - set(optional)
+    if not required_keys.issubset(actual_keys) or not actual_keys.issubset(expected):
+        raise Neo4jIdentityConflict(
+            f"{identity} properties differ from the fixed complete contract"
+        )
+    return copied
+
+
 def _require_exact_properties(
     value: Mapping[str, object],
     expected: frozenset[str],
@@ -626,9 +658,11 @@ __all__ = [
     "_COMPLETE_DELIVERY_LABEL",
     "_COMPLETE_DOCUMENT_BASE_LABEL",
     "_DELIVERY_PROPERTY_KEYS",
+    "_DOCUMENT_OPTIONAL_PROPERTY_KEYS",
     "_DOCUMENT_PROPERTY_KEYS",
     "_ENDPOINT_PROPERTY_KEYS",
     "_RELATION_IDENTITY_PROPERTY_KEYS",
+    "_RELATION_OPTIONAL_PROPERTY_KEYS",
     "_RELATION_PROPERTY_KEYS",
     "_complete_state_digest_from_parts",
     "_delivery_from_properties",

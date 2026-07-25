@@ -35,6 +35,7 @@ def _route(*paths: str) -> dict[str, object]:
 
 def test_increment_1c_native_graph_paths_require_actual_service_evidence() -> None:
     expected_tests = [
+        "newsroom/tests/test_complete_projection_2b_neo4j_service.py",
         _INTEGRATED_SERVICE_TEST,
         "newsroom/tests/test_projection_b2_neo4j_service.py",
         "newsroom/tests/test_projection_b3_neo4j_service.py",

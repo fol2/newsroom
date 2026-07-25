@@ -253,6 +253,14 @@ jobs:
           path: projection-b2-b3-c1-complete-neo4j-results.xml
           if-no-files-found: error
 
+      - name: Upload legacy B2/B3/C1 actual-service evidence alias
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: projection-b2-b3-c1-neo4j-evidence
+          path: projection-b2-b3-c1-complete-neo4j-results.xml
+          if-no-files-found: error
+
       - name: Remove disposable Neo4j state
         if: always()
         run: docker rm --force newsroom-b2-neo4j || true
