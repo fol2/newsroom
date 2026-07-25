@@ -1,0 +1,79 @@
+name: agent-increment2b-review-fix-materialize
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    env:
+      AUTHORIZED_PARENT: 041b7a60013fce741fe5118d37116d4f31ea63a6
+      TARGET_BRANCH: agent/increment-2b-fulltext-vector-projection
+      PATCH_SHA256: 6f1bd606bd7c678cd0538da9bc4ad769c5223edfaefd1b7afc86e5f35d8dbbe6
+      EXPECTED_TREE: 544d537349869677c84f5afc8734c7308348123f
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Materialize verified Increment 2B review corrections
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat .github/increment2b-review-fix/READY)" = "$PATCH_SHA256"
+          base64 --decode .github/increment2b-review-fix/fix.patch.gz.b64 \
+            > /tmp/increment2b-review-fix.patch.gz
+          echo "$PATCH_SHA256  /tmp/increment2b-review-fix.patch.gz" \
+            | sha256sum --check -
+          gzip --decompress --stdout /tmp/increment2b-review-fix.patch.gz \
+            > /tmp/increment2b-review-fix.patch
+
+          git checkout --detach "$AUTHORIZED_PARENT"
+          git apply --check /tmp/increment2b-review-fix.patch
+          git apply /tmp/increment2b-review-fix.patch
+          rm -rf .github/increment2b-review-fix
+          rm -f .github/workflows/agent-increment2b-review-fix-materialize.yml
+          git add -A
+
+          cat > /tmp/expected-paths <<'EOF'
+          docs/README.md
+          docs/operations/increment-2b-complete-projection.md
+          docs/research/2026-07-25-increment-2b-substantive-review.md
+          newsroom/authority/_complete_projection_system.py
+          newsroom/authority/_projection_store.py
+          newsroom/authority/_projection_system.py
+          newsroom/projection/neo4j/__init__.py
+          newsroom/projection/neo4j/_complete_adapter.py
+          newsroom/projection/neo4j/traceability.py
+          newsroom/tests/complete_projection_2b_helpers.py
+          newsroom/tests/test_complete_projection_2b_adapter_unit.py
+          newsroom/tests/test_complete_projection_2b_authority.py
+          newsroom/tests/test_complete_projection_2b_migrations.py
+          newsroom/tests/test_complete_projection_2b_neo4j_service.py
+          newsroom/tests/test_complete_projection_2b_traceability.py
+          EOF
+          sed -i 's/^          //' /tmp/expected-paths
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          git diff --cached --name-only "$AUTHORIZED_PARENT" | sort \
+            > /tmp/actual-paths
+          diff -u /tmp/expected-paths /tmp/actual-paths
+          git diff --cached --check
+          python -m compileall -q newsroom scripts
+
+          tree="$(git write-tree)"
+          echo "TREE_SHA=$tree"
+          test "$tree" = "$EXPECTED_TREE"
+          git config user.name "Newsroom Increment 2B Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          commit="$(printf '%s\n\n%s\n' \
+            'fix(projection): close Increment 2B review findings' \
+            'Close one source-watermark P1 and seven P2 findings: atomic validation and promotion guards, complete raw/normalized qualification evidence, strict startup row binding, operations, traceability, exclusions, rollback and current-head review evidence.' \
+            | git commit-tree "$tree" -p "$AUTHORIZED_PARENT")"
+          echo "COMMIT_SHA=$commit"
+          git push --force origin "$commit:refs/heads/$TARGET_BRANCH"
