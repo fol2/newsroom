@@ -40,12 +40,13 @@ The corrected tree was examined for:
 - migration checksums, schema fingerprint and startup cross-record validation;
 - bilingual fixture ownership, provenance and lifecycle evidence;
 - absence of arbitrary Cypher, caller-selected predicates and graph mutation authority;
-- exclusions, rollback and the stop boundary before issue #156.
+- exclusions, rollback and the stop boundary before issue #156; and
+- bounded, repeatable test-fixture construction within the accepted SDLC evidence margin.
 
 ## Result
 
 - P1 findings: 0
-- P2 findings: 7
+- P2 findings: 8
 - Remaining unresolved P1/P2 after correction: 0
 - Pull-request review submissions at review time: 0
 - Unresolved inline review threads at review time: 0
@@ -141,6 +142,21 @@ Correction:
 - require an Assertion's `admitted_at` value to equal its admitting Decision time exactly;
 - add raw-SQL tamper/reopen tests for Decision sequence rebinding and Assertion admission-time rebinding.
 
+### P2-8 — Repeated fixture construction consumed the SDLC evidence margin
+
+The corrected relation tests initially rebuilt the complete deterministic fixture authority for every test: SQLite migrations and immutable rows, governed-object CAS content, lifecycle events, revocation and tombstone state. The tests remained semantically correct, but repeated identical setup consumed a disproportionate share of the bounded core-lane runtime and threatened the accepted SDLC evidence margin.
+
+Correction:
+
+- build each default deterministic fixture variant once in a private process-owned template directory;
+- close the authority writer before the template becomes reusable;
+- copy both the SQLite database and governed-object directory into every test's isolated `tmp_path`;
+- retain independent startup integrity validation and per-test mutation after cloning;
+- keep tests with a custom clock on the uncached construction path because retained chronology is material to those scenarios;
+- defensively copy mutable helper mappings and remove the private templates at process exit.
+
+The cache is test-only. It creates no production database, shared writer, mutable authority shortcut or runtime product surface.
+
 ## Validation performed
 
 The corrected implementation passed the complete repository test set in five bounded file-list shards:
@@ -161,6 +177,7 @@ Additional checks:
 - `python -m compileall -q newsroom scripts`: passed;
 - clustering evaluation gate with `--fail-on-regression`: passed with no regressions;
 - `git diff --check`: passed;
+- the P2-8 helper module parsed and compiled after the template-clone correction;
 - PR #159 review submissions and inline review threads: zero at review time.
 
 The working environment could not complete `uv lock --check` because the configured internal package mirror repeatedly returned HTTP 503 while fetching declared dependencies; the final attempt failed on `requests`. `pyproject.toml` and `uv.lock` are unchanged by Increment 2A. Exact-head GitHub CI must still execute the repository lockfile check and all applicable SDLC gates before merge.
