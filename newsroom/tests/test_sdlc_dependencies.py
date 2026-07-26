@@ -152,3 +152,45 @@ def test_test_modules_are_excluded_from_production_dependency_analysis() -> None
             "README.md",
         )
     ) == ("newsroom/core.py", "scripts/tool.py")
+
+
+def test_cached_graph_invalidates_when_same_root_source_changes(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "newsroom/__init__.py")
+    _write(tmp_path, "newsroom/core.py", "VALUE = 1\n")
+    _write(tmp_path, "newsroom/consumer.py", "VALUE = 2\n")
+
+    first = build_dependency_graph(tmp_path)
+    assert first.dependent_paths("newsroom/core.py") == ()
+
+    _write(
+        tmp_path,
+        "newsroom/consumer.py",
+        "from newsroom.core import VALUE\n",
+    )
+    second = build_dependency_graph(tmp_path)
+
+    assert second.dependent_paths("newsroom/core.py") == (
+        "newsroom/consumer.py",
+    )
+
+
+def test_cached_graph_returns_isolated_mutable_mappings(tmp_path: Path) -> None:
+    _write(tmp_path, "newsroom/__init__.py")
+    _write(tmp_path, "newsroom/core.py", "VALUE = 1\n")
+
+    first = build_dependency_graph(tmp_path)
+    first.path_to_module.clear()
+    first.module_to_path.clear()
+    first.reverse_importers.clear()
+
+    second = build_dependency_graph(tmp_path)
+    assert second.path_to_module == {
+        "newsroom/__init__.py": "newsroom",
+        "newsroom/core.py": "newsroom.core",
+    }
+    assert second.module_to_path == {
+        "newsroom": "newsroom/__init__.py",
+        "newsroom.core": "newsroom/core.py",
+    }
