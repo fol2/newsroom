@@ -31,7 +31,7 @@ The review excludes Increment 2C, hybrid retrieval, Retrieval Context version 2,
 ## Result
 
 - P1 findings: 1
-- P2 findings: 10
+- P2 findings: 11
 - Remaining unresolved P1/P2 after correction: 0
 
 Review submissions, inline threads and actionable top-level comments must be rechecked against the exact final PR head before merge.
@@ -175,6 +175,20 @@ Correction:
 - extend workflow and lane contract tests so removing or changing the complete-service flag fails closed.
 
 The flag grants no runtime product authority. It only requires the already selected complete actual-service tests to execute in the authenticated evidence lane.
+
+### P2-11 — Complete service tests still depended on removed bootstrap-admin credentials
+
+After the service lane began executing the eight complete cases, every product assertion passed but teardown or deliberate fault injection failed because the test module opened a second driver from `NEO4J_ADMIN_*` variables. The SDLC service workflow intentionally deletes the bootstrap administrator credential before the evidence command, so the module had an undeclared and prohibited credential dependency.
+
+Correction:
+
+- open fault-injection, inspection and cleanup sessions from the typed `Neo4jProjectorConfig`;
+- use the same dedicated non-bootstrap projector identity and database as the governed adapter;
+- remove every bootstrap username, password and URI reference from the complete-service module;
+- retain the bootstrap administrator only for disposable service readiness and projector-user creation before evidence execution; and
+- add a documentation-contract test proving the service module cannot regress to bootstrap-admin environment access.
+
+The correction does not broaden product authority: the projector already owns the exact fixed index and generation mutations exercised by the adapter, while no public driver, arbitrary Cypher or caller-selected administration surface is introduced.
 
 ## Local validation
 

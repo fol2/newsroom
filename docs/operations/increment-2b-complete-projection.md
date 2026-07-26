@@ -143,6 +143,8 @@ Lifecycle changes produce rights-safe removals for every derivative. A rebuild f
 
 The complete cases prove bilingual raw and normalized full-text queries, deterministic vector nearest-neighbor reads, exact complete generation promotion, wrong configuration and dimension failure, graph or index loss failure, replacement-generation recovery, rights revocation, tombstone non-resurrection and authority-only rebuild.
 
+The bootstrap administrator exists only long enough to establish the disposable service and projector identity. Its credential file is removed before the evidence command starts. Complete-service fault injection, reconciliation inspection and cleanup use the same dedicated non-bootstrap projector credential as the governed adapter; the test module has no bootstrap username, password or URI dependency.
+
 JUnit evidence must prove every required case executed without skip, failure or error. The workflow retains both the extended complete evidence artifact and the legacy B2/B3/C1 artifact alias expected by the accepted SDLC service lane.
 
 ## SDLC evidence margin

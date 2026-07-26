@@ -13,6 +13,10 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _OPERATION_GUIDE = (
     _REPOSITORY_ROOT / "docs/operations/increment-2b-complete-projection.md"
 )
+_COMPLETE_SERVICE_TEST = (
+    _REPOSITORY_ROOT
+    / "newsroom/tests/test_complete_projection_2b_neo4j_service.py"
+)
 _SUBSTANTIVE_REVIEW = (
     _REPOSITORY_ROOT
     / "docs/research/2026-07-25-increment-2b-substantive-review.md"
@@ -110,7 +114,7 @@ def test_increment_2b_review_records_zero_unresolved_p1_p2() -> None:
     text = _SUBSTANTIVE_REVIEW.read_text(encoding="utf-8")
     for required in (
         "P1 findings: 1",
-        "P2 findings: 10",
+        "P2 findings: 11",
         "Remaining unresolved P1/P2 after correction: 0",
         "A source event could arrive during reconciliation",
         "The normalized full-text query contract was retained but not executed",
@@ -119,7 +123,17 @@ def test_increment_2b_review_records_zero_unresolved_p1_p2() -> None:
         "Deterministic core evidence exceeded the accepted lane budget",
         "Complete actual-service cases were not optional in the deterministic core manifest",
         "The SDLC service lane selected complete tests without enabling them",
+        "Complete service tests still depended on removed bootstrap-admin credentials",
         "1,094 passed, 19 skipped, 0 failed",
         "Issue #157 remains blocked",
     ):
         assert required in text
+
+
+def test_increment_2b_complete_service_uses_only_projector_credentials() -> None:
+    text = _COMPLETE_SERVICE_TEST.read_text(encoding="utf-8")
+    assert "def _projector_driver" in text
+    assert "Neo4jProjectorConfig.from_environment()" in text
+    assert "NEO4J_ADMIN_USERNAME" not in text
+    assert "NEO4J_ADMIN_PASSWORD" not in text
+    assert 'os.environ["NEO4J_URI"]' not in text

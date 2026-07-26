@@ -54,15 +54,13 @@ def _service_config() -> Neo4jProjectorConfig:
     return Neo4jProjectorConfig.from_environment()
 
 
-def _admin_driver():
+def _projector_driver():
     from neo4j import GraphDatabase
 
+    config = _service_config()
     return GraphDatabase.driver(
-        os.environ["NEO4J_URI"],
-        auth=(
-            os.environ["NEO4J_ADMIN_USERNAME"],
-            os.environ["NEO4J_ADMIN_PASSWORD"],
-        ),
+        config.uri,
+        auth=(config.username, config.password),
     )
 
 
@@ -156,19 +154,19 @@ def _names(generation_id):
     )
 
 
-def _admin_write(statement: str, **parameters) -> None:
-    driver = _admin_driver()
+def _projector_write(statement: str, **parameters) -> None:
+    driver = _projector_driver()
     try:
-        with driver.session(database=os.environ["NEWSROOM_NEO4J_DATABASE"]) as session:
+        with driver.session(database=_service_config().database) as session:
             session.run(statement, parameters).consume()
     finally:
         driver.close()
 
 
-def _admin_scalar(statement: str, **parameters) -> int:
-    driver = _admin_driver()
+def _projector_scalar(statement: str, **parameters) -> int:
+    driver = _projector_driver()
     try:
-        with driver.session(database=os.environ["NEWSROOM_NEO4J_DATABASE"]) as session:
+        with driver.session(database=_service_config().database) as session:
             record = session.run(statement, parameters).single(strict=True)
             return int(record[0])
     finally:
@@ -178,8 +176,8 @@ def _admin_scalar(statement: str, **parameters) -> int:
 def _cleanup_generation(generation_id) -> None:
     names = _names(generation_id)
     for index_name in (names.fulltext_index_name, names.vector_index_name):
-        _admin_write(f"DROP INDEX `{index_name}` IF EXISTS")
-    _admin_write(
+        _projector_write(f"DROP INDEX `{index_name}` IF EXISTS")
+    _projector_write(
         "MATCH (value) WHERE value.generation_id=$generation_id "
         "DETACH DELETE value",
         generation_id=str(generation_id),
@@ -251,12 +249,12 @@ def test_actual_service_complete_generation_queries_and_promotes_exact_state(
             proof=proof(),
         )
         assert promoted.generation.state is ProjectionGenerationState.ACTIVE
-        assert _admin_scalar(
+        assert _projector_scalar(
             "MATCH ()-[relation:DEVELOPMENT_OF {generation_id:$generation_id}]->() "
             "RETURN count(relation)",
             generation_id=str(generation.generation_id),
         ) == 1
-        assert _admin_scalar(
+        assert _projector_scalar(
             "MATCH (document {generation_id:$generation_id, passage_id:$passage}) "
             "RETURN count(document)",
             generation_id=str(generation.generation_id),
@@ -294,10 +292,10 @@ def test_actual_service_partial_or_contract_mismatched_state_fails_closed(
             key=f"actual-tamper-rebuild-{tamper}",
         )
         if tamper == "missing-vector-index":
-            _admin_write(f"DROP INDEX `{names.vector_index_name}`")
+            _projector_write(f"DROP INDEX `{names.vector_index_name}`")
         elif tamper == "wrong-vector-dimensions":
-            _admin_write(f"DROP INDEX `{names.vector_index_name}`")
-            _admin_write(
+            _projector_write(f"DROP INDEX `{names.vector_index_name}`")
+            _projector_write(
                 f"""
                 CREATE VECTOR INDEX `{names.vector_index_name}`
                 FOR (node:`{names.document_label}`)
@@ -309,10 +307,10 @@ def test_actual_service_partial_or_contract_mismatched_state_fails_closed(
                 }}}}
                 """
             )
-            _admin_write("CALL db.awaitIndexes(120)")
+            _projector_write("CALL db.awaitIndexes(120)")
         elif tamper == "wrong-fulltext-analyzer":
-            _admin_write(f"DROP INDEX `{names.fulltext_index_name}`")
-            _admin_write(
+            _projector_write(f"DROP INDEX `{names.fulltext_index_name}`")
+            _projector_write(
                 f"""
                 CREATE FULLTEXT INDEX `{names.fulltext_index_name}`
                 FOR (node:`{names.document_label}`)
@@ -323,9 +321,9 @@ def test_actual_service_partial_or_contract_mismatched_state_fails_closed(
                 }}}}
                 """
             )
-            _admin_write("CALL db.awaitIndexes(120)")
+            _projector_write("CALL db.awaitIndexes(120)")
         else:
-            _admin_write(
+            _projector_write(
                 "MATCH (document {generation_id:$generation_id, passage_id:$passage}) "
                 "DETACH DELETE document",
                 generation_id=str(generation.generation_id),
@@ -373,7 +371,7 @@ def test_actual_service_wrong_watermark_generation_and_vector_dimension_fail_clo
         from neo4j.exceptions import Neo4jError
 
         with pytest.raises(Neo4jError):
-            _admin_write(
+            _projector_write(
                 "CALL db.index.vector.queryNodes($index_name, 3, $vector) "
                 "YIELD node, score RETURN count(node)",
                 index_name=names.vector_index_name,
@@ -385,12 +383,13 @@ def test_actual_service_wrong_watermark_generation_and_vector_dimension_fail_clo
                 type(generation.generation_id).new(),
                 rebuilt.checkpoint_ledger_seq,
             )
+        projector = _service_config()
         with pytest.raises(Neo4jConfigurationError, match="bootstrap administrator"):
             Neo4jProjectorConfig(
-                uri=os.environ["NEWSROOM_NEO4J_URI"],
-                database=os.environ["NEWSROOM_NEO4J_DATABASE"],
-                username=os.environ["NEO4J_ADMIN_USERNAME"],
-                password=os.environ["NEO4J_ADMIN_PASSWORD"],
+                uri=projector.uri,
+                database=projector.database,
+                username="neo4j",
+                password="bootstrap-credential-not-used",
             )
     finally:
         system.close()
@@ -412,8 +411,8 @@ def test_actual_service_replacement_generation_recovers_from_authority_only(
             key="actual-primary-rebuild",
         )
         names = _names(generation.generation_id)
-        _admin_write(f"DROP INDEX `{names.fulltext_index_name}`")
-        _admin_write(
+        _projector_write(f"DROP INDEX `{names.fulltext_index_name}`")
+        _projector_write(
             "MATCH (value {generation_id:$generation_id}) DETACH DELETE value",
             generation_id=str(generation.generation_id),
         )
@@ -558,13 +557,13 @@ def test_actual_service_revocation_and_tombstone_remove_current_derivatives(
                 ),
                 proof=proof(),
             )
-        assert _admin_scalar(
+        assert _projector_scalar(
             "MATCH (document {generation_id:$generation_id, passage_id:$passage}) "
             "RETURN count(document)",
             generation_id=str(generation.generation_id),
             passage=active_passage.passage_id,
         ) == 0
-        assert _admin_scalar(
+        assert _projector_scalar(
             "MATCH ()-[relation:DEVELOPMENT_OF {generation_id:$generation_id}]->() "
             "RETURN count(relation)",
             generation_id=str(generation.generation_id),
