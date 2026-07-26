@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: agent-increment2c-p2-20-materialize
+  group: agent-increment2c-p2-20-materialize-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
