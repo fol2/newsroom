@@ -25,9 +25,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode .github/increment2b-optional-core/fix.patch.gz.b64 \
-            > /tmp/increment2b-optional-core.patch.gz
-          sha256sum /tmp/increment2b-optional-core.patch.gz
+          python - <<'PY'
+          import base64
+          import hashlib
+          from pathlib import Path
+
+          encoded = Path(
+              ".github/increment2b-optional-core/fix.patch.gz.b64"
+          ).read_text(encoding="utf-8")
+          decoded = base64.b64decode(encoded, validate=False)
+          target = Path("/tmp/increment2b-optional-core.patch.gz")
+          target.write_bytes(decoded)
+          print("encoded_chars=", len(encoded))
+          print("decoded_bytes=", len(decoded))
+          print("decoded_sha256=", hashlib.sha256(decoded).hexdigest())
+          PY
           gzip --decompress --stdout /tmp/increment2b-optional-core.patch.gz \
             > /tmp/increment2b-optional-core.patch
 
