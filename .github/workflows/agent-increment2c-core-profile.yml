@@ -31,6 +31,9 @@ jobs:
           uv lock --check
           uv sync --dev --locked
 
+      - name: Precompile exact repository bytecode
+        run: uv run --no-sync python -m compileall -q newsroom scripts
+
       - name: Profile complete deterministic suite
         id: profile
         continue-on-error: true
