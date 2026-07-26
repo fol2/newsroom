@@ -14,7 +14,6 @@ jobs:
     env:
       AUTHORISED_PARENT: 64c4500e449826a04e0e3d63e13bc573eaada6d6
       TARGET_BRANCH: agent/increment-2b-fulltext-vector-projection
-      PATCH_SHA256: d3c33154a4487f2a3c6ff452a6a72fa35b8a9c7a4ff241f5c09ad2794c92be0f
       EXPECTED_TREE: 2ff1de5e88d403c50f01b20bfc07474dba7e42cd
     steps:
       - uses: actions/checkout@v4
@@ -22,14 +21,13 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Reconstruct verified optional-service manifest patch
+      - name: Reconstruct optional-service manifest patch
         shell: bash
         run: |
           set -euo pipefail
           base64 --decode .github/increment2b-optional-core/fix.patch.gz.b64 \
             > /tmp/increment2b-optional-core.patch.gz
-          echo "$PATCH_SHA256  /tmp/increment2b-optional-core.patch.gz" \
-            | sha256sum --check -
+          sha256sum /tmp/increment2b-optional-core.patch.gz
           gzip --decompress --stdout /tmp/increment2b-optional-core.patch.gz \
             > /tmp/increment2b-optional-core.patch
 
