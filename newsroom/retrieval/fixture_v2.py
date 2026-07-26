@@ -55,6 +55,7 @@ class IntegratedFixtureV2RetrievalContract:
     fixture_id: str
     canonical_process_id: str
     query_revision_id: str
+    prior_revision_id: str
     query_hypothesis_version_id: str
     prior_hypothesis_version_id: str
     prior_candidate_version_id: str
@@ -76,6 +77,8 @@ class IntegratedFixtureV2RetrievalContract:
         hypotheses = source["event_hypotheses"]
         if self.query_revision_id != str(revisions[-1]["source_revision_id"]):
             raise RetrievalContractError("retrieval query revision differs")
+        if self.prior_revision_id != str(revisions[0]["source_revision_id"]):
+            raise RetrievalContractError("retrieval prior revision differs")
         if self.query_hypothesis_version_id != str(hypotheses["new_version_id"]):
             raise RetrievalContractError("retrieval query hypothesis differs")
         if self.prior_hypothesis_version_id != str(hypotheses["prior_version_id"]):
@@ -131,6 +134,7 @@ class IntegratedFixtureV2RetrievalContract:
             "fixture_id": self.fixture_id,
             "canonical_process_id": self.canonical_process_id,
             "query_revision_id": self.query_revision_id,
+            "prior_revision_id": self.prior_revision_id,
             "query_hypothesis_version_id": self.query_hypothesis_version_id,
             "prior_hypothesis_version_id": self.prior_hypothesis_version_id,
             "prior_candidate_version_id": self.prior_candidate_version_id,
@@ -174,6 +178,7 @@ INTEGRATED_FIXTURE_V2_RETRIEVAL = IntegratedFixtureV2RetrievalContract(
     fixture_id=INTEGRATED_FIXTURE_V2.fixture_id,
     canonical_process_id=_CANONICAL_PROCESS_ID,
     query_revision_id=str(_new["source_revision_id"]),
+    prior_revision_id=str(_prior["source_revision_id"]),
     query_hypothesis_version_id=str(_HYPOTHESES["new_version_id"]),
     prior_hypothesis_version_id=str(_HYPOTHESES["prior_version_id"]),
     prior_candidate_version_id=INTEGRATED_FIXTURE_V2.prior_candidate_version_id,

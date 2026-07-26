@@ -100,6 +100,7 @@ def test_policy_and_fixture_contracts_pin_the_accepted_2c_bounds() -> None:
     assert policy.retained_candidate_limit == 12
     assert policy.reciprocal_rank_k == 60
     assert fixture.policy_digest == policy.contract_digest
+    assert fixture.prior_revision_id.endswith("2004")
     assert fixture.prior_candidate_version_id.endswith("2012")
     assert fixture.root_by_passage_id["ifv2-prior-en"].candidate_version_id == (
         fixture.prior_candidate_version_id
