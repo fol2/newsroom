@@ -1,0 +1,123 @@
+name: agent-increment2c-relation-key-materialize
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-increment2c-relation-key-materialize
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    env:
+      AUTHORISED_PARENT: e96da901ee0101c5b4f852c576e396ad5c215349
+      EXPECTED_BASE_TREE: bfda35ad86fa5123778fd2c8bb147cb41af80427
+      TARGET_BRANCH: agent/increment-2c-bounded-hybrid-retrieval
+      PATCH_SHA256: 5d9397fb86a6a74209776b47377c9e64c8afbd8a5c745cce8e220d7b3d2f1a18
+      EXPECTED_TREE: e0b7385807eae146ebda16600ca4f80fde7f6141
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Reconstruct exact relation-key correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/increment2c-relation-key/fix.patch.gz.b64 \
+            > /tmp/increment2c-relation-key.patch.gz
+          echo "$PATCH_SHA256  /tmp/increment2c-relation-key.patch.gz" \
+            | sha256sum --check -
+          gzip --decompress --stdout /tmp/increment2c-relation-key.patch.gz \
+            > /tmp/increment2c-relation-key.patch
+
+      - name: Apply exact thirteen-file correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$AUTHORISED_PARENT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_BASE_TREE"
+          git apply --index /tmp/increment2c-relation-key.patch
+          cat > /tmp/expected-paths <<'EOF'
+          docs/operations/increment-2c-bounded-hybrid-retrieval.md
+          docs/research/2026-07-26-increment-2c-substantive-review.md
+          newsroom/authority/_relation_store.py
+          newsroom/relations/__init__.py
+          newsroom/relations/fixture_v2.py
+          newsroom/relations/models.py
+          newsroom/retrieval/fixture_v2.py
+          newsroom/tests/complete_projection_2b_helpers.py
+          newsroom/tests/relation_2a_helpers.py
+          newsroom/tests/retrieval_2c_helpers.py
+          newsroom/tests/test_retrieval_2c_contracts.py
+          newsroom/tests/test_retrieval_2c_neo4j_service.py
+          newsroom/tests/test_retrieval_2c_traceability.py
+          EOF
+          sed -i 's/^          //' /tmp/expected-paths
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          git diff --cached --name-only "$AUTHORISED_PARENT" | sort \
+            > /tmp/actual-paths
+          diff -u /tmp/expected-paths /tmp/actual-paths
+          git diff --cached --check
+          python -m compileall -q newsroom scripts
+          tree="$(git write-tree)"
+          echo "TREE_SHA=$tree"
+          test "$tree" = "$EXPECTED_TREE"
+
+      - name: Run locked affected gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_relation_2a_contracts.py \
+            newsroom/tests/test_complete_projection_2b_state.py \
+            newsroom/tests/test_complete_projection_2b_source_store.py \
+            newsroom/tests/test_complete_projection_2b_authority.py \
+            newsroom/tests/test_complete_projection_2b_contracts.py \
+            newsroom/tests/test_retrieval_2c_contracts.py \
+            newsroom/tests/test_retrieval_2c_fusion.py \
+            newsroom/tests/test_retrieval_2c_adapter_unit.py \
+            newsroom/tests/test_retrieval_2c_authority.py \
+            newsroom/tests/test_retrieval_2c_migrations.py \
+            newsroom/tests/test_retrieval_2c_traceability.py \
+            newsroom/tests/test_retrieval_2c_neo4j_service.py
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+          git diff --cached --check
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+
+      - name: Create and push clean correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Newsroom Increment 2C Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
+          commit="$(printf '%s\n\n%s\n' \
+            'fix(retrieval): bind admitted graph identity to fixture authority' \
+            'Centralize governed relation-key derivation, bind the exact fixture admission identity into retrieval contracts and validation, restore substantive service assertions, and record the corrected current-head review evidence.' \
+            | git commit-tree "$tree" -p "$AUTHORISED_PARENT")"
+          echo "COMMIT_SHA=$commit"
+          git push --force-with-lease="refs/heads/$TARGET_BRANCH:$AUTHORISED_PARENT" \
+            origin "$commit:refs/heads/$TARGET_BRANCH"
