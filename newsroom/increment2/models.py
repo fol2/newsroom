@@ -83,9 +83,23 @@ class DevelopmentCandidateManifest:
     canonical_process_id: str
     relation_key: str
     retrieval_contract_digest: str
+    coverage_basis: str
+    hypothesis_summary: str
+    geography: str
+    category: str
+    urgency: str
+    likely_new_information: str
+    reader_utility_basis: str
+    uncertainties: tuple[str, ...]
+    evidence_objectives: tuple[str, ...]
+    coverage_contract_version: str
+    triage_policy_version: str
+    retrieval_policy_version: str
     route: CandidateRoute = CandidateRoute.DEVELOPMENT
     hypothesis_trust_scope: TrustScope = TrustScope.PROPOSED
-    policy_version: str = "integrated-fixture-v2-development-candidate-v1"
+    admission_policy_version: str = (
+        "integrated-fixture-v2-development-candidate-v1"
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.fixture_id, IntegratedFixtureId):
@@ -110,8 +124,51 @@ class DevelopmentCandidateManifest:
                 raise IntegratedContractError(
                     f"{field_name} must be canonical UUIDv4"
                 ) from exc
-        for field_name in ("canonical_process_id", "policy_version"):
+        for field_name in (
+            "canonical_process_id",
+            "geography",
+            "category",
+            "urgency",
+            "coverage_contract_version",
+            "triage_policy_version",
+            "retrieval_policy_version",
+            "admission_policy_version",
+        ):
             require_token(getattr(self, field_name), field=field_name)
+        for field_name in (
+            "coverage_basis",
+            "hypothesis_summary",
+            "likely_new_information",
+            "reader_utility_basis",
+        ):
+            value = getattr(self, field_name)
+            if (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+                or len(value.encode("utf-8")) > 2_048
+            ):
+                raise IntegratedContractError(
+                    f"{field_name} must be bounded non-empty text"
+                )
+        for field_name in ("uncertainties", "evidence_objectives"):
+            values = getattr(self, field_name)
+            if (
+                not isinstance(values, tuple)
+                or not values
+                or len(values) > 16
+                or tuple(sorted(set(values))) != values
+                or any(
+                    not isinstance(value, str)
+                    or not value
+                    or value != value.strip()
+                    or len(value.encode("utf-8")) > 1_024
+                    for value in values
+                )
+            ):
+                raise IntegratedContractError(
+                    f"{field_name} must be sorted unique bounded text"
+                )
         validate_sha256_digest(self.relation_key, field="relation_key")
         validate_sha256_digest(
             self.retrieval_contract_digest,
@@ -142,9 +199,21 @@ class DevelopmentCandidateManifest:
             "canonical_process_id": self.canonical_process_id,
             "relation_key": self.relation_key,
             "retrieval_contract_digest": self.retrieval_contract_digest,
+            "coverage_basis": self.coverage_basis,
+            "hypothesis_summary": self.hypothesis_summary,
+            "geography": self.geography,
+            "category": self.category,
+            "urgency": self.urgency,
+            "likely_new_information": self.likely_new_information,
+            "reader_utility_basis": self.reader_utility_basis,
+            "uncertainties": list(self.uncertainties),
+            "evidence_objectives": list(self.evidence_objectives),
+            "coverage_contract_version": self.coverage_contract_version,
+            "triage_policy_version": self.triage_policy_version,
+            "retrieval_policy_version": self.retrieval_policy_version,
             "route": self.route.value,
             "hypothesis_trust_scope": self.hypothesis_trust_scope.value,
-            "policy_version": self.policy_version,
+            "admission_policy_version": self.admission_policy_version,
         }
 
     @property
@@ -268,6 +337,37 @@ INTEGRATED_FIXTURE_V2_DEVELOPMENT_CANDIDATE = DevelopmentCandidateManifest(
         temporal_scope=_relation.temporal_scope,
     ),
     retrieval_contract_digest=INTEGRATED_FIXTURE_V2_RETRIEVAL.contract_digest,
+    coverage_basis=(
+        "Repository-owned synthetic formal-process coverage under the accepted "
+        "Increment 2 complete-fixture contract."
+    ),
+    hypothesis_summary=(
+        "Unverified development hypothesis: the second synthetic revision "
+        "changes the deadline and submission channel for SYN-PROC-2042."
+    ),
+    geography="synthetic_hong_kong",
+    category="formal_process_update",
+    urgency="time_bounded_material_change",
+    likely_new_information=(
+        "The deadline moves from 20 March 2042 to 27 March 2042 and submission "
+        "moves from Counter A to the synthetic online portal."
+    ),
+    reader_utility_basis=(
+        "A permitted reader preparing the synthetic renewal would need the "
+        "changed deadline and submission instruction before acting."
+    ),
+    uncertainties=(
+        "No real-world fact is asserted because the fixture is synthetic.",
+        "The development remains a proposed discovery hypothesis until evidence intake.",
+    ),
+    evidence_objectives=(
+        "Confirm the authoritative effective deadline for SYN-PROC-2042.",
+        "Confirm the authoritative submission channel for SYN-PROC-2042.",
+        "Determine whether any additional instructions changed between revisions.",
+    ),
+    coverage_contract_version="integrated-fixture-v2-coverage-v1",
+    triage_policy_version="integrated-fixture-v2-triage-v1",
+    retrieval_policy_version="hybrid-fixture-policy-v1",
 )
 
 

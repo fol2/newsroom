@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Callable
 
 from newsroom.authority import (
+    ObjectAdmissionId,
     StaticAuthenticator,
     StaticAuthorizer,
     StaticPrincipal,
@@ -12,7 +13,16 @@ from newsroom.authority._development_candidate_system import (
     _open_complete_fixture_candidate_with_adapter,
 )
 from newsroom.increment2 import DevelopmentCandidateAdmissionRequest
+from newsroom.increment2.policy import (
+    merge_development_candidate_authority_registries,
+)
 from newsroom.integrated import IntegratedTriageProposalId
+from newsroom.projection.policy import merge_projection_authority_registries
+from newsroom.relations import (
+    RelationAdmissionDecisionId,
+    RelationProposalId,
+)
+from newsroom.relations.policy import merge_relation_authority_registries
 from newsroom.retrieval import (
     FindRelatedEventCandidatesRequest,
     INTEGRATED_FIXTURE_V2_RETRIEVAL,
@@ -20,7 +30,7 @@ from newsroom.retrieval import (
     RetrievalRequestId,
 )
 
-from .authority_a2b_helpers import _policy_registries
+from .authority_a2b_helpers import _policy_registries, open_object_system
 from .authority_event_helpers import payload_schemas
 from .complete_projection_2b_helpers import (
     COMPLETE_NOW,
@@ -29,6 +39,16 @@ from .complete_projection_2b_helpers import (
     proof,
 )
 from .projection_b1_helpers import source_command_registry
+from .relation_2a_helpers import (
+    authenticator as relation_authenticator,
+    authorizer as relation_authorizer,
+    event_read_policy as relation_event_read_policy,
+    relation_read_policy,
+)
+from newsroom.authority._relation_system import (
+    open_governed_relation_authority_system,
+)
+from newsroom.authority.object_policy import merge_authority_registries
 from .retrieval_2c_helpers import (
     MemoryHybridRetrievalAdapter,
     object_limits,
@@ -45,6 +65,89 @@ def scopes() -> frozenset[str]:
             "authority.candidate.read",
         }
     )
+
+
+def candidate_registries():
+    object_commands, object_schemas = merge_authority_registries(
+        command_registry=source_command_registry(),
+        payload_schemas=payload_schemas(),
+    )
+    relation_commands, relation_schemas = merge_relation_authority_registries(
+        command_registry=object_commands,
+        payload_schemas=object_schemas,
+    )
+    projection_commands, projection_schemas = (
+        merge_projection_authority_registries(
+            command_registry=relation_commands,
+            payload_schemas=relation_schemas,
+        )
+    )
+    return merge_development_candidate_authority_registries(
+        command_registry=projection_commands,
+        payload_schemas=projection_schemas,
+    )
+
+
+def open_candidate_relation_system(database: Path):
+    commands, schemas = candidate_registries()
+    return open_governed_relation_authority_system(
+        path=database,
+        registry=commands,
+        payload_schemas=schemas,
+        authenticator=relation_authenticator(),
+        authorizer=relation_authorizer(),
+        event_read_policy=relation_event_read_policy(),
+        relation_read_policy=relation_read_policy(),
+        clock=lambda: COMPLETE_NOW,
+    )
+
+
+def open_candidate_object_system(database: Path, *, object_root: Path):
+    commands, schemas = candidate_registries()
+    return open_object_system(
+        database,
+        object_root=object_root,
+        scopes=scopes(),
+        command_registry=commands,
+        payload_schema_registry=schemas,
+        clock=lambda: COMPLETE_NOW,
+    )
+
+
+def retained_relation_identities(
+    database: Path,
+) -> tuple[RelationProposalId, RelationAdmissionDecisionId]:
+    import sqlite3
+
+    with sqlite3.connect(database) as conn:
+        row = conn.execute(
+            "SELECT proposal_id,decision_id FROM relation_decision_heads "
+            "WHERE current_state='ADMITTED'"
+        ).fetchone()
+    if row is None:
+        raise AssertionError("fixture relation is not admitted")
+    return (
+        RelationProposalId.parse(str(row[0])),
+        RelationAdmissionDecisionId.parse(str(row[1])),
+    )
+
+
+def fixture_passage_admission_id(
+    database: Path,
+    *,
+    passage_id: str,
+) -> ObjectAdmissionId:
+    import sqlite3
+
+    with sqlite3.connect(database) as conn:
+        row = conn.execute(
+            "SELECT admission_id FROM integrated_fixture_v2_passage_objects "
+            "WHERE passage_id=?",
+            (passage_id,),
+        ).fetchone()
+    if row is None:
+        raise AssertionError(f"fixture passage {passage_id!r} is not bound")
+    return ObjectAdmissionId.parse(str(row[0]))
 
 
 def open_candidate_test_system(
