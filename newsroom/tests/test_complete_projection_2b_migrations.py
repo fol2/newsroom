@@ -45,19 +45,20 @@ def _migrated_connection() -> sqlite3.Connection:
     return conn
 
 
-def test_complete_projection_migration_is_checked_version_seven() -> None:
-    assert COMPLETE_PROJECTION_SCHEMA_VERSION == SCHEMA_VERSION == 7
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+def test_complete_projection_migration_remains_checked_version_seven() -> None:
+    assert COMPLETE_PROJECTION_SCHEMA_VERSION == 7
+    assert SCHEMA_VERSION == 8
+    assert (
         7,
         COMPLETE_PROJECTION_MIGRATION_NAME,
         COMPLETE_PROJECTION_MIGRATION_CHECKSUM,
-    )
+    ) in EXPECTED_MIGRATION_HISTORY
 
 
 def test_complete_projection_tables_are_in_exact_schema_fingerprint() -> None:
     conn = _migrated_connection()
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         tables = {
             str(row[0])
             for row in conn.execute(

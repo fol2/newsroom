@@ -3,12 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+    validate_sha256_digest,
+)
+from newsroom.authority.types import TrustScope
 from newsroom.projection import INTEGRATED_FIXTURE_V2_PROJECTION
 from newsroom.relations import INTEGRATED_FIXTURE_V2
 
-from .models import RetrievalContractError, RetrievalExclusionReason
-from .policy import HYBRID_FIXTURE_POLICY_V1
+from .models import (
+    RetrievalBranch,
+    RetrievalBranchExecution,
+    RetrievalContractError,
+    RetrievalExclusionReason,
+)
+from .policy import HYBRID_FIXTURE_POLICY_V1, HybridRetrievalPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +171,129 @@ class IntegratedFixtureV2RetrievalContract:
                 "authority_watermark": watermark,
             }
         )
+
+
+
+def validate_fixture_branch_executions(
+    *,
+    executions: tuple[RetrievalBranchExecution, ...],
+    policy: HybridRetrievalPolicy,
+    contract: IntegratedFixtureV2RetrievalContract,
+    query_digest: str,
+) -> None:
+    """Recheck typed adapter output at the authority boundary.
+
+    The private adapter owns fixed Cypher, but durable context authority must not
+    trust a substituted adapter merely because it returned well-typed rows.
+    This fixture proof therefore binds exact query identities, trust classes,
+    source identities and mandatory prior-candidate coverage for every branch.
+    """
+
+    validate_sha256_digest(query_digest, field="retrieval_query_digest")
+    if policy.contract_digest != contract.policy_digest:
+        raise RetrievalContractError(
+            "retrieval branch policy differs from fixture authority"
+        )
+    if tuple(item.branch for item in executions) != policy.required_branches:
+        raise RetrievalContractError(
+            "retrieval branch inventory differs from fixture authority"
+        )
+    fulltext_query_id = next(
+        item.query_id
+        for item in INTEGRATED_FIXTURE_V2_PROJECTION.fulltext_queries
+        if item.language == "en-GB"
+    )
+    expected_query_ids = {
+        RetrievalBranch.EXACT: "fixture-exact-prior-revision",
+        RetrievalBranch.ADMITTED_GRAPH: "fixture-admitted-development",
+        RetrievalBranch.FULL_TEXT: fulltext_query_id,
+        RetrievalBranch.VECTOR: contract.vector_query_id,
+    }
+    candidate_root_id = f"candidate:{contract.prior_candidate_version_id}"
+    relation = INTEGRATED_FIXTURE_V2.relation
+    expected_relation_key = digest_canonical(
+        {
+            "subject": relation.subject.canonical_value(),
+            "predicate": relation.predicate.value,
+            "object": relation.object.canonical_value(),
+            "temporal_scope": relation.temporal_scope.canonical_value(),
+        }
+    )
+
+    for execution in executions:
+        if (
+            execution.query_id != expected_query_ids[execution.branch]
+            or execution.query_digest != query_digest
+            or execution.result_limit != policy.branch_result_limit
+            or execution.elapsed_ms > policy.timeout_ms
+            or not execution.hits
+        ):
+            raise RetrievalContractError(
+                f"{execution.branch.value} retrieval execution differs from fixture authority"
+            )
+        if not any(
+            hit.dependency_root_id == candidate_root_id
+            for hit in execution.hits
+        ):
+            raise RetrievalContractError(
+                f"{execution.branch.value} omitted the mandatory prior candidate"
+            )
+        for hit in execution.hits:
+            root = contract.root_by_id.get(hit.dependency_root_id)
+            if root is None:
+                raise RetrievalContractError(
+                    "retrieval hit has no checked fixture dependency root"
+                )
+            if hit.query_id != execution.query_id or hit.query_digest != query_digest:
+                raise RetrievalContractError(
+                    "retrieval hit query identity differs from its branch"
+                )
+            if execution.branch is RetrievalBranch.ADMITTED_GRAPH:
+                if (
+                    hit.passage_id is not None
+                    or hit.trust_scope is not TrustScope.ADMITTED
+                    or hit.source_kind != "RELATION_ASSERTION"
+                    or hit.dependency_root_id != candidate_root_id
+                    or hit.result_key
+                    != (
+                        f"{RetrievalBranch.ADMITTED_GRAPH.value}:"
+                        f"{contract.prior_hypothesis_version_id}"
+                    )
+                    or hit.source_identity != expected_relation_key
+                ):
+                    raise RetrievalContractError(
+                        "admitted graph evidence differs from the governed fixture relation"
+                    )
+                continue
+
+            if (
+                hit.passage_id is None
+                or hit.trust_scope is not TrustScope.OBSERVED
+                or hit.source_kind
+                not in {"GOVERNED_PASSAGE", "GOVERNED_REVISION"}
+                or hit.result_key
+                != f"{execution.branch.value}:{hit.passage_id}"
+                or contract.root_by_passage_id.get(hit.passage_id) != root
+            ):
+                raise RetrievalContractError(
+                    "retrieval document evidence differs from governed fixture authority"
+                )
+            if execution.branch is RetrievalBranch.EXACT:
+                if (
+                    hit.source_kind != "GOVERNED_REVISION"
+                    or hit.source_identity != contract.prior_revision_id
+                    or hit.dependency_root_id != candidate_root_id
+                ):
+                    raise RetrievalContractError(
+                        "exact retrieval evidence differs from prior revision authority"
+                    )
+            elif (
+                hit.source_kind != "GOVERNED_PASSAGE"
+                or hit.source_identity != hit.passage_id
+            ):
+                raise RetrievalContractError(
+                    "approximate retrieval evidence differs from passage authority"
+                )
 
 
 _SOURCE_VALUE = json.loads(INTEGRATED_FIXTURE_V2.canonical_bytes)

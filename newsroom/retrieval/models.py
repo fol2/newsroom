@@ -473,7 +473,9 @@ class HydratedRetrievalPassage:
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise RetrievalContractError(f"{field_name} must be non-negative")
         if self.byte_start != 0 or self.byte_end != len(self.text.encode("utf-8")):
-            raise RetrievalContractError("fixture hydration must cover exact passage bytes")
+            raise RetrievalContractError(
+                "fixture hydration must cover the exact governed object bytes"
+            )
         require_token(self.rights_state, field="hydrated_rights_state")
         require_token(self.lifecycle_state, field="hydrated_lifecycle_state")
         if self.trust_scope is not TrustScope.OBSERVED:
@@ -596,6 +598,103 @@ class RetrievalContextV2:
     @property
     def context_digest(self) -> str:
         return digest_bytes(canonical_json_bytes(self.canonical_value()))
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalFailure:
+    request_id: RetrievalRequestId
+    context_id: RetrievalContextV2Id
+    outcome: RetrievalOutcome
+    reason_code: str
+    policy_digest: str
+    recorded_at: UtcTimestamp
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request_id, RetrievalRequestId):
+            raise RetrievalContractError("retrieval failure request identity must be typed")
+        if not isinstance(self.context_id, RetrievalContextV2Id):
+            raise RetrievalContractError("retrieval failure context identity must be typed")
+        if not isinstance(self.outcome, RetrievalOutcome) or self.outcome is RetrievalOutcome.COMPLETE:
+            raise RetrievalContractError("retrieval failure requires a non-complete outcome")
+        require_token(self.reason_code, field="retrieval_failure_reason")
+        validate_sha256_digest(self.policy_digest, field="retrieval_failure_policy_digest")
+        if not isinstance(self.recorded_at, UtcTimestamp):
+            raise RetrievalContractError("retrieval failure time must be typed")
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "contract": "newsroom-retrieval-failure-v1",
+            "request_id": str(self.request_id),
+            "context_id": str(self.context_id),
+            "outcome": self.outcome.value,
+            "reason_code": self.reason_code,
+            "policy_digest": self.policy_digest,
+            "recorded_at": self.recorded_at.to_text(),
+        }
+
+    @property
+    def failure_digest(self) -> str:
+        return digest_bytes(canonical_json_bytes(self.canonical_value()))
+
+
+@dataclass(frozen=True, slots=True)
+class FindRelatedEventCandidatesResult:
+    request: FindRelatedEventCandidatesRequest
+    context: RetrievalContextV2 | None
+    failure: RetrievalFailure | None
+    replayed: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request, FindRelatedEventCandidatesRequest):
+            raise RetrievalContractError("retrieval result request must be typed")
+        if (self.context is None) == (self.failure is None):
+            raise RetrievalContractError(
+                "retrieval result requires exactly one context or failure"
+            )
+        if self.context is not None:
+            if not isinstance(self.context, RetrievalContextV2):
+                raise RetrievalContractError("retrieval result context must be typed")
+            if (
+                self.context.request_id != self.request.request_id
+                or self.context.context_id != self.request.context_id
+            ):
+                raise RetrievalContractError(
+                    "retrieval result context identity differs from request"
+                )
+        if self.failure is not None:
+            if not isinstance(self.failure, RetrievalFailure):
+                raise RetrievalContractError("retrieval result failure must be typed")
+            if (
+                self.failure.request_id != self.request.request_id
+                or self.failure.context_id != self.request.context_id
+            ):
+                raise RetrievalContractError(
+                    "retrieval result failure identity differs from request"
+                )
+        if not isinstance(self.replayed, bool):
+            raise RetrievalContractError("retrieval replay flag must be boolean")
+
+    @property
+    def outcome(self) -> RetrievalOutcome:
+        if self.context is not None:
+            return self.context.outcome
+        assert self.failure is not None
+        return self.failure.outcome
+
+    @property
+    def result_digest(self) -> str:
+        value = (
+            self.context.canonical_value()
+            if self.context is not None
+            else self.failure.canonical_value()  # type: ignore[union-attr]
+        )
+        return digest_canonical(
+            {
+                "contract": "newsroom-find-related-event-candidates-result-v1",
+                "request": self.request.canonical_value(),
+                "result": value,
+            }
+        )
 
 
 def sorted_branch_hits(value: Iterable[RetrievalBranchHit]) -> tuple[RetrievalBranchHit, ...]:

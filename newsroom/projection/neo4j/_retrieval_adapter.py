@@ -30,6 +30,7 @@ from newsroom.retrieval.models import (
 )
 from newsroom.retrieval.policy import HybridRetrievalPolicy
 
+from ._adapter import _open_neo4j_driver
 from ._complete_adapter import _CompleteNeo4jAdapter, _require_generation_contracts
 
 
@@ -530,4 +531,18 @@ def _elapsed_ms(started_ns: int, completed_ns: int) -> int:
     return (completed_ns - started_ns) // 1_000_000
 
 
-__all__ = ["_HybridRetrievalNeo4jAdapter"]
+def _open_hybrid_retrieval_neo4j_adapter(
+    config: Neo4jProjectorConfig,
+) -> _HybridRetrievalNeo4jAdapter:
+    driver, driver_version = _open_neo4j_driver(config)
+    return _HybridRetrievalNeo4jAdapter(
+        driver=driver,
+        config=config,
+        driver_version=driver_version,
+    )
+
+
+__all__ = [
+    "_HybridRetrievalNeo4jAdapter",
+    "_open_hybrid_retrieval_neo4j_adapter",
+]

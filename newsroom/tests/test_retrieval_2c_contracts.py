@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fractions import Fraction
+import inspect
 
 import pytest
 
@@ -10,6 +11,7 @@ from newsroom.retrieval import (
     FindRelatedEventCandidatesRequest,
     FusedRetrievalCandidate,
     HYBRID_FIXTURE_POLICY_V1,
+    HybridRetrievalAuthoritySystem,
     HydratedRetrievalPassage,
     INTEGRATED_FIXTURE_V2_RETRIEVAL,
     ReciprocalRankScore,
@@ -23,6 +25,7 @@ from newsroom.retrieval import (
     RetrievalProjectionMetadata,
     RetrievalRequestId,
     canonical_score,
+    open_hybrid_retrieval_authority_system,
 )
 
 from .complete_projection_2b_helpers import COMPLETE_NOW, complete_identity
@@ -260,3 +263,21 @@ def test_context_v2_requires_all_four_branches_active_projection_and_exact_hydra
             truncated=False,
             recorded_at=COMPLETE_NOW,
         )
+
+
+def test_public_named_tool_surface_exposes_no_driver_or_query_language() -> None:
+    parameters = set(
+        inspect.signature(
+            open_hybrid_retrieval_authority_system
+        ).parameters
+    )
+    assert "neo4j_config" in parameters
+    assert {"driver", "cypher", "label", "predicate", "limit"}.isdisjoint(
+        parameters
+    )
+    assert HybridRetrievalAuthoritySystem.__slots__ == (
+        "retrieval",
+        "__close",
+    )
+    assert not hasattr(HybridRetrievalAuthoritySystem, "driver")
+    assert not hasattr(HybridRetrievalAuthoritySystem, "execute_cypher")
