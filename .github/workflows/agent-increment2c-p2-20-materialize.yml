@@ -100,12 +100,13 @@ jobs:
           import subprocess
           import time
 
+          report = 'p2-20-core.xml'
           started = time.monotonic()
           completed = subprocess.run(
               [
                   'uv', 'run', '--no-sync', 'python', '-m',
                   'scripts.sdlc.workflow_lane', 'core-tests',
-                  '--repo-root', '.', '--report', '/tmp/core-p2-20.xml',
+                  '--repo-root', '.', '--report', report,
                   '--clustering',
               ],
               check=False,
@@ -121,7 +122,7 @@ jobs:
           from scripts.sdlc.junit_evidence import summarize_junit
           from scripts.sdlc.workflow_lane import _OPTIONAL_CORE_TEST_IDS
           summary = summarize_junit(
-              '.', ('/tmp/core-p2-20.xml',),
+              '.', (report,),
               optional_test_ids=_OPTIONAL_CORE_TEST_IDS,
           )
           if (
@@ -132,6 +133,7 @@ jobs:
           ):
               raise SystemExit('complete sharded core summary differs')
           PY
+          rm -f p2-20-core.xml
           git diff --cached --check
           test "$(git write-tree)" = "$EXPECTED_TREE"
 
