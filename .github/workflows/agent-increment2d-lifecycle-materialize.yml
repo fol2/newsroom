@@ -1,0 +1,106 @@
+name: agent-increment2d-lifecycle-materialize
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-increment2d-lifecycle-materialize
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    env:
+      AUTHORISED_PARENT: f5321574838bddfb5c8f0d93113dbd9314cbcd17
+      EXPECTED_BASE_TREE: 6806b360e1f7516515cb2927995bfaab15985670
+      EXPECTED_TREE: 7e658d4b2e613ac7cd0e3d49367d09183dee8df5
+      PATCH_SHA256: 6bf578dc31e73bc360efc893bd7e8c5e8118ce47049f195320f1080676b64a52
+      TARGET_BRANCH: agent/increment-2d-complete-actual-neo4j-proof
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Reconstruct exact lifecycle patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat \
+            .github/increment2d-lifecycle/part-000 \
+            .github/increment2d-lifecycle/part-001 \
+            | base64 --decode > /tmp/increment2d-lifecycle.patch.gz
+          echo "$PATCH_SHA256  /tmp/increment2d-lifecycle.patch.gz" \
+            | sha256sum --check -
+          gzip --decompress --stdout /tmp/increment2d-lifecycle.patch.gz \
+            > /tmp/increment2d-lifecycle.patch
+
+      - name: Apply and verify exact lifecycle tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$AUTHORISED_PARENT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_BASE_TREE"
+          git apply --index /tmp/increment2d-lifecycle.patch
+          cat > /tmp/expected-paths <<'EOF'
+          newsroom/tests/increment_2d_helpers.py
+          newsroom/tests/test_increment_2d_candidate_authority.py
+          EOF
+          sed -i 's/^          //' /tmp/expected-paths
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          git diff --cached --name-only "$AUTHORISED_PARENT" | sort \
+            > /tmp/actual-paths
+          diff -u /tmp/expected-paths /tmp/actual-paths
+          git diff --cached --check
+          tree="$(git write-tree)"
+          echo "TREE_SHA=$tree"
+          test "$tree" = "$EXPECTED_TREE"
+
+      - name: Run locked lifecycle gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_increment_2d_candidate_authority.py \
+            newsroom/tests/test_increment_2d_migrations.py \
+            newsroom/tests/test_retrieval_2c_authority.py \
+            newsroom/tests/test_relation_2a_lifecycle_integrity.py \
+            newsroom/tests/test_complete_projection_2b_authority.py
+          uv run --no-sync python -m scripts.sdlc.workflow_lane core-tests \
+            --repo-root . \
+            --report increment2d-lifecycle-core.xml \
+            --clustering
+          git diff --cached --check
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+
+      - name: Create and push clean lifecycle checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Newsroom Increment 2D Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
+          commit="$(printf '%s\n\n%s\n' \
+            'test(candidate): prove lifecycle and recovery authority' \
+            'Prove replacement-generation deduplication, restart integrity, relation revocation, governed tombstone and gap/dead-letter fail-closed behavior.' \
+            | git commit-tree "$tree" -p "$AUTHORISED_PARENT")"
+          echo "COMMIT_SHA=$commit"
+          git push --force-with-lease="refs/heads/$TARGET_BRANCH:$AUTHORISED_PARENT" \
+            origin "$commit:refs/heads/$TARGET_BRANCH"
