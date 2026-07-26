@@ -1,0 +1,62 @@
+name: agent-increment2c-reason-diag-materialize
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    env:
+      AUTHORISED_PARENT: 3c65f428dbd6472bdb6f9957de223b510dcec478
+      TARGET_BRANCH: agent/increment-2c-bounded-hybrid-retrieval
+      EXPECTED_BASE_TREE: 326604b9daf20a17f393561ae363b0c07265d38c
+      PATCH_SHA256: 64a904ba27f461f8486dced2cc001136d4076dd5e6dd648efdaa121aec529f4b
+      EXPECTED_TREE: bfda35ad86fa5123778fd2c8bb147cb41af80427
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Reconstruct reason-code patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/increment2c-reason-diag/fix.patch.gz.b64 \
+            > /tmp/increment2c-reason-diag.patch.gz
+          echo "$PATCH_SHA256  /tmp/increment2c-reason-diag.patch.gz" \
+            | sha256sum --check -
+          gzip --decompress --stdout /tmp/increment2c-reason-diag.patch.gz \
+            > /tmp/increment2c-reason-diag.patch
+
+      - name: Apply exact one-line diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$AUTHORISED_PARENT"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_BASE_TREE"
+          git apply --check /tmp/increment2c-reason-diag.patch
+          git apply --index /tmp/increment2c-reason-diag.patch
+          test "$(git diff --cached --name-only)" = \
+            "newsroom/tests/test_retrieval_2c_neo4j_service.py"
+          git diff --cached --check
+          python -m compileall -q newsroom scripts
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+
+      - name: Create and push diagnostic commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Newsroom Increment 2C Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
+          commit="$(printf '%s\n\n%s\n' \
+            'test(retrieval): expose remaining service failure reason' \
+            'Include the retained reason code in the nominal actual-service assertion without changing product behavior.' \
+            | git commit-tree "$tree" -p "$AUTHORISED_PARENT")"
+          git push --force origin "$commit:refs/heads/$TARGET_BRANCH"
