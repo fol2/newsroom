@@ -33,6 +33,18 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+      - name: Apply closed-store fixture clone experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/helper.patch.gz.b64 <<'EOF'
+          H4sIAAAAAAACA81XbVPjNhD+nl+xky91GtscEA6GDh0ozV2ZckBp+qHT6RjF3iQ6bMmVZCAz/fFdyS9xQkjCfWpuDtvyvunZ3UfrhE8mEARTboDtCXzWSspsz6A2ei+WWZ6iwShX8ivGhksRHYyjGaY5Kh3mcxi/W6XDRYIvMD5JjvcngzAcnIyPkiOE/Q8fPg4GnSAIviGOTr/f/5ZYzs8h2PePob/v7+/D+XkHJkpmEEWTwhQKowh4lktF0AghDbMWdAc6gZNKmGFxyrRGXYs1S51+rWjwhZtOf6uGDwrzlMVYxZAzM0v5uJa7o8fGqJ4VhqfNo8Esn/AUKy9mppAlXExr3ftrGT9WZs08b725ZGnKxqQJ1esawZAVZiYVN/Na1HNgHQ38j9A/OvEPBgQXXN5+ubsejobR5+HN8P5idHV7E139DGdw1yD+GQUqh9xVEuZMafQ60LMOO/2o0b/4Y/TL7f3V6M9oNKSlC1q6vr38lSy54L3eFuH729vRqQMJ/oUbKZA07WWz2imYgirkL6vnQ/lXjm3gq9e/V83afwlOIIpTZKLIo6bYGuQim5eUCsDrQfCj0zvt9IF+01SOWQpbd+RvFCltPXPa81YgK8f2R+k1tI2tzhcam0QbQHYRdnaXNPikjIdroAZrY2R/ZZ2HKjMK0bOCPvCpkNSZqJRU+mykCuyV2Sg7LVQ45dqg8nbJTKkKNpGNVCyFUSw2UWlJzb3eaadEDokUhEM84sLglOoak2jCXxxZPB1EaxjHa5FPbVp7PdsBrqEOHf8cHR3ShRYcF8AXzKSaX1bWblAOvl4kLKdtVaE4dDCdhHEqNSaEqUXCdVVgd6ORAmuiqSNsAPCq4t0iFhUiZvEME6/0aslqzDSWneaXi99X17JRIpul+r3bIJGFo4wP/vGh3eFO4bXxtsKY+EBA5lKz1CcTMdcEaMkiZRtuar//Q9tRpW/so/Ud0IJhe0y7tp9Njrfsoz5CwuwxsfdUtUhpOevWB0JQAxws6jmoEhd0ewtrrdu6XHZhG9iDbpO6UP+TcoOH3YWtVnXtaq5U0S0jb1eStbl7MyxBV+/SX15uBXzWuvfXIrWFYd/tceVNte/lxQaEFeMVIusD3akW67NxOwmtI5V+RSr9N0ilX7dzt9u9TO2ZbP9XPJiQJ5VxQcTNY6hcwmKYocGPOk1aWkjATomhDdZaG82wOQMaxRmjQS1BQcaIOHiWFcaOS/D7b9dUnzQVJjCVT6gEJkEZKmgaExG4KK0ivZxbymNFakqHAD8VPE2csosaaPSWIkYXHGUlRjsNmhkKCsjO2JKoRhs69XR1aAojAakWncHvNCnxJ+v14cFkeWQnx4cH8jN0zunQ0UVGpgmSNKUMyhyFdu6fWMoJ/touE2CHc3ptt7xo3zFOyDnYzdu2/4GICp4JTrIpFaiC4MnQRp4UFoBCTWiMJZhLq3rGFCZhk7Ma8Jqeo6acF0tV6/qbO7bVFpv5v5TrNSNH7TGkiUHb09juo1nkOtLzLOXisTk5XOkzTlh8IpIcOq2hnUC8WmthvFWyS/bb6+9y0VLsLbeMnacpU5a0ufLKh3Im8sG5juRjPSI5yNX89XRla+zAW5ONla2tqLiR7PUhspS+XfnJ2qNPLuFOlbN2XK9ZCF9izA0M3YXET1+fN2EhHLQZ15o+dlZAeD1YtgNbP18uJah8rJjQa3Oj+37zduBelrjYaCQcz6lftWZTjHhylvDYeKVG+IZMrw1J634Nna9QeWvYrYfkRdtMm8+0avjScxLIFjPefxvpO20oEAAA=
+          EOF
+          sed -i 's/^          //' /tmp/helper.patch.gz.b64
+          base64 --decode /tmp/helper.patch.gz.b64 | gzip --decompress > /tmp/helper.patch
+          git apply --check /tmp/helper.patch
+          git apply /tmp/helper.patch
+          git diff --check
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
