@@ -4,12 +4,15 @@ on:
   push:
     branches:
       - agent/increment-2d-handoff-materialize
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 concurrency:
-  group: agent-increment2d-handoff-materialize
+  group: agent-increment2d-handoff-materialize-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
