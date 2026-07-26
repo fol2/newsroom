@@ -1,0 +1,93 @@
+name: agent-increment2b-service-required-materialize
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    env:
+      AUTHORISED_PARENT: 88faf8e11939287d4e464b1ffd2dcda281c4bc9b
+      TARGET_BRANCH: agent/increment-2b-fulltext-vector-projection
+      EXPECTED_TREE: 9a45e4f4930846c1bdc4378fff2db129f9e98cf0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Reconstruct complete-service requirement patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64
+          import hashlib
+          from pathlib import Path
+
+          encoded = Path(
+              ".github/increment2b-service-required/fix.patch.gz.b64"
+          ).read_text(encoding="utf-8")
+          decoded = base64.b64decode(encoded, validate=False)
+          target = Path("/tmp/increment2b-service-required.patch.gz")
+          target.write_bytes(decoded)
+          print("encoded_chars=", len(encoded))
+          print("decoded_bytes=", len(decoded))
+          print("decoded_sha256=", hashlib.sha256(decoded).hexdigest())
+          PY
+          gzip --decompress --stdout /tmp/increment2b-service-required.patch.gz \
+            > /tmp/increment2b-service-required.patch
+
+      - name: Apply correction to exact authorised parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$AUTHORISED_PARENT"
+          git apply --check /tmp/increment2b-service-required.patch
+          git apply /tmp/increment2b-service-required.patch
+          rm -rf .github/increment2b-service-required
+          rm -f .github/workflows/agent-increment2b-service-required-materialize.yml
+          git add -A
+
+      - name: Verify exact correction boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/expected-paths <<'EOF'
+          .github/workflows/evidence.yml
+          docs/operations/increment-2b-complete-projection.md
+          docs/research/2026-07-25-increment-2b-substantive-review.md
+          newsroom/tests/test_complete_projection_2b_traceability.py
+          newsroom/tests/test_sdlc_evidence_workflow.py
+          newsroom/tests/test_sdlc_workflow_lane.py
+          scripts/sdlc/workflow_lane.py
+          EOF
+          sed -i 's/^          //' /tmp/expected-paths
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          git diff --cached --name-only "$AUTHORISED_PARENT" | sort \
+            > /tmp/actual-paths
+          diff -u /tmp/expected-paths /tmp/actual-paths
+          git diff --cached --check
+          python -m compileall -q newsroom scripts
+          tree="$(git write-tree)"
+          echo "TREE_SHA=$tree"
+          test "$tree" = "$EXPECTED_TREE"
+
+      - name: Create and push exact correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Newsroom Increment 2B Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
+          commit="$(printf '%s\n\n%s\n' \
+            'fix(sdlc): require complete tests in service lane' \
+            'Set the complete-Neo4j required flag in the fixed SDLC service environment and workflow, preserve password-only secret passthrough, extend exact contracts, and record the tenth resolved Increment 2B review finding.' \
+            | git commit-tree "$tree" -p "$AUTHORISED_PARENT")"
+          echo "COMMIT_SHA=$commit"
+          git push --force origin "$commit:refs/heads/$TARGET_BRANCH"
