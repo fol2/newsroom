@@ -120,7 +120,7 @@ def test_increment_2c_review_records_zero_unresolved_p1_p2() -> None:
     text = _SUBSTANTIVE_REVIEW.read_text(encoding="utf-8")
     for required in (
         "P1 findings: 2",
-        "P2 findings: 17",
+        "P2 findings: 18",
         "Remaining unresolved P1/P2 after correction: 0",
         "Retrieval initially opened a second SQLite authority writer",
         "Authentication could expire while Neo4j work was in flight",
@@ -141,9 +141,11 @@ def test_increment_2c_review_records_zero_unresolved_p1_p2() -> None:
         "Typed branch timing evidence could exceed the shared deadline",
         "Retrieval serving trusted constructor-time driver compatibility only",
         "Canonical score syntax confused significant digits with decimal places",
+        "Retrieval re-derived a graph key without the fixture binding",
         "155 passed, 4 intentional no-service skips, 0 failed",
         "116 passed, 4 intentional no-service skips, 0 failed",
-        "1,167 passed, 23 skipped, 0 failed",
+        "122 passed, 4 intentional no-service skips, 0 failed",
+        "1,170 passed, 23 skipped, 0 failed",
         "Issue #158 remains blocked",
     ):
         assert required in text

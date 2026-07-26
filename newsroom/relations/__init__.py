@@ -2,6 +2,7 @@
 
 from .fixture_v2 import (
     INTEGRATED_FIXTURE_V2,
+    INTEGRATED_FIXTURE_V2_BINDING_ID,
     INTEGRATED_FIXTURE_V2_DIGEST,
     IntegratedFixtureV2,
     IntegratedFixtureV2Passage,
@@ -40,6 +41,7 @@ from .models import (
     RelationStaleDecision,
     RelationStateError,
     RelationTemporalScope,
+    governed_relation_key,
     sorted_passage_objects,
 )
 from .policy import (
@@ -78,6 +80,7 @@ __all__ = [
     "GovernedRelationAuthoritySystem",
     "GovernedRelations",
     "INTEGRATED_FIXTURE_V2",
+    "INTEGRATED_FIXTURE_V2_BINDING_ID",
     "INTEGRATED_FIXTURE_V2_BIND_COMMAND",
     "INTEGRATED_FIXTURE_V2_DIGEST",
     "INCREMENT_2A_DEFERRED",
@@ -118,6 +121,7 @@ __all__ = [
     "RelationStaleDecision",
     "RelationStateError",
     "RelationTemporalScope",
+    "governed_relation_key",
     "load_integrated_fixture_v2",
     "merge_relation_authority_registries",
     "open_governed_relation_authority_system",

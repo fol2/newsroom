@@ -7,6 +7,12 @@ import inspect
 import pytest
 
 from newsroom.authority import ObjectAdmissionId, TrustScope, digest_bytes
+from newsroom.relations import (
+    INTEGRATED_FIXTURE_V2,
+    INTEGRATED_FIXTURE_V2_BINDING_ID,
+    IntegratedFixtureV2BindingId,
+    governed_relation_key,
+)
 from newsroom.authority.objects import ObjectAccessDecisionId
 from newsroom.retrieval import (
     FindRelatedEventCandidatesRequest,
@@ -106,6 +112,10 @@ def test_policy_and_fixture_contracts_pin_the_accepted_2c_bounds() -> None:
     assert policy.max_projection_age_seconds == 60 * 60
     assert policy.reciprocal_rank_k == 60
     assert fixture.policy_digest == policy.contract_digest
+    assert (
+        fixture.relation_fixture_binding_id
+        == INTEGRATED_FIXTURE_V2_BINDING_ID
+    )
     assert fixture.prior_revision_id.endswith("2004")
     assert fixture.prior_candidate_version_id.endswith("2012")
     assert fixture.root_by_passage_id["ifv2-prior-en"].candidate_version_id == (
@@ -113,6 +123,26 @@ def test_policy_and_fixture_contracts_pin_the_accepted_2c_bounds() -> None:
     )
     assert fixture.root_by_passage_id["ifv2-new-en"].candidate_version_id is None
     assert "ifv2-tombstoned-negative" not in fixture.root_by_passage_id
+
+
+def test_fixture_contract_binds_the_exact_governed_relation_key() -> None:
+    fixture = INTEGRATED_FIXTURE_V2_RETRIEVAL
+    relation = INTEGRATED_FIXTURE_V2.relation
+    assert governed_relation_key(
+        fixture_binding_id=fixture.relation_fixture_binding_id,
+        subject=relation.subject,
+        predicate=relation.predicate,
+        object=relation.object,
+        temporal_scope=relation.temporal_scope,
+    ) == "sha256:2f34e2792409b5551f9b220eb9936165d73dc9aef961620906ee710e68060da6"
+
+    with pytest.raises(
+        RetrievalContractError, match="relation fixture binding"
+    ):
+        replace(
+            fixture,
+            relation_fixture_binding_id=IntegratedFixtureV2BindingId.new(),
+        )
 
 
 def test_fixture_contract_rejects_identity_and_root_ambiguity() -> None:

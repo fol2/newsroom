@@ -41,7 +41,10 @@ from newsroom.retrieval import (
     canonical_score,
 )
 from newsroom.projection import INTEGRATED_FIXTURE_V2_PROJECTION
-from newsroom.relations import INTEGRATED_FIXTURE_V2
+from newsroom.relations import (
+    INTEGRATED_FIXTURE_V2,
+    governed_relation_key,
+)
 
 from .authority_a2b_helpers import _policy_registries
 from .authority_event_helpers import payload_schemas
@@ -328,13 +331,12 @@ class MemoryHybridRetrievalAdapter:
             f"candidate:{retrieval_contract.prior_candidate_version_id}"
         )
         relation = INTEGRATED_FIXTURE_V2.relation
-        relation_key = digest_canonical(
-            {
-                "subject": relation.subject.canonical_value(),
-                "predicate": relation.predicate.value,
-                "object": relation.object.canonical_value(),
-                "temporal_scope": relation.temporal_scope.canonical_value(),
-            }
+        relation_key = governed_relation_key(
+            fixture_binding_id=retrieval_contract.relation_fixture_binding_id,
+            subject=relation.subject,
+            predicate=relation.predicate,
+            object=relation.object,
+            temporal_scope=relation.temporal_scope,
         )
         query_ids = {
             RetrievalBranch.EXACT: "fixture-exact-prior-revision",

@@ -146,9 +146,7 @@ def test_actual_service_executes_all_four_branches_and_hydrates_authority(
             request,
             proof=AuthenticationProof(method="STATIC_TOKEN", credential="token-1"),
         )
-        assert result.outcome is RetrievalOutcome.COMPLETE, (
-            None if result.failure is None else result.failure.reason_code
-        )
+        assert result.outcome is RetrievalOutcome.COMPLETE
         assert result.context is not None
         context = result.context
         assert tuple(item.branch for item in context.branches) == tuple(RetrievalBranch)

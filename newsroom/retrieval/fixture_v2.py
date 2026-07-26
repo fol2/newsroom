@@ -11,7 +11,12 @@ from newsroom.authority.canonical import (
 )
 from newsroom.authority.types import TrustScope, UtcTimestamp
 from newsroom.projection import INTEGRATED_FIXTURE_V2_PROJECTION
-from newsroom.relations import INTEGRATED_FIXTURE_V2
+from newsroom.relations import (
+    INTEGRATED_FIXTURE_V2,
+    INTEGRATED_FIXTURE_V2_BINDING_ID,
+    IntegratedFixtureV2BindingId,
+    governed_relation_key,
+)
 
 from .models import (
     RetrievalBranch,
@@ -70,6 +75,7 @@ class IntegratedFixtureV2RetrievalContract:
     projection_fixture_digest: str
     policy_digest: str
     fixture_id: str
+    relation_fixture_binding_id: IntegratedFixtureV2BindingId
     canonical_process_id: str
     query_revision_id: str
     prior_revision_id: str
@@ -90,6 +96,16 @@ class IntegratedFixtureV2RetrievalContract:
             raise RetrievalContractError("retrieval fixture policy digest differs")
         if self.fixture_id != INTEGRATED_FIXTURE_V2.fixture_id:
             raise RetrievalContractError("retrieval fixture identity differs")
+        if (
+            not isinstance(
+                self.relation_fixture_binding_id, IntegratedFixtureV2BindingId
+            )
+            or self.relation_fixture_binding_id
+            != INTEGRATED_FIXTURE_V2_BINDING_ID
+        ):
+            raise RetrievalContractError(
+                "retrieval relation fixture binding differs"
+            )
         if (
             self.contract_id != "integrated_fixture_v2_retrieval"
             or self.contract_version != "integrated-fixture-v2-retrieval-v1"
@@ -300,6 +316,9 @@ class IntegratedFixtureV2RetrievalContract:
             "projection_fixture_digest": self.projection_fixture_digest,
             "policy_digest": self.policy_digest,
             "fixture_id": self.fixture_id,
+            "relation_fixture_binding_id": str(
+                self.relation_fixture_binding_id
+            ),
             "canonical_process_id": self.canonical_process_id,
             "query_revision_id": self.query_revision_id,
             "prior_revision_id": self.prior_revision_id,
@@ -415,13 +434,12 @@ def validate_fixture_branch_executions(
     }
     candidate_root_id = f"candidate:{contract.prior_candidate_version_id}"
     relation = INTEGRATED_FIXTURE_V2.relation
-    expected_relation_key = digest_canonical(
-        {
-            "subject": relation.subject.canonical_value(),
-            "predicate": relation.predicate.value,
-            "object": relation.object.canonical_value(),
-            "temporal_scope": relation.temporal_scope.canonical_value(),
-        }
+    expected_relation_key = governed_relation_key(
+        fixture_binding_id=contract.relation_fixture_binding_id,
+        subject=relation.subject,
+        predicate=relation.predicate,
+        object=relation.object,
+        temporal_scope=relation.temporal_scope,
     )
 
     for execution in executions:
@@ -532,6 +550,7 @@ INTEGRATED_FIXTURE_V2_RETRIEVAL = IntegratedFixtureV2RetrievalContract(
     projection_fixture_digest=INTEGRATED_FIXTURE_V2_PROJECTION.manifest_digest,
     policy_digest=HYBRID_FIXTURE_POLICY_V1.contract_digest,
     fixture_id=INTEGRATED_FIXTURE_V2.fixture_id,
+    relation_fixture_binding_id=INTEGRATED_FIXTURE_V2_BINDING_ID,
     canonical_process_id=_CANONICAL_PROCESS_ID,
     query_revision_id=str(_new["source_revision_id"]),
     prior_revision_id=str(_prior["source_revision_id"]),

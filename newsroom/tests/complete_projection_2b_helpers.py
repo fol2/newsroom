@@ -38,9 +38,11 @@ from newsroom.projection.neo4j import (
 from newsroom.relations import (
     FixturePassageObject,
     INTEGRATED_FIXTURE_V2,
+    INTEGRATED_FIXTURE_V2_BINDING_ID,
     RelationAdmissionDecisionId,
     RelationAssertionId,
     RelationProposalId,
+    governed_relation_key,
 )
 
 from .authority_event_helpers import payload_schemas
@@ -166,13 +168,12 @@ def admitted_relation(
             key=lambda item: item.passage_id,
         )
     )
-    relation_key = digest_canonical(
-        {
-            "subject": template.subject.canonical_value(),
-            "predicate": template.predicate.value,
-            "object": template.object.canonical_value(),
-            "temporal_scope": template.temporal_scope.canonical_value(),
-        }
+    relation_key = governed_relation_key(
+        fixture_binding_id=INTEGRATED_FIXTURE_V2_BINDING_ID,
+        subject=template.subject,
+        predicate=template.predicate,
+        object=template.object,
+        temporal_scope=template.temporal_scope,
     )
     return AdmittedRelationProjection(
         identity=selected_identity,

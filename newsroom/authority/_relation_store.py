@@ -45,6 +45,7 @@ from newsroom.relations.models import (
     RelationStaleDecision,
     RelationStateError,
     RelationTemporalScope,
+    governed_relation_key,
 )
 from newsroom.relations.policy import (
     INTEGRATED_FIXTURE_V2_BIND_COMMAND,
@@ -1366,15 +1367,12 @@ class _RelationAuthorityStore(_EventAuthorityStore):
 
     @classmethod
     def _relation_key(cls, proposal: RelationProposal) -> str:
-        return digest_canonical(
-            {
-                "contract": "newsroom-governed-relation-key-v1",
-                "fixture_binding_id": str(proposal.fixture_binding_id),
-                "subject": proposal.subject.canonical_value(),
-                "predicate": proposal.predicate.value,
-                "object": proposal.object.canonical_value(),
-                "temporal_scope": proposal.temporal_scope.canonical_value(),
-            }
+        return governed_relation_key(
+            fixture_binding_id=proposal.fixture_binding_id,
+            subject=proposal.subject,
+            predicate=proposal.predicate,
+            object=proposal.object,
+            temporal_scope=proposal.temporal_scope,
         )
 
     @classmethod

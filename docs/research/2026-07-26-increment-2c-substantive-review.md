@@ -19,7 +19,7 @@ It excludes Increment 2D Candidate admission, Graphiti, external models or embed
 ## Result
 
 - P1 findings: 2
-- P2 findings: 17
+- P2 findings: 18
 - Remaining unresolved P1/P2 after correction: 0
 
 Review submissions, requested changes, inline threads and actionable PR comments must be rechecked against the exact final remote head before merge.
@@ -244,6 +244,20 @@ Correction:
 - add a regression using the exact live Neo4j score and a negative alternate-spelling case; and
 - rerun authenticated success and missing-vector-index cases so the former reaches complete authority and the latter reaches its intended explicit unavailability boundary.
 
+### P2-18 — Retrieval re-derived a graph key without the fixture binding
+
+The live admitted relation carried the authoritative `newsroom-governed-relation-key-v1` identity, which includes the immutable fixture binding ID. The retrieval fixture validator and memory adapter independently re-derived an older endpoint-only digest. Unit evidence passed because both duplicated the same incomplete formula, while authenticated Neo4j correctly returned the admitted assertion key and the nominal context failed closed.
+
+Correction:
+
+- add one shared typed `governed_relation_key` primitive in the relation contract layer;
+- include the exact repository-owned `integrated_fixture_v2` binding identity in the retrieval contract and its digest;
+- make relation admission, retrieval validation and memory evidence call the same primitive;
+- reject a retrieval contract rebound to any other fixture binding;
+- retain an exact regression for the live admitted relation key; and
+- remove temporary reason-code and branch-recording diagnostics; and
+- rerun the nominal and missing-relation actual-Neo4j cases so only the deliberate relation deletion produces contract incompleteness.
+
 ## Validation performed
 
 The corrected focused retrieval, service-contract and SDLC selection passed locally:
@@ -258,18 +272,25 @@ The P2-17 binary64 score correction then passed the exact affected retrieval, au
 116 passed, 4 intentional no-service skips, 0 failed
 ```
 
-The complete repository passed in seven deterministic file-list shards:
+The P2-18 shared governed-relation key correction passed the exact affected relation, complete-projection, retrieval, authority, migration and traceability selection:
 
 ```text
-shard 1: 155 passed,  0 skipped
-shard 2: 184 passed,  8 skipped
-shard 3: 113 passed,  1 skipped
-shard 4: 183 passed,  0 skipped
-shard 5: 156 passed, 10 skipped
-shard 6: 173 passed,  4 skipped
-shard 7: 203 passed,  0 skipped
+122 passed, 4 intentional no-service skips, 0 failed
+```
+
+The complete repository passed in eight deterministic file-list shards:
+
+```text
+shard 1: 198 passed,  0 skipped
+shard 2: 149 passed,  4 skipped
+shard 3: 142 passed,  0 skipped
+shard 4: 116 passed,  0 skipped
+shard 5: 106 passed,  0 skipped
+shard 6: 235 passed, 14 skipped
+shard 7: 129 passed,  1 skipped
+shard 8:  95 passed,  4 skipped
 ----------------------------------
-total:   1,167 passed, 23 skipped, 0 failed
+total:   1,170 passed, 23 skipped, 0 failed
 ```
 
 Additional checks passed at the review boundary:
@@ -279,7 +300,7 @@ Additional checks passed at the review boundary:
 - the projection import-boundary regression; and
 - clustering evaluation with `--fail-on-regression`.
 
-The four retrieval service tests intentionally skip without `NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED=1`; the exact remote authenticated-service run remains mandatory. The earlier unsharded local pytest process was stopped by the execution wrapper after reaching 48 percent, and the post-P2-17 rerun was stopped at 66 percent, both without an observed failure. The complete result above is therefore based on deterministic file-list shards, while the exact affected post-correction selection is reported separately rather than claiming either interrupted process completed. `uv lock --check` and locked sync were blocked by the configured internal package mirror returning HTTP 503 while fetching `pytest-cov`; `pyproject.toml` and `uv.lock` are unchanged. The exact remote head must still provide the authoritative lockfile, actual-Neo4j and SDLC evidence.
+The four retrieval service tests intentionally skip without `NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED=1`; the exact remote authenticated-service run remains mandatory. Earlier unsharded local pytest processes were stopped by the execution wrapper without an observed failure; the post-P2-18 run reached 60 percent. The complete result above therefore comes from deterministic file-list shards. `uv lock --check` passed, while `uv sync --dev --locked` was blocked by the configured internal package mirror returning HTTP 503 while fetching `neo4j`; `pyproject.toml` and `uv.lock` are unchanged. The exact remote head must still provide the authoritative locked-sync, actual-Neo4j and SDLC evidence.
 
 ## Residual merge gates
 
