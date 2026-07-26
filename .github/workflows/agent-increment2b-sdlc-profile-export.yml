@@ -24,3 +24,43 @@ jobs:
             !.git/**
           include-hidden-files: true
           retention-days: 1
+
+  profile-core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v8
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync locked environment
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+      - name: Profile deterministic full suite
+        env:
+          CI: 'true'
+          PYTHONHASHSEED: '0'
+          PYTHONUTF8: '1'
+        run: |
+          set -o pipefail
+          /usr/bin/time -f '\nELAPSED=%e\nMAX_RSS_KB=%M' \
+            uv run --no-sync python -m pytest -q newsroom/tests --durations=100 \
+            2>&1 | tee increment2b-sdlc-pytest-profile.txt
+      - name: Upload deterministic profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment2b-sdlc-pytest-profile
+          path: increment2b-sdlc-pytest-profile.txt
+          if-no-files-found: error
+          retention-days: 1
