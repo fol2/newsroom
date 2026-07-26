@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/increment-2c-authority-materialize
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -24,6 +27,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-python@v5
         with:
@@ -88,8 +92,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse "$TARGET_BRANCH")" = "$AUTHORISED_PARENT" || \
-            test "$(git rev-parse "origin/$TARGET_BRANCH")" = "$AUTHORISED_PARENT"
+          test "$(git rev-parse "origin/$TARGET_BRANCH")" = "$AUTHORISED_PARENT"
           git checkout --detach "$AUTHORISED_PARENT"
           tar -xzf /tmp/increment2c-authority.tar.gz -C .
           rm -rf .github/increment2c-authority
