@@ -12,6 +12,13 @@ from .complete_projection_migrations import (
     COMPLETE_PROJECTION_MIGRATION_STATEMENTS,
     COMPLETE_PROJECTION_SCHEMA_VERSION,
 )
+from .development_candidate_migrations import (
+    DEVELOPMENT_CANDIDATE_MIGRATION,
+    DEVELOPMENT_CANDIDATE_MIGRATION_CHECKSUM,
+    DEVELOPMENT_CANDIDATE_MIGRATION_NAME,
+    DEVELOPMENT_CANDIDATE_MIGRATION_STATEMENTS,
+    DEVELOPMENT_CANDIDATE_SCHEMA_VERSION,
+)
 from .integrated_migrations import (
     INTEGRATED_FOUNDATION_MIGRATION,
     INTEGRATED_FOUNDATION_MIGRATION_CHECKSUM,
@@ -56,7 +63,7 @@ from .retrieval_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = HYBRID_RETRIEVAL_SCHEMA_VERSION
+SCHEMA_VERSION = DEVELOPMENT_CANDIDATE_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -644,6 +651,20 @@ def apply_pending_migrations(
                 ),
             )
             current = HYBRID_RETRIEVAL_SCHEMA_VERSION
+        if current == HYBRID_RETRIEVAL_SCHEMA_VERSION:
+            for statement in DEVELOPMENT_CANDIDATE_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    DEVELOPMENT_CANDIDATE_SCHEMA_VERSION,
+                    DEVELOPMENT_CANDIDATE_MIGRATION_NAME,
+                    DEVELOPMENT_CANDIDATE_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = DEVELOPMENT_CANDIDATE_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -661,6 +682,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     RELATION_MIGRATION,
     COMPLETE_PROJECTION_MIGRATION,
     HYBRID_RETRIEVAL_MIGRATION,
+    DEVELOPMENT_CANDIDATE_MIGRATION,
 )
 
 def _expected_fingerprint() -> str:
@@ -708,5 +730,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         HYBRID_RETRIEVAL_SCHEMA_VERSION,
         HYBRID_RETRIEVAL_MIGRATION_NAME,
         HYBRID_RETRIEVAL_MIGRATION_CHECKSUM,
+    ),
+    (
+        DEVELOPMENT_CANDIDATE_SCHEMA_VERSION,
+        DEVELOPMENT_CANDIDATE_MIGRATION_NAME,
+        DEVELOPMENT_CANDIDATE_MIGRATION_CHECKSUM,
     ),
 )

@@ -757,7 +757,7 @@ class _HybridRetrievalAuthorityStore(
         latest = int(
             conn.execute(
                 "SELECT COALESCE(MAX(ledger_seq),0) FROM ledger_events "
-                "WHERE security_scope!='authority.projection'"
+                "WHERE security_scope NOT IN ('authority.projection','authority.candidate')"
             ).fetchone()[0]
         )
         validation = conn.execute(
