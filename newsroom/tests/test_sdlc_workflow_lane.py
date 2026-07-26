@@ -212,6 +212,7 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
     captured = {}
     monkeypatch.setenv("NEWSROOM_NEO4J_PROJECTOR_PASSWORD", "secret")
     monkeypatch.setenv("NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED", "1")
+    monkeypatch.setenv("NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_URI", "bolt://localhost:7687")
     monkeypatch.setenv("NEWSROOM_NEO4J_DATABASE", "neo4j")
@@ -246,6 +247,7 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
     )
     static = captured["spec"]["static_env"]
     assert static["NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED"] == "1"
+    assert static["NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED"] == "1"
     assert static["NEWSROOM_NEO4J_SERVICE_REQUIRED"] == "1"
     assert "NEWSROOM_NEO4J_PROJECTOR_PASSWORD" not in static
 
@@ -326,6 +328,9 @@ def test_optional_core_skips_are_exact_actual_service_cases() -> None:
         'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_promotion_rejects_graph_loss_after_validation',
         'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_rebuild_cleanup_cannot_cross_generation_namespace',
         'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_tombstone_does_not_resurrect_after_wipe_rebuild',
+        'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_executes_all_four_branches_and_hydrates_authority',
+        'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_admitted_relation_is_incomplete_not_no_match',
+        'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_fulltext_index_is_unavailable_not_no_match',
     )
     assert lane_module._OPTIONAL_CORE_TEST_IDS == expected
     assert lane_module._OPTIONAL_CORE_TEST_IDS == tuple(sorted(expected))

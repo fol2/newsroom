@@ -101,7 +101,7 @@ _QUERY_IDS: Mapping[RetrievalBranch, str] = {
 class _HybridRetrievalNeo4jAdapter(_CompleteNeo4jAdapter):
     """Private fixed-query adapter for the one bounded Increment 2C tool."""
 
-    __slots__ = ("_monotonic_ns",)
+    __slots__ = ("_monotonic_ns", "_unit_of_work")
 
     def __init__(
         self,
@@ -110,6 +110,7 @@ class _HybridRetrievalNeo4jAdapter(_CompleteNeo4jAdapter):
         config: Neo4jProjectorConfig,
         driver_version: str,
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
+        unit_of_work_factory: Callable[..., Callable] | None = None,
     ) -> None:
         super().__init__(
             driver=driver,
@@ -118,7 +119,31 @@ class _HybridRetrievalNeo4jAdapter(_CompleteNeo4jAdapter):
         )
         if not callable(monotonic_ns):
             raise TypeError("retrieval monotonic clock must be callable")
+        if unit_of_work_factory is None:
+            from neo4j import unit_of_work
+
+            unit_of_work_factory = unit_of_work
+        if not callable(unit_of_work_factory):
+            raise TypeError("retrieval unit-of-work factory must be callable")
         self._monotonic_ns = monotonic_ns
+        self._unit_of_work = unit_of_work_factory
+
+    def _execute_bounded_read(
+        self,
+        session: Any,
+        callback: Callable[[Any], list[Any]],
+        *,
+        policy: HybridRetrievalPolicy,
+        branch: RetrievalBranch,
+    ) -> list[Any]:
+        managed = self._unit_of_work(
+            timeout=policy.timeout_ms / 1000.0,
+            metadata={
+                "newsroom_tool": policy.tool_name,
+                "newsroom_branch": branch.value,
+            },
+        )(callback)
+        return list(session.execute_read(managed))
 
     def run_bounded_hybrid_branches(
         self,
@@ -227,7 +252,8 @@ class _HybridRetrievalNeo4jAdapter(_CompleteNeo4jAdapter):
         query_id = _QUERY_IDS[branch]
         started_ns = self._monotonic_ns()
         query = _exact_query(names)
-        rows = session.execute_read(
+        rows = self._execute_bounded_read(
+            session,
             lambda transaction: list(
                 transaction.run(
                     query,
@@ -237,7 +263,9 @@ class _HybridRetrievalNeo4jAdapter(_CompleteNeo4jAdapter):
                         "limit": policy.branch_result_limit,
                     },
                 )
-            )
+            ),
+            policy=policy,
+            branch=branch,
         )
         hits = tuple(
             self._document_hit(
@@ -273,7 +301,8 @@ class _HybridRetrievalNeo4jAdapter(_CompleteNeo4jAdapter):
         branch = RetrievalBranch.ADMITTED_GRAPH
         query_id = _QUERY_IDS[branch]
         started_ns = self._monotonic_ns()
-        rows = session.execute_read(
+        rows = self._execute_bounded_read(
+            session,
             lambda transaction: list(
                 transaction.run(
                     _ADMITTED_GRAPH_QUERY_TEMPLATE,
@@ -289,7 +318,9 @@ class _HybridRetrievalNeo4jAdapter(_CompleteNeo4jAdapter):
                         "limit": policy.branch_result_limit,
                     },
                 )
-            )
+            ),
+            policy=policy,
+            branch=branch,
         )
         hits: list[RetrievalBranchHit] = []
         for rank, row in enumerate(rows, start=1):
@@ -359,7 +390,8 @@ class _HybridRetrievalNeo4jAdapter(_CompleteNeo4jAdapter):
             item for item in fixture.fulltext_queries if item.language == "en-GB"
         )
         query_id = query.query_id
-        rows = session.execute_read(
+        rows = self._execute_bounded_read(
+            session,
             lambda transaction: list(
                 transaction.run(
                     _FULLTEXT_QUERY,
@@ -370,7 +402,9 @@ class _HybridRetrievalNeo4jAdapter(_CompleteNeo4jAdapter):
                         "limit": policy.branch_result_limit,
                     },
                 )
-            )
+            ),
+            policy=policy,
+            branch=branch,
         )
         hits = tuple(
             self._document_hit(
@@ -410,7 +444,8 @@ class _HybridRetrievalNeo4jAdapter(_CompleteNeo4jAdapter):
         query_id = query.query_id
         source = fixture.document_by_id[query.passage_id]
         vector = fixture.vector_contract.vector_from_components(source.components)
-        rows = session.execute_read(
+        rows = self._execute_bounded_read(
+            session,
             lambda transaction: list(
                 transaction.run(
                     _VECTOR_QUERY,
@@ -421,7 +456,9 @@ class _HybridRetrievalNeo4jAdapter(_CompleteNeo4jAdapter):
                         "limit": policy.branch_result_limit,
                     },
                 )
-            )
+            ),
+            policy=policy,
+            branch=branch,
         )
         hits = tuple(
             self._document_hit(

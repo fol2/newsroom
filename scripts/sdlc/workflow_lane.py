@@ -69,11 +69,15 @@ _OPTIONAL_CORE_TEST_IDS = (
     'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_promotion_rejects_graph_loss_after_validation',
     'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_rebuild_cleanup_cannot_cross_generation_namespace',
     'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_tombstone_does_not_resurrect_after_wipe_rebuild',
+    'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_executes_all_four_branches_and_hydrates_authority',
+    'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_admitted_relation_is_incomplete_not_no_match',
+    'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_fulltext_index_is_unavailable_not_no_match',
 )
 _SERVICE_CONFIGURATION = {
     "NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_DATABASE": "neo4j",
     "NEWSROOM_NEO4J_PROJECTOR_USERNAME": "newsroom_projector",
+    "NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
 }

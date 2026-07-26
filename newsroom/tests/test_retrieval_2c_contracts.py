@@ -283,7 +283,15 @@ def test_public_named_tool_surface_exposes_no_driver_or_query_language() -> None
         ).parameters
     )
     assert "neo4j_config" in parameters
-    assert {"driver", "cypher", "label", "predicate", "limit"}.isdisjoint(
+    assert {
+        "driver",
+        "cypher",
+        "label",
+        "predicate",
+        "limit",
+        "policy",
+        "retrieval_contract",
+    }.isdisjoint(
         parameters
     )
     assert HybridRetrievalAuthoritySystem.__slots__ == (

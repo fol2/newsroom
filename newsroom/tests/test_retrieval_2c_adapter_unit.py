@@ -78,6 +78,19 @@ class _Clock:
         return self.value
 
 
+class _UnitOfWorkFactory:
+    def __init__(self) -> None:
+        self.configurations: list[tuple[float, dict[str, object]]] = []
+
+    def __call__(self, *, timeout: float, metadata: dict[str, object]):
+        self.configurations.append((timeout, dict(metadata)))
+
+        def decorate(callback):
+            return callback
+
+        return decorate
+
+
 def _rows(statement: str, parameters: dict[str, object]) -> list[dict[str, object]]:
     assert parameters["limit"] == 8
     if "revision_id IN $revision_ids" in statement:
@@ -123,6 +136,7 @@ def _rows(statement: str, parameters: dict[str, object]) -> list[dict[str, objec
 def _adapter(rows=_rows):
     transaction = _Transaction(rows)
     driver = _Driver(transaction)
+    unit_of_work = _UnitOfWorkFactory()
     adapter = _HybridRetrievalNeo4jAdapter(
         driver=driver,
         config=Neo4jProjectorConfig(
@@ -133,12 +147,13 @@ def _adapter(rows=_rows):
         ),
         driver_version=NEO4J_B2_DRIVER_VERSION,
         monotonic_ns=_Clock(),
+        unit_of_work_factory=unit_of_work,
     )
-    return adapter, driver, transaction
+    return adapter, driver, transaction, unit_of_work
 
 
 def test_adapter_executes_four_fixed_server_owned_queries_once() -> None:
-    adapter, driver, transaction = _adapter()
+    adapter, driver, transaction, unit_of_work = _adapter()
 
     executions = adapter.run_bounded_hybrid_branches(
         identity=complete_identity(),
@@ -152,6 +167,16 @@ def test_adapter_executes_four_fixed_server_owned_queries_once() -> None:
     assert [len(item.hits) for item in executions] == [2, 1, 3, 4]
     assert driver.databases == ["neo4j"]
     assert len(transaction.statements) == 4
+    assert unit_of_work.configurations == [
+        (
+            5.0,
+            {
+                "newsroom_tool": "find_related_event_candidates",
+                "newsroom_branch": branch.value,
+            },
+        )
+        for branch in RetrievalBranch
+    ]
     statements = [item[0] for item in transaction.statements]
     assert "revision_id IN $revision_ids" in statements[0]
     assert "DEVELOPMENT_OF*1..2" in statements[1]
@@ -194,7 +219,7 @@ def test_unknown_projection_result_fails_closed() -> None:
             return [{"passage_id": "unknown-passage", "score": 1.0}]
         return _rows(statement, parameters)
 
-    adapter, _driver, _transaction = _adapter(rows)
+    adapter, _driver, _transaction, _unit_of_work = _adapter(rows)
     with pytest.raises(Neo4jIdentityConflict, match="checked fixture"):
         adapter.run_bounded_hybrid_branches(
             identity=complete_identity(),
@@ -218,7 +243,7 @@ def test_graph_result_requires_checked_target_and_admitted_relation_evidence() -
             ]
         return _rows(statement, parameters)
 
-    adapter, _driver, _transaction = _adapter(rows)
+    adapter, _driver, _transaction, _unit_of_work = _adapter(rows)
     with pytest.raises(Neo4jIdentityConflict, match="checked fixture"):
         adapter.run_bounded_hybrid_branches(
             identity=complete_identity(),

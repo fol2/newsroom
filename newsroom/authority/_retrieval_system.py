@@ -690,10 +690,6 @@ def open_hybrid_retrieval_authority_system(
     authenticator: Any,
     authorizer: Any,
     neo4j_config: Neo4jProjectorConfig,
-    policy: HybridRetrievalPolicy = HYBRID_FIXTURE_POLICY_V1,
-    retrieval_contract: IntegratedFixtureV2RetrievalContract = (
-        INTEGRATED_FIXTURE_V2_RETRIEVAL
-    ),
     command_service_version: str = "authority-command-v1",
     busy_timeout_ms: int = 5_000,
     clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
@@ -712,8 +708,8 @@ def open_hybrid_retrieval_authority_system(
         authenticator=authenticator,
         authorizer=authorizer,
         adapter=adapter,
-        policy=policy,
-        retrieval_contract=retrieval_contract,
+        policy=HYBRID_FIXTURE_POLICY_V1,
+        retrieval_contract=INTEGRATED_FIXTURE_V2_RETRIEVAL,
         command_service_version=command_service_version,
         busy_timeout_ms=busy_timeout_ms,
         clock=clock,
