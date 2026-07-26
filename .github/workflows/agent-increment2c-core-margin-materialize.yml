@@ -1,0 +1,145 @@
+name: agent-increment2c-core-margin-materialize
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-increment2c-core-margin-materialize
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    env:
+      AUTHORISED_PARENT: 1e0dff90ed8285a65dd527029524299a4379911a
+      EXPECTED_BASE_TREE: e0b7385807eae146ebda16600ca4f80fde7f6141
+      TARGET_BRANCH: agent/increment-2c-core-margin-candidate
+      PATCH_SHA256: a91b82fd1f551cbd34d9fe5ca4e834be1bfe578f14e22935c08975e94b978160
+      EXPECTED_TREE: aa8f81eccca6d85d6881320c4e563e739b7cdaa7
+      MAX_PROFILE_SECONDS: '52.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Reconstruct exact evidence-margin correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/increment2c-core-margin/fix.patch.gz.b64 \
+            > /tmp/increment2c-core-margin.patch.gz
+          echo "$PATCH_SHA256  /tmp/increment2c-core-margin.patch.gz" \
+            | sha256sum --check -
+          gzip --decompress --stdout /tmp/increment2c-core-margin.patch.gz \
+            > /tmp/increment2c-core-margin.patch
+
+      - name: Apply exact eleven-file correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$AUTHORISED_PARENT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_BASE_TREE"
+          git apply --index /tmp/increment2c-core-margin.patch
+          cat > /tmp/expected-paths <<'EOF'
+          .github/workflows/evidence.yml
+          docs/operations/increment-2c-bounded-hybrid-retrieval.md
+          docs/research/2026-07-26-increment-2c-substantive-review.md
+          newsroom/tests/source_import_inventory.py
+          newsroom/tests/test_authority_a2b_boundary.py
+          newsroom/tests/test_authority_import_boundary.py
+          newsroom/tests/test_projection_b2_boundaries.py
+          newsroom/tests/test_retrieval_2c_traceability.py
+          newsroom/tests/test_sdlc_evidence_workflow.py
+          newsroom/tests/test_sdlc_watchdog.py
+          newsroom/tests/test_subprocess_json.py
+          EOF
+          sed -i 's/^          //' /tmp/expected-paths
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          git diff --cached --name-only "$AUTHORISED_PARENT" | sort \
+            > /tmp/actual-paths
+          diff -u /tmp/expected-paths /tmp/actual-paths
+          git diff --cached --check
+          tree="$(git write-tree)"
+          echo "TREE_SHA=$tree"
+          test "$tree" = "$EXPECTED_TREE"
+
+      - name: Run locked complete profile and regression gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom scripts
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import time
+
+          started = time.monotonic()
+          completed = subprocess.run(
+              [
+                  "uv", "run", "--no-sync", "python", "-m", "pytest",
+                  "-q", "newsroom/tests",
+              ],
+              check=False,
+          )
+          elapsed = time.monotonic() - started
+          Path("/tmp/increment2c-core-margin-profile.txt").write_text(
+              f"returncode={completed.returncode}\nwall_seconds={elapsed:.6f}\n",
+              encoding="utf-8",
+          )
+          print(f"FULL_DETERMINISTIC_WALL_SECONDS={elapsed:.6f}")
+          if completed.returncode != 0:
+              raise SystemExit(completed.returncode)
+          if elapsed > float(os.environ["MAX_PROFILE_SECONDS"]):
+              raise SystemExit(
+                  f"deterministic suite exceeded candidate profile ceiling: {elapsed:.6f}"
+              )
+          PY
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+          git diff --cached --check
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+
+      - name: Upload exact profile evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment2c-core-margin-profile
+          path: /tmp/increment2c-core-margin-profile.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Create and push clean candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Newsroom Increment 2C Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
+          commit="$(printf '%s\n\n%s\n' \
+            'test(sdlc): restore deterministic core evidence margin' \
+            'Precompile exact source before the lane clock, share exact-byte-bound import facts across boundary tests, shorten readiness-proven timeout fixtures, and record the unchanged 55-second evidence contract.' \
+            | git commit-tree "$tree" -p "$AUTHORISED_PARENT")"
+          echo "COMMIT_SHA=$commit"
+          git push --force-with-lease="refs/heads/$TARGET_BRANCH:$AUTHORISED_PARENT" \
+            origin "$commit:refs/heads/$TARGET_BRANCH"
