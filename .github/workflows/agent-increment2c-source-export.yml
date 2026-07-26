@@ -1,0 +1,26 @@
+name: agent-increment2c-source-export
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Upload exact Increment 2C base source tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment2c-base-source
+          path: |
+            .
+            !.git/**
+          include-hidden-files: true
+          retention-days: 1
