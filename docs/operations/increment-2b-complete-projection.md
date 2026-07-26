@@ -153,6 +153,7 @@ The accepted deterministic core lane remains a complete repository suite under t
 - callers receive isolated dependency mappings and cannot mutate the cached authority used by another classification;
 - watchdog tests shorten their waits only after an explicit child or command readiness marker has been observed, while still proving shared-deadline enforcement, descendant termination and background-process rejection; and
 - repeated deterministic complete-fixture tests clone a closed SQLite and governed-object template into each isolated test directory, then independently reopen and validate it before mutation.
+- the deterministic core JUnit manifest marks the exact authenticated Neo4j cases optional only in that no-service lane; the service route still selects the complete 2B service file and proves all eight cases execute without skip, failure or error.
 
 These are test and classifier execution optimizations only. They create no shared authority writer, skip no production test, change no SDLC contract, and expose no runtime product surface.
 

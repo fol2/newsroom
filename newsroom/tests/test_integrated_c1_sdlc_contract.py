@@ -80,8 +80,25 @@ def test_increment_1c_contract_models_are_stateful_and_service_qualified() -> No
         )
 
 
-def test_integrated_actual_service_case_is_the_only_new_optional_core_skip() -> None:
+def test_complete_actual_service_cases_are_optional_only_in_core() -> None:
     optional = lane_module._OPTIONAL_CORE_TEST_IDS
+    complete = {
+        'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_complete_generation_queries_and_promotes_exact_state',
+        'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_partial_or_contract_mismatched_state_fails_closed[deleted-document]',
+        'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_partial_or_contract_mismatched_state_fails_closed[missing-vector-index]',
+        'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_partial_or_contract_mismatched_state_fails_closed[wrong-fulltext-analyzer]',
+        'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_partial_or_contract_mismatched_state_fails_closed[wrong-vector-dimensions]',
+        'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_replacement_generation_recovers_from_authority_only',
+        'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_revocation_and_tombstone_remove_current_derivatives',
+        'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_wrong_watermark_generation_and_vector_dimension_fail_closed',
+    }
     assert _INTEGRATED_SERVICE_TEST_ID in optional
+    assert complete <= set(optional)
     assert optional == tuple(sorted(optional))
-    assert len(optional) == 11
+    assert len(optional) == 19
+
+    route = _route("newsroom/projection/neo4j/_complete_adapter.py")
+    assert route["service_required"] is True
+    assert "newsroom/tests/test_complete_projection_2b_neo4j_service.py" in (
+        route["service_tests"]
+    )

@@ -31,7 +31,7 @@ The review excludes Increment 2C, hybrid retrieval, Retrieval Context version 2,
 ## Result
 
 - P1 findings: 1
-- P2 findings: 8
+- P2 findings: 9
 - Remaining unresolved P1/P2 after correction: 0
 
 Review submissions, inline threads and actionable top-level comments must be rechecked against the exact final PR head before merge.
@@ -149,6 +149,19 @@ Correction:
 - build one closed deterministic complete-fixture authority template per test process, then copy the SQLite database and governed-object CAS into each test's isolated `tmp_path`;
 - retain independent startup integrity validation and per-test mutation after every clone; and
 - keep the accepted 55-second deadline, complete deterministic suite and service-lane topology unchanged.
+
+### P2-9 — Complete actual-service cases were not optional in the deterministic core manifest
+
+The full deterministic core suite correctly skipped tests that require authenticated Neo4j, but the optional-test manifest still listed only the earlier Increment 1 service cases. All eight new complete Increment 2B actual-service cases therefore counted as required skips in the core JUnit summary even though the dedicated service lane executed them successfully.
+
+Correction:
+
+- add the exact eight complete-service testcase identities, including every parameterized drift case, to the core-only optional manifest;
+- keep `test_complete_projection_2b_neo4j_service.py` mandatory in the service route;
+- retain the service workflow proof that exactly eight complete cases execute without skip, failure or error; and
+- add contract tests binding both the sorted 19-case core optional set and mandatory complete-service file selection.
+
+The change does not suppress a product test or relax the actual-service gate. It distinguishes intentionally unavailable Neo4j cases in the deterministic lane from their required execution in the authenticated service lane.
 
 ## Local validation
 
