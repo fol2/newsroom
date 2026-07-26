@@ -5,6 +5,7 @@
 - Owner: Product owner
 - Canonical language: English
 - Date: 2026-07-25
+- Updated: 2026-07-26
 - Related issue: #156
 - Parent epic: #142
 - Related draft PR: #164
@@ -30,7 +31,7 @@ The review excludes Increment 2C, hybrid retrieval, Retrieval Context version 2,
 ## Result
 
 - P1 findings: 1
-- P2 findings: 7
+- P2 findings: 8
 - Remaining unresolved P1/P2 after correction: 0
 
 Review submissions, inline threads and actionable top-level comments must be rechecked against the exact final PR head before merge.
@@ -136,13 +137,28 @@ Correction:
 - compare every complete-contract, generation-binding and validation-binding column; and
 - add trigger-preserving raw-SQL tamper/reopen tests proving store open fails for normalized contract, generation-binding and validation-binding changes.
 
+### P2-8 — Deterministic core evidence exceeded the accepted lane budget
+
+The exact PR head passed the ordinary full CI suite, but the SDLC deterministic core command exceeded the accepted 55-second lane deadline. The first hosted profile completed the full suite in 58.50 seconds. The overrun came from repeated deterministic setup rather than product or service failures: each route-classification test reparsed the complete repository dependency graph, watchdog tests waited near multi-second deadlines even after readiness was observable, and complete-projection tests repeatedly rebuilt identical SQLite and governed-object fixture authority.
+
+Correction:
+
+- cache the dependency graph only by an exact snapshot of every repository-owned Python source path and byte sequence;
+- return isolated mapping copies and prove same-root byte changes invalidate the cache;
+- shorten watchdog fixtures only after explicit process-readiness evidence while preserving shared-deadline, descendant-termination and unauthorized-background-process assertions;
+- build one closed deterministic complete-fixture authority template per test process, then copy the SQLite database and governed-object CAS into each test's isolated `tmp_path`;
+- retain independent startup integrity validation and per-test mutation after every clone; and
+- keep the accepted 55-second deadline, complete deterministic suite and service-lane topology unchanged.
+
 ## Local validation
 
 The corrected implementation and substantive-review additions passed a bounded complete repository run:
 
 ```text
-1,092 passed, 19 skipped, 0 failed
+1,094 passed, 19 skipped, 0 failed
 ```
+
+Hosted-runner profiling of the same full deterministic suite improved from 58.50 seconds before the correction to 52.62 seconds after exact-source dependency caching and readiness-observed watchdog fixtures, then to 50.77 seconds after closed-store complete-fixture cloning (`51.98` seconds wall time). The accepted 55-second lane, complete suite and service topology are unchanged; the exact final SDLC run remains the authoritative merge gate.
 
 Additional local checks passed:
 

@@ -99,6 +99,7 @@ def test_increment_2b_operations_record_authority_queries_and_rollback() -> None
         "Issue #157 remains blocked",
         "No caller supplies Cypher",
         "no external embedding provider or model call",
+        "The accepted deterministic core lane remains a complete repository suite",
     ):
         assert required in text
 
@@ -107,13 +108,14 @@ def test_increment_2b_review_records_zero_unresolved_p1_p2() -> None:
     text = _SUBSTANTIVE_REVIEW.read_text(encoding="utf-8")
     for required in (
         "P1 findings: 1",
-        "P2 findings: 7",
+        "P2 findings: 8",
         "Remaining unresolved P1/P2 after correction: 0",
         "A source event could arrive during reconciliation",
         "The normalized full-text query contract was retained but not executed",
         "The authority boundary trusted adapter query evidence completeness",
         "Startup integrity did not compare every normalized contract column",
-        "1,092 passed, 19 skipped, 0 failed",
+        "Deterministic core evidence exceeded the accepted lane budget",
+        "1,094 passed, 19 skipped, 0 failed",
         "Issue #157 remains blocked",
     ):
         assert required in text

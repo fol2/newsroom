@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import atexit
+from dataclasses import dataclass, replace
 from pathlib import Path
+import shutil
+import tempfile
+from threading import RLock
 from typing import Callable
 
 from newsroom.authority import (
@@ -52,6 +56,24 @@ COMPLETE_NOW = UtcTimestamp.parse("2042-03-12T12:00:00.000000Z")
 COMPLETE_GENERATION_ID = ProjectionGenerationId.parse(
     "33333333-3333-4333-8333-333333333333"
 )
+
+
+_COMPLETE_AUTHORITY_TEMPLATE_LOCK = RLock()
+_COMPLETE_AUTHORITY_TEMPLATE_ROOT: Path | None = None
+_COMPLETE_AUTHORITY_TEMPLATE: tuple[Path, Path, object, object, object] | None = None
+
+
+def _cleanup_complete_authority_template() -> None:
+    global _COMPLETE_AUTHORITY_TEMPLATE_ROOT, _COMPLETE_AUTHORITY_TEMPLATE
+    with _COMPLETE_AUTHORITY_TEMPLATE_LOCK:
+        root = _COMPLETE_AUTHORITY_TEMPLATE_ROOT
+        _COMPLETE_AUTHORITY_TEMPLATE = None
+        _COMPLETE_AUTHORITY_TEMPLATE_ROOT = None
+    if root is not None:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+atexit.register(_cleanup_complete_authority_template)
 
 
 def complete_contract_registry():
@@ -531,7 +553,7 @@ class MemoryCompleteNeo4jAdapter:
         self.closed = True
 
 
-def seed_complete_fixture_authority(
+def _seed_complete_fixture_authority_uncached(
     database: Path,
     *,
     object_root: Path,
@@ -556,6 +578,73 @@ def seed_complete_fixture_authority(
     finally:
         system.close()
     return seeded, proposal, decision
+
+
+def _complete_authority_template():
+    global _COMPLETE_AUTHORITY_TEMPLATE_ROOT, _COMPLETE_AUTHORITY_TEMPLATE
+    with _COMPLETE_AUTHORITY_TEMPLATE_LOCK:
+        if _COMPLETE_AUTHORITY_TEMPLATE is not None:
+            return _COMPLETE_AUTHORITY_TEMPLATE
+        _COMPLETE_AUTHORITY_TEMPLATE_ROOT = Path(
+            tempfile.mkdtemp(prefix="newsroom-complete-projection-fixture-")
+        )
+        database = _COMPLETE_AUTHORITY_TEMPLATE_ROOT / "authority.sqlite3"
+        object_root = _COMPLETE_AUTHORITY_TEMPLATE_ROOT / "objects"
+        seeded, proposal, decision = _seed_complete_fixture_authority_uncached(
+            database,
+            object_root=object_root,
+        )
+        _COMPLETE_AUTHORITY_TEMPLATE = (
+            database,
+            object_root,
+            seeded,
+            proposal,
+            decision,
+        )
+        return _COMPLETE_AUTHORITY_TEMPLATE
+
+
+def seed_complete_fixture_authority(
+    database: Path,
+    *,
+    object_root: Path,
+):
+    """Clone one closed deterministic fixture authority per isolated test.
+
+    The complete fixture has identical immutable SQLite and governed-object state in
+    every default test.  Build and close it once per process, then copy both stores
+    into each test's private ``tmp_path``.  Every consumer still reopens and validates
+    an independent database before mutation; no writer or runtime product surface is
+    shared.
+    """
+
+    template_database, template_objects, seeded, proposal, decision = (
+        _complete_authority_template()
+    )
+    if database.exists() or database.is_symlink():
+        raise FileExistsError(database)
+    if object_root.exists() or object_root.is_symlink():
+        raise FileExistsError(object_root)
+    database.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copy2(template_database, database)
+        shutil.copytree(
+            template_objects,
+            object_root,
+            copy_function=shutil.copy2,
+        )
+    except Exception:
+        database.unlink(missing_ok=True)
+        shutil.rmtree(object_root, ignore_errors=True)
+        raise
+    return (
+        replace(
+            seeded,
+            admission_by_passage_id=dict(seeded.admission_by_passage_id),
+        ),
+        proposal,
+        decision,
+    )
 
 
 def register_complete_generation(

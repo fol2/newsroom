@@ -145,6 +145,17 @@ The complete cases prove bilingual raw and normalized full-text queries, determi
 
 JUnit evidence must prove every required case executed without skip, failure or error. The workflow retains both the extended complete evidence artifact and the legacy B2/B3/C1 artifact alias expected by the accepted SDLC service lane.
 
+## SDLC evidence margin
+
+The accepted deterministic core lane remains a complete repository suite under the existing 55-second deadline. Increment 2B preserves that evidence margin without selecting tests or raising the budget:
+
+- dependency analysis is cached only by the exact path and bytes of every repository-owned Python source; any add, delete, rename or byte change creates a new graph identity;
+- callers receive isolated dependency mappings and cannot mutate the cached authority used by another classification;
+- watchdog tests shorten their waits only after an explicit child or command readiness marker has been observed, while still proving shared-deadline enforcement, descendant termination and background-process rejection; and
+- repeated deterministic complete-fixture tests clone a closed SQLite and governed-object template into each isolated test directory, then independently reopen and validate it before mutation.
+
+These are test and classifier execution optimizations only. They create no shared authority writer, skip no production test, change no SDLC contract, and expose no runtime product surface.
+
 ## Operator verification
 
 Before merge, run from the repository root:

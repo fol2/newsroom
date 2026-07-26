@@ -72,35 +72,42 @@ def test_expired_shared_deadline_prevents_process_start(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
-def test_multiple_commands_share_one_lane_deadline() -> None:
-    deadline = LaneDeadline.start(2.5)
+def test_multiple_commands_share_one_lane_deadline(tmp_path: Path) -> None:
+    second_started = tmp_path / "second-started"
+    deadline = LaneDeadline.start(1.5)
     started = time.monotonic()
     first = _run_gate_command(
         gate_id="core-deterministic",
         phase="first",
-        argv=_python("import time; time.sleep(0.1)"),
+        argv=_python("pass"),
         deadline=deadline,
-        command_timeout_seconds=1.5,
+        command_timeout_seconds=1.0,
         termination_grace_seconds=0.1,
     )
     second = _run_gate_command(
         gate_id="core-deterministic",
         phase="second",
-        argv=_python("import time; time.sleep(5)"),
+        argv=_python(
+            "from pathlib import Path; import sys, time; "
+            "Path(sys.argv[1]).touch(); time.sleep(30)",
+            str(second_started),
+        ),
         deadline=deadline,
-        command_timeout_seconds=3,
-        termination_grace_seconds=0.2,
+        command_timeout_seconds=2.0,
+        termination_grace_seconds=0.15,
     )
 
     assert first.result == "PASS"
+    assert second_started.exists()
     assert second.result == "BUDGET_EXCEEDED"
-    assert time.monotonic() - started < 2.5
-    assert deadline.remaining_seconds() <= 0.25
+    assert time.monotonic() - started < 1.65
+    assert deadline.remaining_seconds() <= 0.2
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group evidence is POSIX-specific")
 def test_timeout_terminates_descendant_process_group(tmp_path: Path) -> None:
     marker = tmp_path / "child-terminated"
+    ready = tmp_path / "child-ready"
     pid_file = tmp_path / "child-pid"
     child = """
 import signal
@@ -113,6 +120,7 @@ def stop(*_args):
     raise SystemExit(0)
 
 signal.signal(signal.SIGTERM, stop)
+Path(sys.argv[2]).write_text('ready', encoding='utf-8')
 time.sleep(30)
 """
     parent = """
@@ -121,27 +129,30 @@ from pathlib import Path
 import sys
 import time
 
-process = subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])
-Path(sys.argv[3]).write_text(str(process.pid), encoding='utf-8')
+process = subprocess.Popen(
+    [sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3]]
+)
+Path(sys.argv[4]).write_text(str(process.pid), encoding='utf-8')
 time.sleep(30)
 """
 
     result = _run_gate_command(
         gate_id="core-deterministic",
         phase="descendants",
-        argv=_python(parent, child, str(marker), str(pid_file)),
-        deadline=LaneDeadline.start(3),
-        command_timeout_seconds=2.5,
-        termination_grace_seconds=0.5,
+        argv=_python(parent, child, str(marker), str(ready), str(pid_file)),
+        deadline=LaneDeadline.start(1.75),
+        command_timeout_seconds=1.5,
+        termination_grace_seconds=0.25,
     )
 
     stop_at = time.monotonic() + 1
     while time.monotonic() < stop_at and not marker.exists():
         time.sleep(0.01)
     assert pid_file.exists()
+    assert ready.read_text(encoding="utf-8") == "ready"
     assert marker.read_text(encoding="utf-8") == "terminated"
     assert result.result == "BUDGET_EXCEEDED"
-    assert result.execution_ms < 2_500
+    assert result.execution_ms < 1_500
     assert result.result_reason == "BUDGET_EXCEEDED:core-deterministic:descendants"
 
 
