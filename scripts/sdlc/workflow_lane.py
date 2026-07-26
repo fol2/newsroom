@@ -71,6 +71,7 @@ _OPTIONAL_CORE_TEST_IDS = (
     'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_tombstone_does_not_resurrect_after_wipe_rebuild',
 )
 _SERVICE_CONFIGURATION = {
+    "NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_DATABASE": "neo4j",
     "NEWSROOM_NEO4J_PROJECTOR_USERNAME": "newsroom_projector",
     "NEWSROOM_NEO4J_SERVICE_REQUIRED": "1",

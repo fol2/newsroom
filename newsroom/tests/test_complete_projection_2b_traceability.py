@@ -101,6 +101,7 @@ def test_increment_2b_operations_record_authority_queries_and_rollback() -> None
         "no external embedding provider or model call",
         "The accepted deterministic core lane remains a complete repository suite",
         "optional only in that no-service lane",
+        "NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED=1",
     ):
         assert required in text
 
@@ -109,7 +110,7 @@ def test_increment_2b_review_records_zero_unresolved_p1_p2() -> None:
     text = _SUBSTANTIVE_REVIEW.read_text(encoding="utf-8")
     for required in (
         "P1 findings: 1",
-        "P2 findings: 9",
+        "P2 findings: 10",
         "Remaining unresolved P1/P2 after correction: 0",
         "A source event could arrive during reconciliation",
         "The normalized full-text query contract was retained but not executed",
@@ -117,6 +118,7 @@ def test_increment_2b_review_records_zero_unresolved_p1_p2() -> None:
         "Startup integrity did not compare every normalized contract column",
         "Deterministic core evidence exceeded the accepted lane budget",
         "Complete actual-service cases were not optional in the deterministic core manifest",
+        "The SDLC service lane selected complete tests without enabling them",
         "1,094 passed, 19 skipped, 0 failed",
         "Issue #157 remains blocked",
     ):

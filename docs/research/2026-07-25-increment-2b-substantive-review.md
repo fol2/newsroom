@@ -31,7 +31,7 @@ The review excludes Increment 2C, hybrid retrieval, Retrieval Context version 2,
 ## Result
 
 - P1 findings: 1
-- P2 findings: 9
+- P2 findings: 10
 - Remaining unresolved P1/P2 after correction: 0
 
 Review submissions, inline threads and actionable top-level comments must be rechecked against the exact final PR head before merge.
@@ -162,6 +162,19 @@ Correction:
 - add contract tests binding both the sorted 19-case core optional set and mandatory complete-service file selection.
 
 The change does not suppress a product test or relax the actual-service gate. It distinguishes intentionally unavailable Neo4j cases in the deterministic lane from their required execution in the authenticated service lane.
+
+### P2-10 — The SDLC service lane selected complete tests without enabling them
+
+The service route selected `test_complete_projection_2b_neo4j_service.py`, but its fixed environment set only the earlier `NEWSROOM_NEO4J_SERVICE_REQUIRED` flag. The complete service module requires the separate `NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED` flag, so all eight cases skipped and the signed service JUnit evidence failed despite the standalone actual-Neo4j workflow passing.
+
+Correction:
+
+- add `NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED=1` to the repository-owned SDLC service configuration;
+- bind the same value into the fixed GitHub service job environment and command-spec static environment;
+- retain password-only secret passthrough and loopback-only Neo4j configuration; and
+- extend workflow and lane contract tests so removing or changing the complete-service flag fails closed.
+
+The flag grants no runtime product authority. It only requires the already selected complete actual-service tests to execute in the authenticated evidence lane.
 
 ## Local validation
 

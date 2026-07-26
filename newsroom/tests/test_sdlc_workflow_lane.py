@@ -211,6 +211,7 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
     artifact.mkdir()
     captured = {}
     monkeypatch.setenv("NEWSROOM_NEO4J_PROJECTOR_PASSWORD", "secret")
+    monkeypatch.setenv("NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_URI", "bolt://localhost:7687")
     monkeypatch.setenv("NEWSROOM_NEO4J_DATABASE", "neo4j")
@@ -244,6 +245,7 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
         "NEWSROOM_NEO4J_PROJECTOR_PASSWORD",
     )
     static = captured["spec"]["static_env"]
+    assert static["NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED"] == "1"
     assert static["NEWSROOM_NEO4J_SERVICE_REQUIRED"] == "1"
     assert "NEWSROOM_NEO4J_PROJECTOR_PASSWORD" not in static
 
@@ -408,6 +410,7 @@ def test_service_configuration_is_exact(
     contract = _contract(tmp_path)
     artifact = tmp_path / "artifact-exact"
     artifact.mkdir()
+    monkeypatch.setenv("NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_URI", "bolt://remote.example:7687")
     monkeypatch.setenv("NEWSROOM_NEO4J_DATABASE", "neo4j")
