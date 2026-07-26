@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import ast
 import inspect
-from pathlib import Path
 
 import newsroom.authority as authority
+from .source_import_inventory import production_import_inventory
+
 from newsroom.authority import (
     AuthenticationProof,
     HydrationRequest,
@@ -62,27 +62,16 @@ def test_public_request_surfaces_do_not_accept_authority_identity_or_time() -> N
 
 
 def test_non_authority_modules_cannot_import_private_object_writer() -> None:
-    repository_root = Path(__file__).resolve().parents[2]
-    newsroom_root = repository_root / "newsroom"
     violations: list[str] = []
-    for path in newsroom_root.rglob("*.py"):
-        relative = path.relative_to(repository_root)
-        if "authority" in relative.parts or "tests" in relative.parts:
+    for relative, imports, parse_error in production_import_inventory():
+        if "authority" in relative.parts:
             continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeError) as exc:
-            violations.append(f"{relative}: unreadable: {exc}")
+        if parse_error is not None:
+            violations.append(f"{relative}: unreadable: {parse_error}")
             continue
-        for node in ast.walk(tree):
-            modules: list[str] = []
-            if isinstance(node, ast.ImportFrom) and node.module:
-                modules.append(node.module)
-            elif isinstance(node, ast.Import):
-                modules.extend(alias.name for alias in node.names)
-            for module in modules:
-                if module.startswith("newsroom.authority._object"):
-                    violations.append(f"{relative}:{node.lineno}:{module}")
+        for lineno, module in imports:
+            if module.startswith("newsroom.authority._object"):
+                violations.append(f"{relative}:{lineno}:{module}")
     assert not violations, "private object-writer imports: " + "; ".join(
         violations
     )

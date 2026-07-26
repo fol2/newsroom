@@ -26,10 +26,10 @@ class TestRunJsonCommand(unittest.TestCase):
                 "time.sleep(5)"
             ),
         ]
-        res = run_json_command(cmd, timeout_seconds=0.5, max_output_chars=2000)
+        res = run_json_command(cmd, timeout_seconds=0.15, max_output_chars=2000)
         self.assertFalse(res.get("ok"))
         self.assertEqual(res.get("error"), "timeout")
-        self.assertEqual(res.get("timeout_seconds"), 0.5)
+        self.assertEqual(res.get("timeout_seconds"), 0.15)
         self.assertEqual(res.get("cmd"), cmd)
         self.assertEqual(len(res.get("stdout", "")), 2000)
         self.assertEqual(len(res.get("stderr", "")), 2000)

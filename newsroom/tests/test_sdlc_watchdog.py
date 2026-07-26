@@ -74,15 +74,15 @@ def test_expired_shared_deadline_prevents_process_start(tmp_path: Path) -> None:
 
 def test_multiple_commands_share_one_lane_deadline(tmp_path: Path) -> None:
     second_started = tmp_path / "second-started"
-    deadline = LaneDeadline.start(1.5)
+    deadline = LaneDeadline.start(0.8)
     started = time.monotonic()
     first = _run_gate_command(
         gate_id="core-deterministic",
         phase="first",
         argv=("/bin/true",),
         deadline=deadline,
-        command_timeout_seconds=1.0,
-        termination_grace_seconds=0.1,
+        command_timeout_seconds=0.4,
+        termination_grace_seconds=0.08,
     )
     second = _run_gate_command(
         gate_id="core-deterministic",
@@ -95,14 +95,14 @@ def test_multiple_commands_share_one_lane_deadline(tmp_path: Path) -> None:
             str(second_started),
         ),
         deadline=deadline,
-        command_timeout_seconds=2.0,
-        termination_grace_seconds=0.15,
+        command_timeout_seconds=0.8,
+        termination_grace_seconds=0.08,
     )
 
     assert first.result == "PASS"
     assert second_started.read_text(encoding="utf-8") == "started"
     assert second.result == "BUDGET_EXCEEDED"
-    assert time.monotonic() - started < 1.65
+    assert time.monotonic() - started < 1.0
     assert deadline.remaining_seconds() <= 0.2
 
 
@@ -141,9 +141,9 @@ while True:
         gate_id="core-deterministic",
         phase="descendants",
         argv=_python(parent, str(marker), str(ready), str(pid_file)),
-        deadline=LaneDeadline.start(3),
-        command_timeout_seconds=2.5,
-        termination_grace_seconds=0.4,
+        deadline=LaneDeadline.start(1.1),
+        command_timeout_seconds=0.85,
+        termination_grace_seconds=0.2,
     )
 
     stop_at = time.monotonic() + 1
@@ -153,7 +153,7 @@ while True:
     assert ready.read_text(encoding="utf-8") == "ready"
     assert marker.read_text(encoding="utf-8") == "terminated"
     assert result.result == "BUDGET_EXCEEDED"
-    assert result.execution_ms < 2_500
+    assert result.execution_ms < 850
     assert result.result_reason == "BUDGET_EXCEEDED:core-deterministic:descendants"
 
 

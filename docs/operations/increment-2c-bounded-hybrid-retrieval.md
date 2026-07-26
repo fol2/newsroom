@@ -118,6 +118,12 @@ Authentication and the exact purpose-bound scope are checked before replay looku
 
 The workflow proves the exact four test identities executed with zero skip, failure or error and publishes a new extended evidence artifact while retaining the earlier aliases. The SDLC service lane fixes `NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED=1`; these cases are optional only in the deterministic no-service core manifest.
 
+## Deterministic evidence margin
+
+The accepted SDLC core lane remains one shared `55`-second deterministic budget. Increment 2C does not increase that budget or remove any test. After locked environment sync and exact Python-version validation, the core bootstrap precompiles the exact checked-out `newsroom` and `scripts` source before the lane execution clock starts. The source-integrity phase still independently recompiles and validates source inside the evidence lane; bootstrap bytecode is an execution-efficiency input, never trusted integrity evidence.
+
+Repository boundary tests share one immutable production-import inventory only when the exact relative paths and source bytes are identical. Any byte or path change creates a different cache key and forces a new AST parse. Watchdog and subprocess timeout fixtures use explicit readiness evidence and shorter waits while retaining the same shared-deadline, process-group termination, child `SIGTERM`, output truncation and unauthorized-background-process assertions. These changes are test/evidence infrastructure only and create no runtime product authority.
+
 ## Operator verification
 
 Before merge, run from the repository root:

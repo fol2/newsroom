@@ -141,6 +141,7 @@ jobs:
           assert sys.version_info[:2] == (3, 12), sys.version
           assert platform.python_implementation() == 'CPython'
           PY
+          uv run --no-sync python -m compileall -q newsroom scripts
 
       - name: Execute evidence lane
         shell: bash

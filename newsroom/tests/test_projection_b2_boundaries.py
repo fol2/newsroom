@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import ast
 from dataclasses import fields, is_dataclass
+from functools import lru_cache
 import inspect
 from pathlib import Path
+
+from .source_import_inventory import production_import_inventory
 
 from newsroom.authority.neo4j_projection_system import (
     Neo4jProjectionAuthoritySystem,
@@ -30,7 +32,6 @@ from newsroom.projection.neo4j import (
 
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-_PRODUCTION_ROOT = _REPOSITORY_ROOT / "newsroom"
 _PRIVATE_ADAPTER_IMPORTER = Path("newsroom/authority/_neo4j_projection_system.py")
 _PRIVATE_DRIVER_IMPORTER = Path("newsroom/projection/neo4j/_adapter.py")
 _FORBIDDEN_PUBLIC_FIELDS = {
@@ -47,16 +48,18 @@ _FORBIDDEN_PUBLIC_FIELDS = {
 }
 
 
-def _production_python_files() -> tuple[Path, ...]:
-    return tuple(
-        path
-        for path in sorted(_PRODUCTION_ROOT.rglob("*.py"))
-        if "tests" not in path.parts and "__pycache__" not in path.parts
-    )
-
-
-def _relative(path: Path) -> Path:
-    return path.relative_to(_REPOSITORY_ROOT)
+@lru_cache(maxsize=1)
+def _production_importers() -> tuple[frozenset[Path], frozenset[Path]]:
+    adapter_importers: set[Path] = set()
+    driver_importers: set[Path] = set()
+    for relative, imports, parse_error in production_import_inventory():
+        assert parse_error is None, f"{relative}: unreadable: {parse_error}"
+        for _lineno, module in imports:
+            if module == "newsroom.projection.neo4j._adapter":
+                adapter_importers.add(relative)
+            if module == "neo4j":
+                driver_importers.add(relative)
+    return frozenset(adapter_importers), frozenset(driver_importers)
 
 
 def test_public_projector_exposes_only_bounded_structural_operations() -> None:
@@ -132,35 +135,13 @@ def test_public_typed_contracts_contain_no_internal_identity_or_property_maps() 
 
 
 def test_private_adapter_has_one_production_import_path() -> None:
-    importers: set[Path] = set()
-    for path in _production_python_files():
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == (
-                "newsroom.projection.neo4j._adapter"
-            ):
-                importers.add(_relative(path))
-            if isinstance(node, ast.Import):
-                if any(
-                    alias.name == "newsroom.projection.neo4j._adapter"
-                    for alias in node.names
-                ):
-                    importers.add(_relative(path))
-    assert importers == {_PRIVATE_ADAPTER_IMPORTER}
+    adapter_importers, _driver_importers = _production_importers()
+    assert adapter_importers == {_PRIVATE_ADAPTER_IMPORTER}
 
 
 def test_official_driver_is_imported_only_inside_private_adapter() -> None:
-    importers: set[Path] = set()
-    for path in _production_python_files():
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "neo4j":
-                importers.add(_relative(path))
-            if isinstance(node, ast.Import) and any(
-                alias.name == "neo4j" for alias in node.names
-            ):
-                importers.add(_relative(path))
-    assert importers == {_PRIVATE_DRIVER_IMPORTER}
+    _adapter_importers, driver_importers = _production_importers()
+    assert driver_importers == {_PRIVATE_DRIVER_IMPORTER}
 
 
 def test_traceability_names_permanent_boundary_service_and_operations_evidence() -> None:

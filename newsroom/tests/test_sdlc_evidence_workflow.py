@@ -284,6 +284,20 @@ def test_lane_step_names_match_jobs_api_telemetry_contract() -> None:
     assert "Finalize evidence" in {step["name"] for step in _steps("service")}
 
 
+def test_core_bootstrap_precompiles_exact_source_before_timed_lane() -> None:
+    sync = _step("core", "Sync locked environment")["run"]
+    assert sync.splitlines()[-1] == (
+        "uv run --no-sync python -m compileall -q newsroom scripts"
+    )
+    names = [step["name"] for step in _steps("core")]
+    assert names.index("Sync locked environment") < names.index(
+        "Execute evidence lane"
+    )
+    assert "compileall" not in _step(
+        "service", "Sync locked environment"
+    )["run"]
+
+
 def test_service_boundary_is_exact_authenticated_loopback_and_bounded() -> None:
     job = _jobs()["service"]
     assert job["env"] == {
