@@ -210,6 +210,94 @@ def test_future_query_valid_time_is_policy_blocked_before_graph_lookup(
         system.close()
 
 
+def test_non_contract_query_valid_time_is_policy_blocked_before_graph_lookup(
+    tmp_path: Path,
+) -> None:
+    _database, _objects, adapter, system = setup(tmp_path)
+    try:
+        result = system.retrieval.find_related_event_candidates(
+            request(
+                query_valid_time=UtcTimestamp.parse(
+                    "2042-03-12T11:59:59.999999Z"
+                )
+            ),
+            proof=proof(),
+        )
+        assert result.outcome is RetrievalOutcome.POLICY_BLOCKED
+        assert result.failure is not None
+        assert result.failure.reason_code == "QUERY_VALID_TIME_NOT_ALLOWED"
+        assert adapter.call_count == 0
+    finally:
+        system.close()
+
+
+def test_expired_projection_freshness_is_stale_before_graph_lookup(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    object_root = tmp_path / "objects"
+    seed_active_retrieval_authority(database, object_root=object_root)
+    adapter = MemoryHybridRetrievalAdapter()
+    system = open_retrieval_test_system(
+        database,
+        object_root=object_root,
+        adapter=adapter,
+        clock=lambda: UtcTimestamp.parse(
+            "2042-03-12T13:00:00.000001Z"
+        ),
+    )
+    try:
+        result = system.retrieval.find_related_event_candidates(
+            request(), proof=proof()
+        )
+        assert result.outcome is RetrievalOutcome.STALE
+        assert result.failure is not None
+        assert result.failure.reason_code == "RETRIEVAL_SOURCE_STALE"
+        assert adapter.call_count == 0
+    finally:
+        system.close()
+
+
+def test_complete_replay_expires_at_retained_projection_freshness_deadline(
+    tmp_path: Path,
+) -> None:
+    database, object_root, _adapter, system = setup(tmp_path)
+    try:
+        first = system.retrieval.find_related_event_candidates(
+            request(), proof=proof()
+        )
+        assert first.outcome is RetrievalOutcome.COMPLETE
+        assert first.context is not None
+        assert first.context.projection.validation_recorded_at == COMPLETE_NOW
+        assert first.context.projection.query_valid_time == (
+            INTEGRATED_FIXTURE_V2_RETRIEVAL.query_valid_time
+        )
+    finally:
+        system.close()
+
+    adapter = MemoryHybridRetrievalAdapter()
+    reopened = open_retrieval_test_system(
+        database,
+        object_root=object_root,
+        adapter=adapter,
+        clock=lambda: UtcTimestamp.parse(
+            "2042-03-12T13:00:00.000001Z"
+        ),
+    )
+    try:
+        replay = reopened.retrieval.find_related_event_candidates(
+            request(), proof=proof()
+        )
+        assert replay.replayed is True
+        assert replay.context is None
+        assert replay.outcome is RetrievalOutcome.STALE
+        assert replay.failure is not None
+        assert replay.failure.reason_code == "RETRIEVAL_SOURCE_STALE"
+        assert adapter.call_count == 0
+    finally:
+        reopened.close()
+
+
 def test_missing_active_generation_is_unavailable_not_no_match(
     tmp_path: Path,
 ) -> None:

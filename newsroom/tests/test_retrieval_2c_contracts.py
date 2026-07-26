@@ -101,6 +101,8 @@ def test_policy_and_fixture_contracts_pin_the_accepted_2c_bounds() -> None:
     assert policy.relation_fanout == 32
     assert policy.branch_result_limit == 8
     assert policy.retained_candidate_limit == 12
+    assert policy.date_window_seconds == 31 * 24 * 60 * 60
+    assert policy.max_projection_age_seconds == 60 * 60
     assert policy.reciprocal_rank_k == 60
     assert fixture.policy_digest == policy.contract_digest
     assert fixture.prior_revision_id.endswith("2004")
@@ -179,7 +181,16 @@ def test_context_v2_requires_all_four_branches_active_projection_and_exact_hydra
         contiguous_ledger_seq=42,
         open_gap_count=0,
         dead_letter_count=0,
+        validation_recorded_at=COMPLETE_NOW,
+        date_window_start=(
+            HYBRID_FIXTURE_POLICY_V1.date_window_start(COMPLETE_NOW)
+        ),
         query_valid_time=COMPLETE_NOW,
+        freshness_deadline=(
+            HYBRID_FIXTURE_POLICY_V1.projection_freshness_deadline(
+                COMPLETE_NOW
+            )
+        ),
         serving_time=COMPLETE_NOW,
     )
     hits = tuple(_hit(branch) for branch in RetrievalBranch)

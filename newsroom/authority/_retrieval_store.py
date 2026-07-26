@@ -159,6 +159,19 @@ class _HybridRetrievalAuthorityStore(
         validation = self.projection_generation_validation(
             metadata.generation.generation_id
         )
+        serving_time = self._clock()
+        date_window_start = self._retrieval_policy.date_window_start(
+            query_valid_time
+        )
+        freshness_deadline = (
+            self._retrieval_policy.projection_freshness_deadline(
+                validation.recorded_at
+            )
+        )
+        if serving_time.value > freshness_deadline.value:
+            raise RetrievalStateError(
+                "retrieval projection freshness is stale"
+            )
         latest = self.latest_complete_source_ledger_seq()
         if (
             validation.checkpoint_ledger_seq != metadata.contiguous_ledger_seq
@@ -176,8 +189,11 @@ class _HybridRetrievalAuthorityStore(
             contiguous_ledger_seq=metadata.contiguous_ledger_seq,
             open_gap_count=metadata.open_gap_count,
             dead_letter_count=metadata.dead_letter_count,
+            validation_recorded_at=validation.recorded_at,
+            date_window_start=date_window_start,
             query_valid_time=query_valid_time,
-            serving_time=self._clock(),
+            freshness_deadline=freshness_deadline,
+            serving_time=serving_time,
         )
 
     def fixture_passage_binding(
@@ -641,7 +657,8 @@ class _HybridRetrievalAuthorityStore(
             ).fetchone()[0]
         )
         validation = conn.execute(
-            "SELECT checkpoint_ledger_seq FROM projection_generation_validations "
+            "SELECT checkpoint_ledger_seq,recorded_at "
+            "FROM projection_generation_validations "
             "WHERE generation_id=?",
             (generation_id,),
         ).fetchone()
@@ -665,6 +682,29 @@ class _HybridRetrievalAuthorityStore(
         ):
             raise RetrievalStateError(
                 "retrieval projection changed before context authority commit"
+            )
+        validation_recorded_at = UtcTimestamp.parse(
+            str(validation["recorded_at"])
+        )
+        expected_window_start = self._retrieval_policy.date_window_start(
+            projection.query_valid_time
+        )
+        expected_freshness_deadline = (
+            self._retrieval_policy.projection_freshness_deadline(
+                validation_recorded_at
+            )
+        )
+        if (
+            projection.validation_recorded_at != validation_recorded_at
+            or projection.date_window_start != expected_window_start
+            or projection.freshness_deadline != expected_freshness_deadline
+        ):
+            raise RetrievalStateError(
+                "retrieval projection temporal authority changed"
+            )
+        if self._clock().value > expected_freshness_deadline.value:
+            raise RetrievalStateError(
+                "retrieval projection freshness is stale"
             )
         identity, _complete, _fulltext, _vector, _fixture = (
             self.complete_projection_contracts(projection.identity.generation_id)
@@ -1461,8 +1501,17 @@ class _HybridRetrievalAuthorityStore(
             contiguous_ledger_seq=int(projection_value["contiguous_ledger_seq"]),
             open_gap_count=int(projection_value["open_gap_count"]),
             dead_letter_count=int(projection_value["dead_letter_count"]),
+            validation_recorded_at=UtcTimestamp.parse(
+                str(projection_value["validation_recorded_at"])
+            ),
+            date_window_start=UtcTimestamp.parse(
+                str(projection_value["date_window_start"])
+            ),
             query_valid_time=UtcTimestamp.parse(
                 str(projection_value["query_valid_time"])
+            ),
+            freshness_deadline=UtcTimestamp.parse(
+                str(projection_value["freshness_deadline"])
             ),
             serving_time=UtcTimestamp.parse(str(projection_value["serving_time"])),
             authoritative_system=str(projection_value["authoritative_system"]),

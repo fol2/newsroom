@@ -173,7 +173,10 @@ class RetrievalProjectionMetadata:
     contiguous_ledger_seq: int
     open_gap_count: int
     dead_letter_count: int
+    validation_recorded_at: UtcTimestamp
+    date_window_start: UtcTimestamp
     query_valid_time: UtcTimestamp
+    freshness_deadline: UtcTimestamp
     serving_time: UtcTimestamp
     authoritative_system: str = "sqlite-ledger-and-governed-objects"
     projection_role: str = "non-authoritative-rebuildable-context"
@@ -195,12 +198,33 @@ class RetrievalProjectionMetadata:
             raise RetrievalStateError("hybrid retrieval requires a positive watermark")
         if self.open_gap_count or self.dead_letter_count:
             raise RetrievalStateError("hybrid retrieval cannot conceal gaps or dead letters")
-        if not isinstance(self.query_valid_time, UtcTimestamp) or not isinstance(
-            self.serving_time, UtcTimestamp
+        if any(
+            not isinstance(value, UtcTimestamp)
+            for value in (
+                self.validation_recorded_at,
+                self.date_window_start,
+                self.query_valid_time,
+                self.freshness_deadline,
+                self.serving_time,
+            )
         ):
             raise RetrievalContractError("retrieval times must be typed")
+        if self.date_window_start.value > self.query_valid_time.value:
+            raise RetrievalStateError(
+                "retrieval date window starts after query-valid time"
+            )
         if self.query_valid_time.value > self.serving_time.value:
             raise RetrievalStateError("query-valid time exceeds serving time")
+        if self.validation_recorded_at.value > self.serving_time.value:
+            raise RetrievalStateError(
+                "projection validation time exceeds serving time"
+            )
+        if self.validation_recorded_at.value > self.freshness_deadline.value:
+            raise RetrievalStateError(
+                "projection freshness deadline precedes validation"
+            )
+        if self.serving_time.value > self.freshness_deadline.value:
+            raise RetrievalStateError("retrieval projection freshness is stale")
         if self.authoritative_system != "sqlite-ledger-and-governed-objects":
             raise RetrievalStateError("retrieval must return to SQLite/object authority")
         if self.projection_role != "non-authoritative-rebuildable-context":
@@ -213,7 +237,10 @@ class RetrievalProjectionMetadata:
             "contiguous_ledger_seq": self.contiguous_ledger_seq,
             "open_gap_count": self.open_gap_count,
             "dead_letter_count": self.dead_letter_count,
+            "validation_recorded_at": self.validation_recorded_at.to_text(),
+            "date_window_start": self.date_window_start.to_text(),
             "query_valid_time": self.query_valid_time.to_text(),
+            "freshness_deadline": self.freshness_deadline.to_text(),
             "serving_time": self.serving_time.to_text(),
             "authoritative_system": self.authoritative_system,
             "projection_role": self.projection_role,

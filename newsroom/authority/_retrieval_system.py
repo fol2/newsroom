@@ -285,13 +285,20 @@ class _HybridRetrievalBoundary:
                 len(item.text.encode("utf-8")) for item in hydrated
             )
             serving_time = self._clock()
+            if serving_time.value > projection.freshness_deadline.value:
+                raise RetrievalStateError(
+                    "retrieval projection freshness is stale"
+                )
             projection = RetrievalProjectionMetadata(
                 identity=projection.identity,
                 generation_state=projection.generation_state,
                 contiguous_ledger_seq=projection.contiguous_ledger_seq,
                 open_gap_count=projection.open_gap_count,
                 dead_letter_count=projection.dead_letter_count,
+                validation_recorded_at=projection.validation_recorded_at,
+                date_window_start=projection.date_window_start,
                 query_valid_time=projection.query_valid_time,
+                freshness_deadline=projection.freshness_deadline,
                 serving_time=serving_time,
             )
             context = RetrievalContextV2(
@@ -355,6 +362,8 @@ class _HybridRetrievalBoundary:
             return "QUERY_HYPOTHESIS_NOT_ALLOWED"
         if request.query_valid_time.value > checked_at.value:
             return "QUERY_VALID_TIME_IN_FUTURE"
+        if request.query_valid_time != contract.query_valid_time:
+            return "QUERY_VALID_TIME_NOT_ALLOWED"
         return None
 
     def _hydrate_candidates(

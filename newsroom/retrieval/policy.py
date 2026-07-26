@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
-from newsroom.authority.types import TrustScope, require_token
+from newsroom.authority.types import TrustScope, UtcTimestamp, require_token
 from newsroom.relations.models import RelationPredicate, RelationRecordType
 
 from .models import RetrievalBranch, RetrievalContractError
@@ -21,6 +22,8 @@ class HybridRetrievalPolicy:
     relation_fanout: int
     branch_result_limit: int
     retained_candidate_limit: int
+    date_window_seconds: int
+    max_projection_age_seconds: int
     timeout_ms: int
     response_byte_limit: int
     reciprocal_rank_k: int
@@ -45,6 +48,8 @@ class HybridRetrievalPolicy:
             "relation_fanout": 32,
             "branch_result_limit": 8,
             "retained_candidate_limit": 12,
+            "date_window_seconds": 31 * 24 * 60 * 60,
+            "max_projection_age_seconds": 60 * 60,
             "timeout_ms": 5_000,
             "response_byte_limit": 262_144,
             "reciprocal_rank_k": 60,
@@ -69,6 +74,27 @@ class HybridRetrievalPolicy:
     def required_branches(self) -> tuple[RetrievalBranch, ...]:
         return tuple(RetrievalBranch)
 
+    def date_window_start(self, query_valid_time: UtcTimestamp) -> UtcTimestamp:
+        if not isinstance(query_valid_time, UtcTimestamp):
+            raise RetrievalContractError("query-valid time must be typed")
+        return UtcTimestamp(
+            query_valid_time.value
+            - timedelta(seconds=self.date_window_seconds)
+        )
+
+    def projection_freshness_deadline(
+        self,
+        validation_recorded_at: UtcTimestamp,
+    ) -> UtcTimestamp:
+        if not isinstance(validation_recorded_at, UtcTimestamp):
+            raise RetrievalContractError(
+                "projection validation time must be typed"
+            )
+        return UtcTimestamp(
+            validation_recorded_at.value
+            + timedelta(seconds=self.max_projection_age_seconds)
+        )
+
     def canonical_value(self) -> dict[str, object]:
         return {
             "policy_id": self.policy_id,
@@ -81,6 +107,8 @@ class HybridRetrievalPolicy:
             "relation_fanout": self.relation_fanout,
             "branch_result_limit": self.branch_result_limit,
             "retained_candidate_limit": self.retained_candidate_limit,
+            "date_window_seconds": self.date_window_seconds,
+            "max_projection_age_seconds": self.max_projection_age_seconds,
             "timeout_ms": self.timeout_ms,
             "response_byte_limit": self.response_byte_limit,
             "reciprocal_rank_k": self.reciprocal_rank_k,
@@ -115,6 +143,8 @@ HYBRID_FIXTURE_POLICY_V1 = HybridRetrievalPolicy(
     relation_fanout=32,
     branch_result_limit=8,
     retained_candidate_limit=12,
+    date_window_seconds=31 * 24 * 60 * 60,
+    max_projection_age_seconds=60 * 60,
     timeout_ms=5_000,
     response_byte_limit=262_144,
     reciprocal_rank_k=60,

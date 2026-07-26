@@ -9,7 +9,7 @@ from newsroom.authority.canonical import (
     digest_canonical,
     validate_sha256_digest,
 )
-from newsroom.authority.types import TrustScope
+from newsroom.authority.types import TrustScope, UtcTimestamp
 from newsroom.projection import INTEGRATED_FIXTURE_V2_PROJECTION
 from newsroom.relations import INTEGRATED_FIXTURE_V2
 
@@ -28,6 +28,7 @@ class FixtureDependencyRoot:
     candidate_version_id: str | None
     dependency_ids: tuple[str, ...]
     passage_ids: tuple[str, ...]
+    observed_at: UtcTimestamp
     exclusion_reason: RetrievalExclusionReason | None = None
 
     def __post_init__(self) -> None:
@@ -39,6 +40,10 @@ class FixtureDependencyRoot:
                 raise RetrievalContractError(
                     f"fixture {field_name} must be sorted and unique"
                 )
+        if not isinstance(self.observed_at, UtcTimestamp):
+            raise RetrievalContractError(
+                "fixture dependency observation time must be typed"
+            )
         if self.candidate_version_id is None and self.exclusion_reason is None:
             raise RetrievalContractError(
                 "non-candidate fixture roots require an exclusion reason"
@@ -50,6 +55,7 @@ class FixtureDependencyRoot:
             "candidate_version_id": self.candidate_version_id,
             "dependency_ids": list(self.dependency_ids),
             "passage_ids": list(self.passage_ids),
+            "observed_at": self.observed_at.to_text(),
             "exclusion_reason": (
                 None if self.exclusion_reason is None else self.exclusion_reason.value
             ),
@@ -67,6 +73,7 @@ class IntegratedFixtureV2RetrievalContract:
     canonical_process_id: str
     query_revision_id: str
     prior_revision_id: str
+    query_valid_time: UtcTimestamp
     query_hypothesis_version_id: str
     prior_hypothesis_version_id: str
     prior_candidate_version_id: str
@@ -90,6 +97,15 @@ class IntegratedFixtureV2RetrievalContract:
             raise RetrievalContractError("retrieval query revision differs")
         if self.prior_revision_id != str(revisions[0]["source_revision_id"]):
             raise RetrievalContractError("retrieval prior revision differs")
+        if not isinstance(self.query_valid_time, UtcTimestamp):
+            raise RetrievalContractError(
+                "retrieval fixture query-valid time must be typed"
+            )
+        query_observed_at = UtcTimestamp.parse(str(revisions[-1]["observed_at"]))
+        if self.query_valid_time.value < query_observed_at.value:
+            raise RetrievalContractError(
+                "retrieval query-valid time precedes the query revision"
+            )
         if self.query_hypothesis_version_id != str(hypotheses["new_version_id"]):
             raise RetrievalContractError("retrieval query hypothesis differs")
         if self.prior_hypothesis_version_id != str(hypotheses["prior_version_id"]):
@@ -114,6 +130,20 @@ class IntegratedFixtureV2RetrievalContract:
         expected_active = set(INTEGRATED_FIXTURE_V2_PROJECTION.expected_active_passage_ids)
         if passage_ids != expected_active:
             raise RetrievalContractError("retrieval roots must cover active fixture passages")
+        window_start = HYBRID_FIXTURE_POLICY_V1.date_window_start(
+            self.query_valid_time
+        )
+        candidate = self.root_by_id.get(
+            f"candidate:{self.prior_candidate_version_id}"
+        )
+        if (
+            candidate is None
+            or candidate.observed_at.value < window_start.value
+            or candidate.observed_at.value > self.query_valid_time.value
+        ):
+            raise RetrievalContractError(
+                "retrieval prior candidate is outside the accepted date window"
+            )
 
     @property
     def root_by_id(self) -> dict[str, FixtureDependencyRoot]:
@@ -146,6 +176,7 @@ class IntegratedFixtureV2RetrievalContract:
             "canonical_process_id": self.canonical_process_id,
             "query_revision_id": self.query_revision_id,
             "prior_revision_id": self.prior_revision_id,
+            "query_valid_time": self.query_valid_time.to_text(),
             "query_hypothesis_version_id": self.query_hypothesis_version_id,
             "prior_hypothesis_version_id": self.prior_hypothesis_version_id,
             "prior_candidate_version_id": self.prior_candidate_version_id,
@@ -302,6 +333,9 @@ _prior = _REVISIONS[0]
 _new = _REVISIONS[1]
 _HYPOTHESES = _SOURCE_VALUE["event_hypotheses"]
 _CANONICAL_PROCESS_ID = str(_SOURCE_VALUE["formal_process"]["canonical_process_id"])
+_QUERY_VALID_TIME = UtcTimestamp.parse("2042-03-12T12:00:00.000000Z")
+_PRIOR_OBSERVED_AT = UtcTimestamp.parse(str(_prior["observed_at"]))
+_NEW_OBSERVED_AT = UtcTimestamp.parse(str(_new["observed_at"]))
 
 INTEGRATED_FIXTURE_V2_RETRIEVAL = IntegratedFixtureV2RetrievalContract(
     contract_id="integrated_fixture_v2_retrieval",
@@ -313,6 +347,7 @@ INTEGRATED_FIXTURE_V2_RETRIEVAL = IntegratedFixtureV2RetrievalContract(
     canonical_process_id=_CANONICAL_PROCESS_ID,
     query_revision_id=str(_new["source_revision_id"]),
     prior_revision_id=str(_prior["source_revision_id"]),
+    query_valid_time=_QUERY_VALID_TIME,
     query_hypothesis_version_id=str(_HYPOTHESES["new_version_id"]),
     prior_hypothesis_version_id=str(_HYPOTHESES["prior_version_id"]),
     prior_candidate_version_id=INTEGRATED_FIXTURE_V2.prior_candidate_version_id,
@@ -336,6 +371,7 @@ INTEGRATED_FIXTURE_V2_RETRIEVAL = IntegratedFixtureV2RetrievalContract(
                         )
                     ),
                     passage_ids=tuple(sorted(str(item["passage_id"]) for item in _prior["passages"])),
+                    observed_at=_PRIOR_OBSERVED_AT,
                 ),
                 FixtureDependencyRoot(
                     root_id=f"query:{_new["source_revision_id"]}",
@@ -349,6 +385,7 @@ INTEGRATED_FIXTURE_V2_RETRIEVAL = IntegratedFixtureV2RetrievalContract(
                         )
                     ),
                     passage_ids=tuple(sorted(str(item["passage_id"]) for item in _new["passages"])),
+                    observed_at=_NEW_OBSERVED_AT,
                     exclusion_reason=RetrievalExclusionReason.SELF_QUERY,
                 ),
                 FixtureDependencyRoot(
@@ -356,6 +393,7 @@ INTEGRATED_FIXTURE_V2_RETRIEVAL = IntegratedFixtureV2RetrievalContract(
                     candidate_version_id=None,
                     dependency_ids=("SYN-PROC-2042-NORTH",),
                     passage_ids=("ifv2-distinct-jurisdiction",),
+                    observed_at=_PRIOR_OBSERVED_AT,
                     exclusion_reason=RetrievalExclusionReason.INCOMPATIBLE_JURISDICTION,
                 ),
                 FixtureDependencyRoot(
@@ -363,6 +401,7 @@ INTEGRATED_FIXTURE_V2_RETRIEVAL = IntegratedFixtureV2RetrievalContract(
                     candidate_version_id=None,
                     dependency_ids=("SYN-PROC-2402",),
                     passage_ids=("ifv2-incompatible-formal-id",),
+                    observed_at=_NEW_OBSERVED_AT,
                     exclusion_reason=RetrievalExclusionReason.INCOMPATIBLE_FORMAL_ID,
                 ),
             ),

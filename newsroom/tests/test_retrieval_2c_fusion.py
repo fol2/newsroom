@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from fractions import Fraction
 
 import pytest
 
-from newsroom.authority import TrustScope
+from newsroom.authority import TrustScope, UtcTimestamp
 from newsroom.retrieval import (
     HYBRID_FIXTURE_POLICY_V1,
     INTEGRATED_FIXTURE_V2_RETRIEVAL,
@@ -159,3 +160,41 @@ def test_fusion_rejects_unchecked_dependency_root() -> None:
             policy=HYBRID_FIXTURE_POLICY_V1,
             fixture=INTEGRATED_FIXTURE_V2_RETRIEVAL,
         )
+
+
+def test_fusion_excludes_checked_root_outside_server_owned_date_window() -> None:
+    root_id = "distractor:distinct-jurisdiction"
+    roots = tuple(
+        replace(
+            root,
+            observed_at=UtcTimestamp.parse(
+                "2041-01-01T00:00:00.000000Z"
+            ),
+        )
+        if root.root_id == root_id
+        else root
+        for root in INTEGRATED_FIXTURE_V2_RETRIEVAL.roots
+    )
+    fixture = replace(
+        INTEGRATED_FIXTURE_V2_RETRIEVAL,
+        roots=roots,
+    )
+    executions = tuple(
+        _execution(
+            branch,
+            ((root_id, "ifv2-distinct-jurisdiction"),)
+            if branch is RetrievalBranch.FULL_TEXT
+            else (),
+        )
+        for branch in RetrievalBranch
+    )
+
+    retained, excluded = fuse_fixture_candidates(
+        executions=executions,
+        policy=HYBRID_FIXTURE_POLICY_V1,
+        fixture=fixture,
+    )
+
+    assert retained == ()
+    assert len(excluded) == 1
+    assert excluded[0].reason is RetrievalExclusionReason.OUTSIDE_TEMPORAL_SCOPE

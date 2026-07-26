@@ -36,9 +36,26 @@ def fuse_fixture_candidates(
 
     candidates: list[tuple[Fraction, str, tuple[RetrievalBranchHit, ...]]] = []
     exclusions: list[RetrievalExclusion] = []
+    date_window_start = policy.date_window_start(fixture.query_valid_time)
     for root_id in sorted(grouped):
         root = fixture.root_by_id[root_id]
         hits = _best_hit_per_branch(grouped[root_id])
+        if (
+            root.observed_at.value < date_window_start.value
+            or root.observed_at.value > fixture.query_valid_time.value
+        ):
+            exclusions.append(
+                RetrievalExclusion(
+                    dependency_root_id=root_id,
+                    reason=RetrievalExclusionReason.OUTSIDE_TEMPORAL_SCOPE,
+                    branch_hits=hits,
+                    detail=(
+                        "The dependency root falls outside the server-owned "
+                        "retrieval date window."
+                    ),
+                )
+            )
+            continue
         if root.exclusion_reason is not None:
             exclusions.append(
                 RetrievalExclusion(
