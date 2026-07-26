@@ -146,7 +146,7 @@ def test_actual_service_executes_all_four_branches_and_hydrates_authority(
             request,
             proof=AuthenticationProof(method="STATIC_TOKEN", credential="token-1"),
         )
-        assert result.outcome is RetrievalOutcome.COMPLETE
+        assert result.outcome is RetrievalOutcome.COMPLETE, result.failure
         assert result.context is not None
         context = result.context
         assert tuple(item.branch for item in context.branches) == tuple(RetrievalBranch)
@@ -228,7 +228,7 @@ def test_actual_service_missing_vector_index_is_unavailable_not_no_match(
             _request(key="actual-retrieval-2c-missing-vector"),
             proof=AuthenticationProof(method="STATIC_TOKEN", credential="token-1"),
         )
-        assert result.outcome is RetrievalOutcome.UNAVAILABLE
+        assert result.outcome is RetrievalOutcome.UNAVAILABLE, result.failure
         assert result.failure is not None
         assert result.failure.reason_code == "NEO4J_RETRIEVAL_UNAVAILABLE"
         assert result.context is None
