@@ -1,0 +1,142 @@
+name: agent-increment2c-p2-20-materialize
+
+on:
+  push:
+    branches:
+      - agent/increment-2c-p2-20-materialize
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-increment2c-p2-20-materialize
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    env:
+      AUTHORISED_PARENT: c0b447ea48b968248b5c48d4285e695f3c33bf76
+      EXPECTED_BASE_TREE: aa8f81eccca6d85d6881320c4e563e739b7cdaa7
+      TARGET_BRANCH: agent/increment-2c-bounded-hybrid-retrieval
+      PATCH_SHA256: a22b4753ff1b41ec73a001a6a8674269a282af243d799f2af22d6bef4d51a7ae
+      EXPECTED_TREE: 9cd9413ae91690e2f06faae2c3897dcebb6a90e6
+      MAX_CORE_SECONDS: '40.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Reconstruct exact P2-20 correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/increment2c-p2-20/fix.patch.gz.b64 \
+            > /tmp/increment2c-p2-20.patch.gz
+          echo "$PATCH_SHA256  /tmp/increment2c-p2-20.patch.gz" \
+            | sha256sum --check -
+          gzip --decompress --stdout /tmp/increment2c-p2-20.patch.gz \
+            > /tmp/increment2c-p2-20.patch
+
+      - name: Apply exact five-file correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$AUTHORISED_PARENT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_BASE_TREE"
+          git apply --index /tmp/increment2c-p2-20.patch
+          cat > /tmp/expected-paths <<'EOF'
+          docs/operations/increment-2c-bounded-hybrid-retrieval.md
+          docs/research/2026-07-26-increment-2c-substantive-review.md
+          newsroom/tests/test_retrieval_2c_traceability.py
+          newsroom/tests/test_sdlc_workflow_lane.py
+          scripts/sdlc/workflow_lane.py
+          EOF
+          sed -i 's/^          //' /tmp/expected-paths
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          git diff --cached --name-only "$AUTHORISED_PARENT" | sort \
+            > /tmp/actual-paths
+          diff -u /tmp/expected-paths /tmp/actual-paths
+          git diff --cached --check
+          tree="$(git write-tree)"
+          echo "TREE_SHA=$tree"
+          test "$tree" = "$EXPECTED_TREE"
+
+      - name: Run locked complete sharded evidence gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            newsroom/tests/test_retrieval_2c_traceability.py \
+            newsroom/tests/test_sdlc_evidence_workflow.py \
+            newsroom/tests/test_sdlc_watchdog.py \
+            newsroom/tests/test_subprocess_json.py
+          uv run --no-sync python - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import time
+
+          started = time.monotonic()
+          completed = subprocess.run(
+              [
+                  'uv', 'run', '--no-sync', 'python', '-m',
+                  'scripts.sdlc.workflow_lane', 'core-tests',
+                  '--repo-root', '.', '--report', '/tmp/core-p2-20.xml',
+                  '--clustering',
+              ],
+              check=False,
+          )
+          elapsed = time.monotonic() - started
+          print(f'COMPLETE_SHARDED_CORE_SECONDS={elapsed:.6f}')
+          if completed.returncode != 0:
+              raise SystemExit(completed.returncode)
+          if elapsed > float(os.environ['MAX_CORE_SECONDS']):
+              raise SystemExit(
+                  f'complete sharded core exceeded validation ceiling: {elapsed:.6f}'
+              )
+          from scripts.sdlc.junit_evidence import summarize_junit
+          from scripts.sdlc.workflow_lane import _OPTIONAL_CORE_TEST_IDS
+          summary = summarize_junit(
+              '.', ('/tmp/core-p2-20.xml',),
+              optional_test_ids=_OPTIONAL_CORE_TEST_IDS,
+          )
+          if (
+              summary.outcome != 'PASS'
+              or summary.test_count != 1201
+              or summary.skip_count != 23
+              or summary.required_skip_count != 0
+          ):
+              raise SystemExit('complete sharded core summary differs')
+          PY
+          git diff --cached --check
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+
+      - name: Create and push clean P2-20 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Newsroom Increment 2C Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
+          commit="$(printf '%s\n\n%s\n' \
+            'test(sdlc): shard deterministic core evidence' \
+            'Run the complete deterministic pytest inventory in four fixed server-owned shards, merge and revalidate one authoritative JUnit report, preserve the 55-second budget and record the corrected Increment 2C review evidence.' \
+            | git commit-tree "$tree" -p "$AUTHORISED_PARENT")"
+          echo "COMMIT_SHA=$commit"
+          git push --force-with-lease="refs/heads/$TARGET_BRANCH:$AUTHORISED_PARENT" \
+            origin "$commit:refs/heads/$TARGET_BRANCH"
