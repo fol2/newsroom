@@ -11,6 +11,11 @@ from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
     SCHEMA_VERSION,
 )
+from newsroom.authority.complete_projection_migrations import (
+    COMPLETE_PROJECTION_MIGRATION_CHECKSUM,
+    COMPLETE_PROJECTION_MIGRATION_NAME,
+    COMPLETE_PROJECTION_SCHEMA_VERSION,
+)
 from newsroom.authority.relation_migrations import (
     RELATION_MIGRATION_CHECKSUM,
     RELATION_MIGRATION_NAME,
@@ -215,10 +220,16 @@ def test_relation_read_policy_is_server_owned_bounded_authority() -> None:
         )
 
 
-def test_relation_migration_is_checked_version_six() -> None:
-    assert SCHEMA_VERSION == RELATION_SCHEMA_VERSION == 6
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+def test_relation_migration_remains_checked_version_six_before_complete_v7() -> None:
+    assert RELATION_SCHEMA_VERSION == 6
+    assert COMPLETE_PROJECTION_SCHEMA_VERSION == SCHEMA_VERSION == 7
+    assert EXPECTED_MIGRATION_HISTORY[-2] == (
         6,
         RELATION_MIGRATION_NAME,
         RELATION_MIGRATION_CHECKSUM,
+    )
+    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+        7,
+        COMPLETE_PROJECTION_MIGRATION_NAME,
+        COMPLETE_PROJECTION_MIGRATION_CHECKSUM,
     )

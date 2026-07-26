@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
@@ -139,14 +140,40 @@ class DependencyGraph:
         )
 
 
-def build_dependency_graph(repo_root: str | Path) -> DependencyGraph:
-    root = Path(repo_root).resolve()
+def _source_snapshot(repo_root: Path) -> tuple[tuple[str, bytes], ...]:
+    """Read one exact immutable view of repository-owned Python sources.
+
+    Dependency classification may be invoked repeatedly while evaluating one exact
+    checkout.  Keying the parsed graph by the complete source bytes avoids repeated
+    AST work without trusting mtimes, sizes, caller state, or a mutable singleton.
+    Any added, deleted, renamed, or byte-changed source produces a different cache
+    key and is parsed again.
+    """
+
+    snapshot: list[tuple[str, bytes]] = []
+    for source_path in _source_paths(repo_root):
+        relative = source_path.relative_to(repo_root).as_posix()
+        try:
+            payload = source_path.read_bytes()
+        except OSError as exc:
+            raise DependencyError(
+                f"cannot read repository module: {relative}"
+            ) from exc
+        snapshot.append((relative, payload))
+    return tuple(snapshot)
+
+
+@lru_cache(maxsize=16)
+def _build_dependency_graph_from_snapshot(
+    root_value: str,
+    snapshot: tuple[tuple[str, bytes], ...],
+) -> DependencyGraph:
+    root = Path(root_value)
     path_to_module: dict[str, str] = {}
     module_to_path: dict[str, str] = {}
     sources: dict[str, tuple[Path, ast.AST]] = {}
 
-    for source_path in _source_paths(root):
-        relative = source_path.relative_to(root).as_posix()
+    for relative, payload in snapshot:
         module = module_name_for_path(relative)
         if module is None:
             continue
@@ -154,11 +181,12 @@ def build_dependency_graph(repo_root: str | Path) -> DependencyGraph:
             raise DependencyError(f"duplicate repository module: {module}")
         try:
             tree = ast.parse(
-                source_path.read_text(encoding="utf-8"),
+                payload.decode("utf-8"),
                 filename=relative,
             )
-        except (OSError, SyntaxError, UnicodeError) as exc:
+        except (SyntaxError, UnicodeError) as exc:
             raise DependencyError(f"cannot parse repository module: {relative}") from exc
+        source_path = root / relative
         path_to_module[relative] = module
         module_to_path[module] = relative
         sources[module] = (source_path, tree)
@@ -217,6 +245,21 @@ def build_dependency_graph(repo_root: str | Path) -> DependencyGraph:
             module: frozenset(importers)
             for module, importers in reverse.items()
         },
+    )
+
+
+def build_dependency_graph(repo_root: str | Path) -> DependencyGraph:
+    root = Path(repo_root).resolve()
+    cached = _build_dependency_graph_from_snapshot(
+        str(root),
+        _source_snapshot(root),
+    )
+    # Return isolated mappings so a caller cannot corrupt a later cached result.
+    return DependencyGraph(
+        repo_root=cached.repo_root,
+        path_to_module=dict(cached.path_to_module),
+        module_to_path=dict(cached.module_to_path),
+        reverse_importers=dict(cached.reverse_importers),
     )
 
 

@@ -160,14 +160,16 @@ LIMIT $limit
 _STATE_NODES_QUERY = """
 MATCH (value)
 WHERE value.generation_id = $generation_id
+  AND (value:NewsroomProjectionNode
+       OR value:NewsroomProjectionDelivery
+       OR value:NewsroomProjectionRelationIdentity)
 RETURN labels(value) AS labels, properties(value) AS properties
 """
 
 _STATE_RELATIONSHIPS_QUERY = """
-MATCH (source)-[relation]->(target)
-WHERE source.generation_id = $generation_id
-   OR target.generation_id = $generation_id
-   OR relation.generation_id = $generation_id
+MATCH (source:NewsroomProjectionNode)-[relation]->(target:NewsroomProjectionNode)
+WHERE relation.generation_id = $generation_id
+  AND type(relation) IN $relation_types
 RETURN labels(source) AS source_labels,
        properties(source) AS source_properties,
        type(relation) AS relation_type,
@@ -413,10 +415,19 @@ class _Neo4jAdapter:
         transaction: Any,
         generation_id: str,
     ) -> tuple[list[Any], list[Any]]:
-        parameters = {"generation_id": generation_id}
+        node_parameters = {"generation_id": generation_id}
+        relation_parameters = {
+            "generation_id": generation_id,
+            "relation_types": [item.value for item in ProjectionRelationType],
+        }
         return (
-            list(transaction.run(_STATE_NODES_QUERY, parameters)),
-            list(transaction.run(_STATE_RELATIONSHIPS_QUERY, parameters)),
+            list(transaction.run(_STATE_NODES_QUERY, node_parameters)),
+            list(
+                transaction.run(
+                    _STATE_RELATIONSHIPS_QUERY,
+                    relation_parameters,
+                )
+            ),
         )
 
     def cleanup_generation(self, generation_id: str) -> int:
@@ -613,8 +624,8 @@ def _apply_tombstone_cleanup(transaction: Any, batch: StructuralBatch) -> None:
             )
 
 
-def _open_neo4j_adapter(config: Neo4jProjectorConfig) -> _Neo4jAdapter:
-    """Open the official driver only inside the private adapter module."""
+def _open_neo4j_driver(config: Neo4jProjectorConfig) -> tuple[Any, str]:
+    """Open the official driver only inside this one private module."""
 
     try:
         import neo4j
@@ -626,10 +637,15 @@ def _open_neo4j_adapter(config: Neo4jProjectorConfig) -> _Neo4jAdapter:
         )
     except Exception:
         raise Neo4jConnectionError("Neo4j projector driver creation failed") from None
+    return driver, str(neo4j.__version__)
+
+
+def _open_neo4j_adapter(config: Neo4jProjectorConfig) -> _Neo4jAdapter:
+    driver, driver_version = _open_neo4j_driver(config)
     return _Neo4jAdapter(
         driver=driver,
         config=config,
-        driver_version=str(neo4j.__version__),
+        driver_version=driver_version,
     )
 
 

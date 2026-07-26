@@ -307,6 +307,211 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 contract.contract_digest,
                 canonical,
             )
+        self._persist_complete_projection_contracts(conn, recorded_at=recorded_at)
+
+    def _persist_complete_projection_contracts(
+        self, conn: sqlite3.Connection, *, recorded_at: str
+    ) -> None:
+        registry = self._projection_contracts.complete_projections
+        if registry is None:
+            return
+        for contract in registry.fulltext_contracts():
+            canonical = canonical_json_bytes(contract.canonical_value())
+            if digest_bytes(canonical) != contract.contract_digest:
+                raise AuthorityPersistenceError(
+                    "projection full-text contract digest mismatch"
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO projection_fulltext_contracts("
+                "contract_digest,contract_id,contract_version,"
+                "implementation_version,index_name,node_label,source_field,"
+                "retrieval_property,analyzer,provider,unicode_normalization,casefold,"
+                "collapse_whitespace,eventually_consistent,canonical_bytes,"
+                "registered_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    contract.contract_digest,
+                    contract.contract_id,
+                    contract.contract_version,
+                    contract.implementation_version,
+                    contract.index_name,
+                    contract.node_label,
+                    contract.source_field,
+                    contract.retrieval_property,
+                    contract.analyzer,
+                    contract.provider,
+                    contract.unicode_normalization,
+                    int(contract.casefold),
+                    int(contract.collapse_whitespace),
+                    int(contract.eventually_consistent),
+                    canonical,
+                    recorded_at,
+                ),
+            )
+            self._require_exact_bytes(
+                conn,
+                "projection_fulltext_contracts",
+                "contract_digest",
+                contract.contract_digest,
+                canonical,
+            )
+        for contract in registry.vector_contracts():
+            canonical = canonical_json_bytes(contract.canonical_value())
+            if digest_bytes(canonical) != contract.contract_digest:
+                raise AuthorityPersistenceError(
+                    "projection vector contract digest mismatch"
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO projection_vector_contracts("
+                "contract_digest,contract_id,contract_version,"
+                "implementation_version,index_name,node_label,vector_property,"
+                "dimensions,component_scale,provider,similarity_function,"
+                "quantization,provider_kind,fixture_only,canonical_bytes,"
+                "registered_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    contract.contract_digest,
+                    contract.contract_id,
+                    contract.contract_version,
+                    contract.implementation_version,
+                    contract.index_name,
+                    contract.node_label,
+                    contract.vector_property,
+                    contract.dimensions,
+                    contract.component_scale,
+                    contract.provider,
+                    contract.similarity_function.value,
+                    contract.quantization.value,
+                    contract.provider_kind.value,
+                    int(contract.fixture_only),
+                    canonical,
+                    recorded_at,
+                ),
+            )
+            self._require_exact_bytes(
+                conn,
+                "projection_vector_contracts",
+                "contract_digest",
+                contract.contract_digest,
+                canonical,
+            )
+        for manifest in registry.fixture_manifests():
+            conn.execute(
+                "INSERT OR IGNORE INTO projection_fixture_vector_manifests("
+                "manifest_digest,schema_version,fixture_id,"
+                "source_fixture_digest,dimensions,component_scale,"
+                "canonical_bytes,registered_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    manifest.manifest_digest,
+                    manifest.schema_version,
+                    manifest.fixture_id,
+                    manifest.source_fixture_digest,
+                    manifest.dimensions,
+                    manifest.component_scale,
+                    manifest.canonical_bytes,
+                    recorded_at,
+                ),
+            )
+            self._require_exact_bytes(
+                conn,
+                "projection_fixture_vector_manifests",
+                "manifest_digest",
+                manifest.manifest_digest,
+                manifest.canonical_bytes,
+            )
+            for document in manifest.documents:
+                value = document.canonical_value()
+                canonical = canonical_json_bytes(value)
+                components = canonical_json_bytes(list(document.components))
+                conn.execute(
+                    "INSERT OR IGNORE INTO projection_fixture_vectors("
+                    "manifest_digest,passage_id,blob_digest,language,revision_id,"
+                    "expected_lifecycle,normalized_text_digest,components_bytes,"
+                    "vector_digest,canonical_bytes,canonical_digest) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        manifest.manifest_digest,
+                        document.passage_id,
+                        document.blob_digest,
+                        document.language,
+                        document.revision_id,
+                        document.expected_lifecycle,
+                        document.normalized_text_digest,
+                        components,
+                        document.vector_digest,
+                        canonical,
+                        digest_bytes(canonical),
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT canonical_bytes,components_bytes FROM "
+                    "projection_fixture_vectors WHERE manifest_digest=? "
+                    "AND passage_id=?",
+                    (manifest.manifest_digest, document.passage_id),
+                ).fetchone()
+                if (
+                    row is None
+                    or bytes(row["canonical_bytes"]) != canonical
+                    or bytes(row["components_bytes"]) != components
+                ):
+                    raise AuthorityPersistenceError(
+                        "projection fixture vector identity belongs to other evidence"
+                    )
+        for contract in registry.complete_contracts():
+            canonical = canonical_json_bytes(contract.canonical_value())
+            required = canonical_json_bytes(list(contract.required_derivatives))
+            if digest_bytes(canonical) != contract.contract_digest:
+                raise AuthorityPersistenceError(
+                    "complete projection contract digest mismatch"
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO projection_complete_contracts("
+                "contract_digest,contract_id,contract_version,"
+                "implementation_version,admitted_relation_projector_version,"
+                "source_fixture_digest,fixture_vector_manifest_digest,"
+                "fulltext_contract_digest,vector_contract_digest,"
+                "required_derivatives_bytes,canonical_bytes,registered_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    contract.contract_digest,
+                    contract.contract_id,
+                    contract.contract_version,
+                    contract.implementation_version,
+                    contract.admitted_relation_projector_version,
+                    contract.source_fixture_digest,
+                    contract.fixture_vector_manifest_digest,
+                    contract.fulltext_contract_digest,
+                    contract.vector_contract_digest,
+                    required,
+                    canonical,
+                    recorded_at,
+                ),
+            )
+            self._require_exact_bytes(
+                conn,
+                "projection_complete_contracts",
+                "contract_digest",
+                contract.contract_digest,
+                canonical,
+            )
+        for definition in self._projection_contracts.families.definitions():
+            digest = definition.complete_projection_contract_digest
+            if digest is None:
+                continue
+            registry.complete(digest)
+            conn.execute(
+                "INSERT OR IGNORE INTO projection_family_complete_contracts("
+                "definition_digest,complete_contract_digest,registered_at) "
+                "VALUES(?,?,?)",
+                (definition.digest, digest, recorded_at),
+            )
+            row = conn.execute(
+                "SELECT complete_contract_digest FROM "
+                "projection_family_complete_contracts WHERE definition_digest=?",
+                (definition.digest,),
+            ).fetchone()
+            if row is None or str(row["complete_contract_digest"]) != digest:
+                raise AuthorityPersistenceError(
+                    "projection family complete contract identity conflict"
+                )
 
     @staticmethod
     def _require_exact_bytes(
@@ -416,6 +621,300 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 )
             self._validate_projection_delivery_integrity(conn)
             self._validate_projection_promotion_integrity(conn)
+            self._validate_complete_projection_integrity(conn)
+
+    def _validate_complete_projection_integrity(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        registry = self._projection_contracts.complete_projections
+        retained = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM projection_complete_contracts"
+            ).fetchone()[0]
+        )
+        if retained and registry is None:
+            raise AuthorityPersistenceError(
+                "retained complete projection contracts are unavailable"
+            )
+        if registry is None:
+            orphan = conn.execute(
+                "SELECT 1 FROM projection_family_complete_contracts LIMIT 1"
+            ).fetchone()
+            if orphan is not None:
+                raise AuthorityPersistenceError(
+                    "complete projection family link lacks contract registry"
+                )
+            return
+        for row in conn.execute(
+            "SELECT * FROM projection_fulltext_contracts"
+        ).fetchall():
+            contract = registry.fulltext(str(row["contract_digest"]))
+            canonical = canonical_json_bytes(contract.canonical_value())
+            text_fields = (
+                "contract_id",
+                "contract_version",
+                "implementation_version",
+                "index_name",
+                "node_label",
+                "source_field",
+                "retrieval_property",
+                "analyzer",
+                "provider",
+                "unicode_normalization",
+            )
+            boolean_fields = (
+                "casefold",
+                "collapse_whitespace",
+                "eventually_consistent",
+            )
+            if (
+                bytes(row["canonical_bytes"]) != canonical
+                or digest_bytes(canonical) != str(row["contract_digest"])
+                or any(
+                    str(row[field_name]) != str(getattr(contract, field_name))
+                    for field_name in text_fields
+                )
+                or any(
+                    bool(row[field_name]) is not getattr(contract, field_name)
+                    for field_name in boolean_fields
+                )
+            ):
+                raise AuthorityPersistenceError(
+                    "retained full-text projection contract is inconsistent"
+                )
+        for row in conn.execute(
+            "SELECT * FROM projection_vector_contracts"
+        ).fetchall():
+            contract = registry.vector(str(row["contract_digest"]))
+            canonical = canonical_json_bytes(contract.canonical_value())
+            text_fields = (
+                "contract_id",
+                "contract_version",
+                "implementation_version",
+                "index_name",
+                "node_label",
+                "vector_property",
+                "provider",
+            )
+            if (
+                bytes(row["canonical_bytes"]) != canonical
+                or digest_bytes(canonical) != str(row["contract_digest"])
+                or any(
+                    str(row[field_name]) != str(getattr(contract, field_name))
+                    for field_name in text_fields
+                )
+                or int(row["dimensions"]) != contract.dimensions
+                or int(row["component_scale"]) != contract.component_scale
+                or str(row["similarity_function"])
+                != contract.similarity_function.value
+                or str(row["quantization"]) != contract.quantization.value
+                or str(row["provider_kind"]) != contract.provider_kind.value
+                or bool(row["fixture_only"]) is not contract.fixture_only
+            ):
+                raise AuthorityPersistenceError(
+                    "retained vector projection contract is inconsistent"
+                )
+        for row in conn.execute(
+            "SELECT * FROM projection_fixture_vector_manifests"
+        ).fetchall():
+            manifest = registry.fixture_manifest(str(row["manifest_digest"]))
+            if (
+                bytes(row["canonical_bytes"]) != manifest.canonical_bytes
+                or digest_bytes(manifest.canonical_bytes)
+                != str(row["manifest_digest"])
+                or str(row["schema_version"]) != manifest.schema_version
+                or str(row["fixture_id"]) != manifest.fixture_id
+                or str(row["source_fixture_digest"])
+                != manifest.source_fixture_digest
+                or int(row["dimensions"]) != manifest.dimensions
+                or int(row["component_scale"]) != manifest.component_scale
+            ):
+                raise AuthorityPersistenceError(
+                    "retained fixture vector manifest is inconsistent"
+                )
+            rows = conn.execute(
+                "SELECT * FROM projection_fixture_vectors "
+                "WHERE manifest_digest=? ORDER BY passage_id",
+                (manifest.manifest_digest,),
+            ).fetchall()
+            if len(rows) != len(manifest.documents):
+                raise AuthorityPersistenceError(
+                    "fixture vector manifest document coverage is incomplete"
+                )
+            for vector_row, document in zip(rows, manifest.documents, strict=True):
+                canonical = canonical_json_bytes(document.canonical_value())
+                components = canonical_json_bytes(list(document.components))
+                if (
+                    str(vector_row["passage_id"]) != document.passage_id
+                    or str(vector_row["blob_digest"]) != document.blob_digest
+                    or str(vector_row["language"]) != document.language
+                    or vector_row["revision_id"] != document.revision_id
+                    or str(vector_row["expected_lifecycle"])
+                    != document.expected_lifecycle
+                    or str(vector_row["normalized_text_digest"])
+                    != document.normalized_text_digest
+                    or bytes(vector_row["canonical_bytes"]) != canonical
+                    or str(vector_row["canonical_digest"])
+                    != digest_bytes(canonical)
+                    or bytes(vector_row["components_bytes"]) != components
+                    or str(vector_row["vector_digest"])
+                    != document.vector_digest
+                ):
+                    raise AuthorityPersistenceError(
+                        "retained fixture vector document is inconsistent"
+                    )
+        for row in conn.execute(
+            "SELECT * FROM projection_complete_contracts"
+        ).fetchall():
+            contract = registry.complete(str(row["contract_digest"]))
+            canonical = canonical_json_bytes(contract.canonical_value())
+            if (
+                bytes(row["canonical_bytes"]) != canonical
+                or digest_bytes(canonical) != str(row["contract_digest"])
+                or str(row["contract_id"]) != contract.contract_id
+                or str(row["contract_version"]) != contract.contract_version
+                or str(row["implementation_version"])
+                != contract.implementation_version
+                or str(row["admitted_relation_projector_version"])
+                != contract.admitted_relation_projector_version
+                or str(row["source_fixture_digest"])
+                != contract.source_fixture_digest
+                or str(row["fixture_vector_manifest_digest"])
+                != contract.fixture_vector_manifest_digest
+                or str(row["fulltext_contract_digest"])
+                != contract.fulltext_contract_digest
+                or str(row["vector_contract_digest"])
+                != contract.vector_contract_digest
+                or bytes(row["required_derivatives_bytes"])
+                != canonical_json_bytes(list(contract.required_derivatives))
+            ):
+                raise AuthorityPersistenceError(
+                    "retained complete projection contract is inconsistent"
+                )
+        definitions = {
+            item.digest: item
+            for item in self._projection_contracts.families.definitions()
+        }
+        links = {
+            str(row["definition_digest"]): str(row["complete_contract_digest"])
+            for row in conn.execute(
+                "SELECT * FROM projection_family_complete_contracts"
+            ).fetchall()
+        }
+        expected_links = {
+            digest: item.complete_projection_contract_digest
+            for digest, item in definitions.items()
+            if item.complete_projection_contract_digest is not None
+        }
+        if links != expected_links:
+            raise AuthorityPersistenceError(
+                "projection family complete contract links are inconsistent"
+            )
+        for row in conn.execute(
+            "SELECT g.generation_id,f.definition_digest,"
+            "l.complete_contract_digest FROM projection_generations g "
+            "JOIN projection_families f ON f.family_id=g.family_id "
+            "LEFT JOIN projection_family_complete_contracts l "
+            "ON l.definition_digest=f.definition_digest"
+        ).fetchall():
+            generation_id = str(row["generation_id"])
+            binding = conn.execute(
+                "SELECT * FROM projection_generation_complete_bindings "
+                "WHERE generation_id=?",
+                (generation_id,),
+            ).fetchone()
+            complete_digest = row["complete_contract_digest"]
+            if complete_digest is None:
+                if binding is not None:
+                    raise AuthorityPersistenceError(
+                        "structural-only generation has a complete binding"
+                    )
+                continue
+            contract = registry.complete(str(complete_digest))
+            if binding is None:
+                raise AuthorityPersistenceError(
+                    "complete projection generation lacks immutable binding"
+                )
+            value = {
+                "generation_id": generation_id,
+                "definition_digest": str(row["definition_digest"]),
+                "complete_contract_digest": contract.contract_digest,
+                "fulltext_contract_digest": contract.fulltext_contract_digest,
+                "vector_contract_digest": contract.vector_contract_digest,
+                "fixture_vector_manifest_digest": (
+                    contract.fixture_vector_manifest_digest
+                ),
+            }
+            canonical = canonical_json_bytes(value)
+            if (
+                bytes(binding["canonical_bytes"]) != canonical
+                or str(binding["canonical_digest"]) != digest_bytes(canonical)
+                or str(binding["definition_digest"])
+                != str(row["definition_digest"])
+                or str(binding["complete_contract_digest"])
+                != contract.contract_digest
+                or str(binding["fulltext_contract_digest"])
+                != contract.fulltext_contract_digest
+                or str(binding["vector_contract_digest"])
+                != contract.vector_contract_digest
+                or str(binding["fixture_vector_manifest_digest"])
+                != contract.fixture_vector_manifest_digest
+            ):
+                raise AuthorityPersistenceError(
+                    "complete projection generation binding is inconsistent"
+                )
+        for validation in conn.execute(
+            "SELECT v.validation_digest,v.generation_id,v.recorded_at,"
+            "f.definition_digest,l.complete_contract_digest "
+            "FROM projection_generation_validations v "
+            "JOIN projection_generations g ON g.generation_id=v.generation_id "
+            "JOIN projection_families f ON f.family_id=g.family_id "
+            "LEFT JOIN projection_family_complete_contracts l "
+            "ON l.definition_digest=f.definition_digest"
+        ).fetchall():
+            binding = conn.execute(
+                "SELECT * FROM projection_generation_complete_validations "
+                "WHERE validation_digest=?",
+                (str(validation["validation_digest"]),),
+            ).fetchone()
+            complete_digest = validation["complete_contract_digest"]
+            if complete_digest is None:
+                if binding is not None:
+                    raise AuthorityPersistenceError(
+                        "structural validation has a complete contract binding"
+                    )
+                continue
+            contract = registry.complete(str(complete_digest))
+            value = {
+                "validation_digest": str(validation["validation_digest"]),
+                "generation_id": str(validation["generation_id"]),
+                "complete_contract_digest": contract.contract_digest,
+                "fulltext_contract_digest": contract.fulltext_contract_digest,
+                "vector_contract_digest": contract.vector_contract_digest,
+                "fixture_vector_manifest_digest": (
+                    contract.fixture_vector_manifest_digest
+                ),
+            }
+            canonical = canonical_json_bytes(value)
+            if (
+                binding is None
+                or bytes(binding["canonical_bytes"]) != canonical
+                or str(binding["canonical_digest"]) != digest_bytes(canonical)
+                or str(binding["generation_id"])
+                != str(validation["generation_id"])
+                or str(binding["complete_contract_digest"])
+                != contract.contract_digest
+                or str(binding["fulltext_contract_digest"])
+                != contract.fulltext_contract_digest
+                or str(binding["vector_contract_digest"])
+                != contract.vector_contract_digest
+                or str(binding["fixture_vector_manifest_digest"])
+                != contract.fixture_vector_manifest_digest
+                or str(binding["recorded_at"]) != str(validation["recorded_at"])
+            ):
+                raise AuthorityPersistenceError(
+                    "complete projection validation binding is inconsistent"
+                )
 
     @staticmethod
     def _validation_canonical_value(row: sqlite3.Row) -> dict[str, object]:
@@ -878,13 +1377,24 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 family.mapping_contract_digest
             ).resolve(source.event_type)
             outcome = ProjectionDeliveryOutcome(str(attempt["outcome"]))
+            complete_required = (
+                family.complete_projection_contract_digest is not None
+            )
             try:
-                self._validate_delivery_outcome(mapping, outcome)
+                self._validate_delivery_outcome(
+                    mapping,
+                    outcome,
+                    complete_required=complete_required,
+                )
             except ProjectionStateError as exc:
                 raise AuthorityPersistenceError(
                     "projection delivery attempt violates retained mapping"
                 ) from exc
-            required = False if mapping is None else mapping.required
+            required = (
+                True
+                if complete_required
+                else False if mapping is None else mapping.required
+            )
             if bool(attempt["required"]) is not required:
                 raise AuthorityPersistenceError(
                     "projection delivery required flag differs from retained mapping"
@@ -1046,6 +1556,44 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     recorded_at,
                 ),
             )
+            definition = self._registered_family_definition(conn, family_id)
+            complete_digest = definition.complete_projection_contract_digest
+            if complete_digest is not None:
+                registry = self._projection_contracts.complete_projections
+                if registry is None:
+                    raise AuthorityPersistenceError(
+                        "complete generation contract registry is absent"
+                    )
+                contract = registry.complete(complete_digest)
+                value = {
+                    "generation_id": str(generation_id),
+                    "definition_digest": definition.digest,
+                    "complete_contract_digest": contract.contract_digest,
+                    "fulltext_contract_digest": contract.fulltext_contract_digest,
+                    "vector_contract_digest": contract.vector_contract_digest,
+                    "fixture_vector_manifest_digest": (
+                        contract.fixture_vector_manifest_digest
+                    ),
+                }
+                canonical = canonical_json_bytes(value)
+                conn.execute(
+                    "INSERT INTO projection_generation_complete_bindings("
+                    "generation_id,definition_digest,complete_contract_digest,"
+                    "fulltext_contract_digest,vector_contract_digest,"
+                    "fixture_vector_manifest_digest,canonical_bytes,"
+                    "canonical_digest,bound_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        str(generation_id),
+                        definition.digest,
+                        contract.contract_digest,
+                        contract.fulltext_contract_digest,
+                        contract.vector_contract_digest,
+                        contract.fixture_vector_manifest_digest,
+                        canonical,
+                        digest_bytes(canonical),
+                        recorded_at,
+                    ),
+                )
             return self._generation_view(conn, str(generation_id))
 
     def transition_generation(
@@ -1174,10 +1722,16 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
         service_compatibility_digest: str,
         projection_state_digest: str,
         reason_code: str,
+        required_source_ledger_seq: int | None = None,
     ) -> ProjectionGenerationValidationView:
         with self._lock, self._transaction() as conn:
             result = self._commit_grant_in_transaction(
                 conn, grant, recorded_at=self._clock().to_text()
+            )
+            self._require_source_watermark(
+                conn,
+                checkpoint_ledger_seq=checkpoint_ledger_seq,
+                required_source_ledger_seq=required_source_ledger_seq,
             )
             if result.replayed:
                 return self._validation_for_authority_event(conn, result.event_id)
@@ -1294,6 +1848,43 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     recorded_at,
                 ),
             )
+            complete_digest = family.complete_projection_contract_digest
+            if complete_digest is not None:
+                registry = self._projection_contracts.complete_projections
+                if registry is None:
+                    raise AuthorityPersistenceError(
+                        "complete validation contract registry is absent"
+                    )
+                contract = registry.complete(complete_digest)
+                complete_value = {
+                    "validation_digest": validation_digest,
+                    "generation_id": str(generation_id),
+                    "complete_contract_digest": contract.contract_digest,
+                    "fulltext_contract_digest": contract.fulltext_contract_digest,
+                    "vector_contract_digest": contract.vector_contract_digest,
+                    "fixture_vector_manifest_digest": (
+                        contract.fixture_vector_manifest_digest
+                    ),
+                }
+                complete_canonical = canonical_json_bytes(complete_value)
+                conn.execute(
+                    "INSERT INTO projection_generation_complete_validations("
+                    "validation_digest,generation_id,complete_contract_digest,"
+                    "fulltext_contract_digest,vector_contract_digest,"
+                    "fixture_vector_manifest_digest,canonical_bytes,"
+                    "canonical_digest,recorded_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        validation_digest,
+                        str(generation_id),
+                        contract.contract_digest,
+                        contract.fulltext_contract_digest,
+                        contract.vector_contract_digest,
+                        contract.fixture_vector_manifest_digest,
+                        complete_canonical,
+                        digest_bytes(complete_canonical),
+                        recorded_at,
+                    ),
+                )
             return self._validation_view_from_row(
                 conn.execute(
                     "SELECT * FROM projection_generation_validations "
@@ -1312,6 +1903,7 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
         validation_digest: str,
         prior_generation_id: ProjectionGenerationId | None,
         reason_code: str,
+        required_source_ledger_seq: int | None = None,
     ) -> ProjectionGenerationPromotionView:
         with self._lock, self._transaction() as conn:
             recorded_at = self._clock().to_text()
@@ -1322,6 +1914,11 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 )
             target_result = self._commit_grant_in_transaction(
                 conn, target_grant, recorded_at=recorded_at
+            )
+            self._require_source_watermark(
+                conn,
+                checkpoint_ledger_seq=checkpoint_ledger_seq,
+                required_source_ledger_seq=required_source_ledger_seq,
             )
             if target_result.replayed:
                 if prior_result is not None and not prior_result.replayed:
@@ -1390,6 +1987,42 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 raise AuthorityPersistenceError(
                     "promotion validation differs from retained family contracts"
                 )
+            complete_digest = family.complete_projection_contract_digest
+            complete_validation = conn.execute(
+                "SELECT * FROM projection_generation_complete_validations "
+                "WHERE validation_digest=?",
+                (validation_digest,),
+            ).fetchone()
+            if complete_digest is None:
+                if complete_validation is not None:
+                    raise AuthorityPersistenceError(
+                        "structural validation has unexpected complete binding"
+                    )
+            else:
+                registry = self._projection_contracts.complete_projections
+                if registry is None:
+                    raise AuthorityPersistenceError(
+                        "complete promotion contract registry is absent"
+                    )
+                contract = registry.complete(complete_digest)
+                if (
+                    complete_validation is None
+                    or str(complete_validation["generation_id"])
+                    != str(generation_id)
+                    or str(complete_validation["complete_contract_digest"])
+                    != contract.contract_digest
+                    or str(complete_validation["fulltext_contract_digest"])
+                    != contract.fulltext_contract_digest
+                    or str(complete_validation["vector_contract_digest"])
+                    != contract.vector_contract_digest
+                    or str(
+                        complete_validation["fixture_vector_manifest_digest"]
+                    )
+                    != contract.fixture_vector_manifest_digest
+                ):
+                    raise ProjectionStateError(
+                        "complete generation validation binding is absent or stale"
+                    )
             open_required = conn.execute(
                 "SELECT 1 FROM projection_gaps WHERE generation_id=? "
                 "AND state='OPEN' AND required=1 AND ledger_seq_start<=? LIMIT 1",
@@ -1550,6 +2183,35 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 recorded_at=UtcTimestamp.parse(recorded_at),
             )
 
+    @staticmethod
+    def _require_source_watermark(
+        conn: sqlite3.Connection,
+        *,
+        checkpoint_ledger_seq: int,
+        required_source_ledger_seq: int | None,
+    ) -> None:
+        if required_source_ledger_seq is None:
+            return
+        if (
+            isinstance(required_source_ledger_seq, bool)
+            or not isinstance(required_source_ledger_seq, int)
+            or required_source_ledger_seq < 0
+        ):
+            raise ValueError("required source ledger sequence is invalid")
+        latest = int(
+            conn.execute(
+                "SELECT COALESCE(MAX(ledger_seq),0) FROM ledger_events "
+                "WHERE security_scope!='authority.projection'"
+            ).fetchone()[0]
+        )
+        if (
+            checkpoint_ledger_seq != required_source_ledger_seq
+            or latest != required_source_ledger_seq
+        ):
+            raise ProjectionStateError(
+                "complete generation source watermark changed before authority commit"
+            )
+
     def begin_projection_rebuild(
         self,
         grant: _AuthorizedCommandGrant,
@@ -1592,6 +2254,14 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     authority_version=result.aggregate_version,
                     authority_event_id=result.event_id,
                     recorded_at=recorded_at,
+                    maximum_ledger_seq=(
+                        through_ledger_seq
+                        if self._registered_family_definition(
+                            conn, str(current["family_id"])
+                        ).complete_projection_contract_digest
+                        is not None
+                        else None
+                    ),
                 )
             return _ProjectionRebuildReceipt(
                 generation=self._generation_view(conn, str(generation_id)),
@@ -1634,8 +2304,19 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     "projection delivery cannot target its own authority event"
                 )
             mapping = mapping_contract.resolve(source.event_type)
-            required = False if mapping is None else mapping.required
-            self._validate_delivery_outcome(mapping, outcome)
+            complete_required = (
+                family.complete_projection_contract_digest is not None
+            )
+            required = (
+                True
+                if complete_required
+                else False if mapping is None else mapping.required
+            )
+            self._validate_delivery_outcome(
+                mapping,
+                outcome,
+                complete_required=complete_required,
+            )
             source_digest = digest_canonical(asdict(source))
             existing = conn.execute(
                 "SELECT * FROM projection_delivery_states "
@@ -1679,7 +2360,14 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     continue
                 missing = self._source_event(conn, missing_seq)
                 missing_mapping = mapping_contract.resolve(missing.event_type)
-                if missing_mapping is not None and missing_mapping.required:
+                missing_required = (
+                    complete_required
+                    or (
+                        missing_mapping is not None
+                        and missing_mapping.required
+                    )
+                )
+                if missing_required:
                     self._open_gap(
                         conn,
                         generation_id=str(generation_id),
@@ -1803,6 +2491,7 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 authority_version=result.aggregate_version,
                 authority_event_id=result.event_id,
                 recorded_at=recorded_at,
+                maximum_ledger_seq=ledger_seq if complete_required else None,
             )
             return self._delivery_for_authority_event(conn, result.event_id)
 
@@ -1887,7 +2576,15 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
         self,
         mapping: StructuralEventMapping | None,
         outcome: ProjectionDeliveryOutcome,
+        *,
+        complete_required: bool = False,
     ) -> None:
+        if complete_required:
+            if outcome is ProjectionDeliveryOutcome.IGNORED_OPTIONAL:
+                raise ProjectionStateError(
+                    "complete projection events cannot be ignored"
+                )
+            return
         if mapping is None:
             if outcome is not ProjectionDeliveryOutcome.IGNORED_OPTIONAL:
                 raise ProjectionStateError(
@@ -2031,11 +2728,17 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
         authority_version: int,
         authority_event_id: str,
         recorded_at: str,
+        maximum_ledger_seq: int | None = None,
     ) -> None:
         current = self._checkpoint_seq(conn, generation_id)
         candidate = current
         while True:
             next_seq = candidate + 1
+            if (
+                maximum_ledger_seq is not None
+                and next_seq > maximum_ledger_seq
+            ):
+                break
             gap = conn.execute(
                 "SELECT 1 FROM projection_gaps WHERE generation_id=? "
                 "AND state='OPEN' AND ledger_seq_start<=? AND ledger_seq_end>=? LIMIT 1",

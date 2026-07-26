@@ -1,0 +1,222 @@
+{
+  "component_scale": 1000000,
+  "dimensions": 16,
+  "documents": [
+    {
+      "blob_digest": "sha256:bf5495cbaa4c59d4f52dfe053adfd02a7e66310b0ceed64a108c5e97e5ffaa36",
+      "components": [
+        400000,
+        50000,
+        0,
+        0,
+        0,
+        250000,
+        900000,
+        0,
+        0,
+        10000,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected_lifecycle": "ACTIVE",
+      "language": "en-GB",
+      "passage_id": "ifv2-distinct-jurisdiction",
+      "revision_id": null
+    },
+    {
+      "blob_digest": "sha256:59f1baa82424dd7d17aa7ea09d8f084cbfe6d187d818a81bf3834ec0a7460c24",
+      "components": [
+        850000,
+        390000,
+        470000,
+        0,
+        300000,
+        0,
+        0,
+        520000,
+        0,
+        20000,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected_lifecycle": "ACTIVE",
+      "language": "zh-HK",
+      "passage_id": "ifv2-incompatible-formal-id",
+      "revision_id": null
+    },
+    {
+      "blob_digest": "sha256:f158cbb638353ebc1574831b3a43c70b66198ff8d1b6a8300ef7c4ee4eb022b4",
+      "components": [
+        950000,
+        420000,
+        500000,
+        0,
+        0,
+        300000,
+        0,
+        0,
+        0,
+        30000,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected_lifecycle": "ACTIVE",
+      "language": "en-GB",
+      "passage_id": "ifv2-new-en",
+      "revision_id": "00000000-0000-4000-8000-000000002005"
+    },
+    {
+      "blob_digest": "sha256:2d50709c46e778ed1bf32d7bc8dfdaebece21f4792a88feb32709d1331ec1ac1",
+      "components": [
+        950000,
+        420000,
+        500000,
+        0,
+        300000,
+        0,
+        0,
+        0,
+        0,
+        30000,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected_lifecycle": "ACTIVE",
+      "language": "zh-HK",
+      "passage_id": "ifv2-new-zh-hk",
+      "revision_id": "00000000-0000-4000-8000-000000002005"
+    },
+    {
+      "blob_digest": "sha256:282852e35eab2b2f6ed87bb6c05e7d3568d9c84682926113caee150cc0431372",
+      "components": [
+        950000,
+        220000,
+        0,
+        500000,
+        0,
+        300000,
+        0,
+        0,
+        0,
+        20000,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected_lifecycle": "ACTIVE",
+      "language": "en-GB",
+      "passage_id": "ifv2-prior-en",
+      "revision_id": "00000000-0000-4000-8000-000000002004"
+    },
+    {
+      "blob_digest": "sha256:72ceb938e4cc23e0341a5ae80162c1cb273070e7465650dad8887f4a13bb8b39",
+      "components": [
+        950000,
+        220000,
+        0,
+        500000,
+        300000,
+        0,
+        0,
+        0,
+        0,
+        20000,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected_lifecycle": "ACTIVE",
+      "language": "zh-HK",
+      "passage_id": "ifv2-prior-zh-hk",
+      "revision_id": "00000000-0000-4000-8000-000000002004"
+    },
+    {
+      "blob_digest": "sha256:6d6705ae0767bfca02e22f3a74ddc6bd366092ac839eaca7f31a5f4de5ad993c",
+      "components": [
+        900000,
+        400000,
+        460000,
+        0,
+        0,
+        250000,
+        0,
+        0,
+        900000,
+        20000,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected_lifecycle": "TOMBSTONED",
+      "language": "en-GB",
+      "passage_id": "ifv2-tombstoned-negative",
+      "revision_id": null
+    }
+  ],
+  "expected_active_passage_ids": [
+    "ifv2-distinct-jurisdiction",
+    "ifv2-incompatible-formal-id",
+    "ifv2-new-en",
+    "ifv2-new-zh-hk",
+    "ifv2-prior-en",
+    "ifv2-prior-zh-hk"
+  ],
+  "expected_tombstoned_passage_ids": [
+    "ifv2-tombstoned-negative"
+  ],
+  "fixture_id": "00000000-0000-4000-8000-000000002001",
+  "qualification_queries": {
+    "fulltext": [
+      {
+        "expected_first_passage_id": "ifv2-new-en",
+        "language": "en-GB",
+        "query": "synthetic online portal deadline 27 March 2042",
+        "query_id": "fixture-fulltext-en-update"
+      },
+      {
+        "expected_first_passage_id": "ifv2-new-zh-hk",
+        "language": "zh-HK",
+        "query": "合成網上平台 截止日期 二〇四二年三月二十七日",
+        "query_id": "fixture-fulltext-zh-hk-update"
+      }
+    ],
+    "vector": [
+      {
+        "expected_active_prefix": [
+          "ifv2-new-en",
+          "ifv2-new-zh-hk",
+          "ifv2-incompatible-formal-id"
+        ],
+        "passage_id": "ifv2-new-en",
+        "query_id": "fixture-vector-new-en"
+      }
+    ]
+  },
+  "schema_version": "integrated_fixture_v2_projection_v1",
+  "source_fixture_digest": "sha256:d2c8e45b7c8119f716142ce74f1ebd48e3845934462b24689aee1c6a3535fc5e"
+}
