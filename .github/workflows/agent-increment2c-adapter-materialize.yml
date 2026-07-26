@@ -1,0 +1,112 @@
+name: agent-increment2c-adapter-materialize
+
+on:
+  push:
+    branches:
+      - agent/increment-2c-adapter-materialize
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-increment2c-adapter-materialize
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    env:
+      AUTHORISED_PARENT: e652c5bb5fc0f7f48327d00615eff1dbbacc5a39
+      TARGET_BRANCH: agent/increment-2c-bounded-hybrid-retrieval
+      ARCHIVE_SHA256: e0f39fb57d7b5872d76198a83cc3bb202d6ef07de48220a76a3e54a7cd6920e0
+      EXPECTED_TREE: 0e55bfba101fa0da8d2efeec9da7a188270201b2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Reconstruct and verify adapter archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat .github/increment2c-adapter/READY)" = "$ARCHIVE_SHA256"
+          cat .github/increment2c-adapter/part-* \
+            | base64 --decode > /tmp/increment2c-adapter.tar.gz
+          echo "$ARCHIVE_SHA256  /tmp/increment2c-adapter.tar.gz" \
+            | sha256sum --check -
+          cat > /tmp/expected-paths <<'EOF'
+          newsroom/projection/neo4j/_retrieval_adapter.py
+          newsroom/retrieval/fixture_v2.py
+          newsroom/tests/test_retrieval_2c_adapter_unit.py
+          newsroom/tests/test_retrieval_2c_contracts.py
+          EOF
+          sed -i 's/^          //' /tmp/expected-paths
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          tar -tzf /tmp/increment2c-adapter.tar.gz | sort > /tmp/archive-paths
+          diff -u /tmp/expected-paths /tmp/archive-paths
+          python - <<'PY'
+          from pathlib import PurePosixPath
+          import tarfile
+          with tarfile.open('/tmp/increment2c-adapter.tar.gz', 'r:gz') as archive:
+              for member in archive.getmembers():
+                  path = PurePosixPath(member.name)
+                  if (
+                      path.is_absolute()
+                      or '..' in path.parts
+                      or member.issym()
+                      or member.islnk()
+                      or not member.isfile()
+                  ):
+                      raise SystemExit(f'unsafe archive member: {member.name!r}')
+          PY
+
+      - name: Apply exact adapter checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$AUTHORISED_PARENT"
+          tar -xzf /tmp/increment2c-adapter.tar.gz -C .
+          git add -A
+          git diff --cached --name-only "$AUTHORISED_PARENT" | sort \
+            > /tmp/actual-paths
+          diff -u /tmp/expected-paths /tmp/actual-paths
+          git diff --cached --check
+          python -m compileall -q newsroom scripts
+          tree="$(git write-tree)"
+          echo "TREE_SHA=$tree"
+          test "$tree" = "$EXPECTED_TREE"
+
+      - name: Run focused adapter tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_retrieval_2c_contracts.py \
+            newsroom/tests/test_retrieval_2c_fusion.py \
+            newsroom/tests/test_retrieval_2c_adapter_unit.py
+
+      - name: Create and push clean adapter checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Newsroom Increment 2C Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
+          commit="$(printf '%s\n\n%s\n' \
+            'feat(retrieval): add fixed Neo4j branch reads' \
+            'Add the private four-branch fixed-query Neo4j adapter, explicit prior-revision authority, server-derived generation/index names, admitted DEVELOPMENT_OF traversal, bounded scores, provenance, timeout evidence and fail-closed adapter tests.' \
+            | git commit-tree "$tree" -p "$AUTHORISED_PARENT")"
+          echo "COMMIT_SHA=$commit"
+          git push --force origin "$commit:refs/heads/$TARGET_BRANCH"
