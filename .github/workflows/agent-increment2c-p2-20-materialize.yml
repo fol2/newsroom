@@ -44,7 +44,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .github/increment2c-p2-20/part-* \
+          cat \
+            .github/increment2c-p2-20/part-000 \
+            .github/increment2c-p2-20/part-001 \
+            .github/increment2c-p2-20/part-002 \
+            .github/increment2c-p2-20/part-003 \
+            .github/increment2c-p2-20/part-01 \
+            .github/increment2c-p2-20/part-02 \
+            .github/increment2c-p2-20/part-03 \
             | base64 --decode > /tmp/increment2c-p2-20.patch.gz
           echo "$PATCH_SHA256  /tmp/increment2c-p2-20.patch.gz" \
             | sha256sum --check -
