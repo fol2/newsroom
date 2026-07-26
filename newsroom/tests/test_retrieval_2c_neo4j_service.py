@@ -86,9 +86,14 @@ class _RecordingAdapter:
     def __init__(self, inner) -> None:
         self.inner = inner
         self.executions = None
+        self.exception = None
 
     def run_bounded_hybrid_branches(self, **kwargs):
-        self.executions = self.inner.run_bounded_hybrid_branches(**kwargs)
+        try:
+            self.executions = self.inner.run_bounded_hybrid_branches(**kwargs)
+        except Exception as exc:
+            self.exception = exc
+            raise
         return self.executions
 
     def close(self) -> None:
@@ -126,7 +131,9 @@ def _open_retrieval_recording(database: Path, object_root: Path):
 
 
 def _revalidate_recorded(adapter: _RecordingAdapter) -> None:
-    assert adapter.executions is not None
+    if adapter.executions is None:
+        assert adapter.exception is not None
+        raise adapter.exception
     validate_fixture_branch_executions(
         executions=adapter.executions,
         policy=HYBRID_FIXTURE_POLICY_V1,
