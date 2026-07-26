@@ -19,7 +19,7 @@ It excludes Increment 2D Candidate admission, Graphiti, external models or embed
 ## Result
 
 - P1 findings: 2
-- P2 findings: 19
+- P2 findings: 20
 - Remaining unresolved P1/P2 after correction: 0
 
 Review submissions, requested changes, inline threads and actionable PR comments must be rechecked against the exact final remote head before merge.
@@ -273,6 +273,25 @@ Correction:
 
 The correction changes no product runtime, accepted gate, optional-test classification or evidence topology.
 
+### P2-20 — Sequential core execution still lacked robust hosted-runner margin
+
+The P2-19 tree passed a candidate signed lane but the official PR run expired at 72 percent after the deterministic pytest command consumed 53.4 seconds of the shared 55-second source-plus-test deadline. Precompilation and exact-source AST caching had removed avoidable setup work, but one sequential pytest process still left the signed decision dependent on normal hosted-runner variance. Increasing the accepted budget or dropping tests would have weakened the gate.
+
+Correction:
+
+- keep the accepted shared `55`-second lane deadline and every deterministic test;
+- discover the complete regular `newsroom/tests/**/test_*.py` inventory inside the server-owned command;
+- assign every file exactly once to a fixed four-shard topology using a deterministic size-balanced algorithm, with no caller-selected shard count, file list or exclusion;
+- run all shards concurrently inside the existing outer process group and watchdog;
+- disable pytest's shared cache provider and isolate each shard's base temporary directory;
+- replay shard logs in fixed order and require every shard report to exist;
+- parse all shard reports together to reject duplicate test identities or malformed evidence;
+- merge them into the unchanged single authoritative `pytest.xml`;
+- re-summarize the merged report and require exact equality of the test-identity digest, counts, skips, durations and first-failure fingerprint; and
+- propagate any shard failure while still retaining the merged failure evidence when reports are available.
+
+The correction changes no product behavior, test selection, optional-service classification, JUnit evidence topology, accepted budget or activation boundary.
+
 ## Validation performed
 
 The corrected focused retrieval, service-contract and SDLC selection passed locally:
@@ -299,19 +318,17 @@ The P2-19 deterministic-evidence correction passed the exact affected boundary, 
 46 passed, 0 skipped, 0 failed
 ```
 
-The complete repository passed in eight deterministic file-list shards:
+The complete repository passed through the fixed four-shard core command and merged authoritative report:
 
 ```text
-shard 1: 198 passed,  0 skipped
-shard 2: 149 passed,  4 skipped
-shard 3: 143 passed,  0 skipped
-shard 4: 116 passed,  0 skipped
-shard 5: 106 passed,  0 skipped
-shard 6: 235 passed, 14 skipped
-shard 7: 130 passed,  1 skipped
-shard 8:  95 passed,  4 skipped
-----------------------------------
-total:   1,172 passed, 23 skipped, 0 failed
+shard 1: 268 passed, 16 skipped
+shard 2: 283 passed,  6 skipped
+shard 3: 302 passed,  0 skipped
+shard 4: 325 passed,  1 skipped
+---------------------------------
+total:   1,178 passed, 23 skipped, 0 failed
+merged report test outcomes: 1,201
+local command wall time: 19.43 seconds
 ```
 
 Additional checks passed at the review boundary:
@@ -321,7 +338,7 @@ Additional checks passed at the review boundary:
 - the projection import-boundary regression; and
 - clustering evaluation with `--fail-on-regression`.
 
-The four retrieval service tests intentionally skip without `NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED=1`; the exact remote authenticated-service run remains mandatory. Earlier unsharded local pytest processes were stopped by the execution wrapper without an observed failure; the post-P2-18 run reached 60 percent. The complete result above therefore comes from deterministic file-list shards. Hosted profiling of the exact P2-18 tree measured `54.94` seconds for the complete deterministic suite and `54.25` seconds after bootstrap bytecode precompilation, confirming that product correctness was green while shared-lane evidence margin was insufficient. `uv lock --check` passed, while a local `uv sync --dev --locked` attempt was blocked by the configured internal package mirror returning HTTP 503; `pyproject.toml` and `uv.lock` are unchanged. The exact corrected remote head must provide the authoritative locked-sync, actual-Neo4j and signed SDLC evidence.
+The four retrieval service tests intentionally skip without `NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED=1`; the exact remote authenticated-service run remains mandatory. Earlier unsharded local pytest processes were stopped by the execution wrapper without an observed failure; the post-P2-18 run reached 60 percent. The complete result above therefore comes from deterministic file-list shards. Hosted profiling of the exact P2-18 tree measured `54.94` seconds for the complete deterministic suite and `54.25` seconds after bootstrap bytecode precompilation. The official P2-19 PR run then expired after 53.4 seconds at 72 percent. The fixed four-shard command completed the complete local inventory and merged evidence in `19.43` seconds, providing a material margin that still requires exact hosted signed-lane confirmation. `uv lock --check` passed, while a local `uv sync --dev --locked` attempt was blocked by the configured internal package mirror returning HTTP 503; `pyproject.toml` and `uv.lock` are unchanged. The exact corrected remote head must provide the authoritative locked-sync, actual-Neo4j and signed SDLC evidence.
 
 ## Residual merge gates
 
