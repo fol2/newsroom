@@ -1,0 +1,132 @@
+name: agent-increment2c-p2-20-diagnose
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    env:
+      AUTHORISED_PARENT: c0b447ea48b968248b5c48d4285e695f3c33bf76
+      EXPECTED_BASE_TREE: aa8f81eccca6d85d6881320c4e563e739b7cdaa7
+      PATCH_SHA256: a22b4753ff1b41ec73a001a6a8674269a282af243d799f2af22d6bef4d51a7ae
+      EXPECTED_TREE: 9cd9413ae91690e2f06faae2c3897dcebb6a90e6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Apply exact checked correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat \
+            .github/increment2c-p2-20/part-000 \
+            .github/increment2c-p2-20/part-001 \
+            .github/increment2c-p2-20/part-002 \
+            .github/increment2c-p2-20/part-003 \
+            .github/increment2c-p2-20/part-01 \
+            .github/increment2c-p2-20/part-02 \
+            .github/increment2c-p2-20/part-03 \
+            | base64 --decode > /tmp/p2-20.patch.gz
+          echo "$PATCH_SHA256  /tmp/p2-20.patch.gz" | sha256sum --check -
+          gzip -dc /tmp/p2-20.patch.gz > /tmp/p2-20.patch
+          git checkout --detach "$AUTHORISED_PARENT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_BASE_TREE"
+          git apply --index /tmp/p2-20.patch
+          git diff --cached --check
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+
+      - name: Verify locked environment
+        id: environment
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            uv lock --check
+            uv sync --dev --locked
+            uv run --no-sync python -m compileall -q newsroom scripts
+          } 2>&1 | tee /tmp/p2-20-environment.log
+
+      - name: Run focused contracts
+        id: focused
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            newsroom/tests/test_retrieval_2c_traceability.py \
+            newsroom/tests/test_sdlc_evidence_workflow.py \
+            newsroom/tests/test_sdlc_watchdog.py \
+            newsroom/tests/test_subprocess_json.py \
+            2>&1 | tee /tmp/p2-20-focused.log
+
+      - name: Run complete sharded core
+        id: core
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          /usr/bin/time -f '\nWALL=%e CPU=%P MAXRSS=%M' \
+            uv run --no-sync python -m scripts.sdlc.workflow_lane \
+            core-tests --repo-root . --report /tmp/core-p2-20.xml \
+            --clustering 2>&1 | tee /tmp/p2-20-core.log
+
+      - name: Summarize merged JUnit
+        if: always()
+        shell: bash
+        run: |
+          uv run --no-sync python - <<'PY' > /tmp/p2-20-summary.txt 2>&1 || true
+          from pathlib import Path
+          from scripts.sdlc.junit_evidence import summarize_junit
+          from scripts.sdlc.workflow_lane import _OPTIONAL_CORE_TEST_IDS
+          report = Path('/tmp/core-p2-20.xml')
+          print(f'report_exists={report.is_file()}')
+          if report.is_file():
+              summary = summarize_junit(
+                  '.', (str(report),),
+                  optional_test_ids=_OPTIONAL_CORE_TEST_IDS,
+              )
+              for name in (
+                  'outcome', 'test_count', 'failure_count', 'error_count',
+                  'skip_count', 'required_skip_count', 'test_ids_digest',
+                  'duration_ms', 'first_failure_fingerprint',
+              ):
+                  print(f'{name}={getattr(summary, name)}')
+          PY
+          cat /tmp/p2-20-summary.txt
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment2c-p2-20-diagnostic
+          path: |
+            /tmp/p2-20-environment.log
+            /tmp/p2-20-focused.log
+            /tmp/p2-20-core.log
+            /tmp/p2-20-summary.txt
+            /tmp/core-p2-20.xml
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Preserve diagnostic result
+        if: steps.environment.outcome != 'success' || steps.focused.outcome != 'success' || steps.core.outcome != 'success'
+        run: exit 1
