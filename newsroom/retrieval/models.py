@@ -26,6 +26,7 @@ from newsroom.projection.neo4j.complete_models import CompleteProjectionIdentity
 
 
 _SCORE = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]{1,17})?(?:e-?[0-9]{1,3})?$")
+_MAX_NAMED_TOOL_ELAPSED_MS = 5_000
 
 
 class RetrievalContractError(ValueError):
@@ -269,6 +270,24 @@ class RetrievalBranchHit:
         if isinstance(self.rank, bool) or not isinstance(self.rank, int) or not 1 <= self.rank <= 8:
             raise RetrievalContractError("branch rank exceeds the fixed bound")
         _validate_score(self.raw_score)
+        score = float(self.raw_score)
+        if self.branch is RetrievalBranch.EXACT and score != 1.0:
+            raise RetrievalContractError("exact retrieval score must be one")
+        if (
+            self.branch is RetrievalBranch.ADMITTED_GRAPH
+            and not 0.0 < score <= 1.0
+        ):
+            raise RetrievalContractError(
+                "admitted graph retrieval score must be in (0, 1]"
+            )
+        if self.branch is RetrievalBranch.FULL_TEXT and score < 0.0:
+            raise RetrievalContractError(
+                "full-text retrieval score must be non-negative"
+            )
+        if self.branch is RetrievalBranch.VECTOR and not 0.0 <= score <= 1.0:
+            raise RetrievalContractError(
+                "vector retrieval score must be in [0, 1]"
+            )
         for field_name in ("result_key", "dependency_root_id", "source_identity"):
             _bounded_text(getattr(self, field_name), field=field_name, maximum_bytes=256)
         if self.passage_id is not None:
@@ -563,6 +582,13 @@ class RetrievalContextV2:
         branch_order = tuple(item.branch for item in self.branches)
         if branch_order != tuple(RetrievalBranch):
             raise RetrievalContractError("all four retrieval branches must execute exactly once")
+        if (
+            sum(item.elapsed_ms for item in self.branches)
+            > _MAX_NAMED_TOOL_ELAPSED_MS
+        ):
+            raise RetrievalContractError(
+                "retrieval branch evidence exceeds the shared tool timeout"
+            )
         if not isinstance(self.retained_candidates, tuple) or len(self.retained_candidates) > 12:
             raise RetrievalContractError("retained candidates exceed fixed context bound")
         ranks = tuple(item.final_rank for item in self.retained_candidates)

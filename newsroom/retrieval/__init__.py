@@ -29,6 +29,11 @@ from .models import (
     canonical_score,
 )
 from .policy import HYBRID_FIXTURE_POLICY_V1, HybridRetrievalPolicy
+from .traceability import (
+    INCREMENT_2C_DEFERRED,
+    INCREMENT_2C_EXCLUSIONS,
+    INCREMENT_2C_TRACEABILITY,
+)
 
 
 def __getattr__(name: str):
@@ -52,6 +57,9 @@ __all__ = [
     "HybridRetrievalAuthoritySystem",
     "HydratedRetrievalPassage",
     "INTEGRATED_FIXTURE_V2_RETRIEVAL",
+    "INCREMENT_2C_DEFERRED",
+    "INCREMENT_2C_EXCLUSIONS",
+    "INCREMENT_2C_TRACEABILITY",
     "IntegratedFixtureV2RetrievalContract",
     "HybridRetrievalPolicy",
     "ReciprocalRankScore",

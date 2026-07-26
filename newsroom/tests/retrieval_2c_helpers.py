@@ -391,29 +391,68 @@ class MemoryHybridRetrievalAdapter:
                 ),
             )
             hits = [candidate]
-            if self.include_exclusions and branch in {
-                RetrievalBranch.FULL_TEXT,
-                RetrievalBranch.VECTOR,
-            }:
-                hits.append(
-                    RetrievalBranchHit(
-                        branch=branch,
-                        query_id=query_id,
-                        query_digest=query_digest,
-                        rank=2,
-                        raw_score=canonical_score(0.5),
-                        result_key=(
-                            f"{branch.value}:ifv2-incompatible-formal-id"
+            if self.include_exclusions and branch is RetrievalBranch.FULL_TEXT:
+                for rank, (root_id, passage_id, score) in enumerate(
+                    (
+                        (
+                            f"query:{retrieval_contract.query_revision_id}",
+                            "ifv2-new-en",
+                            0.9,
                         ),
-                        dependency_root_id=(
-                            "distractor:incompatible-formal-id"
+                        (
+                            "distractor:distinct-jurisdiction",
+                            "ifv2-distinct-jurisdiction",
+                            0.8,
                         ),
-                        passage_id="ifv2-incompatible-formal-id",
-                        trust_scope=TrustScope.OBSERVED,
-                        source_kind="GOVERNED_PASSAGE",
-                        source_identity="ifv2-incompatible-formal-id",
+                    ),
+                    start=2,
+                ):
+                    hits.append(
+                        RetrievalBranchHit(
+                            branch=branch,
+                            query_id=query_id,
+                            query_digest=query_digest,
+                            rank=rank,
+                            raw_score=canonical_score(score),
+                            result_key=f"{branch.value}:{passage_id}",
+                            dependency_root_id=root_id,
+                            passage_id=passage_id,
+                            trust_scope=TrustScope.OBSERVED,
+                            source_kind="GOVERNED_PASSAGE",
+                            source_identity=passage_id,
+                        )
                     )
-                )
+            if self.include_exclusions and branch is RetrievalBranch.VECTOR:
+                for rank, (root_id, passage_id, score) in enumerate(
+                    (
+                        (
+                            f"query:{retrieval_contract.query_revision_id}",
+                            "ifv2-new-zh-hk",
+                            0.99,
+                        ),
+                        (
+                            "distractor:incompatible-formal-id",
+                            "ifv2-incompatible-formal-id",
+                            0.98,
+                        ),
+                    ),
+                    start=2,
+                ):
+                    hits.append(
+                        RetrievalBranchHit(
+                            branch=branch,
+                            query_id=query_id,
+                            query_digest=query_digest,
+                            rank=rank,
+                            raw_score=canonical_score(score),
+                            result_key=f"{branch.value}:{passage_id}",
+                            dependency_root_id=root_id,
+                            passage_id=passage_id,
+                            trust_scope=TrustScope.OBSERVED,
+                            source_kind="GOVERNED_PASSAGE",
+                            source_identity=passage_id,
+                        )
+                    )
             executions.append(
                 RetrievalBranchExecution(
                     branch=branch,
@@ -450,6 +489,7 @@ def open_retrieval_test_system(
     scopes: frozenset[str] | None = None,
     principal_id: str = "principal.alpha",
     clock: Callable = lambda: COMPLETE_NOW,
+    authentication_ttl_seconds: int = 300,
 ):
     rights, hydration, admissions = _policy_registries()
     selected_scopes = scopes or frozenset(
@@ -468,6 +508,7 @@ def open_retrieval_test_system(
         authenticator=StaticAuthenticator(
             credentials={"token-1": StaticPrincipal(principal_id)},
             authority_domain="newsroom.authority",
+            ttl_seconds=authentication_ttl_seconds,
         ),
         authorizer=StaticAuthorizer(
             policy_version="retrieval-2c-authz-v1",

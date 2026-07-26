@@ -168,6 +168,13 @@ class _HybridRetrievalAuthorityStore(
                 validation.recorded_at
             )
         )
+        if serving_time.value < max(
+            query_valid_time.value,
+            validation.recorded_at.value,
+        ):
+            raise RetrievalStateError(
+                "retrieval authority clock moved backwards"
+            )
         if serving_time.value > freshness_deadline.value:
             raise RetrievalStateError(
                 "retrieval projection freshness is stale"
@@ -262,7 +269,15 @@ class _HybridRetrievalAuthorityStore(
         row: sqlite3.Row,
         request: FindRelatedEventCandidatesRequest,
         authentication: Any,
+        authorization_request: Any,
+        authorization: Any,
     ) -> FindRelatedEventCandidatesResult:
+        self._require_current_security_locked(
+            request=request,
+            authentication=authentication,
+            authorization_request=authorization_request,
+            authorization=authorization,
+        )
         original_authentication = conn.execute(
             "SELECT principal_id,authority_domain "
             "FROM authentication_contexts "
@@ -302,6 +317,8 @@ class _HybridRetrievalAuthorityStore(
         request: FindRelatedEventCandidatesRequest,
         *,
         authentication: Any,
+        authorization_request: Any,
+        authorization: Any,
     ) -> FindRelatedEventCandidatesResult | None:
         with self._lock:
             row = self._existing_attempt_locked(
@@ -315,6 +332,8 @@ class _HybridRetrievalAuthorityStore(
                 row=row,
                 request=request,
                 authentication=authentication,
+                authorization_request=authorization_request,
+                authorization=authorization,
             )
 
     def retrieval_context(
@@ -369,8 +388,24 @@ class _HybridRetrievalAuthorityStore(
                     row=existing,
                     request=request,
                     authentication=authentication,
+                    authorization_request=authorization_request,
+                    authorization=authorization,
                 )
 
+            security_checked_at = self._require_current_security_locked(
+                request=request,
+                authentication=authentication,
+                authorization_request=authorization_request,
+                authorization=authorization,
+            )
+            if (
+                context.recorded_at.value < authorization.decided_at.value
+                or context.recorded_at.value > security_checked_at.value
+                or context.recorded_at.value >= authentication.expires_at.value
+            ):
+                raise PermissionError(
+                    "retrieval context time is outside current security authority"
+                )
             self._require_current_projection_locked(conn, context.projection)
             self._validate_hydrations_locked(
                 conn,
@@ -538,6 +573,22 @@ class _HybridRetrievalAuthorityStore(
                     row=existing,
                     request=request,
                     authentication=authentication,
+                    authorization_request=authorization_request,
+                    authorization=authorization,
+                )
+            security_checked_at = self._require_current_security_locked(
+                request=request,
+                authentication=authentication,
+                authorization_request=authorization_request,
+                authorization=authorization,
+            )
+            if (
+                failure.recorded_at.value < authorization.decided_at.value
+                or failure.recorded_at.value > security_checked_at.value
+                or failure.recorded_at.value >= authentication.expires_at.value
+            ):
+                raise PermissionError(
+                    "retrieval failure time is outside current security authority"
                 )
             if projection is not None:
                 self._require_current_projection_locked(conn, projection)
@@ -610,6 +661,59 @@ class _HybridRetrievalAuthorityStore(
             failure=failure,
             replayed=False,
         )
+
+    def _require_current_security_locked(
+        self,
+        *,
+        request: FindRelatedEventCandidatesRequest,
+        authentication: Any,
+        authorization_request: Any,
+        authorization: Any,
+    ) -> UtcTimestamp:
+        now = self._clock()
+        authentication.require_current(now)
+        authorization.require_allowed()
+        if (
+            authorization_request.authentication_context_id
+            != authentication.authentication_context_id
+            or authorization_request.principal_id != authentication.principal_id
+            or authorization_request.authority_domain
+            != authentication.authority_domain
+            or authorization.authentication_context_id
+            != authentication.authentication_context_id
+            or authorization.authorization_request_digest
+            != authorization_request.request_digest
+            or authorization.decided_at.value < authentication.authenticated_at.value
+            or authorization.decided_at.value > now.value
+        ):
+            raise PermissionError(
+                "retrieval security provenance is not current and exact"
+            )
+        require_exact_retrieval_authorization_value(
+            value=authorization_request.canonical_value(),
+            authentication_context_id=str(
+                authentication.authentication_context_id
+            ),
+            principal_id=authentication.principal_id,
+            authority_domain=authentication.authority_domain,
+            request=request,
+            policy=self._retrieval_policy,
+            retrieval_contract=self._retrieval_contract,
+        )
+        expected_scope_digest = digest_canonical(
+            {
+                "authentication_context_digest": authentication.digest,
+                "effective_scopes": list(authorization.effective_scopes),
+            }
+        )
+        if (
+            RETRIEVAL_REQUIRED_SCOPE not in authorization.effective_scopes
+            or authorization.effective_scope_digest != expected_scope_digest
+        ):
+            raise PermissionError(
+                "retrieval authorization no longer contains exact scope evidence"
+            )
+        return now
 
     def _require_current_projection_locked(
         self,
@@ -702,7 +806,16 @@ class _HybridRetrievalAuthorityStore(
             raise RetrievalStateError(
                 "retrieval projection temporal authority changed"
             )
-        if self._clock().value > expected_freshness_deadline.value:
+        now = self._clock()
+        if now.value < max(
+            projection.serving_time.value,
+            projection.query_valid_time.value,
+            validation_recorded_at.value,
+        ):
+            raise RetrievalStateError(
+                "retrieval authority clock moved backwards"
+            )
+        if now.value > expected_freshness_deadline.value:
             raise RetrievalStateError(
                 "retrieval projection freshness is stale"
             )
@@ -757,14 +870,22 @@ class _HybridRetrievalAuthorityStore(
                     "hydrated passage differs from its access decision"
                 )
             blob = self._blob_lifecycle_row(passage.blob_digest, conn=conn)
-            if str(blob["state"]) not in {
+            blob_state = str(blob["state"])
+            if blob_state not in {
                 BlobLifecycleState.INSTALLED.value,
                 BlobLifecycleState.ACTIVE.value,
             }:
                 raise RetrievalStateError("hydrated passage blob is not current")
+            cutoff = self._decode_retrieval_canonical(
+                bytes(access["state_cutoff_bytes"]),
+                identity="retrieval hydration state cutoff",
+            )
             if (
-                passage.rights_state != "PERMITTED"
-                or passage.lifecycle_state != AdmissionState.ACTIVE.value
+                cutoff.get("admission_state")
+                != AdmissionState.ACTIVE.value
+                or cutoff.get("blob_state") != blob_state
+                or passage.rights_state != "PERMITTED"
+                or passage.lifecycle_state != blob_state
                 or passage.trust_scope is not TrustScope.OBSERVED
             ):
                 raise RetrievalStateError(
@@ -1378,7 +1499,7 @@ class _HybridRetrievalAuthorityStore(
                 or cutoff.get("length")
                 != passage.byte_end - passage.byte_start
                 or passage.rights_state != "PERMITTED"
-                or passage.lifecycle_state != AdmissionState.ACTIVE.value
+                or passage.lifecycle_state != cutoff.get("blob_state")
                 or passage.trust_scope is not TrustScope.OBSERVED
             ):
                 raise AuthorityPersistenceError(

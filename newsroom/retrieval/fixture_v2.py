@@ -90,9 +90,18 @@ class IntegratedFixtureV2RetrievalContract:
             raise RetrievalContractError("retrieval fixture policy digest differs")
         if self.fixture_id != INTEGRATED_FIXTURE_V2.fixture_id:
             raise RetrievalContractError("retrieval fixture identity differs")
+        if (
+            self.contract_id != "integrated_fixture_v2_retrieval"
+            or self.contract_version != "integrated-fixture-v2-retrieval-v1"
+        ):
+            raise RetrievalContractError("retrieval fixture contract identity differs")
         source = json.loads(INTEGRATED_FIXTURE_V2.canonical_bytes)
         revisions = source["revisions"]
         hypotheses = source["event_hypotheses"]
+        if self.canonical_process_id != str(
+            source["formal_process"]["canonical_process_id"]
+        ):
+            raise RetrievalContractError("retrieval canonical process identity differs")
         if self.query_revision_id != str(revisions[-1]["source_revision_id"]):
             raise RetrievalContractError("retrieval query revision differs")
         if self.prior_revision_id != str(revisions[0]["source_revision_id"]):
@@ -100,6 +109,12 @@ class IntegratedFixtureV2RetrievalContract:
         if not isinstance(self.query_valid_time, UtcTimestamp):
             raise RetrievalContractError(
                 "retrieval fixture query-valid time must be typed"
+            )
+        if self.query_valid_time != UtcTimestamp.parse(
+            "2042-03-12T12:00:00.000000Z"
+        ):
+            raise RetrievalContractError(
+                "retrieval fixture query-valid time differs from the accepted contract"
             )
         query_observed_at = UtcTimestamp.parse(str(revisions[-1]["observed_at"]))
         if self.query_valid_time.value < query_observed_at.value:
@@ -122,14 +137,50 @@ class IntegratedFixtureV2RetrievalContract:
         root_ids = tuple(item.root_id for item in self.roots)
         if root_ids != tuple(sorted(set(root_ids))):
             raise RetrievalContractError("retrieval fixture roots must be sorted and unique")
-        passage_ids = {
+        expected_root_ids = {
+            f"candidate:{self.prior_candidate_version_id}",
+            f"query:{self.query_revision_id}",
+            "distractor:distinct-jurisdiction",
+            "distractor:incompatible-formal-id",
+        }
+        if set(root_ids) != expected_root_ids:
+            raise RetrievalContractError("retrieval fixture root inventory differs")
+        passage_inventory = [
             passage_id
             for root in self.roots
             for passage_id in root.passage_ids
-        }
+        ]
+        if len(passage_inventory) != len(set(passage_inventory)):
+            raise RetrievalContractError(
+                "retrieval fixture passage authority is ambiguous across roots"
+            )
+        dependency_inventory = [
+            dependency_id
+            for root in self.roots
+            for dependency_id in root.dependency_ids
+        ]
+        if len(dependency_inventory) != len(set(dependency_inventory)):
+            raise RetrievalContractError(
+                "retrieval fixture dependency authority is ambiguous across roots"
+            )
+        passage_ids = set(passage_inventory)
         expected_active = set(INTEGRATED_FIXTURE_V2_PROJECTION.expected_active_passage_ids)
         if passage_ids != expected_active:
             raise RetrievalContractError("retrieval roots must cover active fixture passages")
+        candidate_roots = tuple(
+            root for root in self.roots if root.candidate_version_id is not None
+        )
+        if (
+            len(candidate_roots) != 1
+            or candidate_roots[0].root_id
+            != f"candidate:{self.prior_candidate_version_id}"
+            or candidate_roots[0].candidate_version_id
+            != self.prior_candidate_version_id
+            or candidate_roots[0].exclusion_reason is not None
+        ):
+            raise RetrievalContractError(
+                "retrieval fixture prior-candidate authority differs"
+            )
         window_start = HYBRID_FIXTURE_POLICY_V1.date_window_start(
             self.query_valid_time
         )
@@ -144,6 +195,82 @@ class IntegratedFixtureV2RetrievalContract:
             raise RetrievalContractError(
                 "retrieval prior candidate is outside the accepted date window"
             )
+        expected_roots = {
+            f"candidate:{self.prior_candidate_version_id}": {
+                "candidate_version_id": self.prior_candidate_version_id,
+                "dependency_ids": tuple(
+                    sorted(
+                        {
+                            self.prior_revision_id,
+                            self.prior_hypothesis_version_id,
+                            self.prior_candidate_version_id,
+                        }
+                    )
+                ),
+                "passage_ids": tuple(
+                    sorted(str(item["passage_id"]) for item in revisions[0]["passages"])
+                ),
+                "observed_at": UtcTimestamp.parse(
+                    str(revisions[0]["observed_at"])
+                ),
+                "exclusion_reason": None,
+            },
+            f"query:{self.query_revision_id}": {
+                "candidate_version_id": None,
+                "dependency_ids": tuple(
+                    sorted(
+                        {
+                            self.query_revision_id,
+                            self.query_hypothesis_version_id,
+                        }
+                    )
+                ),
+                "passage_ids": tuple(
+                    sorted(str(item["passage_id"]) for item in revisions[-1]["passages"])
+                ),
+                "observed_at": UtcTimestamp.parse(
+                    str(revisions[-1]["observed_at"])
+                ),
+                "exclusion_reason": RetrievalExclusionReason.SELF_QUERY,
+            },
+            "distractor:distinct-jurisdiction": {
+                "candidate_version_id": None,
+                "dependency_ids": ("SYN-PROC-2042-NORTH",),
+                "passage_ids": ("ifv2-distinct-jurisdiction",),
+                "observed_at": UtcTimestamp.parse(
+                    str(revisions[0]["observed_at"])
+                ),
+                "exclusion_reason": (
+                    RetrievalExclusionReason.INCOMPATIBLE_JURISDICTION
+                ),
+            },
+            "distractor:incompatible-formal-id": {
+                "candidate_version_id": None,
+                "dependency_ids": ("SYN-PROC-2402",),
+                "passage_ids": ("ifv2-incompatible-formal-id",),
+                "observed_at": UtcTimestamp.parse(
+                    str(revisions[-1]["observed_at"])
+                ),
+                "exclusion_reason": (
+                    RetrievalExclusionReason.INCOMPATIBLE_FORMAL_ID
+                ),
+            },
+        }
+        for root in self.roots:
+            expected = expected_roots[root.root_id]
+            if any(
+                (
+                    root.candidate_version_id
+                    != expected["candidate_version_id"],
+                    root.dependency_ids != expected["dependency_ids"],
+                    root.passage_ids != expected["passage_ids"],
+                    root.observed_at != expected["observed_at"],
+                    root.exclusion_reason != expected["exclusion_reason"],
+                )
+            ):
+                raise RetrievalContractError(
+                    "retrieval fixture root lineage differs from accepted authority"
+                )
 
     @property
     def root_by_id(self) -> dict[str, FixtureDependencyRoot]:
@@ -189,7 +316,40 @@ class IntegratedFixtureV2RetrievalContract:
     def contract_digest(self) -> str:
         return digest_bytes(canonical_json_bytes(self.canonical_value()))
 
-    def query_digest(self, *, generation_identity_digest: str, query_valid_time: str, watermark: int) -> str:
+    def query_digest(
+        self,
+        *,
+        generation_identity_digest: str,
+        query_valid_time: str,
+        watermark: int,
+    ) -> str:
+        try:
+            validate_sha256_digest(
+                generation_identity_digest,
+                field="retrieval_generation_identity_digest",
+            )
+        except ValueError as exc:
+            raise RetrievalContractError(
+                "retrieval generation identity digest is invalid"
+            ) from exc
+        try:
+            parsed_query_valid_time = UtcTimestamp.parse(query_valid_time)
+        except (TypeError, ValueError) as exc:
+            raise RetrievalContractError(
+                "retrieval query digest time is invalid"
+            ) from exc
+        if parsed_query_valid_time != self.query_valid_time:
+            raise RetrievalContractError(
+                "retrieval query digest time differs from fixture authority"
+            )
+        if (
+            isinstance(watermark, bool)
+            or not isinstance(watermark, int)
+            or watermark <= 0
+        ):
+            raise RetrievalContractError(
+                "retrieval query digest watermark must be positive"
+            )
         return digest_canonical(
             {
                 "contract": "newsroom-find-related-event-candidates-query-v1",
@@ -198,7 +358,7 @@ class IntegratedFixtureV2RetrievalContract:
                 "query_revision_id": self.query_revision_id,
                 "query_hypothesis_version_id": self.query_hypothesis_version_id,
                 "canonical_process_id": self.canonical_process_id,
-                "query_valid_time": query_valid_time,
+                "query_valid_time": parsed_query_valid_time.to_text(),
                 "authority_watermark": watermark,
             }
         )
@@ -228,6 +388,19 @@ def validate_fixture_branch_executions(
     if tuple(item.branch for item in executions) != policy.required_branches:
         raise RetrievalContractError(
             "retrieval branch inventory differs from fixture authority"
+        )
+    if sum(item.elapsed_ms for item in executions) > policy.timeout_ms:
+        raise RetrievalContractError(
+            "retrieval branch evidence exceeds the shared tool timeout"
+        )
+    observed_roots = {
+        hit.dependency_root_id
+        for execution in executions
+        for hit in execution.hits
+    }
+    if observed_roots != set(contract.root_by_id):
+        raise RetrievalContractError(
+            "retrieval branch evidence omits the mandatory fixture neighbourhood"
         )
     fulltext_query_id = next(
         item.query_id
@@ -274,6 +447,21 @@ def validate_fixture_branch_executions(
             if root is None:
                 raise RetrievalContractError(
                     "retrieval hit has no checked fixture dependency root"
+                )
+            score = float(hit.raw_score)
+            if execution.branch in {
+                RetrievalBranch.EXACT,
+                RetrievalBranch.ADMITTED_GRAPH,
+            } and score != 1.0:
+                raise RetrievalContractError(
+                    f"{execution.branch.value} score differs from fixture authority"
+                )
+            if (
+                execution.branch is RetrievalBranch.VECTOR
+                and not 0.0 <= score <= 1.0
+            ):
+                raise RetrievalContractError(
+                    "vector score differs from fixture authority"
                 )
             if hit.query_id != execution.query_id or hit.query_digest != query_digest:
                 raise RetrievalContractError(

@@ -166,7 +166,11 @@ def test_actual_service_executes_all_four_branches_and_hydrates_authority(
             "ifv2-prior-en",
             "ifv2-prior-zh-hk",
         )
-        assert all(item.rights_state == "PERMITTED" for item in context.hydrated_passages)
+        assert all(
+            item.rights_state == "PERMITTED"
+            and item.lifecycle_state in {"INSTALLED", "ACTIVE"}
+            for item in context.hydrated_passages
+        )
         assert {
             item.reason for item in context.exclusions
         } >= {
@@ -201,6 +205,27 @@ def test_actual_service_missing_fulltext_index_is_unavailable_not_no_match(
     try:
         result = system.retrieval.find_related_event_candidates(
             _request(key="actual-retrieval-2c-missing-fulltext"),
+            proof=AuthenticationProof(method="STATIC_TOKEN", credential="token-1"),
+        )
+        assert result.outcome is RetrievalOutcome.UNAVAILABLE
+        assert result.failure is not None
+        assert result.failure.reason_code == "NEO4J_RETRIEVAL_UNAVAILABLE"
+        assert result.context is None
+    finally:
+        system.close()
+        _cleanup_generation(generation.generation_id)
+
+
+def test_actual_service_missing_vector_index_is_unavailable_not_no_match(
+    tmp_path: Path,
+) -> None:
+    database, object_root, generation = _activate(tmp_path)
+    names = _names(generation.generation_id)
+    _projector_write(f"DROP INDEX `{names.vector_index_name}`")
+    system = _open_retrieval(database, object_root)
+    try:
+        result = system.retrieval.find_related_event_candidates(
+            _request(key="actual-retrieval-2c-missing-vector"),
             proof=AuthenticationProof(method="STATIC_TOKEN", credential="token-1"),
         )
         assert result.outcome is RetrievalOutcome.UNAVAILABLE

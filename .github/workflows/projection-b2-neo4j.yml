@@ -256,6 +256,7 @@ jobs:
               "test_actual_service_executes_all_four_branches_and_hydrates_authority",
               "test_actual_service_missing_admitted_relation_is_incomplete_not_no_match",
               "test_actual_service_missing_fulltext_index_is_unavailable_not_no_match",
+              "test_actual_service_missing_vector_index_is_unavailable_not_no_match",
           }
           retrieval_names = {case.attrib.get("name", "") for case in retrieval}
           if retrieval_names != required_retrieval:

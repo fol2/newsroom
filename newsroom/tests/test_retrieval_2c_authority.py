@@ -8,6 +8,7 @@ import sqlite3
 import pytest
 
 from newsroom.authority import (
+    AuthenticationError,
     AuthenticationProof,
     AuthorityPersistenceError,
     ObjectAdmissionId,
@@ -19,7 +20,7 @@ from newsroom.authority.canonical import (
     digest_canonical,
 )
 from newsroom.authority.persistence import IdempotencyConflict
-from newsroom.projection.neo4j import Neo4jReadError
+from newsroom.projection.neo4j import Neo4jCompatibilityError, Neo4jReadError
 from newsroom.retrieval import (
     FindRelatedEventCandidatesRequest,
     INTEGRATED_FIXTURE_V2_RETRIEVAL,
@@ -27,6 +28,7 @@ from newsroom.retrieval import (
     RetrievalContextV2Id,
     RetrievalOutcome,
     RetrievalRequestId,
+    canonical_score,
 )
 
 from .complete_projection_2b_helpers import COMPLETE_NOW, complete_scopes, proof
@@ -47,6 +49,14 @@ _REQUEST_ID = RetrievalRequestId.parse(
 _CONTEXT_ID = RetrievalContextV2Id.parse(
     "00000000-0000-4000-8000-000000002402"
 )
+
+
+class _MutableClock:
+    def __init__(self, current: UtcTimestamp) -> None:
+        self.current = current
+
+    def __call__(self) -> UtcTimestamp:
+        return self.current
 
 
 def request(
@@ -128,6 +138,20 @@ def test_find_related_event_candidates_persists_authoritative_context_and_replay
             assert conn.execute(
                 "SELECT COUNT(*) FROM hybrid_retrieval_context_hydrations"
             ).fetchone()[0] == 2
+            cutoffs = {
+                str(access_decision_id): json.loads(bytes(state_cutoff_bytes))
+                for access_decision_id, state_cutoff_bytes in conn.execute(
+                    "SELECT access_decision_id,state_cutoff_bytes "
+                    "FROM object_access_decisions"
+                )
+            }
+            assert all(
+                passage.lifecycle_state
+                == cutoffs[str(passage.access_decision_id)]["blob_state"]
+                and cutoffs[str(passage.access_decision_id)]["admission_state"]
+                == "ACTIVE"
+                for passage in first.context.hydrated_passages
+            )
             assert conn.execute(
                 "SELECT COUNT(*) FROM object_access_decisions"
             ).fetchone()[0] >= 2
@@ -298,6 +322,144 @@ def test_complete_replay_expires_at_retained_projection_freshness_deadline(
         reopened.close()
 
 
+def test_authentication_expiry_during_retrieval_creates_no_context_authority(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    object_root = tmp_path / "objects"
+    seed_active_retrieval_authority(database, object_root=object_root)
+    clock = _MutableClock(COMPLETE_NOW)
+    adapter = MemoryHybridRetrievalAdapter(
+        on_execute=lambda: setattr(
+            clock,
+            "current",
+            UtcTimestamp.parse("2042-03-12T12:05:00.000001Z"),
+        )
+    )
+    system = open_retrieval_test_system(
+        database,
+        object_root=object_root,
+        adapter=adapter,
+        clock=clock,
+        authentication_ttl_seconds=300,
+    )
+    try:
+        with pytest.raises(AuthenticationError, match="expired"):
+            system.retrieval.find_related_event_candidates(
+                request(), proof=proof()
+            )
+        with sqlite3.connect(database) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM hybrid_retrieval_attempts"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM hybrid_retrieval_contexts_v2"
+            ).fetchone()[0] == 0
+    finally:
+        system.close()
+
+
+def test_authentication_expiry_during_graph_failure_is_not_persisted(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    object_root = tmp_path / "objects"
+    seed_active_retrieval_authority(database, object_root=object_root)
+    clock = _MutableClock(COMPLETE_NOW)
+    adapter = MemoryHybridRetrievalAdapter(
+        failure=Neo4jReadError("simulated unavailable graph"),
+        on_execute=lambda: setattr(
+            clock,
+            "current",
+            UtcTimestamp.parse("2042-03-12T12:05:00.000001Z"),
+        ),
+    )
+    system = open_retrieval_test_system(
+        database,
+        object_root=object_root,
+        adapter=adapter,
+        clock=clock,
+        authentication_ttl_seconds=300,
+    )
+    try:
+        with pytest.raises(AuthenticationError, match="expired"):
+            system.retrieval.find_related_event_candidates(
+                request(key="retrieval-2c-expired-failure"),
+                proof=proof(),
+            )
+        with sqlite3.connect(database) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM hybrid_retrieval_attempts"
+            ).fetchone()[0] == 0
+    finally:
+        system.close()
+
+
+def test_replay_rejects_authority_clock_rollback_without_graph_lookup(
+    tmp_path: Path,
+) -> None:
+    database, object_root, _adapter, system = setup(tmp_path)
+    try:
+        first = system.retrieval.find_related_event_candidates(
+            request(), proof=proof()
+        )
+        assert first.outcome is RetrievalOutcome.COMPLETE
+        assert first.context is not None
+    finally:
+        system.close()
+
+    adapter = MemoryHybridRetrievalAdapter()
+    reopened = open_retrieval_test_system(
+        database,
+        object_root=object_root,
+        adapter=adapter,
+        clock=lambda: UtcTimestamp.parse(
+            "2042-03-12T11:59:59.999999Z"
+        ),
+    )
+    try:
+        replay = reopened.retrieval.find_related_event_candidates(
+            request(), proof=proof()
+        )
+        assert replay.replayed is True
+        assert replay.context is None
+        assert replay.outcome is RetrievalOutcome.STALE
+        assert replay.failure is not None
+        assert replay.failure.reason_code == "RETRIEVAL_SOURCE_STALE"
+        assert adapter.call_count == 0
+    finally:
+        reopened.close()
+
+
+def test_substituted_adapter_cannot_omit_mandatory_fixture_neighbourhood(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    object_root = tmp_path / "objects"
+    seed_active_retrieval_authority(database, object_root=object_root)
+    adapter = MemoryHybridRetrievalAdapter(include_exclusions=False)
+    system = open_retrieval_test_system(
+        database,
+        object_root=object_root,
+        adapter=adapter,
+    )
+    try:
+        result = system.retrieval.find_related_event_candidates(
+            request(key="retrieval-2c-omitted-neighbourhood"),
+            proof=proof(),
+        )
+        assert result.outcome is RetrievalOutcome.INCOMPLETE
+        assert result.failure is not None
+        assert result.failure.reason_code == "RETRIEVAL_CONTRACT_MISMATCH"
+        assert result.context is None
+        with sqlite3.connect(database) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM hybrid_retrieval_contexts_v2"
+            ).fetchone()[0] == 0
+    finally:
+        system.close()
+
+
 def test_missing_active_generation_is_unavailable_not_no_match(
     tmp_path: Path,
 ) -> None:
@@ -428,6 +590,34 @@ def test_replay_is_bound_to_the_original_principal(tmp_path: Path) -> None:
         other.close()
 
 
+def test_nonqualified_live_neo4j_is_explicitly_unavailable(
+    tmp_path: Path,
+) -> None:
+    database, _objects, adapter, system = setup(
+        tmp_path,
+        adapter=MemoryHybridRetrievalAdapter(
+            failure=Neo4jCompatibilityError(
+                "synthetic nonqualified Neo4j service"
+            )
+        ),
+    )
+    try:
+        result = system.retrieval.find_related_event_candidates(
+            request(), proof=proof()
+        )
+        assert result.outcome is RetrievalOutcome.UNAVAILABLE
+        assert result.context is None
+        assert result.failure is not None
+        assert result.failure.reason_code == "NEO4J_RETRIEVAL_UNAVAILABLE"
+        assert adapter.call_count == 1
+        with sqlite3.connect(database) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM hybrid_retrieval_contexts_v2"
+            ).fetchone()[0] == 0
+    finally:
+        system.close()
+
+
 def test_graph_unavailability_is_explicit_and_idempotently_retained(
     tmp_path: Path,
 ) -> None:
@@ -499,6 +689,39 @@ def test_substituted_typed_adapter_query_identity_fails_closed(
                     hits=altered_hits,
                 ),
                 *executions[1:],
+            )
+
+    _database, _objects, adapter, system = setup(
+        tmp_path,
+        adapter=SubstitutedAdapter(),
+    )
+    try:
+        result = system.retrieval.find_related_event_candidates(
+            request(), proof=proof()
+        )
+        assert result.outcome is RetrievalOutcome.INCOMPLETE
+        assert result.failure is not None
+        assert result.failure.reason_code == "RETRIEVAL_CONTRACT_MISMATCH"
+        assert adapter.call_count == 1
+    finally:
+        system.close()
+
+
+def test_substituted_typed_adapter_score_evidence_fails_closed(
+    tmp_path: Path,
+) -> None:
+    class SubstitutedAdapter(MemoryHybridRetrievalAdapter):
+        def run_bounded_hybrid_branches(self, **kwargs):
+            executions = super().run_bounded_hybrid_branches(**kwargs)
+            graph = executions[1]
+            altered_hits = tuple(
+                replace(hit, raw_score=canonical_score(0.5))
+                for hit in graph.hits
+            )
+            return (
+                executions[0],
+                replace(graph, hits=altered_hits),
+                *executions[2:],
             )
 
     _database, _objects, adapter, system = setup(

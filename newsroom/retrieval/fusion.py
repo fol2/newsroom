@@ -40,9 +40,10 @@ def fuse_fixture_candidates(
     for root_id in sorted(grouped):
         root = fixture.root_by_id[root_id]
         hits = _best_hit_per_branch(grouped[root_id])
-        if (
-            root.observed_at.value < date_window_start.value
-            or root.observed_at.value > fixture.query_valid_time.value
+        if _outside_date_window(
+            observed_at=root.observed_at,
+            date_window_start=date_window_start,
+            query_valid_time=fixture.query_valid_time,
         ):
             exclusions.append(
                 RetrievalExclusion(
@@ -124,6 +125,27 @@ def _best_hit_per_branch(
             selected.values(),
             key=lambda item: (item.branch.value, item.rank, item.result_key),
         )
+    )
+
+
+def _outside_date_window(
+    *,
+    observed_at: object,
+    date_window_start: object,
+    query_valid_time: object,
+) -> bool:
+    from newsroom.authority.types import UtcTimestamp
+
+    if not all(
+        isinstance(value, UtcTimestamp)
+        for value in (observed_at, date_window_start, query_valid_time)
+    ):
+        raise RetrievalContractError(
+            "retrieval temporal bounds must be typed UTC values"
+        )
+    return (
+        observed_at.value < date_window_start.value
+        or observed_at.value > query_valid_time.value
     )
 
 

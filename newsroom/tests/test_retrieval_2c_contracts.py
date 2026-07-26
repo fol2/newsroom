@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from fractions import Fraction
 import inspect
 
@@ -114,6 +115,101 @@ def test_policy_and_fixture_contracts_pin_the_accepted_2c_bounds() -> None:
     assert "ifv2-tombstoned-negative" not in fixture.root_by_passage_id
 
 
+def test_fixture_contract_rejects_identity_and_root_ambiguity() -> None:
+    fixture = INTEGRATED_FIXTURE_V2_RETRIEVAL
+    with pytest.raises(RetrievalContractError, match="canonical process"):
+        replace(fixture, canonical_process_id="attacker-selected-process")
+
+    candidate = fixture.root_by_id[
+        f"candidate:{fixture.prior_candidate_version_id}"
+    ]
+    query = fixture.root_by_id[f"query:{fixture.query_revision_id}"]
+    ambiguous_passages = replace(
+        candidate,
+        passage_ids=tuple(sorted((*candidate.passage_ids, query.passage_ids[0]))),
+    )
+    with pytest.raises(RetrievalContractError, match="passage authority is ambiguous"):
+        replace(
+            fixture,
+            roots=tuple(
+                sorted(
+                    (
+                        ambiguous_passages,
+                        *(root for root in fixture.roots if root is not candidate),
+                    ),
+                    key=lambda root: root.root_id,
+                )
+            ),
+        )
+
+    ambiguous_dependencies = replace(
+        candidate,
+        dependency_ids=tuple(
+            sorted((*candidate.dependency_ids, query.dependency_ids[0]))
+        ),
+    )
+    with pytest.raises(RetrievalContractError, match="dependency authority is ambiguous"):
+        replace(
+            fixture,
+            roots=tuple(
+                sorted(
+                    (
+                        ambiguous_dependencies,
+                        *(root for root in fixture.roots if root is not candidate),
+                    ),
+                    key=lambda root: root.root_id,
+                )
+            ),
+        )
+
+
+def test_fixture_contract_rejects_rebound_root_lineage_and_query_identity() -> None:
+    fixture = INTEGRATED_FIXTURE_V2_RETRIEVAL
+    candidate = fixture.root_by_id[
+        f"candidate:{fixture.prior_candidate_version_id}"
+    ]
+    query = fixture.root_by_id[f"query:{fixture.query_revision_id}"]
+    rebound_candidate = replace(
+        candidate,
+        passage_ids=query.passage_ids,
+    )
+    rebound_query = replace(
+        query,
+        passage_ids=candidate.passage_ids,
+    )
+    with pytest.raises(RetrievalContractError, match="root lineage"):
+        replace(
+            fixture,
+            roots=tuple(
+                sorted(
+                    (
+                        rebound_candidate,
+                        rebound_query,
+                        *(
+                            root
+                            for root in fixture.roots
+                            if root not in {candidate, query}
+                        ),
+                    ),
+                    key=lambda root: root.root_id,
+                )
+            ),
+        )
+
+    with pytest.raises(RetrievalContractError, match="query digest time"):
+        fixture.query_digest(
+            generation_identity_digest=complete_identity().identity_digest,
+            query_valid_time="2042-03-12T12:00:00.000001Z",
+            watermark=42,
+        )
+    with pytest.raises(RetrievalContractError, match="watermark"):
+        fixture.query_digest(
+            generation_identity_digest=complete_identity().identity_digest,
+            query_valid_time=fixture.query_valid_time.to_text(),
+            watermark=0,
+        )
+
+
 def test_request_has_no_caller_selected_limit_generation_or_query_surface() -> None:
     request = FindRelatedEventCandidatesRequest(
         request_id=_REQUEST_ID,
@@ -169,6 +265,41 @@ def test_branch_execution_requires_contiguous_bounded_unique_hits() -> None:
             result_limit=8,
             elapsed_ms=4,
             hits=(second,),
+        )
+
+
+@pytest.mark.parametrize(
+    ("branch", "score", "message"),
+    (
+        (RetrievalBranch.EXACT, 0.5, "exact retrieval score"),
+        (RetrievalBranch.ADMITTED_GRAPH, 0.0, "graph retrieval score"),
+        (RetrievalBranch.FULL_TEXT, -0.5, "full-text retrieval score"),
+        (RetrievalBranch.VECTOR, 1.01, "vector retrieval score"),
+    ),
+)
+def test_branch_hit_score_domains_are_typed_and_bounded(
+    branch: RetrievalBranch,
+    score: float,
+    message: str,
+) -> None:
+    with pytest.raises(RetrievalContractError, match=message):
+        replace(_hit(branch), raw_score=canonical_score(score))
+
+
+def test_shared_timeout_is_rechecked_by_typed_and_fixture_authority() -> None:
+    executions = tuple(
+        replace(execution, elapsed_ms=1_300)
+        for execution in _executions()
+    )
+    with pytest.raises(RetrievalContractError, match="shared tool timeout"):
+        __import__(
+            "newsroom.retrieval.fixture_v2",
+            fromlist=["validate_fixture_branch_executions"],
+        ).validate_fixture_branch_executions(
+            executions=executions,
+            policy=HYBRID_FIXTURE_POLICY_V1,
+            contract=INTEGRATED_FIXTURE_V2_RETRIEVAL,
+            query_digest=_QUERY_DIGEST,
         )
 
 
@@ -255,6 +386,15 @@ def test_context_v2_requires_all_four_branches_active_projection_and_exact_hydra
         recorded_at=COMPLETE_NOW,
     )
     assert context.context_digest.startswith("sha256:")
+
+    with pytest.raises(RetrievalContractError, match="shared tool timeout"):
+        replace(
+            context,
+            branches=tuple(
+                replace(execution, elapsed_ms=1_300)
+                for execution in context.branches
+            ),
+        )
 
     with pytest.raises(RetrievalContractError, match="all four"):
         RetrievalContextV2(

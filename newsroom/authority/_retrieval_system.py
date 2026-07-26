@@ -14,6 +14,7 @@ from newsroom.projection.neo4j._retrieval_adapter import (
     _open_hybrid_retrieval_neo4j_adapter,
 )
 from newsroom.projection.neo4j.models import (
+    Neo4jCompatibilityError,
     Neo4jIdentityConflict,
     Neo4jProjectorConfig,
     Neo4jReadError,
@@ -218,6 +219,8 @@ class _HybridRetrievalBoundary:
             replay = self._store.replay_request(
                 request,
                 authentication=security.authentication,
+                authorization_request=security.authorization_request,
+                authorization=security.authorization,
             )
         except (RetrievalStateError, ProjectionStateError) as exc:
             outcome, reason_code = self._classify_failure(exc)
@@ -285,6 +288,12 @@ class _HybridRetrievalBoundary:
                 len(item.text.encode("utf-8")) for item in hydrated
             )
             serving_time = self._clock()
+            security.authentication.require_current(serving_time)
+            security.authorization.require_allowed()
+            if serving_time.value < projection.serving_time.value:
+                raise RetrievalStateError(
+                    "retrieval authority clock moved backwards"
+                )
             if serving_time.value > projection.freshness_deadline.value:
                 raise RetrievalStateError(
                     "retrieval projection freshness is stale"
@@ -448,7 +457,7 @@ class _HybridRetrievalBoundary:
                     ),
                     rights_state="PERMITTED",
                     lifecycle_state=str(
-                        state_cutoff.get("admission_state", "UNKNOWN")
+                        state_cutoff.get("blob_state", "UNKNOWN")
                     ),
                     trust_scope=TrustScope.OBSERVED,
                 )
@@ -512,7 +521,7 @@ class _HybridRetrievalBoundary:
             raise exc
         if isinstance(exc, (ObjectHydrationDenied, ObjectAdmissionDenied)):
             return RetrievalOutcome.INCOMPLETE, "HYDRATION_AUTHORITY_DENIED"
-        if isinstance(exc, Neo4jReadError):
+        if isinstance(exc, (Neo4jReadError, Neo4jCompatibilityError)):
             return RetrievalOutcome.UNAVAILABLE, "NEO4J_RETRIEVAL_UNAVAILABLE"
         if isinstance(exc, Neo4jIdentityConflict):
             return RetrievalOutcome.INCOMPLETE, "NEO4J_RETRIEVAL_IDENTITY_MISMATCH"
@@ -524,6 +533,7 @@ class _HybridRetrievalBoundary:
                 "stale" in message
                 or "source" in message
                 or "changed before" in message
+                or "authority clock moved backwards" in message
             ):
                 return RetrievalOutcome.STALE, "RETRIEVAL_SOURCE_STALE"
             if "dead letter" in message:

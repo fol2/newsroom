@@ -15,6 +15,9 @@ class TestRunJsonCommand(unittest.TestCase):
         # Emit a lot of output, then hang long enough to trigger the timeout.
         cmd = [
             sys.executable,
+            "-I",
+            "-S",
+            "-u",
             "-c",
             (
                 "import sys, time;"

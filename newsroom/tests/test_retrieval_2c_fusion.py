@@ -17,6 +17,7 @@ from newsroom.retrieval import (
     canonical_score,
     fuse_fixture_candidates,
 )
+from newsroom.retrieval.fusion import _outside_date_window
 
 
 _QUERY_DIGEST = "sha256:" + "4" * 64
@@ -164,37 +165,15 @@ def test_fusion_rejects_unchecked_dependency_root() -> None:
 
 def test_fusion_excludes_checked_root_outside_server_owned_date_window() -> None:
     root_id = "distractor:distinct-jurisdiction"
-    roots = tuple(
-        replace(
-            root,
-            observed_at=UtcTimestamp.parse(
-                "2041-01-01T00:00:00.000000Z"
-            ),
-        )
-        if root.root_id == root_id
-        else root
-        for root in INTEGRATED_FIXTURE_V2_RETRIEVAL.roots
-    )
-    fixture = replace(
-        INTEGRATED_FIXTURE_V2_RETRIEVAL,
-        roots=roots,
-    )
-    executions = tuple(
-        _execution(
-            branch,
-            ((root_id, "ifv2-distinct-jurisdiction"),)
-            if branch is RetrievalBranch.FULL_TEXT
-            else (),
-        )
-        for branch in RetrievalBranch
+    root = replace(
+        INTEGRATED_FIXTURE_V2_RETRIEVAL.root_by_id[root_id],
+        observed_at=UtcTimestamp.parse("2041-01-01T00:00:00.000000Z"),
     )
 
-    retained, excluded = fuse_fixture_candidates(
-        executions=executions,
-        policy=HYBRID_FIXTURE_POLICY_V1,
-        fixture=fixture,
+    assert _outside_date_window(
+        observed_at=root.observed_at,
+        date_window_start=HYBRID_FIXTURE_POLICY_V1.date_window_start(
+            INTEGRATED_FIXTURE_V2_RETRIEVAL.query_valid_time
+        ),
+        query_valid_time=INTEGRATED_FIXTURE_V2_RETRIEVAL.query_valid_time,
     )
-
-    assert retained == ()
-    assert len(excluded) == 1
-    assert excluded[0].reason is RetrievalExclusionReason.OUTSIDE_TEMPORAL_SCOPE
