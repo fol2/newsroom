@@ -6,13 +6,18 @@ import sqlite3
 
 import pytest
 
-from newsroom.authority import AuthenticationProof
+from newsroom.authority import AuthenticationProof, AuthorityPersistenceError
 from newsroom.authority.migrations import SCHEMA_VERSION
 from newsroom.increment2 import (
     DevelopmentCandidateAdmissionRequest,
     INTEGRATED_FIXTURE_V2_DEVELOPMENT_CANDIDATE,
 )
 from newsroom.integrated import CandidateAdmissionOutcome, IntegratedTriageProposalId
+from newsroom.projection.neo4j import (
+    CompleteDerivativeType,
+    Neo4jIdentityConflict,
+)
+from newsroom.projection.neo4j import Neo4jIdentityConflict
 from newsroom.relations import (
     INTEGRATED_FIXTURE_V2,
     RelationCurrentState,
@@ -26,12 +31,15 @@ from newsroom.retrieval import (
 
 from .increment_2d_helpers import (
     MemoryHybridRetrievalAdapter,
+    block_active_candidate_generation,
+    candidate_request,
     fixture_passage_admission_id,
     open_candidate_object_system,
     open_candidate_relation_system,
-    candidate_request,
     open_candidate_test_system,
     proof,
+    rebuild_replacement_generation,
+    replace_active_retrieval_generation,
     retained_relation_identities,
     retrieval_request,
     scopes,
@@ -39,7 +47,6 @@ from .increment_2d_helpers import (
 )
 
 from .relation_2a_helpers import decision_request
-from .retrieval_2c_helpers import block_active_retrieval_generation
 
 
 def _complete_context(system, *, key: str):
@@ -49,6 +56,39 @@ def _complete_context(system, *, key: str):
     )
     assert result.context is not None
     return result.context
+
+
+def _admit_fixture_candidate(tmp_path: Path, *, key: str):
+    database = tmp_path / "authority.sqlite3"
+    object_root = tmp_path / "objects"
+    seed_active_retrieval_authority(database, object_root=object_root)
+    system = open_candidate_test_system(
+        database,
+        object_root=object_root,
+        adapter=MemoryHybridRetrievalAdapter(),
+    )
+    try:
+        context = _complete_context(system, key=f"{key}-context")
+        request = candidate_request(context, key=f"{key}-admit")
+        admitted = system.candidates.admit(request, proof=proof())
+    finally:
+        system.close()
+    return database, object_root, context, request, admitted
+
+
+def _candidate_counts(database: Path) -> tuple[int, int, int, int]:
+    with sqlite3.connect(database) as conn:
+        return tuple(
+            int(
+                conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            )
+            for table in (
+                "development_candidates_v2",
+                "development_candidate_versions_v2",
+                "development_candidate_admission_decisions_v2",
+                "ledger_events",
+            )
+        )
 
 
 def test_schema_version_advances_to_candidate_authority_v9(tmp_path: Path) -> None:
@@ -158,6 +198,279 @@ def test_equivalent_context_deduplicates_to_same_candidate_and_version(
         system.close()
 
 
+def test_replacement_generation_recovery_deduplicates_without_rewriting_history(
+    tmp_path: Path,
+) -> None:
+    database, object_root, _context, _request, admitted = (
+        _admit_fixture_candidate(tmp_path, key="increment-2d-replacement")
+    )
+    replacement_id = replace_active_retrieval_generation(
+        database,
+        object_root=object_root,
+        suffix="candidate-recovery",
+    )
+
+    system = open_candidate_test_system(
+        database,
+        object_root=object_root,
+        adapter=MemoryHybridRetrievalAdapter(),
+    )
+    try:
+        recovered_context = _complete_context(
+            system,
+            key="increment-2d-replacement-recovered-context",
+        )
+        assert recovered_context.projection.identity.generation_id == replacement_id
+        recovered = system.candidates.admit(
+            candidate_request(
+                recovered_context,
+                key="increment-2d-replacement-recovered-admit",
+            ),
+            proof=proof(),
+        )
+        assert recovered.outcome is CandidateAdmissionOutcome.DEDUPLICATED
+        assert recovered.candidate_id == admitted.candidate_id
+        assert recovered.candidate_version_id == admitted.candidate_version_id
+        assert recovered.decision_id != admitted.decision_id
+        assert system.candidates.decision(
+            admitted.decision_id,
+            proof=proof(),
+        ) == admitted
+        assert _candidate_counts(database)[:3] == (1, 1, 2)
+    finally:
+        system.close()
+
+
+def test_relation_revocation_preserves_candidate_history_and_blocks_later_admission(
+    tmp_path: Path,
+) -> None:
+    database, object_root, context, original_request, admitted = (
+        _admit_fixture_candidate(tmp_path, key="increment-2d-relation-revoke")
+    )
+    proposal_id, admission_decision_id = retained_relation_identities(database)
+    with open_candidate_relation_system(database) as relation_system:
+        proposal = relation_system.relations.proposal(proposal_id, proof=proof())
+        revoked = relation_system.relations.decide(
+            decision_request(
+                proposal,
+                action=RelationDecisionAction.REVOKE,
+                expected_version=1,
+                previous_decision_id=admission_decision_id,
+                key="increment-2d-revoke-admitted-development",
+            ),
+            proof=proof(),
+        )
+        assert revoked.current_state is RelationCurrentState.REVOKED
+
+    stale = open_candidate_test_system(
+        database,
+        object_root=object_root,
+        adapter=MemoryHybridRetrievalAdapter(),
+    )
+    try:
+        assert stale.candidates.decision(
+            admitted.decision_id,
+            proof=proof(),
+        ) == admitted
+        with pytest.raises(RetrievalStateError, match="source watermark is stale"):
+            stale.candidates.admit(original_request, proof=proof())
+        assert _candidate_counts(database)[:3] == (1, 1, 1)
+    finally:
+        stale.close()
+
+    replace_active_retrieval_generation(
+        database,
+        object_root=object_root,
+        suffix="after-relation-revocation",
+    )
+    current = open_candidate_test_system(
+        database,
+        object_root=object_root,
+        adapter=MemoryHybridRetrievalAdapter(),
+    )
+    try:
+        later_context = _complete_context(
+            current,
+            key="increment-2d-after-relation-revocation",
+        )
+        with pytest.raises(
+            AuthorityPersistenceError,
+            match="relation is not currently admitted",
+        ):
+            current.candidates.admit(
+                candidate_request(
+                    later_context,
+                    key="increment-2d-revoked-relation-admit",
+                ),
+                proof=proof(),
+            )
+        assert current.candidates.decision(
+            admitted.decision_id,
+            proof=proof(),
+        ) == admitted
+        assert context.context_digest == admitted.retrieval_context_digest
+        assert _candidate_counts(database)[:3] == (1, 1, 1)
+    finally:
+        current.close()
+
+
+def test_governed_deletion_preserves_candidate_history_and_prevents_resurrection(
+    tmp_path: Path,
+) -> None:
+    database, object_root, _context, original_request, admitted = (
+        _admit_fixture_candidate(tmp_path, key="increment-2d-object-delete")
+    )
+    passage = INTEGRATED_FIXTURE_V2.passage_by_id["ifv2-prior-en"]
+    admission_id = fixture_passage_admission_id(
+        database,
+        passage_id=passage.passage_id,
+    )
+    with open_candidate_object_system(
+        database,
+        object_root=object_root,
+    ) as object_system:
+        object_system.objects.revoke(
+            admission_id,
+            reason_code="INCREMENT_2D_PRIOR_PASSAGE_REVOKED",
+            idempotency_key="increment-2d-prior-passage-revoke",
+            proof=proof(),
+        )
+        deletion = object_system.objects.request_deletion(
+            passage.blob_digest,
+            reason_code="INCREMENT_2D_PRIOR_PASSAGE_DELETE",
+            idempotency_key="increment-2d-prior-passage-delete",
+            proof=proof(),
+        )
+        object_system.objects.tombstone(
+            deletion.deletion_id,
+            reason_code="INCREMENT_2D_PRIOR_PASSAGE_TOMBSTONE",
+            idempotency_key="increment-2d-prior-passage-tombstone",
+            proof=proof(),
+        )
+
+    stale = open_candidate_test_system(
+        database,
+        object_root=object_root,
+        adapter=MemoryHybridRetrievalAdapter(),
+    )
+    try:
+        assert stale.candidates.decision(
+            admitted.decision_id,
+            proof=proof(),
+        ) == admitted
+        with pytest.raises(RetrievalStateError):
+            stale.candidates.admit(original_request, proof=proof())
+    finally:
+        stale.close()
+
+    adapter, replacement_id, _checkpoint = rebuild_replacement_generation(
+        database,
+        object_root=object_root,
+        suffix="after-prior-passage-tombstone",
+    )
+    documents = tuple(
+        document
+        for (generation_id, _ledger_seq), batch in adapter.deliveries.items()
+        if generation_id == str(replacement_id)
+        for document in batch.documents
+    )
+    removals = tuple(
+        removal
+        for (generation_id, _ledger_seq), batch in adapter.deliveries.items()
+        if generation_id == str(replacement_id)
+        for removal in batch.removals
+        if removal.stable_key == passage.passage_id
+    )
+    assert passage.passage_id not in {item.passage_id for item in documents}
+    assert {item.derivative_type for item in removals} == {
+        CompleteDerivativeType.FULL_TEXT,
+        CompleteDerivativeType.VECTOR,
+    }
+    assert all(item.object_admission_ids == (admission_id,) for item in removals)
+    with pytest.raises(
+        Neo4jIdentityConflict,
+        match="active set differs from fixture",
+    ):
+        replace_active_retrieval_generation(
+            database,
+            object_root=object_root,
+            suffix="after-prior-passage-tombstone-qualification",
+        )
+
+    current = open_candidate_test_system(
+        database,
+        object_root=object_root,
+        adapter=MemoryHybridRetrievalAdapter(),
+    )
+    try:
+        result = current.retrieval.find_related_event_candidates(
+            retrieval_request(key="increment-2d-after-tombstone-retrieval"),
+            proof=proof(),
+        )
+        assert result.outcome is RetrievalOutcome.STALE
+        assert result.context is None
+        assert result.failure is not None
+        assert result.failure.reason_code == "RETRIEVAL_SOURCE_STALE"
+        assert current.candidates.decision(
+            admitted.decision_id,
+            proof=proof(),
+        ) == admitted
+        assert _candidate_counts(database)[:3] == (1, 1, 1)
+    finally:
+        current.close()
+
+
+@pytest.mark.parametrize(
+    ("dead_letter", "reason_fragment", "failure_code"),
+    (
+        (False, "required gap", "RETRIEVAL_GAP_BLOCKED"),
+        (True, "dead letter", "RETRIEVAL_DEAD_LETTER_BLOCKED"),
+    ),
+)
+def test_gap_or_dead_letter_preserves_history_and_blocks_candidate_reuse(
+    tmp_path: Path,
+    dead_letter: bool,
+    reason_fragment: str,
+    failure_code: str,
+) -> None:
+    database, object_root, _context, original_request, admitted = (
+        _admit_fixture_candidate(
+            tmp_path,
+            key=f"increment-2d-blocked-{dead_letter}",
+        )
+    )
+    block_active_candidate_generation(
+        database,
+        object_root=object_root,
+        dead_letter=dead_letter,
+    )
+    system = open_candidate_test_system(
+        database,
+        object_root=object_root,
+        adapter=MemoryHybridRetrievalAdapter(),
+    )
+    try:
+        assert system.candidates.decision(
+            admitted.decision_id,
+            proof=proof(),
+        ) == admitted
+        with pytest.raises(RetrievalStateError, match=reason_fragment):
+            system.candidates.admit(original_request, proof=proof())
+        blocked = system.retrieval.find_related_event_candidates(
+            retrieval_request(
+                key=f"increment-2d-blocked-retrieval-{dead_letter}"
+            ),
+            proof=proof(),
+        )
+        assert blocked.outcome is RetrievalOutcome.INCOMPLETE
+        assert blocked.context is None
+        assert blocked.failure is not None
+        assert blocked.failure.reason_code == failure_code
+        assert _candidate_counts(database)[:3] == (1, 1, 1)
+    finally:
+        system.close()
+
+
 def test_admission_authenticates_before_context_lookup(tmp_path: Path) -> None:
     database = tmp_path / "authority.sqlite3"
     object_root = tmp_path / "objects"
@@ -238,18 +551,6 @@ def test_reopen_rejects_redigested_normalized_candidate_tamper(
         )
 
 
-def _candidate_counts(database: Path) -> tuple[int, int, int, int]:
-    with sqlite3.connect(database) as conn:
-        return tuple(
-            int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            for table in (
-                "development_candidates_v2",
-                "development_candidate_versions_v2",
-                "development_candidate_admission_decisions_v2",
-                "ledger_events",
-            )
-        )
-
 
 def test_restart_revalidates_and_replays_without_rewriting_candidate_history(
     tmp_path: Path,
@@ -288,224 +589,3 @@ def test_restart_revalidates_and_replays_without_rewriting_candidate_history(
         reopened.close()
 
     assert _candidate_counts(database) == before
-
-
-def test_relation_revocation_preserves_candidate_history_and_blocks_later_admission(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "authority.sqlite3"
-    object_root = tmp_path / "objects"
-    seed_active_retrieval_authority(database, object_root=object_root)
-    system = open_candidate_test_system(
-        database,
-        object_root=object_root,
-        adapter=MemoryHybridRetrievalAdapter(),
-    )
-    try:
-        context = _complete_context(system, key="increment-2d-relation-context")
-        admitted = system.candidates.admit(
-            candidate_request(context, key="increment-2d-relation-admit"),
-            proof=proof(),
-        )
-    finally:
-        system.close()
-    before = _candidate_counts(database)
-
-    proposal_id, decision_id = retained_relation_identities(database)
-    relations = open_candidate_relation_system(database)
-    try:
-        proposal = relations.relations.proposal(proposal_id, proof=proof())
-        revoked = relations.relations.decide(
-            decision_request(
-                proposal,
-                action=RelationDecisionAction.REVOKE,
-                expected_version=1,
-                previous_decision_id=decision_id,
-                key="increment-2d-relation-revoke",
-            ),
-            proof=proof(),
-        )
-        assert revoked.current_state is RelationCurrentState.REVOKED
-    finally:
-        relations.close()
-
-    adapter = MemoryHybridRetrievalAdapter()
-    reopened = open_candidate_test_system(
-        database,
-        object_root=object_root,
-        adapter=adapter,
-    )
-    try:
-        assert reopened.candidates.decision(
-            admitted.decision_id,
-            proof=proof(),
-        ) == admitted
-        with pytest.raises(RetrievalStateError, match="source watermark is stale"):
-            reopened.candidates.admit(
-                candidate_request(context, key="increment-2d-after-relation-revoke"),
-                proof=proof(),
-            )
-        later = reopened.retrieval.find_related_event_candidates(
-            retrieval_request(key="increment-2d-context-after-relation-revoke"),
-            proof=proof(),
-        )
-        assert later.outcome is RetrievalOutcome.STALE
-        assert later.context is None
-        assert later.failure is not None
-        assert later.failure.reason_code == "RETRIEVAL_SOURCE_STALE"
-        assert adapter.call_count == 0
-    finally:
-        reopened.close()
-
-    after = _candidate_counts(database)
-    assert after[:3] == before[:3]
-    assert after[3] > before[3]
-
-
-def test_tombstoned_hydration_preserves_candidate_history_and_never_replays_bytes(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "authority.sqlite3"
-    object_root = tmp_path / "objects"
-    seed_active_retrieval_authority(database, object_root=object_root)
-    retrieval = retrieval_request(key="increment-2d-object-context")
-    system = open_candidate_test_system(
-        database,
-        object_root=object_root,
-        adapter=MemoryHybridRetrievalAdapter(),
-    )
-    try:
-        result = system.retrieval.find_related_event_candidates(
-            retrieval,
-            proof=proof(),
-        )
-        assert result.context is not None
-        context = result.context
-        admitted = system.candidates.admit(
-            candidate_request(context, key="increment-2d-object-admit"),
-            proof=proof(),
-        )
-    finally:
-        system.close()
-    before = _candidate_counts(database)
-
-    passage = INTEGRATED_FIXTURE_V2.passage_by_id["ifv2-prior-en"]
-    admission_id = fixture_passage_admission_id(
-        database,
-        passage_id=passage.passage_id,
-    )
-    objects = open_candidate_object_system(database, object_root=object_root)
-    try:
-        objects.objects.revoke(
-            admission_id,
-            reason_code="INCREMENT_2D_PRIOR_PASSAGE_REVOKED",
-            idempotency_key="increment-2d-prior-passage-revoke",
-            proof=proof(),
-        )
-        deletion = objects.objects.request_deletion(
-            passage.blob_digest,
-            reason_code="INCREMENT_2D_PRIOR_PASSAGE_DELETE",
-            idempotency_key="increment-2d-prior-passage-delete",
-            proof=proof(),
-        )
-        objects.objects.tombstone(
-            deletion.deletion_id,
-            reason_code="INCREMENT_2D_PRIOR_PASSAGE_TOMBSTONE",
-            idempotency_key="increment-2d-prior-passage-tombstone",
-            proof=proof(),
-        )
-    finally:
-        objects.close()
-
-    adapter = MemoryHybridRetrievalAdapter()
-    reopened = open_candidate_test_system(
-        database,
-        object_root=object_root,
-        adapter=adapter,
-    )
-    try:
-        assert reopened.candidates.decision(
-            admitted.decision_id,
-            proof=proof(),
-        ) == admitted
-        with pytest.raises(RetrievalStateError, match="source watermark is stale"):
-            reopened.candidates.admit(
-                candidate_request(context, key="increment-2d-after-tombstone"),
-                proof=proof(),
-            )
-        replay = reopened.retrieval.find_related_event_candidates(
-            retrieval,
-            proof=proof(),
-        )
-        assert replay.replayed is True
-        assert replay.outcome is RetrievalOutcome.STALE
-        assert replay.context is None
-        assert replay.failure is not None
-        assert replay.failure.reason_code == "RETRIEVAL_SOURCE_STALE"
-        assert adapter.call_count == 0
-    finally:
-        reopened.close()
-
-    after = _candidate_counts(database)
-    assert after[:3] == before[:3]
-    assert after[3] > before[3]
-
-
-@pytest.mark.parametrize(
-    ("dead_letter", "reason_code"),
-    (
-        (False, "RETRIEVAL_GAP_BLOCKED"),
-        (True, "RETRIEVAL_DEAD_LETTER_BLOCKED"),
-    ),
-)
-def test_gap_or_dead_letter_cannot_create_context_or_candidate(
-    tmp_path: Path,
-    dead_letter: bool,
-    reason_code: str,
-) -> None:
-    database = tmp_path / "authority.sqlite3"
-    object_root = tmp_path / "objects"
-    seed_active_retrieval_authority(database, object_root=object_root)
-    block_active_retrieval_generation(
-        database,
-        object_root=object_root,
-        dead_letter=dead_letter,
-    )
-    adapter = MemoryHybridRetrievalAdapter()
-    system = open_candidate_test_system(
-        database,
-        object_root=object_root,
-        adapter=adapter,
-    )
-    try:
-        result = system.retrieval.find_related_event_candidates(
-            retrieval_request(
-                key=(
-                    "increment-2d-dead-letter-context"
-                    if dead_letter
-                    else "increment-2d-gap-context"
-                )
-            ),
-            proof=proof(),
-        )
-        assert result.outcome is RetrievalOutcome.INCOMPLETE
-        assert result.context is None
-        assert result.failure is not None
-        assert result.failure.reason_code == reason_code
-        assert adapter.call_count == 0
-    finally:
-        system.close()
-
-    with sqlite3.connect(database) as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM hybrid_retrieval_contexts_v2"
-        ).fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT COUNT(*) FROM development_candidates_v2"
-        ).fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT COUNT(*) FROM development_candidate_versions_v2"
-        ).fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT COUNT(*) FROM development_candidate_admission_decisions_v2"
-        ).fetchone()[0] == 0
