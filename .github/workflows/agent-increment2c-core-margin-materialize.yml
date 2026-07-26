@@ -42,8 +42,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode .github/increment2c-core-margin/fix.patch.gz.b64 \
-            > /tmp/increment2c-core-margin.patch.gz
+          cat .github/increment2c-core-margin/part-* \
+            | base64 --decode > /tmp/increment2c-core-margin.patch.gz
           echo "$PATCH_SHA256  /tmp/increment2c-core-margin.patch.gz" \
             | sha256sum --check -
           gzip --decompress --stdout /tmp/increment2c-core-margin.patch.gz \
