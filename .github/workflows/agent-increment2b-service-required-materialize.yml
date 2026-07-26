@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: agent-increment2b-service-required-materialize
+  cancel-in-progress: true
+
 jobs:
   materialize:
     runs-on: ubuntu-latest
