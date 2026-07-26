@@ -286,6 +286,25 @@ def test_branch_hit_score_domains_are_typed_and_bounded(
         replace(_hit(branch), raw_score=canonical_score(score))
 
 
+def test_canonical_score_accepts_exact_binary64_fixed_notation() -> None:
+    # This is the actual Neo4j 2026.06 full-text score that exposed the old
+    # fractional-digit cap.  ``.17g`` correctly emits 17 significant digits,
+    # which requires 18 fractional digits for a value in the 10^-2 range.
+    score = 0.03687901422381401
+    canonical = canonical_score(score)
+    assert canonical == "0.036879014223814011"
+    hit = replace(_hit(RetrievalBranch.FULL_TEXT), raw_score=canonical)
+    assert hit.raw_score == canonical
+
+
+def test_score_text_still_rejects_noncanonical_binary64_spellings() -> None:
+    with pytest.raises(RetrievalContractError, match="score text"):
+        replace(
+            _hit(RetrievalBranch.FULL_TEXT),
+            raw_score="0.036879014223814010",
+        )
+
+
 def test_shared_timeout_is_rechecked_by_typed_and_fixture_authority() -> None:
     executions = tuple(
         replace(execution, elapsed_ms=1_300)

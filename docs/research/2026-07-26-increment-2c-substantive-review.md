@@ -19,7 +19,7 @@ It excludes Increment 2D Candidate admission, Graphiti, external models or embed
 ## Result
 
 - P1 findings: 2
-- P2 findings: 16
+- P2 findings: 17
 - Remaining unresolved P1/P2 after correction: 0
 
 Review submissions, requested changes, inline threads and actionable PR comments must be rechecked against the exact final remote head before merge.
@@ -232,12 +232,30 @@ Correction:
 - classify missing, malformed or non-qualified live-server evidence as explicit `UNAVAILABLE` with no Retrieval Context; and
 - add adapter and authority tests proving branch queries never start and no context is created against a non-qualified service.
 
+### P2-17 — Canonical score syntax confused significant digits with decimal places
+
+The typed score serializer correctly used Python's `.17g` form to preserve an exact finite binary64 round trip, but its validation regex allowed at most seventeen digits after the decimal point. A valid Neo4j `2026.06` full-text score of `0.03687901422381401` serializes canonically as `0.036879014223814011`: seventeen significant digits require eighteen fractional digits at that magnitude. The adapter therefore classified successful full-text reads as a retrieval-contract mismatch before the vector branch could execute.
+
+Correction:
+
+- retain `.17g` as the single deterministic binary64 serializer;
+- allow the complete fixed-notation shape it can emit, up to twenty fractional digits for exponent `-4`;
+- keep exact parse-and-reserialize equality as the canonical-text boundary, so padded or alternate spellings remain rejected;
+- add a regression using the exact live Neo4j score and a negative alternate-spelling case; and
+- rerun authenticated success and missing-vector-index cases so the former reaches complete authority and the latter reaches its intended explicit unavailability boundary.
+
 ## Validation performed
 
 The corrected focused retrieval, service-contract and SDLC selection passed locally:
 
 ```text
 155 passed, 4 intentional no-service skips, 0 failed
+```
+
+The P2-17 binary64 score correction then passed the exact affected retrieval, authority, traceability and SDLC selection:
+
+```text
+116 passed, 4 intentional no-service skips, 0 failed
 ```
 
 The complete repository passed in seven deterministic file-list shards:
@@ -261,7 +279,7 @@ Additional checks passed at the review boundary:
 - the projection import-boundary regression; and
 - clustering evaluation with `--fail-on-regression`.
 
-The four retrieval service tests intentionally skip without `NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED=1`; the exact remote authenticated-service run remains mandatory. The unsharded local pytest process was stopped by the execution wrapper after reaching 48 percent, so the complete result above is based on deterministic file-list shards rather than a claim that the interrupted process completed. `uv lock --check` and locked sync were blocked by the configured internal package mirror returning HTTP 503 while fetching `pytest-cov`; `pyproject.toml` and `uv.lock` are unchanged. The exact remote head must still provide the authoritative lockfile, actual-Neo4j and SDLC evidence.
+The four retrieval service tests intentionally skip without `NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED=1`; the exact remote authenticated-service run remains mandatory. The earlier unsharded local pytest process was stopped by the execution wrapper after reaching 48 percent, and the post-P2-17 rerun was stopped at 66 percent, both without an observed failure. The complete result above is therefore based on deterministic file-list shards, while the exact affected post-correction selection is reported separately rather than claiming either interrupted process completed. `uv lock --check` and locked sync were blocked by the configured internal package mirror returning HTTP 503 while fetching `pytest-cov`; `pyproject.toml` and `uv.lock` are unchanged. The exact remote head must still provide the authoritative lockfile, actual-Neo4j and SDLC evidence.
 
 ## Residual merge gates
 

@@ -13,7 +13,6 @@ from newsroom.authority import (
     StaticPrincipal,
 )
 from newsroom.authority._retrieval_system import (
-    _open_hybrid_retrieval_with_adapter,
     open_hybrid_retrieval_authority_system,
 )
 from newsroom.projection import (
@@ -21,11 +20,7 @@ from newsroom.projection import (
     ProjectionGenerationPromotionRequest,
     ProjectionGenerationState,
 )
-from newsroom.projection import INTEGRATED_FIXTURE_V2_PROJECTION
 from newsroom.projection.neo4j import Neo4jProjectorConfig
-from newsroom.projection.neo4j._retrieval_adapter import (
-    _open_hybrid_retrieval_neo4j_adapter,
-)
 from newsroom.retrieval import (
     FindRelatedEventCandidatesRequest,
     INTEGRATED_FIXTURE_V2_RETRIEVAL,
@@ -34,9 +29,7 @@ from newsroom.retrieval import (
     RetrievalExclusionReason,
     RetrievalOutcome,
     RetrievalRequestId,
-    HYBRID_FIXTURE_POLICY_V1,
 )
-from newsroom.retrieval.fixture_v2 import validate_fixture_branch_executions
 
 from .authority_a2b_helpers import _policy_registries
 from .authority_event_helpers import payload_schemas
@@ -79,66 +72,6 @@ def _request(*, key: str = "actual-retrieval-2c-request") -> FindRelatedEventCan
         query_hypothesis_version_id=fixture.query_hypothesis_version_id,
         query_valid_time=fixture.query_valid_time,
         idempotency_key=f"{key}-{uuid4().hex}",
-    )
-
-
-class _RecordingAdapter:
-    def __init__(self, inner) -> None:
-        self.inner = inner
-        self.executions = None
-        self.exception = None
-
-    def run_bounded_hybrid_branches(self, **kwargs):
-        try:
-            self.executions = self.inner.run_bounded_hybrid_branches(**kwargs)
-        except Exception as exc:
-            self.exception = exc
-            raise
-        return self.executions
-
-    def close(self) -> None:
-        self.inner.close()
-
-
-def _open_retrieval_recording(database: Path, object_root: Path):
-    rights, hydration, admissions = _policy_registries()
-    scopes = frozenset({*complete_scopes(), "authority.retrieval.read"})
-    adapter = _RecordingAdapter(
-        _open_hybrid_retrieval_neo4j_adapter(_service_config())
-    )
-    system = _open_hybrid_retrieval_with_adapter(
-        path=database,
-        object_root=object_root,
-        object_limits=object_limits(),
-        registry=source_command_registry(),
-        payload_schemas=payload_schemas(),
-        contracts=complete_contract_registry(),
-        admission_registry=admissions,
-        rights_policies=rights,
-        hydration_policies=hydration,
-        authenticator=StaticAuthenticator(
-            credentials={"token-1": StaticPrincipal("principal.alpha")},
-            authority_domain="newsroom.authority",
-        ),
-        authorizer=StaticAuthorizer(
-            policy_version="retrieval-2c-actual-service-authz-v1",
-            grants_by_principal={"principal.alpha": scopes},
-        ),
-        adapter=adapter,
-        clock=lambda: COMPLETE_NOW,
-    )
-    return system, adapter
-
-
-def _revalidate_recorded(adapter: _RecordingAdapter) -> None:
-    if adapter.executions is None:
-        assert adapter.exception is not None
-        raise adapter.exception
-    validate_fixture_branch_executions(
-        executions=adapter.executions,
-        policy=HYBRID_FIXTURE_POLICY_V1,
-        contract=INTEGRATED_FIXTURE_V2_RETRIEVAL,
-        query_digest=adapter.executions[0].query_digest,
     )
 
 
@@ -207,20 +140,13 @@ def test_actual_service_executes_all_four_branches_and_hydrates_authority(
 ) -> None:
     database, object_root, generation = _activate(tmp_path)
     request = _request()
-    system, recording = _open_retrieval_recording(database, object_root)
+    system = _open_retrieval(database, object_root)
     try:
         result = system.retrieval.find_related_event_candidates(
             request,
             proof=AuthenticationProof(method="STATIC_TOKEN", credential="token-1"),
         )
-        if (
-            result.failure is not None
-            and result.failure.reason_code == "RETRIEVAL_CONTRACT_MISMATCH"
-        ):
-            _revalidate_recorded(recording)
-        assert result.outcome is RetrievalOutcome.COMPLETE, (
-            None if result.failure is None else result.failure.reason_code
-        )
+        assert result.outcome is RetrievalOutcome.COMPLETE
         assert result.context is not None
         context = result.context
         assert tuple(item.branch for item in context.branches) == tuple(RetrievalBranch)
@@ -296,20 +222,13 @@ def test_actual_service_missing_vector_index_is_unavailable_not_no_match(
     database, object_root, generation = _activate(tmp_path)
     names = _names(generation.generation_id)
     _projector_write(f"DROP INDEX `{names.vector_index_name}`")
-    system, recording = _open_retrieval_recording(database, object_root)
+    system = _open_retrieval(database, object_root)
     try:
         result = system.retrieval.find_related_event_candidates(
             _request(key="actual-retrieval-2c-missing-vector"),
             proof=AuthenticationProof(method="STATIC_TOKEN", credential="token-1"),
         )
-        if (
-            result.failure is not None
-            and result.failure.reason_code == "RETRIEVAL_CONTRACT_MISMATCH"
-        ):
-            _revalidate_recorded(recording)
-        assert result.outcome is RetrievalOutcome.UNAVAILABLE, (
-            None if result.failure is None else result.failure.reason_code
-        )
+        assert result.outcome is RetrievalOutcome.UNAVAILABLE
         assert result.failure is not None
         assert result.failure.reason_code == "NEO4J_RETRIEVAL_UNAVAILABLE"
         assert result.context is None

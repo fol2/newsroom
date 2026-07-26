@@ -25,7 +25,13 @@ from newsroom.projection.models import ProjectionGenerationId, ProjectionGenerat
 from newsroom.projection.neo4j.complete_models import CompleteProjectionIdentity
 
 
-_SCORE = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]{1,17})?(?:e-?[0-9]{1,3})?$")
+# ``format(binary64, ".17g")`` emits at most 17 significant digits.
+# In fixed notation, values with exponent -4 can therefore require up to 20
+# fractional digits (three leading fractional zeroes plus 17 significant
+# digits).  Canonical round-trip equality in ``_validate_score`` remains the
+# strictness boundary; this regex only admits the complete finite binary64
+# textual shape that Python itself can emit.
+_SCORE = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]{1,20})?(?:e-?[0-9]{1,3})?$")
 _MAX_NAMED_TOOL_ELAPSED_MS = 5_000
 
 
