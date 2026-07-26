@@ -1,0 +1,91 @@
+name: agent-increment2b-projector-test-identity-materialize
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    env:
+      AUTHORISED_PARENT: b2006c4c77575dc2d1e2aebebc3302a5fba702d7
+      TARGET_BRANCH: agent/increment-2b-fulltext-vector-projection
+      EXPECTED_TREE: d8892bd8047702011de9dcbf6fafc07ee9cfc230
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Reconstruct projector-identity service-test patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64
+          import hashlib
+          from pathlib import Path
+
+          encoded = Path(
+              ".github/increment2b-projector-test-identity/fix.patch.gz.b64"
+          ).read_text(encoding="utf-8")
+          decoded = base64.b64decode(encoded, validate=False)
+          target = Path("/tmp/increment2b-projector-test-identity.patch.gz")
+          target.write_bytes(decoded)
+          print("encoded_chars=", len(encoded))
+          print("decoded_bytes=", len(decoded))
+          print("decoded_sha256=", hashlib.sha256(decoded).hexdigest())
+          PY
+          gzip --decompress --stdout \
+            /tmp/increment2b-projector-test-identity.patch.gz \
+            > /tmp/increment2b-projector-test-identity.patch
+
+      - name: Apply correction to exact authorised parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$AUTHORISED_PARENT"
+          git apply --check /tmp/increment2b-projector-test-identity.patch
+          git apply /tmp/increment2b-projector-test-identity.patch
+          rm -rf .github/increment2b-projector-test-identity
+          rm -f .github/workflows/agent-increment2b-projector-test-identity-materialize.yml
+          git add -A
+
+      - name: Verify exact correction boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/expected-paths <<'EOF'
+          docs/operations/increment-2b-complete-projection.md
+          docs/research/2026-07-25-increment-2b-substantive-review.md
+          newsroom/tests/test_complete_projection_2b_neo4j_service.py
+          newsroom/tests/test_complete_projection_2b_traceability.py
+          EOF
+          sed -i 's/^          //' /tmp/expected-paths
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          git diff --cached --name-only "$AUTHORISED_PARENT" | sort \
+            > /tmp/actual-paths
+          diff -u /tmp/expected-paths /tmp/actual-paths
+          git diff --cached --check
+          python -m compileall -q newsroom scripts
+          tree="$(git write-tree)"
+          echo "TREE_SHA=$tree"
+          test "$tree" = "$EXPECTED_TREE"
+
+      - name: Create and push exact correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Newsroom Increment 2B Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
+          commit="$(printf '%s\n\n%s\n' \
+            'fix(projection): keep service tests on projector identity' \
+            'Use the dedicated non-bootstrap projector for complete-service fault injection, inspection and cleanup; remove bootstrap credential dependencies; and record the eleventh resolved Increment 2B review finding.' \
+            | git commit-tree "$tree" -p "$AUTHORISED_PARENT")"
+          echo "COMMIT_SHA=$commit"
+          git push --force origin "$commit:refs/heads/$TARGET_BRANCH"
