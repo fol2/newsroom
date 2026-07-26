@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/increment-2c-p2-20-materialize
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
