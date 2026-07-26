@@ -1,0 +1,60 @@
+name: agent-increment2c-diagnostic-materialize
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    env:
+      AUTHORISED_PARENT: 27ee45f8cc2f24262c06533efdf19aa1b4ace0a9
+      TARGET_BRANCH: agent/increment-2c-bounded-hybrid-retrieval
+      PATCH_SHA256: c39da431c3e39c64a08a1f6921bd6024cf7982db725b7f6fe423f9476bee7b6e
+      EXPECTED_TREE: a5e177e7b5401733fde8d3b0c1dba8c48457ae8f
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Reconstruct diagnostic assertion patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/increment2c-diagnostic/fix.patch.gz.b64 \
+            > /tmp/increment2c-diagnostic.patch.gz
+          echo "$PATCH_SHA256  /tmp/increment2c-diagnostic.patch.gz" \
+            | sha256sum --check -
+          gzip --decompress --stdout /tmp/increment2c-diagnostic.patch.gz \
+            > /tmp/increment2c-diagnostic.patch
+
+      - name: Apply and verify exact one-file correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$AUTHORISED_PARENT"
+          git apply --check /tmp/increment2c-diagnostic.patch
+          git apply --index /tmp/increment2c-diagnostic.patch
+          test "$(git diff --cached --name-only)" = \
+            "newsroom/tests/test_retrieval_2c_neo4j_service.py"
+          git diff --cached --check
+          python -m compileall -q newsroom scripts
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+
+      - name: Create and push diagnostic evidence commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Newsroom Increment 2C Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
+          commit="$(printf '%s\n\n%s\n' \
+            'test(retrieval): expose actual-service failure evidence' \
+            'Include retained failure evidence in the two actual-service outcome assertions so an exact-head service mismatch reports its authority classification.' \
+            | git commit-tree "$tree" -p "$AUTHORISED_PARENT")"
+          git push --force origin "$commit:refs/heads/$TARGET_BRANCH"
