@@ -141,6 +141,7 @@ jobs:
           assert sys.version_info[:2] == (3, 12), sys.version
           assert platform.python_implementation() == 'CPython'
           PY
+          uv run --no-sync python -m compileall -q newsroom scripts
 
       - name: Execute evidence lane
         shell: bash
@@ -198,6 +199,7 @@ jobs:
       NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED: '1'
       NEWSROOM_NEO4J_DATABASE: neo4j
       NEWSROOM_NEO4J_PROJECTOR_USERNAME: newsroom_projector
+      NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED: '1'
       NEWSROOM_NEO4J_SERVICE_REQUIRED: '1'
       NEWSROOM_NEO4J_URI: bolt://localhost:7687
     steps:

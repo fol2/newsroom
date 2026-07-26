@@ -649,6 +649,18 @@ def _open_neo4j_adapter(config: Neo4jProjectorConfig) -> _Neo4jAdapter:
     )
 
 
+def _neo4j_unit_of_work_factory() -> Any:
+    """Return the official managed-transaction decorator from the one driver seam."""
+
+    try:
+        from neo4j import unit_of_work
+    except Exception:
+        raise Neo4jConnectionError(
+            "Neo4j managed-transaction support is unavailable"
+        ) from None
+    return unit_of_work
+
+
 
 def _record_labels(record: Any, key: str) -> tuple[str, ...]:
     try:
@@ -788,6 +800,7 @@ def _relation_view(
 __all__ = [
     "_Neo4jAdapter",
     "_expected_projection_state_digest",
+    "_neo4j_unit_of_work_factory",
     "_node_properties",
     "_open_neo4j_adapter",
     "_relation_properties",

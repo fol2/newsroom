@@ -47,9 +47,16 @@ from .relation_migrations import (
     RELATION_MIGRATION_STATEMENTS,
     RELATION_SCHEMA_VERSION,
 )
+from .retrieval_migrations import (
+    HYBRID_RETRIEVAL_MIGRATION,
+    HYBRID_RETRIEVAL_MIGRATION_CHECKSUM,
+    HYBRID_RETRIEVAL_MIGRATION_NAME,
+    HYBRID_RETRIEVAL_MIGRATION_STATEMENTS,
+    HYBRID_RETRIEVAL_SCHEMA_VERSION,
+)
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = COMPLETE_PROJECTION_SCHEMA_VERSION
+SCHEMA_VERSION = HYBRID_RETRIEVAL_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -623,6 +630,20 @@ def apply_pending_migrations(
                 ),
             )
             current = COMPLETE_PROJECTION_SCHEMA_VERSION
+        if current == COMPLETE_PROJECTION_SCHEMA_VERSION:
+            for statement in HYBRID_RETRIEVAL_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    HYBRID_RETRIEVAL_SCHEMA_VERSION,
+                    HYBRID_RETRIEVAL_MIGRATION_NAME,
+                    HYBRID_RETRIEVAL_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = HYBRID_RETRIEVAL_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -639,6 +660,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     INTEGRATED_FOUNDATION_MIGRATION,
     RELATION_MIGRATION,
     COMPLETE_PROJECTION_MIGRATION,
+    HYBRID_RETRIEVAL_MIGRATION,
 )
 
 def _expected_fingerprint() -> str:
@@ -681,5 +703,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         COMPLETE_PROJECTION_SCHEMA_VERSION,
         COMPLETE_PROJECTION_MIGRATION_NAME,
         COMPLETE_PROJECTION_MIGRATION_CHECKSUM,
+    ),
+    (
+        HYBRID_RETRIEVAL_SCHEMA_VERSION,
+        HYBRID_RETRIEVAL_MIGRATION_NAME,
+        HYBRID_RETRIEVAL_MIGRATION_CHECKSUM,
     ),
 )

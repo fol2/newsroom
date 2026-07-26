@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
 import os
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Mapping, Sequence
+import xml.etree.ElementTree as ET
 
 from .artifact_envelope import (
     ArtifactProvenanceError,
@@ -69,15 +71,21 @@ _OPTIONAL_CORE_TEST_IDS = (
     'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_promotion_rejects_graph_loss_after_validation',
     'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_rebuild_cleanup_cannot_cross_generation_namespace',
     'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_tombstone_does_not_resurrect_after_wipe_rebuild',
+    'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_executes_all_four_branches_and_hydrates_authority',
+    'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_admitted_relation_is_incomplete_not_no_match',
+    'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_fulltext_index_is_unavailable_not_no_match',
+    'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_vector_index_is_unavailable_not_no_match',
 )
 _SERVICE_CONFIGURATION = {
     "NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_DATABASE": "neo4j",
     "NEWSROOM_NEO4J_PROJECTOR_USERNAME": "newsroom_projector",
+    "NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
 }
 _CORE_TESTS = ("newsroom/tests",)
+_CORE_SHARD_COUNT = 4
 _CACHE_KEY_ENV = "NEWSROOM_SDLC_CACHE_KEY"
 _CACHE_HIT_ENV = "NEWSROOM_SDLC_CACHE_HIT"
 _MAX_CACHE_KEY_CHARS = 512
@@ -801,21 +809,247 @@ def source_check(*, repo_root: str | Path, base_sha: str, head_sha: str) -> int:
     return 0
 
 
+def _core_test_files(root: Path) -> tuple[tuple[str, int], ...]:
+    test_root = root / "newsroom" / "tests"
+    if test_root.is_symlink() or not test_root.is_dir():
+        raise WorkflowLaneError("core_test_root")
+    values: list[tuple[str, int]] = []
+    for path in sorted(test_root.rglob("test_*.py")):
+        if path.is_symlink() or not path.is_file():
+            raise WorkflowLaneError("core_test_file")
+        try:
+            size = len(path.read_bytes())
+        except OSError as exc:
+            raise WorkflowLaneError("core_test_file") from exc
+        values.append((path.relative_to(root).as_posix(), size))
+    if len(values) < _CORE_SHARD_COUNT:
+        raise WorkflowLaneError("core_test_count")
+    return tuple(values)
+
+
+def _core_test_shards(root: Path) -> tuple[tuple[str, ...], ...]:
+    files = _core_test_files(root)
+    shards: list[list[str]] = [[] for _ in range(_CORE_SHARD_COUNT)]
+    weights = [0] * _CORE_SHARD_COUNT
+    for relative, size in sorted(files, key=lambda item: (-item[1], item[0])):
+        shard = min(range(_CORE_SHARD_COUNT), key=lambda index: (weights[index], index))
+        shards[shard].append(relative)
+        weights[shard] += size
+    result = tuple(tuple(sorted(shard)) for shard in shards)
+    flattened = tuple(item for shard in result for item in shard)
+    expected = tuple(sorted(relative for relative, _size in files))
+    if any(not shard for shard in result):
+        raise WorkflowLaneError("core_shard_empty")
+    if len(flattened) != len(set(flattened)) or tuple(sorted(flattened)) != expected:
+        raise WorkflowLaneError("core_shard_coverage")
+    return result
+
+
+def _core_shard_command(
+    *,
+    test_files: Sequence[str],
+    report: Path,
+    basetemp: Path,
+) -> tuple[str, ...]:
+    if not test_files:
+        raise WorkflowLaneError("core_shard_empty")
+    return (
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        *test_files,
+        f"--basetemp={basetemp}",
+        f"--junitxml={report}",
+    )
+
+
+def _run_core_shard(*, argv: Sequence[str], root: Path, log: Path) -> int:
+    try:
+        with log.open("wb") as stream:
+            completed = subprocess.run(
+                tuple(argv),
+                cwd=root,
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        return completed.returncode
+    except OSError as exc:
+        try:
+            log.write_text(
+                f"EVIDENCE_MISMATCH:core-shard:{type(exc).__name__}\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        return 2
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _publish_private_bytes(path: Path, payload: bytes) -> None:
+    if path.exists() or path.is_symlink() or not path.parent.is_dir():
+        raise WorkflowLaneError("report_exists")
+    descriptor = -1
+    temporary: Path | None = None
+    try:
+        descriptor, raw_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        temporary = Path(raw_name)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = -1
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path, follow_symlinks=False)
+        directory = os.open(
+            path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except FileExistsError as exc:
+        raise WorkflowLaneError("report_exists") from exc
+    except OSError as exc:
+        path.unlink(missing_ok=True)
+        raise WorkflowLaneError("report_publish") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _merge_core_junit_reports(
+    *,
+    root: Path,
+    report: Path,
+    shard_reports: Sequence[Path],
+) -> None:
+    if len(shard_reports) != _CORE_SHARD_COUNT:
+        raise WorkflowLaneError("core_shard_report_count")
+    relative_reports: list[str] = []
+    for shard_report in shard_reports:
+        if not shard_report.is_file() or shard_report.is_symlink():
+            raise WorkflowLaneError("core_shard_report_missing")
+        try:
+            relative_reports.append(shard_report.relative_to(root).as_posix())
+        except ValueError as exc:
+            raise WorkflowLaneError("report_path") from exc
+    source = summarize_junit(root, tuple(relative_reports))
+    merged = ET.Element(
+        "testsuites",
+        {
+            "tests": str(source.test_count),
+            "failures": str(source.failure_count),
+            "errors": str(source.error_count),
+            "skipped": str(source.skip_count),
+        },
+    )
+    for shard_report in shard_reports:
+        try:
+            document = ET.parse(shard_report).getroot()
+        except ET.ParseError as exc:
+            raise WorkflowLaneError("core_shard_report_xml") from exc
+        name = _xml_local_name(document.tag)
+        if name == "testsuite":
+            merged.append(document)
+        elif name == "testsuites":
+            suites = [
+                child for child in document if _xml_local_name(child.tag) == "testsuite"
+            ]
+            if not suites:
+                raise WorkflowLaneError("core_shard_report_xml")
+            merged.extend(suites)
+        else:
+            raise WorkflowLaneError("core_shard_report_xml")
+    payload = ET.tostring(merged, encoding="utf-8", xml_declaration=True)
+    _publish_private_bytes(report, payload)
+    relative_report = report.relative_to(root).as_posix()
+    final = summarize_junit(root, (relative_report,))
+    comparable_source = (
+        source.test_ids_digest,
+        source.test_count,
+        source.failure_count,
+        source.error_count,
+        source.skip_count,
+        source.required_skip_count,
+        source.duration_ms,
+        source.first_failure_fingerprint,
+    )
+    comparable_final = (
+        final.test_ids_digest,
+        final.test_count,
+        final.failure_count,
+        final.error_count,
+        final.skip_count,
+        final.required_skip_count,
+        final.duration_ms,
+        final.first_failure_fingerprint,
+    )
+    if comparable_source != comparable_final:
+        report.unlink(missing_ok=True)
+        raise WorkflowLaneError("core_shard_report_merge")
+
+
+def _run_core_pytest_shards(*, root: Path, report: Path) -> int:
+    shards = _core_test_shards(root)
+    if report.exists() or report.is_symlink() or not report.parent.is_dir():
+        raise WorkflowLaneError("report_exists")
+    shard_reports = tuple(
+        report.with_name(f"{report.stem}-shard-{index:02d}{report.suffix}")
+        for index in range(_CORE_SHARD_COUNT)
+    )
+    if any(path.exists() or path.is_symlink() for path in shard_reports):
+        raise WorkflowLaneError("core_shard_report_exists")
+    with tempfile.TemporaryDirectory(prefix="newsroom-core-shards-") as raw_temp:
+        temporary = Path(raw_temp)
+        logs = tuple(temporary / f"shard-{index:02d}.log" for index in range(_CORE_SHARD_COUNT))
+        commands = tuple(
+            _core_shard_command(
+                test_files=shards[index],
+                report=shard_reports[index],
+                basetemp=temporary / f"pytest-{index:02d}",
+            )
+            for index in range(_CORE_SHARD_COUNT)
+        )
+        with ThreadPoolExecutor(max_workers=_CORE_SHARD_COUNT) as executor:
+            futures = tuple(
+                executor.submit(
+                    _run_core_shard,
+                    argv=commands[index],
+                    root=root,
+                    log=logs[index],
+                )
+                for index in range(_CORE_SHARD_COUNT)
+            )
+            codes = tuple(future.result() for future in futures)
+        for log in logs:
+            try:
+                sys.stdout.buffer.write(log.read_bytes())
+            except OSError as exc:
+                raise WorkflowLaneError("core_shard_log") from exc
+        sys.stdout.buffer.flush()
+    _merge_core_junit_reports(root=root, report=report, shard_reports=shard_reports)
+    for shard_report in shard_reports:
+        shard_report.unlink(missing_ok=True)
+    return next((code if code > 0 else 1 for code in codes if code), 0)
+
+
 def core_tests(*, repo_root: str | Path, report: str | Path, clustering: bool) -> int:
     root = Path(repo_root).resolve()
     report_path = Path(report).resolve()
     if not report_path.is_relative_to(root):
         raise WorkflowLaneError("report_path")
-    code = _run_subprocess(
-        (
-            sys.executable,
-            "-m",
-            "pytest",
-            "-q",
-            "newsroom/tests",
-            f"--junitxml={report_path}",
-        )
-    )
+    code = _run_core_pytest_shards(root=root, report=report_path)
     if code or not clustering:
         return code
     return _run_subprocess(

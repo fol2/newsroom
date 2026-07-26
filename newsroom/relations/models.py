@@ -1081,6 +1081,51 @@ class RelationDecisionResult:
             raise RelationContractError("current relation state must be typed")
 
 
+def governed_relation_key(
+    *,
+    fixture_binding_id: IntegratedFixtureV2BindingId,
+    subject: RelationEndpoint,
+    predicate: RelationPredicate,
+    object: RelationEndpoint,
+    temporal_scope: RelationTemporalScope,
+) -> str:
+    """Derive the one authoritative stable key for a governed relation.
+
+    The fixture binding is part of relation identity.  Callers must not derive
+    graph or retrieval keys from endpoints alone because the same semantic axis
+    can exist under a different immutable fixture or evidence binding.
+    """
+
+    if not isinstance(fixture_binding_id, IntegratedFixtureV2BindingId):
+        raise RelationContractError(
+            "governed relation key requires a typed fixture binding"
+        )
+    if not isinstance(subject, RelationEndpoint) or not isinstance(
+        object, RelationEndpoint
+    ):
+        raise RelationContractError(
+            "governed relation key requires typed endpoints"
+        )
+    if not isinstance(predicate, RelationPredicate):
+        raise RelationContractError(
+            "governed relation key requires a typed predicate"
+        )
+    if not isinstance(temporal_scope, RelationTemporalScope):
+        raise RelationContractError(
+            "governed relation key requires a typed temporal scope"
+        )
+    return digest_canonical(
+        {
+            "contract": "newsroom-governed-relation-key-v1",
+            "fixture_binding_id": str(fixture_binding_id),
+            "subject": subject.canonical_value(),
+            "predicate": predicate.value,
+            "object": object.canonical_value(),
+            "temporal_scope": temporal_scope.canonical_value(),
+        }
+    )
+
+
 def sorted_passage_objects(
     values: Iterable[FixturePassageObject],
 ) -> tuple[FixturePassageObject, ...]:
@@ -1119,5 +1164,6 @@ __all__ = [
     "RelationStaleDecision",
     "RelationStateError",
     "RelationTemporalScope",
+    "governed_relation_key",
     "sorted_passage_objects",
 ]

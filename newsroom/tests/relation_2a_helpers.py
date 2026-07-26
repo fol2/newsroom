@@ -25,6 +25,7 @@ from newsroom.authority.policy import CommandRegistry, PayloadSchemaRegistry
 from newsroom.relations import (
     FixturePassageObject,
     INTEGRATED_FIXTURE_V2,
+    INTEGRATED_FIXTURE_V2_BINDING_ID,
     IntegratedFixtureV2BindingId,
     IntegratedFixtureV2BindingRequest,
     RelationDecisionAction,
@@ -42,9 +43,7 @@ from .authority_event_helpers import payload_schemas, registry_v1
 
 
 RELATION_NOW = UtcTimestamp.parse("2042-03-12T12:00:00.000000Z")
-BINDING_ID = IntegratedFixtureV2BindingId.parse(
-    "00000000-0000-4000-8000-000000002101"
-)
+BINDING_ID = INTEGRATED_FIXTURE_V2_BINDING_ID
 PROPOSAL_ID = RelationProposalId.parse(
     "00000000-0000-4000-8000-000000002104"
 )

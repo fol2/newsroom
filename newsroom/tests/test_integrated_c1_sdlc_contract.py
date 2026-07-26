@@ -39,6 +39,7 @@ def test_increment_1c_native_graph_paths_require_actual_service_evidence() -> No
         _INTEGRATED_SERVICE_TEST,
         "newsroom/tests/test_projection_b2_neo4j_service.py",
         "newsroom/tests/test_projection_b3_neo4j_service.py",
+        "newsroom/tests/test_retrieval_2c_neo4j_service.py",
     ]
     paths = (
         "newsroom/authority/_integrated_system.py",
@@ -91,14 +92,21 @@ def test_complete_actual_service_cases_are_optional_only_in_core() -> None:
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_replacement_generation_recovers_from_authority_only',
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_revocation_and_tombstone_remove_current_derivatives',
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_wrong_watermark_generation_and_vector_dimension_fail_closed',
+        'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_executes_all_four_branches_and_hydrates_authority',
+        'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_admitted_relation_is_incomplete_not_no_match',
+        'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_fulltext_index_is_unavailable_not_no_match',
+        'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_vector_index_is_unavailable_not_no_match',
     }
     assert _INTEGRATED_SERVICE_TEST_ID in optional
     assert complete <= set(optional)
     assert optional == tuple(sorted(optional))
-    assert len(optional) == 19
+    assert len(optional) == 23
 
     route = _route("newsroom/projection/neo4j/_complete_adapter.py")
     assert route["service_required"] is True
     assert "newsroom/tests/test_complete_projection_2b_neo4j_service.py" in (
+        route["service_tests"]
+    )
+    assert "newsroom/tests/test_retrieval_2c_neo4j_service.py" in (
         route["service_tests"]
     )

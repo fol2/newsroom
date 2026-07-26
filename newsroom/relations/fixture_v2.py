@@ -29,6 +29,11 @@ _FIXTURE_PATH = _FIXTURE_ROOT / "integrated_fixture_v2.json"
 _SCHEMA_PATH = _FIXTURE_ROOT / "integrated_fixture_v2.schema.json"
 
 
+INTEGRATED_FIXTURE_V2_BINDING_ID = IntegratedFixtureV2BindingId.parse(
+    "00000000-0000-4000-8000-000000002101"
+)
+
+
 @dataclass(frozen=True, slots=True)
 class IntegratedFixtureV2Passage:
     passage_id: str
@@ -280,6 +285,7 @@ INTEGRATED_FIXTURE_V2_DIGEST = INTEGRATED_FIXTURE_V2.manifest_digest
 
 __all__ = [
     "INTEGRATED_FIXTURE_V2",
+    "INTEGRATED_FIXTURE_V2_BINDING_ID",
     "INTEGRATED_FIXTURE_V2_DIGEST",
     "IntegratedFixtureV2",
     "IntegratedFixtureV2Passage",

@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).parents[2]
 
 
 def _python(source: str, *arguments: str) -> tuple[str, ...]:
-    return (sys.executable, "-c", source, *arguments)
+    return (sys.executable, "-I", "-S", "-u", "-c", source, *arguments)
 
 
 def test_success_and_nonzero_exit_are_typed() -> None:
@@ -74,33 +74,35 @@ def test_expired_shared_deadline_prevents_process_start(tmp_path: Path) -> None:
 
 def test_multiple_commands_share_one_lane_deadline(tmp_path: Path) -> None:
     second_started = tmp_path / "second-started"
-    deadline = LaneDeadline.start(1.5)
+    deadline = LaneDeadline.start(0.8)
     started = time.monotonic()
     first = _run_gate_command(
         gate_id="core-deterministic",
         phase="first",
-        argv=_python("pass"),
+        argv=("/bin/true",),
         deadline=deadline,
-        command_timeout_seconds=1.0,
-        termination_grace_seconds=0.1,
+        command_timeout_seconds=0.4,
+        termination_grace_seconds=0.08,
     )
     second = _run_gate_command(
         gate_id="core-deterministic",
         phase="second",
-        argv=_python(
-            "from pathlib import Path; import sys, time; "
-            "Path(sys.argv[1]).touch(); time.sleep(30)",
+        argv=(
+            "/bin/sh",
+            "-c",
+            'printf started > "$1"; sleep 30',
+            "newsroom-shared-deadline",
             str(second_started),
         ),
         deadline=deadline,
-        command_timeout_seconds=2.0,
-        termination_grace_seconds=0.15,
+        command_timeout_seconds=0.8,
+        termination_grace_seconds=0.08,
     )
 
     assert first.result == "PASS"
-    assert second_started.exists()
+    assert second_started.read_text(encoding="utf-8") == "started"
     assert second.result == "BUDGET_EXCEEDED"
-    assert time.monotonic() - started < 1.65
+    assert time.monotonic() - started < 1.0
     assert deadline.remaining_seconds() <= 0.2
 
 
@@ -109,40 +111,39 @@ def test_timeout_terminates_descendant_process_group(tmp_path: Path) -> None:
     marker = tmp_path / "child-terminated"
     ready = tmp_path / "child-ready"
     pid_file = tmp_path / "child-pid"
-    child = """
-import signal
-from pathlib import Path
-import sys
-import time
-
-def stop(*_args):
-    Path(sys.argv[1]).write_text('terminated', encoding='utf-8')
-    raise SystemExit(0)
-
-signal.signal(signal.SIGTERM, stop)
-Path(sys.argv[2]).write_text('ready', encoding='utf-8')
-time.sleep(30)
-"""
     parent = """
-import subprocess
+import os
 from pathlib import Path
+import signal
 import sys
 import time
 
-process = subprocess.Popen(
-    [sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3]]
-)
-Path(sys.argv[4]).write_text(str(process.pid), encoding='utf-8')
-time.sleep(30)
+marker = Path(sys.argv[1])
+ready = Path(sys.argv[2])
+pid_file = Path(sys.argv[3])
+child = os.fork()
+if child == 0:
+    def stop(*_args):
+        marker.write_text('terminated', encoding='utf-8')
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, stop)
+    ready.write_text('ready', encoding='utf-8')
+    while True:
+        time.sleep(30)
+
+pid_file.write_text(str(child), encoding='utf-8')
+while True:
+    time.sleep(30)
 """
 
     result = _run_gate_command(
         gate_id="core-deterministic",
         phase="descendants",
-        argv=_python(parent, child, str(marker), str(ready), str(pid_file)),
-        deadline=LaneDeadline.start(1.75),
-        command_timeout_seconds=1.5,
-        termination_grace_seconds=0.25,
+        argv=_python(parent, str(marker), str(ready), str(pid_file)),
+        deadline=LaneDeadline.start(1.1),
+        command_timeout_seconds=0.85,
+        termination_grace_seconds=0.2,
     )
 
     stop_at = time.monotonic() + 1
@@ -152,7 +153,7 @@ time.sleep(30)
     assert ready.read_text(encoding="utf-8") == "ready"
     assert marker.read_text(encoding="utf-8") == "terminated"
     assert result.result == "BUDGET_EXCEEDED"
-    assert result.execution_ms < 1_500
+    assert result.execution_ms < 850
     assert result.result_reason == "BUDGET_EXCEEDED:core-deterministic:descendants"
 
 
@@ -160,12 +161,17 @@ time.sleep(30)
 def test_successful_parent_cannot_leave_background_process(tmp_path: Path) -> None:
     pid_file = tmp_path / "background-pid"
     parent = """
-import subprocess
+import os
 from pathlib import Path
 import sys
+import time
 
-process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
-Path(sys.argv[1]).write_text(str(process.pid), encoding='utf-8')
+child = os.fork()
+if child == 0:
+    while True:
+        time.sleep(30)
+
+Path(sys.argv[1]).write_text(str(child), encoding='utf-8')
 """
     result = _run_gate_command(
         gate_id="core-deterministic",

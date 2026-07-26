@@ -222,13 +222,14 @@ def test_relation_read_policy_is_server_owned_bounded_authority() -> None:
 
 def test_relation_migration_remains_checked_version_six_before_complete_v7() -> None:
     assert RELATION_SCHEMA_VERSION == 6
-    assert COMPLETE_PROJECTION_SCHEMA_VERSION == SCHEMA_VERSION == 7
-    assert EXPECTED_MIGRATION_HISTORY[-2] == (
+    assert COMPLETE_PROJECTION_SCHEMA_VERSION == 7
+    assert SCHEMA_VERSION == 8
+    assert EXPECTED_MIGRATION_HISTORY[-3] == (
         6,
         RELATION_MIGRATION_NAME,
         RELATION_MIGRATION_CHECKSUM,
     )
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+    assert EXPECTED_MIGRATION_HISTORY[-2] == (
         7,
         COMPLETE_PROJECTION_MIGRATION_NAME,
         COMPLETE_PROJECTION_MIGRATION_CHECKSUM,
