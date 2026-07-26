@@ -89,7 +89,7 @@ jobs:
             newsroom/tests/test_complete_projection_2b_authority.py
           uv run --no-sync python -m scripts.sdlc.workflow_lane core-tests \
             --repo-root . \
-            --report /tmp/increment2d-handoff-core.xml \
+            --report increment2d-handoff-core.xml \
             --clustering
           git diff --cached --check
           test "$(git write-tree)" = "$EXPECTED_TREE"
