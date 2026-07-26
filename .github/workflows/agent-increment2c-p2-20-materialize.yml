@@ -41,8 +41,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode .github/increment2c-p2-20/fix.patch.gz.b64 \
-            > /tmp/increment2c-p2-20.patch.gz
+          cat .github/increment2c-p2-20/part-* \
+            | base64 --decode > /tmp/increment2c-p2-20.patch.gz
           echo "$PATCH_SHA256  /tmp/increment2c-p2-20.patch.gz" \
             | sha256sum --check -
           gzip --decompress --stdout /tmp/increment2c-p2-20.patch.gz \
@@ -87,7 +87,6 @@ jobs:
             newsroom/tests/test_subprocess_json.py
           uv run --no-sync python - <<'PY'
           import os
-          from pathlib import Path
           import subprocess
           import time
 
