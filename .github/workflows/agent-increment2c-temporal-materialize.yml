@@ -1,0 +1,110 @@
+name: agent-increment2c-temporal-materialize
+
+on:
+  push:
+    branches:
+      - agent/increment-2c-temporal-materialize
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    env:
+      AUTHORISED_PARENT: 9647ac251759894a2a5fc4528282e08f0223c840
+      TARGET_BRANCH: agent/increment-2c-bounded-hybrid-retrieval
+      PATCH_SHA256: 7de932efa362a25a0ce27685a695f5cf4d9390271a17931509e77cb22ee51156
+      EXPECTED_TREE: 9da125ffa2d89bfcc741e21702440dadc5e40397
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Reconstruct temporal policy patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/increment2c-temporal/fix.patch.gz.b64 \
+            > /tmp/increment2c-temporal.patch.gz
+          echo "$PATCH_SHA256  /tmp/increment2c-temporal.patch.gz" \
+            | sha256sum --check -
+          gzip --decompress --stdout /tmp/increment2c-temporal.patch.gz \
+            > /tmp/increment2c-temporal.patch
+
+      - name: Apply exact temporal correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "origin/$TARGET_BRANCH")" = "$AUTHORISED_PARENT"
+          git checkout --detach "$AUTHORISED_PARENT"
+          git apply --check /tmp/increment2c-temporal.patch
+          git apply /tmp/increment2c-temporal.patch
+          rm -rf .github/increment2c-temporal
+          rm -f .github/workflows/agent-increment2c-temporal-materialize.yml
+          git add -A
+          cat > /tmp/expected-paths <<'EOF'
+          newsroom/authority/_retrieval_store.py
+          newsroom/authority/_retrieval_system.py
+          newsroom/retrieval/fixture_v2.py
+          newsroom/retrieval/fusion.py
+          newsroom/retrieval/models.py
+          newsroom/retrieval/policy.py
+          newsroom/tests/test_retrieval_2c_authority.py
+          newsroom/tests/test_retrieval_2c_contracts.py
+          newsroom/tests/test_retrieval_2c_fusion.py
+          EOF
+          sed -i 's/^          //' /tmp/expected-paths
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          git diff --cached --name-only "$AUTHORISED_PARENT" | sort \
+            > /tmp/actual-paths
+          diff -u /tmp/expected-paths /tmp/actual-paths
+          git diff --cached --check
+          python -m compileall -q newsroom scripts
+          tree="$(git write-tree)"
+          echo "TREE_SHA=$tree"
+          test "$tree" = "$EXPECTED_TREE"
+
+      - name: Run locked focused temporal gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_retrieval_2c_contracts.py \
+            newsroom/tests/test_retrieval_2c_fusion.py \
+            newsroom/tests/test_retrieval_2c_adapter_unit.py \
+            newsroom/tests/test_retrieval_2c_migrations.py \
+            newsroom/tests/test_retrieval_2c_authority.py \
+            newsroom/tests/test_complete_projection_2b_migrations.py \
+            newsroom/tests/test_projection_b1_migrations.py \
+            newsroom/tests/test_relation_2a_contracts.py
+
+      - name: Create and push clean temporal correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Newsroom Increment 2C Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
+          commit="$(printf '%s\n\n%s\n' \
+            'feat(retrieval): enforce temporal freshness bounds' \
+            'Bind the fixed query-valid time, 31-day candidate window and one-hour projection freshness contract into fixture roots, projection metadata, fusion, replay and authority-side fail-closed tests.' \
+            | git commit-tree "$tree" -p "$AUTHORISED_PARENT")"
+          echo "COMMIT_SHA=$commit"
+          git push --force origin "$commit:refs/heads/$TARGET_BRANCH"
