@@ -1,0 +1,55 @@
+name: agent-increment2c-core-profile
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.8.0'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync locked environment
+        run: |
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Profile complete deterministic suite
+        id: profile
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          /usr/bin/time -f '\nWALL=%e CPU=%P MAXRSS=%M' \
+            uv run --no-sync python -m pytest -q newsroom/tests --durations=120 \
+            2>&1 | tee core-profile.log
+
+      - name: Upload profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment2c-core-profile
+          path: core-profile.log
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Preserve test result
+        if: steps.profile.outcome != 'success'
+        run: exit 1
