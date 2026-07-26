@@ -1,0 +1,60 @@
+name: agent-increment2c-diagnostic2-materialize
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    env:
+      AUTHORISED_PARENT: fda4293a533b9fe1eb472d14e38af93db210cb72
+      TARGET_BRANCH: agent/increment-2c-bounded-hybrid-retrieval
+      PATCH_SHA256: 4b26614a0219639e06cdbd5ba927154b21d8d9b1320f7dd47aeaf3948975afa0
+      EXPECTED_TREE: 4d51b572b31fd6010ea70f21acf0e91d40c5c6dc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Reconstruct reason-code diagnostic patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/increment2c-diagnostic2/fix.patch.gz.b64 \
+            > /tmp/increment2c-diagnostic2.patch.gz
+          echo "$PATCH_SHA256  /tmp/increment2c-diagnostic2.patch.gz" \
+            | sha256sum --check -
+          gzip --decompress --stdout /tmp/increment2c-diagnostic2.patch.gz \
+            > /tmp/increment2c-diagnostic2.patch
+
+      - name: Apply and verify exact one-file correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$AUTHORISED_PARENT"
+          git apply --check /tmp/increment2c-diagnostic2.patch
+          git apply --index /tmp/increment2c-diagnostic2.patch
+          test "$(git diff --cached --name-only)" = \
+            "newsroom/tests/test_retrieval_2c_neo4j_service.py"
+          git diff --cached --check
+          python -m compileall -q newsroom scripts
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+
+      - name: Create and push reason-code diagnostic commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Newsroom Increment 2C Agent"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          tree="$(git write-tree)"
+          commit="$(printf '%s\n\n%s\n' \
+            'test(retrieval): surface service failure reason code' \
+            'Report the exact retained authority reason code in the two failing service outcome assertions.' \
+            | git commit-tree "$tree" -p "$AUTHORISED_PARENT")"
+          git push --force origin "$commit:refs/heads/$TARGET_BRANCH"
