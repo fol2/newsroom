@@ -97,6 +97,11 @@ def test_complete_actual_service_cases_are_optional_only_in_core() -> None:
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[fulltext]',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[relation]',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[vector]',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_governed_deletion_purges_derivative_and_never_requalifies',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_relation_revocation_changes_later_context_without_rewrite',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_replacement_generation_deduplicates_candidate_authority',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_required_gap_blocks_complete_candidate_proof',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_dead_letter_blocks_complete_candidate_proof',
         'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_executes_all_four_branches_and_hydrates_authority',
         'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_admitted_relation_is_incomplete_not_no_match',
         'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_fulltext_index_is_unavailable_not_no_match',
@@ -105,7 +110,7 @@ def test_complete_actual_service_cases_are_optional_only_in_core() -> None:
     assert _INTEGRATED_SERVICE_TEST_ID in optional
     assert complete <= set(optional)
     assert optional == tuple(sorted(optional))
-    assert len(optional) == 27
+    assert len(optional) == 32
 
     route = _route("newsroom/projection/neo4j/_complete_adapter.py")
     assert route["service_required"] is True

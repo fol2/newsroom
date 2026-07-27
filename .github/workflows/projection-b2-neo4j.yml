@@ -285,6 +285,11 @@ jobs:
               "test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[fulltext]",
               "test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[relation]",
               "test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[vector]",
+              "test_actual_service_governed_deletion_purges_derivative_and_never_requalifies",
+              "test_actual_service_relation_revocation_changes_later_context_without_rewrite",
+              "test_actual_service_replacement_generation_deduplicates_candidate_authority",
+              "test_actual_service_required_gap_blocks_complete_candidate_proof",
+              "test_actual_service_dead_letter_blocks_complete_candidate_proof",
           }
           increment_2d_names = {
               case.attrib.get("name", "") for case in increment_2d
