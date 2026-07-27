@@ -29,6 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/_materialize_increment_3c_migration.py
+          python scripts/_materialize_increment_3c_schema_assertions.py
           python -m compileall -q newsroom/authority newsroom/tests
           git diff --check
 
@@ -51,6 +52,12 @@ jobs:
             newsroom/tests/test_check_3c_migrations.py \
             newsroom/tests/test_source_3a_lifecycle_integrity.py \
             newsroom/tests/test_source_3a_authority.py \
+            newsroom/tests/test_complete_projection_2b_migrations.py \
+            newsroom/tests/test_increment_2d_candidate_authority.py \
+            newsroom/tests/test_increment_2d_migrations.py \
+            newsroom/tests/test_projection_b1_migrations.py \
+            newsroom/tests/test_relation_2a_contracts.py \
+            newsroom/tests/test_retrieval_2c_migrations.py \
             2>&1 | tee -a /tmp/increment-3c-migration-verification.log
           status="${PIPESTATUS[0]}"
           if [ "${status}" -eq 0 ]; then
@@ -90,14 +97,22 @@ jobs:
           set -euo pipefail
           rm \
             .github/workflows/materialize-increment-3c-migration-chain.yml \
-            scripts/_materialize_increment_3c_migration.py
+            scripts/_materialize_increment_3c_migration.py \
+            scripts/_materialize_increment_3c_schema_assertions.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add newsroom/authority/migrations.py \
             newsroom/tests/test_source_3a_lifecycle_integrity.py \
             newsroom/tests/test_check_3c_migrations.py \
+            newsroom/tests/test_complete_projection_2b_migrations.py \
+            newsroom/tests/test_increment_2d_candidate_authority.py \
+            newsroom/tests/test_increment_2d_migrations.py \
+            newsroom/tests/test_projection_b1_migrations.py \
+            newsroom/tests/test_relation_2a_contracts.py \
+            newsroom/tests/test_retrieval_2c_migrations.py \
             .github/workflows/materialize-increment-3c-migration-chain.yml \
-            scripts/_materialize_increment_3c_migration.py
+            scripts/_materialize_increment_3c_migration.py \
+            scripts/_materialize_increment_3c_schema_assertions.py
           git diff --cached --check
           git commit -m 'feat(checks): activate checked schema v11 migration'
           git push origin HEAD:agent/increment-3c-check-transition-authority
