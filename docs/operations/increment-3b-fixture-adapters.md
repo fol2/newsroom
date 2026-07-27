@@ -30,22 +30,22 @@ A `SourceShapeContract` names exact item and field paths, required fields, stabl
 
 Before any fixture body is interpreted, the runner validates:
 
-- canonical HTTPS URL, exact allow-listed host and port;
-- no user-info, fragment, IP-literal destination, scheme downgrade or redirect loop;
+- canonical ASCII HTTPS URL, exact allow-listed host and port;
+- no raw whitespace, control character, backslash, literal or encoded dot segment, noncanonical percent escape, user-info, fragment, IP-literal destination, scheme downgrade or redirect loop;
 - a contiguous redirect chain within its configured bound;
 - separate DNS and TLS evidence for the initial endpoint and every redirect target;
 - supplied DNS evidence containing only canonical public, globally routable addresses;
 - supplied TLS evidence with a valid certificate, hostname verification and permitted TLS version;
 - independent connect, read, idle and total timing bounds;
 - compressed byte, decompressed byte and decompression-ratio limits;
-- exact permitted content encoding, media type and charset; and
+- syntactically valid and exactly permitted content encoding, media type, parameter quoting and charset; and
 - response `Content-Length` consistency where supplied.
 
 Preflight rejection returns a `BLOCKED` proposal without a transport receipt. It does not silently broaden the endpoint, switch provider, weaken TLS or create an alternative source path.
 
 ## Parser containment
 
-JSON parsing rejects duplicate keys, non-finite numbers, excessive nesting, oversized strings or numbers, excessive collection entries and excessive item counts. RSS/Atom parsing rejects DTD and entity declarations, external resolution, malformed XML, excessive depth, attributes, scalar size and collection size. Maintained HTML uses a non-network parser and extracts text only; no script, style, link or instruction is executed.
+JSON parsing rejects duplicate keys, non-finite numbers, excessive nesting, oversized strings or numbers, excessive collection entries and excessive item counts. RSS/Atom parsing rejects DTD and entity declarations, external resolution, malformed XML, excessive depth, attributes, scalar size and collection size. RSS/Atom and maintained-document bytes must independently decode as UTF-8; an XML declaration cannot override or conflict with the transport charset. Maintained HTML uses a non-network parser and extracts text only; no script, style, link or instruction is executed.
 
 Compressed input is expanded incrementally under independent compressed, decompressed and ratio limits. Malformed, truncated or concatenated compressed streams fail closed.
 
@@ -62,7 +62,7 @@ The runner preserves these distinctions:
 - `SUCCESS_TRUNCATED` — bounded candidates are emitted and omitted tail remains visible;
 - `BLOCKED`, `REDIRECTED`, `RATE_LIMITED`, `UNAUTHORISED`, `NOT_FOUND`, `GONE`, `MALFORMED`, `SHAPE_DRIFT` and `TRANSPORT_FAILED` — distinct non-success or degraded meanings.
 
-Timeout, TLS, DNS, malformed input, parser rejection, `404`, `410`, `429`, redirect and empty `2xx` never collapse into healthy unchanged. `204`, `205` and `304` responses carrying payload bytes fail the transport contract. Rolling-list absence never becomes withdrawal. Partial or truncated complete-current-state output never becomes clearance. All proposals retain `authority_effect = NONE`.
+Only HTTP `200` is accepted as a body-bearing complete-success contract in this unit. Bodyless `204` and `205` remain explicit empty success with an empty Capture. HTTP `206` and other uncontracted `2xx` statuses fail closed rather than masquerading as complete source state. Timeout, TLS, DNS, malformed input, parser rejection, `404`, `410`, `429`, redirect and empty `2xx` never collapse into healthy unchanged. `204`, `205` and `304` responses carrying payload bytes fail the transport contract. Rolling-list absence never becomes withdrawal. Partial or truncated complete-current-state output never becomes clearance. All proposals retain `authority_effect = NONE`.
 
 A mixed valid/invalid collection may return independently valid items as `SUCCESS_PARTIAL`. An all-invalid collection, identity collision, unexpected strict-shape field, singleton multiplicity or stable item-key drift is contained as `SHAPE_DRIFT` rather than publisher change.
 
