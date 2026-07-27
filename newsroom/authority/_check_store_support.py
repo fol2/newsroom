@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Any, Mapping
 
 from newsroom.authority._capability import _AuthorizedCommandGrant
 from newsroom.authority.canonical import digest_bytes
@@ -89,6 +90,56 @@ class _CheckStoreSupport:
             raise AuthorityPersistenceError(
                 "discovery Check grant differs from the typed record"
             )
+
+    @classmethod
+    def _validate_record_envelope(
+        cls,
+        conn: sqlite3.Connection,
+        row: Mapping[str, Any],
+        *,
+        command_type: str,
+        aggregate_id: str,
+        canonical_bytes: bytes,
+        canonical_digest: str,
+    ) -> sqlite3.Row:
+        spec = _CHECK_RECORD_SPECS.get(command_type)
+        if spec is None:
+            return super()._validate_record_envelope(
+                conn,
+                row,
+                command_type=command_type,
+                aggregate_id=aggregate_id,
+                canonical_bytes=canonical_bytes,
+                canonical_digest=canonical_digest,
+            )
+        event = cls._record_context(
+            conn,
+            event_id=str(row["authority_event_id"]),
+        )
+        aggregate_type, event_type, trust_scope = spec
+        if (
+            str(event["event_type"]) != event_type
+            or int(event["event_schema_version"]) != 1
+            or str(event["aggregate_type"]) != aggregate_type
+            or str(event["aggregate_id"]) != aggregate_id
+            or int(event["aggregate_version"])
+            != int(row["authority_aggregate_version"])
+            or int(row["authority_aggregate_version"]) != 1
+            or str(event["recorded_at"]) != str(row["recorded_at"])
+            or str(event["security_scope"])
+            != "authority.discovery_checks"
+            or str(event["retention_scope"]) != "authority.audit"
+            or str(event["trust_scope"]) != trust_scope.value
+            or str(event["payload_mode"]) != PayloadMode.INLINE.value
+            or str(event["payload_digest"]) != canonical_digest
+            or event["payload_bytes"] is None
+            or bytes(event["payload_bytes"]) != canonical_bytes
+            or digest_bytes(canonical_bytes) != canonical_digest
+        ):
+            raise AuthorityPersistenceError(
+                "Check record authority envelope is inconsistent"
+            )
+        return event
 
     @classmethod
     def _check_request_row(
