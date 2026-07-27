@@ -326,7 +326,7 @@ class _SourceRegistryBoundary:
             request,
             proof,
             command_type=SOURCE_DEFINITION_REGISTER_COMMAND,
-            aggregate_id=AggregateId(str(request.definition_id)),
+            aggregate_id=AggregateId(request.definition_id.value),
             commit=self._store.commit_source_definition,
         )
 
@@ -341,7 +341,7 @@ class _SourceRegistryBoundary:
             request,
             proof,
             command_type=SOURCE_DEFINITION_VERSION_RECORD_COMMAND,
-            aggregate_id=AggregateId(str(request.version_id)),
+            aggregate_id=AggregateId(request.version_id.value),
             commit=self._store.commit_source_definition_version,
         )
 
@@ -356,7 +356,7 @@ class _SourceRegistryBoundary:
             request,
             proof,
             command_type=SOURCE_ITEM_REGISTER_COMMAND,
-            aggregate_id=AggregateId(str(request.item_id)),
+            aggregate_id=AggregateId(request.item_id.value),
             commit=self._store.commit_source_item,
         )
 
@@ -371,7 +371,7 @@ class _SourceRegistryBoundary:
             request,
             proof,
             command_type=SOURCE_LOCATOR_CONTINUITY_DECIDE_COMMAND,
-            aggregate_id=AggregateId(str(request.decision_id)),
+            aggregate_id=AggregateId(request.decision_id.value),
             commit=self._store.commit_locator_continuity_decision,
         )
 
@@ -386,7 +386,7 @@ class _SourceRegistryBoundary:
             request,
             proof,
             command_type=SOURCE_REVISION_RECORD_COMMAND,
-            aggregate_id=AggregateId(str(request.revision_id)),
+            aggregate_id=AggregateId(request.revision_id.value),
             commit=self._store.commit_source_revision,
         )
 
@@ -401,7 +401,7 @@ class _SourceRegistryBoundary:
             request,
             proof,
             command_type=DISCOVERY_REPRESENTATION_RECORD_COMMAND,
-            aggregate_id=AggregateId(str(request.representation_id)),
+            aggregate_id=AggregateId(request.representation_id.value),
             commit=self._store.commit_discovery_representation,
         )
 
@@ -416,7 +416,7 @@ class _SourceRegistryBoundary:
             request,
             proof,
             command_type=DISCOVERY_OCCURRENCE_RECORD_COMMAND,
-            aggregate_id=AggregateId(str(request.occurrence_id)),
+            aggregate_id=AggregateId(request.occurrence_id.value),
             commit=self._store.commit_discovery_occurrence,
         )
 
