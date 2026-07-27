@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
+import json
 import sqlite3
 
 import pytest
 
-from newsroom.authority import AuthenticationProof, AuthorityPersistenceError
+from newsroom.authority import (
+    AuthenticationProof,
+    AuthorityPersistenceError,
+    IdempotencyConflict,
+    StaticAuthorizer,
+    canonical_json_bytes,
+    digest_bytes,
+)
 from newsroom.authority.migrations import SCHEMA_VERSION
 from newsroom.increment2 import (
     DevelopmentCandidateAdmissionRequest,
@@ -17,7 +26,6 @@ from newsroom.projection.neo4j import (
     CompleteDerivativeType,
     Neo4jIdentityConflict,
 )
-from newsroom.projection.neo4j import Neo4jIdentityConflict
 from newsroom.relations import (
     INTEGRATED_FIXTURE_V2,
     RelationCurrentState,
@@ -89,6 +97,15 @@ def _candidate_counts(database: Path) -> tuple[int, int, int, int]:
                 "ledger_events",
             )
         )
+
+
+def _trigger_sql(conn: sqlite3.Connection, name: str) -> str:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+        (name,),
+    ).fetchone()
+    assert row is not None and isinstance(row[0], str)
+    return str(row[0])
 
 
 def test_schema_version_advances_to_candidate_authority_v9(tmp_path: Path) -> None:
@@ -471,6 +488,48 @@ def test_gap_or_dead_letter_preserves_history_and_blocks_candidate_reuse(
         system.close()
 
 
+
+
+class _RecordingAuthorizer:
+    def __init__(self, delegate: StaticAuthorizer) -> None:
+        self._delegate = delegate
+        self.requests: list[object] = []
+
+    def authorize(self, context, request, *, now):
+        self.requests.append(request)
+        return self._delegate.authorize(context, request, now=now)
+
+
+def test_candidate_decision_read_uses_candidate_security_scope(
+    tmp_path: Path,
+) -> None:
+    database, object_root, _context, _request, admitted = (
+        _admit_fixture_candidate(tmp_path, key="increment-2d-read-scope")
+    )
+    recorder = _RecordingAuthorizer(
+        StaticAuthorizer(
+            policy_version="increment-2d-read-scope-v1",
+            grants_by_principal={"principal.alpha": scopes()},
+        )
+    )
+    system = open_candidate_test_system(
+        database,
+        object_root=object_root,
+        adapter=MemoryHybridRetrievalAdapter(),
+        authorizer=recorder,
+    )
+    try:
+        assert system.candidates.decision(
+            admitted.decision_id,
+            proof=proof(),
+        ) == admitted
+    finally:
+        system.close()
+    assert len(recorder.requests) == 1
+    request = recorder.requests[0]
+    assert getattr(request, "required_scope") == "authority.candidate.read"
+    assert getattr(request, "security_scope") == "authority.candidate"
+
 def test_admission_authenticates_before_context_lookup(tmp_path: Path) -> None:
     database = tmp_path / "authority.sqlite3"
     object_root = tmp_path / "objects"
@@ -511,7 +570,10 @@ def test_context_digest_rebinding_is_rejected(tmp_path: Path) -> None:
             request,
             expected_context_digest="sha256:" + "b" * 64,
         )
-        with pytest.raises(Exception):
+        with pytest.raises(
+            IdempotencyConflict,
+            match="expected context digest differs",
+        ):
             system.candidates.admit(rebound, proof=proof())
     finally:
         system.close()
@@ -537,19 +599,181 @@ def test_reopen_rejects_redigested_normalized_candidate_tamper(
     finally:
         system.close()
     with sqlite3.connect(database) as conn:
+        trigger_sql = _trigger_sql(
+            conn,
+            "immutable_development_candidate_version_update",
+        )
         conn.execute("DROP TRIGGER immutable_development_candidate_version_update")
         conn.execute(
             "UPDATE development_candidate_versions_v2 "
             "SET canonical_process_id='SYN-PROC-TAMPERED'"
         )
+        conn.execute(trigger_sql)
         conn.commit()
-    with pytest.raises(Exception):
+    with pytest.raises(
+        AuthorityPersistenceError,
+        match="development Candidate version normalized columns differ",
+    ):
         open_candidate_test_system(
             database,
             object_root=object_root,
             adapter=MemoryHybridRetrievalAdapter(),
         )
 
+
+
+def test_reopen_rejects_normalized_candidate_decision_tamper(
+    tmp_path: Path,
+) -> None:
+    database, object_root, _context, _request, _admitted = (
+        _admit_fixture_candidate(tmp_path, key="decision-normalized-tamper")
+    )
+    with sqlite3.connect(database) as conn:
+        trigger_sql = _trigger_sql(
+            conn,
+            "immutable_development_candidate_decision_update",
+        )
+        conn.execute(
+            "DROP TRIGGER immutable_development_candidate_decision_update"
+        )
+        conn.execute(
+            "UPDATE development_candidate_admission_decisions_v2 "
+            "SET relation_key=?",
+            ("sha256:" + "f" * 64,),
+        )
+        conn.execute(trigger_sql)
+        conn.commit()
+
+    with pytest.raises(
+        AuthorityPersistenceError,
+        match="development Candidate decision normalized columns differ",
+    ):
+        open_candidate_test_system(
+            database,
+            object_root=object_root,
+            adapter=MemoryHybridRetrievalAdapter(),
+        )
+
+
+def test_reopen_rejects_redigested_candidate_decision_outcome_tamper(
+    tmp_path: Path,
+) -> None:
+    database, object_root, _context, _request, _admitted = (
+        _admit_fixture_candidate(tmp_path, key="decision-outcome-tamper")
+    )
+    with sqlite3.connect(database) as conn:
+        row = conn.execute(
+            "SELECT canonical_bytes FROM "
+            "development_candidate_admission_decisions_v2"
+        ).fetchone()
+        assert row is not None
+        value = json.loads(bytes(row[0]).decode("utf-8"))
+        value["outcome"] = CandidateAdmissionOutcome.DEDUPLICATED.value
+        canonical = canonical_json_bytes(value)
+        trigger_sql = _trigger_sql(
+            conn,
+            "immutable_development_candidate_decision_update",
+        )
+        conn.execute(
+            "DROP TRIGGER immutable_development_candidate_decision_update"
+        )
+        conn.execute(
+            "UPDATE development_candidate_admission_decisions_v2 "
+            "SET outcome=?,canonical_bytes=?,canonical_digest=?",
+            (
+                CandidateAdmissionOutcome.DEDUPLICATED.value,
+                canonical,
+                digest_bytes(canonical),
+            ),
+        )
+        conn.execute(trigger_sql)
+        conn.commit()
+
+    with pytest.raises(
+        AuthorityPersistenceError,
+        match="development Candidate identity chronology differs",
+    ):
+        open_candidate_test_system(
+            database,
+            object_root=object_root,
+            adapter=MemoryHybridRetrievalAdapter(),
+        )
+
+
+def test_reopen_rejects_candidate_identity_chronology_tamper(
+    tmp_path: Path,
+) -> None:
+    database, object_root, _context, _request, _admitted = (
+        _admit_fixture_candidate(tmp_path, key="candidate-chronology-tamper")
+    )
+    with sqlite3.connect(database) as conn:
+        trigger_sql = _trigger_sql(
+            conn,
+            "immutable_development_candidate_update",
+        )
+        conn.execute("DROP TRIGGER immutable_development_candidate_update")
+        conn.execute(
+            "UPDATE development_candidates_v2 "
+            "SET created_at='2042-03-12T12:00:01.000000Z'"
+        )
+        conn.execute(trigger_sql)
+        conn.commit()
+
+    with pytest.raises(
+        AuthorityPersistenceError,
+        match="development Candidate identity chronology differs",
+    ):
+        open_candidate_test_system(
+            database,
+            object_root=object_root,
+            adapter=MemoryHybridRetrievalAdapter(),
+        )
+
+
+def test_reopen_rejects_candidate_command_payload_rebinding(
+    tmp_path: Path,
+) -> None:
+    database, object_root, _context, _request, _admitted = (
+        _admit_fixture_candidate(tmp_path, key="candidate-payload-tamper")
+    )
+    with sqlite3.connect(database) as conn:
+        row = conn.execute(
+            "SELECT e.payload_id,p.payload_bytes "
+            "FROM development_candidate_admission_decisions_v2 d "
+            "JOIN ledger_events e ON e.event_id=d.authority_event_id "
+            "JOIN authority_payloads p ON p.payload_id=e.payload_id"
+        ).fetchone()
+        assert row is not None
+        value = json.loads(bytes(row[1]).decode("utf-8"))
+        value["expected_context_digest"] = "sha256:" + "e" * 64
+        canonical = canonical_json_bytes(value)
+        digest = digest_bytes(canonical)
+        payload_trigger = _trigger_sql(conn, "immutable_authority_payloads_update")
+        event_trigger = _trigger_sql(conn, "immutable_ledger_events_update")
+        conn.execute("DROP TRIGGER immutable_authority_payloads_update")
+        conn.execute("DROP TRIGGER immutable_ledger_events_update")
+        conn.execute(
+            "UPDATE authority_payloads SET payload_bytes=?,payload_digest=? "
+            "WHERE payload_id=?",
+            (canonical, digest, str(row[0])),
+        )
+        conn.execute(
+            "UPDATE ledger_events SET payload_digest=? WHERE payload_id=?",
+            (digest, str(row[0])),
+        )
+        conn.execute(payload_trigger)
+        conn.execute(event_trigger)
+        conn.commit()
+
+    with pytest.raises(
+        AuthorityPersistenceError,
+        match="development Candidate decision payload differs from authority",
+    ):
+        open_candidate_test_system(
+            database,
+            object_root=object_root,
+            adapter=MemoryHybridRetrievalAdapter(),
+        )
 
 
 def test_restart_revalidates_and_replays_without_rewriting_candidate_history(

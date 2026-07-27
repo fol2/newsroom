@@ -29,7 +29,7 @@ It excludes Increment 3, live sources/search, Graphiti, external models or embed
 ## Result
 
 - P1 findings: 0
-- P2 findings: 8
+- P2 findings: 13
 - Remaining unresolved P1/P2 after correction: 0
 
 Review submissions, requested changes, inline threads and actionable PR comments must be rechecked against the exact final remote head before merge.
@@ -124,24 +124,81 @@ Correction:
 - rebuild a replacement generation and require the derivative count to remain zero; and
 - require complete validation to fail rather than recreate or silently omit required authority.
 
+### P2-9 — Proposal-only relation exclusion was inferred rather than retained in the complete proof
+
+The complete proof verified the admitted `DEVELOPMENT_OF` relation but did not retain an explicit competing `SAME_EVENT_AS` proposal and prove that it remained proposal-only in both SQLite assertion authority and Neo4j projection state. That left one required issue #158 boundary dependent on earlier-unit evidence.
+
+Correction:
+
+- retain a synthetic authorised `SAME_EVENT_AS` distractor proposal before the complete rebuild;
+- require it to exist in `relation_proposals` but never in `relation_assertions`;
+- require the complete generation to contain zero `SAME_EVENT_AS` relationships; and
+- preserve Candidate admission through only the governed admitted `DEVELOPMENT_OF` relation.
+
+### P2-10 — The normalized Candidate tamper regression stopped at schema fingerprint validation
+
+The first normalized-row tamper test dropped the immutable-update trigger, changed a Candidate Version column and reopened the store. Reopen correctly failed, but it failed at the earlier schema-fingerprint boundary because the trigger remained absent; the test did not prove the Candidate-specific normalized-column check.
+
+Correction:
+
+- capture the exact retained trigger definition;
+- temporarily remove it only to inject the normalized-column tamper;
+- recreate the exact trigger before reopen so the schema fingerprint remains canonical; and
+- require the Candidate Version normalized-column validator itself to reject the tampered value.
+
+### P2-11 — Complete proof preparation did not use the caller-supplied authentication proof
+
+The actual-service proof controller accepted a typed `AuthenticationProof`, but the trusted preparation callback delegated rebuild, validation, qualification and promotion to older helper functions that created a separate static proof. The later retrieval and Candidate operations still authenticated correctly, but the complete preparation chain was not cryptographically tied to the proof supplied to the public controller.
+
+Correction:
+
+- make the complete preparation boundary require the supplied typed proof;
+- use that exact proof for generation reads, rebuild, validation, qualification and promotion;
+- retain repository-owned fixed operation identities and policy scopes; and
+- keep direct lifecycle fixtures explicit by passing their own repository-owned proof rather than relying on hidden helper credentials.
+
+### P2-12 — Candidate decision reads used the broader integrated security scope
+
+The Candidate decision read correctly required `authority.candidate.read`, but its authorization request labelled the operation with `authority.integrated`. That broader label was inconsistent with the Candidate command and retained decision domain, and weakened provenance inspection even though the required scope still denied unauthorized principals.
+
+Correction:
+
+- label both the unsigned authorization digest and typed authorization request with `authority.candidate`;
+- retain the separately required `authority.candidate.read` scope;
+- add a recording-authorizer regression that proves the exact required and security scopes; and
+- leave Candidate reads non-mutating and separately authorised from admission.
+
+### P2-13 — Candidate restart integrity did not independently bind chronology and command payload
+
+The first schema-v9 restart pass rederived Candidate Version and decision canonical rows, but Candidate identity chronology and the exact command/event payload envelope were not independently reconstructed. A trigger-preserving attacker capable of re-digesting several retained rows could therefore try to reclassify the first decision, shift Candidate creation time or rebind the admission payload while keeping an internally consistent decision JSON.
+
+Correction:
+
+- require exactly one immutable Candidate Version and at least one ledger-linked decision for every Candidate identity;
+- require the first ledger-ordered decision to be `ADMITTED` at the exact Candidate/Version creation time and every later decision to be `DEDUPLICATED`;
+- reconstruct every decision outcome from ledger order rather than trusting the retained outcome column;
+- bind the exact proposal command, inline payload, ledger event, aggregate version, security/retention/trust scopes, Retrieval Context, manifest, Candidate and Candidate Version;
+- reject a missing decision/version join rather than silently omitting it from startup validation; and
+- add trigger-restored raw-SQL regressions for normalized decision linkage, re-digested outcome changes, Candidate chronology changes and command-payload rebinding.
+
 ## Validation performed
 
 The current local source passed the focused Increment 2D proof, Candidate, migration and SDLC contract selection:
 
 ```text
-86 passed, 9 intentional no-service skips, 0 failed
+125 passed, 9 intentional no-service skips, 0 failed
 ```
 
 The complete deterministic repository lane passed through the fixed four-shard command:
 
 ```text
-shard 1: 282 passed, 11 skipped
-shard 2: 274 passed,  9 skipped
-shard 3: 299 passed,  4 skipped
-shard 4: 347 passed,  8 skipped
+shard 1: 319 passed,  1 skipped
+shard 2: 284 passed,  4 skipped
+shard 3: 292 passed, 15 skipped
+shard 4: 312 passed, 12 skipped
 ---------------------------------
-total:   1,202 passed, 32 skipped, 0 failed
-merged report outcomes: 1,234
+total:   1,207 passed, 32 skipped, 0 failed
+merged report outcomes: 1,239
 required skips: 0
 ```
 

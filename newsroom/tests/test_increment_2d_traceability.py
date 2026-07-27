@@ -98,6 +98,7 @@ def test_increment_2d_operations_record_authority_and_rollback() -> None:
         "Revoking the admitted `DEVELOPMENT_OF` relation does not mutate or delete the Candidate",
         "delivery removes the passage derivative from the active generation",
         "zero open required gaps and zero dead letters",
+        "It independently derives first-admission versus later-deduplication order",
         "do not delete migration rows",
         "Do not start Increment 3 issue #143",
     ):
@@ -108,14 +109,19 @@ def test_increment_2d_review_records_zero_unresolved_p1_p2() -> None:
     text = _SUBSTANTIVE_REVIEW.read_text(encoding="utf-8")
     for required in (
         "P1 findings: 0",
-        "P2 findings: 8",
+        "P2 findings: 13",
         "Remaining unresolved P1/P2 after correction: 0",
         "The Candidate fixture initially lacked the minimum development handoff",
         "The complete proof was test composition rather than a public bounded controller",
         "Graph, full-text and vector loss were not tested at the integrated Candidate boundary",
         "Tombstone evidence did not directly prove derivative purge",
-        "1,202 passed, 32 skipped, 0 failed",
-        "merged report outcomes: 1,234",
+        "Proposal-only relation exclusion was inferred rather than retained",
+        "normalized Candidate tamper regression stopped at schema fingerprint validation",
+        "Complete proof preparation did not use the caller-supplied authentication proof",
+        "Candidate decision reads used the broader integrated security scope",
+        "Candidate restart integrity did not independently bind chronology and command payload",
+        "1,207 passed, 32 skipped, 0 failed",
+        "merged report outcomes: 1,239",
         "Do not begin Increment 3",
     ):
         assert required in text

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 from pathlib import Path
 import sqlite3
@@ -23,6 +24,7 @@ from newsroom.increment2 import (
     Increment2PreparedAuthority,
     Increment2ProofEnvironment,
     Increment2ProofKeys,
+    Increment2ProofStateError,
 )
 from newsroom.integrated import CandidateAdmissionOutcome, IntegratedTriageProposalId
 from newsroom.projection import (
@@ -35,6 +37,7 @@ from newsroom.projection.neo4j import (
     CompleteDeliveryRequest,
     CompleteGenerationQualificationRequest,
     CompleteGenerationValidationRequest,
+    CompleteRebuildRequest,
     Neo4jIdentityConflict,
     Neo4jProjectorConfig,
 )
@@ -43,8 +46,13 @@ from newsroom.projection.neo4j._complete_adapter import (
 )
 from newsroom.relations import (
     INTEGRATED_FIXTURE_V2,
+    INTEGRATED_FIXTURE_V2_BINDING_ID,
     RelationCurrentState,
     RelationDecisionAction,
+    RelationPredicate,
+    RelationProducer,
+    RelationProducerKind,
+    RelationProposalId,
 )
 from newsroom.retrieval import (
     RetrievalContextV2Id,
@@ -80,14 +88,10 @@ from .projection_b1_helpers import source_command_registry
 from .relation_2a_helpers import decision_request
 from .test_complete_projection_2b_neo4j_service import (
     _cleanup_generation,
-    _current,
     _names,
     _projector_scalar,
     _projector_write,
-    _qualify,
-    _rebuild,
     _setup,
-    _validate,
 )
 
 
@@ -135,6 +139,37 @@ def _keys(prefix: str) -> Increment2ProofKeys:
     )
 
 
+
+
+def _retain_unadmitted_same_event_proposal(database: Path) -> RelationProposalId:
+    proposal_id = RelationProposalId.new()
+    request = replace(
+        INTEGRATED_FIXTURE_V2.relation.request(
+            proposal_id=proposal_id,
+            fixture_binding_id=INTEGRATED_FIXTURE_V2_BINDING_ID,
+            idempotency_key=f"increment-2d-actual-same-event-{uuid4().hex}",
+        ),
+        predicate=RelationPredicate.SAME_EVENT_AS,
+        producer=RelationProducer(
+            RelationProducerKind.AUTHORISED_OPERATOR,
+            "increment-2d-fixture-reviewer",
+            "increment-2d-fixture-reviewer-v1",
+            "increment-2d-same-event-distractor-v1",
+        ),
+        statement=(
+            "This synthetic SAME_EVENT_AS proposal is retained only as an "
+            "unadmitted Increment 2D distractor."
+        ),
+    )
+    system = open_candidate_relation_system(database)
+    try:
+        retained = system.relations.propose(request, proof=proof())
+        assert retained.proposal_id == proposal_id
+        assert retained.predicate is RelationPredicate.SAME_EVENT_AS
+    finally:
+        system.close()
+    return proposal_id
+
 def _candidate_counts(database: Path) -> tuple[int, int, int]:
     with sqlite3.connect(database) as conn:
         return tuple(
@@ -147,25 +182,64 @@ def _candidate_counts(database: Path) -> tuple[int, int, int]:
         )
 
 
-def _activate_initial(complete_system, generation, database: Path) -> Increment2PreparedAuthority:
-    rebuilt = _rebuild(
-        complete_system,
-        generation,
-        database,
-        key=f"increment-2d-service-rebuild-{uuid4().hex}",
+def _authenticated_current(complete_system, generation_id, authentication):
+    return next(
+        item
+        for item in complete_system.projections.generations(
+            INTEGRATED_FIXTURE_V2_COMPLETE_FAMILY_ID,
+            proof=authentication,
+        )
+        if item.generation_id == generation_id
     )
-    validation = _validate(
+
+
+def _activate_initial(
+    complete_system,
+    generation,
+    database: Path,
+    *,
+    authentication: AuthenticationProof,
+) -> Increment2PreparedAuthority:
+    if not isinstance(authentication, AuthenticationProof):
+        raise TypeError("complete proof preparation authentication must be typed")
+    rebuilt = complete_system.complete.rebuild(
+        CompleteRebuildRequest(
+            generation_id=generation.generation_id,
+            expected_authority_version=generation.authority_aggregate_version,
+            through_ledger_seq=_latest_complete_source_ledger_seq(database),
+            reason_code="INCREMENT_2D_COMPLETE_PROOF_REBUILD",
+            idempotency_key=f"increment-2d-service-rebuild-{uuid4().hex}",
+        ),
+        proof=authentication,
+    )
+    current = _authenticated_current(
         complete_system,
         generation.generation_id,
-        rebuilt.checkpoint_ledger_seq,
-        key=f"increment-2d-service-validate-{uuid4().hex}",
+        authentication,
     )
-    _qualify(
+    validation = complete_system.complete.validate_generation(
+        CompleteGenerationValidationRequest(
+            generation_id=generation.generation_id,
+            expected_authority_version=current.authority_aggregate_version,
+            checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
+            reason_code="INCREMENT_2D_COMPLETE_PROOF_VALIDATE",
+            idempotency_key=f"increment-2d-service-validate-{uuid4().hex}",
+        ),
+        proof=authentication,
+    )
+    complete_system.complete.qualify_generation(
+        CompleteGenerationQualificationRequest(
+            generation_id=generation.generation_id,
+            checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
+            profile=CompleteProjectionProfile.FIXTURE_QUALIFICATION,
+        ),
+        proof=authentication,
+    )
+    current = _authenticated_current(
         complete_system,
         generation.generation_id,
-        rebuilt.checkpoint_ledger_seq,
+        authentication,
     )
-    current = _current(complete_system, generation.generation_id)
     promoted = complete_system.projections.promote_generation(
         ProjectionGenerationPromotionRequest(
             generation_id=generation.generation_id,
@@ -175,7 +249,7 @@ def _activate_initial(complete_system, generation, database: Path) -> Increment2
             reason_code="INCREMENT_2D_COMPLETE_PROOF_PROMOTE",
             idempotency_key=f"increment-2d-service-promote-{uuid4().hex}",
         ),
-        proof=proof(),
+        proof=authentication,
     )
     assert promoted.generation.state is ProjectionGenerationState.ACTIVE
     return Increment2PreparedAuthority(
@@ -294,6 +368,13 @@ def test_actual_service_complete_increment_2_proof_admits_replays_and_restarts(
         complete_system,
         generation,
     ) = _setup(tmp_path)
+    complete_system.close()
+    distractor_id = _retain_unadmitted_same_event_proposal(database)
+    complete_system = open_candidate_complete_system(
+        database,
+        object_root=object_root,
+        adapter=_open_complete_neo4j_adapter(_service_config()),
+    )
     prepared: dict[str, Increment2PreparedAuthority] = {}
 
     def prepare(
@@ -305,7 +386,12 @@ def test_actual_service_complete_increment_2_proof_admits_replays_and_restarts(
         current = prepared.get("authority")
         if current is not None:
             return current
-        current = _activate_initial(complete_system, generation, database)
+        current = _activate_initial(
+            complete_system,
+            generation,
+            database,
+            authentication=authentication,
+        )
         complete_system.close()
         prepared["authority"] = current
         return current
@@ -345,6 +431,21 @@ def test_actual_service_complete_increment_2_proof_admits_replays_and_restarts(
         assert replay.context.context_digest == result.context.context_digest
         assert replay.candidate == result.candidate
         assert _candidate_counts(database) == (1, 1, 1)
+        with sqlite3.connect(database) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM relation_proposals "
+                "WHERE proposal_id=? AND predicate='SAME_EVENT_AS'",
+                (str(distractor_id),),
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM relation_assertions WHERE proposal_id=?",
+                (str(distractor_id),),
+            ).fetchone()[0] == 0
+        assert _projector_scalar(
+            "MATCH ()-[relation:SAME_EVENT_AS "
+            "{generation_id:$generation_id}]->() RETURN count(relation)",
+            generation_id=str(generation.generation_id),
+        ) == 0
     finally:
         if "authority" not in prepared:
             complete_system.close()
@@ -359,7 +460,9 @@ def test_actual_service_replacement_generation_deduplicates_candidate_authority(
     )
     replacement_id = None
     try:
-        _activate_initial(system, generation, database)
+        _activate_initial(
+            system, generation, database, authentication=proof()
+        )
     finally:
         system.close()
     try:
@@ -409,7 +512,9 @@ def test_actual_service_relation_revocation_changes_later_context_without_rewrit
     )
     replacement_id = None
     try:
-        _activate_initial(system, generation, database)
+        _activate_initial(
+            system, generation, database, authentication=proof()
+        )
     finally:
         system.close()
     try:
@@ -489,7 +594,9 @@ def test_actual_service_governed_deletion_purges_derivative_and_never_requalifie
     )
     replacement_id = None
     try:
-        _activate_initial(system, generation, database)
+        _activate_initial(
+            system, generation, database, authentication=proof()
+        )
     finally:
         system.close()
     try:
@@ -626,7 +733,9 @@ def test_actual_service_complete_proof_fails_closed_when_required_surface_is_los
         tmp_path
     )
     try:
-        prepared = _activate_initial(system, generation, database)
+        prepared = _activate_initial(
+            system, generation, database, authentication=proof()
+        )
     finally:
         system.close()
     try:
@@ -653,7 +762,7 @@ def test_actual_service_complete_proof_fails_closed_when_required_surface_is_los
                 ),
             )
         )
-        with pytest.raises(Exception, match=expected):
+        with pytest.raises(Increment2ProofStateError, match=expected):
             controller.run(
                 proof=AuthenticationProof(
                     method="STATIC_TOKEN", credential="token-1"
@@ -672,7 +781,9 @@ def test_actual_service_required_gap_blocks_complete_candidate_proof(
         tmp_path
     )
     try:
-        _activate_initial(system, generation, database)
+        _activate_initial(
+            system, generation, database, authentication=proof()
+        )
     finally:
         system.close()
     try:
@@ -718,7 +829,9 @@ def test_actual_service_dead_letter_blocks_complete_candidate_proof(
         tmp_path
     )
     try:
-        _activate_initial(system, generation, database)
+        _activate_initial(
+            system, generation, database, authentication=proof()
+        )
     finally:
         system.close()
     try:

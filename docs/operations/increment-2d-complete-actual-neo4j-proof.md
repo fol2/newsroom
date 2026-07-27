@@ -52,7 +52,7 @@ A Candidate does not assert that the hypothesis is true. The fixture hypothesis 
 
 The public request exposes only typed proposal and Retrieval Context identities, the expected context digest and an idempotency key. It exposes no SQL, Neo4j driver, Cypher, label, predicate, generation, index, result limit or policy object.
 
-Authentication and authorisation occur before context lookup. The command grant is bound to the exact proposal and expected aggregate version. The Candidate store rechecks authentication, current projection authority, deterministic branch evidence, governed hydration, current rights/lifecycle state and current admitted relation state inside the single SQLite writer transaction.
+The public controller passes one typed authentication proof through complete-generation preparation, retrieval, Candidate admission, replay and restart reads. Authentication and authorisation occur before context lookup. The command grant is bound to the exact proposal and expected aggregate version. The Candidate store rechecks authentication, current projection authority, deterministic branch evidence, governed hydration, current rights/lifecycle state and current admitted relation state inside the single SQLite writer transaction.
 
 Exact replay creates no duplicate event, Candidate, Candidate Version or decision. A new authorised proposal over an equivalent recovered context creates a new immutable `DEDUPLICATED` decision pointing to the existing Candidate and Candidate Version. Semantic collision is resolved by relational authority; graph ranking cannot allocate identity.
 
@@ -72,13 +72,13 @@ The permanent authenticated Neo4j workflow requires exactly these Increment 2D c
 8. an unresolved required gap blocking complete retrieval and Candidate reuse; and
 9. a retained dead letter blocking complete retrieval and Candidate reuse.
 
-The workflow also retains and rechecks all earlier B2/B3/C1, complete 2B and retrieval 2C actual-service cases. A fake, disabled, no-op, graph-free, exact-only or missing-index configuration cannot satisfy the JUnit identity set.
+The nominal proof additionally retains one authorised `SAME_EVENT_AS` distractor proposal, requires it to remain absent from admitted assertions and requires zero projected `SAME_EVENT_AS` relationships. The workflow also retains and rechecks all earlier B2/B3/C1, complete 2B and retrieval 2C actual-service cases. A fake, disabled, no-op, graph-free, exact-only or missing-index configuration cannot satisfy the JUnit identity set.
 
 ## Relation revocation and immutable history
 
 Revoking the admitted `DEVELOPMENT_OF` relation does not mutate or delete the Candidate, its first Candidate Version, the original Candidate Admission Decision or the original Retrieval Context. It does block replay as a new admission input because current relation authority no longer permits it.
 
-A replacement complete generation rebuilt from retained authority omits the revoked relation. A later retrieval is explicitly non-complete; it does not become a false `no prior match`. Earlier history remains readable through the separately authorised Candidate decision surface.
+A replacement complete generation rebuilt from retained authority omits the revoked relation. A later retrieval is explicitly non-complete; it does not become a false `no prior match`. Earlier history remains readable through the separately authorised Candidate decision surface. That read requires `authority.candidate.read` and carries `authority.candidate` security provenance; it does not reuse the admission scope or the broader integrated domain.
 
 ## Governed deletion, purge and tombstone non-resurrection
 
@@ -97,7 +97,7 @@ Neo4j is never used to restore SQLite, object admissions, rights, lifecycle stat
 
 Complete proof requires one SQLite-selected ACTIVE generation at the current non-projection/non-Candidate source watermark, a matching complete validation, zero open required gaps and zero dead letters. Wrong generation, stale checkpoint, missing contract, unresolved gap or dead letter fails closed before Candidate authority is created.
 
-Process restart reopens schema version 9 and structurally revalidates canonical and normalized Candidate, Candidate Version and decision rows plus their retained Retrieval Context, projection, relation, access-decision and authority-event links. Restart performs no history rewrite.
+Process restart reopens schema version 9 and structurally revalidates canonical and normalized Candidate, Candidate Version and decision rows plus their retained Retrieval Context, projection, relation, access-decision, command payload and authority-event links. It independently derives first-admission versus later-deduplication order and requires Candidate creation, first-version and first-decision chronology to agree. Restart performs no history rewrite. Every decision is also rebound to the exact proposal command, inline payload and ledger event under `authority.candidate`; trigger-restored, re-digested outcome, chronology, payload or normalized-linkage tampering fails reopen.
 
 ## Operator verification
 

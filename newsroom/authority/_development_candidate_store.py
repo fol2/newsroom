@@ -306,6 +306,8 @@ class _DevelopmentCandidateAuthorityStore(_HybridRetrievalAuthorityStore):
             if committed.replayed:
                 return self._decision_for_event(conn, committed.event_id)
 
+            authority_event_id = EventId.parse(committed.event_id)
+            decision_id = CandidateAdmissionDecisionId.parse(committed.event_id)
             collision = manifest.semantic_collision_digest
             identity = conn.execute(
                 "SELECT candidate_id FROM development_candidates_v2 "
@@ -314,8 +316,10 @@ class _DevelopmentCandidateAuthorityStore(_HybridRetrievalAuthorityStore):
             ).fetchone()
             if identity is None:
                 outcome = CandidateAdmissionOutcome.ADMITTED
-                candidate_id = StoryCandidateId.new()
-                candidate_version_id = StoryCandidateVersionId.new()
+                candidate_id = StoryCandidateId.parse(committed.event_id)
+                candidate_version_id = StoryCandidateVersionId.parse(
+                    committed.event_id
+                )
                 conn.execute(
                     "INSERT INTO development_candidates_v2("
                     "candidate_id,semantic_collision_digest,manifest_digest,created_at"
@@ -383,8 +387,6 @@ class _DevelopmentCandidateAuthorityStore(_HybridRetrievalAuthorityStore):
                     str(version["candidate_version_id"])
                 )
 
-            decision_id = CandidateAdmissionDecisionId.new()
-            authority_event_id = EventId.parse(committed.event_id)
             decision_value = self._decision_value(
                 decision_id=decision_id,
                 outcome=outcome,
@@ -550,43 +552,95 @@ class _DevelopmentCandidateAuthorityStore(_HybridRetrievalAuthorityStore):
         with self._lock:
             conn = self._connection
             for row in conn.execute(
+                "SELECT * FROM development_candidates_v2"
+            ).fetchall():
+                self._validate_candidate_row(conn, row)
+            for row in conn.execute(
                 "SELECT * FROM development_candidate_versions_v2"
             ).fetchall():
                 self._validate_version_row(conn, row)
-            for row in conn.execute(
+            decision_rows = conn.execute(
                 "SELECT d.*,v.version_number FROM "
                 "development_candidate_admission_decisions_v2 d "
                 "JOIN development_candidate_versions_v2 v "
                 "ON v.candidate_version_id=d.candidate_version_id"
-            ).fetchall():
+            ).fetchall()
+            decision_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM "
+                    "development_candidate_admission_decisions_v2"
+                ).fetchone()[0]
+            )
+            if len(decision_rows) != decision_count:
+                raise AuthorityPersistenceError(
+                    "development Candidate decision version linkage differs"
+                )
+            for row in decision_rows:
                 self._validate_decision_row(conn, row)
-            for row in conn.execute(
-                "SELECT * FROM development_candidates_v2"
-            ).fetchall():
-                collision = str(row["semantic_collision_digest"])
-                validate_sha256_digest(
-                    collision,
-                    field="development_candidate_semantic_collision_digest",
-                )
-                if (
-                    collision != self._candidate_manifest.semantic_collision_digest
-                    or str(row["manifest_digest"])
-                    != self._candidate_manifest.manifest_digest
-                ):
-                    raise AuthorityPersistenceError(
-                        "development Candidate identity differs from fixture authority"
-                    )
-                count = int(
-                    conn.execute(
-                        "SELECT COUNT(*) FROM development_candidate_versions_v2 "
-                        "WHERE candidate_id=?",
-                        (str(row["candidate_id"]),),
-                    ).fetchone()[0]
-                )
-                if count != 1:
-                    raise AuthorityPersistenceError(
-                        "development Candidate identity requires one exact version"
-                    )
+
+    def _validate_candidate_row(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+    ) -> None:
+        manifest = self._candidate_manifest
+        candidate_id = StoryCandidateId.parse(str(row["candidate_id"]))
+        collision = str(row["semantic_collision_digest"])
+        validate_sha256_digest(
+            collision,
+            field="development_candidate_semantic_collision_digest",
+        )
+        created_at = UtcTimestamp.parse(str(row["created_at"]))
+        if (
+            collision != manifest.semantic_collision_digest
+            or str(row["manifest_digest"]) != manifest.manifest_digest
+        ):
+            raise AuthorityPersistenceError(
+                "development Candidate identity differs from fixture authority"
+            )
+        versions = conn.execute(
+            "SELECT candidate_version_id,recorded_at FROM "
+            "development_candidate_versions_v2 WHERE candidate_id=?",
+            (str(candidate_id),),
+        ).fetchall()
+        if len(versions) != 1:
+            raise AuthorityPersistenceError(
+                "development Candidate identity requires one exact version"
+            )
+        decisions = conn.execute(
+            "SELECT d.decision_id,d.outcome,d.candidate_version_id,"
+            "d.recorded_at,e.event_id,e.ledger_seq "
+            "FROM development_candidate_admission_decisions_v2 d "
+            "JOIN ledger_events e ON e.event_id=d.authority_event_id "
+            "WHERE d.candidate_id=? ORDER BY e.ledger_seq,d.decision_id",
+            (str(candidate_id),),
+        ).fetchall()
+        if not decisions:
+            raise AuthorityPersistenceError(
+                "development Candidate identity lacks an admission decision"
+            )
+        first = decisions[0]
+        originating_event_id = str(first["event_id"])
+        if (
+            str(candidate_id) != originating_event_id
+            or str(versions[0]["candidate_version_id"])
+            != originating_event_id
+            or str(first["decision_id"]) != originating_event_id
+            or str(first["outcome"])
+            != CandidateAdmissionOutcome.ADMITTED.value
+            or str(first["candidate_version_id"])
+            != str(versions[0]["candidate_version_id"])
+            or str(first["recorded_at"]) != created_at.to_text()
+            or str(versions[0]["recorded_at"]) != created_at.to_text()
+            or any(
+                str(item["outcome"])
+                != CandidateAdmissionOutcome.DEDUPLICATED.value
+                for item in decisions[1:]
+            )
+        ):
+            raise AuthorityPersistenceError(
+                "development Candidate identity chronology differs"
+            )
 
     def _validate_version_row(
         self,
@@ -602,6 +656,17 @@ class _DevelopmentCandidateAuthorityStore(_HybridRetrievalAuthorityStore):
         version_id = StoryCandidateVersionId.parse(
             str(row["candidate_version_id"])
         )
+        candidate = conn.execute(
+            "SELECT created_at FROM development_candidates_v2 "
+            "WHERE candidate_id=?",
+            (str(candidate_id),),
+        ).fetchone()
+        if candidate is None:
+            raise AuthorityPersistenceError(
+                "development Candidate version identity is missing"
+            )
+        recorded_at = UtcTimestamp.parse(str(row["recorded_at"]))
+        created_at = UtcTimestamp.parse(str(candidate["created_at"]))
         context = self.retrieval_context(
             RetrievalContextV2Id.parse(str(row["initial_retrieval_context_id"]))
         )
@@ -650,44 +715,59 @@ class _DevelopmentCandidateAuthorityStore(_HybridRetrievalAuthorityStore):
             raise AuthorityPersistenceError(
                 "development Candidate version normalized columns differ"
             )
+        if (
+            recorded_at != created_at
+            or context.recorded_at.value > recorded_at.value
+        ):
+            raise AuthorityPersistenceError(
+                "development Candidate version chronology differs"
+            )
+
+    def _event_payload_value(
+        self,
+        conn: sqlite3.Connection,
+        event: sqlite3.Row,
+    ) -> dict[str, Any]:
+        payload = conn.execute(
+            "SELECT mode,payload_bytes,payload_digest FROM authority_payloads "
+            "WHERE payload_id=?",
+            (str(event["payload_id"]),),
+        ).fetchone()
+        if payload is None or str(payload["mode"]) != "INLINE":
+            raise AuthorityPersistenceError(
+                "development Candidate decision payload is missing"
+            )
+        canonical = bytes(payload["payload_bytes"])
+        digest = digest_bytes(canonical)
+        if (
+            digest != str(payload["payload_digest"])
+            or digest != str(event["payload_digest"])
+        ):
+            raise AuthorityPersistenceError(
+                "development Candidate decision payload digest differs"
+            )
+        return self._decode_candidate_canonical(
+            canonical,
+            identity="development Candidate decision payload",
+        )
 
     def _validate_decision_row(
         self,
         conn: sqlite3.Connection,
         row: sqlite3.Row,
     ) -> None:
-        value = self._canonical_row_value(
-            row,
-            identity="development Candidate decision",
+        manifest = self._candidate_manifest
+        decision_id = CandidateAdmissionDecisionId.parse(
+            str(row["decision_id"])
+        )
+        proposal_id = IntegratedTriageProposalId.parse(str(row["proposal_id"]))
+        candidate_id = StoryCandidateId.parse(str(row["candidate_id"]))
+        candidate_version_id = StoryCandidateVersionId.parse(
+            str(row["candidate_version_id"])
         )
         context = self.retrieval_context(
             RetrievalContextV2Id.parse(str(row["retrieval_context_id"]))
         )
-        expected = self._decision_value(
-            decision_id=CandidateAdmissionDecisionId.parse(
-                str(row["decision_id"])
-            ),
-            outcome=CandidateAdmissionOutcome(str(row["outcome"])),
-            candidate_id=StoryCandidateId.parse(str(row["candidate_id"])),
-            candidate_version_id=StoryCandidateVersionId.parse(
-                str(row["candidate_version_id"])
-            ),
-            request=DevelopmentCandidateAdmissionRequest(
-                proposal_id=IntegratedTriageProposalId.parse(
-                    str(row["proposal_id"])
-                ),
-                retrieval_context_id=context.context_id,
-                expected_context_digest=context.context_digest,
-                idempotency_key="retained-decision-validation",
-            ),
-            context=context,
-            authority_event_id=EventId.parse(str(row["authority_event_id"])),
-            authority_aggregate_version=int(row["authority_aggregate_version"]),
-        )
-        if value != expected:
-            raise AuthorityPersistenceError(
-                "development Candidate decision canonical value differs"
-            )
         event = conn.execute(
             "SELECT * FROM ledger_events WHERE event_id=?",
             (str(row["authority_event_id"]),),
@@ -696,17 +776,150 @@ class _DevelopmentCandidateAuthorityStore(_HybridRetrievalAuthorityStore):
             raise AuthorityPersistenceError(
                 "development Candidate decision event is missing"
             )
+        command = conn.execute(
+            "SELECT * FROM authority_commands WHERE command_id=?",
+            (str(event["command_id"]),),
+        ).fetchone()
+        version = conn.execute(
+            "SELECT candidate_id,version_number,recorded_at FROM "
+            "development_candidate_versions_v2 WHERE candidate_version_id=?",
+            (str(candidate_version_id),),
+        ).fetchone()
+        candidate = conn.execute(
+            "SELECT semantic_collision_digest,manifest_digest,created_at "
+            "FROM development_candidates_v2 WHERE candidate_id=?",
+            (str(candidate_id),),
+        ).fetchone()
+        if command is None or version is None or candidate is None:
+            raise AuthorityPersistenceError(
+                "development Candidate decision linkage is missing"
+            )
+        first = conn.execute(
+            "SELECT d.decision_id FROM "
+            "development_candidate_admission_decisions_v2 d "
+            "JOIN ledger_events e ON e.event_id=d.authority_event_id "
+            "WHERE d.candidate_id=? ORDER BY e.ledger_seq,d.decision_id LIMIT 1",
+            (str(candidate_id),),
+        ).fetchone()
+        if first is None:
+            raise AuthorityPersistenceError(
+                "development Candidate decision ordering is missing"
+            )
+        expected_outcome = (
+            CandidateAdmissionOutcome.ADMITTED
+            if str(first["decision_id"]) == str(decision_id)
+            else CandidateAdmissionOutcome.DEDUPLICATED
+        )
+        expected_payload = {
+            "proposal_id": str(proposal_id),
+            "retrieval_context_id": str(context.context_id),
+            "expected_context_digest": context.context_digest,
+            "candidate_manifest_digest": manifest.manifest_digest,
+            "semantic_collision_digest": manifest.semantic_collision_digest,
+        }
+        if self._event_payload_value(conn, event) != expected_payload:
+            raise AuthorityPersistenceError(
+                "development Candidate decision payload differs from authority"
+            )
+        recorded_at = UtcTimestamp.parse(str(row["recorded_at"]))
+        normalized = (
+            str(row["proposal_aggregate_type"]),
+            str(row["outcome"]),
+            str(row["candidate_id"]),
+            str(row["candidate_version_id"]),
+            int(row["version_number"]),
+            str(row["route"]),
+            str(row["fixture_id"]),
+            str(row["retrieval_context_id"]),
+            str(row["retrieval_context_digest"]),
+            str(row["manifest_digest"]),
+            str(row["semantic_collision_digest"]),
+            str(row["relation_key"]),
+            str(row["prior_candidate_version_id"]),
+            int(row["authority_aggregate_version"]),
+            str(row["recorded_at"]),
+        )
+        expected_normalized = (
+            "development_candidate_admission_proposal",
+            expected_outcome.value,
+            str(candidate_id),
+            str(candidate_version_id),
+            1,
+            manifest.route.value,
+            str(manifest.fixture_id),
+            str(context.context_id),
+            context.context_digest,
+            manifest.manifest_digest,
+            manifest.semantic_collision_digest,
+            manifest.relation_key,
+            str(manifest.prior_candidate_version_id),
+            1,
+            str(event["recorded_at"]),
+        )
+        if normalized != expected_normalized:
+            raise AuthorityPersistenceError(
+                "development Candidate decision normalized columns differ"
+            )
         if (
-            str(event["event_type"])
+            str(version["candidate_id"]) != str(candidate_id)
+            or int(version["version_number"]) != 1
+            or str(candidate["semantic_collision_digest"])
+            != manifest.semantic_collision_digest
+            or str(candidate["manifest_digest"]) != manifest.manifest_digest
+            or UtcTimestamp.parse(str(candidate["created_at"])).value
+            > recorded_at.value
+            or UtcTimestamp.parse(str(version["recorded_at"])).value
+            > recorded_at.value
+            or context.recorded_at.value > recorded_at.value
+        ):
+            raise AuthorityPersistenceError(
+                "development Candidate decision cross-record linkage differs"
+            )
+        value = self._canonical_row_value(
+            row,
+            identity="development Candidate decision",
+        )
+        expected = self._decision_value(
+            decision_id=decision_id,
+            outcome=expected_outcome,
+            candidate_id=candidate_id,
+            candidate_version_id=candidate_version_id,
+            request=DevelopmentCandidateAdmissionRequest(
+                proposal_id=proposal_id,
+                retrieval_context_id=context.context_id,
+                expected_context_digest=context.context_digest,
+                idempotency_key="retained-decision-validation",
+            ),
+            context=context,
+            authority_event_id=EventId.parse(str(row["authority_event_id"])),
+            authority_aggregate_version=1,
+        )
+        if value != expected:
+            raise AuthorityPersistenceError(
+                "development Candidate decision canonical value differs"
+            )
+        if (
+            str(decision_id) != str(event["event_id"])
+            or str(command["command_type"])
+            != DEVELOPMENT_CANDIDATE_ADMISSION_COMMAND
+            or str(command["aggregate_type"])
+            != "development_candidate_admission_proposal"
+            or str(command["aggregate_id"]) != str(proposal_id)
+            or int(command["expected_aggregate_version"]) != 0
+            or str(command["payload_id"]) != str(event["payload_id"])
+            or str(command["committed_at"]) != recorded_at.to_text()
+            or str(event["event_type"])
             != "candidate.development.admission.decided"
             or str(event["aggregate_type"])
             != "development_candidate_admission_proposal"
-            or str(event["aggregate_id"]) != str(row["proposal_id"])
-            or int(event["aggregate_version"])
-            != int(row["authority_aggregate_version"])
+            or str(event["aggregate_id"]) != str(proposal_id)
+            or int(event["aggregate_version"]) != 1
+            or str(event["payload_mode"]) != "INLINE"
+            or event["object_admission_id"] is not None
+            or str(event["trust_scope"]) != "ADMITTED"
             or str(event["security_scope"]) != "authority.candidate"
             or str(event["retention_scope"]) != "authority.audit"
-            or str(event["recorded_at"]) != str(row["recorded_at"])
+            or str(event["recorded_at"]) != recorded_at.to_text()
         ):
             raise AuthorityPersistenceError(
                 "development Candidate decision event differs from authority"

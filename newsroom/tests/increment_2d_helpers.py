@@ -443,6 +443,7 @@ def open_candidate_test_system(
     object_root: Path,
     adapter: object,
     granted_scopes: frozenset[str] | None = None,
+    authorizer: object | None = None,
     clock: Callable = lambda: COMPLETE_NOW,
 ):
     rights, hydration, admissions = _policy_registries()
@@ -461,9 +462,13 @@ def open_candidate_test_system(
             credentials={"token-1": StaticPrincipal("principal.alpha")},
             authority_domain="newsroom.authority",
         ),
-        authorizer=StaticAuthorizer(
-            policy_version="increment-2d-candidate-authz-v1",
-            grants_by_principal={"principal.alpha": selected},
+        authorizer=(
+            StaticAuthorizer(
+                policy_version="increment-2d-candidate-authz-v1",
+                grants_by_principal={"principal.alpha": selected},
+            )
+            if authorizer is None
+            else authorizer
         ),
         adapter=adapter,
         clock=clock,
