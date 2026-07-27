@@ -41,30 +41,39 @@ jobs:
   materialize-increment-3b-review:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'agent/increment-3b-generic-adapters'
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - name: Check out exact Increment 3B branch
         uses: actions/checkout@v4
         with:
           ref: agent/increment-3b-generic-adapters
-          fetch-depth: 1
+          fetch-depth: 0
           show-progress: false
 
-      - name: Reconstruct reviewed corrections
-        id: payload
+      - name: Reconstruct exact reviewed corrections
         shell: bash
         run: |
           set -euo pipefail
-          if test -f newsroom/tests/test_discovery_adapter_3b_review_regressions.py; then
-            echo "needed=false" >> "${GITHUB_OUTPUT}"
-            echo "Reviewed Increment 3B corrections are already materialized."
-            exit 0
-          fi
-          echo "needed=true" >> "${GITHUB_OUTPUT}"
+          checked_head="$(git rev-parse HEAD)"
+          printf '%s\n' "${checked_head}" > "${RUNNER_TEMP}/increment-3b-reviewed-head"
           payload="${RUNNER_TEMP}/increment-3b-review-corrections.tar.gz"
           extracted="${RUNNER_TEMP}/increment-3b-review-corrections"
-          base64 --decode .github/increment-3b-review-payload.b64 > "${payload}"
-          echo "3665df1bf4308a94b8fcb87533be40f0894ec2066fb6f0e701e00db4c3ca8c9f  ${payload}" | sha256sum --check --strict
+          python - <<'PY'
+          from pathlib import Path
+
+          directory = Path('.github/increment-3b-review-payload')
+          expected = {f'part-{index:02d}' for index in range(6)}
+          actual = {path.name for path in directory.glob('part-*') if path.is_file()}
+          if actual != expected:
+              raise SystemExit(
+                  f'review chunk inventory differs: expected={sorted(expected)} actual={sorted(actual)}'
+              )
+          PY
+          cat .github/increment-3b-review-payload/part-* \
+            | tr -d '\r\n' \
+            | base64 --decode > "${payload}"
+          echo "fdf09eaa96f0a29cee22539e0af5f7b2289bd9b34500f41d0034f47840874abf  ${payload}" \
+            | sha256sum --check --strict
           PAYLOAD="${payload}" EXTRACTED="${extracted}" python - <<'PY'
           from pathlib import Path
           import os
@@ -72,45 +81,39 @@ jobs:
           import tarfile
 
           expected = {
-              "newsroom/discovery_adapters/__init__.py",
-              "newsroom/discovery_adapters/types.py",
-              "newsroom/discovery_adapters/models.py",
-              "newsroom/discovery_adapters/parsers.py",
-              "newsroom/discovery_adapters/runner.py",
-              "newsroom/discovery_adapters/security.py",
-              "newsroom/discovery_adapters/traceability.py",
-              "newsroom/tests/discovery_adapter_3b_helpers.py",
-              "newsroom/tests/test_discovery_adapter_3b_security.py",
-              "newsroom/tests/test_discovery_adapter_3b_parsers.py",
-              "newsroom/tests/test_discovery_adapter_3b_traceability.py",
-              "newsroom/tests/test_discovery_adapter_3b_review_regressions.py",
-              "docs/operations/increment-3b-fixture-adapters.md",
-              "docs/research/2026-07-27-increment-3b-design-record.md",
-              "docs/research/2026-07-27-increment-3b-substantive-review.md",
+              'newsroom/discovery_adapters/__init__.py',
+              'newsroom/discovery_adapters/models.py',
+              'newsroom/discovery_adapters/parsers.py',
+              'newsroom/discovery_adapters/runner.py',
+              'newsroom/discovery_adapters/security.py',
+              'newsroom/discovery_adapters/types.py',
+              'newsroom/tests/discovery_adapter_3b_helpers.py',
+              'newsroom/tests/test_discovery_adapter_3b_review_regressions.py',
+              'newsroom/tests/test_discovery_adapter_3b_runner.py',
           }
-          payload = Path(os.environ["PAYLOAD"])
-          extracted = Path(os.environ["EXTRACTED"])
+          payload = Path(os.environ['PAYLOAD'])
+          extracted = Path(os.environ['EXTRACTED'])
           extracted.mkdir(mode=0o700)
-          with tarfile.open(payload, mode="r:gz") as archive:
+          with tarfile.open(payload, mode='r:gz') as archive:
               members = archive.getmembers()
               names = [member.name for member in members]
               if len(names) != len(set(names)) or set(names) != expected:
-                  raise SystemExit("review payload inventory differs from the exact manifest")
+                  raise SystemExit('review payload inventory differs from the exact manifest')
               for member in members:
                   path = Path(member.name)
                   if (
                       not member.isfile()
                       or path.is_absolute()
-                      or ".." in path.parts
+                      or '..' in path.parts
                       or member.size > 1_000_000
                   ):
-                      raise SystemExit(f"unsafe review payload member: {member.name}")
+                      raise SystemExit(f'unsafe review payload member: {member.name}')
                   source = archive.extractfile(member)
                   if source is None:
-                      raise SystemExit(f"review payload member has no bytes: {member.name}")
+                      raise SystemExit(f'review payload member has no bytes: {member.name}')
                   destination = extracted / path
                   destination.parent.mkdir(parents=True, exist_ok=True)
-                  with source, destination.open("wb") as target:
+                  with source, destination.open('wb') as target:
                       shutil.copyfileobj(source, target)
                   destination.chmod(0o644)
           for relative in sorted(expected):
@@ -119,11 +122,49 @@ jobs:
               destination.parent.mkdir(parents=True, exist_ok=True)
               shutil.copy2(source, destination)
           PY
+          rm -f .github/increment-3b-review-payload.b64
+          rm -rf .github/increment-3b-review-payload
+          git show 86afbf878f6b138ae0c99386d42828b32f12b645:.github/workflows/ci.yml \
+            > .github/workflows/ci.yml
           python -m compileall -q newsroom/discovery_adapters newsroom/tests
           git diff --check
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          expected = {
+              '.github/increment-3b-review-payload.b64',
+              '.github/increment-3b-review-payload/part-00',
+              '.github/increment-3b-review-payload/part-01',
+              '.github/increment-3b-review-payload/part-02',
+              '.github/increment-3b-review-payload/part-03',
+              '.github/increment-3b-review-payload/part-04',
+              '.github/increment-3b-review-payload/part-05',
+              '.github/workflows/ci.yml',
+              'newsroom/discovery_adapters/__init__.py',
+              'newsroom/discovery_adapters/models.py',
+              'newsroom/discovery_adapters/parsers.py',
+              'newsroom/discovery_adapters/runner.py',
+              'newsroom/discovery_adapters/security.py',
+              'newsroom/discovery_adapters/types.py',
+              'newsroom/tests/discovery_adapter_3b_helpers.py',
+              'newsroom/tests/test_discovery_adapter_3b_review_regressions.py',
+              'newsroom/tests/test_discovery_adapter_3b_runner.py',
+          }
+          actual = set(
+              subprocess.check_output(
+                  ['git', 'diff', '--name-only', '--'], text=True
+              ).splitlines()
+          )
+          if actual != expected:
+              raise SystemExit(
+                  f'materialized path inventory differs: expected={sorted(expected)} actual={sorted(actual)}'
+              )
+          if any(Path(path).is_symlink() for path in expected if Path(path).exists()):
+              raise SystemExit('materialized review path cannot be a symlink')
+          PY
 
       - name: Install locked development environment
-        if: steps.payload.outputs.needed == 'true'
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
@@ -132,7 +173,6 @@ jobs:
           uv sync --dev --locked
 
       - name: Run reviewed Increment 3B and retained Increment 3A suites
-        if: steps.payload.outputs.needed == 'true'
         run: |
           set -euo pipefail
           uv run python -m pytest -q \
@@ -141,25 +181,36 @@ jobs:
             newsroom/tests/test_source_3a_authority.py \
             newsroom/tests/test_source_3a_lifecycle_integrity.py \
             newsroom/tests/test_source_3a_review_regressions.py \
-            newsroom/tests/test_source_3a_traceability.py
+            newsroom/tests/test_source_3a_traceability.py \
+            --junitxml="${RUNNER_TEMP}/increment-3b-reviewed.xml"
 
-      - name: Commit and push reviewed Increment 3B corrections
-        if: steps.payload.outputs.needed == 'true'
+      - name: Commit and push verified reviewed corrections
         shell: bash
         run: |
           set -euo pipefail
+          checked_head="$(cat "${RUNNER_TEMP}/increment-3b-reviewed-head")"
+          git fetch origin agent/increment-3b-generic-adapters
+          remote_head="$(git rev-parse origin/agent/increment-3b-generic-adapters)"
+          test "${remote_head}" = "${checked_head}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- \
+          git add -A -- \
+            .github/increment-3b-review-payload.b64 \
+            .github/increment-3b-review-payload \
+            .github/workflows/ci.yml \
             newsroom/discovery_adapters \
             newsroom/tests/discovery_adapter_3b_helpers.py \
-            newsroom/tests/test_discovery_adapter_3b_security.py \
-            newsroom/tests/test_discovery_adapter_3b_parsers.py \
-            newsroom/tests/test_discovery_adapter_3b_traceability.py \
             newsroom/tests/test_discovery_adapter_3b_review_regressions.py \
-            docs/operations/increment-3b-fixture-adapters.md \
-            docs/research/2026-07-27-increment-3b-design-record.md \
-            docs/research/2026-07-27-increment-3b-substantive-review.md
+            newsroom/tests/test_discovery_adapter_3b_runner.py
           git diff --cached --check
           git commit -m "fix(adapters): preserve identity and honest replay semantics"
           git push origin HEAD:agent/increment-3b-generic-adapters
+
+      - name: Upload reviewed focused evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-3b-reviewed-focused-evidence
+          path: ${{ runner.temp }}/increment-3b-reviewed.xml
+          if-no-files-found: warn
+          retention-days: 90
