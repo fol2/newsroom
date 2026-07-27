@@ -534,7 +534,10 @@ class SourceTime:
             if parsed_date.isoformat() != self.value:
                 raise SourceContractError("date-only source time is not canonical")
             return
-        parsed_time = UtcTimestamp.parse(self.value)
+        try:
+            parsed_time = UtcTimestamp.parse(self.value)
+        except ValueError as exc:
+            raise SourceContractError("source time is invalid") from exc
         if parsed_time.to_text() != self.value:
             raise SourceContractError("source time must use canonical UTC text")
 

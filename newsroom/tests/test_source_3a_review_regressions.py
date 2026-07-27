@@ -106,17 +106,16 @@ def test_mixed_anchor_comparator_does_not_corrupt_active_mapping() -> None:
     )
     assert mixed.coverage_mappings[0].contribution is CoverageContribution.REVISION_VISIBILITY
 
-    comparator_active = replace(
-        request,
-        coverage_mappings=(
-  replace(
-      request.coverage_mappings[0],
-      contribution=CoverageContribution.COMPARATOR,
-  ),
-        ),
-    )
     with pytest.raises(SourceContractError, match="Active coverage"):
-        comparator_active.__post_init__()
+        replace(
+            request,
+            coverage_mappings=(
+                replace(
+                    request.coverage_mappings[0],
+                    contribution=CoverageContribution.COMPARATOR,
+                ),
+            ),
+        )
 
 
 def test_source_version_can_explicitly_revert_but_not_emit_a_noop(tmp_path) -> None:

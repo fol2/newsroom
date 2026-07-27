@@ -77,16 +77,6 @@ class _SourceRegistryLineageCommitMixin:
                 identifier=str(request.item_id),
                 identity="source item identity",
             )
-            self._ensure_semantic_absent(
-                conn,
-                table="source_items",
-                predicate="definition_id=? AND identity_digest=?",
-                parameters=(
-                    str(request.definition_id),
-                    request.identity_digest,
-                ),
-                identity="source item semantics",
-            )
             if request.source_native_id is not None:
                 self._ensure_semantic_absent(
                     conn,
@@ -98,6 +88,16 @@ class _SourceRegistryLineageCommitMixin:
                     ),
                     identity="source-native item identity",
                 )
+            self._ensure_semantic_absent(
+                conn,
+                table="source_items",
+                predicate="definition_id=? AND identity_digest=?",
+                parameters=(
+                    str(request.definition_id),
+                    request.identity_digest,
+                ),
+                identity="source item semantics",
+            )
             recorded_at = self._clock().to_text()
             committed = self._commit_grant_in_transaction(
                 conn, grant, recorded_at=recorded_at
