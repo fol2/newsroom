@@ -30,95 +30,39 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      - name: Repair retained migration expectations
+      - name: Preserve typed UUID authority at every command boundary
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          def replace_once(path: str, old: str, new: str) -> None:
-              target = Path(path)
-              text = target.read_text(encoding="utf-8")
+          path = Path("newsroom/authority/_source_registry_system.py")
+          text = path.read_text(encoding="utf-8")
+          replacements = {
+              "AggregateId(str(request.definition_id))": "AggregateId(request.definition_id.value)",
+              "AggregateId(str(request.version_id))": "AggregateId(request.version_id.value)",
+              "AggregateId(str(request.item_id))": "AggregateId(request.item_id.value)",
+              "AggregateId(str(request.decision_id))": "AggregateId(request.decision_id.value)",
+              "AggregateId(str(request.revision_id))": "AggregateId(request.revision_id.value)",
+              "AggregateId(str(request.representation_id))": "AggregateId(request.representation_id.value)",
+              "AggregateId(str(request.occurrence_id))": "AggregateId(request.occurrence_id.value)",
+          }
+          for old, new in replacements.items():
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(
-                      f"{path}: expected one replacement, found {count}: {old!r}"
-                  )
-              target.write_text(text.replace(old, new, 1), encoding="utf-8")
-
-          replace_once(
-              "newsroom/tests/test_projection_b1_migrations.py",
-              '        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9\n',
-              '        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10\n',
-          )
-          replace_once(
-              "newsroom/tests/test_projection_b1_migrations.py",
-              '            (9, "complete_fixture_candidate_authority_v9"),\n        ]\n',
-              '            (9, "complete_fixture_candidate_authority_v9"),\n'
-              '            (10, "source_registry_authority_v10"),\n'
-              '        ]\n',
-          )
-          replace_once(
-              "newsroom/tests/test_complete_projection_2b_migrations.py",
-              "    assert SCHEMA_VERSION == 9\n",
-              "    assert SCHEMA_VERSION == 10\n",
-          )
-          replace_once(
-              "newsroom/tests/test_retrieval_2c_migrations.py",
-              "    assert SCHEMA_VERSION == 9\n",
-              "    assert SCHEMA_VERSION == 10\n",
-          )
-          replace_once(
-              "newsroom/tests/test_increment_2d_migrations.py",
-              "    assert DEVELOPMENT_CANDIDATE_SCHEMA_VERSION == SCHEMA_VERSION == 9\n"
-              "    assert EXPECTED_MIGRATION_HISTORY[-1] == (\n"
-              "        9,\n"
-              "        DEVELOPMENT_CANDIDATE_MIGRATION_NAME,\n"
-              "        DEVELOPMENT_CANDIDATE_MIGRATION_CHECKSUM,\n"
-              "    )\n",
-              "    assert DEVELOPMENT_CANDIDATE_SCHEMA_VERSION == 9\n"
-              "    assert SCHEMA_VERSION == 10\n"
-              "    assert (\n"
-              "        9,\n"
-              "        DEVELOPMENT_CANDIDATE_MIGRATION_NAME,\n"
-              "        DEVELOPMENT_CANDIDATE_MIGRATION_CHECKSUM,\n"
-              "    ) in EXPECTED_MIGRATION_HISTORY\n",
-          )
-          replace_once(
-              "newsroom/tests/test_increment_2d_migrations.py",
-              '        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9\n',
-              '        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION\n',
-          )
-          replace_once(
-              "newsroom/tests/test_increment_2d_candidate_authority.py",
-              "import json\nfrom pathlib import Path\nimport json\n",
-              "import json\nfrom pathlib import Path\n",
-          )
-          replace_once(
-              "newsroom/tests/test_increment_2d_candidate_authority.py",
-              "def test_schema_version_advances_to_candidate_authority_v9(tmp_path: Path) -> None:\n",
-              "def test_candidate_authority_v9_remains_available_under_current_schema(tmp_path: Path) -> None:\n",
-          )
-          replace_once(
-              "newsroom/tests/test_increment_2d_candidate_authority.py",
-              '        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 9\n',
-              '        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10\n',
-          )
-          replace_once(
-              "newsroom/tests/test_relation_2a_contracts.py",
-              "    assert SCHEMA_VERSION == 9\n",
-              "    assert SCHEMA_VERSION == 10\n",
-          )
+                  raise SystemExit(f"expected one {old!r}, found {count}")
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding="utf-8")
           PY
           python -m compileall -q newsroom
           git diff --check
 
-      - name: Commit migration compatibility repair
+      - name: Commit typed authority repair
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add newsroom/tests
+          git add newsroom/authority/_source_registry_system.py
           git diff --cached --check
-          git commit -m "test(authority): advance retained schema expectations to v10"
+          git commit -m "fix(authority): preserve typed source aggregate identities"
           git pull --rebase origin agent/increment-3a-source-registry
           git push origin HEAD:agent/increment-3a-source-registry
 
