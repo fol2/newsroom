@@ -39,14 +39,18 @@ jobs:
             set -euo pipefail
             python - <<'PY'
           from pathlib import Path
-          import textwrap
 
           source = Path('.github/workflows/increment-3a-repair.yml')
           lines = source.read_text(encoding='utf-8').splitlines()
           marker = "          python - <<'PY'"
           start = lines.index(marker) + 1
           end = lines.index('          PY', start)
-          code = textwrap.dedent('\n'.join(lines[start:end])) + '\n'
+          prefix = ' ' * 10
+          code_lines = [
+              line[len(prefix):] if line.startswith(prefix) else line
+              for line in lines[start:end]
+          ]
+          code = '\n'.join(code_lines) + '\n'
           target = Path('/tmp/increment-3a-substantive-repair.py')
           target.write_text(code, encoding='utf-8')
           compile(code, str(target), 'exec')
