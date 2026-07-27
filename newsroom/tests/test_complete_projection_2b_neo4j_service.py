@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import atexit
+from functools import lru_cache
 import os
 from pathlib import Path
 import sqlite3
@@ -48,20 +50,38 @@ from newsroom.relations.policy import merge_relation_authority_registries
 _REQUIRED_FLAG = "NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED"
 
 
+@lru_cache(maxsize=1)
 def _service_config() -> Neo4jProjectorConfig:
     if os.environ.get(_REQUIRED_FLAG) != "1":
         pytest.skip("actual complete Neo4j service is required only by the 2B gate")
     return Neo4jProjectorConfig.from_environment()
 
 
-def _projector_driver():
-    from neo4j import GraphDatabase
+_PROJECTOR_ADMIN_DRIVER = None
 
-    config = _service_config()
-    return GraphDatabase.driver(
-        config.uri,
-        auth=(config.username, config.password),
-    )
+
+def _projector_driver():
+    global _PROJECTOR_ADMIN_DRIVER
+    if _PROJECTOR_ADMIN_DRIVER is None:
+        from neo4j import GraphDatabase
+
+        config = _service_config()
+        _PROJECTOR_ADMIN_DRIVER = GraphDatabase.driver(
+            config.uri,
+            auth=(config.username, config.password),
+        )
+        _PROJECTOR_ADMIN_DRIVER.verify_connectivity()
+    return _PROJECTOR_ADMIN_DRIVER
+
+
+def _close_projector_driver() -> None:
+    global _PROJECTOR_ADMIN_DRIVER
+    if _PROJECTOR_ADMIN_DRIVER is not None:
+        _PROJECTOR_ADMIN_DRIVER.close()
+        _PROJECTOR_ADMIN_DRIVER = None
+
+
+atexit.register(_close_projector_driver)
 
 
 def _latest_source(database: Path) -> int:
@@ -156,21 +176,15 @@ def _names(generation_id):
 
 def _projector_write(statement: str, **parameters) -> None:
     driver = _projector_driver()
-    try:
-        with driver.session(database=_service_config().database) as session:
-            session.run(statement, parameters).consume()
-    finally:
-        driver.close()
+    with driver.session(database=_service_config().database) as session:
+        session.run(statement, parameters).consume()
 
 
 def _projector_scalar(statement: str, **parameters) -> int:
     driver = _projector_driver()
-    try:
-        with driver.session(database=_service_config().database) as session:
-            record = session.run(statement, parameters).single(strict=True)
-            return int(record[0])
-    finally:
-        driver.close()
+    with driver.session(database=_service_config().database) as session:
+        record = session.run(statement, parameters).single(strict=True)
+        return int(record[0])
 
 
 def _cleanup_generation(generation_id) -> None:

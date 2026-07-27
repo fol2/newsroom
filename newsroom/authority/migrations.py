@@ -62,8 +62,16 @@ from .retrieval_migrations import (
     HYBRID_RETRIEVAL_SCHEMA_VERSION,
 )
 
+from .source_registry_migrations import (
+    SOURCE_REGISTRY_MIGRATION,
+    SOURCE_REGISTRY_MIGRATION_CHECKSUM,
+    SOURCE_REGISTRY_MIGRATION_NAME,
+    SOURCE_REGISTRY_MIGRATION_STATEMENTS,
+    SOURCE_REGISTRY_SCHEMA_VERSION,
+)
+
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = DEVELOPMENT_CANDIDATE_SCHEMA_VERSION
+SCHEMA_VERSION = SOURCE_REGISTRY_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -665,6 +673,21 @@ def apply_pending_migrations(
                 ),
             )
             current = DEVELOPMENT_CANDIDATE_SCHEMA_VERSION
+        if current == DEVELOPMENT_CANDIDATE_SCHEMA_VERSION:
+            for statement in SOURCE_REGISTRY_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations("
+                "version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    SOURCE_REGISTRY_SCHEMA_VERSION,
+                    SOURCE_REGISTRY_MIGRATION_NAME,
+                    SOURCE_REGISTRY_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = SOURCE_REGISTRY_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -683,6 +706,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     COMPLETE_PROJECTION_MIGRATION,
     HYBRID_RETRIEVAL_MIGRATION,
     DEVELOPMENT_CANDIDATE_MIGRATION,
+    SOURCE_REGISTRY_MIGRATION,
 )
 
 def _expected_fingerprint() -> str:
@@ -735,5 +759,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         DEVELOPMENT_CANDIDATE_SCHEMA_VERSION,
         DEVELOPMENT_CANDIDATE_MIGRATION_NAME,
         DEVELOPMENT_CANDIDATE_MIGRATION_CHECKSUM,
+    ),
+    (
+        SOURCE_REGISTRY_SCHEMA_VERSION,
+        SOURCE_REGISTRY_MIGRATION_NAME,
+        SOURCE_REGISTRY_MIGRATION_CHECKSUM,
     ),
 )
