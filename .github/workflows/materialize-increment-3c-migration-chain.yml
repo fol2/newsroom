@@ -41,20 +41,50 @@ jobs:
           uv sync --dev --locked
 
       - name: Run migration, source and complete regressions
+        id: verify
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          set +e
+          : > /tmp/increment-3c-migration-verification.log
           uv run --no-sync python -m pytest -q \
             newsroom/tests/test_check_3c_migrations.py \
             newsroom/tests/test_source_3a_lifecycle_integrity.py \
-            newsroom/tests/test_source_3a_authority.py
-          uv run --no-sync python -m pytest -q
-          uv run --no-sync python scripts/eval_clustering_metrics.py \
-            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
-            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
-            --fail-on-regression
+            newsroom/tests/test_source_3a_authority.py \
+            2>&1 | tee -a /tmp/increment-3c-migration-verification.log
+          status="${PIPESTATUS[0]}"
+          if [ "${status}" -eq 0 ]; then
+            uv run --no-sync python -m pytest -q \
+              2>&1 | tee -a /tmp/increment-3c-migration-verification.log
+            status="${PIPESTATUS[0]}"
+          fi
+          if [ "${status}" -eq 0 ]; then
+            uv run --no-sync python scripts/eval_clustering_metrics.py \
+              --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+              --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+              --fail-on-regression \
+              2>&1 | tee -a /tmp/increment-3c-migration-verification.log
+            status="${PIPESTATUS[0]}"
+          fi
+          set -e
+          printf 'status=%s\n' "${status}" >> /tmp/increment-3c-migration-verification.log
+          exit "${status}"
+
+      - name: Upload bounded migration verification diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: increment-3c-migration-verification-${{ github.event.pull_request.head.sha }}
+          path: /tmp/increment-3c-migration-verification.log
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+          archive: true
 
       - name: Commit verified clean migration chain
+        if: steps.verify.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
