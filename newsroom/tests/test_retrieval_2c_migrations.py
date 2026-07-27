@@ -37,7 +37,7 @@ def migrated() -> sqlite3.Connection:
 
 def test_retrieval_migration_is_checked_repository_schema_version_eight() -> None:
     assert HYBRID_RETRIEVAL_SCHEMA_VERSION == 8
-    assert SCHEMA_VERSION == 10
+    assert SCHEMA_VERSION >= HYBRID_RETRIEVAL_SCHEMA_VERSION
     assert (
         8,
         HYBRID_RETRIEVAL_MIGRATION_NAME,

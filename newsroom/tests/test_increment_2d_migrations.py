@@ -35,7 +35,7 @@ def _migrated() -> sqlite3.Connection:
 
 def test_increment_2d_migration_is_checked_schema_version_nine() -> None:
     assert DEVELOPMENT_CANDIDATE_SCHEMA_VERSION == 9
-    assert SCHEMA_VERSION == 10
+    assert SCHEMA_VERSION >= DEVELOPMENT_CANDIDATE_SCHEMA_VERSION
     assert (
         9,
         DEVELOPMENT_CANDIDATE_MIGRATION_NAME,

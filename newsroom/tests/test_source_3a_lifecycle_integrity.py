@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+from newsroom.authority.migrations import SCHEMA_VERSION
 from newsroom.authority.persistence import AuthorityPersistenceError
 from newsroom.authority.source_registry_migrations import (
     SOURCE_REGISTRY_MIGRATION_CHECKSUM,
@@ -20,7 +21,7 @@ from .source_3a_helpers import (
 )
 
 
-def test_checked_source_registry_migration_is_v10_and_reopenable(
+def test_checked_source_registry_migration_is_retained_in_v11(
     tmp_path,
 ) -> None:
     database = tmp_path / "authority.sqlite3"
@@ -30,7 +31,7 @@ def test_checked_source_registry_migration_is_v10_and_reopenable(
     conn = sqlite3.connect(database)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == (
-            SOURCE_REGISTRY_SCHEMA_VERSION
+            SCHEMA_VERSION
         )
         row = conn.execute(
             "SELECT name,checksum FROM authority_migrations WHERE version=?",

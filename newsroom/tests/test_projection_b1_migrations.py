@@ -11,6 +11,7 @@ from newsroom.authority import (
     InlinePayload,
     SemanticCommand,
 )
+from newsroom.authority.migrations import SCHEMA_VERSION
 from newsroom.projection import (
     ProjectionDeliveryOutcome,
     ProjectionDeliveryRequest,
@@ -48,7 +49,7 @@ def test_projection_migration_history_contracts_and_schema_are_exact(
     _seed(database)
     conn = sqlite3.connect(database)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         history = conn.execute(
             "SELECT version,name FROM authority_migrations ORDER BY version"
         ).fetchall()
@@ -63,6 +64,7 @@ def test_projection_migration_history_contracts_and_schema_are_exact(
             (8, "hybrid_retrieval_authority_v8"),
             (9, "complete_fixture_candidate_authority_v9"),
             (10, "source_registry_authority_v10"),
+            (11, "check_transition_authority_v11"),
         ]
         assert conn.execute(
             "SELECT COUNT(*) FROM projection_ontology_contracts"
