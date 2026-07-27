@@ -1,0 +1,99 @@
+name: Increment 3A substantive review runner
+
+on:
+  push:
+    branches:
+      - agent/increment-3a-source-registry
+    paths:
+      - .github/workflows/increment-3a-review-run.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: increment-3a-substantive-review-runner
+  cancel-in-progress: true
+
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact Increment 3A branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-3a-source-registry
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Extract and apply reviewed repair payload
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          source = Path('.github/workflows/increment-3a-repair.yml')
+          lines = source.read_text(encoding='utf-8').splitlines()
+          marker = "          python - <<'PY'"
+          start = lines.index(marker) + 1
+          end = lines.index('          PY', start)
+          code = textwrap.dedent('\n'.join(lines[start:end])) + '\n'
+          target = Path('/tmp/increment-3a-substantive-repair.py')
+          target.write_text(code, encoding='utf-8')
+          compile(code, str(target), 'exec')
+          PY
+          python /tmp/increment-3a-substantive-repair.py
+          python -m compileall -q newsroom
+          git diff --check
+
+      - name: Commit substantive source-authority corrections
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add newsroom
+          git diff --cached --check
+          git commit -m "fix(sources): bind immutable lineage and redacted reads"
+          git pull --rebase origin agent/increment-3a-source-registry
+          git push origin HEAD:agent/increment-3a-source-registry
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install locked development environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Run Increment 3A substantive and retained suites
+        id: focused
+        continue-on-error: true
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_projection_b1_migrations.py \
+            newsroom/tests/test_complete_projection_2b_migrations.py \
+            newsroom/tests/test_retrieval_2c_migrations.py \
+            newsroom/tests/test_increment_2d_migrations.py \
+            newsroom/tests/test_increment_2d_candidate_authority.py \
+            newsroom/tests/test_relation_2a_contracts.py \
+            newsroom/tests/test_source_3a_contracts.py \
+            newsroom/tests/test_source_3a_authority.py \
+            newsroom/tests/test_source_3a_lifecycle_integrity.py \
+            newsroom/tests/test_source_3a_review_regressions.py \
+            newsroom/tests/test_source_3a_traceability.py \
+            --junitxml=increment-3a-focused-results.xml
+
+      - name: Upload focused evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-3a-focused-test-evidence
+          path: increment-3a-focused-results.xml
+          if-no-files-found: error
+
+      - name: Enforce focused evidence
+        if: steps.focused.outcome != 'success'
+        run: exit 1
