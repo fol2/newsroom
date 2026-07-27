@@ -1,5 +1,6 @@
 name: Increment 3B fixture corpus materializer
 
+# Triggered through the contents API so the repository-owned materializer runs.
 on:
   push:
     branches:
