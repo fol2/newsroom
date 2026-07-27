@@ -57,7 +57,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Re-verify exact failed core transport and retain exception chain
+      - name: Re-verify original attempt and retain exception chain
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -71,6 +71,19 @@ jobs:
           from scripts.sdlc.contracts import load_contract
           from scripts.sdlc.github_transport import GitHubActionsClient, fetch_artifact_bundle
           from scripts.sdlc.shadow_lane import verify_shadow_lane
+
+          class HistoricAttemptClient:
+              def __init__(self, delegate, attempt):
+                  self.delegate = delegate
+                  self.attempt = attempt
+
+              def fetch_run(self, run_id):
+                  value = dict(self.delegate.fetch_run(run_id))
+                  value['run_attempt'] = self.attempt
+                  return value
+
+              def __getattr__(self, name):
+                  return getattr(self.delegate, name)
 
           root = Path('.').resolve()
           target = root / '.sdlc-diagnostic'
@@ -94,7 +107,8 @@ jobs:
               ref='refs/pull/211/merge',
               runner_environment='github-hosted',
           )
-          client = GitHubActionsClient.from_environment(timeout_seconds=5.0)
+          delegate = GitHubActionsClient.from_environment(timeout_seconds=5.0)
+          client = HistoricAttemptClient(delegate, context.run_attempt)
           try:
               fetch_artifact_bundle(
                   client=client,
