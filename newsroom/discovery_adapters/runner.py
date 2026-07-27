@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from newsroom.authority.canonical import digest_bytes, digest_canonical
 from newsroom.sources import ObservationModel
 
@@ -37,6 +39,16 @@ _ENCODING_HEADERS = {
     "gzip": BodyEncoding.GZIP,
     "deflate": BodyEncoding.DEFLATE,
 }
+
+
+def _reasons(
+    scenario: FixtureTransportScenario,
+    *values: str,
+) -> tuple[str, ...]:
+    selected = set(values)
+    if scenario.redirects:
+        selected.add("REDIRECT_CHAIN_OBSERVED")
+    return tuple(sorted(selected))
 
 
 def _proposal(
@@ -243,7 +255,7 @@ def run_fixture_adapter(
             tls=scenario.tls_evidence,
             redirects=scenario.redirects,
         )
-    except AdapterContractError:
+    except AdapterContractError as exc:
         return _proposal(
             request,
             scenario,
@@ -275,6 +287,23 @@ def run_fixture_adapter(
     assert scenario.status_code is not None
     status = scenario.status_code
     if status == 304:
+        if scenario.body:
+            receipt = _receipt(
+                request,
+                scenario,
+                final_url=final_url,
+                failure_kind=None,
+                decompressed=None,
+            )
+            return _proposal(
+                request,
+                scenario,
+                outcome=ObservationProposalOutcome.TRANSPORT_FAILED,
+                reason_codes=_reasons(scenario, "HTTP_304_WITH_BODY"),
+                quarantine=QuarantineRecommendation.REVIEW,
+                incomplete=True,
+                receipt=receipt,
+            )
         receipt = _receipt(
             request,
             scenario,
@@ -296,7 +325,7 @@ def run_fixture_adapter(
             request,
             scenario,
             outcome=ObservationProposalOutcome.SUCCESS_UNCHANGED,
-            reason_codes=("HTTP_304_EXACT_BASELINE",),
+            reason_codes=_reasons(scenario, "HTTP_304_EXACT_BASELINE"),
             quarantine=QuarantineRecommendation.NONE,
             incomplete=False,
             receipt=receipt,
@@ -310,7 +339,7 @@ def run_fixture_adapter(
             scenario,
             final_url=final_url,
             failure_kind=None,
-            decompressed=b"",
+            decompressed=None,
         )
         return _proposal(
             request,
@@ -336,7 +365,7 @@ def run_fixture_adapter(
             scenario,
             final_url=final_url,
             failure_kind=None,
-            decompressed=b"",
+            decompressed=None,
         )
         return _proposal(
             request,
@@ -422,7 +451,7 @@ def run_fixture_adapter(
             request,
             scenario,
             outcome=ObservationProposalOutcome.SUCCESS_EMPTY,
-            reason_codes=("SUCCESSFUL_EMPTY_RESPONSE",),
+            reason_codes=_reasons(scenario, "SUCCESSFUL_EMPTY_RESPONSE"),
             quarantine=QuarantineRecommendation.NONE,
             incomplete=False,
             receipt=receipt,
@@ -493,7 +522,7 @@ def run_fixture_adapter(
             request,
             scenario,
             outcome=ObservationProposalOutcome.SUCCESS_EMPTY,
-            reason_codes=("SUCCESSFUL_EMPTY_COLLECTION",),
+            reason_codes=_reasons(scenario, "SUCCESSFUL_EMPTY_COLLECTION"),
             quarantine=QuarantineRecommendation.NONE,
             incomplete=False,
             receipt=receipt,
@@ -511,7 +540,7 @@ def run_fixture_adapter(
             request,
             scenario,
             outcome=ObservationProposalOutcome.SUCCESS_UNCHANGED,
-            reason_codes=("REPRESENTATION_MATCHES_EXACT_BASELINE",),
+            reason_codes=_reasons(scenario, "REPRESENTATION_MATCHES_EXACT_BASELINE"),
             quarantine=QuarantineRecommendation.NONE,
             incomplete=False,
             receipt=receipt,
@@ -521,22 +550,28 @@ def run_fixture_adapter(
 
     if parser_result.completeness is Completeness.TRUNCATED:
         outcome = ObservationProposalOutcome.SUCCESS_TRUNCATED
-        reasons = ("ITEM_LIMIT_TRUNCATED", "NO_CLEARANCE_OR_WITHDRAWAL_AUTHORITY")
+        reasons = _reasons(
+            scenario,
+            "ITEM_LIMIT_TRUNCATED",
+            "NO_CLEARANCE_OR_WITHDRAWAL_AUTHORITY",
+        )
         incomplete = True
         quarantine = QuarantineRecommendation.REVIEW
     elif parser_result.completeness is Completeness.PARTIAL:
         outcome = ObservationProposalOutcome.SUCCESS_PARTIAL
-        reasons = ("INDEPENDENTLY_VALID_PARTIAL_OUTPUT",)
+        reasons = _reasons(scenario, "INDEPENDENTLY_VALID_PARTIAL_OUTPUT")
         if request.observation_model in {
             ObservationModel.COMPLETE_CURRENT_STATE,
             ObservationModel.ROLLING_LIST,
         }:
-            reasons += ("NO_CLEARANCE_OR_WITHDRAWAL_AUTHORITY",)
+            reasons = tuple(
+                sorted({*reasons, "NO_CLEARANCE_OR_WITHDRAWAL_AUTHORITY"})
+            )
         incomplete = True
         quarantine = QuarantineRecommendation.REVIEW
     else:
         outcome = ObservationProposalOutcome.SUCCESS_CHANGED
-        reasons = ("OBSERVABLE_CHANGE_CANDIDATES",)
+        reasons = _reasons(scenario, "OBSERVABLE_CHANGE_CANDIDATES")
         incomplete = False
         quarantine = QuarantineRecommendation.NONE
 

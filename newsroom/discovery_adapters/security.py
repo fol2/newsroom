@@ -69,6 +69,8 @@ def validate_dns_evidence(
             address = ip_address(value)
         except ValueError as exc:
             raise AdapterContractError("DNS evidence contains an invalid address") from exc
+        if value != value.lower() or str(address) != value:
+            raise AdapterContractError("DNS evidence address is not canonical")
         if (
             not address.is_global
             or address.is_private

@@ -87,7 +87,12 @@ def _validate_json_resources(value: Any, limits: ParserLimits) -> None:
         elif isinstance(current, float):
             if not math.isfinite(current):
                 raise AdapterContractError("JSON number must be finite")
-        elif current is not None and not isinstance(current, (bool, int)):
+            if len(repr(current).encode("utf-8")) > limits.max_scalar_bytes:
+                raise AdapterContractError("JSON number exceeds its scalar bound")
+        elif isinstance(current, int) and not isinstance(current, bool):
+            if len(str(current).encode("utf-8")) > limits.max_scalar_bytes:
+                raise AdapterContractError("JSON number exceeds its scalar bound")
+        elif current is not None and not isinstance(current, bool):
             raise AdapterContractError("JSON contains an unsupported scalar")
         if entries > limits.max_collection_entries:
             raise AdapterContractError("JSON collection size exceeds its bound")
@@ -103,7 +108,7 @@ def safe_json_loads(data: bytes, *, limits: ParserLimits) -> Any:
         )
     except _DuplicateJsonKey:
         raise
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
         raise AdapterContractError("JSON body is malformed") from exc
     _validate_json_resources(value, limits)
     return value
@@ -347,6 +352,8 @@ def _json_batch(
 
 
 def _xml_local_name(element: etree._Element) -> str:
+    if not isinstance(element.tag, str):
+        return ""
     return etree.QName(element).localname.lower()
 
 
@@ -361,6 +368,20 @@ def _first_text(element: etree._Element, names: tuple[str, ...]) -> str | None:
             text = " ".join(part.strip() for part in child.itertext() if part.strip())
             if text:
                 return text
+    return None
+
+
+def _first_descendant_text(
+    element: etree._Element,
+    names: tuple[str, ...],
+) -> str | None:
+    selected = set(names)
+    for child in element.iter():
+        if _xml_local_name(child) not in selected:
+            continue
+        text = " ".join(part.strip() for part in child.itertext() if part.strip())
+        if text:
+            return text
     return None
 
 
@@ -413,6 +434,8 @@ def _validate_xml_resources(root: etree._Element, limits: ParserLimits) -> None:
                 raise AdapterContractError("XML attribute exceeds its scalar bound")
         if element.text and len(element.text.encode("utf-8")) > limits.max_scalar_bytes:
             raise AdapterContractError("XML text exceeds its scalar bound")
+        if element.tail and len(element.tail.encode("utf-8")) > limits.max_scalar_bytes:
+            raise AdapterContractError("XML tail text exceeds its scalar bound")
         stack.extend((child, depth + 1) for child in element)
 
 
@@ -422,7 +445,7 @@ def _rss_atom_batch(
     contract: SourceShapeContract,
     limits: ParserLimits,
 ) -> _ParsedBatch:
-    lowered = data[:8192].lower()
+    lowered = data.lower()
     if any(marker in lowered for marker in _PROHIBITED_XML_MARKERS):
         raise AdapterContractError("XML DTD or entity declarations are prohibited")
     parser = etree.XMLParser(
@@ -477,9 +500,9 @@ def _maintained_document_batch(
         text = _decode_utf8(capture.body, identity="maintained document")
         value = {"body": text.strip()}
     elif capture.content_type == "text/html":
-        lowered = capture.body[:8192].lower()
-        if any(marker in lowered for marker in _PROHIBITED_XML_MARKERS):
-            raise AdapterContractError("HTML DTD or entity declarations are prohibited")
+        lowered = capture.body.lower()
+        if b"<!entity" in lowered:
+            raise AdapterContractError("HTML entity declarations are prohibited")
         parser = etree.HTMLParser(
             encoding="utf-8",
             no_network=True,
@@ -493,8 +516,9 @@ def _maintained_document_batch(
         if root is None:
             raise AdapterContractError("maintained HTML has no document root")
         _validate_xml_resources(root, limits)
+        title = _first_descendant_text(root, ("title",))
+        etree.strip_elements(root, "script", "style", with_tail=False)
         text = " ".join(part.strip() for part in root.itertext() if part.strip())
-        title = _first_text(root, ("title",))
         value = {"body": text}
         if title:
             value["title"] = title

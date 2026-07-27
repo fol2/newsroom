@@ -25,6 +25,11 @@ from .security import (
     validate_redirects,
     validate_tls_evidence,
 )
+from .traceability import (
+    INCREMENT_3B_DEFERRED,
+    INCREMENT_3B_EXCLUSIONS,
+    INCREMENT_3B_TRACEABILITY,
+)
 from .types import (
     AdapterContractError,
     AdapterExecutionProfile,
@@ -67,6 +72,9 @@ __all__ = [
     "EndpointPolicy",
     "FixtureTransportScenario",
     "Header",
+    "INCREMENT_3B_DEFERRED",
+    "INCREMENT_3B_EXCLUSIONS",
+    "INCREMENT_3B_TRACEABILITY",
     "ObservationBaseline",
     "ObservationProposal",
     "ObservationProposalId",
@@ -88,6 +96,7 @@ __all__ = [
     "TransportAttemptId",
     "TransportFailureKind",
     "TransportReceipt",
+    "decompress_body",
     "parse_capture",
     "run_fixture_adapter",
     "safe_json_loads",

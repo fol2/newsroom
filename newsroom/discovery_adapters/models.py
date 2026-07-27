@@ -440,7 +440,11 @@ class TransportReceipt:
             raise AdapterContractError("transport receipt request must be typed")
         require_token(self.scenario_id, field="receipt_scenario_id")
         bounded_text(self.final_url, field="receipt_final_url", maximum_bytes=4096)
-        if self.status_code is not None and not 100 <= self.status_code <= 599:
+        if self.status_code is not None and (
+            isinstance(self.status_code, bool)
+            or not isinstance(self.status_code, int)
+            or not 100 <= self.status_code <= 599
+        ):
             raise AdapterContractError("receipt status code is invalid")
         if self.headers != sorted_headers(self.headers):
             raise AdapterContractError("receipt headers must be canonically sorted")
