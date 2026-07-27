@@ -1,9 +1,13 @@
 name: Increment 3A substantive review runner
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/increment-3a-source-registry
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
     paths:
       - .github/workflows/increment-3a-review-run.yml
 
