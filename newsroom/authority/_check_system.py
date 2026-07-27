@@ -7,6 +7,9 @@ from newsroom.authority._capability import _CapabilityIssuer
 from newsroom.authority._check_boundary import _CheckBoundary
 from newsroom.authority._check_store import _CheckAuthorityStore
 from newsroom.authority._check_facade import GovernedChecks
+from newsroom.authority._proposal_admission import (
+    _ProposalAdmissionBoundary,
+)
 from newsroom.authority._source_registry_system import (
     _SourceRegistryBoundary,
     GovernedSources,
@@ -114,6 +117,10 @@ def open_governed_check_authority_system(
             read_policy=check_read_policy,
             clock=clock,
         )
+        proposal_admission = _ProposalAdmissionBoundary(
+            store=store,
+            command_service=command_service,
+        )
         closed = False
 
         def close() -> None:
@@ -150,6 +157,7 @@ def open_governed_check_authority_system(
                 record_finding_occurrence=(
                     check_boundary.record_finding_occurrence
                 ),
+                admit_proposal=proposal_admission.admit,
                 request=check_boundary.request,
                 attempt=check_boundary.attempt,
                 outcome=check_boundary.outcome,

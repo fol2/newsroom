@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Callable
 
 from newsroom.authority.auth import AuthenticationProof
+from newsroom.checks.admission_models import (
+    ProposalAdmissionRequest,
+    ProposalAdmissionResult,
+)
 from newsroom.checks.baseline_models import BaselineDecisionRequest
 from newsroom.checks.check_models import (
     CheckAttemptRequest,
@@ -42,6 +46,7 @@ class GovernedChecks:
         "__record_transition",
         "__open_finding",
         "__record_finding_occurrence",
+        "__admit_proposal",
         "__request",
         "__attempt",
         "__outcome",
@@ -66,6 +71,7 @@ class GovernedChecks:
         record_finding_occurrence: Callable[
             ..., OperationalFindingOccurrence
         ],
+        admit_proposal: Callable[..., ProposalAdmissionResult],
         request: Callable[..., CheckRequest],
         attempt: Callable[..., CheckAttempt],
         outcome: Callable[..., CheckOutcome],
@@ -86,6 +92,7 @@ class GovernedChecks:
         self.__record_transition = record_transition
         self.__open_finding = open_finding
         self.__record_finding_occurrence = record_finding_occurrence
+        self.__admit_proposal = admit_proposal
         self.__request = request
         self.__attempt = attempt
         self.__outcome = outcome
@@ -152,6 +159,14 @@ class GovernedChecks:
         proof: AuthenticationProof,
     ) -> OperationalFindingOccurrence:
         return self.__record_finding_occurrence(request, proof)
+
+    def admit_proposal(
+        self,
+        request: ProposalAdmissionRequest,
+        *,
+        proof: AuthenticationProof,
+    ) -> ProposalAdmissionResult:
+        return self.__admit_proposal(request, proof)
 
     def request(
         self,

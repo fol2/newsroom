@@ -1,5 +1,14 @@
 """Deterministic Check, baseline and observable-transition contracts."""
 
+from .admission_models import (
+    AdmissionRecordState,
+    AdmittedSourceObservation,
+    ProposalAdmissionConflict,
+    ProposalAdmissionError,
+    ProposalAdmissionRequest,
+    ProposalAdmissionResult,
+    deterministic_uuid4,
+)
 from .baseline_models import (
     AbsenceEndingGuard,
     AgendaMissGuard,
@@ -76,6 +85,8 @@ from .types import (
 )
 
 __all__ = [
+    "AdmissionRecordState",
+    "AdmittedSourceObservation",
     "AbsenceEndingGuard",
     "AgendaMissGuard",
     "BaselineDecision",
@@ -129,10 +140,15 @@ __all__ = [
     "OperationalFindingOccurrenceId",
     "OperationalFindingOccurrenceRequest",
     "OperationalFindingRequest",
+    "ProposalAdmissionConflict",
+    "ProposalAdmissionError",
+    "ProposalAdmissionRequest",
+    "ProposalAdmissionResult",
     "QuarantineDisposition",
     "TransitionBasis",
     "TriggerKind",
     "TriggerRef",
+    "deterministic_uuid4",
     "discovery_check_command_definitions",
     "discovery_check_payload_contracts",
     "merge_discovery_check_authority_registries",
