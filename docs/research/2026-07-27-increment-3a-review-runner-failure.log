@@ -1,7 +1,4 @@
-Increment 3A substantive repair runner failed on de5a0eb77e49840e31a2fbd893bf38da2c18a60a.
+Increment 3A substantive repair runner failed on 159d5a3d8946f5f658b3d74342b5b8585818350e.
 
-Traceback (most recent call last):
-  File "<stdin>", line 12, in <module>
-  File "/tmp/increment-3a-substantive-repair.py", line 1
-    from pathlib import Path
-IndentationError: unexpected indent
+extracted 935 reviewed repair lines
+newsroom/authority/source_registry_migrations.py: expected one replacement, found 2: '        UNIQUE(definition_id,semantic_digest),\n'
