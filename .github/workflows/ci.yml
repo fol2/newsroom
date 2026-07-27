@@ -47,7 +47,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: agent/increment-3b-generic-adapters
-          fetch-depth: 1
+          fetch-depth: 0
           show-progress: false
 
       - name: Reconstruct and validate reviewed payload
