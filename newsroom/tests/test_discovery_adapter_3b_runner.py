@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 from newsroom.discovery_adapters import (
     AdapterKind,
     Header,
@@ -14,6 +12,7 @@ from newsroom.sources import ObservationModel
 
 from .discovery_adapter_3b_helpers import (
     OTHER_VERSION_ID,
+    arbitrary_baseline,
     baseline,
     request,
     scenario,
@@ -28,7 +27,7 @@ def test_successful_empty_changed_and_exact_baseline_unchanged_are_distinct() ->
     changed = run_fixture_adapter(request(), scenario())
     assert changed.parser_result is not None
     unchanged = run_fixture_adapter(
-        request(baseline=baseline(changed.parser_result.representation_digest)),
+        request(baseline=baseline(changed.parser_result)),
         scenario(),
     )
 
@@ -40,13 +39,16 @@ def test_successful_empty_changed_and_exact_baseline_unchanged_are_distinct() ->
     assert unchanged.candidate_items == ()
     assert unchanged.parser_result is not None
     assert unchanged.parser_result.items
-    assert all(result.authority_effect == "NONE" for result in (empty, changed, unchanged))
+    assert all(
+        result.authority_effect == "NONE"
+        for result in (empty, changed, unchanged)
+    )
 
 
 def test_304_requires_exact_source_version_policy_and_validator_baseline() -> None:
-    digest = "sha256:" + "a" * 64
+    exact_baseline = arbitrary_baseline()
     exact = run_fixture_adapter(
-        request(baseline=baseline(digest)),
+        request(baseline=exact_baseline),
         scenario(
             status=304,
             body=b"",
@@ -59,15 +61,17 @@ def test_304_requires_exact_source_version_policy_and_validator_baseline() -> No
         scenario(status=304, body=b"", content_type=None),
     )
     stale_version = run_fixture_adapter(
-        request(baseline=baseline(digest, version_id=OTHER_VERSION_ID)),
+        request(
+            baseline=arbitrary_baseline(version_id=OTHER_VERSION_ID)
+        ),
         scenario(status=304, body=b"", content_type=None),
     )
     stale_policy = run_fixture_adapter(
-        request(baseline=baseline(digest, policy_version="v2")),
+        request(baseline=arbitrary_baseline(policy_version="v2")),
         scenario(status=304, body=b"", content_type=None),
     )
     wrong_validator = run_fixture_adapter(
-        request(baseline=baseline(digest)),
+        request(baseline=exact_baseline),
         scenario(
             status=304,
             body=b"",
@@ -77,7 +81,12 @@ def test_304_requires_exact_source_version_policy_and_validator_baseline() -> No
     )
 
     assert exact.outcome is ObservationProposalOutcome.SUCCESS_UNCHANGED
-    for result in (no_baseline, stale_version, stale_policy, wrong_validator):
+    for result in (
+        no_baseline,
+        stale_version,
+        stale_policy,
+        wrong_validator,
+    ):
         assert result.outcome is ObservationProposalOutcome.TRANSPORT_FAILED
         assert result.incomplete is True
         assert result.candidate_items == ()
@@ -106,6 +115,9 @@ def test_http_status_transport_and_redirect_outcomes_do_not_collapse_to_no_news(
         assert result.reason_codes == (reason,)
         assert result.incomplete is True
         assert result.candidate_items == ()
+        if status == 503:
+            assert result.receipt is not None
+            assert result.receipt.failure_kind is None
 
     transport = run_fixture_adapter(
         request(),

@@ -219,8 +219,11 @@ def test_parser_upgrade_changes_representation_not_source_item_identity() -> Non
 
     assert original.parser_result is not None
     assert upgraded.parser_result is not None
-    assert original.parser_result.representation_digest != (
+    assert original.parser_result.representation_digest == (
         upgraded.parser_result.representation_digest
+    )
+    assert original.parser_result.producer_slot_digest != (
+        upgraded.parser_result.producer_slot_digest
     )
     assert original.candidate_items[0].item_key == upgraded.candidate_items[0].item_key
     assert not hasattr(original, "source_revision_id")

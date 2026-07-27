@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import gzip
 
 from newsroom.authority.types import UtcTimestamp
@@ -20,7 +19,9 @@ from newsroom.discovery_adapters import (
     ObservationBaseline,
     ObservationProposalId,
     ParserLimits,
+    ParserResult,
     ParserResultId,
+    RedirectEvidence,
     RedirectHop,
     ShapeField,
     SourceShapeContract,
@@ -39,26 +40,49 @@ from newsroom.sources import (
 )
 
 NOW = UtcTimestamp.parse("2042-03-12T10:00:00.000000Z")
-REQUEST_ID = AdapterRequestId.parse("00000000-0000-4000-8000-000000004001")
-DEFINITION_ID = SourceDefinitionId.parse("00000000-0000-4000-8000-000000004002")
-VERSION_ID = SourceDefinitionVersionId.parse("00000000-0000-4000-8000-000000004003")
-OTHER_VERSION_ID = SourceDefinitionVersionId.parse("00000000-0000-4000-8000-000000004013")
-ATTEMPT_ID = TransportAttemptId.parse("00000000-0000-4000-8000-000000004004")
-CAPTURE_ID = CaptureId.parse("00000000-0000-4000-8000-000000004005")
-PARSER_RESULT_ID = ParserResultId.parse("00000000-0000-4000-8000-000000004006")
-PROPOSAL_ID = ObservationProposalId.parse("00000000-0000-4000-8000-000000004007")
+REQUEST_ID = AdapterRequestId.parse(
+    "00000000-0000-4000-8000-000000004001"
+)
+DEFINITION_ID = SourceDefinitionId.parse(
+    "00000000-0000-4000-8000-000000004002"
+)
+VERSION_ID = SourceDefinitionVersionId.parse(
+    "00000000-0000-4000-8000-000000004003"
+)
+OTHER_VERSION_ID = SourceDefinitionVersionId.parse(
+    "00000000-0000-4000-8000-000000004013"
+)
+ATTEMPT_ID = TransportAttemptId.parse(
+    "00000000-0000-4000-8000-000000004004"
+)
+CAPTURE_ID = CaptureId.parse(
+    "00000000-0000-4000-8000-000000004005"
+)
+PARSER_RESULT_ID = ParserResultId.parse(
+    "00000000-0000-4000-8000-000000004006"
+)
+PROPOSAL_ID = ObservationProposalId.parse(
+    "00000000-0000-4000-8000-000000004007"
+)
 
 
-def adapter(version: str = "v1", parser: str = "parser-v1") -> AdapterVersionRef:
+def adapter(
+    version: str = "v1",
+    parser: str = "parser-v1",
+    normalizer: str = "normalizer-v1",
+) -> AdapterVersionRef:
     return AdapterVersionRef(
         adapter_id="fixture-adapter",
         adapter_version=version,
         parser_version=parser,
-        normalizer_version="normalizer-v1",
+        normalizer_version=normalizer,
     )
 
 
-def json_shape() -> SourceShapeContract:
+def json_shape(
+    *,
+    allow_additional_fields: bool = True,
+) -> SourceShapeContract:
     return SourceShapeContract(
         shape_id="json-items-v1",
         kind=AdapterKind.JSON_DOCUMENT,
@@ -68,6 +92,7 @@ def json_shape() -> SourceShapeContract:
             ShapeField("title", ("title",), True),
         ),
         identity_fields=("id",),
+        allow_additional_fields=allow_additional_fields,
     )
 
 
@@ -94,7 +119,8 @@ def document_shape() -> SourceShapeContract:
             ShapeField("body", ("body",), True, maximum_bytes=100_000),
             ShapeField("title", ("title",), False),
         ),
-        identity_fields=("body",),
+        identity_fields=(),
+        singleton_identity="maintained-document",
     )
 
 
@@ -105,6 +131,7 @@ def request(
     shape: SourceShapeContract | None = None,
     baseline: ObservationBaseline | None = None,
     parser_version: str = "parser-v1",
+    normalizer_version: str = "normalizer-v1",
     max_items: int = 20,
     allowed_hosts: tuple[str, ...] = ("fixture.example",),
     allowed_content_types: tuple[str, ...] | None = None,
@@ -128,7 +155,10 @@ def request(
         request_id=REQUEST_ID,
         source_definition_id=DEFINITION_ID,
         source_definition_version_id=VERSION_ID,
-        adapter=adapter(parser=parser_version),
+        adapter=adapter(
+            parser=parser_version,
+            normalizer=normalizer_version,
+        ),
         kind=kind,
         observation_model=observation_model,
         endpoint="https://fixture.example/items",
@@ -144,16 +174,25 @@ def request(
             content_types,
             allowed_encodings=allowed_encodings,
         ),
-        parser_limits=ParserLimits(max_items, 32, 100_000, 10_000, 100),
+        parser_limits=ParserLimits(
+            max_items,
+            32,
+            100_000,
+            10_000,
+            100,
+        ),
         shape_contract=selected_shape,
-        validator_contract=VersionedPolicyRef("fixture-validator", "v1"),
+        validator_contract=VersionedPolicyRef(
+            "fixture-validator",
+            "v1",
+        ),
         requested_at=NOW,
         baseline=baseline,
     )
 
 
 def baseline(
-    representation_digest: str,
+    parser_result: ParserResult,
     *,
     version_id: SourceDefinitionVersionId = VERSION_ID,
     policy_version: str = "v1",
@@ -164,10 +203,38 @@ def baseline(
             "fixture-validator",
             policy_version,
         ),
-        representation_digest=representation_digest,
+        source_body_digest=parser_result.source_body_digest,
+        producer_slot_digest=parser_result.producer_slot_digest,
+        representation_digest=parser_result.representation_digest,
+        item_keys=parser_result.item_keys,
         validator=ConditionalValidator(etag='"fixture-etag"'),
         recorded_at=NOW,
     )
+
+
+def arbitrary_baseline(
+    representation_digest: str = "sha256:" + "a" * 64,
+    *,
+    version_id: SourceDefinitionVersionId = VERSION_ID,
+    policy_version: str = "v1",
+) -> ObservationBaseline:
+    return ObservationBaseline(
+        source_definition_version_id=version_id,
+        validator_contract=VersionedPolicyRef(
+            "fixture-validator",
+            policy_version,
+        ),
+        source_body_digest="sha256:" + "b" * 64,
+        producer_slot_digest="sha256:" + "c" * 64,
+        representation_digest=representation_digest,
+        item_keys=(),
+        validator=ConditionalValidator(etag='"fixture-etag"'),
+        recorded_at=NOW,
+    )
+
+
+def _host(url: str) -> str:
+    return url.split("/", 3)[2].split(":", 1)[0]
 
 
 def scenario(
@@ -177,6 +244,7 @@ def scenario(
     content_type: str | None = "application/json; charset=utf-8",
     content_encoding: BodyEncoding = BodyEncoding.IDENTITY,
     redirects: tuple[RedirectHop, ...] = (),
+    redirect_evidence: tuple[RedirectEvidence, ...] | None = None,
     failure_kind: TransportFailureKind | None = None,
     timing: TimingEvidence | None = None,
     dns_addresses: tuple[str, ...] = ("93.184.216.34",),
@@ -194,11 +262,30 @@ def scenario(
         if content_type is not None:
             values.append(Header("content-type", content_type))
         if content_encoding is not BodyEncoding.IDENTITY:
-            values.append(Header("content-encoding", content_encoding.value.lower()))
+            values.append(
+                Header(
+                    "content-encoding",
+                    content_encoding.value.lower(),
+                )
+            )
         headers = tuple(sorted(values, key=lambda item: item.name))
-    final_host = "fixture.example"
-    if redirects:
-        final_host = redirects[-1].to_url.split("/")[2].split(":")[0]
+
+    initial_host = "fixture.example"
+    if redirect_evidence is None:
+        redirect_evidence = tuple(
+            RedirectEvidence(
+                hop.to_url,
+                DnsEvidence(_host(hop.to_url), dns_addresses, NOW),
+                TlsEvidence(
+                    _host(hop.to_url),
+                    TlsVersion.TLS_1_3,
+                    tls_valid,
+                    tls_hostname_verified,
+                    NOW,
+                ),
+            )
+            for hop in redirects
+        )
     return FixtureTransportScenario(
         scenario_id="fixture-scenario-v1",
         request_id=REQUEST_ID,
@@ -207,9 +294,9 @@ def scenario(
         parser_result_id=PARSER_RESULT_ID,
         proposal_id=PROPOSAL_ID,
         observed_at=NOW,
-        dns_evidence=DnsEvidence(final_host, dns_addresses, NOW),
+        dns_evidence=DnsEvidence(initial_host, dns_addresses, NOW),
         tls_evidence=TlsEvidence(
-            final_host,
+            initial_host,
             TlsVersion.TLS_1_3,
             tls_valid,
             tls_hostname_verified,
@@ -221,6 +308,7 @@ def scenario(
         body=body,
         content_encoding=content_encoding,
         redirects=redirects,
+        redirect_evidence=redirect_evidence,
         failure_kind=failure_kind,
     )
 

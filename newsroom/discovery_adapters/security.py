@@ -3,7 +3,12 @@ from __future__ import annotations
 from ipaddress import ip_address
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
-from .models import DnsEvidence, RedirectHop, TlsEvidence
+from .models import (
+    DnsEvidence,
+    RedirectEvidence,
+    RedirectHop,
+    TlsEvidence,
+)
 from .types import AdapterContractError, EndpointPolicy, canonical_host
 
 
@@ -36,7 +41,9 @@ def _split_endpoint(url: str) -> SplitResult:
     path = parsed.path or "/"
     normalized = SplitResult("https", netloc, path, parsed.query, "")
     if urlunsplit(normalized) != url:
-        raise AdapterContractError("endpoint URL must use canonical HTTPS form")
+        raise AdapterContractError(
+            "endpoint URL must use canonical HTTPS form"
+        )
     return normalized
 
 
@@ -47,10 +54,14 @@ def validate_endpoint(url: str, policy: EndpointPolicy) -> SplitResult:
     host = parsed.hostname
     assert host is not None
     if host not in policy.allowed_hosts:
-        raise AdapterContractError("endpoint host is outside the allow-list")
+        raise AdapterContractError(
+            "endpoint host is outside the allow-list"
+        )
     port = parsed.port or 443
     if port not in policy.allowed_ports:
-        raise AdapterContractError("endpoint port is outside the allow-list")
+        raise AdapterContractError(
+            "endpoint port is outside the allow-list"
+        )
     return parsed
 
 
@@ -62,15 +73,23 @@ def validate_dns_evidence(
     parsed = validate_endpoint(url, policy)
     host = parsed.hostname
     assert host is not None
+    if not isinstance(evidence, DnsEvidence):
+        raise AdapterContractError("DNS evidence must be typed")
     if evidence.host != host:
-        raise AdapterContractError("DNS evidence host differs from endpoint")
+        raise AdapterContractError(
+            "DNS evidence host differs from endpoint"
+        )
     for value in evidence.addresses:
         try:
             address = ip_address(value)
         except ValueError as exc:
-            raise AdapterContractError("DNS evidence contains an invalid address") from exc
+            raise AdapterContractError(
+                "DNS evidence contains an invalid address"
+            ) from exc
         if value != value.lower() or str(address) != value:
-            raise AdapterContractError("DNS evidence address is not canonical")
+            raise AdapterContractError(
+                "DNS evidence address is not canonical"
+            )
         if (
             not address.is_global
             or address.is_private
@@ -80,7 +99,9 @@ def validate_dns_evidence(
             or address.is_reserved
             or address.is_unspecified
         ):
-            raise AdapterContractError("DNS evidence contains a non-public address")
+            raise AdapterContractError(
+                "DNS evidence contains a non-public address"
+            )
 
 
 def validate_tls_evidence(
@@ -91,14 +112,20 @@ def validate_tls_evidence(
     parsed = validate_endpoint(url, policy)
     host = parsed.hostname
     assert host is not None
+    if not isinstance(evidence, TlsEvidence):
+        raise AdapterContractError("TLS evidence must be typed")
     if evidence.host != host:
-        raise AdapterContractError("TLS evidence host differs from endpoint")
+        raise AdapterContractError(
+            "TLS evidence host differs from endpoint"
+        )
     if not evidence.certificate_valid:
         raise AdapterContractError("TLS certificate validation failed")
     if not evidence.hostname_verified:
         raise AdapterContractError("TLS hostname verification failed")
     if evidence.negotiated_version.rank < policy.minimum_tls_version.rank:
-        raise AdapterContractError("negotiated TLS version is below policy")
+        raise AdapterContractError(
+            "negotiated TLS version is below policy"
+        )
 
 
 def validate_redirects(
@@ -108,20 +135,30 @@ def validate_redirects(
 ) -> str:
     validate_endpoint(initial_url, policy)
     if not isinstance(redirects, tuple):
-        raise AdapterContractError("redirect chain must be an immutable tuple")
+        raise AdapterContractError(
+            "redirect chain must be an immutable tuple"
+        )
     if len(redirects) > policy.max_redirects:
-        raise AdapterContractError("redirect chain exceeds the policy bound")
+        raise AdapterContractError(
+            "redirect chain exceeds the policy bound"
+        )
     current = initial_url
     seen = {initial_url}
     for hop in redirects:
         if not isinstance(hop, RedirectHop):
-            raise AdapterContractError("redirect chain entries must be typed")
+            raise AdapterContractError(
+                "redirect chain entries must be typed"
+            )
         if hop.from_url != current:
-            raise AdapterContractError("redirect chain is not contiguous")
+            raise AdapterContractError(
+                "redirect chain is not contiguous"
+            )
         validate_endpoint(hop.from_url, policy)
         validate_endpoint(hop.to_url, policy)
         if hop.to_url in seen:
-            raise AdapterContractError("redirect chain contains a loop")
+            raise AdapterContractError(
+                "redirect chain contains a loop"
+            )
         seen.add(hop.to_url)
         current = hop.to_url
     return current
@@ -134,10 +171,33 @@ def validate_endpoint_evidence(
     dns: DnsEvidence,
     tls: TlsEvidence,
     redirects: tuple[RedirectHop, ...],
+    redirect_evidence: tuple[RedirectEvidence, ...] = (),
 ) -> str:
     final_url = validate_redirects(initial_url, redirects, policy)
-    validate_dns_evidence(final_url, policy, dns)
-    validate_tls_evidence(final_url, policy, tls)
+    validate_dns_evidence(initial_url, policy, dns)
+    validate_tls_evidence(initial_url, policy, tls)
+    if not isinstance(redirect_evidence, tuple) or any(
+        not isinstance(item, RedirectEvidence)
+        for item in redirect_evidence
+    ):
+        raise AdapterContractError(
+            "redirect endpoint evidence must be a typed tuple"
+        )
+    if len(redirect_evidence) != len(redirects):
+        raise AdapterContractError(
+            "each redirect target requires exact DNS and TLS evidence"
+        )
+    for hop, evidence in zip(
+        redirects,
+        redirect_evidence,
+        strict=True,
+    ):
+        if evidence.url != hop.to_url:
+            raise AdapterContractError(
+                "redirect evidence URL differs from redirect target"
+            )
+        validate_dns_evidence(hop.to_url, policy, evidence.dns_evidence)
+        validate_tls_evidence(hop.to_url, policy, evidence.tls_evidence)
     return final_url
 
 

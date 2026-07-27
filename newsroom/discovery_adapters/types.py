@@ -104,6 +104,21 @@ _HOST = re.compile(
 )
 _HEADER = re.compile(r"^[a-z0-9!#$%&'*+.^_`|~-]{1,128}$")
 
+# Receipts retain only protocol metadata needed for parsing, validation,
+# retry/back-pressure or conditional requests. Provider cookies and arbitrary
+# response metadata never enter the durable proposal record.
+RETAINED_RESPONSE_HEADER_NAMES = frozenset(
+    {
+        "content-encoding",
+        "content-length",
+        "content-type",
+        "etag",
+        "last-modified",
+        "location",
+        "retry-after",
+    }
+)
+
 
 def require_token(value: str, *, field: str) -> str:
     if not isinstance(value, str) or _TOKEN.fullmatch(value) is None:
@@ -155,7 +170,11 @@ def sorted_unique_text(
 
 
 def canonical_host(value: str) -> str:
-    if not isinstance(value, str) or value != value.strip().lower() or value.endswith("."):
+    if (
+        not isinstance(value, str)
+        or value != value.strip().lower()
+        or value.endswith(".")
+    ):
         raise AdapterContractError("host must be canonical lowercase text")
     try:
         ascii_host = value.encode("idna").decode("ascii")
@@ -205,10 +224,18 @@ class TimeoutLimits:
             ("idle_ms", self.idle_ms),
             ("total_ms", self.total_ms),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 600_000:
-                raise AdapterContractError(f"{field} must be between 1 and 600000")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 1 <= value <= 600_000
+            ):
+                raise AdapterContractError(
+                    f"{field} must be between 1 and 600000"
+                )
         if self.total_ms < max(self.connect_ms, self.read_ms, self.idle_ms):
-            raise AdapterContractError("total timeout cannot be smaller than a component")
+            raise AdapterContractError(
+                "total timeout cannot be smaller than a component"
+            )
 
     def canonical_value(self) -> dict[str, int]:
         return {
@@ -230,11 +257,23 @@ class BodyLimits:
 
     def __post_init__(self) -> None:
         for field, value, maximum in (
-            ("max_compressed_bytes", self.max_compressed_bytes, 64 * 1024 * 1024),
-            ("max_decompressed_bytes", self.max_decompressed_bytes, 128 * 1024 * 1024),
+            (
+                "max_compressed_bytes",
+                self.max_compressed_bytes,
+                64 * 1024 * 1024,
+            ),
+            (
+                "max_decompressed_bytes",
+                self.max_decompressed_bytes,
+                128 * 1024 * 1024,
+            ),
             ("max_decompression_ratio", self.max_decompression_ratio, 10_000),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 1 <= value <= maximum
+            ):
                 raise AdapterContractError(f"{field} is outside its safe bound")
         if self.max_decompressed_bytes < self.max_compressed_bytes:
             raise AdapterContractError("decompressed byte bound cannot be smaller")
@@ -244,8 +283,13 @@ class BodyLimits:
             maximum_items=32,
             maximum_item_bytes=128,
         )
-        if any(item != item.lower() or "/" not in item or ";" in item for item in content_types):
-            raise AdapterContractError("content types must be lowercase media types")
+        if any(
+            item != item.lower() or "/" not in item or ";" in item
+            for item in content_types
+        ):
+            raise AdapterContractError(
+                "content types must be lowercase media types"
+            )
         charsets = sorted_unique_text(
             self.allowed_charsets,
             field="allowed_charsets",
@@ -255,13 +299,19 @@ class BodyLimits:
         if any(item != item.lower() for item in charsets):
             raise AdapterContractError("charsets must be lowercase")
         if not isinstance(self.allowed_encodings, tuple) or not self.allowed_encodings:
-            raise AdapterContractError("allowed encodings must be a non-empty tuple")
-        if any(not isinstance(item, BodyEncoding) for item in self.allowed_encodings):
+            raise AdapterContractError(
+                "allowed encodings must be a non-empty tuple"
+            )
+        if any(
+            not isinstance(item, BodyEncoding) for item in self.allowed_encodings
+        ):
             raise AdapterContractError("allowed encodings must be typed")
         if self.allowed_encodings != tuple(
             sorted(set(self.allowed_encodings), key=lambda item: item.value)
         ):
-            raise AdapterContractError("allowed encodings must be sorted and unique")
+            raise AdapterContractError(
+                "allowed encodings must be sorted and unique"
+            )
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -290,7 +340,11 @@ class ParserLimits:
             ("max_collection_entries", self.max_collection_entries, 1_000_000),
             ("max_xml_attributes", self.max_xml_attributes, 1_000_000),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 1 <= value <= maximum
+            ):
                 raise AdapterContractError(f"{field} is outside its safe bound")
 
     def canonical_value(self) -> dict[str, int]:
@@ -323,12 +377,16 @@ class EndpointPolicy:
             not isinstance(self.allowed_ports, tuple)
             or not self.allowed_ports
             or any(
-                isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535
+                isinstance(port, bool)
+                or not isinstance(port, int)
+                or not 1 <= port <= 65535
                 for port in self.allowed_ports
             )
             or self.allowed_ports != tuple(sorted(set(self.allowed_ports)))
         ):
-            raise AdapterContractError("allowed ports must be sorted unique integers")
+            raise AdapterContractError(
+                "allowed ports must be sorted unique integers"
+            )
         if (
             isinstance(self.max_redirects, bool)
             or not isinstance(self.max_redirects, int)
@@ -365,11 +423,15 @@ class ShapeField:
     def __post_init__(self) -> None:
         require_token(self.name, field="shape_field_name")
         if not isinstance(self.path, tuple) or not self.path:
-            raise AdapterContractError("shape field path must be a non-empty tuple")
+            raise AdapterContractError(
+                "shape field path must be a non-empty tuple"
+            )
         for part in self.path:
             bounded_text(part, field="shape_field_path", maximum_bytes=128)
         if not isinstance(self.required, bool):
-            raise AdapterContractError("shape field required flag must be boolean")
+            raise AdapterContractError(
+                "shape field required flag must be boolean"
+            )
         if (
             isinstance(self.maximum_bytes, bool)
             or not isinstance(self.maximum_bytes, int)
@@ -386,6 +448,11 @@ class ShapeField:
         }
 
 
+def _paths_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+    shortest = min(len(left), len(right))
+    return left[:shortest] == right[:shortest]
+
+
 @dataclass(frozen=True, slots=True)
 class SourceShapeContract:
     shape_id: str
@@ -394,6 +461,7 @@ class SourceShapeContract:
     fields: tuple[ShapeField, ...]
     identity_fields: tuple[str, ...]
     allow_additional_fields: bool = True
+    singleton_identity: str | None = None
 
     def __post_init__(self) -> None:
         require_token(self.shape_id, field="source_shape_id")
@@ -412,16 +480,59 @@ class SourceShapeContract:
         names = tuple(item.name for item in self.fields)
         if len(names) != len(set(names)):
             raise AdapterContractError("shape field names must be unique")
+        paths = tuple(item.path for item in self.fields)
+        if len(paths) != len(set(paths)):
+            raise AdapterContractError("shape field paths must be unique")
+
         identities = sorted_unique_text(
             self.identity_fields,
             field="identity_fields",
             maximum_items=16,
             maximum_item_bytes=128,
+            allow_empty=True,
         )
+        by_name = {item.name: item for item in self.fields}
         if not set(identities) <= set(names):
-            raise AdapterContractError("identity fields must resolve to shape fields")
+            raise AdapterContractError(
+                "identity fields must resolve to shape fields"
+            )
+        if any(not by_name[name].required for name in identities):
+            raise AdapterContractError("identity fields must be required")
+        identity_paths = tuple(by_name[name].path for name in identities)
+        for index, path in enumerate(identity_paths):
+            if any(
+                _paths_overlap(path, other)
+                for other in identity_paths[index + 1 :]
+            ):
+                raise AdapterContractError(
+                    "identity field paths cannot overlap"
+                )
+
+        if self.singleton_identity is None:
+            if not identities:
+                raise AdapterContractError(
+                    "non-singleton shape requires identity fields"
+                )
+        else:
+            require_token(
+                self.singleton_identity,
+                field="shape_singleton_identity",
+            )
+            if identities:
+                raise AdapterContractError(
+                    "singleton shape cannot also use item identity fields"
+                )
+        if (
+            self.kind is AdapterKind.MAINTAINED_DOCUMENT
+            and self.singleton_identity is None
+        ):
+            raise AdapterContractError(
+                "maintained-document shape requires stable singleton identity"
+            )
         if not isinstance(self.allow_additional_fields, bool):
-            raise AdapterContractError("additional-field flag must be boolean")
+            raise AdapterContractError(
+                "additional-field flag must be boolean"
+            )
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -431,6 +542,7 @@ class SourceShapeContract:
             "fields": [item.canonical_value() for item in self.fields],
             "identity_fields": list(self.identity_fields),
             "allow_additional_fields": self.allow_additional_fields,
+            "singleton_identity": self.singleton_identity,
         }
 
     @property
@@ -444,22 +556,41 @@ class Header:
     value: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or self.name != self.name.lower() or _HEADER.fullmatch(self.name) is None:
-            raise AdapterContractError("header name must be canonical lowercase text")
-        bounded_text(self.value, field="header_value", maximum_bytes=8192, allow_empty=True)
+        if (
+            not isinstance(self.name, str)
+            or self.name != self.name.lower()
+            or _HEADER.fullmatch(self.name) is None
+        ):
+            raise AdapterContractError(
+                "header name must be canonical lowercase text"
+            )
+        bounded_text(
+            self.value,
+            field="header_value",
+            maximum_bytes=8192,
+            allow_empty=True,
+        )
         if "\r" in self.value or "\n" in self.value:
-            raise AdapterContractError("header values cannot contain line breaks")
+            raise AdapterContractError(
+                "header values cannot contain line breaks"
+            )
 
     def canonical_value(self) -> dict[str, str]:
         return {"name": self.name, "value": self.value}
 
 
 def sorted_headers(values: Iterable[Header]) -> tuple[Header, ...]:
-    if not isinstance(values, tuple) or any(not isinstance(item, Header) for item in values):
-        raise AdapterContractError("headers must be an immutable typed tuple")
+    if not isinstance(values, tuple) or any(
+        not isinstance(item, Header) for item in values
+    ):
+        raise AdapterContractError(
+            "headers must be an immutable typed tuple"
+        )
     result = tuple(sorted(values, key=lambda item: item.name))
     if len(result) != len({item.name for item in result}):
-        raise AdapterContractError("fixture headers must have unique names")
+        raise AdapterContractError(
+            "fixture headers must have unique names"
+        )
     return result
 
 
@@ -480,6 +611,7 @@ __all__ = [
     "ParserLimits",
     "ParserResultId",
     "QuarantineRecommendation",
+    "RETAINED_RESPONSE_HEADER_NAMES",
     "ShapeField",
     "SourceShapeContract",
     "TimeoutLimits",
