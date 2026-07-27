@@ -1,0 +1,3 @@
+<?xml version="1.0"?>
+<!DOCTYPE feed [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>unsafe</id><title>&xxe;</title><link href="https://fixture.example/unsafe"/></entry></feed>

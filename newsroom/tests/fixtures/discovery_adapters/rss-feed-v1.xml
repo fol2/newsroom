@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Fixture RSS</title>
+    <link>https://fixture.example/</link>
+    <description>Fixture feed</description>
+    <item>
+      <guid isPermaLink="false">rss-1</guid>
+      <title>Fixture RSS item</title>
+      <link>https://fixture.example/rss-1</link>
+      <pubDate>Thu, 12 Mar 2042 10:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
