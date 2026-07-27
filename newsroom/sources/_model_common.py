@@ -13,7 +13,7 @@ from .types import (
 
 
 def require_idempotency_key(value: str) -> str:
-    return bounded_text(value, field="idempotency_key", maximum_bytes=512)
+    return bounded_text(value, field="idempotency_key", maximum_bytes=256)
 
 
 def require_locator(value: str, *, field: str = "locator") -> str:
