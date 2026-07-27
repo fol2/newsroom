@@ -11,7 +11,7 @@ from newsroom.discovery_adapters import (
 
 
 def test_increment_3b_traceability_is_complete_and_explicitly_bounded() -> None:
-    assert len(INCREMENT_3B_TRACEABILITY) == 10
+    assert len(INCREMENT_3B_TRACEABILITY) == 11
     assert all(key.startswith("3B-") for key in INCREMENT_3B_TRACEABILITY)
     assert all(values for values in INCREMENT_3B_TRACEABILITY.values())
     assert {
