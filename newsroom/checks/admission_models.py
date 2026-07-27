@@ -27,7 +27,13 @@ from .check_models import (
     CandidateObservationRef,
     CheckOutcomeRequest,
 )
-from .record_models import BaselineDecision, CheckOutcome, ObservableTransition
+from .record_models import (
+    BaselineDecision,
+    CheckOutcome,
+    ObservableTransition,
+    OperationalFinding,
+    OperationalFindingOccurrence,
+)
 from .types import (
     CheckAttemptId,
     CheckAuthorityError,
@@ -336,6 +342,8 @@ class ProposalAdmissionResult:
     observations: tuple[AdmittedSourceObservation, ...]
     baseline: BaselineDecision | None = None
     transitions: tuple[ObservableTransition, ...] = ()
+    findings: tuple[OperationalFinding, ...] = ()
+    finding_occurrences: tuple[OperationalFindingOccurrence, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.request, ProposalAdmissionRequest):
@@ -403,6 +411,27 @@ class ProposalAdmissionResult:
             raise CheckContractError(
                 "proposal admission transition differs from Outcome"
             )
+        if not isinstance(self.findings, tuple) or any(
+            not isinstance(item, OperationalFinding)
+            for item in self.findings
+        ):
+            raise CheckContractError(
+                "proposal admission Findings must be a typed tuple"
+            )
+        if not isinstance(self.finding_occurrences, tuple) or any(
+            not isinstance(item, OperationalFindingOccurrence)
+            for item in self.finding_occurrences
+        ):
+            raise CheckContractError(
+                "proposal admission Finding occurrences must be typed"
+            )
+        if any(
+            item.request.outcome_id != self.outcome.request.outcome_id
+            for item in self.finding_occurrences
+        ):
+            raise CheckContractError(
+                "proposal admission Finding occurrence differs from Outcome"
+            )
 
     @property
     def replayed(self) -> bool:
@@ -428,6 +457,14 @@ class ProposalAdmissionResult:
             "transition_ids": [
                 str(item.request.transition_id)
                 for item in self.transitions
+            ],
+            "finding_ids": [
+                str(item.request.finding_id)
+                for item in self.findings
+            ],
+            "finding_occurrence_ids": [
+                str(item.request.occurrence_id)
+                for item in self.finding_occurrences
             ],
         }
 

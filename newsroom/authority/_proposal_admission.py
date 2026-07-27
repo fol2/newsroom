@@ -11,6 +11,7 @@ from newsroom.authority.types import AggregateId
 from ._check_store import _CheckAuthorityStore
 from ._proposal_admission_commit import _ProposalAdmissionCommitMixin
 from ._proposal_admission_decisions import _ProposalAdmissionDecisionMixin
+from ._proposal_admission_findings import _ProposalAdmissionFindingMixin
 from ._proposal_admission_planning import _ProposalAdmissionPlanningMixin
 from ._proposal_admission_validation import _ProposalAdmissionValidationMixin
 
@@ -18,6 +19,7 @@ from ._proposal_admission_validation import _ProposalAdmissionValidationMixin
 class _ProposalAdmissionBoundary(
     _ProposalAdmissionCommitMixin,
     _ProposalAdmissionDecisionMixin,
+    _ProposalAdmissionFindingMixin,
     _ProposalAdmissionPlanningMixin,
     _ProposalAdmissionValidationMixin,
 ):

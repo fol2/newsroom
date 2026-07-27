@@ -27,6 +27,7 @@ from newsroom.sources import (
 
 from ._proposal_admission_models import (
     _AuthorizedDecisionPlan,
+    _AuthorizedFindingPlan,
     _AuthorizedPlan,
 )
 
@@ -205,6 +206,66 @@ class _ProposalAdmissionCommitMixin:
             ),
         )
 
+    def _commit_finding(
+        self,
+        authorized: _AuthorizedFindingPlan,
+    ):
+        plan = authorized.plan
+        finding = plan.finding
+        if plan.finding_request is not None:
+            assert authorized.finding_grant is not None
+            try:
+                finding = self._store.commit_operational_finding(
+                    authorized.finding_grant,
+                    request=plan.finding_request,
+                )
+            except (
+                CheckIdentifierReuse,
+                CheckSemanticCollision,
+                CheckStateError,
+                sqlite3.IntegrityError,
+            ) as exc:
+                finding = self._store.operational_finding(
+                    plan.finding_request.finding_id
+                )
+                if (
+                    finding is None
+                    or finding.request.semantic_digest
+                    != plan.finding_request.semantic_digest
+                ):
+                    raise ProposalAdmissionConflict(
+                        "Operational Finding conflicted with retained authority"
+                    ) from exc
+
+        occurrence = plan.occurrence
+        if plan.occurrence_request is not None:
+            assert authorized.occurrence_grant is not None
+            try:
+                occurrence = self._store.commit_operational_finding_occurrence(
+                    authorized.occurrence_grant,
+                    request=plan.occurrence_request,
+                )
+            except (
+                CheckIdentifierReuse,
+                CheckSemanticCollision,
+                CheckStateError,
+                sqlite3.IntegrityError,
+            ) as exc:
+                occurrence = self._store.finding_occurrence_by_identity(
+                    plan.occurrence_request.occurrence_id
+                )
+                if (
+                    occurrence is None
+                    or occurrence.request.digest
+                    != plan.occurrence_request.digest
+                ):
+                    raise ProposalAdmissionConflict(
+                        "Finding occurrence conflicted with retained authority"
+                    ) from exc
+        findings = () if finding is None else (finding,)
+        occurrences = () if occurrence is None else (occurrence,)
+        return findings, occurrences
+
     def _commit_decisions(
         self,
         authorized: _AuthorizedDecisionPlan,
@@ -364,6 +425,11 @@ class _ProposalAdmissionCommitMixin:
             decision_plan,
             proof,
         )
+        finding_plan = self._plan_finding(request)
+        authorized_finding = self._authorize_finding(
+            finding_plan,
+            proof,
+        )
         outcome = self._commit_outcome(
             outcome_request,
             outcome_grant,
@@ -380,12 +446,17 @@ class _ProposalAdmissionCommitMixin:
         baseline, transitions = self._commit_decisions(
             authorized_decisions
         )
+        findings, finding_occurrences = self._commit_finding(
+            authorized_finding
+        )
         return ProposalAdmissionResult(
             request=request,
             outcome=outcome,
             observations=observations,
             baseline=baseline,
             transitions=transitions,
+            findings=findings,
+            finding_occurrences=finding_occurrences,
         )
 
 

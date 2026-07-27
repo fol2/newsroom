@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from newsroom.checks.types import CheckStateError
+from newsroom.checks.record_models import OperationalFindingOccurrence
+from newsroom.checks.types import (
+    CheckStateError,
+    OperationalFindingOccurrenceId,
+)
 from newsroom.sources import (
     DiscoveryOccurrence,
     DiscoveryOccurrenceId,
@@ -142,6 +146,26 @@ class _CheckAdmissionLookupMixin:
                 else self._occurrence_from_row(
                     self._connection,
                     rows[0],
+                    replayed=False,
+                )
+            )
+
+    def finding_occurrence_by_identity(
+        self,
+        occurrence_id: OperationalFindingOccurrenceId,
+    ) -> OperationalFindingOccurrence | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM operational_finding_occurrences "
+                "WHERE occurrence_id=?",
+                (str(occurrence_id),),
+            ).fetchone()
+            return (
+                None
+                if row is None
+                else self._finding_occurrence_from_row(
+                    self._connection,
+                    row,
                     replayed=False,
                 )
             )

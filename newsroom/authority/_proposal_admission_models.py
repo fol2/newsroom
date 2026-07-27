@@ -8,7 +8,16 @@ from newsroom.authority.canonical import digest_canonical
 from newsroom.authority.types import TimePrecision, UtcTimestamp
 from newsroom.discovery_adapters import ParsedItem
 from newsroom.checks.baseline_models import BaselineDecisionRequest
-from newsroom.checks.record_models import BaselineDecision, ObservableTransition
+from newsroom.checks.finding_models import (
+    OperationalFindingOccurrenceRequest,
+    OperationalFindingRequest,
+)
+from newsroom.checks.record_models import (
+    BaselineDecision,
+    ObservableTransition,
+    OperationalFinding,
+    OperationalFindingOccurrence,
+)
 from newsroom.checks.transition_models import ObservableTransitionRequest
 from newsroom.sources import (
     DiscoveryOccurrence,
@@ -38,6 +47,21 @@ class _AuthorizedDecisionPlan:
     plan: _DecisionPlan
     baseline_grant: _AuthorizedCommandGrant | None
     transition_grants: tuple[_AuthorizedCommandGrant, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _FindingPlan:
+    finding: OperationalFinding | None
+    finding_request: OperationalFindingRequest | None
+    occurrence: OperationalFindingOccurrence | None
+    occurrence_request: OperationalFindingOccurrenceRequest | None
+
+
+@dataclass(frozen=True, slots=True)
+class _AuthorizedFindingPlan:
+    plan: _FindingPlan
+    finding_grant: _AuthorizedCommandGrant | None
+    occurrence_grant: _AuthorizedCommandGrant | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,8 +123,10 @@ def _source_time(item: ParsedItem, field_name: str) -> SourceTime:
 
 __all__ = [
     "_AuthorizedDecisionPlan",
+    "_AuthorizedFindingPlan",
     "_AuthorizedPlan",
     "_DecisionPlan",
+    "_FindingPlan",
     "_ObservationPlan",
     "_field_map",
     "_identity_component_name",
