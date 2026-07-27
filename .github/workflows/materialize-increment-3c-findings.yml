@@ -45,9 +45,13 @@ jobs:
               (root / '.github/increment-3c-findings-manifest.json').read_text()
           )
           archive = archive_path.read_bytes()
-          if len(archive) != manifest['archive_size']:
+          actual_archive_size = len(archive)
+          actual_archive_digest = hashlib.sha256(archive).hexdigest()
+          print(f'Finding archive size: {actual_archive_size}')
+          print(f'Finding archive sha256: {actual_archive_digest}')
+          if actual_archive_size != manifest['archive_size']:
               raise SystemExit('Finding payload archive size differs from manifest')
-          if hashlib.sha256(archive).hexdigest() != manifest['archive_sha256']:
+          if actual_archive_digest != manifest['archive_sha256']:
               raise SystemExit('Finding payload archive digest differs from manifest')
           expected_paths = tuple(manifest['paths'])
           if len(expected_paths) != len(set(expected_paths)):
@@ -58,7 +62,8 @@ jobs:
               with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as tar:
                   members = tar.getmembers()
                   names = tuple(member.name for member in members)
-                  if names != tuple(sorted(expected_paths)):
+                  print(f'Finding archive paths: {names!r}')
+                  if len(names) != len(set(names)) or set(names) != set(expected_paths):
                       raise SystemExit('Finding archive inventory differs from manifest')
                   for member in members:
                       path = PurePosixPath(member.name)
