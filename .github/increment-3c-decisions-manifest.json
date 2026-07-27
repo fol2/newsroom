@@ -1,0 +1,22 @@
+{
+  "archive_sha256": "164b8e83d991d7332f1809eb795b04f69b9f0bdd42ff2a53a30f900fdc083f83",
+  "archive_size": 11033,
+  "base64_size": 14712,
+  "chunk_count": 3,
+  "file_sha256": {
+    "newsroom/authority/_proposal_admission.py": "f901041d7499e3cac6e429434c4e0df8a54871769ee98589f642d661511155d3",
+    "newsroom/authority/_proposal_admission_commit.py": "91b9806c6a7483d3b73897dcbad9d0834a77b3106ad3d411f5c1bcd61f79c25d",
+    "newsroom/authority/_proposal_admission_decisions.py": "c7f117dcb533d1b0902747ce027da4022e3d0b1f321b7ec49fa022c8f1818244",
+    "newsroom/authority/_proposal_admission_models.py": "cfa5fc1fa9fbdcbacb2034c36748724be5845deca7478a8487f7b1950fd60044",
+    "newsroom/checks/admission_models.py": "38f8f9106769934e3803661b7a091f49f4067ea45450409e125256c435eccf97",
+    "newsroom/tests/test_check_3c_admission.py": "e3d83c3628ca01a6b28c01e197f57fe852c6db1a32417ef538563fe65fe63016"
+  },
+  "paths": [
+    "newsroom/authority/_proposal_admission.py",
+    "newsroom/authority/_proposal_admission_commit.py",
+    "newsroom/authority/_proposal_admission_models.py",
+    "newsroom/authority/_proposal_admission_decisions.py",
+    "newsroom/checks/admission_models.py",
+    "newsroom/tests/test_check_3c_admission.py"
+  ]
+}
