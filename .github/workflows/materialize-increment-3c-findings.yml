@@ -31,6 +31,7 @@ jobs:
           python - <<'PY'
           from __future__ import annotations
 
+          import base64
           import hashlib
           import io
           import json
@@ -40,11 +41,21 @@ jobs:
           import tempfile
 
           root = Path.cwd()
-          archive_path = root / '.github/increment-3c-findings-payload.tar.gz'
+          payload_root = root / '.github/increment-3c-findings-payload'
           manifest = json.loads(
               (root / '.github/increment-3c-findings-manifest.json').read_text()
           )
-          archive = archive_path.read_bytes()
+          expected_chunks = tuple(
+              payload_root / f'part-{index:02d}.b64'
+              for index in range(manifest['chunk_count'])
+          )
+          actual_chunks = tuple(sorted(payload_root.glob('part-*.b64')))
+          if actual_chunks != expected_chunks:
+              raise SystemExit('Finding payload chunk inventory differs from manifest')
+          encoded = ''.join(path.read_text(encoding='ascii') for path in expected_chunks)
+          if len(encoded) != manifest['base64_size']:
+              raise SystemExit('Finding payload base64 size differs from manifest')
+          archive = base64.b64decode(encoded, validate=True)
           actual_archive_size = len(archive)
           actual_archive_digest = hashlib.sha256(archive).hexdigest()
           print(f'Finding archive size: {actual_archive_size}')
@@ -62,7 +73,6 @@ jobs:
               with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as tar:
                   members = tar.getmembers()
                   names = tuple(member.name for member in members)
-                  print(f'Finding archive paths: {names!r}')
                   if len(names) != len(set(names)) or set(names) != set(expected_paths):
                       raise SystemExit('Finding archive inventory differs from manifest')
                   for member in members:
@@ -121,7 +131,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f \
+          rm -rf \
+            .github/increment-3c-findings-payload \
             .github/increment-3c-findings-payload.tar.gz \
             .github/increment-3c-findings-manifest.json \
             .github/workflows/materialize-increment-3c-findings.yml
@@ -135,6 +146,7 @@ jobs:
             newsroom/authority/_proposal_admission_models.py \
             newsroom/checks/admission_models.py \
             newsroom/tests/test_check_3c_admission.py \
+            .github/increment-3c-findings-payload \
             .github/increment-3c-findings-payload.tar.gz \
             .github/increment-3c-findings-manifest.json \
             .github/workflows/materialize-increment-3c-findings.yml
