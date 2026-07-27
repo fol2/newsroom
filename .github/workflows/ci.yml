@@ -114,6 +114,42 @@ jobs:
               destination.parent.mkdir(parents=True, exist_ok=True)
               shutil.copy2(source, destination)
           PY
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding='utf-8')
+              if text.count(old) != 1:
+                  raise SystemExit(f'{path}: exact reviewed replacement count differs')
+              target.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          replace_once(
+              'newsroom/discovery_adapters/parsers.py',
+              "    if truncated:\n"
+              "        completeness = Completeness.TRUNCATED\n"
+              "    elif invalid:\n"
+              "        completeness = Completeness.PARTIAL\n",
+              "    if invalid and not by_key:\n"
+              "        drift = True\n\n"
+              "    if truncated:\n"
+              "        completeness = Completeness.TRUNCATED\n"
+              "    elif invalid:\n"
+              "        completeness = Completeness.PARTIAL\n",
+          )
+          replace_once(
+              'newsroom/tests/test_discovery_adapter_3b_parsers.py',
+              "    assert original.parser_result.representation_digest != (\n"
+              "        upgraded.parser_result.representation_digest\n"
+              "    )\n",
+              "    assert original.parser_result.representation_digest == (\n"
+              "        upgraded.parser_result.representation_digest\n"
+              "    )\n"
+              "    assert original.parser_result.producer_slot_digest != (\n"
+              "        upgraded.parser_result.producer_slot_digest\n"
+              "    )\n",
+          )
+          PY
           rm -f .github/increment-3b-review-payload.b64
           rm -rf .github/increment-3b-review-payload
           git show 86afbf878f6b138ae0c99386d42828b32f12b645:.github/workflows/ci.yml \
@@ -156,6 +192,7 @@ jobs:
             .github/workflows/ci.yml \
             newsroom/discovery_adapters \
             newsroom/tests/discovery_adapter_3b_helpers.py \
+            newsroom/tests/test_discovery_adapter_3b_parsers.py \
             newsroom/tests/test_discovery_adapter_3b_review_regressions.py \
             newsroom/tests/test_discovery_adapter_3b_runner.py
           git diff --cached --check
