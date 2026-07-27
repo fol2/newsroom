@@ -147,10 +147,10 @@ def _patch_migration_chain() -> None:
     )
     text = _replace_once(
         text,
-        "    DEVELOPMENT_CANDIDATE_MIGRATION,\n)\n\n\ndef _expected_fingerprint",
+        "    DEVELOPMENT_CANDIDATE_MIGRATION,\n)\n\ndef _expected_fingerprint",
         "    DEVELOPMENT_CANDIDATE_MIGRATION,\n"
         "    SOURCE_REGISTRY_MIGRATION,\n"
-        ")\n\n\ndef _expected_fingerprint",
+        ")\n\ndef _expected_fingerprint",
         seam="migration manifest",
     )
     text = _replace_once(
