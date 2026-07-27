@@ -1,4 +1,0 @@
-Increment 3A substantive repair runner failed on 159d5a3d8946f5f658b3d74342b5b8585818350e.
-
-extracted 935 reviewed repair lines
-newsroom/authority/source_registry_migrations.py: expected one replacement, found 2: '        UNIQUE(definition_id,semantic_digest),\n'
