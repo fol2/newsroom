@@ -1,4 +1,4 @@
-Increment 3A installer failed on commit 51243c79c329d2fdc786944fa7c448a5d784e8d7.
+Increment 3A installer failed on commit 4c14c634e80e4aea46e0248f39344e108635004d.
 
 Traceback (most recent call last):
   File "/home/runner/work/newsroom/newsroom/.github/increment-3a-apply/apply.py", line 234, in <module>
