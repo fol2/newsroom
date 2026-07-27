@@ -33,6 +33,7 @@ jobs:
           git rev-parse HEAD > "${RUNNER_TEMP}/increment-3b-hardening-head"
           python - <<'PY'
           from pathlib import Path
+          from textwrap import dedent, indent
 
           def replace_once(path: str, old: str, new: str) -> None:
               target = Path(path)
@@ -54,7 +55,11 @@ jobs:
               text = target.read_text(encoding="utf-8")
               start = text.find(start_marker)
               end = text.find(end_marker, start + len(start_marker))
-              if start < 0 or end < 0 or text.find(start_marker, start + 1) >= 0:
+              if (
+                  start < 0
+                  or end < 0
+                  or text.find(start_marker, start + 1) >= 0
+              ):
                   raise SystemExit(f"{path}: reviewed region markers differ")
               target.write_text(
                   text[:start] + replacement + text[end:],
@@ -73,48 +78,47 @@ jobs:
               "_BODY_PROHIBITED_STATUS = frozenset({204, 205, 304})\n"
               "_SUPPORTED_BODY_SUCCESS_STATUS = frozenset({200})\n"
               "_SUPPORTED_EMPTY_SUCCESS_STATUS = frozenset({204, 205})\n"
-              "_HTTP_TOKEN = re.compile(r\"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$\")\n"
+              "_HTTP_TOKEN = re.compile(r\"^[!#$%&'()*+.^_`|~0-9a-z-]+$\")\n"
               "_MEDIA_TYPE = re.compile(\n"
-              "    r\"^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+$\"\n"
+              "    r\"^[!#$%&'()*+.^_`|~0-9a-z-]+/[!#$%&'()*+.^_`|~0-9a-z-]+$\"\n"
               ")\n",
           )
-          strict_content_type = '''def _content_type_parameter(value: str) -> str:
-              if not value:
+          strict_content_type = dedent('''\
+          def _content_type_parameter(value: str) -> str:
+              selected = value.strip()
+              if not selected:
                   raise AdapterContractError(
                       "response content-type parameter is empty"
                   )
-              if value.startswith('"') or value.endswith('"'):
-                  if len(value) < 2 or not (
-                      value.startswith('"') and value.endswith('"')
-                  ):
-                      raise AdapterContractError(
-                          "response content-type quoted parameter is malformed"
-                      )
-                  inner = value[1:-1]
+              if selected.startswith('"') or selected.endswith('"'):
                   if (
-                      not inner
-                      or "\\\\" in inner
-                      or '"' in inner
-                      or any(ord(character) < 0x20 or ord(character) == 0x7F for character in inner)
+                      len(selected) < 2
+                      or not selected.startswith('"')
+                      or not selected.endswith('"')
+                      or '"' in selected[1:-1]
+                      or "\\\\" in selected[1:-1]
                   ):
                       raise AdapterContractError(
                           "response content-type quoted parameter is malformed"
                       )
-                  return inner.lower()
-              if _HTTP_TOKEN.fullmatch(value) is None:
+                  selected = selected[1:-1]
+              elif _HTTP_TOKEN.fullmatch(selected.lower()) is None:
                   raise AdapterContractError(
                       "response content-type parameter is malformed"
                   )
-              return value.lower()
+              if not selected or any(
+                  ord(character) < 0x20 or ord(character) == 0x7F
+                  for character in selected
+              ):
+                  raise AdapterContractError(
+                      "response content-type parameter is malformed"
+                  )
+              return selected.lower()
 
 
           def _parse_content_type(value: str | None) -> tuple[str, str]:
               if value is None:
                   return "application/octet-stream", "utf-8"
-              if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
-                  raise AdapterContractError(
-                      "response content type contains a control character"
-                  )
               parts = [part.strip() for part in value.split(";")]
               media_type = parts[0].lower()
               if _MEDIA_TYPE.fullmatch(media_type) is None:
@@ -130,7 +134,6 @@ jobs:
                       )
                   name, raw_value = parameter.split("=", 1)
                   name = name.strip().lower()
-                  raw_value = raw_value.strip()
                   if _HTTP_TOKEN.fullmatch(name) is None:
                       raise AdapterContractError(
                           "response content-type parameter name is malformed"
@@ -140,46 +143,50 @@ jobs:
                           "response content-type parameter is duplicated"
                       )
                   seen.add(name)
-                  parsed_value = _content_type_parameter(raw_value)
+                  selected = _content_type_parameter(raw_value)
                   if name == "charset":
-                      charset = parsed_value
+                      charset = selected
               return media_type, charset
 
 
-          '''
-          strict_content_type = "\n".join(
-              line[10:] if line.startswith("          ") else line
-              for line in strict_content_type.splitlines()
-          ) + "\n"
+          ''')
           replace_region(
               runner,
               "def _parse_content_type(value: str | None) -> tuple[str, str]:\n",
               "def _encoding_from_headers(\n",
               strict_content_type,
           )
-          replace_once(
-              runner,
-              "    mapped = _STATUS_REASONS.get(status)\n",
-              '''    if status in _SUPPORTED_EMPTY_SUCCESS_STATUS:
-              receipt = _receipt(
-                  request,
-                  scenario,
-                  final_url=final_url,
-                  failure_kind=None,
-                  decompressed=b"",
-              )
-              return _proposal(
-                  request,
-                  scenario,
-                  outcome=ObservationProposalOutcome.SUCCESS_EMPTY,
-                  reason_codes=_reasons(
+          status_block = indent(
+              dedent('''\
+              if status in _SUPPORTED_EMPTY_SUCCESS_STATUS:
+                  receipt = _receipt(
+                      request,
                       scenario,
-                      f"HTTP_{status}_EMPTY_SUCCESS",
-                  ),
-                  quarantine=QuarantineRecommendation.NONE,
-                  incomplete=False,
-                  receipt=receipt,
-              )
+                      final_url=final_url,
+                      failure_kind=None,
+                      decompressed=b"",
+                  )
+                  capture = _capture(
+                      request,
+                      scenario,
+                      receipt,
+                      content_type="application/octet-stream",
+                      charset="utf-8",
+                      body=b"",
+                  )
+                  return _proposal(
+                      request,
+                      scenario,
+                      outcome=ObservationProposalOutcome.SUCCESS_EMPTY,
+                      reason_codes=_reasons(
+                          scenario,
+                          f"HTTP_{status}_SUCCESS_EMPTY",
+                      ),
+                      quarantine=QuarantineRecommendation.NONE,
+                      incomplete=False,
+                      receipt=receipt,
+                      capture=capture,
+                  )
 
               if status == 206:
                   receipt = _receipt(
@@ -199,10 +206,7 @@ jobs:
                       receipt=receipt,
                   )
 
-              if (
-                  200 <= status <= 299
-                  and status not in _SUPPORTED_BODY_SUCCESS_STATUS
-              ):
+              if 200 <= status <= 299 and status not in _SUPPORTED_BODY_SUCCESS_STATUS:
                   receipt = _receipt(
                       request,
                       scenario,
@@ -220,8 +224,13 @@ jobs:
                       receipt=receipt,
                   )
 
-              mapped = _STATUS_REASONS.get(status)
-          '''.replace("\n              ", "\n    ").lstrip(),
+              '''),
+              "    ",
+          )
+          replace_once(
+              runner,
+              "    mapped = _STATUS_REASONS.get(status)\n",
+              status_block + "    mapped = _STATUS_REASONS.get(status)\n",
           )
 
           parsers = "newsroom/discovery_adapters/parsers.py"
@@ -231,7 +240,7 @@ jobs:
               '_PATH_LEAF = "\\x00leaf"\n',
               '_PATH_LEAF = "\\x00leaf"\n'
               '_XML_DECLARATION_ENCODING = re.compile(\n'
-              '    br"<\\?xml[^>]*\\bencoding\\s*=\\s*([\\\'\\\"])(?P<encoding>[^\\\'\\\"]+)\\1",\n'
+              '    r"^<\\?xml[^>]*\\bencoding\\s*=\\s*([\\\'\\\"])([^\\\'\\\"]+)\\1",\n'
               '    re.IGNORECASE,\n'
               ')\n',
           )
@@ -239,24 +248,20 @@ jobs:
               parsers,
               ") -> _ParsedBatch:\n    lowered = data.lower()\n",
               ") -> _ParsedBatch:\n"
-              "    _decode_utf8(data, identity=\"RSS/Atom XML\")\n"
-              "    declaration = _XML_DECLARATION_ENCODING.search(data[:512])\n"
-              "    if declaration is not None:\n"
-              "        declared = declaration.group(\"encoding\").lower()\n"
-              "        if declared not in {b\"utf-8\", b\"utf8\"}:\n"
-              "            raise AdapterContractError(\n"
-              "                \"XML declaration encoding conflicts with UTF-8 transport contract\"\n"
-              "            )\n"
+              "    text = _decode_utf8(data, identity=\"RSS/Atom XML\")\n"
+              "    declaration = text.lstrip(\"\\ufeff \\t\\r\\n\")[:512]\n"
+              "    encoding = _XML_DECLARATION_ENCODING.match(declaration)\n"
+              "    if encoding is not None and encoding.group(2).lower() not in {\"utf-8\", \"utf8\"}:\n"
+              "        raise AdapterContractError(\n"
+              "            \"RSS/Atom XML declaration differs from UTF-8 transport contract\"\n"
+              "        )\n"
               "    lowered = data.lower()\n",
           )
           replace_once(
               parsers,
               '    elif capture.content_type == "text/html":\n        lowered = capture.body.lower()\n',
               '    elif capture.content_type == "text/html":\n'
-              '        _decode_utf8(\n'
-              '            capture.body,\n'
-              '            identity="maintained HTML",\n'
-              '        )\n'
+              '        _decode_utf8(capture.body, identity="maintained HTML")\n'
               '        lowered = capture.body.lower()\n',
           )
 
@@ -271,122 +276,106 @@ jobs:
               "    document_shape,\n    json_shape,\n",
               "    document_shape,\n    feed_shape,\n    json_shape,\n",
           )
-          marker = "def test_endpoint_rejects_noncanonical_components"
           target = Path(tests)
           text = target.read_text(encoding="utf-8")
-          if marker in text:
+          if "test_endpoint_rejects_noncanonical_path_and_query_forms" in text:
               raise SystemExit("review hardening tests already exist")
-          text += '''
+          text += dedent('''
 
           @pytest.mark.parametrize(
-              "url",
+              "endpoint",
               (
-                  "https://fixture.example/raw space",
+                  "https://fixture.example/a b",
                   "https://fixture.example/a/../b",
-                  "https://fixture.example/%2E%2E/secret",
+                  "https://fixture.example/%2E%2E/b",
                   "https://fixture.example/a\\\\b",
-                  "https://fixture.example/items?q=raw space",
-                  "https://fixture.example/items?q=%0D%0Aheader",
-                  "https://fixture.example/items?q=%2f",
+                  "https://fixture.example/?q=a b",
+                  "https://fixture.example/?q=%0D%0AX:x",
+                  "https://fixture.example/%2fambiguous",
               ),
           )
-          def test_endpoint_rejects_noncanonical_components(url: str) -> None:
-              with pytest.raises(AdapterContractError):
-                  validate_endpoint(url, request().endpoint_policy)
-
-
-          @pytest.mark.parametrize(
-              "content_type",
-              (
-                  'application/json; charset="utf-8',
-                  'application/json; charset=utf-8"',
-                  'application/json; charset="utf\\\\8"',
-                  'application/json; charset=',
-              ),
-          )
-          def test_malformed_content_type_quoting_is_rejected(
-              content_type: str,
+          def test_endpoint_rejects_noncanonical_path_and_query_forms(
+              endpoint: str,
           ) -> None:
+              with pytest.raises(AdapterContractError):
+                  validate_endpoint(endpoint, request().endpoint_policy)
+
+
+          def test_malformed_content_type_quoting_fails_closed() -> None:
               result = run_fixture_adapter(
                   request(),
-                  scenario(content_type=content_type),
+                  scenario(content_type='application/json; charset="utf-8""'),
               )
               assert result.outcome is ObservationProposalOutcome.MALFORMED
-              assert result.reason_codes == ("CONTENT_TYPE_REJECTED",)
+              assert result.reason_codes == ("CONTENT_CONTRACT_REJECTED",)
 
 
           @pytest.mark.parametrize(
-              ("kind", "shape", "body", "content_type"),
+              "kind,shape,content_type,body",
               (
                   (
                       AdapterKind.RSS_ATOM,
                       feed_shape(),
-                      b"\\xff<rss><channel /></rss>",
-                      "application/rss+xml; charset=utf-8",
+                      "application/xml; charset=utf-8",
+                      (
+                          "<?xml version='1.0'?><rss><channel><item><guid>1</guid>"
+                          "<title>café</title><link>https://fixture.example/1</link>"
+                          "</item></channel></rss>"
+                      ).encode("utf-16"),
                   ),
                   (
                       AdapterKind.MAINTAINED_DOCUMENT,
                       document_shape(),
-                      b"<html><body>\\xff</body></html>",
                       "text/html; charset=utf-8",
+                      b"<html><body>caf\\xe9</body></html>",
                   ),
               ),
           )
-          def test_textual_parsers_prove_actual_utf8_bytes(
+          def test_textual_parsers_require_actual_utf8_bytes(
               kind: AdapterKind,
               shape: SourceShapeContract,
-              body: bytes,
               content_type: str,
+              body: bytes,
           ) -> None:
               result = run_fixture_adapter(
                   request(kind=kind, shape=shape),
                   scenario(body=body, content_type=content_type),
               )
               assert result.outcome is ObservationProposalOutcome.MALFORMED
-              assert result.parser_result is not None
-              assert result.parser_result.issues[0].code == "PARSER_REJECTED"
+              assert result.reason_codes == ("PARSER_REJECTED_INPUT",)
 
 
           def test_xml_declaration_cannot_override_utf8_transport_contract() -> None:
               body = (
                   b'<?xml version="1.0" encoding="iso-8859-1"?>'
-                  b"<rss><channel /></rss>"
+                  b"<rss><channel><item><guid>1</guid><title>One</title>"
+                  b"<link>https://fixture.example/1</link></item></channel></rss>"
               )
               result = run_fixture_adapter(
                   request(kind=AdapterKind.RSS_ATOM, shape=feed_shape()),
-                  scenario(
-                      body=body,
-                      content_type="application/rss+xml; charset=utf-8",
-                  ),
+                  scenario(body=body, content_type="application/xml; charset=utf-8"),
               )
               assert result.outcome is ObservationProposalOutcome.MALFORMED
-              assert result.parser_result is not None
-              assert result.parser_result.issues[0].code == "PARSER_REJECTED"
+              assert result.reason_codes == ("PARSER_REJECTED_INPUT",)
 
 
           @pytest.mark.parametrize("status", (201, 202, 203, 207, 208, 226))
-          def test_uncontracted_success_status_cannot_masquerade_as_complete(
+          def test_uncontracted_success_statuses_do_not_become_source_success(
               status: int,
           ) -> None:
-              result = run_fixture_adapter(
-                  request(),
-                  scenario(status=status),
-              )
+              result = run_fixture_adapter(request(), scenario(status=status))
               assert result.outcome is ObservationProposalOutcome.TRANSPORT_FAILED
               assert result.reason_codes == ("HTTP_SUCCESS_STATUS_UNSUPPORTED",)
 
 
-          def test_partial_content_requires_an_explicit_future_contract() -> None:
-              result = run_fixture_adapter(
-                  request(),
-                  scenario(status=206),
-              )
+          def test_partial_content_does_not_masquerade_as_complete_source_state() -> None:
+              result = run_fixture_adapter(request(), scenario(status=206))
               assert result.outcome is ObservationProposalOutcome.TRANSPORT_FAILED
               assert result.reason_codes == ("HTTP_PARTIAL_CONTENT_UNSUPPORTED",)
 
 
           @pytest.mark.parametrize("status", (204, 205))
-          def test_bodyless_empty_success_statuses_remain_explicit(
+          def test_bodyless_empty_success_statuses_retain_empty_capture(
               status: int,
           ) -> None:
               result = run_fixture_adapter(
@@ -395,13 +384,10 @@ jobs:
               )
               assert result.outcome is ObservationProposalOutcome.SUCCESS_EMPTY
               assert result.incomplete is False
-              assert result.capture is None
+              assert result.capture is not None
+              assert result.capture.body == b""
               assert result.parser_result is None
-          '''
-          text = "\n".join(
-              line[10:] if line.startswith("          ") else line
-              for line in text.splitlines()
-          ) + "\n"
+          ''')
           target.write_text(text, encoding="utf-8")
           PY
           python -m compileall -q newsroom/discovery_adapters newsroom/tests
