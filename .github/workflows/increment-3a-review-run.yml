@@ -35,7 +35,8 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          {
+          (
+            set -euo pipefail
             python - <<'PY'
           from pathlib import Path
           import textwrap
@@ -54,7 +55,7 @@ jobs:
             python /tmp/increment-3a-substantive-repair.py
             python -m compileall -q newsroom
             git diff --check
-          } > /tmp/increment-3a-review-run.log 2>&1
+          ) > /tmp/increment-3a-review-run.log 2>&1
           status=$?
           cat /tmp/increment-3a-review-run.log
           exit "$status"
@@ -75,7 +76,6 @@ jobs:
           git add docs/research/2026-07-27-increment-3a-review-runner-failure.log
           git diff --cached --check
           git commit -m "chore(ci): retain Increment 3A review runner failure"
-          git pull --rebase origin agent/increment-3a-source-registry
           git push origin HEAD:agent/increment-3a-source-registry
           exit 1
 
@@ -85,16 +85,16 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          {
+          (
+            set -euo pipefail
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add newsroom
             git diff --cached --check
             git diff --cached --stat
             git commit -m "fix(sources): bind immutable lineage and redacted reads"
-            git pull --rebase origin agent/increment-3a-source-registry
             git push origin HEAD:agent/increment-3a-source-registry
-          } > /tmp/increment-3a-review-commit.log 2>&1
+          ) > /tmp/increment-3a-review-commit.log 2>&1
           status=$?
           cat /tmp/increment-3a-review-commit.log
           exit "$status"
@@ -115,7 +115,6 @@ jobs:
           git add docs/research/2026-07-27-increment-3a-review-commit-failure.log
           git diff --cached --check
           git commit -m "chore(ci): retain Increment 3A review commit failure"
-          git pull --rebase origin agent/increment-3a-source-registry
           git push origin HEAD:agent/increment-3a-source-registry
           exit 1
 
