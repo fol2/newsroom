@@ -1,0 +1,34 @@
+{
+  "archive_sha256": "8f75378a20a1b3dba57640ce8c476e3b8afcc8c957c7618357e3a8fa5a8debe8",
+  "archive_size": 15170,
+  "base64_size": 20228,
+  "chunk_count": 5,
+  "file_sha256": {
+    "newsroom/authority/_check_admission_lookup.py": "e9c3129eb4a31fd7ec6c9772d4b49e64206df23ad4d33ed7e2d2d447d19d6d42",
+    "newsroom/authority/_check_facade.py": "b7411647bcb619e0de3593a3416e0a2b8eb842f5073e74a25b752d601097ed0c",
+    "newsroom/authority/_check_store.py": "da5ea02811451185ea300a580c009021487fa2b4d87ab4eb89ae9b3fc009e5fb",
+    "newsroom/authority/_check_system.py": "0654d1af5fc49af02c2376a474f72226edb56c2fee0743b81168e3034adfe702",
+    "newsroom/authority/_proposal_admission.py": "b0005d66dd6e9e42fadc3fec1c4450b7675a48c4ebde7a2f5fd3d75ff2ac0d0c",
+    "newsroom/authority/_proposal_admission_commit.py": "4f9c7ee8c5eb3cabb022c7a017da638a3a18fa4c8abd7fe164675e826159e0cf",
+    "newsroom/authority/_proposal_admission_models.py": "3e2c90f5f4ed83b7134d031f94f9f97f62e8ca9d5c293a853e99ed6e34296998",
+    "newsroom/authority/_proposal_admission_planning.py": "b0dc5496acb7c9c5b3c09cebd64a14e36f3df4d5100dacb5c33db2902a29f820",
+    "newsroom/authority/_proposal_admission_validation.py": "2afc7a3282df3b7eaaefdd167e844dc638e60921331afd608486cc990418a562",
+    "newsroom/checks/__init__.py": "af294bdc1e39533fcdda0e5dbe9eb37660067ac37fb4b0e77ba3d74aea643e0b",
+    "newsroom/checks/admission_models.py": "5e83680c38ab46186a9ea2f63ae267267dcbcdb999c98d092c3d65c237637527",
+    "newsroom/tests/test_check_3c_admission.py": "27b0fb16070e58e194362d76e14525573bc9642c6f846cb1648ec76a4307b4f2"
+  },
+  "paths": [
+    "newsroom/authority/_check_facade.py",
+    "newsroom/authority/_check_store.py",
+    "newsroom/authority/_check_system.py",
+    "newsroom/authority/_check_admission_lookup.py",
+    "newsroom/authority/_proposal_admission.py",
+    "newsroom/authority/_proposal_admission_commit.py",
+    "newsroom/authority/_proposal_admission_models.py",
+    "newsroom/authority/_proposal_admission_planning.py",
+    "newsroom/authority/_proposal_admission_validation.py",
+    "newsroom/checks/__init__.py",
+    "newsroom/checks/admission_models.py",
+    "newsroom/tests/test_check_3c_admission.py"
+  ]
+}
