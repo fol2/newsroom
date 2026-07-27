@@ -1,7 +1,7 @@
 # Increment 3B fixture adapter operations
 
-**Status:** implementation review unit for issue #206  
-**Authority base:** `main@86afbf878f6b138ae0c99386d42828b32f12b645`  
+**Status:** implementation review unit for issue #206
+**Authority base:** `main@86afbf878f6b138ae0c99386d42828b32f12b645`
 **Execution profile:** `FIXTURE_REPLAY_ONLY`
 
 Increment 3B provides production-shaped transport and parser proposal interfaces without external access. It accepts one typed Increment 3A Source Definition/Version contract and one repository-owned fixture scenario. It returns immutable transport, Capture, parser and observation-proposal evidence. It does not write the authority ledger or create a Check Outcome, Source Revision, Discovery Signal, News Lead, Story Candidate, Operational Finding or production action.
@@ -24,7 +24,7 @@ The review unit supports three generic parser families:
 | `JSON_DOCUMENT` | Strict JSON document or item collection | append-only, complete-current-state, rolling-list and explicit-delta proposals |
 | `MAINTAINED_DOCUMENT` | UTF-8 plain text or bounded HTML text extraction | mutable-item proposals |
 
-A `SourceShapeContract` names exact item and field paths, required fields, identity fields and scalar bounds. Parser output is source-scoped proposal data. A shape contract never creates source, coverage, rights or operational authority.
+A `SourceShapeContract` names exact item and field paths, required fields, stable source-scoped identity fields and scalar bounds. Identity fields must be required and their paths cannot overlap. A maintained or other singleton document uses an explicit stable singleton identity. A shape contract never creates source, coverage, rights or operational authority.
 
 ## Preflight and input safety
 
@@ -33,7 +33,8 @@ Before any fixture body is interpreted, the runner validates:
 - canonical HTTPS URL, exact allow-listed host and port;
 - no user-info, fragment, IP-literal destination, scheme downgrade or redirect loop;
 - a contiguous redirect chain within its configured bound;
-- supplied DNS evidence containing only public, globally routable addresses;
+- separate DNS and TLS evidence for the initial endpoint and every redirect target;
+- supplied DNS evidence containing only canonical public, globally routable addresses;
 - supplied TLS evidence with a valid certificate, hostname verification and permitted TLS version;
 - independent connect, read, idle and total timing bounds;
 - compressed byte, decompressed byte and decompression-ratio limits;
@@ -55,19 +56,36 @@ Source fields such as `instructions`, `tools`, `policy`, `url`, `budget` or simi
 The runner preserves these distinctions:
 
 - `SUCCESS_EMPTY` — a successful response or collection with no proposed item;
-- `SUCCESS_UNCHANGED` — exact representation match, or HTTP `304` with an exact Source Definition Version, validator-policy and retained validator baseline;
+- `SUCCESS_UNCHANGED` — exact source/producer/representation replay, a new producer over unchanged source bytes with the same stable item-key set, normalized representation equality, or HTTP `304` with an exact Source Definition Version, validator-policy and retained validator baseline;
 - `SUCCESS_CHANGED` — one or more complete observable-change candidates;
 - `SUCCESS_PARTIAL` — only independently valid candidates are emitted and incompleteness remains visible;
 - `SUCCESS_TRUNCATED` — bounded candidates are emitted and omitted tail remains visible;
 - `BLOCKED`, `REDIRECTED`, `RATE_LIMITED`, `UNAUTHORISED`, `NOT_FOUND`, `GONE`, `MALFORMED`, `SHAPE_DRIFT` and `TRANSPORT_FAILED` — distinct non-success or degraded meanings.
 
-Timeout, TLS, DNS, malformed input, parser rejection, `404`, `410`, `429`, redirect and empty `2xx` never collapse into healthy unchanged. Rolling-list absence never becomes withdrawal. Partial or truncated complete-current-state output never becomes clearance. All proposals retain `authority_effect = NONE`.
+Timeout, TLS, DNS, malformed input, parser rejection, `404`, `410`, `429`, redirect and empty `2xx` never collapse into healthy unchanged. `204`, `205` and `304` responses carrying payload bytes fail the transport contract. Rolling-list absence never becomes withdrawal. Partial or truncated complete-current-state output never becomes clearance. All proposals retain `authority_effect = NONE`.
 
-## Identity and reprocessing
+A mixed valid/invalid collection may return independently valid items as `SUCCESS_PARTIAL`. An all-invalid collection, identity collision, unexpected strict-shape field, singleton multiplicity or stable item-key drift is contained as `SHAPE_DRIFT` rather than publisher change.
 
-Parsed item identity is derived only from the exact Source Shape Contract and its declared source-scoped identity fields. URLs, titles, timestamps, filenames and content digests are not global Newsroom identity.
+## Identity, baseline and reprocessing
 
-Parser or normalizer upgrades change the `ParserResult.representation_digest` but do not change the item key and cannot fabricate a Source Revision. Increment 3C owns authoritative Check/baseline/transition decisions; Increment 3A remains the only source-lineage authority available in this unit.
+Source Item proposal identity is derived only from the typed Source Definition identity plus the configured required identity-field values, or from the typed Source Definition identity plus an explicit singleton identity. Non-identity fields, uncertainty wording, shape-contract versions, adapter versions, parser versions, normalizer versions, URLs, titles, timestamps, filenames and content digests cannot allocate a second logical Source Item.
+
+An exact baseline retains, separately:
+
+- Source Definition Version and validator-contract identity;
+- source-body digest;
+- producer-slot digest, which binds adapter, parser, normalizer and shape-contract versions;
+- normalized representation digest;
+- sorted stable item-key set; and
+- retained conditional validator evidence.
+
+Representation equality is parsed and normalized content equality. A parser or normalizer upgrade may therefore keep the same representation digest while changing the producer-slot digest. Reprocessing unchanged source bytes under a new producer remains `SUCCESS_UNCHANGED` when the stable item-key set is unchanged, while retaining the new Parser Result provenance. It cannot fabricate a Source Revision.
+
+The same producer over the same source bytes must reproduce the same representation and stable item-key set. A mismatch is nondeterministic reprocessing and fails closed as `SHAPE_DRIFT`. Reprocessing under a new producer that changes stable item identity is likewise quarantined.
+
+Transport receipts retain only protocol metadata needed for parsing, conditional validation, redirect evidence and retry/back-pressure. Cookies and arbitrary provider-debug headers are discarded. Capture, Parser Result and Observation Proposal construction revalidates exact request, source-version, receipt and capture lineage so records cannot be substituted across attempts.
+
+Increment 3C owns authoritative Check/baseline/transition decisions. Increment 3A remains the only source-lineage authority available in this unit.
 
 ## Repository fixtures
 
@@ -94,6 +112,7 @@ python -m pytest -q newsroom/tests/test_discovery_adapter_3b_contracts.py
 python -m pytest -q newsroom/tests/test_discovery_adapter_3b_security.py
 python -m pytest -q newsroom/tests/test_discovery_adapter_3b_parsers.py
 python -m pytest -q newsroom/tests/test_discovery_adapter_3b_runner.py
+python -m pytest -q newsroom/tests/test_discovery_adapter_3b_review_regressions.py
 python -m pytest -q newsroom/tests/test_discovery_adapter_3b_traceability.py
 python -m pytest -q
 ```
@@ -102,4 +121,4 @@ Required evidence includes zero required skips, failure or error; exact-head rep
 
 ## Deferred work
 
-Increment 3C owns Check Request/Attempt/Outcome authority, baseline state, retry state, Operational Findings and observable transitions. Increment 3D owns Signal, deterministic gate and News Lead authority. Increment 3E owns the disposable discovery-lineage Neo4j projection and source/parser/coverage health. Named live sources, credentials, source-specific numeric operational profiles, schedules, browser collection, shadow, canary and production activation remain separately blocked.
+Increment 3C owns Check Request/Attempt/Outcome authority, authoritative baseline state, retry state, Operational Findings and observable transitions. Increment 3D owns Signal, deterministic gate and News Lead authority. Increment 3E owns the disposable discovery-lineage Neo4j projection and source/parser/coverage health. Named live sources, credentials, source-specific numeric operational profiles, schedules, browser collection, shadow, canary and production activation remain separately blocked.
