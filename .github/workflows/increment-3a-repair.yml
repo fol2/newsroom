@@ -1,4 +1,4 @@
-name: Increment 3A focused repair
+name: Increment 3A substantive repair
 
 on:
   pull_request:
@@ -21,7 +21,7 @@ concurrency:
 jobs:
   repair-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - name: Check out exact Increment 3A branch
         uses: actions/checkout@v4
@@ -30,39 +30,955 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      - name: Preserve typed UUID authority at every command boundary
+      - name: Apply substantive source-authority corrections
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          path = Path("newsroom/authority/_source_registry_system.py")
-          text = path.read_text(encoding="utf-8")
-          replacements = {
-              "AggregateId(str(request.definition_id))": "AggregateId(request.definition_id.value)",
-              "AggregateId(str(request.version_id))": "AggregateId(request.version_id.value)",
-              "AggregateId(str(request.item_id))": "AggregateId(request.item_id.value)",
-              "AggregateId(str(request.decision_id))": "AggregateId(request.decision_id.value)",
-              "AggregateId(str(request.revision_id))": "AggregateId(request.revision_id.value)",
-              "AggregateId(str(request.representation_id))": "AggregateId(request.representation_id.value)",
-              "AggregateId(str(request.occurrence_id))": "AggregateId(request.occurrence_id.value)",
-          }
-          for old, new in replacements.items():
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f"expected one {old!r}, found {count}")
-              text = text.replace(old, new, 1)
-          path.write_text(text, encoding="utf-8")
+                  raise SystemExit(
+                      f"{path}: expected one replacement, found {count}: {old!r}"
+                  )
+              target.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          # Source time must retain a typed, canonical temporal representation.
+          replace_once(
+              "newsroom/sources/types.py",
+              "from dataclasses import dataclass\nfrom enum import StrEnum\n",
+              "from dataclasses import dataclass\nfrom datetime import date\nfrom enum import StrEnum\n",
+          )
+          replace_once(
+              "newsroom/sources/types.py",
+              "        if self.precision is TimePrecision.UNKNOWN:\n"
+              "            if self.value is not None or self.conflicting_values:\n"
+              "                raise SourceContractError(\"unknown source time cannot carry values\")\n"
+              "            return\n"
+              "        if self.precision is TimePrecision.CONFLICTING:\n"
+              "            if self.value is not None:\n"
+              "                raise SourceContractError(\"conflicting source time has no single value\")\n"
+              "            bounded_text_tuple(\n"
+              "                self.conflicting_values,\n"
+              "                field=\"conflicting_source_times\",\n"
+              "                maximum_items=8,\n"
+              "                maximum_item_bytes=128,\n"
+              "            )\n"
+              "            if len(self.conflicting_values) < 2:\n"
+              "                raise SourceContractError(\n"
+              "                    \"conflicting source time requires at least two alternatives\"\n"
+              "                )\n"
+              "            return\n"
+              "        if self.conflicting_values:\n"
+              "            raise SourceContractError(\n"
+              "                \"source time alternatives are valid only when conflicting\"\n"
+              "            )\n"
+              "        if self.value is None:\n"
+              "            raise SourceContractError(\"known source time requires a value\")\n"
+              "        bounded_text(\n"
+              "            self.value,\n"
+              "            field=\"source_time_value\",\n"
+              "            maximum_bytes=128,\n"
+              "        )\n"
+              "        if self.precision is TimePrecision.EXACT:\n"
+              "            UtcTimestamp.parse(self.value)\n",
+              "        if self.precision is TimePrecision.UNKNOWN:\n"
+              "            if self.value is not None or self.conflicting_values:\n"
+              "                raise SourceContractError(\"unknown source time cannot carry values\")\n"
+              "            return\n"
+              "        if self.precision is TimePrecision.CONFLICTING:\n"
+              "            if self.value is not None:\n"
+              "                raise SourceContractError(\"conflicting source time has no single value\")\n"
+              "            bounded_text_tuple(\n"
+              "                self.conflicting_values,\n"
+              "                field=\"conflicting_source_times\",\n"
+              "                maximum_items=8,\n"
+              "                maximum_item_bytes=128,\n"
+              "            )\n"
+              "            if len(self.conflicting_values) < 2:\n"
+              "                raise SourceContractError(\n"
+              "                    \"conflicting source time requires at least two alternatives\"\n"
+              "                )\n"
+              "            return\n"
+              "        if self.conflicting_values:\n"
+              "            raise SourceContractError(\n"
+              "                \"source time alternatives are valid only when conflicting\"\n"
+              "            )\n"
+              "        if self.value is None:\n"
+              "            raise SourceContractError(\"known source time requires a value\")\n"
+              "        bounded_text(\n"
+              "            self.value,\n"
+              "            field=\"source_time_value\",\n"
+              "            maximum_bytes=128,\n"
+              "        )\n"
+              "        if self.precision is TimePrecision.DATE_ONLY:\n"
+              "            try:\n"
+              "                parsed_date = date.fromisoformat(self.value)\n"
+              "            except ValueError as exc:\n"
+              "                raise SourceContractError(\"date-only source time is invalid\") from exc\n"
+              "            if parsed_date.isoformat() != self.value:\n"
+              "                raise SourceContractError(\"date-only source time is not canonical\")\n"
+              "            return\n"
+              "        parsed_time = UtcTimestamp.parse(self.value)\n"
+              "        if parsed_time.to_text() != self.value:\n"
+              "            raise SourceContractError(\"source time must use canonical UTC text\")\n",
+          )
+
+          # Stable item identity must not change when policy metadata or uncertainty wording changes.
+          replace_once(
+              "newsroom/sources/item_models.py",
+              "                \"definition_id\": str(self.definition_id),\n"
+              "                \"identity_kind\": self.identity_kind.value,\n"
+              "                \"identity_policy\": self.identity_policy.canonical_value(),\n"
+              "                \"source_native_id\": self.source_native_id,\n"
+              "                \"identity_components\": [\n"
+              "                    item.canonical_value() for item in self.identity_components\n"
+              "                ],\n"
+              "                \"uncertainties\": list(self.uncertainties),\n",
+              "                \"definition_id\": str(self.definition_id),\n"
+              "                \"identity_kind\": self.identity_kind.value,\n"
+              "                \"source_native_id\": self.source_native_id,\n"
+              "                \"identity_components\": [\n"
+              "                    item.canonical_value() for item in self.identity_components\n"
+              "                ],\n",
+          )
+
+          # Source Revision equality is source state, not code or policy version identity.
+          replace_once(
+              "newsroom/sources/observation_models.py",
+              "                \"item_id\": str(self.item_id),\n"
+              "                \"source_native_revision_token\": (\n"
+              "                    self.source_native_revision_token\n"
+              "                ),\n"
+              "                \"permitted_state_digest\": self.permitted_state_digest,\n"
+              "                \"revision_policy\": self.revision_policy.canonical_value(),\n"
+              "                \"canonicalizer_version\": self.canonicalizer_version,\n",
+              "                \"item_id\": str(self.item_id),\n"
+              "                \"source_native_revision_token\": (\n"
+              "                    self.source_native_revision_token\n"
+              "                ),\n"
+              "                \"permitted_state_digest\": self.permitted_state_digest,\n",
+          )
+
+          # Comparator metadata may coexist with an Anchor, but never substitutes for Active coverage.
+          replace_once(
+              "newsroom/sources/definition_models.py",
+              "        if active and functions <= {PortfolioFunction.COMPARATOR}:\n"
+              "            raise SourceContractError(\n"
+              "                \"Comparator-only source cannot claim an Active detection path\"\n"
+              "            )\n"
+              "        if PortfolioFunction.COMPARATOR in functions:\n"
+              "            for item in active:\n"
+              "                if item.contribution is not CoverageContribution.COMPARATOR:\n"
+              "                    raise SourceContractError(\n"
+              "                        \"Comparator Active mapping cannot masquerade as production coverage\"\n"
+              "                    )\n",
+              "        if active and functions <= {PortfolioFunction.COMPARATOR}:\n"
+              "            raise SourceContractError(\n"
+              "                \"Comparator-only source cannot claim an Active detection path\"\n"
+              "            )\n"
+              "        if any(\n"
+              "            item.contribution is CoverageContribution.COMPARATOR\n"
+              "            for item in active\n"
+              "        ):\n"
+              "            raise SourceContractError(\n"
+              "                \"Comparator mapping cannot claim Active coverage\"\n"
+              "            )\n",
+          )
+
+          # A later version may explicitly revert to older semantics, but cannot be a no-op.
+          replace_once(
+              "newsroom/authority/source_registry_migrations.py",
+              "        UNIQUE(definition_id,semantic_digest),\n",
+              "",
+          )
+          replace_once(
+              "newsroom/authority/source_registry_migrations.py",
+              "    \"CREATE INDEX idx_source_items_definition ON source_items(definition_id,recorded_at)\",\n"
+              "    \"CREATE INDEX idx_source_revisions_item ON source_revisions(item_id,recorded_at)\",\n",
+              "    \"CREATE INDEX idx_source_items_definition ON source_items(definition_id,recorded_at)\",\n"
+              "    \"CREATE UNIQUE INDEX idx_source_items_native_identity ON source_items(definition_id,source_native_id) WHERE source_native_id IS NOT NULL\",\n"
+              "    \"CREATE INDEX idx_source_revisions_item ON source_revisions(item_id,recorded_at)\",\n"
+              "    \"CREATE UNIQUE INDEX idx_source_revisions_native_token ON source_revisions(item_id,source_native_revision_token) WHERE source_native_revision_token IS NOT NULL\",\n",
+          )
+          replace_once(
+              "newsroom/authority/_source_registry_store_definitions.py",
+              "from newsroom.sources.types import SourceVersionConflict\n",
+              "from newsroom.sources.types import (\n"
+              "    SourceSemanticCollision,\n"
+              "    SourceVersionConflict,\n"
+              ")\n",
+          )
+          replace_once(
+              "newsroom/authority/_source_registry_store_definitions.py",
+              "            self._ensure_semantic_absent(\n"
+              "                conn,\n"
+              "                table=\"source_definition_versions\",\n"
+              "                predicate=\"definition_id=? AND semantic_digest=?\",\n"
+              "                parameters=(\n"
+              "                    str(request.definition_id),\n"
+              "                    request.semantic_digest,\n"
+              "                ),\n"
+              "                identity=\"source definition version semantics\",\n"
+              "            )\n"
+              "            current = self._current_version_row(\n"
+              "                conn, request.definition_id\n"
+              "            )\n",
+              "            current = self._current_version_row(\n"
+              "                conn, request.definition_id\n"
+              "            )\n"
+              "            if (\n"
+              "                current is not None\n"
+              "                and str(current[\"semantic_digest\"])\n"
+              "                == request.semantic_digest\n"
+              "            ):\n"
+              "                raise SourceSemanticCollision(\n"
+              "                    \"source definition version cannot be a semantic no-op\"\n"
+              "                )\n",
+          )
+
+          # Bind native identifiers/tokens independently of mutable policy metadata.
+          replace_once(
+              "newsroom/authority/_source_registry_store_lineage.py",
+              "            self._ensure_semantic_absent(\n"
+              "                conn,\n"
+              "                table=\"source_items\",\n"
+              "                predicate=\"definition_id=? AND identity_digest=?\",\n"
+              "                parameters=(\n"
+              "                    str(request.definition_id),\n"
+              "                    request.identity_digest,\n"
+              "                ),\n"
+              "                identity=\"source item semantics\",\n"
+              "            )\n"
+              "            recorded_at = self._clock().to_text()\n",
+              "            self._ensure_semantic_absent(\n"
+              "                conn,\n"
+              "                table=\"source_items\",\n"
+              "                predicate=\"definition_id=? AND identity_digest=?\",\n"
+              "                parameters=(\n"
+              "                    str(request.definition_id),\n"
+              "                    request.identity_digest,\n"
+              "                ),\n"
+              "                identity=\"source item semantics\",\n"
+              "            )\n"
+              "            if request.source_native_id is not None:\n"
+              "                self._ensure_semantic_absent(\n"
+              "                    conn,\n"
+              "                    table=\"source_items\",\n"
+              "                    predicate=\"definition_id=? AND source_native_id=?\",\n"
+              "                    parameters=(\n"
+              "                        str(request.definition_id),\n"
+              "                        request.source_native_id,\n"
+              "                    ),\n"
+              "                    identity=\"source-native item identity\",\n"
+              "                )\n"
+              "            recorded_at = self._clock().to_text()\n",
+          )
+          replace_once(
+              "newsroom/authority/_source_registry_store_lineage.py",
+              "            self._ensure_semantic_absent(\n"
+              "                conn,\n"
+              "                table=\"source_revisions\",\n"
+              "                predicate=\"item_id=? AND revision_identity_digest=?\",\n"
+              "                parameters=(\n"
+              "                    str(request.item_id),\n"
+              "                    request.revision_identity_digest,\n"
+              "                ),\n"
+              "                identity=\"source revision semantics\",\n"
+              "            )\n"
+              "            latest = conn.execute(\n",
+              "            self._ensure_semantic_absent(\n"
+              "                conn,\n"
+              "                table=\"source_revisions\",\n"
+              "                predicate=\"item_id=? AND revision_identity_digest=?\",\n"
+              "                parameters=(\n"
+              "                    str(request.item_id),\n"
+              "                    request.revision_identity_digest,\n"
+              "                ),\n"
+              "                identity=\"source revision semantics\",\n"
+              "            )\n"
+              "            if request.source_native_revision_token is not None:\n"
+              "                self._ensure_semantic_absent(\n"
+              "                    conn,\n"
+              "                    table=\"source_revisions\",\n"
+              "                    predicate=(\n"
+              "                        \"item_id=? AND source_native_revision_token=?\"\n"
+              "                    ),\n"
+              "                    parameters=(\n"
+              "                        str(request.item_id),\n"
+              "                        request.source_native_revision_token,\n"
+              "                    ),\n"
+              "                    identity=\"source-native revision token\",\n"
+              "                )\n"
+              "            latest = conn.execute(\n",
+          )
+
+          # Sensitive source-native item/revision details must not use metadata scope.
+          replace_once(
+              "newsroom/authority/_source_registry_system.py",
+              "            operation=\"read:source_registry:item\",\n"
+              "            aggregate_type=\"source_item\",\n"
+              "            aggregate_id=str(item_id),\n"
+              "            sensitive=False,\n",
+              "            operation=\"read:source_registry:item\",\n"
+              "            aggregate_type=\"source_item\",\n"
+              "            aggregate_id=str(item_id),\n"
+              "            sensitive=True,\n",
+          )
+          replace_once(
+              "newsroom/authority/_source_registry_system.py",
+              "            operation=\"read:source_registry:revision\",\n"
+              "            aggregate_type=\"source_revision\",\n"
+              "            aggregate_id=str(revision_id),\n"
+              "            sensitive=False,\n",
+              "            operation=\"read:source_registry:revision\",\n"
+              "            aggregate_type=\"source_revision\",\n"
+              "            aggregate_id=str(revision_id),\n"
+              "            sensitive=True,\n",
+          )
+
+          # Rebind every normalized SQL column to retained canonical bytes on reopen.
+          replace_once(
+              "newsroom/authority/_source_registry_store_read.py",
+              "from collections.abc import Callable\n",
+              "from collections.abc import Callable, Mapping\n",
+          )
+          replace_once(
+              "newsroom/authority/_source_registry_store_read.py",
+              "from newsroom.authority.persistence import AuthorityPersistenceError\n",
+              "from newsroom.authority.canonical import canonical_json_bytes, digest_canonical\n"
+              "from newsroom.authority.persistence import AuthorityPersistenceError\n",
+          )
+          replace_once(
+              "newsroom/authority/_source_registry_store_read.py",
+              "class _SourceRegistryReadMixin:\n"
+              "    @staticmethod\n"
+              "    def _row_by_id(\n",
+              "class _SourceRegistryReadMixin:\n"
+              "    @staticmethod\n"
+              "    def _require_normalized_columns(\n"
+              "        row: Mapping[str, Any],\n"
+              "        expected: Mapping[str, object],\n"
+              "        *,\n"
+              "        identity: str,\n"
+              "    ) -> None:\n"
+              "        for column, value in expected.items():\n"
+              "            if row[column] != value:\n"
+              "                raise AuthorityPersistenceError(\n"
+              "                    f\"{identity} column {column} differs from canonical bytes\"\n"
+              "                )\n"
+              "\n"
+              "    @staticmethod\n"
+              "    def _require_canonical_blob(\n"
+              "        row: Mapping[str, Any],\n"
+              "        column: str,\n"
+              "        value: object,\n"
+              "        *,\n"
+              "        identity: str,\n"
+              "    ) -> None:\n"
+              "        if row[column] is None or bytes(row[column]) != canonical_json_bytes(value):\n"
+              "            raise AuthorityPersistenceError(\n"
+              "                f\"{identity} column {column} differs from canonical bytes\"\n"
+              "            )\n"
+              "\n"
+              "    @staticmethod\n"
+              "    def _row_by_id(\n",
+          )
+
+          replace_once(
+              "newsroom/authority/_source_registry_store_read.py",
+              "        request = decode_source_item(\n"
+              "            value, idempotency_key=str(event[\"idempotency_key\"])\n"
+              "        )\n",
+              "        request = decode_source_item(\n"
+              "            value, idempotency_key=str(event[\"idempotency_key\"])\n"
+              "        )\n"
+              "        self._require_normalized_columns(\n"
+              "            row,\n"
+              "            {\n"
+              "                \"definition_id\": str(request.definition_id),\n"
+              "                \"definition_version_id\": str(request.definition_version_id),\n"
+              "                \"identity_kind\": request.identity_kind.value,\n"
+              "                \"identity_policy_id\": request.identity_policy.policy_id,\n"
+              "                \"identity_policy_version\": request.identity_policy.policy_version,\n"
+              "                \"source_native_id\": request.source_native_id,\n"
+              "                \"identity_digest\": request.identity_digest,\n"
+              "            },\n"
+              "            identity=\"source item\",\n"
+              "        )\n"
+              "        self._require_canonical_blob(\n"
+              "            row,\n"
+              "            \"identity_components_bytes\",\n"
+              "            [item.canonical_value() for item in request.identity_components],\n"
+              "            identity=\"source item\",\n"
+              "        )\n"
+              "        self._require_canonical_blob(\n"
+              "            row,\n"
+              "            \"uncertainties_bytes\",\n"
+              "            list(request.uncertainties),\n"
+              "            identity=\"source item\",\n"
+              "        )\n",
+          )
+          replace_once(
+              "newsroom/authority/_source_registry_store_read.py",
+              "        request = decode_locator_continuity(\n"
+              "            value, idempotency_key=str(event[\"idempotency_key\"])\n"
+              "        )\n",
+              "        request = decode_locator_continuity(\n"
+              "            value, idempotency_key=str(event[\"idempotency_key\"])\n"
+              "        )\n"
+              "        prior_locator_digest = digest_canonical(\n"
+              "            {\n"
+              "                \"definition_id\": str(request.definition_id),\n"
+              "                \"locator\": request.prior_locator,\n"
+              "            }\n"
+              "        )\n"
+              "        observed_locator_digest = digest_canonical(\n"
+              "            {\n"
+              "                \"definition_id\": str(request.definition_id),\n"
+              "                \"locator\": request.observed_locator,\n"
+              "            }\n"
+              "        )\n"
+              "        self._require_normalized_columns(\n"
+              "            row,\n"
+              "            {\n"
+              "                \"definition_id\": str(request.definition_id),\n"
+              "                \"definition_version_id\": str(request.definition_version_id),\n"
+              "                \"prior_item_id\": str(request.prior_item_id),\n"
+              "                \"prior_locator\": request.prior_locator,\n"
+              "                \"prior_locator_digest\": prior_locator_digest,\n"
+              "                \"observed_locator\": request.observed_locator,\n"
+              "                \"observed_locator_digest\": observed_locator_digest,\n"
+              "                \"outcome\": request.outcome.value,\n"
+              "                \"related_item_id\": str(request.related_item_id),\n"
+              "                \"rationale\": request.rationale,\n"
+              "                \"decision_policy_id\": request.decision_policy.policy_id,\n"
+              "                \"decision_policy_version\": request.decision_policy.policy_version,\n"
+              "                \"observed_at\": request.observed_at.to_text(),\n"
+              "                \"semantic_digest\": request.semantic_digest,\n"
+              "            },\n"
+              "            identity=\"locator continuity decision\",\n"
+              "        )\n",
+          )
+          replace_once(
+              "newsroom/authority/_source_registry_store_read.py",
+              "        request = decode_source_revision(\n"
+              "            value, idempotency_key=str(event[\"idempotency_key\"])\n"
+              "        )\n",
+              "        request = decode_source_revision(\n"
+              "            value, idempotency_key=str(event[\"idempotency_key\"])\n"
+              "        )\n"
+              "        item = self._item_row(conn, str(request.item_id))\n"
+              "        self._require_normalized_columns(\n"
+              "            row,\n"
+              "            {\n"
+              "                \"item_id\": str(request.item_id),\n"
+              "                \"definition_id\": str(item[\"definition_id\"]),\n"
+              "                \"definition_version_id\": str(request.definition_version_id),\n"
+              "                \"prior_revision_id\": (\n"
+              "                    None\n"
+              "                    if request.prior_revision_id is None\n"
+              "                    else str(request.prior_revision_id)\n"
+              "                ),\n"
+              "                \"source_native_revision_token\": request.source_native_revision_token,\n"
+              "                \"permitted_state_digest\": request.permitted_state_digest,\n"
+              "                \"revision_policy_id\": request.revision_policy.policy_id,\n"
+              "                \"revision_policy_version\": request.revision_policy.policy_version,\n"
+              "                \"canonicalizer_version\": request.canonicalizer_version,\n"
+              "                \"observed_at\": request.observed_at.to_text(),\n"
+              "                \"revision_identity_digest\": request.revision_identity_digest,\n"
+              "            },\n"
+              "            identity=\"source revision\",\n"
+              "        )\n"
+              "        self._require_canonical_blob(\n"
+              "            row,\n"
+              "            \"source_published_time_bytes\",\n"
+              "            request.source_published_time.canonical_value(),\n"
+              "            identity=\"source revision\",\n"
+              "        )\n"
+              "        self._require_canonical_blob(\n"
+              "            row,\n"
+              "            \"source_updated_time_bytes\",\n"
+              "            request.source_updated_time.canonical_value(),\n"
+              "            identity=\"source revision\",\n"
+              "        )\n",
+          )
+          replace_once(
+              "newsroom/authority/_source_registry_store_read.py",
+              "        request = decode_representation(\n"
+              "            value, idempotency_key=str(event[\"idempotency_key\"])\n"
+              "        )\n",
+              "        request = decode_representation(\n"
+              "            value, idempotency_key=str(event[\"idempotency_key\"])\n"
+              "        )\n"
+              "        revision = self._revision_row(conn, str(request.revision_id))\n"
+              "        self._require_normalized_columns(\n"
+              "            row,\n"
+              "            {\n"
+              "                \"revision_id\": str(request.revision_id),\n"
+              "                \"definition_id\": str(revision[\"definition_id\"]),\n"
+              "                \"definition_version_id\": str(request.definition_version_id),\n"
+              "                \"adapter_version\": request.adapter_version,\n"
+              "                \"parser_version\": request.parser_version,\n"
+              "                \"normalizer_version\": request.normalizer_version,\n"
+              "                \"extraction_scope_version\": request.extraction_scope_version,\n"
+              "                \"permitted_fields_digest\": request.permitted_fields_digest,\n"
+              "                \"representation_digest\": request.representation_digest,\n"
+              "                \"producer_slot_digest\": request.producer_slot_digest,\n"
+              "                \"representation_identity_digest\": request.representation_identity_digest,\n"
+              "                \"produced_at\": request.produced_at.to_text(),\n"
+              "            },\n"
+              "            identity=\"discovery representation\",\n"
+              "        )\n",
+          )
+          replace_once(
+              "newsroom/authority/_source_registry_store_read.py",
+              "        request = decode_occurrence(\n"
+              "            value, idempotency_key=str(event[\"idempotency_key\"])\n"
+              "        )\n",
+              "        request = decode_occurrence(\n"
+              "            value, idempotency_key=str(event[\"idempotency_key\"])\n"
+              "        )\n"
+              "        revision = self._revision_row(conn, str(request.revision_id))\n"
+              "        self._require_normalized_columns(\n"
+              "            row,\n"
+              "            {\n"
+              "                \"check_outcome_id\": str(request.check_outcome_id),\n"
+              "                \"revision_id\": str(request.revision_id),\n"
+              "                \"representation_id\": (\n"
+              "                    None\n"
+              "                    if request.representation_id is None\n"
+              "                    else str(request.representation_id)\n"
+              "                ),\n"
+              "                \"definition_id\": str(revision[\"definition_id\"]),\n"
+              "                \"definition_version_id\": str(request.definition_version_id),\n"
+              "                \"occurrence_kind\": request.kind.value,\n"
+              "                \"observed_at\": request.observed_at.to_text(),\n"
+              "                \"receipt_digest\": request.receipt_digest,\n"
+              "                \"semantic_digest\": request.semantic_digest,\n"
+              "            },\n"
+              "            identity=\"discovery occurrence\",\n"
+              "        )\n"
+              "        self._require_canonical_blob(\n"
+              "            row,\n"
+              "            \"source_asserted_time_bytes\",\n"
+              "            request.source_asserted_time.canonical_value(),\n"
+              "            identity=\"discovery occurrence\",\n"
+              "        )\n",
+          )
+
+          # Child tables also bind normalized values, not only their canonical blobs.
+          replace_once(
+              "newsroom/authority/_source_registry_store_integrity.py",
+              "        if [\n"
+              "            self._canonical_child(item, identity=\"source gap\") for item in gaps\n"
+              "        ] != [item.canonical_value() for item in request.explicit_gaps]:\n"
+              "            raise AuthorityPersistenceError(\n"
+              "                \"source gaps differ from canonical source version\"\n"
+              "            )\n",
+              "        if len(gaps) != len(request.explicit_gaps):\n"
+              "            raise AuthorityPersistenceError(\n"
+              "                \"source gaps differ from canonical source version\"\n"
+              "            )\n"
+              "        for stored, expected in zip(gaps, request.explicit_gaps, strict=True):\n"
+              "            if self._canonical_child(stored, identity=\"source gap\") != expected.canonical_value():\n"
+              "                raise AuthorityPersistenceError(\n"
+              "                    \"source gaps differ from canonical source version\"\n"
+              "                )\n"
+              "            self._require_normalized_columns(\n"
+              "                stored,\n"
+              "                {\n"
+              "                    \"gap_id\": expected.gap_id,\n"
+              "                    \"gap_class\": expected.gap_class,\n"
+              "                    \"description\": expected.description,\n"
+              "                    \"launch_blocking\": int(expected.launch_blocking),\n"
+              "                },\n"
+              "                identity=\"source gap\",\n"
+              "            )\n",
+          )
+          replace_once(
+              "newsroom/authority/_source_registry_store_integrity.py",
+              "        if [\n"
+              "            self._canonical_child(item, identity=\"coverage mapping\")\n"
+              "            for item in mappings\n"
+              "        ] != [item.canonical_value() for item in request.coverage_mappings]:\n"
+              "            raise AuthorityPersistenceError(\n"
+              "                \"coverage mappings differ from canonical source version\"\n"
+              "            )\n",
+              "        if len(mappings) != len(request.coverage_mappings):\n"
+              "            raise AuthorityPersistenceError(\n"
+              "                \"coverage mappings differ from canonical source version\"\n"
+              "            )\n"
+              "        for stored, expected in zip(mappings, request.coverage_mappings, strict=True):\n"
+              "            if self._canonical_child(stored, identity=\"coverage mapping\") != expected.canonical_value():\n"
+              "                raise AuthorityPersistenceError(\n"
+              "                    \"coverage mappings differ from canonical source version\"\n"
+              "                )\n"
+              "            self._require_normalized_columns(\n"
+              "                stored,\n"
+              "                {\n"
+              "                    \"obligation_id\": expected.obligation_id,\n"
+              "                    \"responsibility\": expected.responsibility.value,\n"
+              "                    \"contribution\": expected.contribution.value,\n"
+              "                    \"explicit_gap_id\": expected.explicit_gap_id,\n"
+              "                },\n"
+              "                identity=\"coverage mapping\",\n"
+              "            )\n"
+              "            self._require_canonical_blob(\n"
+              "                stored, \"geographies_bytes\", list(expected.geographies), identity=\"coverage mapping\"\n"
+              "            )\n"
+              "            self._require_canonical_blob(\n"
+              "                stored, \"languages_bytes\", list(expected.languages), identity=\"coverage mapping\"\n"
+              "            )\n"
+              "            self._require_canonical_blob(\n"
+              "                stored, \"limitations_bytes\", list(expected.limitations), identity=\"coverage mapping\"\n"
+              "            )\n",
+          )
+          replace_once(
+              "newsroom/authority/_source_registry_store_integrity.py",
+              "        if [\n"
+              "            self._canonical_child(item, identity=\"source dependency\")\n"
+              "            for item in dependencies\n"
+              "        ] != [item.canonical_value() for item in request.dependencies]:\n"
+              "            raise AuthorityPersistenceError(\n"
+              "                \"source dependencies differ from canonical source version\"\n"
+              "            )\n",
+              "        if len(dependencies) != len(request.dependencies):\n"
+              "            raise AuthorityPersistenceError(\n"
+              "                \"source dependencies differ from canonical source version\"\n"
+              "            )\n"
+              "        for stored, expected in zip(dependencies, request.dependencies, strict=True):\n"
+              "            if self._canonical_child(stored, identity=\"source dependency\") != expected.canonical_value():\n"
+              "                raise AuthorityPersistenceError(\n"
+              "                    \"source dependencies differ from canonical source version\"\n"
+              "                )\n"
+              "            self._require_normalized_columns(\n"
+              "                stored,\n"
+              "                {\n"
+              "                    \"dependency_id\": expected.dependency_id,\n"
+              "                    \"dependency_kind\": expected.kind.value,\n"
+              "                    \"description\": expected.description,\n"
+              "                    \"upstream_definition_id\": (\n"
+              "                        None\n"
+              "                        if expected.upstream_source_definition_id is None\n"
+              "                        else str(expected.upstream_source_definition_id)\n"
+              "                    ),\n"
+              "                },\n"
+              "                identity=\"source dependency\",\n"
+              "            )\n",
+          )
+
+          test_file = Path("newsroom/tests/test_source_3a_review_regressions.py")
+          test_file.write_text(
+              '''from __future__ import annotations
+
+from dataclasses import replace
+import sqlite3
+
+import pytest
+
+from newsroom.authority.persistence import AuthorityPersistenceError
+from newsroom.authority.types import TimePrecision
+from newsroom.sources import (
+    CoverageContribution,
+    PortfolioFunction,
+    SourceContractError,
+    SourceDefinitionVersionId,
+    SourceItemId,
+    SourceItemIdentityKind,
+    SourceItemRequest,
+    SourceRevisionId,
+    SourceSemanticCollision,
+    SourceTime,
+    VersionedPolicyRef,
+)
+
+from .source_3a_helpers import (
+    DEFINITION_ID,
+    ITEM_ID,
+    REVISION_1_ID,
+    REVISION_2_ID,
+    VERSION_1_ID,
+    VERSION_2_ID,
+    definition_request,
+    item_request,
+    locator_decision_request,
+    occurrence_request,
+    open_source_system,
+    proof,
+    representation_request,
+    revision_request,
+    scopes,
+    version_request,
+)
+
+
+def _seed_lineage(database):
+    system = open_source_system(database)
+    system.sources.register_definition(definition_request(), proof=proof())
+    system.sources.record_definition_version(version_request(), proof=proof())
+    system.sources.register_item(item_request(), proof=proof())
+    system.sources.record_definition_version(
+        version_request(
+            version_id=VERSION_2_ID,
+            version_number=2,
+            previous_version_id=VERSION_1_ID,
+            locator="fixture://increment-3a/maintained-guidance-v2",
+            key="source-definition-version-v2-review",
+        ),
+        proof=proof(),
+    )
+    system.sources.decide_locator_continuity(
+        locator_decision_request(), proof=proof()
+    )
+    system.sources.record_revision(revision_request(), proof=proof())
+    system.sources.record_representation(
+        representation_request(), proof=proof()
+    )
+    system.sources.record_occurrence(occurrence_request(), proof=proof())
+    return system
+
+
+def test_item_and_revision_identity_ignore_policy_metadata() -> None:
+    item = item_request()
+    item_reprocessed = replace(
+        item,
+        identity_policy=VersionedPolicyRef("fixture-item-identity", "v2"),
+        uncertainties=("Policy wording changed; logical item did not.",),
+    )
+    assert item_reprocessed.identity_digest == item.identity_digest
+
+    revision = revision_request()
+    revision_reprocessed = replace(
+        revision,
+        revision_policy=VersionedPolicyRef("fixture-revision-rule", "v2"),
+        canonicalizer_version="fixture-canonicalizer-v2",
+    )
+    assert revision_reprocessed.revision_identity_digest == revision.revision_identity_digest
+
+
+def test_source_time_requires_canonical_typed_values() -> None:
+    assert SourceTime(TimePrecision.DATE_ONLY, "2042-03-12").value == "2042-03-12"
+    with pytest.raises(SourceContractError):
+        SourceTime(TimePrecision.DATE_ONLY, "2042-3-12")
+    with pytest.raises(SourceContractError):
+        SourceTime(TimePrecision.EXACT, "2042-03-12T10:00:00+00:00")
+    with pytest.raises(SourceContractError):
+        SourceTime(TimePrecision.APPROXIMATE, "approximately noon")
+
+
+def test_mixed_anchor_comparator_does_not_corrupt_active_mapping() -> None:
+    request = version_request()
+    mixed = replace(
+        request,
+        portfolio_functions=(
+            PortfolioFunction.ANCHOR,
+            PortfolioFunction.COMPARATOR,
+        ),
+    )
+    assert mixed.coverage_mappings[0].contribution is CoverageContribution.REVISION_VISIBILITY
+
+    comparator_active = replace(
+        request,
+        coverage_mappings=(
+            replace(
+                request.coverage_mappings[0],
+                contribution=CoverageContribution.COMPARATOR,
+            ),
+        ),
+    )
+    with pytest.raises(SourceContractError, match="Active coverage"):
+        comparator_active.__post_init__()
+
+
+def test_source_version_can_explicitly_revert_but_not_emit_a_noop(tmp_path) -> None:
+    system = open_source_system(tmp_path / "authority.sqlite3")
+    system.sources.register_definition(definition_request(), proof=proof())
+    system.sources.record_definition_version(version_request(), proof=proof())
+
+    noop = version_request(
+        version_id=SourceDefinitionVersionId.new(),
+        version_number=2,
+        previous_version_id=VERSION_1_ID,
+        key="source-version-noop",
+    )
+    with pytest.raises(SourceSemanticCollision, match="no-op"):
+        system.sources.record_definition_version(noop, proof=proof())
+
+    system.sources.record_definition_version(
+        version_request(
+            version_id=VERSION_2_ID,
+            version_number=2,
+            previous_version_id=VERSION_1_ID,
+            locator="fixture://increment-3a/maintained-guidance-v2",
+            key="source-version-forward",
+        ),
+        proof=proof(),
+    )
+    reverted_id = SourceDefinitionVersionId.new()
+    reverted = system.sources.record_definition_version(
+        version_request(
+            version_id=reverted_id,
+            version_number=3,
+            previous_version_id=VERSION_2_ID,
+            locator="fixture://increment-3a/maintained-guidance-v1",
+            key="source-version-revert",
+        ),
+        proof=proof(),
+    )
+    assert reverted.request.version_id == reverted_id
+    assert system.sources.current_summary(DEFINITION_ID, proof=proof()).version_id == reverted_id
+    system.close()
+
+
+def test_duplicate_item_basis_and_native_revision_token_fail_closed(tmp_path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    system = _seed_lineage(database)
+
+    duplicate_item = replace(
+        item_request(version_id=VERSION_2_ID),
+        item_id=SourceItemId.new(),
+        uncertainties=("Uncertainty wording changed only.",),
+        idempotency_key="duplicate-item-basis",
+    )
+    with pytest.raises(SourceSemanticCollision):
+        system.sources.register_item(duplicate_item, proof=proof())
+
+    first = revision_request()
+    conflicting_token = replace(
+        first,
+        revision_id=REVISION_2_ID,
+        prior_revision_id=REVISION_1_ID,
+        permitted_state_digest="sha256:" + "b" * 64,
+        idempotency_key="conflicting-native-revision-token",
+    )
+    with pytest.raises(SourceSemanticCollision, match="revision token"):
+        system.sources.record_revision(conflicting_token, proof=proof())
+    system.close()
+
+
+def test_source_native_item_identifier_is_unique_across_identity_shape(tmp_path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    system = open_source_system(database)
+    system.sources.register_definition(definition_request(), proof=proof())
+    system.sources.record_definition_version(version_request(), proof=proof())
+    first = SourceItemRequest(
+        item_id=ITEM_ID,
+        definition_id=DEFINITION_ID,
+        definition_version_id=VERSION_1_ID,
+        identity_kind=SourceItemIdentityKind.SOURCE_NATIVE,
+        identity_policy=VersionedPolicyRef("fixture-item-identity", "v1"),
+        source_native_id="native-item-1",
+        identity_components=(),
+        uncertainties=(),
+        idempotency_key="native-item-first",
+    )
+    system.sources.register_item(first, proof=proof())
+    second = replace(
+        first,
+        item_id=SourceItemId.new(),
+        identity_components=(),
+        uncertainties=("Later uncertainty must not duplicate native identity.",),
+        idempotency_key="native-item-second",
+    )
+    with pytest.raises(SourceSemanticCollision, match="source-native item"):
+        system.sources.register_item(second, proof=proof())
+    system.close()
+
+
+def test_metadata_scope_cannot_read_native_item_or_revision_details(tmp_path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    system = _seed_lineage(database)
+    system.close()
+
+    restricted = open_source_system(
+        database,
+        granted_scopes=scopes() - frozenset({"authority.sources.read_sensitive"}),
+    )
+    assert restricted.sources.current_summary(DEFINITION_ID, proof=proof()).version_id == VERSION_2_ID
+    with pytest.raises(PermissionError):
+        restricted.sources.item(ITEM_ID, proof=proof())
+    with pytest.raises(PermissionError):
+        restricted.sources.revision(REVISION_1_ID, proof=proof())
+    restricted.close()
+
+
+@pytest.mark.parametrize(
+    ("trigger", "statement", "parameters"),
+    (
+        (
+            "immutable_source_item_update",
+            "UPDATE source_items SET identity_policy_version='tampered' WHERE item_id=?",
+            (str(ITEM_ID),),
+        ),
+        (
+            "immutable_source_locator_decision_update",
+            "UPDATE source_locator_continuity_decisions SET rationale='tampered'",
+            (),
+        ),
+        (
+            "immutable_source_revision_update",
+            "UPDATE source_revisions SET canonicalizer_version='tampered' WHERE revision_id=?",
+            (str(REVISION_1_ID),),
+        ),
+        (
+            "immutable_discovery_representation_update",
+            "UPDATE discovery_representations SET parser_version='tampered'",
+            (),
+        ),
+        (
+            "immutable_discovery_occurrence_update",
+            "UPDATE discovery_occurrences SET receipt_digest=?",
+            ("sha256:" + "0" * 64,),
+        ),
+        (
+            "immutable_source_coverage_update",
+            "UPDATE source_version_coverage_mappings SET limitations_bytes=?",
+            (b"[]",),
+        ),
+    ),
+)
+def test_startup_rejects_normalized_sql_tamper(
+    tmp_path,
+    trigger: str,
+    statement: str,
+    parameters: tuple[object, ...],
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    system = _seed_lineage(database)
+    system.close()
+
+    conn = sqlite3.connect(database)
+    try:
+        trigger_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (trigger,),
+        ).fetchone()[0]
+        conn.execute(f"DROP TRIGGER {trigger}")
+        conn.execute(statement, parameters)
+        conn.execute(trigger_sql)
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(AuthorityPersistenceError, match="differs from canonical"):
+        open_source_system(database)
+''',
+              encoding="utf-8",
+          )
           PY
           python -m compileall -q newsroom
           git diff --check
 
-      - name: Commit typed authority repair
+      - name: Commit substantive source-authority corrections
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add newsroom/authority/_source_registry_system.py
+          git add newsroom
           git diff --cached --check
-          git commit -m "fix(authority): preserve typed source aggregate identities"
+          git commit -m "fix(sources): bind immutable lineage and redacted reads"
           git pull --rebase origin agent/increment-3a-source-registry
           git push origin HEAD:agent/increment-3a-source-registry
 
@@ -78,7 +994,7 @@ jobs:
           uv lock --check
           uv sync --dev --locked
 
-      - name: Run Increment 3A and retained migration suites
+      - name: Run Increment 3A substantive and retained suites
         id: focused
         continue-on-error: true
         run: |
@@ -92,6 +1008,7 @@ jobs:
             newsroom/tests/test_source_3a_contracts.py \
             newsroom/tests/test_source_3a_authority.py \
             newsroom/tests/test_source_3a_lifecycle_integrity.py \
+            newsroom/tests/test_source_3a_review_regressions.py \
             newsroom/tests/test_source_3a_traceability.py \
             --junitxml=increment-3a-focused-results.xml
 
