@@ -55,6 +55,7 @@ from newsroom.relations import (
     RelationProposalId,
 )
 from newsroom.retrieval import (
+    INTEGRATED_FIXTURE_V2_RETRIEVAL,
     RetrievalContextV2Id,
     RetrievalOutcome,
     RetrievalRequestId,
@@ -253,7 +254,7 @@ def _activate_initial(
     )
     assert promoted.generation.state is ProjectionGenerationState.ACTIVE
     return Increment2PreparedAuthority(
-        fixture_id="integrated_fixture_v2",
+        fixture_id=INTEGRATED_FIXTURE_V2_RETRIEVAL.fixture_id,
         generation_id=generation.generation_id,
         checkpoint_ledger_seq=rebuilt.checkpoint_ledger_seq,
         relation_key=INTEGRATED_FIXTURE_V2_DEVELOPMENT_CANDIDATE.relation_key,

@@ -143,6 +143,19 @@ def test_controller_rejects_context_from_unprepared_generation_before_candidate(
     assert _candidate_counts(database) == (0, 0, 0)
 
 
+def test_prepared_authority_rejects_fixture_alias_instead_of_canonical_id() -> None:
+    with pytest.raises(
+        Increment2ProofStateError,
+        match="prepared fixture differs from integrated_fixture_v2",
+    ):
+        Increment2PreparedAuthority(
+            fixture_id="integrated_fixture_v2",
+            generation_id=ProjectionGenerationId.new(),
+            checkpoint_ledger_seq=1,
+            relation_key=INTEGRATED_FIXTURE_V2_DEVELOPMENT_CANDIDATE.relation_key,
+        )
+
+
 def test_proof_environment_rejects_non_callable_authority_composition() -> None:
     with pytest.raises(TypeError, match="preparation"):
         Increment2ProofEnvironment(  # type: ignore[arg-type]

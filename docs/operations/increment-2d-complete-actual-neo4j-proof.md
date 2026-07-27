@@ -25,7 +25,7 @@ synthetic Source Revisions
 → authenticated SQLite-authoritative development Candidate admission
 ```
 
-The public `Increment2CompleteProofController` owns no database, Neo4j driver, object store, relation authority, projection authority, Retrieval Context authority or Candidate authority. It composes two typed capabilities supplied by the application boundary: one preparation operation and one Candidate-authority opener. The controller verifies the prepared generation, contiguous checkpoint and admitted relation identity, then calls the retained public retrieval and Candidate facades.
+The public `Increment2CompleteProofController` owns no database, Neo4j driver, object store, relation authority, projection authority, Retrieval Context authority or Candidate authority. It composes two typed capabilities supplied by the application boundary: one preparation operation and one Candidate-authority opener. The controller verifies the prepared generation, contiguous checkpoint and admitted relation identity, then calls the retained public retrieval and Candidate facades. The prepared fixture identity is the exact canonical repository-owned UUID retained by `integrated_fixture_v2`; the human-readable alias, an alternate fixture or a caller-selected identity is rejected before retrieval.
 
 SQLite ledger records, immutable relation and Candidate decisions, governed objects and retained Retrieval Contexts remain authoritative. Neo4j nodes, relationships, index rows, paths, ranks and similarity scores remain disposable derivative context.
 

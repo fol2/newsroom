@@ -109,7 +109,7 @@ def test_increment_2d_review_records_zero_unresolved_p1_p2() -> None:
     text = _SUBSTANTIVE_REVIEW.read_text(encoding="utf-8")
     for required in (
         "P1 findings: 0",
-        "P2 findings: 13",
+        "P2 findings: 14",
         "Remaining unresolved P1/P2 after correction: 0",
         "The Candidate fixture initially lacked the minimum development handoff",
         "The complete proof was test composition rather than a public bounded controller",
@@ -120,8 +120,9 @@ def test_increment_2d_review_records_zero_unresolved_p1_p2() -> None:
         "Complete proof preparation did not use the caller-supplied authentication proof",
         "Candidate decision reads used the broader integrated security scope",
         "Candidate restart integrity did not independently bind chronology and command payload",
-        "1,207 passed, 32 skipped, 0 failed",
-        "merged report outcomes: 1,239",
+        "Actual-service preparation supplied the fixture alias instead of its canonical identity",
+        "1,208 passed, 32 skipped, 0 failed",
+        "merged report outcomes: 1,240",
         "Do not begin Increment 3",
     ):
         assert required in text

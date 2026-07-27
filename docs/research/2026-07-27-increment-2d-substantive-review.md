@@ -29,7 +29,7 @@ It excludes Increment 3, live sources/search, Graphiti, external models or embed
 ## Result
 
 - P1 findings: 0
-- P2 findings: 13
+- P2 findings: 14
 - Remaining unresolved P1/P2 after correction: 0
 
 Review submissions, requested changes, inline threads and actionable PR comments must be rechecked against the exact final remote head before merge.
@@ -181,24 +181,36 @@ Correction:
 - reject a missing decision/version join rather than silently omitting it from startup validation; and
 - add trigger-restored raw-SQL regressions for normalized decision linkage, re-digested outcome changes, Candidate chronology changes and command-payload rebinding.
 
+### P2-14 — Actual-service preparation supplied the fixture alias instead of its canonical identity
+
+The public `Increment2PreparedAuthority` correctly requires the exact repository-owned fixture UUID retained by the retrieval contract. Unit composition used that canonical identity, while every authenticated actual-Neo4j case passed the human-readable alias `"integrated_fixture_v2"`. All nine service cases therefore failed before retrieval even though generation preparation itself was valid. Treating the alias as equivalent would have weakened the fixed fixture boundary.
+
+Correction:
+
+- pass the exact repository-owned `INTEGRATED_FIXTURE_V2_RETRIEVAL.fixture_id` from actual-service preparation;
+- retain strict equality against the canonical fixture identity;
+- add a unit regression proving the human-readable alias is rejected; and
+- retain the exact nine authenticated service identities and zero-skip/failure gate unchanged.
+
+
 ## Validation performed
 
 The current local source passed the focused Increment 2D proof, Candidate, migration and SDLC contract selection:
 
 ```text
-125 passed, 9 intentional no-service skips, 0 failed
+126 passed, 9 intentional no-service skips, 0 failed
 ```
 
 The complete deterministic repository lane passed through the fixed four-shard command:
 
 ```text
-shard 1: 319 passed,  1 skipped
-shard 2: 284 passed,  4 skipped
-shard 3: 292 passed, 15 skipped
-shard 4: 312 passed, 12 skipped
+shard 1: 321 passed,  1 skipped
+shard 2: 283 passed,  4 skipped
+shard 3: 243 passed, 19 skipped
+shard 4: 361 passed,  8 skipped
 ---------------------------------
-total:   1,207 passed, 32 skipped, 0 failed
-merged report outcomes: 1,239
+total:   1,208 passed, 32 skipped, 0 failed
+merged report outcomes: 1,240
 required skips: 0
 ```
 
