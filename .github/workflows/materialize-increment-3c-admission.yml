@@ -117,7 +117,8 @@ jobs:
             newsroom/tests/test_check_3c_findings.py \
             newsroom/tests/test_check_3c_traceability.py \
             newsroom/tests/test_check_3c_migrations.py \
-            newsroom/tests/test_check_3c_authority.py \
+            newsroom/tests/test_check_3c_authority_store.py \
+            newsroom/tests/test_check_3c_authority_integrity.py \
             newsroom/tests/test_check_3c_admission.py \
             newsroom/tests/test_source_3a_authority.py \
             newsroom/tests/test_source_3a_lifecycle_integrity.py
