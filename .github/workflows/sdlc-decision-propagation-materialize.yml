@@ -36,6 +36,27 @@ jobs:
                   )
               target.write_text(text.replace(old, new, 1), encoding='utf-8')
 
+          def replace_region(
+              path: str,
+              start_marker: str,
+              end_marker: str,
+              replacement: str,
+          ) -> None:
+              target = Path(path)
+              text = target.read_text(encoding='utf-8')
+              start = text.find(start_marker)
+              end = text.find(end_marker, start + len(start_marker))
+              if (
+                  start < 0
+                  or end < 0
+                  or text.find(start_marker, start + 1) >= 0
+              ):
+                  raise SystemExit(f'{path}: reviewed region markers differ')
+              target.write_text(
+                  text[:start] + replacement + text[end:],
+                  encoding='utf-8',
+              )
+
           orchestrator = 'scripts/sdlc/workflow_orchestrator.py'
           replace_once(
               orchestrator,
@@ -49,31 +70,10 @@ jobs:
               '_GITHUB_PROPAGATION_RETRY_ATTEMPTS = 4\n'
               '_GITHUB_PROPAGATION_RETRY_DELAY_SECONDS = 0.75\n',
           )
-          old_boundary = '''def _unexpected_artifact(
-              client: GitHubActionsClient, *, run_id: int, name: str
-          ) -> bool:
-              listing = client.list_artifacts(run_id)
-              artifacts = listing.get("artifacts")
-              if not isinstance(artifacts, list):
-                  raise WorkflowOrchestratorError("artifact_listing")
-              return any(isinstance(item, dict) and item.get("name") == name for item in artifacts)
-
-
-          def collect_decision_inputs(
-          '''
-          new_boundary = '''def _unexpected_artifact(
-              client: GitHubActionsClient, *, run_id: int, name: str
-          ) -> bool:
-              listing = client.list_artifacts(run_id)
-              artifacts = listing.get("artifacts")
-              if not isinstance(artifacts, list):
-                  raise WorkflowOrchestratorError("artifact_listing")
-              return any(isinstance(item, dict) and item.get("name") == name for item in artifacts)
-
-
-          def _fetch_verified_lane(
+          helper = '''def _fetch_verified_lane(
               *,
               client: GitHubActionsClient,
+              root: Path,
               target: Path,
               context: GithubRunContext,
               contract: SdlcContract,
@@ -94,7 +94,7 @@ jobs:
                           artifact_name=artifact_name_value,
                       )
                       return verify_shadow_lane(
-                          repo_root=target.parent,
+                          repo_root=root,
                           bundle_root=output_path,
                           lane_id=lane_id,
                           decision_context=context,
@@ -115,47 +115,16 @@ jobs:
               return f"lane-verification-{code}"
 
 
-          def collect_decision_inputs(
           '''
-          replace_once(orchestrator, old_boundary, new_boundary)
-
-          old_collection = '''            core_name = artifact_name(_producer_context(context, "core"))
-              fetch_artifact_bundle(
-                  client=client,
-                  output_parent=target,
-                  output_name="core-transport",
-                  run_id=context.run_id,
-                  run_attempt=context.run_attempt,
-                  artifact_name=core_name,
-              )
-              core = verify_shadow_lane(
-                  repo_root=root,
-                  bundle_root=target / "core-transport",
-                  lane_id="core",
-                  decision_context=context,
-                  contract=contract,
-              )
-              service_name = artifact_name(_producer_context(context, "service"))
-              if core.receipt.route.service_required:
-                  fetch_artifact_bundle(
-                      client=client,
-                      output_parent=target,
-                      output_name="service-transport",
-                      run_id=context.run_id,
-                      run_attempt=context.run_attempt,
-                      artifact_name=service_name,
-                  )
-                  service = verify_shadow_lane(
-                      repo_root=root,
-                      bundle_root=target / "service-transport",
-                      lane_id="service",
-                      decision_context=context,
-                      contract=contract,
-                  )
-          '''
-          new_collection = '''            core_name = artifact_name(_producer_context(context, "core"))
+          replace_once(
+              orchestrator,
+              'def collect_decision_inputs(\n',
+              helper + 'def collect_decision_inputs(\n',
+          )
+          core_service = '''            core_name = artifact_name(_producer_context(context, "core"))
               core = _fetch_verified_lane(
                   client=client,
+                  root=root,
                   target=target,
                   context=context,
                   contract=contract,
@@ -166,6 +135,7 @@ jobs:
               if core.receipt.route.service_required:
                   service = _fetch_verified_lane(
                       client=client,
+                      root=root,
                       target=target,
                       context=context,
                       contract=contract,
@@ -173,19 +143,22 @@ jobs:
                       artifact_name_value=service_name,
                   )
           '''
-          replace_once(orchestrator, old_collection, new_collection)
+          replace_region(
+              orchestrator,
+              '            core_name = artifact_name(_producer_context(context, "core"))\n',
+              '            elif _unexpected_artifact(\n',
+              core_service + '            elif _unexpected_artifact(\n',
+          )
           replace_once(
               orchestrator,
-              '''        except ShadowLaneError:
-                      event = core = service = None
-                      failure_result = "EVIDENCE_MISMATCH"
-                      failure_code = "lane-verification"
-          ''',
-              '''        except ShadowLaneError as exc:
-                      event = core = service = None
-                      failure_result = "EVIDENCE_MISMATCH"
-                      failure_code = _lane_verification_failure_code(exc)
-          ''',
+              '        except ShadowLaneError:\n'
+              '            event = core = service = None\n'
+              '            failure_result = "EVIDENCE_MISMATCH"\n'
+              '            failure_code = "lane-verification"\n',
+              '        except ShadowLaneError as exc:\n'
+              '            event = core = service = None\n'
+              '            failure_result = "EVIDENCE_MISMATCH"\n'
+              '            failure_code = _lane_verification_failure_code(exc)\n',
           )
 
           tests = 'newsroom/tests/test_sdlc_workflow_orchestrator.py'
@@ -195,7 +168,7 @@ jobs:
               'from scripts.sdlc.shadow_decision import failure_shadow_decision\n'
               'from scripts.sdlc.shadow_lane import ShadowLaneError\n',
           )
-          insertion = '''
+          retry_tests = '''
 
           def test_collection_retries_transient_lane_verification_and_cleans_bundle(
               tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -308,23 +281,21 @@ jobs:
           replace_once(
               tests,
               '\n\ndef test_transport_error_is_redacted_to_stable_failure_code(\n',
-              insertion + '\n\ndef test_transport_error_is_redacted_to_stable_failure_code(\n',
+              retry_tests + '\n\ndef test_transport_error_is_redacted_to_stable_failure_code(\n',
           )
           replace_once(
               tests,
-              '''def test_transport_error_is_redacted_to_stable_failure_code(
-              tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-          ) -> None:
-              monkeypatch.setattr(orchestrator, "context_from_environment", lambda _root: _context())
-          ''',
-              '''def test_transport_error_is_redacted_to_stable_failure_code(
-              tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-          ) -> None:
-              monkeypatch.setattr(
-                  orchestrator, "_GITHUB_PROPAGATION_RETRY_ATTEMPTS", 1
-              )
-              monkeypatch.setattr(orchestrator, "context_from_environment", lambda _root: _context())
-          ''',
+              'def test_transport_error_is_redacted_to_stable_failure_code(\n'
+              '    tmp_path: Path, monkeypatch: pytest.MonkeyPatch\n'
+              ') -> None:\n'
+              '    monkeypatch.setattr(orchestrator, "context_from_environment", lambda _root: _context())\n',
+              'def test_transport_error_is_redacted_to_stable_failure_code(\n'
+              '    tmp_path: Path, monkeypatch: pytest.MonkeyPatch\n'
+              ') -> None:\n'
+              '    monkeypatch.setattr(\n'
+              '        orchestrator, "_GITHUB_PROPAGATION_RETRY_ATTEMPTS", 1\n'
+              '    )\n'
+              '    monkeypatch.setattr(orchestrator, "context_from_environment", lambda _root: _context())\n',
           )
           PY
           python -m compileall -q scripts/sdlc newsroom/tests
