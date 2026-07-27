@@ -12,7 +12,7 @@ import tarfile
 ROOT = Path(__file__).resolve().parents[2]
 PAYLOAD_DIR = Path(__file__).resolve().parent
 EXPECTED_ARCHIVE_SHA256 = (
-    "7087e8ed3b6478d45e98f8b8e0e79f2d865c2ea6b7c1403b8b0014b1d811a04d"
+    "672c4bb34e41a00293bfb9c42224b41fe6ae891ec2f057801e261091f551edba"
 )
 EXPECTED_MEMBERS = frozenset(
     {
