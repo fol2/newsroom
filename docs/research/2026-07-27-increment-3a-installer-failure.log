@@ -1,13 +1,11 @@
-Increment 3A installer failed on commit 96f422e96e70fdc4202d1ea8ce203412095c265c.
+Increment 3A installer failed on commit 51243c79c329d2fdc786944fa7c448a5d784e8d7.
 
 Traceback (most recent call last):
   File "/home/runner/work/newsroom/newsroom/.github/increment-3a-apply/apply.py", line 234, in <module>
     main()
-  File "/home/runner/work/newsroom/newsroom/.github/increment-3a-apply/apply.py", line 228, in main
-    _patch_migration_chain()
-  File "/home/runner/work/newsroom/newsroom/.github/increment-3a-apply/apply.py", line 148, in _patch_migration_chain
-    text = _replace_once(
-           ^^^^^^^^^^^^^^
-  File "/home/runner/work/newsroom/newsroom/.github/increment-3a-apply/apply.py", line 50, in _replace_once
+  File "/home/runner/work/newsroom/newsroom/.github/increment-3a-apply/apply.py", line 226, in main
+    archive = _decode_archive()
+              ^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/newsroom/newsroom/.github/increment-3a-apply/apply.py", line 71, in _decode_archive
     raise RuntimeError(
-RuntimeError: migration seam 'migration manifest' expected exactly once, found 0
+RuntimeError: source payload digest mismatch: expected 7087e8ed3b6478d45e98f8b8e0e79f2d865c2ea6b7c1403b8b0014b1d811a04d, got 7f812e256f784e7785c07bb0b6e316882bc9d96eebab55723f3c79e989c6d424
