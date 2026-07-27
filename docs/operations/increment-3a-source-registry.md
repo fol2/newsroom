@@ -1,8 +1,8 @@
 # Increment 3A source registry operations
 
-**Status:** Implementation review unit for issue #205  
-**Parent:** #143  
-**Authorised base:** `main@eb900c8b16e42506fdf0ff7c12de62773d0dad42`  
+**Status:** Implementation review unit for issue #205
+**Parent:** #143
+**Authorised base:** `main@eb900c8b16e42506fdf0ff7c12de62773d0dad42`
 **Runtime boundary:** Fixture and approved replay only
 
 Increment 3A creates durable source-registry authority. It does not fetch, schedule, parse, execute, project, rank, publish, spend or activate anything.

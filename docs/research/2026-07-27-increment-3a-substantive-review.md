@@ -1,11 +1,11 @@
 # Increment 3A substantive review
 
-**Date:** 2026-07-27  
-**Implementation issue:** #205  
-**Parent:** #143  
-**Programme:** #141  
-**Authorised base:** `main@eb900c8b16e42506fdf0ff7c12de62773d0dad42`  
-**Review unit:** Increment 3A — Source registry and immutable source contracts  
+**Date:** 2026-07-27
+**Implementation issue:** #205
+**Parent:** #143
+**Programme:** #141
+**Authorised base:** `main@eb900c8b16e42506fdf0ff7c12de62773d0dad42`
+**Review unit:** Increment 3A — Source registry and immutable source contracts
 **Runtime authority:** Fixture and approved replay only
 
 ## Review conclusion
