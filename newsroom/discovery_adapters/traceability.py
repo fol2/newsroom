@@ -1,14 +1,16 @@
 """Increment 3B requirement traceability and explicit authority exclusions."""
 
 INCREMENT_3B_TRACEABILITY = {
-    "3B-01-TYPED-FIXTURE-TRANSPORT-AND-CAPTURE/FLOW-020-FLOW-022-DREC-DOUT": (
+    "3B-01-TYPED-FIXTURE-TRANSPORT-CAPTURE-AND-LINEAGE/FLOW-020-FLOW-022-DREC-DOUT": (
         "newsroom.discovery_adapters.models",
         "newsroom.discovery_adapters.runner",
         "newsroom.tests.test_discovery_adapter_3b_runner",
+        "newsroom.tests.test_discovery_adapter_3b_review_regressions",
     ),
-    "3B-02-STRICT-ENDPOINT-DNS-TLS-REDIRECT/DOPS-020-DOPS-026-SRC-020-SRC-026": (
+    "3B-02-STRICT-ENDPOINT-DNS-TLS-AND-PER-HOP-REDIRECT/DOPS-020-DOPS-026-SRC-020-SRC-026": (
         "newsroom.discovery_adapters.security",
         "newsroom.tests.test_discovery_adapter_3b_security",
+        "newsroom.tests.test_discovery_adapter_3b_review_regressions",
     ),
     "3B-03-BOUNDED-TIME-SIZE-ENCODING-AND-DECOMPRESSION/DOPS-020-DOPS-023": (
         "newsroom.discovery_adapters.compression",
@@ -19,33 +21,45 @@ INCREMENT_3B_TRACEABILITY = {
         "newsroom.discovery_adapters.parsers",
         "newsroom.tests.test_discovery_adapter_3b_parsers",
     ),
-    "3B-05-HONEST-OUTCOME-SEPARATION/FLOW-021-FLOW-023-FLOW-024-DOPS-021-DOPS-022": (
+    "3B-05-HONEST-OUTCOME-AND-STATUS-SEPARATION/FLOW-021-FLOW-023-FLOW-024-DOPS-021-DOPS-022": (
         "newsroom.discovery_adapters.runner",
         "newsroom.discovery_adapters.types",
         "newsroom.tests.test_discovery_adapter_3b_runner",
+        "newsroom.tests.test_discovery_adapter_3b_review_regressions",
     ),
-    "3B-06-EXACT-BASELINE-AND-VALIDATOR/FLOW-021-FLOW-025-DOPS-021": (
+    "3B-06-EXACT-BASELINE-VALIDATOR-AND-PRODUCER-PROVENANCE/FLOW-021-FLOW-025-DOPS-021-DOPS-052": (
         "newsroom.discovery_adapters.models",
         "newsroom.discovery_adapters.runner",
         "newsroom.tests.test_discovery_adapter_3b_runner",
+        "newsroom.tests.test_discovery_adapter_3b_review_regressions",
     ),
-    "3B-07-REPRESENTATION-NOT-REVISION/CHG-001-CHG-019-DREC": (
+    "3B-07-STABLE-SOURCE-ITEM-IDENTITY-AND-REPRESENTATION-NOT-REVISION/CHG-001-CHG-019-DREC": (
+        "newsroom.discovery_adapters.types",
         "newsroom.discovery_adapters.parsers",
         "newsroom.discovery_adapters.models",
+        "newsroom.discovery_adapters.runner",
         "newsroom.tests.test_discovery_adapter_3b_parsers",
+        "newsroom.tests.test_discovery_adapter_3b_review_regressions",
     ),
-    "3B-08-SHAPE-DRIFT-PARTIAL-AND-NO-CLEARANCE/FLOW-024-DOPS-024": (
+    "3B-08-SHAPE-DRIFT-PARTIAL-TRUNCATED-AND-NO-CLEARANCE/FLOW-024-DOPS-024": (
         "newsroom.discovery_adapters.parsers",
         "newsroom.discovery_adapters.runner",
         "newsroom.tests.test_discovery_adapter_3b_parsers",
         "newsroom.tests.test_discovery_adapter_3b_runner",
+        "newsroom.tests.test_discovery_adapter_3b_review_regressions",
     ),
     "3B-09-UNTRUSTED-CONTENT-CANNOT-ALTER-POLICY/FLOW-002-DOPS-026-ADR-0004": (
         "newsroom.discovery_adapters.models",
         "newsroom.discovery_adapters.parsers",
         "newsroom.tests.test_discovery_adapter_3b_contracts",
     ),
-    "3B-10-NO-EXTERNAL-ACCESS-OR-LATER-AUTHORITY/FLOW-010-FLOW-011-ADR-0001-ADR-0002": (
+    "3B-10-MINIMUM-RECEIPT-METADATA-AND-CROSS-RECORD-BINDING/FLOW-020-FLOW-026-DREC-DOUT": (
+        "newsroom.discovery_adapters.models",
+        "newsroom.discovery_adapters.runner",
+        "newsroom.tests.test_discovery_adapter_3b_review_regressions",
+        "docs.operations.increment-3b-fixture-adapters",
+    ),
+    "3B-11-NO-EXTERNAL-ACCESS-OR-LATER-AUTHORITY/FLOW-010-FLOW-011-ADR-0001-ADR-0002": (
         "newsroom.discovery_adapters.traceability",
         "newsroom.tests.test_discovery_adapter_3b_traceability",
         "docs.operations.increment-3b-fixture-adapters",
@@ -77,6 +91,7 @@ INCREMENT_3B_DEFERRED = frozenset(
         "LIVE_SOURCE_QUALIFICATION_AND_NUMERIC_OPERATIONAL_PROFILES_LATER_INCREMENT",
     }
 )
+
 
 __all__ = [
     "INCREMENT_3B_DEFERRED",
