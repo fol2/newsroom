@@ -51,6 +51,26 @@ jobs:
               for line in lines[start:end]
           ]
           code = '\n'.join(code_lines) + '\n'
+          ambiguous = r'''replace_once(
+              "newsroom/authority/source_registry_migrations.py",
+              "        UNIQUE(definition_id,semantic_digest),\n",
+              "",
+          )
+          '''
+          narrowed = r'''replace_once(
+              "newsroom/authority/source_registry_migrations.py",
+              "        UNIQUE(definition_id,version_number),\n"
+              "        UNIQUE(definition_id,semantic_digest),\n"
+              "        UNIQUE(version_id,definition_id),\n",
+              "        UNIQUE(definition_id,version_number),\n"
+              "        UNIQUE(version_id,definition_id),\n",
+          )
+          '''
+          if code.count(ambiguous) != 1:
+              raise RuntimeError(
+                  "review payload does not contain one ambiguous version-uniqueness patch"
+              )
+          code = code.replace(ambiguous, narrowed, 1)
           target = Path('/tmp/increment-3a-substantive-repair.py')
           target.write_text(code, encoding='utf-8')
           compile(code, str(target), 'exec')
