@@ -1,6 +1,17 @@
 name: Increment 3A source installer
 
 on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - .github/increment-3a-apply/**
+      - .github/workflows/increment-3a-apply.yml
   push:
     branches:
       - agent/increment-3a-source-registry
