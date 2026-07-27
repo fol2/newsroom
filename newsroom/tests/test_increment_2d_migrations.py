@@ -34,18 +34,19 @@ def _migrated() -> sqlite3.Connection:
 
 
 def test_increment_2d_migration_is_checked_schema_version_nine() -> None:
-    assert DEVELOPMENT_CANDIDATE_SCHEMA_VERSION == SCHEMA_VERSION == 9
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+    assert DEVELOPMENT_CANDIDATE_SCHEMA_VERSION == 9
+    assert SCHEMA_VERSION == 10
+    assert (
         9,
         DEVELOPMENT_CANDIDATE_MIGRATION_NAME,
         DEVELOPMENT_CANDIDATE_MIGRATION_CHECKSUM,
-    )
+    ) in EXPECTED_MIGRATION_HISTORY
 
 
 def test_increment_2d_tables_are_in_exact_schema_fingerprint() -> None:
     conn = _migrated()
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         tables = {
             str(row[0])
             for row in conn.execute(

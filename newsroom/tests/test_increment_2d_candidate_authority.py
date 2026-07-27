@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
-import json
 import sqlite3
 
 import pytest
@@ -108,7 +107,7 @@ def _trigger_sql(conn: sqlite3.Connection, name: str) -> str:
     return str(row[0])
 
 
-def test_schema_version_advances_to_candidate_authority_v9(tmp_path: Path) -> None:
+def test_candidate_authority_v9_remains_available_under_current_schema(tmp_path: Path) -> None:
     database = tmp_path / "authority.sqlite3"
     object_root = tmp_path / "objects"
     seed_active_retrieval_authority(database, object_root=object_root)
@@ -119,7 +118,7 @@ def test_schema_version_advances_to_candidate_authority_v9(tmp_path: Path) -> No
     )
     system.close()
     with sqlite3.connect(database) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
         names = {
             row[0]
             for row in conn.execute(

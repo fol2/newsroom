@@ -48,7 +48,7 @@ def test_projection_migration_history_contracts_and_schema_are_exact(
     _seed(database)
     conn = sqlite3.connect(database)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
         history = conn.execute(
             "SELECT version,name FROM authority_migrations ORDER BY version"
         ).fetchall()
@@ -62,6 +62,7 @@ def test_projection_migration_history_contracts_and_schema_are_exact(
             (7, "complete_projection_authority_v7"),
             (8, "hybrid_retrieval_authority_v8"),
             (9, "complete_fixture_candidate_authority_v9"),
+            (10, "source_registry_authority_v10"),
         ]
         assert conn.execute(
             "SELECT COUNT(*) FROM projection_ontology_contracts"
