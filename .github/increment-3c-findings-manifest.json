@@ -1,6 +1,8 @@
 {
   "archive_sha256": "215a222bf43cb3297003553833111bd009840c5fd881a8d155184174acdeb39f",
   "archive_size": 12236,
+  "base64_size": 16316,
+  "chunk_count": 4,
   "file_sha256": {
     "newsroom/authority/_check_admission_lookup.py": "513e244e47be3069106446550c7de77621d2e7918f2c7120fdba520c7a9c73d6",
     "newsroom/authority/_proposal_admission.py": "a03f4d3e9e2b0d1ac02a1408779a8e520ca8b300d2bc18e8d81fc4b780f063ea",
