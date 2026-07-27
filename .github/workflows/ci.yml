@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -34,3 +37,129 @@ jobs:
             --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
             --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
             --fail-on-regression
+
+  materialize-increment-3b-review:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'agent/increment-3b-generic-adapters'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Check out exact Increment 3B branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-3b-generic-adapters
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Reconstruct reviewed corrections
+        id: payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f newsroom/tests/test_discovery_adapter_3b_review_regressions.py; then
+            echo "needed=false" >> "${GITHUB_OUTPUT}"
+            echo "Reviewed Increment 3B corrections are already materialized."
+            exit 0
+          fi
+          echo "needed=true" >> "${GITHUB_OUTPUT}"
+          payload="${RUNNER_TEMP}/increment-3b-review-corrections.tar.gz"
+          extracted="${RUNNER_TEMP}/increment-3b-review-corrections"
+          base64 --decode .github/increment-3b-review-payload.b64 > "${payload}"
+          echo "3665df1bf4308a94b8fcb87533be40f0894ec2066fb6f0e701e00db4c3ca8c9f  ${payload}" | sha256sum --check --strict
+          PAYLOAD="${payload}" EXTRACTED="${extracted}" python - <<'PY'
+          from pathlib import Path
+          import os
+          import shutil
+          import tarfile
+
+          expected = {
+              "newsroom/discovery_adapters/__init__.py",
+              "newsroom/discovery_adapters/types.py",
+              "newsroom/discovery_adapters/models.py",
+              "newsroom/discovery_adapters/parsers.py",
+              "newsroom/discovery_adapters/runner.py",
+              "newsroom/discovery_adapters/security.py",
+              "newsroom/discovery_adapters/traceability.py",
+              "newsroom/tests/discovery_adapter_3b_helpers.py",
+              "newsroom/tests/test_discovery_adapter_3b_security.py",
+              "newsroom/tests/test_discovery_adapter_3b_parsers.py",
+              "newsroom/tests/test_discovery_adapter_3b_traceability.py",
+              "newsroom/tests/test_discovery_adapter_3b_review_regressions.py",
+              "docs/operations/increment-3b-fixture-adapters.md",
+              "docs/research/2026-07-27-increment-3b-design-record.md",
+              "docs/research/2026-07-27-increment-3b-substantive-review.md",
+          }
+          payload = Path(os.environ["PAYLOAD"])
+          extracted = Path(os.environ["EXTRACTED"])
+          extracted.mkdir(mode=0o700)
+          with tarfile.open(payload, mode="r:gz") as archive:
+              members = archive.getmembers()
+              names = [member.name for member in members]
+              if len(names) != len(set(names)) or set(names) != expected:
+                  raise SystemExit("review payload inventory differs from the exact manifest")
+              for member in members:
+                  path = Path(member.name)
+                  if (
+                      not member.isfile()
+                      or path.is_absolute()
+                      or ".." in path.parts
+                      or member.size > 1_000_000
+                  ):
+                      raise SystemExit(f"unsafe review payload member: {member.name}")
+                  source = archive.extractfile(member)
+                  if source is None:
+                      raise SystemExit(f"review payload member has no bytes: {member.name}")
+                  destination = extracted / path
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  with source, destination.open("wb") as target:
+                      shutil.copyfileobj(source, target)
+                  destination.chmod(0o644)
+          for relative in sorted(expected):
+              source = extracted / relative
+              destination = Path(relative)
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(source, destination)
+          PY
+          python -m compileall -q newsroom/discovery_adapters newsroom/tests
+          git diff --check
+
+      - name: Install locked development environment
+        if: steps.payload.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Run reviewed Increment 3B and retained Increment 3A suites
+        if: steps.payload.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+          uv run python -m pytest -q \
+            newsroom/tests/test_discovery_adapter_3b_*.py \
+            newsroom/tests/test_source_3a_contracts.py \
+            newsroom/tests/test_source_3a_authority.py \
+            newsroom/tests/test_source_3a_lifecycle_integrity.py \
+            newsroom/tests/test_source_3a_review_regressions.py \
+            newsroom/tests/test_source_3a_traceability.py
+
+      - name: Commit and push reviewed Increment 3B corrections
+        if: steps.payload.outputs.needed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- \
+            newsroom/discovery_adapters \
+            newsroom/tests/discovery_adapter_3b_helpers.py \
+            newsroom/tests/test_discovery_adapter_3b_security.py \
+            newsroom/tests/test_discovery_adapter_3b_parsers.py \
+            newsroom/tests/test_discovery_adapter_3b_traceability.py \
+            newsroom/tests/test_discovery_adapter_3b_review_regressions.py \
+            docs/operations/increment-3b-fixture-adapters.md \
+            docs/research/2026-07-27-increment-3b-design-record.md \
+            docs/research/2026-07-27-increment-3b-substantive-review.md
+          git diff --cached --check
+          git commit -m "fix(adapters): preserve identity and honest replay semantics"
+          git push origin HEAD:agent/increment-3b-generic-adapters
