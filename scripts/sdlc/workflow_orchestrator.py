@@ -9,6 +9,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from typing import Mapping, Sequence
 
 from .artifact_envelope import (
@@ -68,6 +69,8 @@ _RESULTS = frozenset(
 )
 _MAX_JSON_BYTES = 64 * 1024 * 1024
 _GITHUB_REQUEST_TIMEOUT_SECONDS = 5.0
+_GITHUB_PROPAGATION_RETRY_ATTEMPTS = 4
+_GITHUB_PROPAGATION_RETRY_DELAY_SECONDS = 0.75
 
 
 class WorkflowOrchestratorError(ValueError):
@@ -371,6 +374,51 @@ def _unexpected_artifact(
     return any(isinstance(item, dict) and item.get("name") == name for item in artifacts)
 
 
+def _fetch_verified_lane(
+    *,
+    client: GitHubActionsClient,
+    root: Path,
+    target: Path,
+    context: GithubRunContext,
+    contract: SdlcContract,
+    lane_id: str,
+    artifact_name_value: str,
+) -> ShadowLaneRecord:
+    output_name = f"{lane_id}-transport"
+    output_path = target / output_name
+    for attempt_index in range(_GITHUB_PROPAGATION_RETRY_ATTEMPTS):
+        shutil.rmtree(output_path, ignore_errors=True)
+        try:
+            fetch_artifact_bundle(
+                client=client,
+                output_parent=target,
+                output_name=output_name,
+                run_id=context.run_id,
+                run_attempt=context.run_attempt,
+                artifact_name=artifact_name_value,
+            )
+            return verify_shadow_lane(
+                repo_root=root,
+                bundle_root=output_path,
+                lane_id=lane_id,
+                decision_context=context,
+                contract=contract,
+            )
+        except (GitHubTransportError, ShadowLaneError):
+            shutil.rmtree(output_path, ignore_errors=True)
+            if attempt_index + 1 >= _GITHUB_PROPAGATION_RETRY_ATTEMPTS:
+                raise
+            time.sleep(_GITHUB_PROPAGATION_RETRY_DELAY_SECONDS)
+    raise AssertionError("bounded lane verification exhausted without result")
+
+
+def _lane_verification_failure_code(error: ShadowLaneError) -> str:
+    code = str(error)
+    if _SAFE_CODE.fullmatch(code) is None:
+        return "lane-verification"
+    return f"lane-verification-{code}"
+
+
 def collect_decision_inputs(
     *, repo_root: str | Path, output_directory: str | Path
 ) -> dict[str, object]:
@@ -394,37 +442,25 @@ def collect_decision_inputs(
                 timeout_seconds=_GITHUB_REQUEST_TIMEOUT_SECONDS
             )
             core_name = artifact_name(_producer_context(context, "core"))
-            fetch_artifact_bundle(
+            core = _fetch_verified_lane(
                 client=client,
-                output_parent=target,
-                output_name="core-transport",
-                run_id=context.run_id,
-                run_attempt=context.run_attempt,
-                artifact_name=core_name,
-            )
-            core = verify_shadow_lane(
-                repo_root=root,
-                bundle_root=target / "core-transport",
-                lane_id="core",
-                decision_context=context,
+                root=root,
+                target=target,
+                context=context,
                 contract=contract,
+                lane_id="core",
+                artifact_name_value=core_name,
             )
             service_name = artifact_name(_producer_context(context, "service"))
             if core.receipt.route.service_required:
-                fetch_artifact_bundle(
+                service = _fetch_verified_lane(
                     client=client,
-                    output_parent=target,
-                    output_name="service-transport",
-                    run_id=context.run_id,
-                    run_attempt=context.run_attempt,
-                    artifact_name=service_name,
-                )
-                service = verify_shadow_lane(
-                    repo_root=root,
-                    bundle_root=target / "service-transport",
-                    lane_id="service",
-                    decision_context=context,
+                    root=root,
+                    target=target,
+                    context=context,
                     contract=contract,
+                    lane_id="service",
+                    artifact_name_value=service_name,
                 )
             elif _unexpected_artifact(
                 client, run_id=context.run_id, name=service_name
@@ -438,10 +474,10 @@ def collect_decision_inputs(
             event = core = service = None
             failure_result = "EVIDENCE_MISMATCH"
             failure_code = "artifact-transport"
-        except ShadowLaneError:
+        except ShadowLaneError as exc:
             event = core = service = None
             failure_result = "EVIDENCE_MISMATCH"
-            failure_code = "lane-verification"
+            failure_code = _lane_verification_failure_code(exc)
         except (ContractError, WorkflowEvidenceError, ArtifactProvenanceError):
             event = core = service = None
             failure_result = "EVIDENCE_MISMATCH"

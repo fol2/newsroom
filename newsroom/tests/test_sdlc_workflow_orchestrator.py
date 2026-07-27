@@ -13,6 +13,7 @@ from scripts.sdlc.emit_evidence import canonical_json_bytes
 from scripts.sdlc.github_transport import GitHubTransportError
 from scripts.sdlc.run_gate import GateRunResult, LaneDeadline
 from scripts.sdlc.shadow_decision import failure_shadow_decision
+from scripts.sdlc.shadow_lane import ShadowLaneError
 from scripts.sdlc.workflow_event import WorkflowEvent
 
 
@@ -258,9 +259,121 @@ def test_unexpected_service_artifact_becomes_typed_collection_failure(
     assert value["core"] is None
 
 
+def test_collection_retries_transient_lane_verification_and_cleans_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = _FakeLane("core", False)
+    fetched = _patch_collection_dependencies(monkeypatch, core=core)
+    attempts = 0
+    sleeps: list[float] = []
+
+    def verify(*, lane_id, **_kwargs):
+        nonlocal attempts
+        assert lane_id == "core"
+        attempts += 1
+        if attempts == 1:
+            raise ShadowLaneError("job_telemetry")
+        return core
+
+    monkeypatch.setattr(orchestrator, "verify_shadow_lane", verify)
+    monkeypatch.setattr(
+        orchestrator, "_GITHUB_PROPAGATION_RETRY_ATTEMPTS", 3
+    )
+    monkeypatch.setattr(
+        orchestrator, "_GITHUB_PROPAGATION_RETRY_DELAY_SECONDS", 0.25
+    )
+    monkeypatch.setattr(orchestrator.time, "sleep", sleeps.append)
+
+    value = orchestrator.collect_decision_inputs(
+        repo_root=tmp_path, output_directory="decision-input"
+    )
+
+    assert value["status"] == "READY"
+    assert attempts == 2
+    assert len(fetched) == 2
+    assert sleeps == [0.25]
+    assert (tmp_path / "decision-input" / "core-transport").is_dir()
+
+
+def test_collection_retries_transient_transport_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = _FakeLane("core", False)
+    _patch_collection_dependencies(monkeypatch, core=core)
+    fetch_attempts = 0
+    sleeps: list[float] = []
+
+    def fetch(**kwargs):
+        nonlocal fetch_attempts
+        fetch_attempts += 1
+        if fetch_attempts == 1:
+            raise GitHubTransportError("jobs")
+        Path(kwargs["output_parent"], kwargs["output_name"]).mkdir()
+        return object()
+
+    monkeypatch.setattr(orchestrator, "fetch_artifact_bundle", fetch)
+    monkeypatch.setattr(
+        orchestrator, "_GITHUB_PROPAGATION_RETRY_ATTEMPTS", 2
+    )
+    monkeypatch.setattr(
+        orchestrator, "_GITHUB_PROPAGATION_RETRY_DELAY_SECONDS", 0.5
+    )
+    monkeypatch.setattr(orchestrator.time, "sleep", sleeps.append)
+
+    value = orchestrator.collect_decision_inputs(
+        repo_root=tmp_path, output_directory="decision-input"
+    )
+
+    assert value["status"] == "READY"
+    assert fetch_attempts == 2
+    assert sleeps == [0.5]
+
+
+def test_collection_exhaustion_is_typed_redacted_and_cleans_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = _FakeLane("core", False)
+    fetched = _patch_collection_dependencies(monkeypatch, core=core)
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        orchestrator,
+        "verify_shadow_lane",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            ShadowLaneError("job_telemetry")
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator, "_GITHUB_PROPAGATION_RETRY_ATTEMPTS", 3
+    )
+    monkeypatch.setattr(
+        orchestrator, "_GITHUB_PROPAGATION_RETRY_DELAY_SECONDS", 0.1
+    )
+    monkeypatch.setattr(orchestrator.time, "sleep", sleeps.append)
+
+    value = orchestrator.collect_decision_inputs(
+        repo_root=tmp_path, output_directory="decision-input"
+    )
+
+    assert value["status"] == "ERROR"
+    assert value["failure_result"] == "EVIDENCE_MISMATCH"
+    assert value["failure_code"] == "lane-verification-job_telemetry"
+    assert len(fetched) == 3
+    assert sleeps == [0.1, 0.1]
+    assert not (tmp_path / "decision-input" / "core-transport").exists()
+    assert (
+        orchestrator._lane_verification_failure_code(
+            ShadowLaneError("provider secret/value")
+        )
+        == "lane-verification"
+    )
+
+
 def test_transport_error_is_redacted_to_stable_failure_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        orchestrator, "_GITHUB_PROPAGATION_RETRY_ATTEMPTS", 1
+    )
     monkeypatch.setattr(orchestrator, "context_from_environment", lambda _root: _context())
     monkeypatch.setattr(orchestrator, "derive_workflow_event", lambda _root: _event())
     monkeypatch.setattr(orchestrator, "load_contract", lambda _root: object())
