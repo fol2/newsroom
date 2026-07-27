@@ -62,6 +62,8 @@ jobs:
       - name: Persist fail-closed substantive repair diagnostic
         if: steps.apply.outcome != 'success'
         run: |
+          git fetch origin agent/increment-3a-source-registry
+          git reset --hard origin/agent/increment-3a-source-registry
           mkdir -p docs/research
           {
             echo "Increment 3A substantive repair runner failed on ${GITHUB_SHA}."
@@ -79,23 +81,52 @@ jobs:
 
       - name: Commit substantive source-authority corrections
         if: steps.apply.outcome == 'success'
+        id: commit
+        continue-on-error: true
         run: |
+          set +e
+          {
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add newsroom
+            git diff --cached --check
+            git diff --cached --stat
+            git commit -m "fix(sources): bind immutable lineage and redacted reads"
+            git pull --rebase origin agent/increment-3a-source-registry
+            git push origin HEAD:agent/increment-3a-source-registry
+          } > /tmp/increment-3a-review-commit.log 2>&1
+          status=$?
+          cat /tmp/increment-3a-review-commit.log
+          exit "$status"
+
+      - name: Persist fail-closed substantive commit diagnostic
+        if: steps.apply.outcome == 'success' && steps.commit.outcome != 'success'
+        run: |
+          git fetch origin agent/increment-3a-source-registry
+          git reset --hard origin/agent/increment-3a-source-registry
+          mkdir -p docs/research
+          {
+            echo "Increment 3A substantive repair commit failed on ${GITHUB_SHA}."
+            echo
+            cat /tmp/increment-3a-review-commit.log
+          } > docs/research/2026-07-27-increment-3a-review-commit-failure.log
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add newsroom
+          git add docs/research/2026-07-27-increment-3a-review-commit-failure.log
           git diff --cached --check
-          git commit -m "fix(sources): bind immutable lineage and redacted reads"
+          git commit -m "chore(ci): retain Increment 3A review commit failure"
           git pull --rebase origin agent/increment-3a-source-registry
           git push origin HEAD:agent/increment-3a-source-registry
+          exit 1
 
       - name: Set up Python
-        if: steps.apply.outcome == 'success'
+        if: steps.apply.outcome == 'success' && steps.commit.outcome == 'success'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install locked development environment
-        if: steps.apply.outcome == 'success'
+        if: steps.apply.outcome == 'success' && steps.commit.outcome == 'success'
         run: |
           python -m pip install --upgrade pip
           python -m pip install uv
@@ -103,7 +134,7 @@ jobs:
           uv sync --dev --locked
 
       - name: Run Increment 3A substantive and retained suites
-        if: steps.apply.outcome == 'success'
+        if: steps.apply.outcome == 'success' && steps.commit.outcome == 'success'
         id: focused
         continue-on-error: true
         run: |
@@ -122,7 +153,7 @@ jobs:
             --junitxml=increment-3a-focused-results.xml
 
       - name: Upload focused evidence
-        if: steps.apply.outcome == 'success'
+        if: steps.apply.outcome == 'success' && steps.commit.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: increment-3a-focused-test-evidence
@@ -130,5 +161,5 @@ jobs:
           if-no-files-found: error
 
       - name: Enforce focused evidence
-        if: steps.apply.outcome == 'success' && steps.focused.outcome != 'success'
+        if: steps.apply.outcome == 'success' && steps.commit.outcome == 'success' && steps.focused.outcome != 'success'
         run: exit 1
