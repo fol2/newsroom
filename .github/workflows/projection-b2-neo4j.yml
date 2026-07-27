@@ -118,12 +118,13 @@ jobs:
               projector.close()
           PY
 
-      - name: Focused B1, B2, B3, C1, complete 2B and retrieval 2C tests against actual service
+      - name: Focused B1, B2, B3, C1 and complete Increment 2 tests against actual service
         id: focused
         continue-on-error: true
         env:
           NEWSROOM_NEO4J_SERVICE_REQUIRED: "1"
           NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED: "1"
+          NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED: "1"
           NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED: "1"
           NEWSROOM_NEO4J_URI: ${{ env.NEO4J_URI }}
         run: |
@@ -134,6 +135,7 @@ jobs:
             newsroom/tests/test_integrated_c1_neo4j_service.py \
             newsroom/tests/test_complete_projection_2b_neo4j_service.py \
             newsroom/tests/test_retrieval_2c_neo4j_service.py \
+            newsroom/tests/test_increment_2d_neo4j_service.py \
             --junitxml=projection-b2-b3-c1-complete-retrieval-neo4j-results.xml
 
       - name: Prove actual-service tests executed
@@ -271,6 +273,34 @@ jobs:
               for case in retrieval
           ):
               raise SystemExit("Increment 2C actual-service cases failed")
+
+          increment_2d = [
+              case
+              for case in cases
+              if "test_increment_2d_neo4j_service"
+              in case.attrib.get("classname", "")
+          ]
+          required_increment_2d = {
+              "test_actual_service_complete_increment_2_proof_admits_replays_and_restarts",
+              "test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[fulltext]",
+              "test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[relation]",
+              "test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[vector]",
+          }
+          increment_2d_names = {
+              case.attrib.get("name", "") for case in increment_2d
+          }
+          if increment_2d_names != required_increment_2d:
+              raise SystemExit(
+                  "required Increment 2D actual-service cases differ: "
+                  + repr(sorted(increment_2d_names))
+              )
+          if any(case.find("skipped") is not None for case in increment_2d):
+              raise SystemExit("Increment 2D actual-service cases were skipped")
+          if any(
+              case.find("failure") is not None or case.find("error") is not None
+              for case in increment_2d
+          ):
+              raise SystemExit("Increment 2D actual-service cases failed")
           PY
 
       - name: Upload B2/B3/C1, complete 2B and retrieval 2C actual-service evidence

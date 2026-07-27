@@ -306,6 +306,7 @@ def test_service_boundary_is_exact_authenticated_loopback_and_bounded() -> None:
         "NEO4J_ADMIN_USERNAME": "neo4j",
         "NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED": "1",
         "NEWSROOM_NEO4J_DATABASE": "neo4j",
+        "NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED": "1",
         "NEWSROOM_NEO4J_PROJECTOR_USERNAME": "newsroom_projector",
         "NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED": "1",
         "NEWSROOM_NEO4J_SERVICE_REQUIRED": "1",

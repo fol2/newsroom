@@ -60,6 +60,10 @@ _OPTIONAL_CORE_TEST_IDS = (
     'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_replacement_generation_recovers_from_authority_only',
     'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_revocation_and_tombstone_remove_current_derivatives',
     'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_wrong_watermark_generation_and_vector_dimension_fail_closed',
+    'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_increment_2_proof_admits_replays_and_restarts',
+    'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[fulltext]',
+    'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[relation]',
+    'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[vector]',
     'newsroom.tests.test_integrated_c1_neo4j_service::test_actual_service_integrated_foundation_replay_recovery_and_tombstone',
     'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_private_adapter_exact_duplicate_and_digest_conflict',
     'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_public_round_trip_duplicate_and_generation_isolation',
@@ -79,6 +83,7 @@ _OPTIONAL_CORE_TEST_IDS = (
 _SERVICE_CONFIGURATION = {
     "NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_DATABASE": "neo4j",
+    "NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_PROJECTOR_USERNAME": "newsroom_projector",
     "NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_SERVICE_REQUIRED": "1",
