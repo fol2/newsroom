@@ -1,4 +1,4 @@
-name: Increment 3A substantive review runner
+name: Increment 3A focused review repair
 
 on:
   pull_request:
@@ -15,13 +15,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: increment-3a-substantive-review-runner
+  group: increment-3a-focused-review-repair
   cancel-in-progress: true
 
 jobs:
-  apply-and-test:
+  repair-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 16
+    timeout-minutes: 12
     steps:
       - name: Check out exact Increment 3A branch
         uses: actions/checkout@v4
@@ -30,134 +30,128 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      - name: Extract and apply reviewed repair payload
-        id: apply
-        continue-on-error: true
+      - name: Apply focused review corrections
         run: |
-          set +e
-          (
-            set -euo pipefail
-            python - <<'PY'
+          python - <<'PY'
           from pathlib import Path
 
-          source = Path('.github/workflows/increment-3a-repair.yml')
-          lines = source.read_text(encoding='utf-8').splitlines()
-          marker = "          python - <<'PY'"
-          start = lines.index(marker) + 1
-          end = lines.index('          PY', start)
-          prefix = ' ' * 10
-          code_lines = [
-              line[len(prefix):] if line.startswith(prefix) else line
-              for line in lines[start:end]
-          ]
-          code = '\n'.join(code_lines) + '\n'
-          ambiguous = r'''replace_once(
-              "newsroom/authority/source_registry_migrations.py",
-              "        UNIQUE(definition_id,semantic_digest),\n",
-              "",
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f"{path}: expected one replacement, found {count}: {old!r}"
+                  )
+              target.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          replace_once(
+              "newsroom/sources/types.py",
+              "        parsed_time = UtcTimestamp.parse(self.value)\n"
+              "        if parsed_time.to_text() != self.value:\n",
+              "        try:\n"
+              "            parsed_time = UtcTimestamp.parse(self.value)\n"
+              "        except ValueError as exc:\n"
+              "            raise SourceContractError(\"source time is invalid\") from exc\n"
+              "        if parsed_time.to_text() != self.value:\n",
           )
-          '''
-          narrowed = r'''replace_once(
-              "newsroom/authority/source_registry_migrations.py",
-              "        UNIQUE(definition_id,version_number),\n"
-              "        UNIQUE(definition_id,semantic_digest),\n"
-              "        UNIQUE(version_id,definition_id),\n",
-              "        UNIQUE(definition_id,version_number),\n"
-              "        UNIQUE(version_id,definition_id),\n",
+
+          replace_once(
+              "newsroom/authority/_source_registry_store_lineage.py",
+              "            self._ensure_semantic_absent(\n"
+              "                conn,\n"
+              "                table=\"source_items\",\n"
+              "                predicate=\"definition_id=? AND identity_digest=?\",\n"
+              "                parameters=(\n"
+              "                    str(request.definition_id),\n"
+              "                    request.identity_digest,\n"
+              "                ),\n"
+              "                identity=\"source item semantics\",\n"
+              "            )\n"
+              "            if request.source_native_id is not None:\n"
+              "                self._ensure_semantic_absent(\n"
+              "                    conn,\n"
+              "                    table=\"source_items\",\n"
+              "                    predicate=\"definition_id=? AND source_native_id=?\",\n"
+              "                    parameters=(\n"
+              "                        str(request.definition_id),\n"
+              "                        request.source_native_id,\n"
+              "                    ),\n"
+              "                    identity=\"source-native item identity\",\n"
+              "                )\n",
+              "            if request.source_native_id is not None:\n"
+              "                self._ensure_semantic_absent(\n"
+              "                    conn,\n"
+              "                    table=\"source_items\",\n"
+              "                    predicate=\"definition_id=? AND source_native_id=?\",\n"
+              "                    parameters=(\n"
+              "                        str(request.definition_id),\n"
+              "                        request.source_native_id,\n"
+              "                    ),\n"
+              "                    identity=\"source-native item identity\",\n"
+              "                )\n"
+              "            self._ensure_semantic_absent(\n"
+              "                conn,\n"
+              "                table=\"source_items\",\n"
+              "                predicate=\"definition_id=? AND identity_digest=?\",\n"
+              "                parameters=(\n"
+              "                    str(request.definition_id),\n"
+              "                    request.identity_digest,\n"
+              "                ),\n"
+              "                identity=\"source item semantics\",\n"
+              "            )\n",
           )
-          '''
-          if code.count(ambiguous) != 1:
-              raise RuntimeError(
-                  "review payload does not contain one ambiguous version-uniqueness patch"
-              )
-          code = code.replace(ambiguous, narrowed, 1)
-          target = Path('/tmp/increment-3a-substantive-repair.py')
-          target.write_text(code, encoding='utf-8')
-          compile(code, str(target), 'exec')
-          print(f"extracted {len(code.splitlines())} reviewed repair lines")
+
+          replace_once(
+              "newsroom/tests/test_source_3a_review_regressions.py",
+              "    comparator_active = replace(\n"
+              "        request,\n"
+              "        coverage_mappings=(\n"
+              "  replace(\n"
+              "      request.coverage_mappings[0],\n"
+              "      contribution=CoverageContribution.COMPARATOR,\n"
+              "  ),\n"
+              "        ),\n"
+              "    )\n"
+              "    with pytest.raises(SourceContractError, match=\"Active coverage\"):\n"
+              "        comparator_active.__post_init__()\n",
+              "    with pytest.raises(SourceContractError, match=\"Active coverage\"):\n"
+              "        replace(\n"
+              "            request,\n"
+              "            coverage_mappings=(\n"
+              "                replace(\n"
+              "                    request.coverage_mappings[0],\n"
+              "                    contribution=CoverageContribution.COMPARATOR,\n"
+              "                ),\n"
+              "            ),\n"
+              "        )\n",
+          )
           PY
-            python /tmp/increment-3a-substantive-repair.py
-            python -m compileall -q newsroom
-            git diff --check
-          ) > /tmp/increment-3a-review-run.log 2>&1
-          status=$?
-          cat /tmp/increment-3a-review-run.log
-          exit "$status"
+          python -m compileall -q newsroom
+          git diff --check
 
-      - name: Persist fail-closed substantive repair diagnostic
-        if: steps.apply.outcome != 'success'
+      - name: Commit focused review corrections
         run: |
-          git fetch origin agent/increment-3a-source-registry
-          git reset --hard origin/agent/increment-3a-source-registry
-          mkdir -p docs/research
-          {
-            echo "Increment 3A substantive repair runner failed on ${GITHUB_SHA}."
-            echo
-            cat /tmp/increment-3a-review-run.log
-          } > docs/research/2026-07-27-increment-3a-review-runner-failure.log
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/research/2026-07-27-increment-3a-review-runner-failure.log
+          git add newsroom
           git diff --cached --check
-          git commit -m "chore(ci): retain Increment 3A review runner failure"
+          git commit -m "fix(sources): close focused Increment 3A review findings"
           git push origin HEAD:agent/increment-3a-source-registry
-          exit 1
-
-      - name: Commit substantive source-authority corrections
-        if: steps.apply.outcome == 'success'
-        id: commit
-        continue-on-error: true
-        run: |
-          set +e
-          (
-            set -euo pipefail
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add newsroom
-            git diff --cached --check
-            git diff --cached --stat
-            git commit -m "fix(sources): bind immutable lineage and redacted reads"
-            git push origin HEAD:agent/increment-3a-source-registry
-          ) > /tmp/increment-3a-review-commit.log 2>&1
-          status=$?
-          cat /tmp/increment-3a-review-commit.log
-          exit "$status"
-
-      - name: Persist fail-closed substantive commit diagnostic
-        if: steps.apply.outcome == 'success' && steps.commit.outcome != 'success'
-        run: |
-          git fetch origin agent/increment-3a-source-registry
-          git reset --hard origin/agent/increment-3a-source-registry
-          mkdir -p docs/research
-          {
-            echo "Increment 3A substantive repair commit failed on ${GITHUB_SHA}."
-            echo
-            cat /tmp/increment-3a-review-commit.log
-          } > docs/research/2026-07-27-increment-3a-review-commit-failure.log
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/research/2026-07-27-increment-3a-review-commit-failure.log
-          git diff --cached --check
-          git commit -m "chore(ci): retain Increment 3A review commit failure"
-          git push origin HEAD:agent/increment-3a-source-registry
-          exit 1
 
       - name: Set up Python
-        if: steps.apply.outcome == 'success' && steps.commit.outcome == 'success'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install locked development environment
-        if: steps.apply.outcome == 'success' && steps.commit.outcome == 'success'
         run: |
           python -m pip install --upgrade pip
           python -m pip install uv
           uv lock --check
           uv sync --dev --locked
 
-      - name: Run Increment 3A substantive and retained suites
-        if: steps.apply.outcome == 'success' && steps.commit.outcome == 'success'
+      - name: Run Increment 3A focused and retained suites
         id: focused
         continue-on-error: true
         run: |
@@ -176,7 +170,7 @@ jobs:
             --junitxml=increment-3a-focused-results.xml
 
       - name: Upload focused evidence
-        if: steps.apply.outcome == 'success' && steps.commit.outcome == 'success'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: increment-3a-focused-test-evidence
@@ -184,5 +178,5 @@ jobs:
           if-no-files-found: error
 
       - name: Enforce focused evidence
-        if: steps.apply.outcome == 'success' && steps.commit.outcome == 'success' && steps.focused.outcome != 'success'
+        if: steps.focused.outcome != 'success'
         run: exit 1
