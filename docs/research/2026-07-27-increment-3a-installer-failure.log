@@ -1,0 +1,13 @@
+Increment 3A installer failed on commit 29e21d65079e0c6df6f8d9d8eac859152d1fe2ee.
+
+Traceback (most recent call last):
+  File "/home/runner/work/newsroom/newsroom/.github/increment-3a-apply/apply.py", line 234, in <module>
+    main()
+  File "/home/runner/work/newsroom/newsroom/.github/increment-3a-apply/apply.py", line 228, in main
+    _patch_migration_chain()
+  File "/home/runner/work/newsroom/newsroom/.github/increment-3a-apply/apply.py", line 148, in _patch_migration_chain
+    text = _replace_once(
+           ^^^^^^^^^^^^^^
+  File "/home/runner/work/newsroom/newsroom/.github/increment-3a-apply/apply.py", line 50, in _replace_once
+    raise RuntimeError(
+RuntimeError: migration seam 'migration manifest' expected exactly once, found 0
