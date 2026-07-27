@@ -18,12 +18,14 @@ from newsroom.discovery_adapters import (
     TlsEvidence,
     TlsVersion,
     run_fixture_adapter,
+    validate_endpoint,
 )
 
 from .discovery_adapter_3b_helpers import (
     NOW,
     baseline,
     document_shape,
+    feed_shape,
     json_shape,
     request,
     scenario,
@@ -352,3 +354,110 @@ def test_proposal_rejects_cross_record_lineage_substitution() -> None:
                 capture_digest="sha256:" + "f" * 64,
             ),
         )
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    (
+        "https://fixture.example/a b",
+        "https://fixture.example/a/../b",
+        "https://fixture.example/%2E%2E/b",
+        "https://fixture.example/a\\b",
+        "https://fixture.example/?q=a b",
+        "https://fixture.example/?q=%0D%0AX:x",
+        "https://fixture.example/%2fambiguous",
+    ),
+)
+def test_endpoint_rejects_noncanonical_path_and_query_forms(
+    endpoint: str,
+) -> None:
+    with pytest.raises(AdapterContractError):
+        validate_endpoint(endpoint, request().endpoint_policy)
+
+
+def test_malformed_content_type_quoting_fails_closed() -> None:
+    result = run_fixture_adapter(
+        request(),
+        scenario(content_type='application/json; charset="utf-8""'),
+    )
+    assert result.outcome is ObservationProposalOutcome.MALFORMED
+    assert result.reason_codes == ("CONTENT_CONTRACT_REJECTED",)
+
+
+@pytest.mark.parametrize(
+    "kind,shape,content_type,body",
+    (
+        (
+            AdapterKind.RSS_ATOM,
+            feed_shape(),
+            "application/xml; charset=utf-8",
+            (
+                "<?xml version='1.0'?><rss><channel><item><guid>1</guid>"
+                "<title>café</title><link>https://fixture.example/1</link>"
+                "</item></channel></rss>"
+            ).encode("utf-16"),
+        ),
+        (
+            AdapterKind.MAINTAINED_DOCUMENT,
+            document_shape(),
+            "text/html; charset=utf-8",
+            b"<html><body>caf\xe9</body></html>",
+        ),
+    ),
+)
+def test_textual_parsers_require_actual_utf8_bytes(
+    kind: AdapterKind,
+    shape: SourceShapeContract,
+    content_type: str,
+    body: bytes,
+) -> None:
+    result = run_fixture_adapter(
+        request(kind=kind, shape=shape),
+        scenario(body=body, content_type=content_type),
+    )
+    assert result.outcome is ObservationProposalOutcome.MALFORMED
+    assert result.reason_codes == ("PARSER_REJECTED_INPUT",)
+
+
+def test_xml_declaration_cannot_override_utf8_transport_contract() -> None:
+    body = (
+        b'<?xml version="1.0" encoding="iso-8859-1"?>'
+        b"<rss><channel><item><guid>1</guid><title>One</title>"
+        b"<link>https://fixture.example/1</link></item></channel></rss>"
+    )
+    result = run_fixture_adapter(
+        request(kind=AdapterKind.RSS_ATOM, shape=feed_shape()),
+        scenario(body=body, content_type="application/xml; charset=utf-8"),
+    )
+    assert result.outcome is ObservationProposalOutcome.MALFORMED
+    assert result.reason_codes == ("PARSER_REJECTED_INPUT",)
+
+
+@pytest.mark.parametrize("status", (201, 202, 203, 207, 208, 226))
+def test_uncontracted_success_statuses_do_not_become_source_success(
+    status: int,
+) -> None:
+    result = run_fixture_adapter(request(), scenario(status=status))
+    assert result.outcome is ObservationProposalOutcome.TRANSPORT_FAILED
+    assert result.reason_codes == ("HTTP_SUCCESS_STATUS_UNSUPPORTED",)
+
+
+def test_partial_content_does_not_masquerade_as_complete_source_state() -> None:
+    result = run_fixture_adapter(request(), scenario(status=206))
+    assert result.outcome is ObservationProposalOutcome.TRANSPORT_FAILED
+    assert result.reason_codes == ("HTTP_PARTIAL_CONTENT_UNSUPPORTED",)
+
+
+@pytest.mark.parametrize("status", (204, 205))
+def test_bodyless_empty_success_statuses_retain_empty_capture(
+    status: int,
+) -> None:
+    result = run_fixture_adapter(
+        request(),
+        scenario(status=status, body=b"", content_type=None),
+    )
+    assert result.outcome is ObservationProposalOutcome.SUCCESS_EMPTY
+    assert result.incomplete is False
+    assert result.capture is not None
+    assert result.capture.body == b""
+    assert result.parser_result is None

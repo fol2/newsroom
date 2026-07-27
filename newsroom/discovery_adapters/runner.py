@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from newsroom.authority.canonical import digest_bytes, digest_canonical
 from newsroom.sources import ObservationModel
 
@@ -40,6 +42,12 @@ _ENCODING_HEADERS = {
     "deflate": BodyEncoding.DEFLATE,
 }
 _BODY_PROHIBITED_STATUS = frozenset({204, 205, 304})
+_SUPPORTED_BODY_SUCCESS_STATUS = frozenset({200})
+_SUPPORTED_EMPTY_SUCCESS_STATUS = frozenset({204, 205})
+_HTTP_TOKEN = re.compile(r"^[!#$%&'()*+.^_`|~0-9a-z-]+$")
+_MEDIA_TYPE = re.compile(
+    r"^[!#$%&'()*+.^_`|~0-9a-z-]+/[!#$%&'()*+.^_`|~0-9a-z-]+$"
+)
 
 
 def _reasons(
@@ -98,34 +106,68 @@ def _timing_failure(
     return None
 
 
+def _content_type_parameter(value: str) -> str:
+    selected = value.strip()
+    if not selected:
+        raise AdapterContractError(
+            "response content-type parameter is empty"
+        )
+    if selected.startswith('"') or selected.endswith('"'):
+        if (
+            len(selected) < 2
+            or not selected.startswith('"')
+            or not selected.endswith('"')
+            or '"' in selected[1:-1]
+            or "\\" in selected[1:-1]
+        ):
+            raise AdapterContractError(
+                "response content-type quoted parameter is malformed"
+            )
+        selected = selected[1:-1]
+    elif _HTTP_TOKEN.fullmatch(selected.lower()) is None:
+        raise AdapterContractError(
+            "response content-type parameter is malformed"
+        )
+    if not selected or any(
+        ord(character) < 0x20 or ord(character) == 0x7F
+        for character in selected
+    ):
+        raise AdapterContractError(
+            "response content-type parameter is malformed"
+        )
+    return selected.lower()
+
+
 def _parse_content_type(value: str | None) -> tuple[str, str]:
     if value is None:
         return "application/octet-stream", "utf-8"
     parts = [part.strip() for part in value.split(";")]
     media_type = parts[0].lower()
-    if not media_type or "/" not in media_type:
+    if _MEDIA_TYPE.fullmatch(media_type) is None:
         raise AdapterContractError(
             "response content type is malformed"
         )
     charset = "utf-8"
     seen: set[str] = set()
     for parameter in parts[1:]:
-        if not parameter:
-            continue
-        if "=" not in parameter:
+        if not parameter or "=" not in parameter:
             raise AdapterContractError(
                 "response content-type parameter is malformed"
             )
         name, raw_value = parameter.split("=", 1)
         name = name.strip().lower()
-        raw_value = raw_value.strip().strip('"').lower()
+        if _HTTP_TOKEN.fullmatch(name) is None:
+            raise AdapterContractError(
+                "response content-type parameter name is malformed"
+            )
         if name in seen:
             raise AdapterContractError(
                 "response content-type parameter is duplicated"
             )
         seen.add(name)
+        selected = _content_type_parameter(raw_value)
         if name == "charset":
-            charset = raw_value
+            charset = selected
     return media_type, charset
 
 
@@ -513,6 +555,72 @@ def run_fixture_adapter(
             ),
             quarantine=QuarantineRecommendation.NONE,
             incomplete=False,
+            receipt=receipt,
+        )
+
+    if status in _SUPPORTED_EMPTY_SUCCESS_STATUS:
+        receipt = _receipt(
+            request,
+            scenario,
+            final_url=final_url,
+            failure_kind=None,
+            decompressed=b"",
+        )
+        capture = _capture(
+            request,
+            scenario,
+            receipt,
+            content_type="application/octet-stream",
+            charset="utf-8",
+            body=b"",
+        )
+        return _proposal(
+            request,
+            scenario,
+            outcome=ObservationProposalOutcome.SUCCESS_EMPTY,
+            reason_codes=_reasons(
+                scenario,
+                f"HTTP_{status}_SUCCESS_EMPTY",
+            ),
+            quarantine=QuarantineRecommendation.NONE,
+            incomplete=False,
+            receipt=receipt,
+            capture=capture,
+        )
+
+    if status == 206:
+        receipt = _receipt(
+            request,
+            scenario,
+            final_url=final_url,
+            failure_kind=None,
+            decompressed=None,
+        )
+        return _proposal(
+            request,
+            scenario,
+            outcome=ObservationProposalOutcome.TRANSPORT_FAILED,
+            reason_codes=("HTTP_PARTIAL_CONTENT_UNSUPPORTED",),
+            quarantine=QuarantineRecommendation.REVIEW,
+            incomplete=True,
+            receipt=receipt,
+        )
+
+    if 200 <= status <= 299 and status not in _SUPPORTED_BODY_SUCCESS_STATUS:
+        receipt = _receipt(
+            request,
+            scenario,
+            final_url=final_url,
+            failure_kind=None,
+            decompressed=None,
+        )
+        return _proposal(
+            request,
+            scenario,
+            outcome=ObservationProposalOutcome.TRANSPORT_FAILED,
+            reason_codes=("HTTP_SUCCESS_STATUS_UNSUPPORTED",),
+            quarantine=QuarantineRecommendation.REVIEW,
+            incomplete=True,
             receipt=receipt,
         )
 

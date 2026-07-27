@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+import re
 from typing import Any, Mapping
 
 from lxml import etree
@@ -34,6 +35,10 @@ from .types import (
 _MISSING = object()
 _PROHIBITED_XML_MARKERS = (b"<!doctype", b"<!entity")
 _PATH_LEAF = "\x00leaf"
+_XML_DECLARATION_ENCODING = re.compile(
+    r"^<\?xml[^>]*\bencoding\s*=\s*([\'\"])([^\'\"]+)\1",
+    re.IGNORECASE,
+)
 
 
 class _DuplicateJsonKey(AdapterContractError):
@@ -601,6 +606,13 @@ def _rss_atom_batch(
     contract: SourceShapeContract,
     limits: ParserLimits,
 ) -> _ParsedBatch:
+    text = _decode_utf8(data, identity="RSS/Atom XML")
+    declaration = text.lstrip("\ufeff \t\r\n")[:512]
+    encoding = _XML_DECLARATION_ENCODING.match(declaration)
+    if encoding is not None and encoding.group(2).lower() not in {"utf-8", "utf8"}:
+        raise AdapterContractError(
+            "RSS/Atom XML declaration differs from UTF-8 transport contract"
+        )
     lowered = data.lower()
     if any(marker in lowered for marker in _PROHIBITED_XML_MARKERS):
         raise AdapterContractError(
@@ -672,6 +684,7 @@ def _maintained_document_batch(
         )
         value = {"body": text.strip()}
     elif capture.content_type == "text/html":
+        _decode_utf8(capture.body, identity="maintained HTML")
         lowered = capture.body.lower()
         if b"<!entity" in lowered:
             raise AdapterContractError(
