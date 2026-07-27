@@ -266,12 +266,11 @@ class ObservableTransitionRequest:
             raise CheckContractError(
                 "state-changing transition requires change facets"
             )
-        if (
+        if (self.current_revision_id is None) != (
             self.representation_id is None
-            and self.current_revision_id is not None
         ):
             raise CheckContractError(
-                "current Revision transition requires Representation"
+                "transition current Revision and Representation move together"
             )
 
     def canonical_value(self) -> dict[str, object]:
