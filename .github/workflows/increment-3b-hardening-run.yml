@@ -1,0 +1,117 @@
+name: Increment 3B exact-head hardening driver
+
+on:
+  push:
+    branches:
+      - agent/increment-3b-generic-adapters
+    paths:
+      - .github/workflows/increment-3b-hardening-run.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: increment-3b-contract-hardening
+  cancel-in-progress: true
+
+jobs:
+  harden-test-and-push:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact Increment 3B branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-3b-generic-adapters
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Extract and execute reviewed hardening patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path('.github/workflows/increment-3b-hardening.yml')
+          lines = source.read_text(encoding='utf-8').splitlines()
+          step = lines.index('      - name: Apply exact reviewed contract corrections')
+          run = lines.index('        run: |', step) + 1
+          end = next(
+              index
+              for index in range(run, len(lines))
+              if lines[index].startswith('      - name:')
+          )
+          prefix = ' ' * 10
+          script = '\n'.join(
+              line[len(prefix):] if line.startswith(prefix) else line
+              for line in lines[run:end]
+          ) + '\n'
+          target = Path('/tmp/increment-3b-hardening.sh')
+          target.write_text(script, encoding='utf-8')
+          compile_lines = [
+              line for line in script.splitlines()
+              if line.strip().startswith('python - <<')
+          ]
+          if len(compile_lines) != 1:
+              raise SystemExit('reviewed hardening script boundary differs')
+          PY
+          bash /tmp/increment-3b-hardening.sh
+
+      - name: Install locked development environment
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Run reviewed Increment 3B and retained Increment 3A suites
+        run: |
+          set -euo pipefail
+          uv run python -m pytest -q \
+            newsroom/tests/test_discovery_adapter_3b_*.py \
+            newsroom/tests/test_source_3a_contracts.py \
+            newsroom/tests/test_source_3a_authority.py \
+            newsroom/tests/test_source_3a_lifecycle_integrity.py \
+            newsroom/tests/test_source_3a_review_regressions.py \
+            newsroom/tests/test_source_3a_traceability.py \
+            --junitxml="${RUNNER_TEMP}/increment-3b-hardening.xml"
+
+      - name: Run full repository and clustering regression
+        run: |
+          set -euo pipefail
+          uv run python -m pytest -q
+          uv run python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+      - name: Commit and push verified hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          checked_head="$(cat "${RUNNER_TEMP}/increment-3b-hardening-head")"
+          git fetch origin agent/increment-3b-generic-adapters
+          test "$(git rev-parse origin/agent/increment-3b-generic-adapters)" = "${checked_head}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm \
+            .github/workflows/increment-3b-hardening.yml \
+            .github/workflows/increment-3b-hardening-run.yml
+          git add -- \
+            newsroom/discovery_adapters/parsers.py \
+            newsroom/discovery_adapters/runner.py \
+            newsroom/tests/test_discovery_adapter_3b_review_regressions.py
+          git diff --cached --check
+          git commit -m "fix(adapters): harden URI charset and HTTP response contracts"
+          git push origin HEAD:agent/increment-3b-generic-adapters
+
+      - name: Upload focused hardening evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-3b-hardening-evidence
+          path: ${{ runner.temp }}/increment-3b-hardening.xml
+          if-no-files-found: warn
+          retention-days: 90
