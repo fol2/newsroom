@@ -12,19 +12,13 @@ on:
     paths:
       - .github/increment-3a-apply/**
       - .github/workflows/increment-3a-apply.yml
-  push:
-    branches:
-      - agent/increment-3a-source-registry
-    paths:
-      - .github/increment-3a-apply/**
-      - .github/workflows/increment-3a-apply.yml
 
 permissions:
   contents: write
 
 concurrency:
   group: increment-3a-source-installer
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   apply:
