@@ -1,0 +1,464 @@
+name: Increment 3B contract hardening
+
+on:
+  push:
+    branches:
+      - agent/increment-3b-generic-adapters
+    paths:
+      - .github/workflows/increment-3b-hardening.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: increment-3b-contract-hardening
+  cancel-in-progress: true
+
+jobs:
+  harden-test-and-push:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact Increment 3B branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/increment-3b-generic-adapters
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Apply exact reviewed contract corrections
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "${RUNNER_TEMP}/increment-3b-hardening-head"
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f"{path}: expected one reviewed replacement, found {count}"
+                  )
+              target.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          def replace_region(
+              path: str,
+              start_marker: str,
+              end_marker: str,
+              replacement: str,
+          ) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              start = text.find(start_marker)
+              end = text.find(end_marker, start + len(start_marker))
+              if start < 0 or end < 0 or text.find(start_marker, start + 1) >= 0:
+                  raise SystemExit(f"{path}: reviewed region markers differ")
+              target.write_text(
+                  text[:start] + replacement + text[end:],
+                  encoding="utf-8",
+              )
+
+          runner = "newsroom/discovery_adapters/runner.py"
+          replace_once(
+              runner,
+              "from __future__ import annotations\n\n",
+              "from __future__ import annotations\n\nimport re\n\n",
+          )
+          replace_once(
+              runner,
+              "_BODY_PROHIBITED_STATUS = frozenset({204, 205, 304})\n",
+              "_BODY_PROHIBITED_STATUS = frozenset({204, 205, 304})\n"
+              "_SUPPORTED_BODY_SUCCESS_STATUS = frozenset({200})\n"
+              "_SUPPORTED_EMPTY_SUCCESS_STATUS = frozenset({204, 205})\n"
+              "_HTTP_TOKEN = re.compile(r\"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$\")\n"
+              "_MEDIA_TYPE = re.compile(\n"
+              "    r\"^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+$\"\n"
+              ")\n",
+          )
+          strict_content_type = '''def _content_type_parameter(value: str) -> str:
+              if not value:
+                  raise AdapterContractError(
+                      "response content-type parameter is empty"
+                  )
+              if value.startswith('"') or value.endswith('"'):
+                  if len(value) < 2 or not (
+                      value.startswith('"') and value.endswith('"')
+                  ):
+                      raise AdapterContractError(
+                          "response content-type quoted parameter is malformed"
+                      )
+                  inner = value[1:-1]
+                  if (
+                      not inner
+                      or "\\\\" in inner
+                      or '"' in inner
+                      or any(ord(character) < 0x20 or ord(character) == 0x7F for character in inner)
+                  ):
+                      raise AdapterContractError(
+                          "response content-type quoted parameter is malformed"
+                      )
+                  return inner.lower()
+              if _HTTP_TOKEN.fullmatch(value) is None:
+                  raise AdapterContractError(
+                      "response content-type parameter is malformed"
+                  )
+              return value.lower()
+
+
+          def _parse_content_type(value: str | None) -> tuple[str, str]:
+              if value is None:
+                  return "application/octet-stream", "utf-8"
+              if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+                  raise AdapterContractError(
+                      "response content type contains a control character"
+                  )
+              parts = [part.strip() for part in value.split(";")]
+              media_type = parts[0].lower()
+              if _MEDIA_TYPE.fullmatch(media_type) is None:
+                  raise AdapterContractError(
+                      "response content type is malformed"
+                  )
+              charset = "utf-8"
+              seen: set[str] = set()
+              for parameter in parts[1:]:
+                  if not parameter or "=" not in parameter:
+                      raise AdapterContractError(
+                          "response content-type parameter is malformed"
+                      )
+                  name, raw_value = parameter.split("=", 1)
+                  name = name.strip().lower()
+                  raw_value = raw_value.strip()
+                  if _HTTP_TOKEN.fullmatch(name) is None:
+                      raise AdapterContractError(
+                          "response content-type parameter name is malformed"
+                      )
+                  if name in seen:
+                      raise AdapterContractError(
+                          "response content-type parameter is duplicated"
+                      )
+                  seen.add(name)
+                  parsed_value = _content_type_parameter(raw_value)
+                  if name == "charset":
+                      charset = parsed_value
+              return media_type, charset
+
+
+          '''
+          strict_content_type = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in strict_content_type.splitlines()
+          ) + "\n"
+          replace_region(
+              runner,
+              "def _parse_content_type(value: str | None) -> tuple[str, str]:\n",
+              "def _encoding_from_headers(\n",
+              strict_content_type,
+          )
+          replace_once(
+              runner,
+              "    mapped = _STATUS_REASONS.get(status)\n",
+              '''    if status in _SUPPORTED_EMPTY_SUCCESS_STATUS:
+              receipt = _receipt(
+                  request,
+                  scenario,
+                  final_url=final_url,
+                  failure_kind=None,
+                  decompressed=b"",
+              )
+              return _proposal(
+                  request,
+                  scenario,
+                  outcome=ObservationProposalOutcome.SUCCESS_EMPTY,
+                  reason_codes=_reasons(
+                      scenario,
+                      f"HTTP_{status}_EMPTY_SUCCESS",
+                  ),
+                  quarantine=QuarantineRecommendation.NONE,
+                  incomplete=False,
+                  receipt=receipt,
+              )
+
+              if status == 206:
+                  receipt = _receipt(
+                      request,
+                      scenario,
+                      final_url=final_url,
+                      failure_kind=None,
+                      decompressed=None,
+                  )
+                  return _proposal(
+                      request,
+                      scenario,
+                      outcome=ObservationProposalOutcome.TRANSPORT_FAILED,
+                      reason_codes=("HTTP_PARTIAL_CONTENT_UNSUPPORTED",),
+                      quarantine=QuarantineRecommendation.REVIEW,
+                      incomplete=True,
+                      receipt=receipt,
+                  )
+
+              if (
+                  200 <= status <= 299
+                  and status not in _SUPPORTED_BODY_SUCCESS_STATUS
+              ):
+                  receipt = _receipt(
+                      request,
+                      scenario,
+                      final_url=final_url,
+                      failure_kind=None,
+                      decompressed=None,
+                  )
+                  return _proposal(
+                      request,
+                      scenario,
+                      outcome=ObservationProposalOutcome.TRANSPORT_FAILED,
+                      reason_codes=("HTTP_SUCCESS_STATUS_UNSUPPORTED",),
+                      quarantine=QuarantineRecommendation.REVIEW,
+                      incomplete=True,
+                      receipt=receipt,
+                  )
+
+              mapped = _STATUS_REASONS.get(status)
+          '''.replace("\n              ", "\n    ").lstrip(),
+          )
+
+          parsers = "newsroom/discovery_adapters/parsers.py"
+          replace_once(parsers, "import math\n", "import math\nimport re\n")
+          replace_once(
+              parsers,
+              '_PATH_LEAF = "\\x00leaf"\n',
+              '_PATH_LEAF = "\\x00leaf"\n'
+              '_XML_DECLARATION_ENCODING = re.compile(\n'
+              '    br"<\\?xml[^>]*\\bencoding\\s*=\\s*([\\\'\\\"])(?P<encoding>[^\\\'\\\"]+)\\1",\n'
+              '    re.IGNORECASE,\n'
+              ')\n',
+          )
+          replace_once(
+              parsers,
+              ") -> _ParsedBatch:\n    lowered = data.lower()\n",
+              ") -> _ParsedBatch:\n"
+              "    _decode_utf8(data, identity=\"RSS/Atom XML\")\n"
+              "    declaration = _XML_DECLARATION_ENCODING.search(data[:512])\n"
+              "    if declaration is not None:\n"
+              "        declared = declaration.group(\"encoding\").lower()\n"
+              "        if declared not in {b\"utf-8\", b\"utf8\"}:\n"
+              "            raise AdapterContractError(\n"
+              "                \"XML declaration encoding conflicts with UTF-8 transport contract\"\n"
+              "            )\n"
+              "    lowered = data.lower()\n",
+          )
+          replace_once(
+              parsers,
+              '    elif capture.content_type == "text/html":\n        lowered = capture.body.lower()\n',
+              '    elif capture.content_type == "text/html":\n'
+              '        _decode_utf8(\n'
+              '            capture.body,\n'
+              '            identity="maintained HTML",\n'
+              '        )\n'
+              '        lowered = capture.body.lower()\n',
+          )
+
+          tests = "newsroom/tests/test_discovery_adapter_3b_review_regressions.py"
+          replace_once(
+              tests,
+              "    TlsVersion,\n    run_fixture_adapter,\n",
+              "    TlsVersion,\n    run_fixture_adapter,\n    validate_endpoint,\n",
+          )
+          replace_once(
+              tests,
+              "    document_shape,\n    json_shape,\n",
+              "    document_shape,\n    feed_shape,\n    json_shape,\n",
+          )
+          marker = "def test_endpoint_rejects_noncanonical_components"
+          target = Path(tests)
+          text = target.read_text(encoding="utf-8")
+          if marker in text:
+              raise SystemExit("review hardening tests already exist")
+          text += '''
+
+          @pytest.mark.parametrize(
+              "url",
+              (
+                  "https://fixture.example/raw space",
+                  "https://fixture.example/a/../b",
+                  "https://fixture.example/%2E%2E/secret",
+                  "https://fixture.example/a\\\\b",
+                  "https://fixture.example/items?q=raw space",
+                  "https://fixture.example/items?q=%0D%0Aheader",
+                  "https://fixture.example/items?q=%2f",
+              ),
+          )
+          def test_endpoint_rejects_noncanonical_components(url: str) -> None:
+              with pytest.raises(AdapterContractError):
+                  validate_endpoint(url, request().endpoint_policy)
+
+
+          @pytest.mark.parametrize(
+              "content_type",
+              (
+                  'application/json; charset="utf-8',
+                  'application/json; charset=utf-8"',
+                  'application/json; charset="utf\\\\8"',
+                  'application/json; charset=',
+              ),
+          )
+          def test_malformed_content_type_quoting_is_rejected(
+              content_type: str,
+          ) -> None:
+              result = run_fixture_adapter(
+                  request(),
+                  scenario(content_type=content_type),
+              )
+              assert result.outcome is ObservationProposalOutcome.MALFORMED
+              assert result.reason_codes == ("CONTENT_TYPE_REJECTED",)
+
+
+          @pytest.mark.parametrize(
+              ("kind", "shape", "body", "content_type"),
+              (
+                  (
+                      AdapterKind.RSS_ATOM,
+                      feed_shape(),
+                      b"\\xff<rss><channel /></rss>",
+                      "application/rss+xml; charset=utf-8",
+                  ),
+                  (
+                      AdapterKind.MAINTAINED_DOCUMENT,
+                      document_shape(),
+                      b"<html><body>\\xff</body></html>",
+                      "text/html; charset=utf-8",
+                  ),
+              ),
+          )
+          def test_textual_parsers_prove_actual_utf8_bytes(
+              kind: AdapterKind,
+              shape: SourceShapeContract,
+              body: bytes,
+              content_type: str,
+          ) -> None:
+              result = run_fixture_adapter(
+                  request(kind=kind, shape=shape),
+                  scenario(body=body, content_type=content_type),
+              )
+              assert result.outcome is ObservationProposalOutcome.MALFORMED
+              assert result.parser_result is not None
+              assert result.parser_result.issues[0].code == "PARSER_REJECTED"
+
+
+          def test_xml_declaration_cannot_override_utf8_transport_contract() -> None:
+              body = (
+                  b'<?xml version="1.0" encoding="iso-8859-1"?>'
+                  b"<rss><channel /></rss>"
+              )
+              result = run_fixture_adapter(
+                  request(kind=AdapterKind.RSS_ATOM, shape=feed_shape()),
+                  scenario(
+                      body=body,
+                      content_type="application/rss+xml; charset=utf-8",
+                  ),
+              )
+              assert result.outcome is ObservationProposalOutcome.MALFORMED
+              assert result.parser_result is not None
+              assert result.parser_result.issues[0].code == "PARSER_REJECTED"
+
+
+          @pytest.mark.parametrize("status", (201, 202, 203, 207, 208, 226))
+          def test_uncontracted_success_status_cannot_masquerade_as_complete(
+              status: int,
+          ) -> None:
+              result = run_fixture_adapter(
+                  request(),
+                  scenario(status=status),
+              )
+              assert result.outcome is ObservationProposalOutcome.TRANSPORT_FAILED
+              assert result.reason_codes == ("HTTP_SUCCESS_STATUS_UNSUPPORTED",)
+
+
+          def test_partial_content_requires_an_explicit_future_contract() -> None:
+              result = run_fixture_adapter(
+                  request(),
+                  scenario(status=206),
+              )
+              assert result.outcome is ObservationProposalOutcome.TRANSPORT_FAILED
+              assert result.reason_codes == ("HTTP_PARTIAL_CONTENT_UNSUPPORTED",)
+
+
+          @pytest.mark.parametrize("status", (204, 205))
+          def test_bodyless_empty_success_statuses_remain_explicit(
+              status: int,
+          ) -> None:
+              result = run_fixture_adapter(
+                  request(),
+                  scenario(status=status, body=b"", content_type=None),
+              )
+              assert result.outcome is ObservationProposalOutcome.SUCCESS_EMPTY
+              assert result.incomplete is False
+              assert result.capture is None
+              assert result.parser_result is None
+          '''
+          text = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in text.splitlines()
+          ) + "\n"
+          target.write_text(text, encoding="utf-8")
+          PY
+          python -m compileall -q newsroom/discovery_adapters newsroom/tests
+          git diff --check
+
+      - name: Install locked development environment
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Run reviewed Increment 3B and retained Increment 3A suites
+        run: |
+          set -euo pipefail
+          uv run python -m pytest -q \
+            newsroom/tests/test_discovery_adapter_3b_*.py \
+            newsroom/tests/test_source_3a_contracts.py \
+            newsroom/tests/test_source_3a_authority.py \
+            newsroom/tests/test_source_3a_lifecycle_integrity.py \
+            newsroom/tests/test_source_3a_review_regressions.py \
+            newsroom/tests/test_source_3a_traceability.py \
+            --junitxml="${RUNNER_TEMP}/increment-3b-hardening.xml"
+
+      - name: Run full repository and clustering regression
+        run: |
+          set -euo pipefail
+          uv run python -m pytest -q
+          uv run python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+      - name: Commit and push verified hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          checked_head="$(cat "${RUNNER_TEMP}/increment-3b-hardening-head")"
+          git fetch origin agent/increment-3b-generic-adapters
+          test "$(git rev-parse origin/agent/increment-3b-generic-adapters)" = "${checked_head}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/increment-3b-hardening.yml
+          git add -- \
+            newsroom/discovery_adapters/parsers.py \
+            newsroom/discovery_adapters/runner.py \
+            newsroom/tests/test_discovery_adapter_3b_review_regressions.py
+          git diff --cached --check
+          git commit -m "fix(adapters): harden URI charset and HTTP response contracts"
+          git push origin HEAD:agent/increment-3b-generic-adapters
+
+      - name: Upload focused hardening evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-3b-hardening-evidence
+          path: ${{ runner.temp }}/increment-3b-hardening.xml
+          if-no-files-found: warn
+          retention-days: 90
