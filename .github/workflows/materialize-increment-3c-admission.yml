@@ -1,18 +1,14 @@
 name: Materialize Increment 3C proposal admission
 
 on:
-  push:
-    branches:
-      - agent/increment-3c-check-transition-authority
-    paths:
-      - .github/workflows/materialize-increment-3c-admission.yml
-      - .github/increment-3c-admission-payload/**
+  pull_request:
 
 permissions:
   contents: write
 
 jobs:
   materialize-test-and-push:
+    if: github.event.pull_request.head.ref == 'agent/increment-3c-check-transition-authority'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
