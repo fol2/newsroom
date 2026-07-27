@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ipaddress import ip_address
-from urllib.parse import SplitResult, urlsplit, urlunsplit
+from urllib.parse import SplitResult, unquote_to_bytes, urlsplit, urlunsplit
 
 from .models import (
     DnsEvidence,
@@ -10,6 +10,54 @@ from .models import (
     TlsEvidence,
 )
 from .types import AdapterContractError, EndpointPolicy, canonical_host
+
+
+_HEX = frozenset("0123456789ABCDEF")
+
+
+def _validate_uri_component(
+    value: str,
+    *,
+    field: str,
+    reject_dot_segments: bool = False,
+) -> None:
+    try:
+        value.encode("ascii", errors="strict")
+    except UnicodeError as exc:
+        raise AdapterContractError(
+            f"{field} must use ASCII with percent-encoded UTF-8"
+        ) from exc
+    index = 0
+    while index < len(value):
+        character = value[index]
+        code = ord(character)
+        if code <= 0x20 or code == 0x7F or character == "\\":
+            raise AdapterContractError(
+                f"{field} contains raw whitespace, control or backslash"
+            )
+        if character != "%":
+            index += 1
+            continue
+        if (
+            index + 2 >= len(value)
+            or value[index + 1] not in _HEX
+            or value[index + 2] not in _HEX
+        ):
+            raise AdapterContractError(
+                f"{field} percent encoding is not canonical uppercase hex"
+            )
+        decoded = int(value[index + 1 : index + 3], 16)
+        if decoded < 0x20 or decoded == 0x7F or decoded == 0x5C:
+            raise AdapterContractError(
+                f"{field} percent encoding contains a prohibited octet"
+            )
+        index += 3
+    if reject_dot_segments:
+        for segment in value.split("/"):
+            if unquote_to_bytes(segment) in {b".", b".."}:
+                raise AdapterContractError(
+                    "endpoint path contains a dot segment"
+                )
 
 
 def _split_endpoint(url: str) -> SplitResult:
@@ -39,6 +87,12 @@ def _split_endpoint(url: str) -> SplitResult:
         raise AdapterContractError("endpoint port is invalid") from exc
     netloc = host if port == 443 else f"{host}:{port}"
     path = parsed.path or "/"
+    _validate_uri_component(
+        path,
+        field="endpoint path",
+        reject_dot_segments=True,
+    )
+    _validate_uri_component(parsed.query, field="endpoint query")
     normalized = SplitResult("https", netloc, path, parsed.query, "")
     if urlunsplit(normalized) != url:
         raise AdapterContractError(
