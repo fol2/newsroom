@@ -27,7 +27,7 @@ from .check_models import (
     CandidateObservationRef,
     CheckOutcomeRequest,
 )
-from .record_models import CheckOutcome
+from .record_models import BaselineDecision, CheckOutcome, ObservableTransition
 from .types import (
     CheckAttemptId,
     CheckAuthorityError,
@@ -334,6 +334,8 @@ class ProposalAdmissionResult:
     request: ProposalAdmissionRequest
     outcome: CheckOutcome
     observations: tuple[AdmittedSourceObservation, ...]
+    baseline: BaselineDecision | None = None
+    transitions: tuple[ObservableTransition, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.request, ProposalAdmissionRequest):
@@ -369,6 +371,38 @@ class ProposalAdmissionResult:
             raise CheckContractError(
                 "proposal admission Occurrence differs from Outcome"
             )
+        if self.baseline is not None:
+            if (
+                not isinstance(self.baseline, BaselineDecision)
+                or self.baseline.request.check_outcome_id
+                != self.outcome.request.outcome_id
+            ):
+                raise CheckContractError(
+                    "proposal admission baseline differs from Outcome"
+                )
+        if not isinstance(self.transitions, tuple) or any(
+            not isinstance(item, ObservableTransition)
+            for item in self.transitions
+        ):
+            raise CheckContractError(
+                "proposal admission transitions must be a typed tuple"
+            )
+        if self.transitions != tuple(
+            sorted(
+                self.transitions,
+                key=lambda item: str(item.request.transition_id),
+            )
+        ):
+            raise CheckContractError(
+                "proposal admission transitions must be sorted"
+            )
+        if any(
+            item.request.check_outcome_id != self.outcome.request.outcome_id
+            for item in self.transitions
+        ):
+            raise CheckContractError(
+                "proposal admission transition differs from Outcome"
+            )
 
     @property
     def replayed(self) -> bool:
@@ -385,6 +419,15 @@ class ProposalAdmissionResult:
             "outcome_replayed": self.outcome.replayed,
             "observations": [
                 item.canonical_value() for item in self.observations
+            ],
+            "baseline_id": (
+                None
+                if self.baseline is None
+                else str(self.baseline.request.decision_id)
+            ),
+            "transition_ids": [
+                str(item.request.transition_id)
+                for item in self.transitions
             ],
         }
 

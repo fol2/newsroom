@@ -9,6 +9,7 @@ from newsroom.checks import (
     AdmissionRecordState,
     CheckAttemptId,
     CheckRequestId,
+    ObservableTransitionKind,
     ProposalAdmissionConflict,
     ProposalAdmissionRequest,
 )
@@ -18,6 +19,7 @@ from newsroom.discovery_adapters import (
     CaptureId,
     Header,
     ObservationBaseline,
+    ConditionalValidator,
     ObservationProposalId,
     ObservationProposalOutcome,
     ParserResultId,
@@ -185,6 +187,9 @@ def test_changed_proposal_commits_exact_lineage_and_replays(tmp_path) -> None:
     result = system.checks.admit_proposal(admission, proof=proof())
 
     assert result.outcome.request.kind.value == "SUCCESS_CHANGED"
+    assert result.baseline is not None
+    assert result.baseline.request.disposition.value == "MAINTAINED_BASELINE_ONLY"
+    assert result.transitions == ()
     assert len(result.observations) == 1
     observed = result.observations[0]
     assert observed.item_state is AdmissionRecordState.CREATED
@@ -199,6 +204,9 @@ def test_changed_proposal_commits_exact_lineage_and_replays(tmp_path) -> None:
     replay = system.checks.admit_proposal(admission, proof=proof())
     assert replay.replayed is True
     assert replay.outcome.event_id == result.outcome.event_id
+    assert replay.baseline is not None
+    assert replay.baseline.event_id == result.baseline.event_id
+    assert replay.transitions == ()
     assert replay.observations[0].occurrence.event_id == observed.occurrence.event_id
     system.close()
 
@@ -255,12 +263,7 @@ def test_new_parser_on_unchanged_source_creates_representation_only(tmp_path) ->
         producer_slot_digest=parser_result.producer_slot_digest,
         representation_digest=parser_result.representation_digest,
         item_keys=parser_result.item_keys,
-        validator=first_request.baseline.validator if first_request.baseline else (
-            __import__(
-                "newsroom.discovery_adapters",
-                fromlist=["ConditionalValidator"],
-            ).ConditionalValidator(etag='"fixture-etag"')
-        ),
+        validator=ConditionalValidator(etag='"fixture-etag"'),
         recorded_at=NOW,
     )
     second_request = _adapter_request(
@@ -289,6 +292,8 @@ def test_new_parser_on_unchanged_source_creates_representation_only(tmp_path) ->
         proof=proof(),
     )
 
+    assert second.baseline is None
+    assert second.transitions == ()
     assert len(second.observations) == 1
     observed = second.observations[0]
     assert observed.item_state is AdmissionRecordState.REUSED
@@ -312,6 +317,107 @@ def test_new_parser_on_unchanged_source_creates_representation_only(tmp_path) ->
         assert conn.execute(
             "SELECT COUNT(*) FROM discovery_occurrences"
         ).fetchone()[0] == 2
+
+
+def test_changed_maintained_state_creates_revision_and_revised_transition(
+    tmp_path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    system = open_check_system(database)
+    _seed_source(system)
+
+    first_request = _adapter_request(suffix=1)
+    first_proposal = run_fixture_adapter(
+        first_request,
+        _scenario(first_request, suffix=1),
+    )
+    first_check, first_attempt = _seed_check(
+        system,
+        first_request,
+        suffix=1,
+    )
+    first = system.checks.admit_proposal(
+        _admission(
+            first_check,
+            first_attempt,
+            first_request,
+            first_proposal,
+        ),
+        proof=proof(),
+    )
+    parser_result = first_proposal.parser_result
+    assert parser_result is not None
+    baseline = ObservationBaseline(
+        source_definition_version_id=VERSION_ID,
+        validator_contract=first_request.validator_contract,
+        source_body_digest=parser_result.source_body_digest,
+        producer_slot_digest=parser_result.producer_slot_digest,
+        representation_digest=parser_result.representation_digest,
+        item_keys=parser_result.item_keys,
+        validator=ConditionalValidator(etag='"fixture-etag"'),
+        recorded_at=NOW,
+    )
+    second_request = _adapter_request(suffix=3, baseline=baseline)
+    second_proposal = run_fixture_adapter(
+        second_request,
+        _scenario(
+            second_request,
+            suffix=3,
+            body=b"Second maintained guidance.",
+        ),
+    )
+    assert second_proposal.outcome is ObservationProposalOutcome.SUCCESS_CHANGED
+    second_check, second_attempt = _seed_check(
+        system,
+        second_request,
+        suffix=3,
+    )
+
+    second = system.checks.admit_proposal(
+        _admission(
+            second_check,
+            second_attempt,
+            second_request,
+            second_proposal,
+        ),
+        proof=proof(),
+    )
+
+    assert second.baseline is None
+    assert len(second.transitions) == 1
+    transition = second.transitions[0]
+    assert transition.request.kind is ObservableTransitionKind.REVISED
+    observed = second.observations[0]
+    prior = first.observations[0]
+    assert observed.item.event_id == prior.item.event_id
+    assert observed.revision.request.prior_revision_id == prior.revision.request.revision_id
+    assert observed.revision.request.revision_id != prior.revision.request.revision_id
+    assert transition.request.prior_revision_id == prior.revision.request.revision_id
+    assert transition.request.current_revision_id == observed.revision.request.revision_id
+    assert (
+        transition.request.representation_id
+        == observed.representation.request.representation_id
+    )
+
+    replay = system.checks.admit_proposal(
+        _admission(
+            second_check,
+            second_attempt,
+            second_request,
+            second_proposal,
+        ),
+        proof=proof(),
+    )
+    assert replay.replayed is True
+    assert replay.transitions[0].event_id == transition.event_id
+    system.close()
+
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM baseline_decisions").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM source_revisions").fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT COUNT(*) FROM observable_transitions"
+        ).fetchone()[0] == 1
 
 
 def test_outcome_prefix_replay_resumes_source_admission(tmp_path) -> None:

@@ -7,6 +7,9 @@ from newsroom.authority._capability import _AuthorizedCommandGrant
 from newsroom.authority.canonical import digest_canonical
 from newsroom.authority.types import TimePrecision, UtcTimestamp
 from newsroom.discovery_adapters import ParsedItem
+from newsroom.checks.baseline_models import BaselineDecisionRequest
+from newsroom.checks.record_models import BaselineDecision, ObservableTransition
+from newsroom.checks.transition_models import ObservableTransitionRequest
 from newsroom.sources import (
     DiscoveryOccurrence,
     DiscoveryOccurrenceRequest,
@@ -19,6 +22,23 @@ from newsroom.sources import (
     SourceRevisionRequest,
     SourceTime,
 )
+
+
+
+@dataclass(frozen=True, slots=True)
+class _DecisionPlan:
+    baseline: BaselineDecision | None
+    baseline_request: BaselineDecisionRequest | None
+    transitions: tuple[ObservableTransition, ...]
+    transition_requests: tuple[ObservableTransitionRequest, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _AuthorizedDecisionPlan:
+    plan: _DecisionPlan
+    baseline_grant: _AuthorizedCommandGrant | None
+    transition_grants: tuple[_AuthorizedCommandGrant, ...]
+
 
 @dataclass(frozen=True, slots=True)
 class _ObservationPlan:
@@ -78,7 +98,9 @@ def _source_time(item: ParsedItem, field_name: str) -> SourceTime:
 
 
 __all__ = [
+    "_AuthorizedDecisionPlan",
     "_AuthorizedPlan",
+    "_DecisionPlan",
     "_ObservationPlan",
     "_field_map",
     "_identity_component_name",

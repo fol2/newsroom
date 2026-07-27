@@ -25,7 +25,10 @@ from newsroom.sources import (
     SourceStateError,
 )
 
-from ._proposal_admission_models import _AuthorizedPlan
+from ._proposal_admission_models import (
+    _AuthorizedDecisionPlan,
+    _AuthorizedPlan,
+)
 
 
 _Record = TypeVar("_Record")
@@ -202,6 +205,72 @@ class _ProposalAdmissionCommitMixin:
             ),
         )
 
+    def _commit_decisions(
+        self,
+        authorized: _AuthorizedDecisionPlan,
+    ):
+        plan = authorized.plan
+        baseline = plan.baseline
+        if plan.baseline_request is not None:
+            assert authorized.baseline_grant is not None
+            try:
+                baseline = self._store.commit_baseline_decision(
+                    authorized.baseline_grant,
+                    request=plan.baseline_request,
+                )
+            except (
+                CheckIdentifierReuse,
+                CheckSemanticCollision,
+                CheckStateError,
+                sqlite3.IntegrityError,
+            ) as exc:
+                baseline = self._store.baseline_decision(
+                    plan.baseline_request.decision_id
+                )
+                if (
+                    baseline is None
+                    or baseline.request.digest
+                    != plan.baseline_request.digest
+                ):
+                    raise ProposalAdmissionConflict(
+                        "Baseline Decision conflicted with retained authority"
+                    ) from exc
+
+        transitions = list(plan.transitions)
+        for request, grant in zip(
+            plan.transition_requests,
+            authorized.transition_grants,
+            strict=True,
+        ):
+            try:
+                transition = self._store.commit_observable_transition(
+                    grant,
+                    request=request,
+                )
+            except (
+                CheckIdentifierReuse,
+                CheckSemanticCollision,
+                CheckStateError,
+                sqlite3.IntegrityError,
+            ) as exc:
+                transition = self._store.observable_transition(
+                    request.transition_id
+                )
+                if (
+                    transition is None
+                    or transition.request.digest != request.digest
+                ):
+                    raise ProposalAdmissionConflict(
+                        "Observable Transition conflicted with retained authority"
+                    ) from exc
+            transitions.append(transition)
+        return baseline, tuple(
+            sorted(
+                transitions,
+                key=lambda item: str(item.request.transition_id),
+            )
+        )
+
     def _commit_outcome(
         self,
         request,
@@ -285,6 +354,16 @@ class _ProposalAdmissionCommitMixin:
             self._authorize_plan(plan, proof)
             for plan in plans
         )
+        decision_plan = self._plan_decisions(
+            request,
+            plans,
+            version=version,
+            retained_request=retained_request,
+        )
+        authorized_decisions = self._authorize_decisions(
+            decision_plan,
+            proof,
+        )
         outcome = self._commit_outcome(
             outcome_request,
             outcome_grant,
@@ -298,10 +377,15 @@ class _ProposalAdmissionCommitMixin:
                 key=lambda item: item.item_key,
             )
         )
+        baseline, transitions = self._commit_decisions(
+            authorized_decisions
+        )
         return ProposalAdmissionResult(
             request=request,
             outcome=outcome,
             observations=observations,
+            baseline=baseline,
+            transitions=transitions,
         )
 
 
