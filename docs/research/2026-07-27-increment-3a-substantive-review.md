@@ -15,11 +15,13 @@ The Increment 3A implementation now provides a production-shaped, repository-nat
 Current substantive-review disposition:
 
 - P1 findings: **0**;
-- P2 findings found and corrected: **12**;
+- P2 findings found and corrected: **13**;
 - unresolved P1/P2 findings: **0**;
 - focused retained/new tests: **78 passed**;
 - focused failures, errors and skips: **0**;
-- temporary materialisation or review transport retained in the PR: **0 files**.
+- timed authenticated service tests: **32 passed**;
+- timed authenticated service failures, errors and skips: **0**;
+- temporary materialisation, review or timing transport retained in the PR: **0 files**.
 
 This document is the owner-authored final-evidence trigger. The exact reviewed head and final workflow run identities are recorded in PR #210 after the required workflows complete for this commit.
 
@@ -92,6 +94,10 @@ Source-native item identifiers are unique within one Source Definition. Source-n
 
 The corrupted review record was replaced completely. All installer, repair-runner and retained failure-diagnostic files were removed after materialisation and focused verification. PR #210 now contains only intended implementation, migration, test and durable documentation files.
 
+### P2-13 — Repeated administrative Neo4j driver creation exhausted service-lane margin
+
+The first final-evidence attempt passed all ordinary and authenticated Neo4j workflows but the signed SDLC service process reached the unchanged 55-second hard deadline. The complete-projection actual-service test module created many short-lived administrative drivers for setup, inspection and cleanup. Those calls now reuse one process-scoped authenticated driver, closed through `atexit`; every production adapter, system boundary, destructive test, credential-failure test and all 32 service scenarios remain unchanged. Source-integrity documentation whitespace found by the same signed run was also removed rather than bypassed.
+
 ## Adversarial evidence added
 
 `newsroom/tests/test_source_3a_review_regressions.py` proves:
@@ -127,6 +133,32 @@ skipped: 0
 ```
 
 The focused set includes retained Projection B1, complete-projection 2B, retrieval 2C, Candidate 2D and relation 2A migration/authority compatibility plus all Increment 3A contract, authority, lifecycle-integrity, adversarial-review and traceability tests.
+
+## Timed service-margin evidence
+
+Workflow run `30260027624` applied the bounded connection-reuse correction, executed the exact permanent service manifest under the unchanged 55-second timeout and removed its proof workflow after success.
+
+Artifact:
+
+```text
+name: increment-3a-service-margin-evidence
+artifact id: 8650516596
+artifact digest: sha256:486d281950ffcc7273f1c447bd3bb34260cc8d48f91ac035853b2ecca4e2b7ee
+```
+
+Retained result:
+
+```text
+tests: 32
+failures: 0
+errors: 0
+skipped: 0
+JUnit duration: 52.316 seconds
+measured command wall time: 53.315 seconds
+hard deadline: 55 seconds
+```
+
+This is margin evidence only. The permanent signed SDLC workflow must still pass for the final owner-authored reviewed head.
 
 ## Authority and safety assessment
 
