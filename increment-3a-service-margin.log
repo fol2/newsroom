@@ -1,9 +1,0 @@
-................................                                         [100%]
-=============================== warnings summary ===============================
-newsroom/tests/test_complete_projection_2b_neo4j_service.py::test_actual_service_revocation_and_tombstone_remove_current_derivatives
-newsroom/tests/test_increment_2d_neo4j_service.py::test_actual_service_governed_deletion_purges_derivative_and_never_requalifies
-  /home/runner/work/newsroom/newsroom/.venv/lib/python3.12/site-packages/neo4j/_sync/work/result.py:636: UserWarning: Expected a result with a single record, but found multiple.
-    warn(
-
--- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-32 passed, 2 warnings in 52.32s
