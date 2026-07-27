@@ -1,9 +1,9 @@
 # SDLC decision metadata-propagation correction
 
-**Status:** Corrective review unit  
-**Issue:** #212  
-**Infrastructure parent:** #98  
-**Discovered by:** Increment 3B / #206 / PR #211  
+**Status:** Corrective review unit
+**Issue:** #212
+**Infrastructure parent:** #98
+**Discovered by:** Increment 3B / #206 / PR #211
 **Authorised base:** `main@86afbf878f6b138ae0c99386d42828b32f12b645`
 
 ## Incident
