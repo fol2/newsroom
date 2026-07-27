@@ -213,6 +213,7 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
     captured = {}
     monkeypatch.setenv("NEWSROOM_NEO4J_PROJECTOR_PASSWORD", "secret")
     monkeypatch.setenv("NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED", "1")
+    monkeypatch.setenv("NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_URI", "bolt://localhost:7687")
@@ -248,6 +249,7 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
     )
     static = captured["spec"]["static_env"]
     assert static["NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED"] == "1"
+    assert static["NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED"] == "1"
     assert static["NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED"] == "1"
     assert static["NEWSROOM_NEO4J_SERVICE_REQUIRED"] == "1"
     assert "NEWSROOM_NEO4J_PROJECTOR_PASSWORD" not in static
@@ -468,6 +470,15 @@ def test_optional_core_skips_are_exact_actual_service_cases() -> None:
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_replacement_generation_recovers_from_authority_only',
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_revocation_and_tombstone_remove_current_derivatives',
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_wrong_watermark_generation_and_vector_dimension_fail_closed',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_increment_2_proof_admits_replays_and_restarts',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[fulltext]',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[relation]',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[vector]',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_dead_letter_blocks_complete_candidate_proof',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_governed_deletion_purges_derivative_and_never_requalifies',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_relation_revocation_changes_later_context_without_rewrite',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_replacement_generation_deduplicates_candidate_authority',
+        'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_required_gap_blocks_complete_candidate_proof',
         'newsroom.tests.test_integrated_c1_neo4j_service::test_actual_service_integrated_foundation_replay_recovery_and_tombstone',
         'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_private_adapter_exact_duplicate_and_digest_conflict',
         'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_public_round_trip_duplicate_and_generation_isolation',

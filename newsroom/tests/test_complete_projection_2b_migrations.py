@@ -47,7 +47,7 @@ def _migrated_connection() -> sqlite3.Connection:
 
 def test_complete_projection_migration_remains_checked_version_seven() -> None:
     assert COMPLETE_PROJECTION_SCHEMA_VERSION == 7
-    assert SCHEMA_VERSION == 8
+    assert SCHEMA_VERSION == 9
     assert (
         7,
         COMPLETE_PROJECTION_MIGRATION_NAME,

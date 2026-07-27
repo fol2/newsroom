@@ -36,18 +36,19 @@ def migrated() -> sqlite3.Connection:
 
 
 def test_retrieval_migration_is_checked_repository_schema_version_eight() -> None:
-    assert HYBRID_RETRIEVAL_SCHEMA_VERSION == SCHEMA_VERSION == 8
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+    assert HYBRID_RETRIEVAL_SCHEMA_VERSION == 8
+    assert SCHEMA_VERSION == 9
+    assert (
         8,
         HYBRID_RETRIEVAL_MIGRATION_NAME,
         HYBRID_RETRIEVAL_MIGRATION_CHECKSUM,
-    )
+    ) in EXPECTED_MIGRATION_HISTORY
 
 
 def test_retrieval_tables_are_in_exact_schema_fingerprint() -> None:
     conn = migrated()
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         tables = {
             str(row[0])
             for row in conn.execute(
