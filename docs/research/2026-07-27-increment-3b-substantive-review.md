@@ -15,13 +15,13 @@ Increment 3B now provides bounded, production-shaped transport and parser propos
 Current substantive-review disposition:
 
 - P1 findings: **0**;
-- P2 findings found and corrected: **14**;
+- P2 findings found and corrected: **18**;
 - unresolved P1/P2 findings: **0**;
-- focused reviewed and retained tests: **78 passed**;
+- focused reviewed and retained tests: **98 passed**;
 - focused failures, errors and skips: **0**;
 - temporary materialisation, payload or review transport retained in the PR: **0 files**.
 
-The reviewed implementation correction was materialised and committed as `2cdc9b94d06e53468ffe3fc094c810f65504a2f0`. This document, the corrected operations record and exact traceability are the final review-record changes. The exact final PR head and permanent workflow identities are recorded in PR #211 after all required gates complete for the resulting head.
+The primary reviewed implementation correction was materialised and committed as `2cdc9b94d06e53468ffe3fc094c810f65504a2f0`. A deeper protocol review then added four fail-closed corrections and twenty adversarial cases; the self-removing exact-head driver ran the 98-case focused/retained set, the complete repository suite and the clustering regression before committing the clean hardened source as `172778bfd096d769889a72d4790184fe742b60d6`. This document and the corrected operations record are the final review-record changes. Only the permanent workflows for the resulting normal branch head may satisfy merge evidence.
 
 ## Reviewed surface
 
@@ -29,7 +29,7 @@ The review covered:
 
 - typed Adapter Request, attempt, Capture, Parser Result and Observation Proposal identities;
 - fixture/replay-only execution and explicit no-authority-effect output;
-- endpoint, host, port, redirect, DNS and TLS evidence contracts;
+- canonical endpoint, host, port, redirect, DNS and TLS evidence contracts;
 - timeout, compressed-body, decompressed-body, decompression-ratio, content-type, charset and encoding bounds;
 - safe RSS/Atom, strict JSON and maintained-document parsing;
 - stable source-scoped item identity and maintained-document singleton identity;
@@ -98,6 +98,22 @@ Unmapped non-success status codes such as `503` remain HTTP failure status outco
 
 Observation Proposal construction now rebinds request and source-version lineage across all retained records. Capture must bind the exact receipt and attempt; Parser Result must bind the exact Capture digest, identity and source-body digest. Cross-attempt or cross-request substitution fails at the contract boundary.
 
+### P2-15 — Endpoint canonicalisation accepted ambiguous URI components
+
+Endpoint validation now rejects raw whitespace and controls, backslashes, literal or percent-encoded dot segments, lowercase or malformed percent escapes and encoded control/backslash octets. URLs must be canonical ASCII HTTPS with percent-encoded UTF-8 where required; parser normalization cannot silently change request identity or egress scope.
+
+### P2-16 — Malformed quoted `Content-Type` parameters could normalize as valid
+
+Media types and parameter names now require HTTP-token grammar. Empty, duplicate, unterminated, over-terminated, backslash-bearing or control-bearing parameters fail the content contract rather than being stripped into an allowed charset.
+
+### P2-17 — Textual parser paths trusted declared charset without proving actual UTF-8 bytes
+
+RSS/Atom and maintained HTML now independently decode the raw bytes as UTF-8. A conflicting XML declaration is rejected before XML interpretation, so parser libraries cannot override the exact transport charset contract.
+
+### P2-18 — Uncontracted successful HTTP statuses could masquerade as complete source state
+
+Only HTTP `200` is accepted as body-bearing complete success in this unit. Bodyless `204` and `205` remain explicit empty success with an empty Capture. HTTP `206` and all other uncontracted `2xx` statuses fail closed and cannot become complete, unchanged or empty source observations.
+
 ## Adversarial evidence added
 
 `newsroom/tests/test_discovery_adapter_3b_review_regressions.py`, together with updated parser and runner tests, proves:
@@ -113,14 +129,19 @@ Observation Proposal construction now rebinds request and source-version lineage
 9. all-invalid collections and strict nested shape drift do not become publisher change;
 10. identity fields are required, paths cannot overlap and singleton multiplicity is rejected;
 11. receipts discard cookies and arbitrary provider metadata;
-12. body-prohibited statuses reject payload bytes; and
-13. cross-record lineage substitution is rejected.
+12. body-prohibited statuses reject payload bytes;
+13. cross-record lineage substitution is rejected;
+14. ambiguous path/query forms, dot segments and noncanonical percent escapes are rejected;
+15. malformed quoted `Content-Type` parameters fail the content contract;
+16. UTF-16, invalid UTF-8 and conflicting XML encoding declarations fail parser admission;
+17. HTTP `206` cannot masquerade as complete state; and
+18. uncontracted `2xx` statuses cannot create source success.
 
 ## Focused and repository evidence
 
-Workflow run `30279144803` reconstructed the checksum-locked reviewed source, compiled it under Python 3.12, ran all Increment 3B suites plus retained Increment 3A suites, and committed the clean reviewed implementation as `2cdc9b94d06e53468ffe3fc094c810f65504a2f0`. The same run's complete repository test job and clustering evaluation also passed.
+Workflow run `30279144803` reconstructed the first checksum-locked reviewed source, compiled it under Python 3.12, ran all Increment 3B suites plus retained Increment 3A suites, and committed the clean implementation as `2cdc9b94d06e53468ffe3fc094c810f65504a2f0`. The same run's complete repository test job and clustering evaluation passed.
 
-Focused artifact:
+Initial focused artifact:
 
 ```text
 name: increment-3b-reviewed-focused-evidence
@@ -128,7 +149,7 @@ artifact id: 8658045266
 artifact digest: sha256:c944f1d993f10e0c2943c753867dbb31eb97c6b8b6f30c0d8721d21d374e6cd2
 ```
 
-Retained JUnit result:
+Initial retained JUnit result:
 
 ```text
 tests: 78
@@ -138,9 +159,9 @@ skipped: 0
 execution: 3.005 seconds
 ```
 
-The focused set includes all Increment 3B contract, endpoint-security, parser, runner, review-regression and traceability tests plus retained Increment 3A contract, authority, lifecycle-integrity, review-regression and traceability suites.
+The deeper hardening adds twenty independently collected adversarial cases. The exact-head driver was ordered fail closed: exact patch application and compilation, locked-environment installation, the complete 98-case Increment 3B/retained Increment 3A set, the complete repository suite, clustering regression, remote-head comparison and only then the clean source commit `172778bfd096d769889a72d4790184fe742b60d6`. Both temporary workflows were deleted in that same commit. The final normal review-record head must independently pass all permanent workflows before merge.
 
-The workflow-generated implementation head produced `action_required` follow-on runs rather than executable exact-head evidence. It is therefore not used as the merge-gate head. The final normal branch commits containing this review record trigger fresh permanent workflows, and only those final-head results may satisfy merge evidence.
+The focused set includes all Increment 3B contract, endpoint-security, parser, runner, review-regression and traceability tests plus retained Increment 3A contract, authority, lifecycle-integrity, review-regression and traceability suites.
 
 ## Authority and safety assessment
 
