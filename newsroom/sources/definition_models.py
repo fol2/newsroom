@@ -235,12 +235,13 @@ class SourceDefinitionVersionRequest:
             raise SourceContractError(
                 "Comparator-only source cannot claim an Active detection path"
             )
-        if PortfolioFunction.COMPARATOR in functions:
-            for item in active:
-                if item.contribution is not CoverageContribution.COMPARATOR:
-                    raise SourceContractError(
-                        "Comparator Active mapping cannot masquerade as production coverage"
-                    )
+        if any(
+            item.contribution is CoverageContribution.COMPARATOR
+            for item in active
+        ):
+            raise SourceContractError(
+                "Comparator mapping cannot claim Active coverage"
+            )
         gap_ids = {item.gap_id for item in self.explicit_gaps}
         for mapping in self.coverage_mappings:
             if (

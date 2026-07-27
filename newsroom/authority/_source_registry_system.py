@@ -586,7 +586,7 @@ class _SourceRegistryBoundary:
             operation="read:source_registry:item",
             aggregate_type="source_item",
             aggregate_id=str(item_id),
-            sensitive=False,
+            sensitive=True,
         )
         value = self._store.source_item(item_id)
         if value is None:
@@ -605,7 +605,7 @@ class _SourceRegistryBoundary:
             operation="read:source_registry:revision",
             aggregate_type="source_revision",
             aggregate_id=str(revision_id),
-            sensitive=False,
+            sensitive=True,
         )
         value = self._store.source_revision(revision_id)
         if value is None:

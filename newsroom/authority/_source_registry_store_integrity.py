@@ -214,11 +214,24 @@ class _SourceRegistryIntegrityMixin:
             "SELECT * FROM source_version_gaps WHERE version_id=? ORDER BY gap_id",
             (version_id,),
         ).fetchall()
-        if [
-            self._canonical_child(item, identity="source gap") for item in gaps
-        ] != [item.canonical_value() for item in request.explicit_gaps]:
+        if len(gaps) != len(request.explicit_gaps):
             raise AuthorityPersistenceError(
                 "source gaps differ from canonical source version"
+            )
+        for stored, expected in zip(gaps, request.explicit_gaps, strict=True):
+            if self._canonical_child(stored, identity="source gap") != expected.canonical_value():
+                raise AuthorityPersistenceError(
+                    "source gaps differ from canonical source version"
+                )
+            self._require_normalized_columns(
+                stored,
+                {
+                    "gap_id": expected.gap_id,
+                    "gap_class": expected.gap_class,
+                    "description": expected.description,
+                    "launch_blocking": int(expected.launch_blocking),
+                },
+                identity="source gap",
             )
 
         mappings = conn.execute(
@@ -226,12 +239,33 @@ class _SourceRegistryIntegrityMixin:
             "WHERE version_id=? ORDER BY obligation_id,responsibility,contribution",
             (version_id,),
         ).fetchall()
-        if [
-            self._canonical_child(item, identity="coverage mapping")
-            for item in mappings
-        ] != [item.canonical_value() for item in request.coverage_mappings]:
+        if len(mappings) != len(request.coverage_mappings):
             raise AuthorityPersistenceError(
                 "coverage mappings differ from canonical source version"
+            )
+        for stored, expected in zip(mappings, request.coverage_mappings, strict=True):
+            if self._canonical_child(stored, identity="coverage mapping") != expected.canonical_value():
+                raise AuthorityPersistenceError(
+                    "coverage mappings differ from canonical source version"
+                )
+            self._require_normalized_columns(
+                stored,
+                {
+                    "obligation_id": expected.obligation_id,
+                    "responsibility": expected.responsibility.value,
+                    "contribution": expected.contribution.value,
+                    "explicit_gap_id": expected.explicit_gap_id,
+                },
+                identity="coverage mapping",
+            )
+            self._require_canonical_blob(
+                stored, "geographies_bytes", list(expected.geographies), identity="coverage mapping"
+            )
+            self._require_canonical_blob(
+                stored, "languages_bytes", list(expected.languages), identity="coverage mapping"
+            )
+            self._require_canonical_blob(
+                stored, "limitations_bytes", list(expected.limitations), identity="coverage mapping"
             )
 
         dependencies = conn.execute(
@@ -239,12 +273,28 @@ class _SourceRegistryIntegrityMixin:
             "WHERE version_id=? ORDER BY dependency_id",
             (version_id,),
         ).fetchall()
-        if [
-            self._canonical_child(item, identity="source dependency")
-            for item in dependencies
-        ] != [item.canonical_value() for item in request.dependencies]:
+        if len(dependencies) != len(request.dependencies):
             raise AuthorityPersistenceError(
                 "source dependencies differ from canonical source version"
+            )
+        for stored, expected in zip(dependencies, request.dependencies, strict=True):
+            if self._canonical_child(stored, identity="source dependency") != expected.canonical_value():
+                raise AuthorityPersistenceError(
+                    "source dependencies differ from canonical source version"
+                )
+            self._require_normalized_columns(
+                stored,
+                {
+                    "dependency_id": expected.dependency_id,
+                    "dependency_kind": expected.kind.value,
+                    "description": expected.description,
+                    "upstream_definition_id": (
+                        None
+                        if expected.upstream_source_definition_id is None
+                        else str(expected.upstream_source_definition_id)
+                    ),
+                },
+                identity="source dependency",
             )
 
         expected_columns: dict[str, object] = {

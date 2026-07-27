@@ -112,7 +112,6 @@ SOURCE_REGISTRY_MIGRATION_STATEMENTS: tuple[str, ...] = (
         canonical_digest TEXT NOT NULL,
         recorded_at TEXT NOT NULL,
         UNIQUE(definition_id,version_number),
-        UNIQUE(definition_id,semantic_digest),
         UNIQUE(version_id,definition_id),
         UNIQUE(definition_id,version_number,version_id),
         CHECK((version_number=1 AND previous_version_id IS NULL)
@@ -343,7 +342,9 @@ SOURCE_REGISTRY_MIGRATION_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX idx_source_versions_definition ON source_definition_versions(definition_id,version_number)",
     "CREATE INDEX idx_source_coverage_obligation ON source_version_coverage_mappings(obligation_id,responsibility,contribution)",
     "CREATE INDEX idx_source_items_definition ON source_items(definition_id,recorded_at)",
+    "CREATE UNIQUE INDEX idx_source_items_native_identity ON source_items(definition_id,source_native_id) WHERE source_native_id IS NOT NULL",
     "CREATE INDEX idx_source_revisions_item ON source_revisions(item_id,recorded_at)",
+    "CREATE UNIQUE INDEX idx_source_revisions_native_token ON source_revisions(item_id,source_native_revision_token) WHERE source_native_revision_token IS NOT NULL",
     "CREATE INDEX idx_source_representations_revision ON discovery_representations(revision_id,recorded_at)",
     "CREATE INDEX idx_source_occurrences_revision ON discovery_occurrences(revision_id,observed_at,recorded_at)",
     """CREATE TRIGGER immutable_source_definition_update

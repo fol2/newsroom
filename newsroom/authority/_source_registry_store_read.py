@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
+from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
 from newsroom.authority.persistence import AuthorityPersistenceError
 from newsroom.authority.types import EventId, UtcTimestamp
 from newsroom.sources.policy import (
@@ -49,6 +50,32 @@ from ._source_registry_decoding import (
 
 
 class _SourceRegistryReadMixin:
+    @staticmethod
+    def _require_normalized_columns(
+        row: Mapping[str, Any],
+        expected: Mapping[str, object],
+        *,
+        identity: str,
+    ) -> None:
+        for column, value in expected.items():
+            if row[column] != value:
+                raise AuthorityPersistenceError(
+                    f"{identity} column {column} differs from canonical bytes"
+                )
+
+    @staticmethod
+    def _require_canonical_blob(
+        row: Mapping[str, Any],
+        column: str,
+        value: object,
+        *,
+        identity: str,
+    ) -> None:
+        if row[column] is None or bytes(row[column]) != canonical_json_bytes(value):
+            raise AuthorityPersistenceError(
+                f"{identity} column {column} differs from canonical bytes"
+            )
+
     @staticmethod
     def _row_by_id(
         conn: sqlite3.Connection,
@@ -229,6 +256,31 @@ class _SourceRegistryReadMixin:
         request = decode_source_item(
             value, idempotency_key=str(event["idempotency_key"])
         )
+        self._require_normalized_columns(
+            row,
+            {
+                "definition_id": str(request.definition_id),
+                "definition_version_id": str(request.definition_version_id),
+                "identity_kind": request.identity_kind.value,
+                "identity_policy_id": request.identity_policy.policy_id,
+                "identity_policy_version": request.identity_policy.policy_version,
+                "source_native_id": request.source_native_id,
+                "identity_digest": request.identity_digest,
+            },
+            identity="source item",
+        )
+        self._require_canonical_blob(
+            row,
+            "identity_components_bytes",
+            [item.canonical_value() for item in request.identity_components],
+            identity="source item",
+        )
+        self._require_canonical_blob(
+            row,
+            "uncertainties_bytes",
+            list(request.uncertainties),
+            identity="source item",
+        )
         if (
             str(request.item_id) != str(row["item_id"])
             or str(request.definition_id) != str(row["definition_id"])
@@ -267,6 +319,38 @@ class _SourceRegistryReadMixin:
         request = decode_locator_continuity(
             value, idempotency_key=str(event["idempotency_key"])
         )
+        prior_locator_digest = digest_canonical(
+            {
+                "definition_id": str(request.definition_id),
+                "locator": request.prior_locator,
+            }
+        )
+        observed_locator_digest = digest_canonical(
+            {
+                "definition_id": str(request.definition_id),
+                "locator": request.observed_locator,
+            }
+        )
+        self._require_normalized_columns(
+            row,
+            {
+                "definition_id": str(request.definition_id),
+                "definition_version_id": str(request.definition_version_id),
+                "prior_item_id": str(request.prior_item_id),
+                "prior_locator": request.prior_locator,
+                "prior_locator_digest": prior_locator_digest,
+                "observed_locator": request.observed_locator,
+                "observed_locator_digest": observed_locator_digest,
+                "outcome": request.outcome.value,
+                "related_item_id": str(request.related_item_id),
+                "rationale": request.rationale,
+                "decision_policy_id": request.decision_policy.policy_id,
+                "decision_policy_version": request.decision_policy.policy_version,
+                "observed_at": request.observed_at.to_text(),
+                "semantic_digest": request.semantic_digest,
+            },
+            identity="locator continuity decision",
+        )
         if (
             str(request.decision_id) != str(row["decision_id"])
             or request.semantic_digest != str(row["semantic_digest"])
@@ -301,6 +385,40 @@ class _SourceRegistryReadMixin:
         )
         request = decode_source_revision(
             value, idempotency_key=str(event["idempotency_key"])
+        )
+        item = self._item_row(conn, str(request.item_id))
+        self._require_normalized_columns(
+            row,
+            {
+                "item_id": str(request.item_id),
+                "definition_id": str(item["definition_id"]),
+                "definition_version_id": str(request.definition_version_id),
+                "prior_revision_id": (
+                    None
+                    if request.prior_revision_id is None
+                    else str(request.prior_revision_id)
+                ),
+                "source_native_revision_token": request.source_native_revision_token,
+                "permitted_state_digest": request.permitted_state_digest,
+                "revision_policy_id": request.revision_policy.policy_id,
+                "revision_policy_version": request.revision_policy.policy_version,
+                "canonicalizer_version": request.canonicalizer_version,
+                "observed_at": request.observed_at.to_text(),
+                "revision_identity_digest": request.revision_identity_digest,
+            },
+            identity="source revision",
+        )
+        self._require_canonical_blob(
+            row,
+            "source_published_time_bytes",
+            request.source_published_time.canonical_value(),
+            identity="source revision",
+        )
+        self._require_canonical_blob(
+            row,
+            "source_updated_time_bytes",
+            request.source_updated_time.canonical_value(),
+            identity="source revision",
         )
         if (
             str(request.revision_id) != str(row["revision_id"])
@@ -339,6 +457,25 @@ class _SourceRegistryReadMixin:
         request = decode_representation(
             value, idempotency_key=str(event["idempotency_key"])
         )
+        revision = self._revision_row(conn, str(request.revision_id))
+        self._require_normalized_columns(
+            row,
+            {
+                "revision_id": str(request.revision_id),
+                "definition_id": str(revision["definition_id"]),
+                "definition_version_id": str(request.definition_version_id),
+                "adapter_version": request.adapter_version,
+                "parser_version": request.parser_version,
+                "normalizer_version": request.normalizer_version,
+                "extraction_scope_version": request.extraction_scope_version,
+                "permitted_fields_digest": request.permitted_fields_digest,
+                "representation_digest": request.representation_digest,
+                "producer_slot_digest": request.producer_slot_digest,
+                "representation_identity_digest": request.representation_identity_digest,
+                "produced_at": request.produced_at.to_text(),
+            },
+            identity="discovery representation",
+        )
         if (
             str(request.representation_id) != str(row["representation_id"])
             or request.producer_slot_digest != str(row["producer_slot_digest"])
@@ -375,6 +512,32 @@ class _SourceRegistryReadMixin:
         )
         request = decode_occurrence(
             value, idempotency_key=str(event["idempotency_key"])
+        )
+        revision = self._revision_row(conn, str(request.revision_id))
+        self._require_normalized_columns(
+            row,
+            {
+                "check_outcome_id": str(request.check_outcome_id),
+                "revision_id": str(request.revision_id),
+                "representation_id": (
+                    None
+                    if request.representation_id is None
+                    else str(request.representation_id)
+                ),
+                "definition_id": str(revision["definition_id"]),
+                "definition_version_id": str(request.definition_version_id),
+                "occurrence_kind": request.kind.value,
+                "observed_at": request.observed_at.to_text(),
+                "receipt_digest": request.receipt_digest,
+                "semantic_digest": request.semantic_digest,
+            },
+            identity="discovery occurrence",
+        )
+        self._require_canonical_blob(
+            row,
+            "source_asserted_time_bytes",
+            request.source_asserted_time.canonical_value(),
+            identity="discovery occurrence",
         )
         if (
             str(request.occurrence_id) != str(row["occurrence_id"])

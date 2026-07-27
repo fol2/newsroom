@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from enum import StrEnum
 from typing import Iterable
 
@@ -525,8 +526,17 @@ class SourceTime:
             field="source_time_value",
             maximum_bytes=128,
         )
-        if self.precision is TimePrecision.EXACT:
-            UtcTimestamp.parse(self.value)
+        if self.precision is TimePrecision.DATE_ONLY:
+            try:
+                parsed_date = date.fromisoformat(self.value)
+            except ValueError as exc:
+                raise SourceContractError("date-only source time is invalid") from exc
+            if parsed_date.isoformat() != self.value:
+                raise SourceContractError("date-only source time is not canonical")
+            return
+        parsed_time = UtcTimestamp.parse(self.value)
+        if parsed_time.to_text() != self.value:
+            raise SourceContractError("source time must use canonical UTC text")
 
     @classmethod
     def unknown(cls) -> "SourceTime":

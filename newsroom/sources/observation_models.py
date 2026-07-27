@@ -106,8 +106,6 @@ class SourceRevisionRequest:
                     self.source_native_revision_token
                 ),
                 "permitted_state_digest": self.permitted_state_digest,
-                "revision_policy": self.revision_policy.canonical_value(),
-                "canonicalizer_version": self.canonicalizer_version,
             }
         )
 

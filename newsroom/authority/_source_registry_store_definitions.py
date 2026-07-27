@@ -16,7 +16,10 @@ from newsroom.sources.record_models import (
     SourceDefinition,
     SourceDefinitionVersion,
 )
-from newsroom.sources.types import SourceVersionConflict
+from newsroom.sources.types import (
+    SourceSemanticCollision,
+    SourceVersionConflict,
+)
 
 
 class _SourceRegistryDefinitionCommitMixin:
@@ -109,19 +112,17 @@ class _SourceRegistryDefinitionCommitMixin:
                 identifier=str(request.version_id),
                 identity="source definition version identity",
             )
-            self._ensure_semantic_absent(
-                conn,
-                table="source_definition_versions",
-                predicate="definition_id=? AND semantic_digest=?",
-                parameters=(
-                    str(request.definition_id),
-                    request.semantic_digest,
-                ),
-                identity="source definition version semantics",
-            )
             current = self._current_version_row(
                 conn, request.definition_id
             )
+            if (
+                current is not None
+                and str(current["semantic_digest"])
+                == request.semantic_digest
+            ):
+                raise SourceSemanticCollision(
+                    "source definition version cannot be a semantic no-op"
+                )
             if current is None:
                 if (
                     request.version_number != 1

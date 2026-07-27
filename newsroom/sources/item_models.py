@@ -127,12 +127,10 @@ class SourceItemRequest:
             {
                 "definition_id": str(self.definition_id),
                 "identity_kind": self.identity_kind.value,
-                "identity_policy": self.identity_policy.canonical_value(),
                 "source_native_id": self.source_native_id,
                 "identity_components": [
                     item.canonical_value() for item in self.identity_components
                 ],
-                "uncertainties": list(self.uncertainties),
             }
         )
 

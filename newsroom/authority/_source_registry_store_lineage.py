@@ -87,6 +87,17 @@ class _SourceRegistryLineageCommitMixin:
                 ),
                 identity="source item semantics",
             )
+            if request.source_native_id is not None:
+                self._ensure_semantic_absent(
+                    conn,
+                    table="source_items",
+                    predicate="definition_id=? AND source_native_id=?",
+                    parameters=(
+                        str(request.definition_id),
+                        request.source_native_id,
+                    ),
+                    identity="source-native item identity",
+                )
             recorded_at = self._clock().to_text()
             committed = self._commit_grant_in_transaction(
                 conn, grant, recorded_at=recorded_at
@@ -304,6 +315,19 @@ class _SourceRegistryLineageCommitMixin:
                 ),
                 identity="source revision semantics",
             )
+            if request.source_native_revision_token is not None:
+                self._ensure_semantic_absent(
+                    conn,
+                    table="source_revisions",
+                    predicate=(
+                        "item_id=? AND source_native_revision_token=?"
+                    ),
+                    parameters=(
+                        str(request.item_id),
+                        request.source_native_revision_token,
+                    ),
+                    identity="source-native revision token",
+                )
             latest = conn.execute(
                 "SELECT r.revision_id FROM source_revisions r "
                 "JOIN ledger_events e ON e.event_id=r.authority_event_id "
