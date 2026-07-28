@@ -252,7 +252,25 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
     assert static["NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED"] == "1"
     assert static["NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED"] == "1"
     assert static["NEWSROOM_NEO4J_SERVICE_REQUIRED"] == "1"
+    assert static["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
     assert "NEWSROOM_NEO4J_PROJECTOR_PASSWORD" not in static
+    argv = captured["spec"]["argv"]
+    assert argv[:6] == [
+        lane_module.shutil.which("uv"),
+        "run",
+        "--no-sync",
+        "python",
+        "-m",
+        "scripts.sdlc.workflow_lane",
+    ]
+    assert argv[6:11] == [
+        "service-tests",
+        "--repo-root",
+        ".",
+        "--report",
+        "service/gates/service-neo4j/tests/reports/pytest.xml",
+    ]
+    assert argv[11:] == _route(service=True)["service_tests"]
 
 
 def test_source_check_compiles_exact_sources_and_runs_locked_integrity(
@@ -385,6 +403,78 @@ def test_core_shard_command_is_server_owned_and_isolated(tmp_path: Path) -> None
     )
 
 
+def test_service_shards_cover_exact_inventory_deterministically(
+    tmp_path: Path,
+) -> None:
+    test_root = tmp_path / "newsroom/tests"
+    test_root.mkdir(parents=True)
+    expected: list[str] = []
+    for index, size in enumerate((900, 800, 700, 600, 500, 400)):
+        path = test_root / f"test_{index}_neo4j_service.py"
+        path.write_text("#" * size + "\n", encoding="utf-8")
+        expected.append(path.relative_to(tmp_path).as_posix())
+
+    first = lane_module._service_test_shards(tmp_path, tuple(sorted(expected)))
+    second = lane_module._service_test_shards(tmp_path, tuple(sorted(expected)))
+
+    assert first == second
+    assert len(first) == lane_module._SERVICE_SHARD_COUNT == 2
+    assert all(first)
+    flattened = tuple(item for shard in first for item in shard)
+    assert len(flattened) == len(set(flattened))
+    assert tuple(sorted(flattened)) == tuple(sorted(expected))
+
+
+def test_service_shard_command_is_isolated_and_diagnostic(
+    tmp_path: Path,
+) -> None:
+    report = tmp_path / "report.xml"
+    basetemp = tmp_path / "basetemp"
+    command = lane_module._service_shard_command(
+        test_files=(
+            "newsroom/tests/test_one_neo4j_service.py",
+            "newsroom/tests/test_two_neo4j_service.py",
+        ),
+        report=report,
+        basetemp=basetemp,
+    )
+
+    assert command[:7] == (
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "--assert=plain",
+        "-p",
+        "no:cacheprovider",
+    )
+    assert command[7:9] == (
+        "newsroom/tests/test_one_neo4j_service.py",
+        "newsroom/tests/test_two_neo4j_service.py",
+    )
+    assert command[-2:] == (
+        f"--basetemp={basetemp}",
+        f"--junitxml={report}",
+    )
+
+
+def test_service_test_inventory_rejects_partial_topology(
+    tmp_path: Path,
+) -> None:
+    test_root = tmp_path / "newsroom/tests"
+    test_root.mkdir(parents=True)
+    first = test_root / "test_first_neo4j_service.py"
+    second = test_root / "test_second_neo4j_service.py"
+    first.write_text("def test_first(): assert True\n", encoding="utf-8")
+    second.write_text("def test_second(): assert True\n", encoding="utf-8")
+
+    with pytest.raises(WorkflowLaneError, match="service_test_topology"):
+        lane_module._service_test_files(
+            tmp_path,
+            (first.relative_to(tmp_path).as_posix(),),
+        )
+
+
 def _junit_case(name: str) -> str:
     return (
         '<testsuites><testsuite tests="1" failures="0" errors="0" skipped="0">'
@@ -451,12 +541,53 @@ def test_parallel_core_runner_merges_all_shards_and_propagates_failure(
         log.write_text(f"shard {index}\n", encoding="utf-8")
         return 9 if index == 2 else 0
 
-    monkeypatch.setattr(lane_module, "_run_core_shard", fake_run)
+    monkeypatch.setattr(lane_module, "_run_pytest_shard", fake_run)
 
     assert lane_module._run_core_pytest_shards(
         root=tmp_path, report=report
     ) == 9
     assert lane_module.summarize_junit(tmp_path, (report.name,)).test_count == 4
+    assert not tuple(tmp_path.glob("pytest-shard-*.xml"))
+
+
+def test_parallel_service_runner_merges_all_shards_and_propagates_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = tmp_path / "pytest.xml"
+    shards = (
+        ("newsroom/tests/test_service_a.py",),
+        ("newsroom/tests/test_service_b.py",),
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_service_test_shards",
+        lambda _root, _paths: shards,
+    )
+
+    def fake_run(*, argv, root, log):
+        assert root == tmp_path
+        report_argument = next(
+            item for item in argv if str(item).startswith("--junitxml=")
+        )
+        shard_report = Path(str(report_argument).split("=", 1)[1])
+        index = int(shard_report.stem.rsplit("-", 1)[1])
+        shard_report.write_text(
+            _junit_case(f"service_{index}"), encoding="utf-8"
+        )
+        log.write_text(f"service shard {index}\n", encoding="utf-8")
+        return 7 if index == 1 else 0
+
+    monkeypatch.setattr(lane_module, "_run_pytest_shard", fake_run)
+
+    assert lane_module._run_service_pytest_shards(
+        root=tmp_path,
+        report=report,
+        test_paths=("ignored-a", "ignored-b"),
+    ) == 7
+    assert lane_module.summarize_junit(
+        tmp_path, (report.name,)
+    ).test_count == 2
     assert not tuple(tmp_path.glob("pytest-shard-*.xml"))
 
 
