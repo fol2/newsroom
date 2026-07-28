@@ -17,8 +17,14 @@ from newsroom.discovery import (
     LeadDispositionDecisionId,
     NextAction,
     NextActionKind,
+    ReasonReference,
+    StructuredReason,
 )
-from newsroom.sources import SourceDefinitionVersionId, SourceVersionConflict
+from newsroom.sources import (
+    SourceDefinitionVersionId,
+    SourceVersionConflict,
+    VersionedPolicyRef,
+)
 
 from .check_3c_authority_helpers import proof, version_request
 from .discovery_3d_authority_helpers import (
@@ -106,6 +112,60 @@ def test_signal_gate_lead_authority_replays_and_reopens(tmp_path: Path) -> None:
         assert reopened.discovery.current_disposition(
             LEAD_ID, proof=proof()
         ).request.decision_id == DISPOSITION_ID
+
+
+def test_duplicate_gate_cannot_collapse_distinct_signal_purpose(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    second_signal_id = DiscoverySignalId.parse(
+        "00000000-0000-4000-8000-000000007098"
+    )
+    with open_discovery_system(database) as system:
+        seed_check_lineage(system)
+        system.discovery.admit_signal(exact_signal_request(), proof=proof())
+        second_signal = replace(
+            exact_signal_request(),
+            signal_id=second_signal_id,
+            purpose="SECONDARY_SOURCE_TRANSITION_PURPOSE",
+            discriminator="SECONDARY_DETERMINISTIC_DISCRIMINATOR",
+            idempotency_key="distinct-purpose-signal",
+        )
+        system.discovery.admit_signal(second_signal, proof=proof())
+
+        duplicate_basis = replace(
+            exact_gate_request().basis,
+            duplicate_signal_id=SIGNAL_ID,
+            duplicate_rule=VersionedPolicyRef("fixture-duplicate", "v1"),
+        )
+        duplicate_gate = replace(
+            exact_gate_request(),
+            decision_id=GateDecisionId.parse(
+                "00000000-0000-4000-8000-000000007097"
+            ),
+            signal_id=second_signal_id,
+            basis=duplicate_basis,
+            outcome=GateOutcome.SUPPRESSED_DUPLICATE,
+            primary_reason=StructuredReason(
+                code="NOVELTY.EXACT_DUPLICATE",
+                basis=exact_gate_request().primary_reason.basis,
+                references=(
+                    ReasonReference("DISCOVERY_SIGNAL", str(SIGNAL_ID)),
+                ),
+                explanation=(
+                    "A distinct deterministic Signal purpose must not be "
+                    "collapsed as an exact duplicate."
+                ),
+            ),
+            next_action=NextAction(
+                NextActionKind.CLOSE,
+                "CLOSE_EXACT_DUPLICATE",
+                instructions="Close only a genuinely equivalent Signal slot.",
+            ),
+            idempotency_key="distinct-purpose-duplicate-gate",
+        )
+        with pytest.raises(DiscoveryVersionConflict, match="distinct-purpose"):
+            system.discovery.decide_gate(duplicate_gate, proof=proof())
 
 
 def test_signal_semantic_collision_and_gate_head_conflict_roll_back(
