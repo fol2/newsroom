@@ -1,0 +1,51 @@
+name: Export Increment 3D hardened source
+
+on:
+  push:
+    branches:
+      - agent/increment-3d-hardening-export
+    paths:
+      - .github/workflows/export-increment-3d-hardening.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-3d-hardening-export
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Create deterministic source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar \
+            --exclude=.git \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -czf /tmp/newsroom-increment-3d-hardening-source.tgz .
+          sha256sum /tmp/newsroom-increment-3d-hardening-source.tgz \
+            > /tmp/newsroom-increment-3d-hardening-source.sha256
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: newsroom-increment-3d-hardening-source-${{ github.sha }}
+          path: |
+            /tmp/newsroom-increment-3d-hardening-source.tgz
+            /tmp/newsroom-increment-3d-hardening-source.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
