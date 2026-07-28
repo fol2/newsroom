@@ -40,12 +40,19 @@ jobs:
           payload_root = root / '.github/increment-3c-model-policies'
           manifest_path = root / '.github/increment-3c-model-policies-manifest.json'
           manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-          parent = subprocess.check_output(
+          staging_parent = subprocess.check_output(
               ['git', 'rev-parse', 'HEAD^'], text=True
           ).strip()
+          parent = subprocess.check_output(
+              ['git', 'rev-parse', 'HEAD^^'], text=True
+          ).strip()
+          if staging_parent != '83aa0be960e23bdad67e2c9fbfd022df7c0d287a':
+              raise SystemExit(
+                  f'workflow repair parent {staging_parent} is not exact staging head'
+              )
           if parent != manifest['parent_sha']:
               raise SystemExit(
-                  f"staging parent {parent} differs from reviewed {manifest['parent_sha']}"
+                  f"staging base {parent} differs from reviewed {manifest['parent_sha']}"
               )
           expected_chunks = tuple(
               payload_root / f'part-{index:02d}.b64'
@@ -104,6 +111,27 @@ jobs:
                   target = root / relative
                   target.parent.mkdir(parents=True, exist_ok=True)
                   shutil.copyfile(source, target)
+          operations = root / 'docs/operations/increment-3c-check-transition-authority.md'
+          operations_text = operations.read_text(encoding='utf-8')
+          old_header = (
+              '**Status:** implementation review unit for issue #207  \n'
+              '**Parent:** #143  \n'
+              '**Authorised base:** `main@707519cebcc18fd8010b9b1b608b361ab2f6de03`  \n'
+          )
+          clean_header = (
+              '**Status:** implementation review unit for issue #207\n'
+              '**Parent:** #143\n'
+              '**Authorised base:** `main@707519cebcc18fd8010b9b1b608b361ab2f6de03`\n'
+          )
+          if operations_text.count(old_header) != 1:
+              raise SystemExit('reviewed operations header changed shape')
+          operations.write_text(
+              operations_text.replace(old_header, clean_header, 1),
+              encoding='utf-8',
+          )
+          clean_operations_digest = hashlib.sha256(operations.read_bytes()).hexdigest()
+          if clean_operations_digest != '22ee88ae88153864cdc0dea45da909025210b7c37cda2f73c549edf73d53f8cc':
+              raise SystemExit('clean operations document digest differs')
           for relative in manifest['deletions']:
               target = root / relative
               if target.exists():
