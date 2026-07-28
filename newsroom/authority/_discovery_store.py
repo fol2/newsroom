@@ -1002,9 +1002,13 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
                     str(duplicate["definition_id"]) != str(signal["definition_id"])
                     or str(duplicate["item_id"]) != str(signal["item_id"])
                     or str(duplicate["revision_id"]) != str(signal["revision_id"])
+                    or str(duplicate["purpose"]) != str(signal["purpose"])
+                    or str(duplicate["discriminator"])
+                    != str(signal["discriminator"])
                 ):
                     raise DiscoveryVersionConflict(
-                        "cross-source or cross-state reports cannot be suppressed as an exact Signal duplicate"
+                        "cross-source, cross-state, or distinct-purpose Signals "
+                        "cannot be suppressed as an exact duplicate"
                     )
             head = conn.execute(
                 "SELECT current_decision_id,current_decision_ordinal FROM discovery_gate_decision_heads WHERE signal_id=?",
