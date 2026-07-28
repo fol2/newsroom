@@ -1,11 +1,22 @@
 """Deterministic Discovery Signal, gate, and News Lead contracts."""
 
+from .admission_models import (
+    SignalLeadAdmissionConflict,
+    SignalLeadAdmissionError,
+    SignalLeadAdmissionRequest,
+    SignalLeadAdmissionResult,
+)
 from .models import (
     DiscoverySignalRequest,
     GateDecisionRequest,
     LeadDispositionDecisionRequest,
     NewsLeadRequest,
     WatchConditionRequest,
+)
+from .read_models import (
+    DiscoveryCurrentActionSource,
+    DiscoveryCurrentPhase,
+    DiscoveryCurrentStatus,
 )
 from .record_models import (
     DiscoverySignal,
@@ -47,6 +58,8 @@ from .types import (
     UrgencyBasis,
     UrgencyRoute,
     WatchConditionId,
+    deterministic_gate_outcome,
+    permitted_newness_for_transition,
 )
 
 __all__ = [
@@ -54,6 +67,9 @@ __all__ = [
     "DecisionTerminality",
     "DiscoveryAuthorityError",
     "DiscoveryContractError",
+    "DiscoveryCurrentActionSource",
+    "DiscoveryCurrentPhase",
+    "DiscoveryCurrentStatus",
     "DiscoveryIdentifierReuse",
     "DiscoveryReadPolicy",
     "DiscoverySemanticCollision",
@@ -83,6 +99,10 @@ __all__ = [
     "ReasonBasisClass",
     "ReasonReference",
     "ScopeDisposition",
+    "SignalLeadAdmissionConflict",
+    "SignalLeadAdmissionError",
+    "SignalLeadAdmissionRequest",
+    "SignalLeadAdmissionResult",
     "StructuredReason",
     "TimeValidity",
     "UrgencyBasis",
@@ -90,6 +110,8 @@ __all__ = [
     "WatchCondition",
     "WatchConditionId",
     "WatchConditionRequest",
+    "deterministic_gate_outcome",
+    "permitted_newness_for_transition",
 ]
 
 from .payloads import (

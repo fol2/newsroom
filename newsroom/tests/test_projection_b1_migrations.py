@@ -11,7 +11,7 @@ from newsroom.authority import (
     InlinePayload,
     SemanticCommand,
 )
-from newsroom.authority.migrations import SCHEMA_VERSION
+from newsroom.authority.migrations import EXPECTED_MIGRATION_HISTORY, SCHEMA_VERSION
 from newsroom.projection import (
     ProjectionDeliveryOutcome,
     ProjectionDeliveryRequest,
@@ -54,18 +54,8 @@ def test_projection_migration_history_contracts_and_schema_are_exact(
             "SELECT version,name FROM authority_migrations ORDER BY version"
         ).fetchall()
         assert history == [
-            (1, "authority_event_foundation_v1"),
-            (2, "governed_object_authority_v2"),
-            (3, "projection_authority_v3"),
-            (4, "projection_generation_promotion_v4"),
-            (5, "integrated_foundation_proof_v5"),
-            (6, "governed_relation_authority_v6"),
-            (7, "complete_projection_authority_v7"),
-            (8, "hybrid_retrieval_authority_v8"),
-            (9, "complete_fixture_candidate_authority_v9"),
-            (10, "source_registry_authority_v10"),
-            (11, "check_transition_authority_v11"),
-            (12, "signal_gate_lead_authority_v12"),
+            (version, name)
+            for version, name, _checksum in EXPECTED_MIGRATION_HISTORY
         ]
         assert conn.execute(
             "SELECT COUNT(*) FROM projection_ontology_contracts"

@@ -1,0 +1,311 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+import sqlite3
+
+import pytest
+
+from newsroom.authority import AuthorityPersistenceError, AuthoritySchemaError
+from newsroom.discovery import (
+    DecisionTerminality,
+    DiscoverySemanticCollision,
+    DiscoverySignalId,
+    DiscoveryVersionConflict,
+    GateDecisionId,
+    GateOutcome,
+    LeadDispositionDecisionId,
+    NextAction,
+    NextActionKind,
+)
+from newsroom.sources import SourceDefinitionVersionId, SourceVersionConflict
+
+from .check_3c_authority_helpers import proof, version_request
+from .discovery_3d_authority_helpers import (
+    DISPOSITION_ID,
+    GATE_ID,
+    LEAD_ID,
+    SIGNAL_ID,
+    exact_admission_request,
+    exact_gate_request,
+    exact_signal_request,
+    open_discovery_system,
+    scopes,
+    seed_check_lineage,
+)
+
+
+def _seed_and_admit(database: Path):
+    with open_discovery_system(database) as system:
+        seed_check_lineage(system)
+        return system.discovery.admit_signal_to_lead(
+            exact_admission_request(),
+            proof=proof(),
+        )
+
+
+def _trigger_sql(conn: sqlite3.Connection, name: str) -> str:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+        (name,),
+    ).fetchone()
+    assert row is not None and isinstance(row[0], str)
+    return str(row[0])
+
+
+def test_signal_gate_lead_authority_replays_and_reopens(tmp_path: Path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    with open_discovery_system(database) as system:
+        seed_check_lineage(system)
+        created = system.discovery.admit_signal_to_lead(
+            exact_admission_request(), proof=proof()
+        )
+        replayed = system.discovery.admit_signal_to_lead(
+            exact_admission_request(), proof=proof()
+        )
+
+        assert created.replayed is False
+        assert replayed.replayed is True
+        assert replayed.signal.event_id == created.signal.event_id
+        assert replayed.gate.event_id == created.gate.event_id
+        assert replayed.lead is not None and created.lead is not None
+        assert replayed.lead.event_id == created.lead.event_id
+        assert replayed.initial_disposition is not None
+        assert created.initial_disposition is not None
+        assert (
+            replayed.initial_disposition.event_id
+            == created.initial_disposition.event_id
+        )
+        assert system.discovery.signal(SIGNAL_ID, proof=proof()) == created.signal
+        assert system.discovery.current_gate(SIGNAL_ID, proof=proof()) == created.gate
+        assert system.discovery.lead(LEAD_ID, proof=proof()) == created.lead
+        assert (
+            system.discovery.current_disposition(LEAD_ID, proof=proof())
+            == created.initial_disposition
+        )
+        status = system.discovery.current_status(SIGNAL_ID, proof=proof())
+        assert status.lead == created.lead
+        assert status.current_disposition == created.initial_disposition
+        assert system.discovery.signals_for_revision(
+            created.signal.request.revision_id,
+            limit=10,
+            proof=proof(),
+        ) == (created.signal,)
+
+    with open_discovery_system(database) as reopened:
+        assert reopened.discovery.signal(SIGNAL_ID, proof=proof()).event_id == (
+            created.signal.event_id
+        )
+        assert reopened.discovery.current_gate(
+            SIGNAL_ID, proof=proof()
+        ).request.decision_id == GATE_ID
+        assert reopened.discovery.lead_for_signal(
+            SIGNAL_ID, proof=proof()
+        ).request.lead_id == LEAD_ID
+        assert reopened.discovery.current_disposition(
+            LEAD_ID, proof=proof()
+        ).request.decision_id == DISPOSITION_ID
+
+
+def test_signal_semantic_collision_and_gate_head_conflict_roll_back(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    with open_discovery_system(database) as system:
+        seed_check_lineage(system)
+        system.discovery.admit_signal(exact_signal_request(), proof=proof())
+
+        equivalent = replace(
+            exact_signal_request(),
+            signal_id=DiscoverySignalId.parse(
+                "00000000-0000-4000-8000-000000007099"
+            ),
+            idempotency_key="equivalent-signal-different-id",
+        )
+        with pytest.raises(DiscoverySemanticCollision):
+            system.discovery.admit_signal(equivalent, proof=proof())
+
+        system.discovery.decide_gate(exact_gate_request(), proof=proof())
+        wrong_head = replace(
+            exact_gate_request(),
+            decision_id=GateDecisionId.parse(
+                "00000000-0000-4000-8000-000000007098"
+            ),
+            decision_ordinal=2,
+            previous_decision_id=GateDecisionId.parse(
+                "00000000-0000-4000-8000-000000007097"
+            ),
+            idempotency_key="wrong-gate-head",
+        )
+        with pytest.raises(DiscoveryVersionConflict, match="current head"):
+            system.discovery.decide_gate(wrong_head, proof=proof())
+
+    with sqlite3.connect(database) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM discovery_signals"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM discovery_gate_decisions"
+        ).fetchone()[0] == 1
+
+
+def test_discovery_write_and_read_scopes_are_separate(tmp_path: Path) -> None:
+    missing_write = tmp_path / "missing-write.sqlite3"
+    with open_discovery_system(
+        missing_write,
+        granted_scopes=scopes() - {"authority.discovery.signals.admit"},
+    ) as system:
+        seed_check_lineage(system)
+        with pytest.raises(PermissionError):
+            system.discovery.admit_signal(exact_signal_request(), proof=proof())
+
+    database = tmp_path / "read-scopes.sqlite3"
+    _seed_and_admit(database)
+    with open_discovery_system(
+        database,
+        granted_scopes=scopes() - {"authority.discovery.read_sensitive"},
+    ) as system:
+        assert system.discovery.current_status(SIGNAL_ID, proof=proof()).lead is not None
+        with pytest.raises(PermissionError):
+            system.discovery.signal(SIGNAL_ID, proof=proof())
+
+    with open_discovery_system(
+        database,
+        granted_scopes=scopes() - {"authority.discovery.read"},
+    ) as system:
+        with pytest.raises(PermissionError):
+            system.discovery.current_status(SIGNAL_ID, proof=proof())
+
+
+def test_discovery_read_limits_are_policy_bounded(tmp_path: Path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    _seed_and_admit(database)
+    with open_discovery_system(database) as system:
+        assert len(system.discovery.gates(SIGNAL_ID, limit=1, proof=proof())) == 1
+        with pytest.raises(PermissionError):
+            system.discovery.gates(SIGNAL_ID, limit=101, proof=proof())
+
+
+def test_gate_revalidates_current_source_version(tmp_path: Path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    with open_discovery_system(database) as system:
+        seed_check_lineage(system)
+        system.discovery.admit_signal(exact_signal_request(), proof=proof())
+        second_version = replace(
+            version_request(),
+            version_id=SourceDefinitionVersionId.parse(
+                "00000000-0000-4000-8000-000000006205"
+            ),
+            version_number=2,
+            expected_previous_version_id=version_request().version_id,
+            locator="fixture://increment-3d/maintained-guidance-v2",
+            change_reason="Exercise stale Gate revalidation.",
+            idempotency_key="fixture-check-source-version-v2",
+        )
+        system.sources.record_definition_version(second_version, proof=proof())
+        with pytest.raises((DiscoveryVersionConflict, SourceVersionConflict), match="current"):
+            system.discovery.decide_gate(exact_gate_request(), proof=proof())
+
+
+def test_startup_rejects_signal_and_gate_head_tampering(tmp_path: Path) -> None:
+    signal_db = tmp_path / "signal-tamper.sqlite3"
+    _seed_and_admit(signal_db)
+    with sqlite3.connect(signal_db) as conn:
+        trigger = _trigger_sql(conn, "immutable_discovery_signals_update")
+        conn.execute("DROP TRIGGER immutable_discovery_signals_update")
+        conn.execute(
+            "UPDATE discovery_signals SET purpose=? WHERE signal_id=?",
+            ("TAMPERED_PURPOSE", str(SIGNAL_ID)),
+        )
+        conn.execute(trigger)
+        conn.commit()
+    with pytest.raises(AuthorityPersistenceError, match="Discovery Signal"):
+        open_discovery_system(signal_db)
+
+    head_db = tmp_path / "head-tamper.sqlite3"
+    _seed_and_admit(head_db)
+    with sqlite3.connect(head_db) as conn:
+        trigger = _trigger_sql(conn, "gate_head_update_guard")
+        conn.execute("DROP TRIGGER gate_head_update_guard")
+        conn.execute(
+            "UPDATE discovery_gate_decision_heads SET updated_at=?",
+            ("2042-03-12T12:00:00.000000Z",),
+        )
+        conn.execute(trigger)
+        conn.commit()
+    with pytest.raises((AuthoritySchemaError, AuthorityPersistenceError)):
+        open_discovery_system(head_db)
+
+
+def test_crash_prefix_recovery_completes_missing_records(tmp_path: Path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    plan = exact_admission_request()
+    with open_discovery_system(database) as system:
+        seed_check_lineage(system)
+        signal = system.discovery.admit_signal(plan.signal, proof=proof())
+        gate = system.discovery.decide_gate(plan.gate, proof=proof())
+        assert signal.replayed is False and gate.replayed is False
+
+        resumed = system.discovery.admit_signal_to_lead(plan, proof=proof())
+        assert resumed.signal_state.value == "REPLAYED"
+        assert resumed.gate_state.value == "REPLAYED"
+        assert resumed.lead_state is not None
+        assert resumed.lead_state.value == "CREATED"
+        assert resumed.disposition_state is not None
+        assert resumed.disposition_state.value == "CREATED"
+        assert resumed.replayed is False
+
+
+def test_later_operational_gate_blocks_new_watch_or_disposition(
+    tmp_path: Path,
+) -> None:
+    from newsroom.discovery import TimeValidity
+    from .discovery_3d_helpers import reason, watch_request, disposition_request
+
+    database = tmp_path / "authority.sqlite3"
+    created = _seed_and_admit(database)
+    assert created.lead is not None and created.initial_disposition is not None
+
+    hold_basis = replace(
+        exact_gate_request().basis,
+        policy_current=False,
+        operationally_executable=False,
+        time_validity=TimeValidity.CURRENT,
+    )
+    hold_gate = replace(
+        exact_gate_request(),
+        decision_id=GateDecisionId.parse(
+            "00000000-0000-4000-8000-000000007096"
+        ),
+        decision_ordinal=2,
+        previous_decision_id=GATE_ID,
+        basis=hold_basis,
+        outcome=GateOutcome.OPERATIONAL_HOLD,
+        terminality=DecisionTerminality.PENDING_CONDITION,
+        primary_reason=reason("OPS.POLICY_STALE"),
+        next_action=NextAction(
+            NextActionKind.REVIEW,
+            "REVIEW_STALE_POLICY",
+            owner="discovery-operator",
+            instructions="Revalidate the current source and gate policy.",
+        ),
+        idempotency_key="second-gate-operational-hold",
+    )
+    with open_discovery_system(database) as system:
+        system.discovery.decide_gate(hold_gate, proof=proof())
+        with pytest.raises(DiscoveryVersionConflict, match="currently promoted"):
+            system.discovery.record_watch_condition(watch_request(), proof=proof())
+        later_disposition = replace(
+            disposition_request(),
+            decision_id=LeadDispositionDecisionId.parse(
+                "00000000-0000-4000-8000-000000007095"
+            ),
+            decision_ordinal=2,
+            previous_decision_id=DISPOSITION_ID,
+            outcome=disposition_request().outcome,
+            idempotency_key="later-disposition-after-hold",
+        )
+        with pytest.raises(DiscoveryVersionConflict, match="currently promoted"):
+            system.discovery.record_lead_disposition(
+                later_disposition, proof=proof()
+            )

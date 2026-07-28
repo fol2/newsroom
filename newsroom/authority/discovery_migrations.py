@@ -8,7 +8,7 @@ from .discovery_migration_schema import DISCOVERY_AUTHORITY_SCHEMA_STATEMENTS
 
 
 DISCOVERY_AUTHORITY_SCHEMA_VERSION = 12
-DISCOVERY_AUTHORITY_MIGRATION_NAME = "signal_gate_lead_authority_v12"
+DISCOVERY_AUTHORITY_MIGRATION_NAME = "discovery_signal_lead_authority_v12"
 
 
 @dataclass(frozen=True, slots=True)

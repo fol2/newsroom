@@ -291,11 +291,11 @@ The planned checked migration adds immutable tables equivalent to:
 
 ```text
 discovery_signals
-gate_decisions
+discovery_gate_decisions
 gate_decision_reasons
-gate_decision_heads
+discovery_gate_decision_heads
 news_leads
-watch_conditions
+discovery_watch_conditions
 lead_disposition_decisions
 lead_disposition_reasons
 lead_disposition_heads

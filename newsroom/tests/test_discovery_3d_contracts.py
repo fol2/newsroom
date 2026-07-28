@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from newsroom.checks import ObservableTransitionKind
 from newsroom.discovery import (
     DecisionTerminality,
     DiscoveryContractError,
@@ -16,9 +17,13 @@ from newsroom.discovery import (
     ReasonBasisClass,
     ScopeDisposition,
     TimeValidity,
+    deterministic_gate_outcome,
+    permitted_newness_for_transition,
+    permitted_newness_for_transition,
     UrgencyRoute,
 )
 from newsroom.discovery.models import LeadDispositionDecisionRequest
+from newsroom.checks import ObservableTransitionKind
 from newsroom.sources import VersionedPolicyRef
 
 from .discovery_3d_helpers import (
@@ -332,3 +337,119 @@ def test_foundation_disposition_rejects_later_editorial_reason_basis() -> None:
                 ReasonBasisClass.EDITORIAL_ASSESSMENT,
             ),
         )
+
+
+def test_duplicate_rule_cannot_exist_without_duplicate_signal() -> None:
+    with pytest.raises(DiscoveryContractError, match="duplicate rule requires"):
+        replace(
+            promoted_basis(),
+            duplicate_rule=VersionedPolicyRef("fixture-duplicate", "v1"),
+        )
+
+
+def test_close_action_cannot_retain_pending_metadata() -> None:
+    with pytest.raises(DiscoveryContractError, match="close action cannot retain"):
+        NextAction(
+            NextActionKind.CLOSE,
+            "CLOSE",
+            due_at=REVIEW_AT,
+        )
+
+
+def test_deterministic_gate_outcome_precedence_is_fail_closed() -> None:
+    promoted = promoted_basis()
+    assert deterministic_gate_outcome(promoted) is GateOutcome.PROMOTED_TO_LEAD
+    assert deterministic_gate_outcome(
+        replace(promoted, time_validity=TimeValidity.STALE)
+    ) is GateOutcome.OPERATIONAL_HOLD
+    assert deterministic_gate_outcome(
+        replace(
+            promoted,
+            duplicate_signal_id=OTHER_SIGNAL_ID,
+            duplicate_rule=VersionedPolicyRef("fixture-duplicate", "v1"),
+        )
+    ) is GateOutcome.SUPPRESSED_DUPLICATE
+    assert deterministic_gate_outcome(
+        replace(promoted, observable_newness=ObservableNewness.PARSER_ONLY)
+    ) is GateOutcome.SUPPRESSED_NON_CHANGE
+    assert deterministic_gate_outcome(
+        replace(
+            promoted,
+            scope_disposition=ScopeDisposition.CLEAR_EXCLUSION,
+            clear_exclusion_rule=VersionedPolicyRef("fixture-exclusion", "v1"),
+        )
+    ) is GateOutcome.REJECTED_CLEAR_EXCLUSION
+    assert deterministic_gate_outcome(
+        replace(
+            promoted,
+            scope_disposition=ScopeDisposition.AMBIGUOUS,
+            ambiguities=("MATERIALITY_UNKNOWN",),
+        )
+    ) is GateOutcome.PROMOTED_TO_LEAD
+
+
+def test_gate_request_cannot_choose_outcome_inconsistent_with_basis() -> None:
+    with pytest.raises(DiscoveryContractError, match="deterministic basis"):
+        gate_request(
+            outcome=GateOutcome.OPERATIONAL_HOLD,
+            basis=promoted_basis(),
+            terminality=DecisionTerminality.PENDING_CONDITION,
+            next_action=NextAction(
+                NextActionKind.REVIEW,
+                "REVIEW_FALSE_HOLD",
+                owner="discovery-operator",
+                due_at=REVIEW_AT,
+                instructions="A fully valid basis cannot be held arbitrarily.",
+            ),
+        )
+    with pytest.raises(DiscoveryContractError, match="deterministic basis"):
+        gate_request(
+            basis=replace(
+                promoted_basis(),
+                time_validity=TimeValidity.STALE,
+            ),
+        )
+
+
+def test_transition_kind_limits_deterministic_newness_classification() -> None:
+    assert permitted_newness_for_transition(
+        ObservableTransitionKind.REOBSERVED
+    ) == frozenset(
+        {ObservableNewness.EXACT_REPEAT, ObservableNewness.PARSER_ONLY}
+    )
+    assert permitted_newness_for_transition(
+        ObservableTransitionKind.AGENDA_RESCHEDULED
+    ) == frozenset({ObservableNewness.EXPECTATION_ONLY})
+    assert permitted_newness_for_transition(
+        ObservableTransitionKind.AMBIGUOUS_ABSENCE
+    ) == frozenset({ObservableNewness.UNKNOWN})
+    assert permitted_newness_for_transition(
+        ObservableTransitionKind.FIRST_OBSERVED
+    ) == frozenset(
+        {ObservableNewness.GENUINE_TRANSITION, ObservableNewness.UNKNOWN}
+    )
+    assert permitted_newness_for_transition(
+        ObservableTransitionKind.REVISED
+    ) == frozenset({ObservableNewness.GENUINE_TRANSITION})
+
+
+def test_transition_kind_bounds_permitted_observable_newness() -> None:
+    assert permitted_newness_for_transition(
+        ObservableTransitionKind.REVISED
+    ) == frozenset({ObservableNewness.GENUINE_TRANSITION})
+    assert permitted_newness_for_transition(
+        ObservableTransitionKind.REOBSERVED
+    ) == frozenset(
+        {ObservableNewness.EXACT_REPEAT, ObservableNewness.PARSER_ONLY}
+    )
+    assert permitted_newness_for_transition(
+        ObservableTransitionKind.AGENDA_CREATED
+    ) == frozenset({ObservableNewness.EXPECTATION_ONLY})
+    assert permitted_newness_for_transition(
+        ObservableTransitionKind.AMBIGUOUS_ABSENCE
+    ) == frozenset({ObservableNewness.UNKNOWN})
+    assert permitted_newness_for_transition(
+        ObservableTransitionKind.FIRST_OBSERVED
+    ) == frozenset(
+        {ObservableNewness.GENUINE_TRANSITION, ObservableNewness.UNKNOWN}
+    )

@@ -8,6 +8,7 @@ from newsroom.authority.canonical import digest_canonical, validate_sha256_diges
 from newsroom.authority.types import UUIDv4Id, UtcTimestamp, require_scope, require_token
 from newsroom.checks.types import (
     CoverageBasis,
+    ObservableTransitionKind,
     bounded_text,
     require_policy,
     sorted_unique_text,
@@ -288,6 +289,17 @@ class NextAction:
             raise DiscoveryContractError(
                 "pending next action requires owner, dependency, due time, or expiry"
             )
+        if self.kind is NextActionKind.CLOSE and any(
+            (
+                self.owner,
+                self.dependency,
+                self.due_at,
+                self.expires_at,
+            )
+        ):
+            raise DiscoveryContractError(
+                "close action cannot retain pending metadata"
+            )
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -355,6 +367,10 @@ class GateBasis:
             raise DiscoveryContractError(
                 "duplicate Signal target requires a versioned duplicate rule"
             )
+        if self.duplicate_signal_id is None and self.duplicate_rule is not None:
+            raise DiscoveryContractError(
+                "duplicate rule requires an exact duplicate Signal target"
+            )
         if self.scope_disposition is ScopeDisposition.CLEAR_EXCLUSION:
             if self.clear_exclusion_rule is None:
                 raise DiscoveryContractError(
@@ -395,6 +411,76 @@ class GateBasis:
             "operationally_executable": self.operationally_executable,
             "ambiguities": list(self.ambiguities),
         }
+
+
+def permitted_newness_for_transition(
+    kind: ObservableTransitionKind,
+) -> frozenset[ObservableNewness]:
+    """Return source-contract newness classes permitted for one transition.
+
+    This mapping prevents a caller from relabelling an exact source transition
+    as parser-only, repeat, or expectation-only work.  FIRST_OBSERVED remains
+    policy-sensitive because first observation is not proof of publication; it
+    may be admitted as a genuine current-state transition or held as unknown.
+    """
+
+    if not isinstance(kind, ObservableTransitionKind):
+        raise DiscoveryContractError("observable transition kind must be typed")
+    if kind is ObservableTransitionKind.REOBSERVED:
+        return frozenset(
+            {ObservableNewness.EXACT_REPEAT, ObservableNewness.PARSER_ONLY}
+        )
+    if kind in {
+        ObservableTransitionKind.AGENDA_CREATED,
+        ObservableTransitionKind.AGENDA_RESCHEDULED,
+        ObservableTransitionKind.AGENDA_CANCELLED,
+        ObservableTransitionKind.AGENDA_MISSED_EXPECTATION,
+        ObservableTransitionKind.AGENDA_LATE_OCCURRENCE,
+    }:
+        return frozenset({ObservableNewness.EXPECTATION_ONLY})
+    if kind is ObservableTransitionKind.AMBIGUOUS_ABSENCE:
+        return frozenset({ObservableNewness.UNKNOWN})
+    if kind is ObservableTransitionKind.FIRST_OBSERVED:
+        return frozenset(
+            {ObservableNewness.GENUINE_TRANSITION, ObservableNewness.UNKNOWN}
+        )
+    return frozenset({ObservableNewness.GENUINE_TRANSITION})
+
+
+def deterministic_gate_outcome(basis: GateBasis) -> GateOutcome:
+    """Return the only permitted deterministic outcome for one Gate basis.
+
+    Authority/currentness failures take precedence over editorially neutral
+    duplicate, non-change, exclusion, and promotion routes.  This keeps stale
+    or incomplete authority from being converted into a terminal suppression
+    or Lead merely because another basis field happens to match.
+    """
+
+    if not isinstance(basis, GateBasis):
+        raise DiscoveryContractError("deterministic Gate outcome requires typed basis")
+    authority_ready = all(
+        (
+            basis.identity_integrity,
+            basis.rights_current,
+            basis.policy_current,
+            basis.operationally_executable,
+        )
+    )
+    if not authority_ready or basis.time_validity is not TimeValidity.CURRENT:
+        return GateOutcome.OPERATIONAL_HOLD
+    if basis.duplicate_signal_id is not None:
+        return GateOutcome.SUPPRESSED_DUPLICATE
+    if basis.observable_newness in {
+        ObservableNewness.EXACT_REPEAT,
+        ObservableNewness.PARSER_ONLY,
+        ObservableNewness.EXPECTATION_ONLY,
+    }:
+        return GateOutcome.SUPPRESSED_NON_CHANGE
+    if basis.scope_disposition is ScopeDisposition.CLEAR_EXCLUSION:
+        return GateOutcome.REJECTED_CLEAR_EXCLUSION
+    if basis.observable_newness is ObservableNewness.GENUINE_TRANSITION:
+        return GateOutcome.PROMOTED_TO_LEAD
+    return GateOutcome.OPERATIONAL_HOLD
 
 
 @dataclass(frozen=True, slots=True)
@@ -578,5 +664,6 @@ __all__ = [
     "UrgencyRoute",
     "WatchConditionId",
     "is_active_disposition",
+    "permitted_newness_for_transition",
     "sorted_reasons",
 ]

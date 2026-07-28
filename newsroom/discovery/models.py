@@ -50,6 +50,7 @@ from .types import (
     StructuredReason,
     UrgencyBasis,
     WatchConditionId,
+    deterministic_gate_outcome,
     is_active_disposition,
     sorted_reasons,
 )
@@ -408,6 +409,13 @@ class GateDecisionRequest:
                 raise DiscoveryContractError(
                     "operational hold must be pending or retryable"
                 )
+
+        expected = deterministic_gate_outcome(self.basis)
+        if self.outcome is not expected:
+            raise DiscoveryContractError(
+                "Gate outcome differs from deterministic basis: "
+                f"expected {expected.value}"
+            )
 
     def canonical_value(self) -> dict[str, object]:
         return {

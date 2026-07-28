@@ -12,19 +12,19 @@ from .check_migrations import (
     CHECK_AUTHORITY_MIGRATION_STATEMENTS,
     CHECK_AUTHORITY_SCHEMA_VERSION,
 )
-from .discovery_migrations import (
-    DISCOVERY_AUTHORITY_MIGRATION,
-    DISCOVERY_AUTHORITY_MIGRATION_CHECKSUM,
-    DISCOVERY_AUTHORITY_MIGRATION_NAME,
-    DISCOVERY_AUTHORITY_MIGRATION_STATEMENTS,
-    DISCOVERY_AUTHORITY_SCHEMA_VERSION,
-)
 from .complete_projection_migrations import (
     COMPLETE_PROJECTION_MIGRATION,
     COMPLETE_PROJECTION_MIGRATION_CHECKSUM,
     COMPLETE_PROJECTION_MIGRATION_NAME,
     COMPLETE_PROJECTION_MIGRATION_STATEMENTS,
     COMPLETE_PROJECTION_SCHEMA_VERSION,
+)
+from .discovery_migrations import (
+    DISCOVERY_AUTHORITY_MIGRATION,
+    DISCOVERY_AUTHORITY_MIGRATION_CHECKSUM,
+    DISCOVERY_AUTHORITY_MIGRATION_NAME,
+    DISCOVERY_AUTHORITY_MIGRATION_STATEMENTS,
+    DISCOVERY_AUTHORITY_SCHEMA_VERSION,
 )
 from .development_candidate_migrations import (
     DEVELOPMENT_CANDIDATE_MIGRATION,
@@ -554,7 +554,7 @@ def apply_pending_migrations(
     """Apply every pending checked migration in one exclusive transaction.
 
     Fresh schema creation is all-or-nothing across every retained authority
-    migration. Existing v10 source registries upgrade only through checked v11.
+    migration. Existing v10 source registries upgrade through checked v11 and v12.
     """
 
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])

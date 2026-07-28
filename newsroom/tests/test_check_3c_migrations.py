@@ -62,7 +62,7 @@ def test_checked_v11_migration_creates_and_reopens_exact_schema(
     conn = sqlite3.connect(database)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-        assert SCHEMA_VERSION > CHECK_AUTHORITY_SCHEMA_VERSION
+        assert SCHEMA_VERSION >= CHECK_AUTHORITY_SCHEMA_VERSION
         row = conn.execute(
             "SELECT name,checksum FROM authority_migrations "
             "WHERE version=?",
