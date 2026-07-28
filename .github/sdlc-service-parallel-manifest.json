@@ -1,0 +1,22 @@
+{
+  "base_file_blobs": {
+    "newsroom/tests/test_sdlc_workflow_lane.py": "1904d6d174d515ae69cbc809109ec89e4328f0b2",
+    "scripts/sdlc/workflow_lane.py": "27a859a815f851b6914bf9c1fc02391530f5698f"
+  },
+  "gzip_sha256": "ed9f19b42d4ab8fbe98e5a126ac5d21bd2a51628e0bc9398db7e8f8493f23129",
+  "gzip_size": 5761,
+  "patch_sha256": "999e4eabc517b717c4286bec7f1dc7d4b527b81cb5799c3a1516ab6912b62273",
+  "patch_size": 19678,
+  "payload_base64_size": 7684,
+  "product_paths": [
+    "docs/research/2026-07-28-sdlc-service-evidence-performance.md",
+    "newsroom/tests/test_sdlc_workflow_lane.py",
+    "scripts/sdlc/workflow_lane.py"
+  ],
+  "schema_version": "newsroom.sdlc.service-parallel-materializer.v1",
+  "temporary_paths": [
+    ".github/sdlc-service-parallel-manifest.json",
+    ".github/sdlc-service-parallel.patch.b64",
+    ".github/workflows/materialize-sdlc-service-parallel.yml"
+  ]
+}
