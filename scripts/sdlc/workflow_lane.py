@@ -99,6 +99,13 @@ _CORE_SHARD_COUNT = 4
 _CACHE_KEY_ENV = "NEWSROOM_SDLC_CACHE_KEY"
 _CACHE_HIT_ENV = "NEWSROOM_SDLC_CACHE_HIT"
 _MAX_CACHE_KEY_CHARS = 512
+_SERVICE_SHARD_COUNT = 2
+_SERVICE_PYTEST_OPTIONS = (
+    "-q",
+    "--assert=plain",
+    "-p",
+    "no:cacheprovider",
+)
 
 
 class WorkflowLaneError(ValueError):
@@ -423,6 +430,7 @@ def _expected_spec(
             / "pytest.xml"
         )
         environment.update(_service_environment())
+        environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
         pass_env = ("NEWSROOM_NEO4J_PROJECTOR_PASSWORD",)
         argv = _uv_command(
             "-m",
@@ -876,7 +884,7 @@ def _core_shard_command(
     )
 
 
-def _run_core_shard(*, argv: Sequence[str], root: Path, log: Path) -> int:
+def _run_pytest_shard(*, argv: Sequence[str], root: Path, log: Path) -> int:
     try:
         with log.open("wb") as stream:
             completed = subprocess.run(
@@ -938,18 +946,20 @@ def _publish_private_bytes(path: Path, payload: bytes) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _merge_core_junit_reports(
+def _merge_junit_reports(
     *,
     root: Path,
     report: Path,
     shard_reports: Sequence[Path],
+    expected_count: int,
+    identity: str,
 ) -> None:
-    if len(shard_reports) != _CORE_SHARD_COUNT:
-        raise WorkflowLaneError("core_shard_report_count")
+    if len(shard_reports) != expected_count:
+        raise WorkflowLaneError(f"{identity}_shard_report_count")
     relative_reports: list[str] = []
     for shard_report in shard_reports:
         if not shard_report.is_file() or shard_report.is_symlink():
-            raise WorkflowLaneError("core_shard_report_missing")
+            raise WorkflowLaneError(f"{identity}_shard_report_missing")
         try:
             relative_reports.append(shard_report.relative_to(root).as_posix())
         except ValueError as exc:
@@ -968,19 +978,21 @@ def _merge_core_junit_reports(
         try:
             document = ET.parse(shard_report).getroot()
         except ET.ParseError as exc:
-            raise WorkflowLaneError("core_shard_report_xml") from exc
+            raise WorkflowLaneError(f"{identity}_shard_report_xml") from exc
         name = _xml_local_name(document.tag)
         if name == "testsuite":
             merged.append(document)
         elif name == "testsuites":
             suites = [
-                child for child in document if _xml_local_name(child.tag) == "testsuite"
+                child
+                for child in document
+                if _xml_local_name(child.tag) == "testsuite"
             ]
             if not suites:
-                raise WorkflowLaneError("core_shard_report_xml")
+                raise WorkflowLaneError(f"{identity}_shard_report_xml")
             merged.extend(suites)
         else:
-            raise WorkflowLaneError("core_shard_report_xml")
+            raise WorkflowLaneError(f"{identity}_shard_report_xml")
     payload = ET.tostring(merged, encoding="utf-8", xml_declaration=True)
     _publish_private_bytes(report, payload)
     relative_report = report.relative_to(root).as_posix()
@@ -1007,7 +1019,37 @@ def _merge_core_junit_reports(
     )
     if comparable_source != comparable_final:
         report.unlink(missing_ok=True)
-        raise WorkflowLaneError("core_shard_report_merge")
+        raise WorkflowLaneError(f"{identity}_shard_report_merge")
+
+
+def _merge_core_junit_reports(
+    *,
+    root: Path,
+    report: Path,
+    shard_reports: Sequence[Path],
+) -> None:
+    _merge_junit_reports(
+        root=root,
+        report=report,
+        shard_reports=shard_reports,
+        expected_count=_CORE_SHARD_COUNT,
+        identity="core",
+    )
+
+
+def _merge_service_junit_reports(
+    *,
+    root: Path,
+    report: Path,
+    shard_reports: Sequence[Path],
+) -> None:
+    _merge_junit_reports(
+        root=root,
+        report=report,
+        shard_reports=shard_reports,
+        expected_count=_SERVICE_SHARD_COUNT,
+        identity="service",
+    )
 
 
 def _run_core_pytest_shards(*, root: Path, report: Path) -> int:
@@ -1034,7 +1076,7 @@ def _run_core_pytest_shards(*, root: Path, report: Path) -> int:
         with ThreadPoolExecutor(max_workers=_CORE_SHARD_COUNT) as executor:
             futures = tuple(
                 executor.submit(
-                    _run_core_shard,
+                    _run_pytest_shard,
                     argv=commands[index],
                     root=root,
                     log=logs[index],
@@ -1075,6 +1117,135 @@ def core_tests(*, repo_root: str | Path, report: str | Path, clustering: bool) -
     )
 
 
+def _service_test_files(
+    root: Path, test_paths: Sequence[str]
+) -> tuple[tuple[str, int], ...]:
+    expected = _repository_service_tests(root)
+    selected = tuple(str(path) for path in test_paths)
+    if (
+        selected != expected
+        or len(selected) != len(set(selected))
+        or len(selected) < _SERVICE_SHARD_COUNT
+    ):
+        raise WorkflowLaneError("service_test_topology")
+    values: list[tuple[str, int]] = []
+    test_root = (root / "newsroom" / "tests").resolve()
+    for relative in selected:
+        path = root / relative
+        try:
+            resolved = path.resolve(strict=True)
+            size = len(resolved.read_bytes())
+        except OSError as exc:
+            raise WorkflowLaneError("service_test_file") from exc
+        if (
+            path.is_symlink()
+            or not resolved.is_relative_to(test_root)
+            or not resolved.is_file()
+            or resolved.name != path.name
+        ):
+            raise WorkflowLaneError("service_test_file")
+        values.append((relative, size))
+    return tuple(values)
+
+
+def _service_test_shards(
+    root: Path, test_paths: Sequence[str]
+) -> tuple[tuple[str, ...], ...]:
+    files = _service_test_files(root, test_paths)
+    shards: list[list[str]] = [[] for _ in range(_SERVICE_SHARD_COUNT)]
+    weights = [0] * _SERVICE_SHARD_COUNT
+    for relative, size in sorted(files, key=lambda item: (-item[1], item[0])):
+        shard = min(
+            range(_SERVICE_SHARD_COUNT),
+            key=lambda index: (weights[index], index),
+        )
+        shards[shard].append(relative)
+        weights[shard] += size
+    result = tuple(tuple(sorted(shard)) for shard in shards)
+    flattened = tuple(item for shard in result for item in shard)
+    expected = tuple(sorted(relative for relative, _size in files))
+    if (
+        any(not shard for shard in result)
+        or len(flattened) != len(set(flattened))
+        or tuple(sorted(flattened)) != expected
+    ):
+        raise WorkflowLaneError("service_shard_coverage")
+    return result
+
+
+def _service_shard_command(
+    *,
+    test_files: Sequence[str],
+    report: Path,
+    basetemp: Path,
+) -> tuple[str, ...]:
+    if not test_files:
+        raise WorkflowLaneError("service_shard_empty")
+    return (
+        sys.executable,
+        "-m",
+        "pytest",
+        *_SERVICE_PYTEST_OPTIONS,
+        *test_files,
+        f"--basetemp={basetemp}",
+        f"--junitxml={report}",
+    )
+
+
+def _run_service_pytest_shards(
+    *,
+    root: Path,
+    report: Path,
+    test_paths: Sequence[str],
+) -> int:
+    shards = _service_test_shards(root, test_paths)
+    if report.exists() or report.is_symlink() or not report.parent.is_dir():
+        raise WorkflowLaneError("report_exists")
+    shard_reports = tuple(
+        report.with_name(f"{report.stem}-shard-{index:02d}{report.suffix}")
+        for index in range(_SERVICE_SHARD_COUNT)
+    )
+    if any(path.exists() or path.is_symlink() for path in shard_reports):
+        raise WorkflowLaneError("service_shard_report_exists")
+    with tempfile.TemporaryDirectory(prefix="newsroom-service-shards-") as raw_temp:
+        temporary = Path(raw_temp)
+        logs = tuple(
+            temporary / f"shard-{index:02d}.log"
+            for index in range(_SERVICE_SHARD_COUNT)
+        )
+        commands = tuple(
+            _service_shard_command(
+                test_files=shards[index],
+                report=shard_reports[index],
+                basetemp=temporary / f"pytest-{index:02d}",
+            )
+            for index in range(_SERVICE_SHARD_COUNT)
+        )
+        with ThreadPoolExecutor(max_workers=_SERVICE_SHARD_COUNT) as executor:
+            futures = tuple(
+                executor.submit(
+                    _run_pytest_shard,
+                    argv=commands[index],
+                    root=root,
+                    log=logs[index],
+                )
+                for index in range(_SERVICE_SHARD_COUNT)
+            )
+            codes = tuple(future.result() for future in futures)
+        for log in logs:
+            try:
+                sys.stdout.buffer.write(log.read_bytes())
+            except OSError as exc:
+                raise WorkflowLaneError("service_shard_log") from exc
+        sys.stdout.buffer.flush()
+    _merge_service_junit_reports(
+        root=root, report=report, shard_reports=shard_reports
+    )
+    for shard_report in shard_reports:
+        shard_report.unlink(missing_ok=True)
+    return next((code if code > 0 else 1 for code in codes if code), 0)
+
+
 def service_tests(
     *, repo_root: str | Path, report: str | Path, test_paths: Sequence[str]
 ) -> int:
@@ -1082,15 +1253,10 @@ def service_tests(
     report_path = Path(report).resolve()
     if not report_path.is_relative_to(root) or not test_paths:
         raise WorkflowLaneError("service_tests")
-    return _run_subprocess(
-        (
-            sys.executable,
-            "-m",
-            "pytest",
-            "-q",
-            *test_paths,
-            f"--junitxml={report_path}",
-        )
+    return _run_service_pytest_shards(
+        root=root,
+        report=report_path,
+        test_paths=test_paths,
     )
 
 
