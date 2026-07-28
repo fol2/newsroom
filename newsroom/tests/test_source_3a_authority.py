@@ -200,3 +200,115 @@ def test_one_parser_slot_cannot_emit_conflicting_representation(
     with pytest.raises(SourceSemanticCollision):
         system.sources.record_representation(conflicting, proof=proof())
     system.close()
+
+
+def test_representation_and_occurrence_cannot_downgrade_source_version(
+    tmp_path,
+) -> None:
+    system = open_source_system(tmp_path / "authority.sqlite3")
+    _seed_source(system)
+    revision = system.sources.record_revision(
+        revision_request(),
+        proof=proof(),
+    )
+    representation = system.sources.record_representation(
+        representation_request(),
+        proof=proof(),
+    )
+
+    with pytest.raises(SourceVersionConflict, match="current version"):
+        system.sources.record_representation(
+            replace(
+                representation_request(
+                    representation_id=REPRESENTATION_2_ID,
+                    parser_version="fixture-parser-stale",
+                    key="stale-source-representation",
+                ),
+                definition_version_id=VERSION_1_ID,
+            ),
+            proof=proof(),
+        )
+
+    with pytest.raises(SourceVersionConflict, match="current version"):
+        system.sources.record_occurrence(
+            replace(
+                occurrence_request(
+                    occurrence_id=OCCURRENCE_2_ID,
+                    check_outcome_id=CHECK_2_ID,
+                    representation_id=representation.request.representation_id,
+                    kind=DiscoveryOccurrenceKind.REOBSERVED,
+                    key="stale-source-occurrence",
+                ),
+                definition_version_id=VERSION_1_ID,
+            ),
+            proof=proof(),
+        )
+
+    assert revision.request.definition_version_id == VERSION_2_ID
+    system.close()
+
+
+def test_observation_must_use_current_version_but_historical_current_rows_reopen(
+    tmp_path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    system = open_source_system(database)
+    _seed_source(system)
+    revision = system.sources.record_revision(revision_request(), proof=proof())
+    representation = system.sources.record_representation(
+        representation_request(),
+        proof=proof(),
+    )
+    occurrence = system.sources.record_occurrence(
+        occurrence_request(),
+        proof=proof(),
+    )
+
+    version_3_id = SourceDefinitionVersionId.parse(
+        "00000000-0000-4000-8000-000000003114"
+    )
+    system.sources.record_definition_version(
+        version_request(
+            version_id=version_3_id,
+            version_number=3,
+            previous_version_id=VERSION_2_ID,
+            locator="fixture://increment-3a/maintained-guidance-v3",
+            key="source-definition-version-v3",
+        ),
+        proof=proof(),
+    )
+
+    with pytest.raises(SourceVersionConflict, match="exact current version"):
+        system.sources.record_representation(
+            representation_request(
+                representation_id=REPRESENTATION_2_ID,
+                parser_version="fixture-parser-stale-current",
+                digest_character="f",
+                key="stale-current-source-representation",
+            ),
+            proof=proof(),
+        )
+    with pytest.raises(SourceVersionConflict, match="exact current version"):
+        system.sources.record_occurrence(
+            occurrence_request(
+                occurrence_id=OCCURRENCE_2_ID,
+                check_outcome_id=CHECK_2_ID,
+                representation_id=representation.request.representation_id,
+                kind=DiscoveryOccurrenceKind.REOBSERVED,
+                key="stale-current-source-occurrence",
+            ),
+            proof=proof(),
+        )
+    system.close()
+
+    reopened = open_source_system(database)
+    assert reopened.sources.revision(
+        revision.request.revision_id,
+        proof=proof(),
+    ).event_id == revision.event_id
+    assert reopened.sources.occurrences(
+        revision.request.revision_id,
+        limit=10,
+        proof=proof(),
+    )[0].event_id == occurrence.event_id
+    reopened.close()

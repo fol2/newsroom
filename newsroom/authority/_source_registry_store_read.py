@@ -109,6 +109,26 @@ class _SourceRegistryReadMixin:
         return row
 
     @classmethod
+    def _require_historically_current_version(
+        cls,
+        conn: sqlite3.Connection,
+        row: Mapping[str, Any],
+        *,
+        definition_id: str,
+        version_id: str,
+        identity: str,
+    ) -> None:
+        if not cls._source_version_was_current_at_event(
+            conn,
+            definition_id=definition_id,
+            version_id=version_id,
+            record_event_id=str(row["authority_event_id"]),
+        ):
+            raise AuthorityPersistenceError(
+                f"{identity} source version was not current when recorded"
+            )
+
+    @classmethod
     def _item_row(
         cls, conn: sqlite3.Connection, item_id: str
     ) -> sqlite3.Row:
@@ -281,6 +301,13 @@ class _SourceRegistryReadMixin:
             list(request.uncertainties),
             identity="source item",
         )
+        self._require_historically_current_version(
+            conn,
+            row,
+            definition_id=str(request.definition_id),
+            version_id=str(request.definition_version_id),
+            identity="source item",
+        )
         if (
             str(request.item_id) != str(row["item_id"])
             or str(request.definition_id) != str(row["definition_id"])
@@ -349,6 +376,13 @@ class _SourceRegistryReadMixin:
                 "observed_at": request.observed_at.to_text(),
                 "semantic_digest": request.semantic_digest,
             },
+            identity="locator continuity decision",
+        )
+        self._require_historically_current_version(
+            conn,
+            row,
+            definition_id=str(request.definition_id),
+            version_id=str(request.definition_version_id),
             identity="locator continuity decision",
         )
         if (
@@ -420,6 +454,13 @@ class _SourceRegistryReadMixin:
             request.source_updated_time.canonical_value(),
             identity="source revision",
         )
+        self._require_historically_current_version(
+            conn,
+            row,
+            definition_id=str(item["definition_id"]),
+            version_id=str(request.definition_version_id),
+            identity="source revision",
+        )
         if (
             str(request.revision_id) != str(row["revision_id"])
             or str(request.item_id) != str(row["item_id"])
@@ -458,6 +499,26 @@ class _SourceRegistryReadMixin:
             value, idempotency_key=str(event["idempotency_key"])
         )
         revision = self._revision_row(conn, str(request.revision_id))
+        if not self._source_version_is_same_or_later(
+            conn,
+            definition_id=str(revision["definition_id"]),
+            lineage_version_id=str(revision["definition_version_id"]),
+            observation_version_id=str(request.definition_version_id),
+        ):
+            raise AuthorityPersistenceError(
+                "representation source version predates or differs from its revision"
+            )
+        self._require_historically_current_version(
+            conn,
+            row,
+            definition_id=str(revision["definition_id"]),
+            version_id=str(request.definition_version_id),
+            identity="discovery representation",
+        )
+        if request.produced_at.to_text() < str(revision["observed_at"]):
+            raise AuthorityPersistenceError(
+                "representation precedes its Source Revision observation"
+            )
         self._require_normalized_columns(
             row,
             {
@@ -514,6 +575,47 @@ class _SourceRegistryReadMixin:
             value, idempotency_key=str(event["idempotency_key"])
         )
         revision = self._revision_row(conn, str(request.revision_id))
+        if not self._source_version_is_same_or_later(
+            conn,
+            definition_id=str(revision["definition_id"]),
+            lineage_version_id=str(revision["definition_version_id"]),
+            observation_version_id=str(request.definition_version_id),
+        ):
+            raise AuthorityPersistenceError(
+                "occurrence source version predates or differs from its revision"
+            )
+        self._require_historically_current_version(
+            conn,
+            row,
+            definition_id=str(revision["definition_id"]),
+            version_id=str(request.definition_version_id),
+            identity="discovery occurrence",
+        )
+        if request.observed_at.to_text() < str(revision["observed_at"]):
+            raise AuthorityPersistenceError(
+                "occurrence precedes its Source Revision observation"
+            )
+        if request.representation_id is not None:
+            representation = self._representation_row(
+                conn,
+                str(request.representation_id),
+            )
+            if str(representation["revision_id"]) != str(request.revision_id):
+                raise AuthorityPersistenceError(
+                    "occurrence representation belongs to another revision"
+                )
+            if str(representation["definition_version_id"]) != str(
+                request.definition_version_id
+            ):
+                raise AuthorityPersistenceError(
+                    "occurrence source version differs from its representation"
+                )
+            if request.observed_at.to_text() < str(
+                representation["produced_at"]
+            ):
+                raise AuthorityPersistenceError(
+                    "occurrence precedes its Representation"
+                )
         self._require_normalized_columns(
             row,
             {

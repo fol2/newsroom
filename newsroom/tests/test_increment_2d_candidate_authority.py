@@ -118,7 +118,7 @@ def test_candidate_authority_v9_remains_available_under_current_schema(tmp_path:
     )
     system.close()
     with sqlite3.connect(database) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         names = {
             row[0]
             for row in conn.execute(
