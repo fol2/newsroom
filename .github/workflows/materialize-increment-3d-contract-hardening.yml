@@ -161,11 +161,12 @@ jobs:
           from pathlib import Path
           import subprocess
 
-          expected = tuple(
-              json.loads(
-                  Path('/tmp/increment-3d-contract-hardening-manifest-copy.json')
-                  .read_text(encoding='utf-8')
-              )['product_paths']
+          manifest = json.loads(
+              Path('/tmp/increment-3d-contract-hardening-manifest-copy.json')
+              .read_text(encoding='utf-8')
+          )
+          expected = tuple(manifest['product_paths']) + tuple(
+              manifest['temporary_paths']
           )
           raw = subprocess.check_output(
               ['git', 'status', '--porcelain=v1', '-z'],
