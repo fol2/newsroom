@@ -36,6 +36,7 @@ from .types import (
     DiscoveryContractError,
     DiscoverySignalId,
     GATE_ALLOWED_REASON_BASES,
+    INCREMENT_3D_ALLOWED_REASON_BASES,
     GateBasis,
     GateDecisionId,
     GateOutcome,
@@ -126,6 +127,10 @@ class DiscoverySignalRequest:
         ):
             raise DiscoveryContractError(
                 "Signal Finding identities must be a sorted unique typed tuple"
+            )
+        if self.incomplete != bool(self.operational_finding_ids):
+            raise DiscoveryContractError(
+                "Signal incompleteness and Operational Finding lineage must agree"
             )
         _require_utc(self.admitted_at, field="Signal admission time")
         _require_idempotency_key(self.idempotency_key)
@@ -291,6 +296,23 @@ class GateDecisionRequest:
         self._validate_outcome_shape()
 
     def _validate_outcome_shape(self) -> None:
+        authority_ready = all(
+            (
+                self.basis.identity_integrity,
+                self.basis.rights_current,
+                self.basis.policy_current,
+                self.basis.operationally_executable,
+            )
+        )
+        if self.outcome is not GateOutcome.OPERATIONAL_HOLD and not authority_ready:
+            raise DiscoveryContractError(
+                "non-hold Gate outcome requires current executable authority"
+            )
+        if self.basis.duplicate_signal_id == self.signal_id:
+            raise DiscoveryContractError(
+                "Gate duplicate target must be a distinct retained Signal"
+            )
+
         if self.outcome is GateOutcome.SUPPRESSED_DUPLICATE:
             if self.basis.duplicate_signal_id is None:
                 raise DiscoveryContractError(
@@ -299,6 +321,10 @@ class GateDecisionRequest:
             if self.terminality is not DecisionTerminality.TERMINAL_EXACT_VERSION:
                 raise DiscoveryContractError(
                     "duplicate suppression is terminal for the exact Signal"
+                )
+            if self.next_action is not None and self.next_action.kind is not NextActionKind.CLOSE:
+                raise DiscoveryContractError(
+                    "duplicate suppression may only close the exact Gate scope"
                 )
         elif self.outcome is GateOutcome.SUPPRESSED_NON_CHANGE:
             if self.basis.observable_newness not in {
@@ -317,6 +343,10 @@ class GateDecisionRequest:
                 raise DiscoveryContractError(
                     "non-change suppression is terminal for the exact Signal"
                 )
+            if self.next_action is not None and self.next_action.kind is not NextActionKind.CLOSE:
+                raise DiscoveryContractError(
+                    "non-change suppression may only close the exact Gate scope"
+                )
         elif self.outcome is GateOutcome.REJECTED_CLEAR_EXCLUSION:
             if self.basis.scope_disposition is not ScopeDisposition.CLEAR_EXCLUSION:
                 raise DiscoveryContractError(
@@ -325,6 +355,10 @@ class GateDecisionRequest:
             if self.terminality is not DecisionTerminality.TERMINAL_EXACT_VERSION:
                 raise DiscoveryContractError(
                     "clear exclusion is terminal for the exact Signal"
+                )
+            if self.next_action is not None and self.next_action.kind is not NextActionKind.CLOSE:
+                raise DiscoveryContractError(
+                    "clear exclusion may only close the exact Gate scope"
                 )
         elif self.outcome is GateOutcome.PROMOTED_TO_LEAD:
             if not all(
@@ -354,6 +388,10 @@ class GateDecisionRequest:
                 raise DiscoveryContractError(
                     "promotion is terminal for the exact Gate evaluation"
                 )
+            if self.next_action is None or self.next_action.kind is not NextActionKind.QUEUE_TRIAGE:
+                raise DiscoveryContractError(
+                    "Lead promotion requires the exact queue-triage next action"
+                )
         elif self.outcome is GateOutcome.OPERATIONAL_HOLD:
             if self.next_action is None or self.next_action.kind not in {
                 NextActionKind.RETRY,
@@ -369,14 +407,6 @@ class GateDecisionRequest:
             }:
                 raise DiscoveryContractError(
                     "operational hold must be pending or retryable"
-                )
-        if self.outcome is not GateOutcome.OPERATIONAL_HOLD and self.next_action:
-            if self.next_action.kind not in {
-                NextActionKind.CLOSE,
-                NextActionKind.QUEUE_TRIAGE,
-            }:
-                raise DiscoveryContractError(
-                    "terminal Gate result cannot retain pending next action"
                 )
 
     def canonical_value(self) -> dict[str, object]:
@@ -515,6 +545,10 @@ class NewsLeadRequest:
         )
         if not isinstance(self.urgency, UrgencyBasis):
             raise DiscoveryContractError("Lead urgency basis must be typed")
+        if self.urgency.primary_reason.basis not in INCREMENT_3D_ALLOWED_REASON_BASES:
+            raise DiscoveryContractError(
+                "Lead urgency reason basis requires later unavailable authority"
+            )
         _require_policy(self.lead_policy, field="lead_policy")
         require_token(
             self.reason_taxonomy_version,
@@ -769,7 +803,18 @@ class LeadDispositionDecisionRequest:
             raise DiscoveryContractError(
                 "Lead disposition primary reason must be typed"
             )
+        if self.primary_reason.basis not in INCREMENT_3D_ALLOWED_REASON_BASES:
+            raise DiscoveryContractError(
+                "Lead disposition reason basis requires later unavailable authority"
+            )
         sorted_reasons(self.supporting_reasons)
+        if any(
+            item.basis not in INCREMENT_3D_ALLOWED_REASON_BASES
+            for item in self.supporting_reasons
+        ):
+            raise DiscoveryContractError(
+                "supporting Lead disposition reason uses unavailable authority"
+            )
         if self.primary_reason.digest in {
             item.digest for item in self.supporting_reasons
         }:

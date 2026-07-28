@@ -14,6 +14,11 @@ from .record_models import (
     NewsLead,
     WatchCondition,
 )
+from .traceability import (
+    INCREMENT_3D_DEFERRED,
+    INCREMENT_3D_EXCLUSIONS,
+    INCREMENT_3D_TRACEABILITY,
+)
 from .types import (
     ACTIVE_INCREMENT_3D_DISPOSITIONS,
     DecisionTerminality,
@@ -57,6 +62,9 @@ __all__ = [
     "DiscoverySignalRequest",
     "DiscoveryStateError",
     "DiscoveryVersionConflict",
+    "INCREMENT_3D_DEFERRED",
+    "INCREMENT_3D_EXCLUSIONS",
+    "INCREMENT_3D_TRACEABILITY",
     "GateBasis",
     "GateDecision",
     "GateDecisionId",

@@ -93,6 +93,12 @@ GATE_ALLOWED_REASON_BASES = frozenset(
     }
 )
 
+# Increment 3D has no editorial, human-adjudication, or downstream-feedback
+# authority. Leads and their foundation dispositions therefore use the same
+# bounded reason basis as deterministic Gate Decisions. Later triage work may
+# define a broader contract without weakening this boundary.
+INCREMENT_3D_ALLOWED_REASON_BASES = GATE_ALLOWED_REASON_BASES
+
 
 class ObservableNewness(StrEnum):
     GENUINE_TRANSITION = "GENUINE_TRANSITION"
@@ -553,6 +559,7 @@ __all__ = [
     "DiscoveryStateError",
     "DiscoveryVersionConflict",
     "GATE_ALLOWED_REASON_BASES",
+    "INCREMENT_3D_ALLOWED_REASON_BASES",
     "GateBasis",
     "GateDecisionId",
     "GateOutcome",

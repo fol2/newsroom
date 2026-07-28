@@ -245,3 +245,90 @@ def test_later_gate_and_disposition_require_exact_predecessors() -> None:
 def test_watch_review_cannot_follow_expiry() -> None:
     with pytest.raises(DiscoveryContractError, match="precedes review"):
         replace(watch_request(), review_at=EXPIRY, expires_at=REVIEW_AT)
+
+
+def test_signal_incompleteness_requires_exact_finding_lineage() -> None:
+    complete = signal_request()
+    with pytest.raises(DiscoveryContractError, match="incompleteness"):
+        replace(complete, incomplete=True)
+
+
+def test_non_hold_gate_requires_current_authority() -> None:
+    basis = replace(promoted_basis(), identity_integrity=False)
+    with pytest.raises(DiscoveryContractError, match="current executable authority"):
+        gate_request(
+            outcome=GateOutcome.SUPPRESSED_NON_CHANGE,
+            basis=replace(
+                basis,
+                observable_newness=ObservableNewness.PARSER_ONLY,
+            ),
+            next_action=NextAction(
+                NextActionKind.CLOSE,
+                "CLOSE_NON_CHANGE",
+                instructions="Invalid because authority is not current.",
+            ),
+        )
+
+
+def test_duplicate_gate_cannot_target_its_own_signal() -> None:
+    with pytest.raises(DiscoveryContractError, match="distinct retained Signal"):
+        gate_request(
+            outcome=GateOutcome.SUPPRESSED_DUPLICATE,
+            basis=replace(
+                promoted_basis(),
+                duplicate_signal_id=signal_request().signal_id,
+                duplicate_rule=VersionedPolicyRef("fixture-duplicate", "v1"),
+            ),
+            next_action=NextAction(
+                NextActionKind.CLOSE,
+                "CLOSE_DUPLICATE",
+                instructions="Invalid self-duplicate.",
+            ),
+        )
+
+
+def test_gate_outcomes_require_exact_next_action_shape() -> None:
+    with pytest.raises(DiscoveryContractError, match="queue-triage"):
+        gate_request(
+            next_action=NextAction(
+                NextActionKind.CLOSE,
+                "CLOSE_PROMOTION",
+                instructions="Promotion cannot close before Lead creation.",
+            )
+        )
+    with pytest.raises(DiscoveryContractError, match="may only close"):
+        gate_request(
+            outcome=GateOutcome.SUPPRESSED_NON_CHANGE,
+            basis=replace(
+                promoted_basis(),
+                observable_newness=ObservableNewness.PARSER_ONLY,
+            ),
+            next_action=NextAction(
+                NextActionKind.QUEUE_TRIAGE,
+                "QUEUE_NON_CHANGE",
+                instructions="Non-change cannot enter triage.",
+            ),
+        )
+
+
+def test_lead_urgency_rejects_later_editorial_reason_basis() -> None:
+    editorial_urgency = replace(
+        urgency(),
+        primary_reason=reason(
+            "UTILITY.EDITORIAL_MATERIALITY",
+            ReasonBasisClass.EDITORIAL_ASSESSMENT,
+        ),
+    )
+    with pytest.raises(DiscoveryContractError, match="later unavailable authority"):
+        replace(lead_request(), urgency=editorial_urgency)
+
+
+def test_foundation_disposition_rejects_later_editorial_reason_basis() -> None:
+    with pytest.raises(DiscoveryContractError, match="later unavailable authority"):
+        replace(
+            disposition_request(),
+            primary_reason=reason(
+                "UTILITY.EDITORIAL_MATERIALITY",
+                ReasonBasisClass.EDITORIAL_ASSESSMENT,
+            ),
+        )
