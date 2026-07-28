@@ -162,8 +162,11 @@ def test_crash_after_baseline_resumes_missing_activation_transition(
     resumed = system.checks.admit_proposal(admission, proof=proof())
 
     assert resumed.baseline is not None
+    assert resumed.baseline_state is AdmissionRecordState.REPLAYED
     assert len(resumed.transitions) == 1
+    assert resumed.transition_states == (AdmissionRecordState.CREATED,)
     assert resumed.transitions[0].request.kind.value == "ACTIVATED"
+    assert resumed.replayed is False
     system.close()
 
     with sqlite3.connect(database) as conn:

@@ -394,9 +394,13 @@ class ProposalAdmissionResult:
     outcome: CheckOutcome
     observations: tuple[AdmittedSourceObservation, ...]
     baseline: BaselineDecision | None = None
+    baseline_state: AdmissionRecordState | None = None
     transitions: tuple[ObservableTransition, ...] = ()
+    transition_states: tuple[AdmissionRecordState, ...] = ()
     findings: tuple[OperationalFinding, ...] = ()
+    finding_states: tuple[AdmissionRecordState, ...] = ()
     finding_occurrences: tuple[OperationalFindingOccurrence, ...] = ()
+    finding_occurrence_states: tuple[AdmissionRecordState, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.request, ProposalAdmissionRequest):
@@ -432,15 +436,20 @@ class ProposalAdmissionResult:
             raise CheckContractError(
                 "proposal admission Occurrence differs from Outcome"
             )
-        if self.baseline is not None:
-            if (
-                not isinstance(self.baseline, BaselineDecision)
-                or self.baseline.request.check_outcome_id
-                != self.outcome.request.outcome_id
-            ):
+        if self.baseline is None:
+            if self.baseline_state is not None:
                 raise CheckContractError(
-                    "proposal admission baseline differs from Outcome"
+                    "proposal admission baseline state requires a baseline"
                 )
+        elif (
+            not isinstance(self.baseline, BaselineDecision)
+            or self.baseline.request.check_outcome_id
+            != self.outcome.request.outcome_id
+            or not isinstance(self.baseline_state, AdmissionRecordState)
+        ):
+            raise CheckContractError(
+                "proposal admission baseline or state differs from Outcome"
+            )
         if not isinstance(self.transitions, tuple) or any(
             not isinstance(item, ObservableTransition)
             for item in self.transitions
@@ -464,6 +473,16 @@ class ProposalAdmissionResult:
             raise CheckContractError(
                 "proposal admission transition differs from Outcome"
             )
+        if (
+            len(self.transition_states) != len(self.transitions)
+            or any(
+                not isinstance(state, AdmissionRecordState)
+                for state in self.transition_states
+            )
+        ):
+            raise CheckContractError(
+                "proposal admission transition states differ from transitions"
+            )
         if not isinstance(self.findings, tuple) or any(
             not isinstance(item, OperationalFinding)
             for item in self.findings
@@ -471,12 +490,33 @@ class ProposalAdmissionResult:
             raise CheckContractError(
                 "proposal admission Findings must be a typed tuple"
             )
+        if (
+            len(self.finding_states) != len(self.findings)
+            or any(
+                not isinstance(state, AdmissionRecordState)
+                for state in self.finding_states
+            )
+        ):
+            raise CheckContractError(
+                "proposal admission Finding states differ from Findings"
+            )
         if not isinstance(self.finding_occurrences, tuple) or any(
             not isinstance(item, OperationalFindingOccurrence)
             for item in self.finding_occurrences
         ):
             raise CheckContractError(
                 "proposal admission Finding occurrences must be typed"
+            )
+        if (
+            len(self.finding_occurrence_states)
+            != len(self.finding_occurrences)
+            or any(
+                not isinstance(state, AdmissionRecordState)
+                for state in self.finding_occurrence_states
+            )
+        ):
+            raise CheckContractError(
+                "proposal admission Finding occurrence states differ from occurrences"
             )
         if any(
             item.request.outcome_id != self.outcome.request.outcome_id
@@ -488,9 +528,32 @@ class ProposalAdmissionResult:
 
     @property
     def replayed(self) -> bool:
-        return self.outcome.replayed and all(
-            observation.occurrence_state is not AdmissionRecordState.CREATED
+        observation_states = (
+            state
             for observation in self.observations
+            for state in (
+                observation.item_state,
+                observation.revision_state,
+                observation.representation_state,
+                observation.occurrence_state,
+            )
+        )
+        decision_states = (
+            (() if self.baseline_state is None else (self.baseline_state,))
+            + self.transition_states
+            + self.finding_states
+            + self.finding_occurrence_states
+        )
+        return (
+            self.outcome.replayed
+            and all(
+                state is not AdmissionRecordState.CREATED
+                for state in observation_states
+            )
+            and all(
+                state is not AdmissionRecordState.CREATED
+                for state in decision_states
+            )
         )
 
     def canonical_value(self) -> dict[str, Any]:
@@ -507,17 +570,29 @@ class ProposalAdmissionResult:
                 if self.baseline is None
                 else str(self.baseline.request.decision_id)
             ),
+            "baseline_state": (
+                None
+                if self.baseline_state is None
+                else self.baseline_state.value
+            ),
             "transition_ids": [
                 str(item.request.transition_id)
                 for item in self.transitions
+            ],
+            "transition_states": [
+                state.value for state in self.transition_states
             ],
             "finding_ids": [
                 str(item.request.finding_id)
                 for item in self.findings
             ],
+            "finding_states": [state.value for state in self.finding_states],
             "finding_occurrence_ids": [
                 str(item.request.occurrence_id)
                 for item in self.finding_occurrences
+            ],
+            "finding_occurrence_states": [
+                state.value for state in self.finding_occurrence_states
             ],
         }
 

@@ -4,7 +4,11 @@ import sqlite3
 
 import pytest
 
-from newsroom.checks import FindingCategory, FindingSeverity
+from newsroom.checks import (
+    AdmissionRecordState,
+    FindingCategory,
+    FindingSeverity,
+)
 from newsroom.discovery_adapters import ObservationProposalOutcome, run_fixture_adapter
 
 from .check_3c_authority_helpers import open_check_system, proof, scopes
@@ -54,11 +58,15 @@ def test_malformed_proposal_opens_stable_finding_and_occurrence(tmp_path) -> Non
     occurrence = result.finding_occurrences[0]
     assert finding.request.category is FindingCategory.PARSER
     assert finding.request.severity is FindingSeverity.BLOCKING
+    assert result.finding_states == (AdmissionRecordState.CREATED,)
+    assert result.finding_occurrence_states == (AdmissionRecordState.CREATED,)
     assert occurrence.request.code == "PROPOSAL_MALFORMED"
     assert occurrence.request.outcome_id == result.outcome.request.outcome_id
 
     replay = system.checks.admit_proposal(admission, proof=proof())
     assert replay.replayed is True
+    assert replay.finding_states == (AdmissionRecordState.REUSED,)
+    assert replay.finding_occurrence_states == (AdmissionRecordState.REPLAYED,)
     assert replay.findings[0].event_id == finding.event_id
     assert replay.finding_occurrences[0].event_id == occurrence.event_id
     system.close()

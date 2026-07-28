@@ -189,7 +189,9 @@ def test_changed_proposal_commits_exact_lineage_and_replays(tmp_path) -> None:
     assert result.outcome.request.kind.value == "SUCCESS_CHANGED"
     assert result.baseline is not None
     assert result.baseline.request.disposition.value == "MAINTAINED_BASELINE_ONLY"
+    assert result.baseline_state is AdmissionRecordState.CREATED
     assert result.transitions == ()
+    assert result.transition_states == ()
     assert len(result.observations) == 1
     observed = result.observations[0]
     assert observed.item_state is AdmissionRecordState.CREATED
@@ -206,7 +208,9 @@ def test_changed_proposal_commits_exact_lineage_and_replays(tmp_path) -> None:
     assert replay.outcome.event_id == result.outcome.event_id
     assert replay.baseline is not None
     assert replay.baseline.event_id == result.baseline.event_id
+    assert replay.baseline_state is AdmissionRecordState.REPLAYED
     assert replay.transitions == ()
+    assert replay.transition_states == ()
     assert replay.observations[0].occurrence.event_id == observed.occurrence.event_id
     system.close()
 
@@ -409,6 +413,7 @@ def test_changed_maintained_state_creates_revision_and_revised_transition(
         proof=proof(),
     )
     assert replay.replayed is True
+    assert replay.transition_states == (AdmissionRecordState.REPLAYED,)
     assert replay.transitions[0].event_id == transition.event_id
     system.close()
 

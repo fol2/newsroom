@@ -197,6 +197,11 @@ class _ProposalAdmissionCommitMixin:
     ):
         plan = authorized.plan
         finding = plan.finding
+        finding_state = (
+            None
+            if finding is None
+            else AdmissionRecordState.REUSED
+        )
         if plan.finding_request is not None:
             assert authorized.finding_grant is not None
             try:
@@ -204,6 +209,7 @@ class _ProposalAdmissionCommitMixin:
                     authorized.finding_grant,
                     request=plan.finding_request,
                 )
+                finding_state = self._committed_state(finding)
             except (
                 CheckIdentifierReuse,
                 CheckSemanticCollision,
@@ -221,8 +227,14 @@ class _ProposalAdmissionCommitMixin:
                     raise ProposalAdmissionConflict(
                         "Operational Finding conflicted with retained authority"
                     ) from exc
+                finding_state = AdmissionRecordState.REUSED
 
         occurrence = plan.occurrence
+        occurrence_state = (
+            None
+            if occurrence is None
+            else AdmissionRecordState.REPLAYED
+        )
         if plan.occurrence_request is not None:
             assert authorized.occurrence_grant is not None
             try:
@@ -230,6 +242,7 @@ class _ProposalAdmissionCommitMixin:
                     authorized.occurrence_grant,
                     request=plan.occurrence_request,
                 )
+                occurrence_state = self._committed_state(occurrence)
             except (
                 CheckIdentifierReuse,
                 CheckSemanticCollision,
@@ -247,9 +260,16 @@ class _ProposalAdmissionCommitMixin:
                     raise ProposalAdmissionConflict(
                         "Finding occurrence conflicted with retained authority"
                     ) from exc
+                occurrence_state = AdmissionRecordState.REUSED
         findings = () if finding is None else (finding,)
+        finding_states = (
+            () if finding_state is None else (finding_state,)
+        )
         occurrences = () if occurrence is None else (occurrence,)
-        return findings, occurrences
+        occurrence_states = (
+            () if occurrence_state is None else (occurrence_state,)
+        )
+        return findings, finding_states, occurrences, occurrence_states
 
     def _commit_decisions(
         self,
@@ -257,6 +277,11 @@ class _ProposalAdmissionCommitMixin:
     ):
         plan = authorized.plan
         baseline = plan.baseline
+        baseline_state = (
+            None
+            if baseline is None
+            else AdmissionRecordState.REPLAYED
+        )
         if plan.baseline_request is not None:
             assert authorized.baseline_grant is not None
             try:
@@ -264,6 +289,7 @@ class _ProposalAdmissionCommitMixin:
                     authorized.baseline_grant,
                     request=plan.baseline_request,
                 )
+                baseline_state = self._committed_state(baseline)
             except (
                 CheckIdentifierReuse,
                 CheckSemanticCollision,
@@ -281,8 +307,12 @@ class _ProposalAdmissionCommitMixin:
                     raise ProposalAdmissionConflict(
                         "Baseline Decision conflicted with retained authority"
                     ) from exc
+                baseline_state = AdmissionRecordState.REUSED
 
-        transitions = list(plan.transitions)
+        transition_results = [
+            (transition, AdmissionRecordState.REPLAYED)
+            for transition in plan.transitions
+        ]
         for request, grant in zip(
             plan.transition_requests,
             authorized.transition_grants,
@@ -293,6 +323,7 @@ class _ProposalAdmissionCommitMixin:
                     grant,
                     request=request,
                 )
+                state = self._committed_state(transition)
             except (
                 CheckIdentifierReuse,
                 CheckSemanticCollision,
@@ -309,12 +340,16 @@ class _ProposalAdmissionCommitMixin:
                     raise ProposalAdmissionConflict(
                         "Observable Transition conflicted with retained authority"
                     ) from exc
-            transitions.append(transition)
-        return baseline, tuple(
-            sorted(
-                transitions,
-                key=lambda item: str(item.request.transition_id),
-            )
+                state = AdmissionRecordState.REUSED
+            transition_results.append((transition, state))
+        transition_results.sort(
+            key=lambda item: str(item[0].request.transition_id)
+        )
+        return (
+            baseline,
+            baseline_state,
+            tuple(item[0] for item in transition_results),
+            tuple(item[1] for item in transition_results),
         )
 
     def _commit_outcome(
@@ -428,20 +463,30 @@ class _ProposalAdmissionCommitMixin:
                 key=lambda item: item.item_key,
             )
         )
-        baseline, transitions = self._commit_decisions(
-            authorized_decisions
-        )
-        findings, finding_occurrences = self._commit_finding(
-            authorized_finding
-        )
+        (
+            baseline,
+            baseline_state,
+            transitions,
+            transition_states,
+        ) = self._commit_decisions(authorized_decisions)
+        (
+            findings,
+            finding_states,
+            finding_occurrences,
+            finding_occurrence_states,
+        ) = self._commit_finding(authorized_finding)
         return ProposalAdmissionResult(
             request=request,
             outcome=outcome,
             observations=observations,
             baseline=baseline,
+            baseline_state=baseline_state,
             transitions=transitions,
+            transition_states=transition_states,
             findings=findings,
+            finding_states=finding_states,
             finding_occurrences=finding_occurrences,
+            finding_occurrence_states=finding_occurrence_states,
         )
 
 
