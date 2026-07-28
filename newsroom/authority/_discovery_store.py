@@ -1010,6 +1010,20 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
                         "cross-source, cross-state, or distinct-purpose Signals "
                         "cannot be suppressed as an exact duplicate"
                     )
+                duplicate_event = self._record_context(
+                    conn,
+                    event_id=str(duplicate["authority_event_id"]),
+                )
+                signal_event = self._record_context(
+                    conn,
+                    event_id=str(signal["authority_event_id"]),
+                )
+                if int(duplicate_event["ledger_seq"]) >= int(
+                    signal_event["ledger_seq"]
+                ):
+                    raise DiscoveryVersionConflict(
+                        "duplicate suppression requires an earlier retained Signal"
+                    )
             head = conn.execute(
                 "SELECT current_decision_id,current_decision_ordinal FROM discovery_gate_decision_heads WHERE signal_id=?",
                 (str(request.signal_id),),

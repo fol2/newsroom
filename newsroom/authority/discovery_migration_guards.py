@@ -123,12 +123,17 @@ DISCOVERY_AUTHORITY_GUARD_STATEMENTS: tuple[str, ...] = (
                     SELECT 1
                     FROM discovery_signals d
                     JOIN discovery_signals s ON s.signal_id=NEW.signal_id
+                    JOIN ledger_events de
+                      ON de.event_id=d.authority_event_id
+                    JOIN ledger_events se
+                      ON se.event_id=s.authority_event_id
                     WHERE d.signal_id=NEW.duplicate_signal_id
                       AND d.definition_id=s.definition_id
                       AND d.item_id=s.item_id
                       AND d.revision_id=s.revision_id
                       AND d.purpose=s.purpose
                       AND d.discriminator=s.discriminator
+                      AND de.ledger_seq<se.ledger_seq
                       AND d.admitted_at<=NEW.decided_at
                 )
                 AND NEW.terminality='TERMINAL_EXACT_VERSION'
