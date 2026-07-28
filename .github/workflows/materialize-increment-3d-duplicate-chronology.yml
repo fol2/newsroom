@@ -1,0 +1,113 @@
+name: Materialize Increment 3D duplicate chronology correction
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-test-and-push:
+    if: github.event.pull_request.head.ref == 'agent/increment-3d-duplicate-chronology-correction'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-3d-duplicate-chronology-correction
+          fetch-depth: 0
+          show-progress: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+      - name: Verify and apply exact duplicate chronology correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import gzip
+          import hashlib
+          import subprocess
+          from pathlib import Path
+
+          base = 'fbd2e3a65729fe9895a2a503f30a9e381b841232'
+          base_tree = '2625b0061b073b093178a55d0aa2c506033ca63f'
+          workflow = '.github/workflows/materialize-increment-3d-duplicate-chronology.yml'
+          payload_dir = Path('.github/increment-3d-duplicate-chronology')
+
+          if subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() != base:
+              raise SystemExit('Increment 3D chronology transport parent differs')
+          if subprocess.check_output(['git', 'rev-parse', f'{base}^{{tree}}'], text=True).strip() != base_tree:
+              raise SystemExit('Increment 3D chronology base tree differs')
+
+          changed = tuple(sorted(subprocess.check_output(
+              ['git', 'diff', '--name-only', f'{base}..HEAD', '--'], text=True
+          ).splitlines()))
+          payload_paths = tuple(sorted(str(path) for path in payload_dir.glob('part-*.txt')))
+          expected = tuple(sorted((*payload_paths, workflow)))
+          if len(payload_paths) != 3 or changed != expected:
+              raise SystemExit(f'Increment 3D chronology transport inventory differs: {changed!r}')
+
+          encoded = ''.join(Path(path).read_text(encoding='ascii').strip() for path in payload_paths)
+          if len(encoded) != 4560:
+              raise SystemExit('Increment 3D chronology base64 size differs')
+          compressed = base64.b64decode(encoded, validate=True)
+          if len(compressed) != 3418:
+              raise SystemExit('Increment 3D chronology gzip size differs')
+          if hashlib.sha256(compressed).hexdigest() != '94edb9d8a4ffc0eeb9326571401be490c6bcf87f013196b5b9ed8e03f5e99226':
+              raise SystemExit('Increment 3D chronology gzip digest differs')
+          patch = gzip.decompress(compressed)
+          if len(patch) != 10494:
+              raise SystemExit('Increment 3D chronology patch size differs')
+          if hashlib.sha256(patch).hexdigest() != 'bf1237f2aac7ee71ed12cc1e9786e69e32dbbb46ee18e5e05a787283179d9ac2':
+              raise SystemExit('Increment 3D chronology patch digest differs')
+          Path('/tmp/increment-3d-duplicate-chronology.patch').write_bytes(patch)
+          PY
+          git apply --check /tmp/increment-3d-duplicate-chronology.patch
+          git apply /tmp/increment-3d-duplicate-chronology.patch
+          rm -rf .github/increment-3d-duplicate-chronology
+          rm -f .github/workflows/materialize-increment-3d-duplicate-chronology.yml
+          python -m compileall -q newsroom scripts
+          git diff --check
+      - name: Install locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+      - name: Run focused and complete regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m pytest -q newsroom/tests/test_discovery_3d_*.py
+          uv run --no-sync python -m pytest -q
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+      - name: Commit verified duplicate chronology correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          test "$(git write-tree)" = '741531a7d280136effb77cb939d74c7e8997be76'
+          test -z "$(git diff --name-only)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(discovery): order exact duplicate authority'
+          git push origin HEAD:agent/increment-3d-duplicate-chronology-correction
