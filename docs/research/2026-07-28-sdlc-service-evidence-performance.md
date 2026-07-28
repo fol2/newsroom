@@ -30,18 +30,21 @@ No Neo4j test, source file, service configuration, credential boundary, artifact
 
 ## Concurrency safety
 
-Each service test uses a separate local pytest temporary root and independently retained SQLite/object authority. Neo4j projection data and derived index names are generation-scoped. The accepted actual-service run remains the authoritative proof that concurrent execution preserves the required isolation and exact test inventory.
+Each service test uses a separate local pytest temporary root and independently retained SQLite/object authority. Neo4j projection data and derived index names are generation-scoped. The actual-service materializer is the first proof that concurrent execution preserves the required isolation and exact test inventory; the permanent signed workflow remains the merge authority.
 
 ## Validation
 
-Before remote actual-service qualification, the correction passed:
+The reviewed correction passed:
 
 - 39 focused workflow-lane tests;
-- 310 repository SDLC tests, with one local environment-only `uv --no-sync` test excluded because the extracted review workspace had no synced lock environment;
-- the complete repository core topology: 1,395 passed and 32 intentional actual-service skips; and
-- the clustering regression gate with no baseline regression.
+- 310 repository SDLC tests, with one local environment-only `uv --no-sync` test excluded only in the extracted review workspace that had no synced lock environment;
+- the complete repository core topology: 1,395 passed and 32 intentional actual-service skips;
+- the clustering regression gate with no baseline regression; and
+- one-use actual-service run `30354566271`, which executed all 32 authenticated Neo4j cases exactly once with zero failure, error or skip and satisfied the explicit sub-45-second material-margin gate.
 
-Merge remains blocked until the exact reviewed head executes all 32 authenticated service cases once, produces a complete merged JUnit report, passes the signed service gate with material margin below 55 seconds and passes every permanent repository workflow.
+The one-use finalizer reapplied the same content-addressed patch, reran the locked complete regression evidence, removed every payload, manifest, verifier and generated report, and committed only the three reviewed product files.
+
+Merge remains blocked until the normal human-authored qualification head passes all permanent workflows, including the signed `service-neo4j` decision under the unchanged 55-second hard timeout.
 
 ## Rollback
 
