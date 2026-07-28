@@ -73,6 +73,8 @@ class _CheckStoreCommitDecisionMixin:
                 != str(request.definition_id)
                 or str(outcome["definition_version_id"])
                 != str(request.definition_version_id)
+                or str(outcome["completed_at"])
+                != request.decided_at.to_text()
                 or str(version["observation_model"])
                 != request.observation_model.value
                 or str(version["baseline_policy_id"])
@@ -108,6 +110,9 @@ class _CheckStoreCommitDecisionMixin:
                     raise CheckVersionConflict(
                         "Baseline Decision does not consume exact complete Outcome"
                     )
+            evidence_error = self._baseline_evidence_error(conn, request)
+            if evidence_error is not None:
+                raise CheckVersionConflict(evidence_error)
             head = conn.execute(
                 "SELECT current_decision_id FROM baseline_decision_heads "
                 "WHERE definition_id=?",
@@ -322,6 +327,9 @@ class _CheckStoreCommitDecisionMixin:
                     raise CheckStateError(
                         "related Source Item belongs to another definition"
                     )
+            evidence_error = self._transition_evidence_error(conn, request)
+            if evidence_error is not None:
+                raise CheckVersionConflict(evidence_error)
             classified = conn.execute(
                 "SELECT transition_id,semantic_digest "
                 "FROM observable_transitions "

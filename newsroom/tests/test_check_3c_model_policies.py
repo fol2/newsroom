@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 import json
 
@@ -13,6 +14,7 @@ from newsroom.checks import (
     BaselineDecisionKind,
     BaselineDisposition,
     BaselineEntryDisposition,
+    ConfirmationOutcomeRef,
     ObservableTransitionKind,
     ProposalAdmissionConflict,
     ProposalAdmissionRequest,
@@ -222,6 +224,11 @@ def _admit(
     suffix: int,
     baseline_control: BaselineControl | None = None,
     transition_directives: tuple[TransitionDirective, ...] = (),
+    transition_directive_factory: Callable[
+        [ProposalAdmissionRequest],
+        tuple[TransitionDirective, ...],
+    ]
+    | None = None,
     trigger: TriggerRef | None = None,
 ):
     request, attempt = _seed_check(
@@ -238,26 +245,52 @@ def _admit(
         baseline_control=baseline_control or BaselineControl(),
         transition_directives=transition_directives,
     )
+    if transition_directive_factory is not None:
+        if transition_directives:
+            raise AssertionError(
+                "static and generated transition directives cannot be combined"
+            )
+        admission = replace(
+            admission,
+            transition_directives=transition_directive_factory(admission),
+        )
     return system.checks.admit_proposal(admission, proof=proof()), admission
 
 
-def _absence_guard(*, authorizing: bool) -> AbsenceEndingGuard:
+def _confirmation_ref(
+    admission: ProposalAdmissionRequest,
+) -> ConfirmationOutcomeRef:
+    outcome = admission.outcome_request()
+    return ConfirmationOutcomeRef(
+        outcome_id=outcome.outcome_id,
+        request_id=outcome.request_id,
+        adapter_request_digest=admission.adapter_request.digest,
+    )
+
+
+def _absence_guard(
+    *,
+    authorizing: bool,
+    confirmation_outcomes: tuple[ConfirmationOutcomeRef, ...],
+) -> AbsenceEndingGuard:
     return AbsenceEndingGuard(
         complete_scope_digest=DIGEST_A,
         filter_contract_digest=DIGEST_B,
         pagination_contract_digest="sha256:" + "c" * 64,
-        successful_complete_outcome=authorizing,
+        successful_complete_outcome=True,
         identity_confirmed=True,
         scope_confirmed=True,
         pagination_complete=True,
-        confirmation_count=2 if authorizing else 0,
-        required_confirmations=2,
+        confirmation_outcomes=confirmation_outcomes,
+        required_confirmations=1,
         grace_satisfied=True,
-        no_alternative_explanation=True,
+        no_alternative_explanation=authorizing,
     )
 
 
-def _agenda_guard() -> AgendaMissGuard:
+def _agenda_guard(
+    confirmation_outcomes: tuple[ConfirmationOutcomeRef, ...],
+) -> AgendaMissGuard:
     return AgendaMissGuard(
         expected_window_digest=DIGEST_A,
         confirmation_paths_digest=DIGEST_B,
@@ -265,6 +298,8 @@ def _agenda_guard() -> AgendaMissGuard:
         grace_satisfied=True,
         confirmation_paths_checked=True,
         no_reschedule_or_cancellation=True,
+        confirmation_outcomes=confirmation_outcomes,
+        required_confirmations=1,
         confirmation_outcomes_complete=True,
         source_failure_absent=True,
     )
@@ -379,18 +414,27 @@ def test_rolling_disappearance_remains_ambiguous(tmp_path) -> None:
     )
     second_proposal = _proposal(second_request, suffix=4, items=[])
     assert second_proposal.outcome is ObservationProposalOutcome.SUCCESS_EMPTY
-    directive = TransitionDirective(
-        item_key=item_key,
-        kind=ObservableTransitionKind.AMBIGUOUS_ABSENCE,
-        transition_discriminator="rolling-window-absence",
-        absence_guard=_absence_guard(authorizing=False),
-    )
+    def rolling_directives(
+        admission: ProposalAdmissionRequest,
+    ) -> tuple[TransitionDirective, ...]:
+        return (
+            TransitionDirective(
+                item_key=item_key,
+                kind=ObservableTransitionKind.AMBIGUOUS_ABSENCE,
+                transition_discriminator="rolling-window-absence",
+                absence_guard=_absence_guard(
+                    authorizing=False,
+                    confirmation_outcomes=(_confirmation_ref(admission),),
+                ),
+            ),
+        )
+
     second, _ = _admit(
         system,
         second_request,
         second_proposal,
         suffix=4,
-        transition_directives=(directive,),
+        transition_directive_factory=rolling_directives,
     )
 
     assert first.transitions == ()
@@ -453,18 +497,27 @@ def test_complete_snapshot_can_end_only_with_complete_authorizing_guard(tmp_path
             }
         ],
     )
-    directive = TransitionDirective(
-        item_key=missing_key,
-        kind=ObservableTransitionKind.RESOLVED_OR_CLEARED,
-        transition_discriminator="complete-snapshot-clearance",
-        absence_guard=_absence_guard(authorizing=True),
-    )
+    def ending_directives(
+        admission: ProposalAdmissionRequest,
+    ) -> tuple[TransitionDirective, ...]:
+        return (
+            TransitionDirective(
+                item_key=missing_key,
+                kind=ObservableTransitionKind.RESOLVED_OR_CLEARED,
+                transition_discriminator="complete-snapshot-clearance",
+                absence_guard=_absence_guard(
+                    authorizing=True,
+                    confirmation_outcomes=(_confirmation_ref(admission),),
+                ),
+            ),
+        )
+
     second, _ = _admit(
         system,
         second_request,
         second_proposal,
         suffix=6,
-        transition_directives=(directive,),
+        transition_directive_factory=ending_directives,
     )
     ending = second.transitions[0].request
     assert ending.kind is ObservableTransitionKind.RESOLVED_OR_CLEARED
@@ -498,7 +551,7 @@ def test_complete_snapshot_can_end_only_with_complete_authorizing_guard(tmp_path
             partial_request,
             partial_proposal,
             suffix=7,
-            transition_directives=(directive,),
+            transition_directive_factory=ending_directives,
         )
     system.close()
 
@@ -641,18 +694,32 @@ def test_planned_agenda_baseline_reschedule_and_miss_remain_expectation_only(
         baseline=_baseline(second_request, second_proposal),
     )
     third_proposal = _proposal(third_request, suffix=12, items=[])
-    missed = TransitionDirective(
-        item_key=future_key,
-        kind=ObservableTransitionKind.AGENDA_MISSED_EXPECTATION,
-        transition_discriminator="agenda-missed-after-confirmation",
-        agenda_guard=_agenda_guard(),
-    )
+    def missed_directives(
+        admission: ProposalAdmissionRequest,
+    ) -> tuple[TransitionDirective, ...]:
+        return (
+            TransitionDirective(
+                item_key=future_key,
+                kind=ObservableTransitionKind.AGENDA_MISSED_EXPECTATION,
+                transition_discriminator="agenda-missed-after-confirmation",
+                agenda_guard=_agenda_guard(
+                    (_confirmation_ref(admission),)
+                ),
+            ),
+        )
+
     third, _ = _admit(
         system,
         third_request,
         third_proposal,
         suffix=12,
-        transition_directives=(missed,),
+        transition_directive_factory=missed_directives,
+        trigger=TriggerRef(
+            TriggerKind.PLANNED_WINDOW,
+            "agenda-confirmation-window",
+            "v1",
+            expected_window_digest=DIGEST_A,
+        ),
     )
     assert third.transitions[0].request.kind is ObservableTransitionKind.AGENDA_MISSED_EXPECTATION
     assert third.transitions[0].request.current_revision_id is None
@@ -856,3 +923,214 @@ def test_one_outcome_cannot_reclassify_its_baseline_decision(tmp_path) -> None:
     with pytest.raises(ProposalAdmissionConflict, match="classification differs"):
         system.checks.admit_proposal(reclassified, proof=proof())
     system.close()
+
+
+def test_unretained_confirmation_fails_before_outcome_commit(tmp_path) -> None:
+    import sqlite3
+
+    from newsroom.checks import CheckOutcomeId, CheckRequestId
+
+    database = tmp_path / "authority.sqlite3"
+    system = open_check_system(database)
+    _seed_source(system, ObservationModel.COMPLETE_CURRENT_STATE)
+    first_request = _adapter_request(
+        ObservationModel.COMPLETE_CURRENT_STATE,
+        suffix=30,
+    )
+    first_proposal = _proposal(
+        first_request,
+        suffix=30,
+        items=[
+            {
+                "id": "guarded-1",
+                "source_published_time": "2042-03-12T08:00:00.000000Z",
+                "status": "active",
+                "title": "Guarded state",
+            }
+        ],
+    )
+    first, _ = _admit(system, first_request, first_proposal, suffix=30)
+    item_key = first_proposal.candidate_items[0].item_key
+    assert first.transitions[0].request.kind is ObservableTransitionKind.ACTIVATED
+
+    second_request = _adapter_request(
+        ObservationModel.COMPLETE_CURRENT_STATE,
+        suffix=31,
+        baseline=_baseline(first_request, first_proposal),
+    )
+    second_proposal = _proposal(second_request, suffix=31, items=[])
+
+    def invalid_directives(
+        admission: ProposalAdmissionRequest,
+    ) -> tuple[TransitionDirective, ...]:
+        references = tuple(
+            sorted(
+                (
+                    _confirmation_ref(admission),
+                    ConfirmationOutcomeRef(
+                        outcome_id=CheckOutcomeId.parse(
+                            "00000000-0000-4000-8000-000000009991"
+                        ),
+                        request_id=CheckRequestId.parse(
+                            "00000000-0000-4000-8000-000000009992"
+                        ),
+                        adapter_request_digest=DIGEST_A,
+                    ),
+                ),
+                key=lambda item: str(item.outcome_id),
+            )
+        )
+        return (
+            TransitionDirective(
+                item_key=item_key,
+                kind=ObservableTransitionKind.RESOLVED_OR_CLEARED,
+                transition_discriminator="invalid-unretained-confirmation",
+                absence_guard=AbsenceEndingGuard(
+                    complete_scope_digest=DIGEST_A,
+                    filter_contract_digest=DIGEST_B,
+                    pagination_contract_digest="sha256:" + "c" * 64,
+                    successful_complete_outcome=True,
+                    identity_confirmed=True,
+                    scope_confirmed=True,
+                    pagination_complete=True,
+                    confirmation_outcomes=references,
+                    required_confirmations=2,
+                    grace_satisfied=True,
+                    no_alternative_explanation=True,
+                ),
+            ),
+        )
+
+    with pytest.raises(ProposalAdmissionConflict, match="unretained Check authority"):
+        _admit(
+            system,
+            second_request,
+            second_proposal,
+            suffix=31,
+            transition_directive_factory=invalid_directives,
+        )
+    system.close()
+
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM check_outcomes").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM observable_transitions"
+        ).fetchone()[0] == 1
+
+
+def test_retry_outcomes_cannot_inflate_confirmation_count(tmp_path) -> None:
+    import sqlite3
+
+    from newsroom.checks import CheckAttemptId, CheckAttemptKind
+
+    database = tmp_path / "authority.sqlite3"
+    system = open_check_system(database)
+    _seed_source(system, ObservationModel.COMPLETE_CURRENT_STATE)
+
+    seed_request = _adapter_request(
+        ObservationModel.COMPLETE_CURRENT_STATE,
+        suffix=32,
+    )
+    seed_proposal = _proposal(
+        seed_request,
+        suffix=32,
+        items=[
+            {
+                "id": "retry-guarded-1",
+                "source_published_time": "2042-03-12T08:00:00.000000Z",
+                "status": "active",
+                "title": "Retry guarded state",
+            }
+        ],
+    )
+    seeded, _ = _admit(system, seed_request, seed_proposal, suffix=32)
+    item_key = seed_proposal.candidate_items[0].item_key
+    assert seeded.transitions[0].request.kind is ObservableTransitionKind.ACTIVATED
+
+    confirmation_request = _adapter_request(
+        ObservationModel.COMPLETE_CURRENT_STATE,
+        suffix=33,
+        baseline=_baseline(seed_request, seed_proposal),
+    )
+    first_empty = _proposal(confirmation_request, suffix=33, items=[])
+    check_request, first_attempt = _seed_check(
+        system,
+        confirmation_request,
+        suffix=33,
+    )
+    first_admission = ProposalAdmissionRequest(
+        check_request_id=check_request.request_id,
+        check_attempt_id=first_attempt.attempt_id,
+        adapter_request=confirmation_request,
+        proposal=first_empty,
+    )
+    first_confirmation = system.checks.admit_proposal(
+        first_admission,
+        proof=proof(),
+    )
+    assert first_confirmation.transitions == ()
+
+    retry_attempt = replace(
+        first_attempt,
+        attempt_id=CheckAttemptId.parse(
+            "00000000-0000-4000-8000-000000009933"
+        ),
+        attempt_number=2,
+        kind=CheckAttemptKind.RETRY,
+        prior_attempt_id=first_attempt.attempt_id,
+        idempotency_key="retry-confirmation-attempt-2",
+    )
+    system.checks.start_attempt(retry_attempt, proof=proof())
+    retry_proposal = _proposal(confirmation_request, suffix=34, items=[])
+    pending = ProposalAdmissionRequest(
+        check_request_id=check_request.request_id,
+        check_attempt_id=retry_attempt.attempt_id,
+        adapter_request=confirmation_request,
+        proposal=retry_proposal,
+    )
+    references = tuple(
+        sorted(
+            (
+                ConfirmationOutcomeRef(
+                    outcome_id=first_confirmation.outcome.request.outcome_id,
+                    request_id=check_request.request_id,
+                    adapter_request_digest=confirmation_request.digest,
+                ),
+                _confirmation_ref(pending),
+            ),
+            key=lambda item: str(item.outcome_id),
+        )
+    )
+    classified = replace(
+        pending,
+        transition_directives=(
+            TransitionDirective(
+                item_key=item_key,
+                kind=ObservableTransitionKind.RESOLVED_OR_CLEARED,
+                transition_discriminator="retry-inflated-confirmation",
+                absence_guard=AbsenceEndingGuard(
+                    complete_scope_digest=DIGEST_A,
+                    filter_contract_digest=DIGEST_B,
+                    pagination_contract_digest="sha256:" + "c" * 64,
+                    successful_complete_outcome=True,
+                    identity_confirmed=True,
+                    scope_confirmed=True,
+                    pagination_complete=True,
+                    confirmation_outcomes=references,
+                    required_confirmations=2,
+                    grace_satisfied=True,
+                    no_alternative_explanation=True,
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(ProposalAdmissionConflict, match="count retries"):
+        system.checks.admit_proposal(classified, proof=proof())
+    system.close()
+
+    with sqlite3.connect(database) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM check_outcomes WHERE request_id=?",
+            (str(check_request.request_id),),
+        ).fetchone()[0] == 1

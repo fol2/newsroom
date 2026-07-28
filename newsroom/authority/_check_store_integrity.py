@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import sqlite3
 
-from newsroom.authority._check_store_support import _CHECK_RECORD_SPECS
+from newsroom.authority._check_store_support import (
+    _CHECK_RECORD_SPECS,
+    _outcome_observed_item_error,
+)
 from newsroom.authority.persistence import AuthorityPersistenceError
+from newsroom.checks.types import FindingScopeKind
 from newsroom.sources import SourceDefinitionId, SourceDefinitionVersionId
 
 
@@ -35,6 +39,15 @@ class _CheckIntegrityMixin:
             record = self._check_request_from_row(conn, row, replayed=False)
             request = record.request
             version = self._version_row(conn, request.definition_version_id)
+            if not self._source_version_was_current_at_event(
+                conn,
+                definition_id=str(request.definition_id),
+                version_id=str(request.definition_version_id),
+                record_event_id=str(row["authority_event_id"]),
+            ):
+                raise AuthorityPersistenceError(
+                    "Check Request source version was not current when recorded"
+                )
             if (
                 str(version["definition_id"]) != str(request.definition_id)
                 or str(version["rights_decision_id"])
@@ -92,6 +105,11 @@ class _CheckIntegrityMixin:
                 or str(parent["definition_id"]) != str(request.definition_id)
                 or str(parent["definition_version_id"])
                 != str(request.definition_version_id)
+                or (
+                    request.producer_slot_digest is not None
+                    and request.producer_slot_digest
+                    != str(parent["producer_slot_digest"])
+                )
                 or request.completed_at.to_text() < str(attempt["started_at"])
             ):
                 raise AuthorityPersistenceError(
@@ -110,6 +128,15 @@ class _CheckIntegrityMixin:
             outcome = self._check_outcome_row(
                 conn, str(request.check_outcome_id)
             )
+            if not self._source_version_was_current_at_event(
+                conn,
+                definition_id=str(request.definition_id),
+                version_id=str(request.definition_version_id),
+                record_event_id=str(row["authority_event_id"]),
+            ):
+                raise AuthorityPersistenceError(
+                    "Baseline Decision source version was not current when recorded"
+                )
             if (
                 str(version["definition_id"]) != str(request.definition_id)
                 or str(version["observation_model"])
@@ -141,6 +168,15 @@ class _CheckIntegrityMixin:
             )
             item = self._item_row(conn, str(request.item_id))
             parent = self._check_request_row(conn, str(outcome["request_id"]))
+            if not self._source_version_was_current_at_event(
+                conn,
+                definition_id=str(request.definition_id),
+                version_id=str(request.definition_version_id),
+                record_event_id=str(row["authority_event_id"]),
+            ):
+                raise AuthorityPersistenceError(
+                    "Observable Transition source version was not current when recorded"
+                )
             if (
                 str(version["definition_id"]) != str(request.definition_id)
                 or str(version["observation_model"])
@@ -163,7 +199,18 @@ class _CheckIntegrityMixin:
             record = self._operational_finding_from_row(
                 conn, row, replayed=False
             )
-            self._validate_finding_lineage(conn, record.request)
+            request = record.request
+            error = self._finding_lineage_error(
+                conn,
+                scope_kind=request.scope_kind,
+                scope_id=request.scope_id,
+                request_id=request.opened_by_request_id,
+                attempt_id=request.opened_by_attempt_id,
+                outcome_id=request.opened_by_outcome_id,
+                observed_at=request.opened_at,
+            )
+            if error is not None:
+                raise AuthorityPersistenceError(error)
 
         for row in conn.execute(
             "SELECT * FROM operational_finding_occurrences"
@@ -171,55 +218,30 @@ class _CheckIntegrityMixin:
             record = self._finding_occurrence_from_row(
                 conn, row, replayed=False
             )
-            self._operational_finding_row(
-                conn, str(record.request.finding_id)
+            request = record.request
+            finding = self._operational_finding_row(
+                conn, str(request.finding_id)
             )
-            self._validate_finding_lineage(conn, record.request)
-
-    def _validate_finding_lineage(self, conn, request) -> None:
-        request_id = getattr(request, "opened_by_request_id", None)
-        attempt_id = getattr(request, "opened_by_attempt_id", None)
-        outcome_id = getattr(request, "opened_by_outcome_id", None)
-        if not hasattr(request, "opened_by_request_id"):
-            request_id = request.request_id
-            attempt_id = request.attempt_id
-            outcome_id = request.outcome_id
-        parent_request = None
-        if request_id is not None:
-            parent_request = self._check_request_row(conn, str(request_id))
-        if attempt_id is not None:
-            attempt = self._check_attempt_row(conn, str(attempt_id))
-            if (
-                parent_request is not None
-                and str(attempt["request_id"]) != str(request_id)
-            ):
-                raise AuthorityPersistenceError(
-                    "Operational Finding Attempt lineage is inconsistent"
-                )
-            if parent_request is None:
-                parent_request = self._check_request_row(
-                    conn, str(attempt["request_id"])
-                )
-        if outcome_id is not None:
-            outcome = self._check_outcome_row(conn, str(outcome_id))
-            if request_id is not None and str(outcome["request_id"]) != str(
-                request_id
-            ):
-                raise AuthorityPersistenceError(
-                    "Operational Finding Outcome lineage is inconsistent"
-                )
-            if attempt_id is not None and str(outcome["attempt_id"]) != str(
-                attempt_id
-            ):
-                raise AuthorityPersistenceError(
-                    "Operational Finding Outcome/Attempt lineage is inconsistent"
-                )
+            error = self._finding_lineage_error(
+                conn,
+                scope_kind=FindingScopeKind(str(finding["scope_kind"])),
+                scope_id=str(finding["scope_id"]),
+                request_id=request.request_id,
+                attempt_id=request.attempt_id,
+                outcome_id=request.outcome_id,
+                observed_at=request.observed_at,
+            )
+            if error is not None:
+                raise AuthorityPersistenceError(error)
 
     @staticmethod
     def _validate_attempt_chains(conn: sqlite3.Connection) -> None:
         rows = conn.execute(
-            "SELECT request_id,attempt_id,attempt_number,prior_attempt_id "
-            "FROM check_attempts ORDER BY request_id,attempt_number"
+            "SELECT a.request_id,a.attempt_id,a.attempt_number,"
+            "a.prior_attempt_id,a.started_at,r.requested_at "
+            "FROM check_attempts a "
+            "JOIN check_requests r ON r.request_id=a.request_id "
+            "ORDER BY a.request_id,a.attempt_number"
         ).fetchall()
         prior_by_request: dict[str, tuple[int, str]] = {}
         for row in rows:
@@ -234,10 +256,27 @@ class _CheckIntegrityMixin:
                 if row["prior_attempt_id"] is None
                 else str(row["prior_attempt_id"])
             )
-            if number != expected_number or actual_id != expected_id:
+            if (
+                number != expected_number
+                or actual_id != expected_id
+                or str(row["started_at"]) < str(row["requested_at"])
+            ):
                 raise AuthorityPersistenceError(
-                    "Check Attempt chain is not contiguous"
+                    "Check Attempt chain or request chronology is inconsistent"
                 )
+            if previous is not None:
+                prior_outcome = conn.execute(
+                    "SELECT completed_at FROM check_outcomes WHERE attempt_id=?",
+                    (previous[1],),
+                ).fetchone()
+                if (
+                    prior_outcome is None
+                    or str(row["started_at"])
+                    < str(prior_outcome["completed_at"])
+                ):
+                    raise AuthorityPersistenceError(
+                        "Check Attempt predecessor Outcome is incomplete or later"
+                    )
             prior_by_request[request_id] = (number, attempt_id)
 
     @staticmethod
@@ -248,7 +287,8 @@ class _CheckIntegrityMixin:
         for definition in definitions:
             definition_id = str(definition["definition_id"])
             rows = conn.execute(
-                "SELECT d.decision_id,d.kind,d.previous_decision_id,e.ledger_seq "
+                "SELECT d.decision_id,d.kind,d.previous_decision_id,"
+                "d.decided_at,e.ledger_seq "
                 "FROM baseline_decisions d "
                 "JOIN ledger_events e ON e.event_id=d.authority_event_id "
                 "WHERE d.definition_id=? ORDER BY e.ledger_seq",
@@ -272,11 +312,15 @@ class _CheckIntegrityMixin:
                     )
                 prior = str(row["decision_id"])
             head = conn.execute(
-                "SELECT current_decision_id FROM baseline_decision_heads "
-                "WHERE definition_id=?",
+                "SELECT current_decision_id,updated_at "
+                "FROM baseline_decision_heads WHERE definition_id=?",
                 (definition_id,),
             ).fetchone()
-            if head is None or str(head["current_decision_id"]) != prior:
+            if (
+                head is None
+                or str(head["current_decision_id"]) != prior
+                or str(head["updated_at"]) != str(rows[-1]["decided_at"])
+            ):
                 raise AuthorityPersistenceError(
                     "baseline head differs from retained decision history"
                 )
@@ -289,14 +333,13 @@ class _CheckIntegrityMixin:
         if orphan is not None:
             raise AuthorityPersistenceError("baseline head is orphaned")
 
-    @staticmethod
-    def _validate_occurrence_links(conn: sqlite3.Connection) -> None:
+    def _validate_occurrence_links(self, conn: sqlite3.Connection) -> None:
         missing = conn.execute(
             "SELECT o.occurrence_id FROM discovery_occurrences o "
-            "JOIN check_outcomes c ON c.outcome_id=o.check_outcome_id "
+            "LEFT JOIN check_outcomes c ON c.outcome_id=o.check_outcome_id "
             "LEFT JOIN discovery_occurrence_check_links l "
             "ON l.occurrence_id=o.occurrence_id "
-            "WHERE l.occurrence_id IS NULL LIMIT 1"
+            "WHERE c.outcome_id IS NULL OR l.occurrence_id IS NULL LIMIT 1"
         ).fetchone()
         if missing is not None:
             raise AuthorityPersistenceError(
@@ -305,12 +348,49 @@ class _CheckIntegrityMixin:
         mismatch = conn.execute(
             "SELECT 1 FROM discovery_occurrence_check_links l "
             "JOIN discovery_occurrences o ON o.occurrence_id=l.occurrence_id "
-            "WHERE o.check_outcome_id!=l.check_outcome_id LIMIT 1"
+            "JOIN check_outcomes c ON c.outcome_id=l.check_outcome_id "
+            "WHERE o.check_outcome_id!=l.check_outcome_id "
+            "OR o.definition_id!=c.definition_id "
+            "OR o.definition_version_id!=c.definition_version_id "
+            "OR o.observed_at!=c.completed_at "
+            "OR o.receipt_digest IS NOT c.receipt_digest "
+            "OR c.kind NOT IN("
+            "'SUCCESS_UNCHANGED','SUCCESS_CHANGED',"
+            "'SUCCESS_PARTIAL','SUCCESS_TRUNCATED') "
+            "LIMIT 1"
         ).fetchone()
         if mismatch is not None:
             raise AuthorityPersistenceError(
                 "discovery occurrence Check link is inconsistent"
             )
+        for occurrence in conn.execute(
+            "SELECT * FROM discovery_occurrences"
+        ).fetchall():
+            if occurrence["representation_id"] is None:
+                raise AuthorityPersistenceError(
+                    "post-v11 discovery occurrence lacks exact Representation"
+                )
+            outcome_row = self._check_outcome_row(
+                conn, str(occurrence["check_outcome_id"])
+            )
+            outcome = self._check_outcome_from_row(
+                conn, outcome_row, replayed=False
+            )
+            revision = self._revision_row(
+                conn, str(occurrence["revision_id"])
+            )
+            representation = self._representation_row(
+                conn, str(occurrence["representation_id"])
+            )
+            error = _outcome_observed_item_error(
+                outcome.request,
+                revision_item_id=str(revision["item_id"]),
+                representation_digest=str(
+                    representation["representation_digest"]
+                ),
+            )
+            if error is not None:
+                raise AuthorityPersistenceError(error)
 
     @staticmethod
     def _validate_check_event_coverage(conn: sqlite3.Connection) -> None:

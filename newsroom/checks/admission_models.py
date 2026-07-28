@@ -311,8 +311,13 @@ class ProposalAdmissionRequest:
                 CandidateObservationRef(item.item_key, item.digest)
                 for item in self.proposal.candidate_items
             ),
+            observed_items=tuple(
+                CandidateObservationRef(item.item_key, item.digest)
+                for item in self.parsed_items
+            ),
             completed_at=self.completed_at,
             idempotency_key=f"proposal-outcome:{self.outcome_id}",
+            admission_semantic_digest=self.semantic_digest,
         )
 
 

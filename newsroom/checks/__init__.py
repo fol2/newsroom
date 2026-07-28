@@ -14,6 +14,7 @@ from .baseline_models import (
     AgendaMissGuard,
     BaselineDecisionRequest,
     BaselineManifestEntry,
+    ConfirmationOutcomeRef,
 )
 from .check_models import (
     CandidateObservationRef,
@@ -103,6 +104,7 @@ __all__ = [
     "BaselineDisposition",
     "BaselineEntryDisposition",
     "BaselineManifestEntry",
+    "ConfirmationOutcomeRef",
     "CHECK_ATTEMPT_START_COMMAND",
     "CHECK_BASELINE_DECIDE_COMMAND",
     "CHECK_OUTCOME_RECORD_COMMAND",

@@ -196,8 +196,16 @@ def decode_check_outcome(
             candidate_observations=tuple(
                 _candidate(item) for item in value["candidate_observations"]
             ),
+            observed_items=tuple(
+                _candidate(item) for item in value["observed_items"]
+            ),
             completed_at=UtcTimestamp.parse(str(value["completed_at"])),
             idempotency_key=idempotency_key,
+            admission_semantic_digest=(
+                None
+                if value["admission_semantic_digest"] is None
+                else str(value["admission_semantic_digest"])
+            ),
         ),
     )
 

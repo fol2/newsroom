@@ -13,6 +13,7 @@ from newsroom.checks import (
     BaselineEntryDisposition,
     BaselineManifestEntry,
     CandidateObservationRef,
+    ConfirmationOutcomeRef,
     CheckAttemptId,
     CheckAttemptKind,
     CheckAttemptRequest,
@@ -35,6 +36,7 @@ from newsroom.checks import (
     QuarantineDisposition,
     TransitionBasis,
     TriggerKind,
+    deterministic_uuid4,
     TriggerRef,
 )
 from newsroom.discovery_adapters import AdapterRequestId, ObservationProposalId
@@ -65,7 +67,14 @@ ATTEMPT_ID = CheckAttemptId.parse("00000000-0000-4000-8000-000000006002")
 OUTCOME_ID = CheckOutcomeId.parse("00000000-0000-4000-8000-000000006003")
 DEFINITION_ID = SourceDefinitionId.parse("00000000-0000-4000-8000-000000006004")
 VERSION_ID = SourceDefinitionVersionId.parse("00000000-0000-4000-8000-000000006005")
-ITEM_ID = SourceItemId.parse("00000000-0000-4000-8000-000000006006")
+ITEM_ID = deterministic_uuid4(
+    SourceItemId,
+    namespace="increment-3c-source-item-v1",
+    semantic_value={
+        "definition_id": str(DEFINITION_ID),
+        "item_key": DIGEST_C,
+    },
+)
 PRIOR_REVISION_ID = SourceRevisionId.parse("00000000-0000-4000-8000-000000006007")
 REVISION_ID = SourceRevisionId.parse("00000000-0000-4000-8000-000000006008")
 REPRESENTATION_ID = DiscoveryRepresentationId.parse("00000000-0000-4000-8000-000000006009")
@@ -104,7 +113,7 @@ def check_request(
         rights_decision_id="00000000-0000-4000-8000-000000006099",
         rights_policy_version="fixture-rights-v1",
         adapter_request_digest=DIGEST_A,
-        producer_slot_digest=DIGEST_B,
+        producer_slot_digest=DIGEST_C,
         baseline_policy=policy("fixture-baseline"),
         revision_policy=policy("fixture-revision"),
         transition_policy=policy("fixture-transition"),
@@ -163,6 +172,7 @@ def changed_outcome(
         representation_digest=DIGEST_D,
         validator_digest=None,
         candidate_observations=selected,
+        observed_items=selected,
         completed_at=LATER,
         idempotency_key="fixture-check-outcome",
     )
@@ -227,8 +237,14 @@ def absence_guard(*, authorizing: bool = True) -> AbsenceEndingGuard:
         identity_confirmed=True,
         scope_confirmed=True,
         pagination_complete=True,
-        confirmation_count=2 if authorizing else 0,
-        required_confirmations=2,
+        confirmation_outcomes=(
+            ConfirmationOutcomeRef(
+                outcome_id=OUTCOME_ID,
+                request_id=REQUEST_ID,
+                adapter_request_digest=DIGEST_A,
+            ),
+        ),
+        required_confirmations=1,
         grace_satisfied=True,
         no_alternative_explanation=True,
     )
@@ -242,6 +258,14 @@ def agenda_guard(*, authorizing: bool = True) -> AgendaMissGuard:
         grace_satisfied=True,
         confirmation_paths_checked=True,
         no_reschedule_or_cancellation=True,
+        confirmation_outcomes=(
+            ConfirmationOutcomeRef(
+                outcome_id=OUTCOME_ID,
+                request_id=REQUEST_ID,
+                adapter_request_digest=DIGEST_A,
+            ),
+        ),
+        required_confirmations=1,
         confirmation_outcomes_complete=True,
         source_failure_absent=True,
     )

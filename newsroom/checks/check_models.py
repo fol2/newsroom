@@ -265,8 +265,10 @@ class CheckOutcomeRequest:
     representation_digest: str | None
     validator_digest: str | None
     candidate_observations: tuple[CandidateObservationRef, ...]
+    observed_items: tuple[CandidateObservationRef, ...]
     completed_at: UtcTimestamp
     idempotency_key: str
+    admission_semantic_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.outcome_id, CheckOutcomeId):
@@ -308,6 +310,10 @@ class CheckOutcomeRequest:
             ("outcome_producer_slot_digest", self.producer_slot_digest),
             ("outcome_representation_digest", self.representation_digest),
             ("outcome_validator_digest", self.validator_digest),
+            (
+                "outcome_admission_semantic_digest",
+                self.admission_semantic_digest,
+            ),
         ):
             optional_digest(value, field=field)
         if (
@@ -333,6 +339,26 @@ class CheckOutcomeRequest:
             {item.item_key for item in self.candidate_observations}
         ):
             raise CheckContractError("candidate item keys must be unique")
+        if (
+            not isinstance(self.observed_items, tuple)
+            or any(
+                not isinstance(item, CandidateObservationRef)
+                for item in self.observed_items
+            )
+        ):
+            raise CheckContractError(
+                "observed items must be a typed immutable tuple"
+            )
+        if self.observed_items != tuple(
+            sorted(self.observed_items, key=lambda item: item.item_key)
+        ):
+            raise CheckContractError(
+                "observed items must be sorted by item key"
+            )
+        if len(self.observed_items) != len(
+            {item.item_key for item in self.observed_items}
+        ):
+            raise CheckContractError("observed item keys must be unique")
         self._validate_outcome_shape()
         if not isinstance(self.completed_at, UtcTimestamp):
             raise CheckContractError(
@@ -349,6 +375,20 @@ class CheckOutcomeRequest:
         if outcome_requires_incomplete(self.kind) != self.incomplete:
             raise CheckContractError(
                 "check outcome incompleteness differs from outcome kind"
+            )
+        if is_candidate_outcome(self.kind):
+            if self.observed_items != self.candidate_observations:
+                raise CheckContractError(
+                    "candidate outcome observed items differ from candidates"
+                )
+        elif self.kind is not CheckOutcomeKind.SUCCESS_UNCHANGED:
+            if self.observed_items:
+                raise CheckContractError(
+                    "only changed or unchanged success may retain observed items"
+                )
+        if self.observed_items and self.parser_result_digest is None:
+            raise CheckContractError(
+                "observed items require exact parser-result evidence"
             )
         if self.capture_digest is not None and self.receipt_digest is None:
             raise CheckContractError(
@@ -385,7 +425,11 @@ class CheckOutcomeRequest:
             raise CheckContractError(
                 "parser failure outcome requires parser-result evidence"
             )
-        if self.kind is CheckOutcomeKind.BLOCKED and any(
+        no_transport_outcomes = {
+            CheckOutcomeKind.BLOCKED,
+            CheckOutcomeKind.QUARANTINED_DISABLED,
+        }
+        if self.kind in no_transport_outcomes and any(
             value is not None
             for value in (
                 self.receipt_digest,
@@ -394,7 +438,29 @@ class CheckOutcomeRequest:
             )
         ):
             raise CheckContractError(
-                "preflight-blocked outcome cannot retain transport evidence"
+                "preflight or disabled outcome cannot retain transport evidence"
+            )
+        if (
+            self.kind not in no_transport_outcomes
+            and self.receipt_digest is None
+        ):
+            raise CheckContractError(
+                "post-preflight outcome requires an exact transport receipt"
+            )
+        receipt_only_outcomes = {
+            CheckOutcomeKind.REDIRECTED,
+            CheckOutcomeKind.RATE_LIMITED,
+            CheckOutcomeKind.UNAUTHORISED,
+            CheckOutcomeKind.NOT_FOUND,
+            CheckOutcomeKind.GONE,
+            CheckOutcomeKind.TRANSPORT_FAILED,
+        }
+        if self.kind in receipt_only_outcomes and (
+            self.capture_digest is not None
+            or self.parser_result_digest is not None
+        ):
+            raise CheckContractError(
+                "transport or HTTP failure outcome cannot claim parser evidence"
             )
         if (
             self.quarantine is QuarantineDisposition.NONE
@@ -431,7 +497,11 @@ class CheckOutcomeRequest:
                 item.canonical_value()
                 for item in self.candidate_observations
             ],
+            "observed_items": [
+                item.canonical_value() for item in self.observed_items
+            ],
             "completed_at": self.completed_at.to_text(),
+            "admission_semantic_digest": self.admission_semantic_digest,
         }
 
     @property
@@ -456,6 +526,10 @@ class CheckOutcomeRequest:
                     item.canonical_value()
                     for item in self.candidate_observations
                 ],
+                "observed_items": [
+                    item.canonical_value() for item in self.observed_items
+                ],
+                "admission_semantic_digest": self.admission_semantic_digest,
             }
         )
 

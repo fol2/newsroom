@@ -120,6 +120,9 @@ class _CheckStoreReadDecisionMixin:
                 raise AuthorityPersistenceError(
                     "Baseline Decision manifest differs from canonical bytes"
                 )
+        evidence_error = self._baseline_evidence_error(conn, request)
+        if evidence_error is not None:
+            raise AuthorityPersistenceError(evidence_error)
         if str(request.decision_id) != str(row["decision_id"]):
             raise AuthorityPersistenceError(
                 "Baseline Decision identity differs from canonical bytes"
@@ -219,6 +222,9 @@ class _CheckStoreReadDecisionMixin:
             request.source_asserted_time.canonical_value(),
             identity="Observable Transition",
         )
+        evidence_error = self._transition_evidence_error(conn, request)
+        if evidence_error is not None:
+            raise AuthorityPersistenceError(evidence_error)
         if str(request.transition_id) != str(row["transition_id"]):
             raise AuthorityPersistenceError(
                 "Observable Transition identity differs from canonical bytes"

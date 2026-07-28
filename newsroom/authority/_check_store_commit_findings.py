@@ -13,7 +13,7 @@ from newsroom.checks.record_models import (
     OperationalFinding,
     OperationalFindingOccurrence,
 )
-from newsroom.checks.types import CheckStateError
+from newsroom.checks.types import CheckStateError, FindingScopeKind
 
 
 class _CheckStoreCommitFindingMixin:
@@ -91,6 +91,17 @@ class _CheckStoreCommitFindingMixin:
                 attempt_id=request.opened_by_attempt_id,
                 outcome_id=request.opened_by_outcome_id,
             )
+            lineage_error = self._finding_lineage_error(
+                conn,
+                scope_kind=request.scope_kind,
+                scope_id=request.scope_id,
+                request_id=request.opened_by_request_id,
+                attempt_id=request.opened_by_attempt_id,
+                outcome_id=request.opened_by_outcome_id,
+                observed_at=request.opened_at,
+            )
+            if lineage_error is not None:
+                raise CheckStateError(lineage_error)
             self._check_identifier_absent(
                 conn,
                 table="operational_findings",
@@ -191,13 +202,27 @@ class _CheckStoreCommitFindingMixin:
                     committed.event_id,
                     replayed=True,
                 )
-            self._operational_finding_row(conn, str(request.finding_id))
+            finding = self._operational_finding_row(
+                conn,
+                str(request.finding_id),
+            )
             self._require_finding_lineage(
                 conn,
                 request_id=request.request_id,
                 attempt_id=request.attempt_id,
                 outcome_id=request.outcome_id,
             )
+            lineage_error = self._finding_lineage_error(
+                conn,
+                scope_kind=FindingScopeKind(str(finding["scope_kind"])),
+                scope_id=str(finding["scope_id"]),
+                request_id=request.request_id,
+                attempt_id=request.attempt_id,
+                outcome_id=request.outcome_id,
+                observed_at=request.observed_at,
+            )
+            if lineage_error is not None:
+                raise CheckStateError(lineage_error)
             self._check_identifier_absent(
                 conn,
                 table="operational_finding_occurrences",

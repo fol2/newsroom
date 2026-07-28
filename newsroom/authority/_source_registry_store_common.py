@@ -166,6 +166,62 @@ class _SourceRegistryStoreSupport:
         return row
 
     @staticmethod
+    def _source_version_was_current_at_event(
+        conn: sqlite3.Connection,
+        *,
+        definition_id: str,
+        version_id: str,
+        record_event_id: str,
+    ) -> bool:
+        row = conn.execute(
+            "SELECT v.version_number,ve.ledger_seq AS version_seq,"
+            "re.ledger_seq AS record_seq "
+            "FROM source_definition_versions v "
+            "JOIN ledger_events ve ON ve.event_id=v.authority_event_id "
+            "JOIN ledger_events re ON re.event_id=? "
+            "WHERE v.version_id=? AND v.definition_id=?",
+            (record_event_id, version_id, definition_id),
+        ).fetchone()
+        if row is None or int(row["version_seq"]) > int(row["record_seq"]):
+            return False
+        next_row = conn.execute(
+            "SELECT MIN(e.ledger_seq) AS next_seq "
+            "FROM source_definition_versions v "
+            "JOIN ledger_events e ON e.event_id=v.authority_event_id "
+            "WHERE v.definition_id=? AND v.version_number>?",
+            (definition_id, int(row["version_number"])),
+        ).fetchone()
+        next_seq = None if next_row is None else next_row["next_seq"]
+        return next_seq is None or int(row["record_seq"]) < int(next_seq)
+
+    @staticmethod
+    def _source_version_is_same_or_later(
+        conn: sqlite3.Connection,
+        *,
+        definition_id: str,
+        lineage_version_id: str,
+        observation_version_id: str,
+    ) -> bool:
+        lineage = conn.execute(
+            "SELECT definition_id,version_number "
+            "FROM source_definition_versions WHERE version_id=?",
+            (lineage_version_id,),
+        ).fetchone()
+        observation = conn.execute(
+            "SELECT definition_id,version_number "
+            "FROM source_definition_versions WHERE version_id=?",
+            (observation_version_id,),
+        ).fetchone()
+        return bool(
+            lineage is not None
+            and observation is not None
+            and str(lineage["definition_id"]) == definition_id
+            and str(observation["definition_id"]) == definition_id
+            and int(observation["version_number"])
+            >= int(lineage["version_number"])
+        )
+
+    @staticmethod
     def _current_version_row(
         conn: sqlite3.Connection,
         definition_id: SourceDefinitionId,

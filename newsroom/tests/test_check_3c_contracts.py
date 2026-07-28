@@ -129,6 +129,7 @@ def test_outcome_kind_controls_candidate_incompleteness_and_evidence_shape() -> 
         producer_slot_digest=None,
         representation_digest=None,
         candidate_observations=(),
+        observed_items=(),
     )
     assert blocked.receipt_digest is None
 
@@ -145,6 +146,7 @@ def test_outcome_kind_controls_candidate_incompleteness_and_evidence_shape() -> 
             reason_codes=("SHAPE_DRIFT",),
             incomplete=True,
             candidate_observations=(),
+            observed_items=(),
             quarantine=QuarantineDisposition.NONE,
         )
 
@@ -154,6 +156,7 @@ def test_outcome_kind_controls_candidate_incompleteness_and_evidence_shape() -> 
         reason_codes=("SHAPE_DRIFT",),
         incomplete=True,
         candidate_observations=(),
+        observed_items=(),
         quarantine=QuarantineDisposition.REVIEW,
     )
     assert reviewed_drift.quarantine is QuarantineDisposition.REVIEW

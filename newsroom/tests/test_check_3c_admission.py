@@ -7,6 +7,7 @@ import pytest
 
 from newsroom.checks import (
     AdmissionRecordState,
+    CandidateObservationRef,
     CheckAttemptId,
     CheckRequestId,
     ObservableTransitionKind,
@@ -31,6 +32,7 @@ from newsroom.discovery_adapters import (
 from newsroom.sources import (
     DiscoveryOccurrenceKind,
     ObservationModel,
+    SourceDefinitionVersionId,
 )
 
 from .check_3c_authority_helpers import (
@@ -234,7 +236,9 @@ def test_changed_proposal_commits_exact_lineage_and_replays(tmp_path) -> None:
     reopened.close()
 
 
-def test_new_parser_on_unchanged_source_creates_representation_only(tmp_path) -> None:
+def test_new_parser_on_unchanged_source_retains_observed_provenance_and_creates_representation_only(
+    tmp_path,
+) -> None:
     database = tmp_path / "authority.sqlite3"
     system = open_check_system(database)
     _seed_source(system)
@@ -298,6 +302,12 @@ def test_new_parser_on_unchanged_source_creates_representation_only(tmp_path) ->
 
     assert second.baseline is None
     assert second.transitions == ()
+    assert second.outcome.request.candidate_observations == ()
+    assert second_proposal.parser_result is not None
+    assert second.outcome.request.observed_items == tuple(
+        CandidateObservationRef(item.item_key, item.digest)
+        for item in second_proposal.parser_result.items
+    )
     assert len(second.observations) == 1
     observed = second.observations[0]
     assert observed.item_state is AdmissionRecordState.REUSED
@@ -522,3 +532,118 @@ def test_locator_only_identity_fails_before_outcome_commit(tmp_path) -> None:
 
     with sqlite3.connect(database) as conn:
         assert conn.execute("SELECT COUNT(*) FROM check_outcomes").fetchone()[0] == 0
+
+
+def test_source_version_upgrade_reuses_state_revision_with_current_representation(
+    tmp_path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    system = open_check_system(database)
+    _seed_source(system)
+
+    first_request = _adapter_request(suffix=21)
+    first_proposal = run_fixture_adapter(
+        first_request,
+        _scenario(first_request, suffix=21),
+    )
+    first_check, first_attempt = _seed_check(
+        system,
+        first_request,
+        suffix=21,
+    )
+    first = system.checks.admit_proposal(
+        _admission(
+            first_check,
+            first_attempt,
+            first_request,
+            first_proposal,
+        ),
+        proof=proof(),
+    )
+    parser_result = first_proposal.parser_result
+    assert parser_result is not None
+
+    version_2_id = SourceDefinitionVersionId.parse(
+        "00000000-0000-4000-8000-000000006121"
+    )
+    system.sources.record_definition_version(
+        replace(
+            version_request(),
+            version_id=version_2_id,
+            version_number=2,
+            expected_previous_version_id=VERSION_ID,
+            locator="fixture://increment-3c/maintained-guidance-v2",
+            change_reason="Fixture source contract advanced without source-state change.",
+            idempotency_key="fixture-check-source-version-v2",
+        ),
+        proof=proof(),
+    )
+    baseline = ObservationBaseline(
+        source_definition_version_id=version_2_id,
+        validator_contract=first_request.validator_contract,
+        source_body_digest=parser_result.source_body_digest,
+        producer_slot_digest=parser_result.producer_slot_digest,
+        representation_digest=parser_result.representation_digest,
+        item_keys=parser_result.item_keys,
+        validator=ConditionalValidator(etag='"fixture-etag"'),
+        recorded_at=NOW,
+    )
+    second_request = replace(
+        _adapter_request(suffix=22, baseline=baseline),
+        source_definition_version_id=version_2_id,
+    )
+    second_proposal = run_fixture_adapter(
+        second_request,
+        _scenario(second_request, suffix=22),
+    )
+    assert (
+        second_proposal.outcome
+        is ObservationProposalOutcome.SUCCESS_UNCHANGED
+    )
+    second_check, second_attempt = _check_records(
+        second_request,
+        suffix=22,
+    )
+    second_check = replace(
+        second_check,
+        definition_version_id=version_2_id,
+    )
+    system.checks.register_request(second_check, proof=proof())
+    system.checks.start_attempt(second_attempt, proof=proof())
+
+    second = system.checks.admit_proposal(
+        _admission(
+            second_check,
+            second_attempt,
+            second_request,
+            second_proposal,
+        ),
+        proof=proof(),
+    )
+
+    assert second.transitions == ()
+    assert len(second.observations) == 1
+    observed = second.observations[0]
+    prior = first.observations[0]
+    assert observed.revision.event_id == prior.revision.event_id
+    assert observed.revision.request.definition_version_id == VERSION_ID
+    assert observed.representation is not None
+    assert observed.representation.request.definition_version_id == version_2_id
+    assert observed.occurrence.request.definition_version_id == version_2_id
+    system.close()
+
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM source_revisions").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM discovery_representations"
+        ).fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT COUNT(*) FROM discovery_occurrences"
+        ).fetchone()[0] == 2
+
+    reopened = open_check_system(database)
+    assert reopened.sources.revision(
+        observed.revision.request.revision_id,
+        proof=proof(),
+    ).event_id == prior.revision.event_id
+    reopened.close()

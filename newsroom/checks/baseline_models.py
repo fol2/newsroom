@@ -88,6 +88,56 @@ class BaselineManifestEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfirmationOutcomeRef:
+    outcome_id: CheckOutcomeId
+    request_id: CheckRequestId
+    adapter_request_digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.outcome_id, CheckOutcomeId):
+            raise CheckContractError(
+                "confirmation Outcome identity must be typed"
+            )
+        if not isinstance(self.request_id, CheckRequestId):
+            raise CheckContractError(
+                "confirmation Request identity must be typed"
+            )
+        canonical_digest(
+            self.adapter_request_digest,
+            field="confirmation_adapter_request_digest",
+        )
+
+    def canonical_value(self) -> dict[str, str]:
+        return {
+            "outcome_id": str(self.outcome_id),
+            "request_id": str(self.request_id),
+            "adapter_request_digest": self.adapter_request_digest,
+        }
+
+
+def _validate_confirmation_outcomes(
+    values: tuple[ConfirmationOutcomeRef, ...],
+) -> None:
+    if not isinstance(values, tuple) or any(
+        not isinstance(item, ConfirmationOutcomeRef) for item in values
+    ):
+        raise CheckContractError(
+            "confirmation Outcomes must be a typed immutable tuple"
+        )
+    expected = tuple(
+        sorted(values, key=lambda item: str(item.outcome_id))
+    )
+    if values != expected:
+        raise CheckContractError(
+            "confirmation Outcomes must be sorted by Outcome identity"
+        )
+    if len(values) != len({item.outcome_id for item in values}):
+        raise CheckContractError(
+            "confirmation Outcome identities must be unique"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AbsenceEndingGuard:
     complete_scope_digest: str
     filter_contract_digest: str
@@ -96,7 +146,7 @@ class AbsenceEndingGuard:
     identity_confirmed: bool
     scope_confirmed: bool
     pagination_complete: bool
-    confirmation_count: int
+    confirmation_outcomes: tuple[ConfirmationOutcomeRef, ...]
     required_confirmations: int
     grace_satisfied: bool
     no_alternative_explanation: bool
@@ -121,17 +171,16 @@ class AbsenceEndingGuard:
         ):
             if not isinstance(value, bool):
                 raise CheckContractError(f"{field} must be boolean")
-        positive_int(
-            self.confirmation_count,
-            field="absence_confirmation_count",
-            maximum=1_000_000,
-            allow_zero=True,
-        )
+        _validate_confirmation_outcomes(self.confirmation_outcomes)
         positive_int(
             self.required_confirmations,
             field="absence_required_confirmations",
             maximum=1_000_000,
         )
+
+    @property
+    def confirmation_count(self) -> int:
+        return len(self.confirmation_outcomes)
 
     @property
     def authorizes_ending(self) -> bool:
@@ -154,6 +203,10 @@ class AbsenceEndingGuard:
             "identity_confirmed": self.identity_confirmed,
             "scope_confirmed": self.scope_confirmed,
             "pagination_complete": self.pagination_complete,
+            "confirmation_outcomes": [
+                item.canonical_value()
+                for item in self.confirmation_outcomes
+            ],
             "confirmation_count": self.confirmation_count,
             "required_confirmations": self.required_confirmations,
             "grace_satisfied": self.grace_satisfied,
@@ -172,6 +225,8 @@ class AgendaMissGuard:
     grace_satisfied: bool
     confirmation_paths_checked: bool
     no_reschedule_or_cancellation: bool
+    confirmation_outcomes: tuple[ConfirmationOutcomeRef, ...]
+    required_confirmations: int
     confirmation_outcomes_complete: bool
     source_failure_absent: bool
 
@@ -183,6 +238,12 @@ class AgendaMissGuard:
         canonical_digest(
             self.confirmation_paths_digest,
             field="agenda_confirmation_paths_digest",
+        )
+        _validate_confirmation_outcomes(self.confirmation_outcomes)
+        positive_int(
+            self.required_confirmations,
+            field="agenda_required_confirmations",
+            maximum=1_000_000,
         )
         for field, value in (
             ("window_closed", self.window_closed),
@@ -205,6 +266,10 @@ class AgendaMissGuard:
                 raise CheckContractError(f"{field} must be boolean")
 
     @property
+    def confirmation_count(self) -> int:
+        return len(self.confirmation_outcomes)
+
+    @property
     def authorizes_miss(self) -> bool:
         return (
             self.window_closed
@@ -212,6 +277,7 @@ class AgendaMissGuard:
             and self.confirmation_paths_checked
             and self.no_reschedule_or_cancellation
             and self.confirmation_outcomes_complete
+            and self.confirmation_count >= self.required_confirmations
             and self.source_failure_absent
         )
 
@@ -225,6 +291,12 @@ class AgendaMissGuard:
             "no_reschedule_or_cancellation": (
                 self.no_reschedule_or_cancellation
             ),
+            "confirmation_outcomes": [
+                item.canonical_value()
+                for item in self.confirmation_outcomes
+            ],
+            "confirmation_count": self.confirmation_count,
+            "required_confirmations": self.required_confirmations,
             "confirmation_outcomes_complete": (
                 self.confirmation_outcomes_complete
             ),
@@ -440,4 +512,5 @@ __all__ = [
     "AgendaMissGuard",
     "BaselineDecisionRequest",
     "BaselineManifestEntry",
+    "ConfirmationOutcomeRef",
 ]

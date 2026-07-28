@@ -94,7 +94,10 @@ CHECK_AUTHORITY_SCHEMA_STATEMENTS: tuple[str, ...] = (
         validator_digest TEXT,
         candidate_observations_bytes BLOB NOT NULL,
         candidate_count INTEGER NOT NULL CHECK(candidate_count>=0),
+        observed_items_bytes BLOB NOT NULL,
+        observed_item_count INTEGER NOT NULL CHECK(observed_item_count>=0),
         completed_at TEXT NOT NULL,
+        admission_semantic_digest TEXT,
         semantic_digest TEXT NOT NULL UNIQUE,
         authority_event_id TEXT NOT NULL UNIQUE REFERENCES ledger_events(event_id),
         authority_aggregate_version INTEGER NOT NULL
@@ -113,6 +116,11 @@ CHECK_AUTHORITY_SCHEMA_STATEMENTS: tuple[str, ...] = (
             ),
         CHECK((kind IN('SUCCESS_CHANGED','SUCCESS_PARTIAL','SUCCESS_TRUNCATED') AND candidate_count>0)
            OR (kind NOT IN('SUCCESS_CHANGED','SUCCESS_PARTIAL','SUCCESS_TRUNCATED') AND candidate_count=0)),
+        CHECK((kind IN('SUCCESS_CHANGED','SUCCESS_PARTIAL','SUCCESS_TRUNCATED')
+               AND observed_item_count=candidate_count)
+           OR kind='SUCCESS_UNCHANGED'
+           OR (kind NOT IN('SUCCESS_CHANGED','SUCCESS_PARTIAL','SUCCESS_TRUNCATED','SUCCESS_UNCHANGED')
+               AND observed_item_count=0)),
         CHECK((kind IN('BLOCKED','SUCCESS_PARTIAL','SUCCESS_TRUNCATED','REDIRECTED','RATE_LIMITED','UNAUTHORISED','NOT_FOUND','GONE','MALFORMED','SHAPE_DRIFT','TRANSPORT_FAILED','QUARANTINED_DISABLED') AND incomplete=1)
            OR (kind NOT IN('BLOCKED','SUCCESS_PARTIAL','SUCCESS_TRUNCATED','REDIRECTED','RATE_LIMITED','UNAUTHORISED','NOT_FOUND','GONE','MALFORMED','SHAPE_DRIFT','TRANSPORT_FAILED','QUARANTINED_DISABLED') AND incomplete=0)),
         CHECK(capture_digest IS NULL OR receipt_digest IS NOT NULL),
@@ -133,6 +141,7 @@ CHECK_AUTHORITY_SCHEMA_STATEMENTS: tuple[str, ...] = (
               OR quarantine!='NONE'),
         CHECK(length(reason_codes_bytes)>0),
         CHECK(length(candidate_observations_bytes)>0),
+        CHECK(length(observed_items_bytes)>0),
         CHECK(length(canonical_bytes)>0)
     ) STRICT""",
     """CREATE TABLE baseline_decisions(

@@ -410,12 +410,25 @@ class _SourceRegistryLineageCommitMixin:
                     conn, committed.event_id, replayed=True
                 )
             revision = self._revision_row(conn, str(request.revision_id))
-            if (
-                str(revision["definition_version_id"])
-                != str(request.definition_version_id)
+            self._require_current_version(
+                conn,
+                definition_id=SourceDefinitionId.parse(
+                    str(revision["definition_id"])
+                ),
+                version_id=request.definition_version_id,
+            )
+            if not self._source_version_is_same_or_later(
+                conn,
+                definition_id=str(revision["definition_id"]),
+                lineage_version_id=str(revision["definition_version_id"]),
+                observation_version_id=str(request.definition_version_id),
             ):
                 raise SourceVersionConflict(
-                    "representation source version differs from its revision"
+                    "representation source version predates or differs from its revision"
+                )
+            if request.produced_at.to_text() < str(revision["observed_at"]):
+                raise SourceStateError(
+                    "representation cannot precede its Source Revision observation"
                 )
             self._ensure_identifier_absent(
                 conn,
@@ -509,12 +522,25 @@ class _SourceRegistryLineageCommitMixin:
                     conn, committed.event_id, replayed=True
                 )
             revision = self._revision_row(conn, str(request.revision_id))
-            if (
-                str(revision["definition_version_id"])
-                != str(request.definition_version_id)
+            self._require_current_version(
+                conn,
+                definition_id=SourceDefinitionId.parse(
+                    str(revision["definition_id"])
+                ),
+                version_id=request.definition_version_id,
+            )
+            if not self._source_version_is_same_or_later(
+                conn,
+                definition_id=str(revision["definition_id"]),
+                lineage_version_id=str(revision["definition_version_id"]),
+                observation_version_id=str(request.definition_version_id),
             ):
                 raise SourceVersionConflict(
-                    "occurrence source version differs from its revision"
+                    "occurrence source version predates or differs from its revision"
+                )
+            if request.observed_at.to_text() < str(revision["observed_at"]):
+                raise SourceStateError(
+                    "occurrence cannot precede its Source Revision observation"
                 )
             if request.representation_id is not None:
                 representation = self._representation_row(
@@ -523,6 +549,18 @@ class _SourceRegistryLineageCommitMixin:
                 if str(representation["revision_id"]) != str(request.revision_id):
                     raise SourceStateError(
                         "occurrence representation belongs to another revision"
+                    )
+                if str(representation["definition_version_id"]) != str(
+                    request.definition_version_id
+                ):
+                    raise SourceVersionConflict(
+                        "occurrence source version differs from its representation"
+                    )
+                if request.observed_at.to_text() < str(
+                    representation["produced_at"]
+                ):
+                    raise SourceStateError(
+                        "occurrence cannot precede its Representation"
                     )
             self._ensure_identifier_absent(
                 conn,

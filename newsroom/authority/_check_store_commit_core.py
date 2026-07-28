@@ -234,9 +234,10 @@ class _CheckStoreCommitCoreMixin:
             if (
                 str(parent["adapter_request_digest"])
                 != request.adapter_request_digest
+                or request.started_at.to_text() < str(parent["requested_at"])
             ):
                 raise CheckVersionConflict(
-                    "Check Attempt adapter digest differs from Request"
+                    "Check Attempt adapter or chronology differs from Request"
                 )
             latest = conn.execute(
                 "SELECT attempt_id,attempt_number FROM check_attempts "
@@ -245,6 +246,19 @@ class _CheckStoreCommitCoreMixin:
             ).fetchone()
             expected_number = 1 if latest is None else int(latest["attempt_number"]) + 1
             expected_prior = None if latest is None else str(latest["attempt_id"])
+            if latest is not None:
+                prior_outcome = conn.execute(
+                    "SELECT completed_at FROM check_outcomes WHERE attempt_id=?",
+                    (str(latest["attempt_id"]),),
+                ).fetchone()
+                if (
+                    prior_outcome is None
+                    or request.started_at.to_text()
+                    < str(prior_outcome["completed_at"])
+                ):
+                    raise CheckVersionConflict(
+                        "later Check Attempt requires a completed predecessor Outcome"
+                    )
             actual_prior = (
                 None
                 if request.prior_attempt_id is None
@@ -345,6 +359,11 @@ class _CheckStoreCommitCoreMixin:
                 or str(parent["definition_id"]) != str(request.definition_id)
                 or str(parent["definition_version_id"])
                 != str(request.definition_version_id)
+                or (
+                    request.producer_slot_digest is not None
+                    and request.producer_slot_digest
+                    != str(parent["producer_slot_digest"])
+                )
                 or request.completed_at.to_text() < str(attempt["started_at"])
             ):
                 raise CheckVersionConflict(
@@ -389,9 +408,11 @@ class _CheckStoreCommitCoreMixin:
                 "incomplete,receipt_digest,capture_digest,parser_result_digest,"
                 "source_body_digest,producer_slot_digest,representation_digest,"
                 "validator_digest,candidate_observations_bytes,candidate_count,"
-                "completed_at,semantic_digest,authority_event_id,"
-                "authority_aggregate_version,canonical_bytes,canonical_digest,"
-                "recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "observed_items_bytes,observed_item_count,completed_at,"
+                "admission_semantic_digest,semantic_digest,"
+                "authority_event_id,authority_aggregate_version,canonical_bytes,"
+                "canonical_digest,recorded_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     str(request.outcome_id),
                     str(request.request_id),
@@ -417,7 +438,12 @@ class _CheckStoreCommitCoreMixin:
                         ]
                     ),
                     len(request.candidate_observations),
+                    self._json_blob(
+                        [item.canonical_value() for item in request.observed_items]
+                    ),
+                    len(request.observed_items),
                     request.completed_at.to_text(),
+                    request.admission_semantic_digest,
                     request.semantic_digest,
                     committed.event_id,
                     committed.aggregate_version,

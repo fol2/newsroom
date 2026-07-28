@@ -5,6 +5,7 @@ from typing import Any, Callable, TypeVar
 
 from newsroom.authority._capability import _AuthorizedCommandGrant
 from newsroom.authority.auth import AuthenticationProof
+from newsroom.authority.service import IdempotencyIdentityConflict
 from newsroom.authority.types import AggregateId
 from newsroom.checks.admission_models import (
     AdmissionRecordState,
@@ -386,12 +387,17 @@ class _ProposalAdmissionCommitMixin:
         if not isinstance(request, ProposalAdmissionRequest):
             raise TypeError("proposal admission requires a typed request")
         outcome_request = request.outcome_request()
-        outcome_grant = self._authorize(
-            outcome_request,
-            proof,
-            command_type=CHECK_OUTCOME_RECORD_COMMAND,
-            aggregate_id=AggregateId(outcome_request.outcome_id.value),
-        )
+        try:
+            outcome_grant = self._authorize(
+                outcome_request,
+                proof,
+                command_type=CHECK_OUTCOME_RECORD_COMMAND,
+                aggregate_id=AggregateId(outcome_request.outcome_id.value),
+            )
+        except IdempotencyIdentityConflict as exc:
+            raise ProposalAdmissionConflict(
+                "proposal admission classification differs from retained Outcome; identity conflicted"
+            ) from exc
         retained_request = self._store.check_request(
             request.check_request_id
         )
@@ -439,6 +445,11 @@ class _ProposalAdmissionCommitMixin:
             request,
             plans,
             version=version,
+            retained_request=retained_request,
+        )
+        self._validate_transition_evidence_preflight(
+            decision_plan.transition_requests,
+            pending_outcome=outcome_request,
             retained_request=retained_request,
         )
         authorized_decisions = self._authorize_decisions(

@@ -241,6 +241,7 @@ def _fixture_vectors() -> tuple[
         representation_digest=digest_d,
         validator_digest=None,
         candidate_observations=(candidate,),
+        observed_items=(candidate,),
         completed_at=now,
         idempotency_key="fixture-check-outcome",
     )

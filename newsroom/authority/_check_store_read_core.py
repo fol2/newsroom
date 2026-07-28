@@ -201,7 +201,11 @@ class _CheckStoreReadCoreMixin:
                 "representation_digest": request.representation_digest,
                 "validator_digest": request.validator_digest,
                 "candidate_count": len(request.candidate_observations),
+                "observed_item_count": len(request.observed_items),
                 "completed_at": request.completed_at.to_text(),
+                "admission_semantic_digest": (
+                    request.admission_semantic_digest
+                ),
                 "semantic_digest": request.semantic_digest,
             },
             identity="Check Outcome",
@@ -216,6 +220,12 @@ class _CheckStoreReadCoreMixin:
             row,
             "candidate_observations_bytes",
             [item.canonical_value() for item in request.candidate_observations],
+            identity="Check Outcome",
+        )
+        self._require_canonical_blob(
+            row,
+            "observed_items_bytes",
+            [item.canonical_value() for item in request.observed_items],
             identity="Check Outcome",
         )
         if str(request.outcome_id) != str(row["outcome_id"]):

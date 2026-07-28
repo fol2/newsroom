@@ -149,7 +149,9 @@ def check_outcome_payload(value: Any) -> bytes:
                 "representation_digest",
                 "validator_digest",
                 "candidate_observations",
+                "observed_items",
                 "completed_at",
+                "admission_semantic_digest",
             }
         ),
         name="Check Outcome",
@@ -177,8 +179,12 @@ def check_outcome_payload(value: Any) -> bytes:
                 _candidate(entry)
                 for entry in item["candidate_observations"]
             ),
+            observed_items=tuple(
+                _candidate(entry) for entry in item["observed_items"]
+            ),
             completed_at=UtcTimestamp.parse(item["completed_at"]),
             idempotency_key=_IDEMPOTENCY,
+            admission_semantic_digest=item["admission_semantic_digest"],
         ),
     )
 

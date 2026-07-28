@@ -5,6 +5,7 @@ from typing import Any, Callable
 from newsroom.authority.canonical import canonical_json_bytes
 from newsroom.authority.types import TimePrecision
 from newsroom.sources import (
+    CheckOutcomeId,
     CoverageContribution,
     CoverageResponsibility,
     SourceItemId,
@@ -18,10 +19,12 @@ from .baseline_models import (
     AbsenceEndingGuard,
     AgendaMissGuard,
     BaselineManifestEntry,
+    ConfirmationOutcomeRef,
 )
 from .check_models import CandidateObservationRef
 from .types import (
     BaselineEntryDisposition,
+    CheckRequestId,
     CoverageBasis,
     TriggerKind,
     TriggerRef,
@@ -146,6 +149,28 @@ def _manifest_entry(value: Any) -> BaselineManifestEntry:
         raise error("baseline manifest entry is invalid") from exc
 
 
+
+def _confirmation_outcome(value: Any) -> ConfirmationOutcomeRef:
+    item = exact(
+        value,
+        fields=frozenset(
+            {
+                "outcome_id",
+                "request_id",
+                "adapter_request_digest",
+            }
+        ),
+        name="confirmation Outcome",
+    )
+    try:
+        return ConfirmationOutcomeRef(
+            outcome_id=CheckOutcomeId.parse(item["outcome_id"]),
+            request_id=CheckRequestId.parse(item["request_id"]),
+            adapter_request_digest=item["adapter_request_digest"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise error("confirmation Outcome is invalid") from exc
+
 def _absence_guard(value: Any) -> AbsenceEndingGuard:
     item = exact(
         value,
@@ -158,6 +183,7 @@ def _absence_guard(value: Any) -> AbsenceEndingGuard:
                 "identity_confirmed",
                 "scope_confirmed",
                 "pagination_complete",
+                "confirmation_outcomes",
                 "confirmation_count",
                 "required_confirmations",
                 "grace_satisfied",
@@ -178,7 +204,10 @@ def _absence_guard(value: Any) -> AbsenceEndingGuard:
             identity_confirmed=item["identity_confirmed"],
             scope_confirmed=item["scope_confirmed"],
             pagination_complete=item["pagination_complete"],
-            confirmation_count=item["confirmation_count"],
+            confirmation_outcomes=tuple(
+                _confirmation_outcome(entry)
+                for entry in item["confirmation_outcomes"]
+            ),
             required_confirmations=item["required_confirmations"],
             grace_satisfied=item["grace_satisfied"],
             no_alternative_explanation=item[
@@ -203,6 +232,9 @@ def _agenda_guard(value: Any) -> AgendaMissGuard:
                 "grace_satisfied",
                 "confirmation_paths_checked",
                 "no_reschedule_or_cancellation",
+                "confirmation_outcomes",
+                "confirmation_count",
+                "required_confirmations",
                 "confirmation_outcomes_complete",
                 "source_failure_absent",
                 "authorizes_miss",
@@ -224,6 +256,11 @@ def _agenda_guard(value: Any) -> AgendaMissGuard:
             no_reschedule_or_cancellation=item[
                 "no_reschedule_or_cancellation"
             ],
+            confirmation_outcomes=tuple(
+                _confirmation_outcome(entry)
+                for entry in item["confirmation_outcomes"]
+            ),
+            required_confirmations=item["required_confirmations"],
             confirmation_outcomes_complete=item[
                 "confirmation_outcomes_complete"
             ],
@@ -278,6 +315,7 @@ __all__ = [
     "_absence_guard",
     "_agenda_guard",
     "_candidate",
+    "_confirmation_outcome",
     "_canonicalize",
     "_coverage",
     "_manifest_entry",

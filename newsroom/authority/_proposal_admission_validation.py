@@ -7,7 +7,13 @@ from newsroom.checks.admission_models import (
     ProposalAdmissionRequest,
     deterministic_uuid4,
 )
-from newsroom.checks.types import TriggerKind
+from newsroom.checks.check_models import CheckOutcomeRequest
+from newsroom.checks.transition_models import ObservableTransitionRequest
+from newsroom.checks.types import (
+    CheckOutcomeKind,
+    QuarantineDisposition,
+    TriggerKind,
+)
 from newsroom.discovery_adapters import ParsedItem
 from newsroom.sources import (
     DiscoveryOccurrenceId,
@@ -26,6 +32,15 @@ from newsroom.sources import (
     sorted_identity_components,
 )
 
+
+
+_COMPLETE_CONFIRMATION_KINDS = frozenset(
+    {
+        CheckOutcomeKind.SUCCESS_EMPTY,
+        CheckOutcomeKind.SUCCESS_UNCHANGED,
+        CheckOutcomeKind.SUCCESS_CHANGED,
+    }
+)
 from ._proposal_admission_models import (
     _field_map,
     _identity_component_name,
@@ -78,6 +93,138 @@ class _ProposalAdmissionValidationMixin:
             raise ProposalAdmissionConflict(
                 "adapter request differs from exact Source Definition Version"
             )
+
+    def _validate_transition_evidence_preflight(
+        self,
+        transitions: tuple[ObservableTransitionRequest, ...],
+        *,
+        pending_outcome: CheckOutcomeRequest,
+        retained_request,
+    ) -> None:
+        for transition in transitions:
+            if transition.check_outcome_id != pending_outcome.outcome_id:
+                raise ProposalAdmissionConflict(
+                    "planned transition differs from pending Check Outcome"
+                )
+            if transition.observed_at != pending_outcome.completed_at:
+                raise ProposalAdmissionConflict(
+                    "planned transition observation time differs from pending Outcome"
+                )
+            guard = transition.absence_guard or transition.agenda_guard
+            if guard is None:
+                continue
+            references = guard.confirmation_outcomes
+            if pending_outcome.outcome_id not in {
+                reference.outcome_id for reference in references
+            }:
+                raise ProposalAdmissionConflict(
+                    "transition guard omits its pending Check Outcome"
+                )
+
+            request_ids = set()
+            current_complete = None
+            for reference in references:
+                if reference.outcome_id == pending_outcome.outcome_id:
+                    outcome = pending_outcome
+                    parent = retained_request.request
+                else:
+                    retained_outcome = self._store.check_outcome(
+                        reference.outcome_id
+                    )
+                    retained_parent = self._store.check_request(
+                        reference.request_id
+                    )
+                    if retained_outcome is None or retained_parent is None:
+                        raise ProposalAdmissionConflict(
+                            "transition guard references unretained Check authority"
+                        )
+                    outcome = retained_outcome.request
+                    parent = retained_parent.request
+                if (
+                    outcome.request_id != reference.request_id
+                    or parent.request_id != reference.request_id
+                    or parent.adapter_request_digest
+                    != reference.adapter_request_digest
+                ):
+                    raise ProposalAdmissionConflict(
+                        "transition guard confirmation differs from exact Check authority"
+                    )
+                if parent.request_id in request_ids:
+                    raise ProposalAdmissionConflict(
+                        "transition guard cannot count retries as separate confirmations"
+                    )
+                request_ids.add(parent.request_id)
+                if (
+                    outcome.definition_id != transition.definition_id
+                    or outcome.definition_version_id
+                    != transition.definition_version_id
+                ):
+                    raise ProposalAdmissionConflict(
+                        "transition guard confirmation belongs to another source version"
+                    )
+                if outcome.completed_at.value > transition.observed_at.value:
+                    raise ProposalAdmissionConflict(
+                        "transition guard confirmation occurs after the transition"
+                    )
+                complete = (
+                    not outcome.incomplete
+                    and outcome.kind in _COMPLETE_CONFIRMATION_KINDS
+                    and outcome.quarantine is QuarantineDisposition.NONE
+                )
+                if outcome.outcome_id == pending_outcome.outcome_id:
+                    current_complete = complete
+                if transition.absence_guard is not None:
+                    current_parent = retained_request.request
+                    if (
+                        parent.coverage != current_parent.coverage
+                        or parent.producer_slot_digest
+                        != current_parent.producer_slot_digest
+                        or parent.validator_policy
+                        != current_parent.validator_policy
+                    ):
+                        raise ProposalAdmissionConflict(
+                            "absence confirmation differs from the exact "
+                            "snapshot Check contract"
+                        )
+                    if transition.absence_guard.authorizes_ending and not complete:
+                        raise ProposalAdmissionConflict(
+                            "absence ending cites incomplete or failed confirmation"
+                        )
+                else:
+                    assert transition.agenda_guard is not None
+                    if (
+                        parent.trigger.kind is not TriggerKind.PLANNED_WINDOW
+                        or parent.trigger.expected_window_digest
+                        != transition.agenda_guard.expected_window_digest
+                    ):
+                        raise ProposalAdmissionConflict(
+                            "Agenda confirmation differs from the exact planned window"
+                        )
+                    if not complete:
+                        raise ProposalAdmissionConflict(
+                            "Agenda miss cites incomplete or failed confirmation"
+                        )
+
+            if transition.absence_guard is not None:
+                if (
+                    current_complete is None
+                    or current_complete
+                    != transition.absence_guard.successful_complete_outcome
+                ):
+                    raise ProposalAdmissionConflict(
+                        "absence guard completeness differs from pending Outcome"
+                    )
+            else:
+                assert transition.agenda_guard is not None
+                trigger = retained_request.request.trigger
+                if (
+                    trigger.kind is not TriggerKind.PLANNED_WINDOW
+                    or trigger.expected_window_digest
+                    != transition.agenda_guard.expected_window_digest
+                ):
+                    raise ProposalAdmissionConflict(
+                        "Agenda miss guard differs from planned-window Check Request"
+                    )
 
     @staticmethod
     def _validate_item_key(

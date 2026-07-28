@@ -47,6 +47,7 @@ CHECK_AUTHORITY_GUARD_STATEMENTS: tuple[str, ...] = (
               AND o.request_id=NEW.check_request_id
               AND o.definition_id=NEW.definition_id
               AND o.definition_version_id=NEW.definition_version_id
+              AND o.completed_at=NEW.decided_at
               AND (
                   NEW.disposition='MANUAL_HOLD'
                   OR (
@@ -71,6 +72,9 @@ CHECK_AUTHORITY_GUARD_STATEMENTS: tuple[str, ...] = (
             JOIN source_revisions r
               ON r.revision_id=NEW.revision_id
              AND r.item_id=NEW.item_id
+            JOIN discovery_occurrences o
+              ON o.revision_id=NEW.revision_id
+             AND o.check_outcome_id=d.check_outcome_id
             WHERE d.decision_id=NEW.decision_id
               AND i.definition_id=d.definition_id
               AND r.definition_id=d.definition_id
@@ -88,6 +92,7 @@ CHECK_AUTHORITY_GUARD_STATEMENTS: tuple[str, ...] = (
               AND v.observation_model=NEW.observation_model
               AND o.definition_id=NEW.definition_id
               AND o.definition_version_id=NEW.definition_version_id
+              AND o.completed_at=NEW.observed_at
               AND (
                   o.incomplete=0
                   OR NEW.kind='AMBIGUOUS_ABSENCE'
@@ -95,6 +100,16 @@ CHECK_AUTHORITY_GUARD_STATEMENTS: tuple[str, ...] = (
               )
         )
         BEGIN SELECT RAISE(ABORT,'observable transition source contract mismatch'); END""",
+    """CREATE TRIGGER observable_transition_occurrence_guard
+        BEFORE INSERT ON observable_transitions
+        WHEN NEW.current_revision_id IS NOT NULL AND NOT EXISTS(
+            SELECT 1 FROM discovery_occurrences o
+            WHERE o.check_outcome_id=NEW.check_outcome_id
+              AND o.revision_id=NEW.current_revision_id
+              AND o.representation_id=NEW.representation_id
+              AND o.definition_version_id=NEW.definition_version_id
+        )
+        BEGIN SELECT RAISE(ABORT,'Observable Transition occurrence mismatch'); END""",
     """CREATE TRIGGER operational_finding_lineage_guard
         BEFORE INSERT ON operational_findings
         WHEN (NEW.opened_by_attempt_id IS NOT NULL AND NOT EXISTS(
@@ -132,6 +147,26 @@ CHECK_AUTHORITY_GUARD_STATEMENTS: tuple[str, ...] = (
                   AND (NEW.attempt_id IS NULL OR o.attempt_id=NEW.attempt_id)
              ))
         BEGIN SELECT RAISE(ABORT,'Finding occurrence Check lineage mismatch'); END""",
+    """CREATE TRIGGER check_attempt_request_chronology_guard
+        BEFORE INSERT ON check_attempts
+        WHEN EXISTS(
+            SELECT 1 FROM check_requests r
+            WHERE r.request_id=NEW.request_id
+              AND NEW.started_at<r.requested_at
+        )
+        BEGIN SELECT RAISE(ABORT,'check attempt precedes request'); END""",
+    """CREATE TRIGGER check_attempt_terminal_predecessor_guard
+        BEFORE INSERT ON check_attempts
+        WHEN NEW.attempt_number>1 AND NOT EXISTS(
+            SELECT 1
+            FROM check_attempts p
+            JOIN check_outcomes o ON o.attempt_id=p.attempt_id
+            WHERE p.attempt_id=NEW.prior_attempt_id
+              AND p.request_id=NEW.request_id
+              AND p.attempt_number=NEW.attempt_number-1
+              AND o.completed_at<=NEW.started_at
+        )
+        BEGIN SELECT RAISE(ABORT,'check attempt predecessor is not complete'); END""",
     """CREATE TRIGGER check_attempt_exact_predecessor_guard
         BEFORE INSERT ON check_attempts
         WHEN NEW.attempt_number>1 AND NOT EXISTS(
@@ -141,6 +176,20 @@ CHECK_AUTHORITY_GUARD_STATEMENTS: tuple[str, ...] = (
               AND p.attempt_number=NEW.attempt_number-1
         )
         BEGIN SELECT RAISE(ABORT,'check attempt predecessor mismatch'); END""",
+    """CREATE TRIGGER check_outcome_request_contract_guard
+        BEFORE INSERT ON check_outcomes
+        WHEN NOT EXISTS(
+            SELECT 1
+            FROM check_requests r
+            JOIN check_attempts a ON a.attempt_id=NEW.attempt_id
+            WHERE r.request_id=NEW.request_id
+              AND a.request_id=NEW.request_id
+              AND r.definition_id=NEW.definition_id
+              AND r.definition_version_id=NEW.definition_version_id
+              AND (NEW.producer_slot_digest IS NULL
+                   OR NEW.producer_slot_digest=r.producer_slot_digest)
+        )
+        BEGIN SELECT RAISE(ABORT,'Check Outcome request contract mismatch'); END""",
     """CREATE TRIGGER check_outcome_chronology_guard
         BEFORE INSERT ON check_outcomes
         WHEN EXISTS(
