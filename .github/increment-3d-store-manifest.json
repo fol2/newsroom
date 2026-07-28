@@ -28,7 +28,12 @@
     ".github/increment-3d-store-payload/part-02.txt",
     ".github/increment-3d-store-payload/part-03.txt",
     ".github/increment-3d-store-payload/part-04.txt",
-    ".github/increment-3d-store-payload/part-05.txt"
+    ".github/increment-3d-store-payload/part-05a.txt",
+    ".github/increment-3d-store-payload/part-05b.txt",
+    ".github/increment-3d-store-payload/part-05c.txt",
+    ".github/increment-3d-store-payload/part-05d.txt",
+    ".github/increment-3d-store-payload/part-05e.txt",
+    ".github/increment-3d-store-payload/part-05f.txt"
   ],
   "product_paths": [
     ".github/workflows/export-increment-3d-recovery-source.yml",
@@ -77,6 +82,12 @@
     ".github/increment-3d-store-payload/part-03.txt",
     ".github/increment-3d-store-payload/part-04.txt",
     ".github/increment-3d-store-payload/part-05.txt",
+    ".github/increment-3d-store-payload/part-05a.txt",
+    ".github/increment-3d-store-payload/part-05b.txt",
+    ".github/increment-3d-store-payload/part-05c.txt",
+    ".github/increment-3d-store-payload/part-05d.txt",
+    ".github/increment-3d-store-payload/part-05e.txt",
+    ".github/increment-3d-store-payload/part-05f.txt",
     ".github/workflows/materialize-increment-3d-store.yml"
   ]
 }
