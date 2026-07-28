@@ -1,0 +1,169 @@
+{
+  "base64_size": 36568,
+  "changed": [
+    {
+      "path": ".github/workflows/export-increment-3c-review-source.yml",
+      "status": "D"
+    },
+    {
+      "path": "newsroom/authority/_check_store_commit.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_check_store_commit_core.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_check_store_commit_decisions.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_check_store_commit_findings.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_check_store_decoding.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_check_store_integrity.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_check_store_read_core.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_check_store_read_decisions.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_check_store_support.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_proposal_admission_commit.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_proposal_admission_validation.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_source_registry_store_common.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_source_registry_store_lineage.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/_source_registry_store_read.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/check_migration_guards.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/authority/check_migration_schema.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/checks/__init__.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/checks/_check_payloads.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/checks/_payload_builders.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/checks/admission_models.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/checks/baseline_models.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/checks/check_models.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/checks/policy.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/tests/check_3c_authority_helpers.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/tests/check_3c_helpers.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/tests/test_check_3c_admission.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/tests/test_check_3c_authority_integrity.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/tests/test_check_3c_authority_store.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/tests/test_check_3c_contracts.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/tests/test_check_3c_migrations.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/tests/test_check_3c_model_policies.py",
+      "status": "M"
+    },
+    {
+      "path": "newsroom/tests/test_source_3a_authority.py",
+      "status": "M"
+    }
+  ],
+  "chunk_count": 6,
+  "chunk_sha256": {
+    "part-00.b64": "da7f8d89f26871075fc1d384a1b4c1354b1a150f88b412c1fa1b8c51f1acf444",
+    "part-01.b64": "31d884dc69d7a23223a5d891b44d33c5457732041c6dded2576e1193393b3151",
+    "part-02.b64": "d4b378e8522b079c5630cd1b7fde1027696246a0c623c6f859f1b10d1e5297ed",
+    "part-03.b64": "eef49b386829fad32d31ce0afb922771029cb6c3f4de4dd1839d114dc8ba6985",
+    "part-04.b64": "3302a21fed75146fd6a44a5f9bb953ce8164ea46c1edbdf79596495497413374",
+    "part-05.b64": "c4b5f97f9fe8a3488e5054c53d3948d740c3986087a4a4fb703458f794f3dbf8"
+  },
+  "final_tree_sha": "498d9d96c00a5afe8c597a4484449c3703f1a77a",
+  "focused_tests": [
+    "newsroom/tests/test_check_3c_contracts.py",
+    "newsroom/tests/test_check_3c_baselines.py",
+    "newsroom/tests/test_check_3c_transitions.py",
+    "newsroom/tests/test_check_3c_agenda.py",
+    "newsroom/tests/test_check_3c_findings.py",
+    "newsroom/tests/test_check_3c_transition_planning.py",
+    "newsroom/tests/test_check_3c_migrations.py",
+    "newsroom/tests/test_check_3c_authority_store.py",
+    "newsroom/tests/test_check_3c_authority_integrity.py",
+    "newsroom/tests/test_check_3c_admission.py",
+    "newsroom/tests/test_check_3c_admission_findings.py",
+    "newsroom/tests/test_check_3c_model_policies.py",
+    "newsroom/tests/test_check_3c_concurrency.py",
+    "newsroom/tests/test_check_3c_traceability.py"
+  ],
+  "gzip_sha256": "630d3d5801c54a796aace0229dc8658475784697af14db48d15729729fed513e",
+  "gzip_size": 27426,
+  "local_base_tree": "360bd15d6b5d4ed0338d3eeaab01684c439b3ff4",
+  "parent_sha": "53dbfdc78453a142a2e0d82503b252a1da7d9d07",
+  "raw_sha256": "ee235d30d35dddf93bc8385d7fa64985b87551115b6b53be6900cde44017f3f8",
+  "raw_size": 161408
+}
