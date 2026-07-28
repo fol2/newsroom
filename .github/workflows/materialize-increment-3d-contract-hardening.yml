@@ -1,0 +1,191 @@
+name: Materialize Increment 3D contract hardening
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-test-and-push:
+    if: github.event.pull_request.head.ref == 'agent/increment-3d-signal-lead-authority'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact Increment 3D branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-3d-signal-lead-authority
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+
+      - name: Verify and apply exact contract-hardening patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import gzip
+          import hashlib
+          import json
+          from pathlib import Path
+          import subprocess
+
+          root = Path.cwd()
+          manifest_path = root / '.github/increment-3d-contract-hardening-manifest.json'
+          payload_path = root / '.github/increment-3d-contract-hardening.patch.b64'
+          manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+          Path('/tmp/increment-3d-contract-hardening-manifest-copy.json').write_text(
+              json.dumps(manifest, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          if manifest.get('schema_version') != (
+              'newsroom.increment-3d.contract-hardening-materializer.v1'
+          ):
+              raise SystemExit('unexpected Increment 3D materializer schema')
+
+          base_commit = manifest['base_commit']
+          subprocess.run(
+              ['git', 'merge-base', '--is-ancestor', base_commit, 'HEAD'],
+              check=True,
+          )
+          base_tree = subprocess.check_output(
+              ['git', 'rev-parse', f'{base_commit}^{{tree}}'], text=True
+          ).strip()
+          if base_tree != manifest['base_tree_sha']:
+              raise SystemExit(
+                  f'Increment 3D base tree differs: {base_tree}'
+              )
+
+          expected_temporary = tuple(sorted(manifest['temporary_paths']))
+          actual_changed = tuple(
+              sorted(
+                  subprocess.check_output(
+                      ['git', 'diff', '--name-only', f'{base_commit}..HEAD', '--'],
+                      text=True,
+                  ).splitlines()
+              )
+          )
+          if actual_changed != expected_temporary:
+              raise SystemExit(
+                  'Increment 3D branch contains non-transport changes before '
+                  f'materialization: {actual_changed!r}'
+              )
+
+          for relative, expected_blob in manifest['base_file_blobs'].items():
+              actual_blob = subprocess.check_output(
+                  ['git', 'rev-parse', f'{base_commit}:{relative}'], text=True
+              ).strip()
+              if actual_blob != expected_blob:
+                  raise SystemExit(
+                      f'Increment 3D base file differs for {relative}: {actual_blob}'
+                  )
+
+          encoded = payload_path.read_text(encoding='ascii')
+          if not encoded.endswith('\n'):
+              raise SystemExit('Increment 3D payload lacks canonical newline')
+          compact = encoded[:-1]
+          if len(compact) != manifest['payload_base64_size']:
+              raise SystemExit('Increment 3D payload base64 size differs')
+          compressed = base64.b64decode(compact, validate=True)
+          if len(compressed) != manifest['gzip_size']:
+              raise SystemExit('Increment 3D payload gzip size differs')
+          if hashlib.sha256(compressed).hexdigest() != manifest['gzip_sha256']:
+              raise SystemExit('Increment 3D payload gzip digest differs')
+          patch = gzip.decompress(compressed)
+          if len(patch) != manifest['patch_size']:
+              raise SystemExit('Increment 3D patch size differs')
+          if hashlib.sha256(patch).hexdigest() != manifest['patch_sha256']:
+              raise SystemExit('Increment 3D patch digest differs')
+          Path('/tmp/increment-3d-contract-hardening.patch').write_bytes(patch)
+          PY
+          git apply --check /tmp/increment-3d-contract-hardening.patch
+          git apply /tmp/increment-3d-contract-hardening.patch
+          rm -f \
+            .github/increment-3d-contract-hardening-manifest.json \
+            .github/increment-3d-contract-hardening.patch.b64 \
+            .github/workflows/materialize-increment-3d-contract-hardening.yml
+          python -m compileall -q newsroom scripts
+          git diff --check
+
+      - name: Install locked development environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Run focused and complete regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_discovery_3d_contracts.py \
+            newsroom/tests/test_discovery_3d_payloads.py \
+            newsroom/tests/test_discovery_3d_policy.py \
+            newsroom/tests/test_discovery_3d_traceability.py
+          uv run --no-sync python -m pytest -q
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+      - name: Commit verified clean contract hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+          import subprocess
+
+          expected = tuple(
+              json.loads(
+                  Path('/tmp/increment-3d-contract-hardening-manifest-copy.json')
+                  .read_text(encoding='utf-8')
+              )['product_paths']
+          )
+          raw = subprocess.check_output(
+              ['git', 'status', '--porcelain=v1', '-z'],
+          ).decode('utf-8')
+          records = [item for item in raw.split('\0') if item]
+          actual: list[str] = []
+          for record in records:
+              path = record[3:]
+              if ' -> ' in path:
+                  path = path.split(' -> ', 1)[1]
+              actual.append(path)
+          if tuple(sorted(actual)) != tuple(sorted(expected)):
+              raise SystemExit(
+                  'Increment 3D clean product paths differ: '
+                  f'{tuple(sorted(actual))!r}'
+              )
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix(discovery): harden Signal gate authority contracts'
+          git push origin HEAD:agent/increment-3d-signal-lead-authority
