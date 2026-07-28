@@ -168,6 +168,64 @@ def test_duplicate_gate_cannot_collapse_distinct_signal_purpose(
             system.discovery.decide_gate(duplicate_gate, proof=proof())
 
 
+def test_duplicate_gate_requires_an_earlier_signal_authority_event(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    later_signal_id = DiscoverySignalId.parse(
+        "00000000-0000-4000-8000-000000007096"
+    )
+    with open_discovery_system(database) as system:
+        seed_check_lineage(system)
+        system.discovery.admit_signal(exact_signal_request(), proof=proof())
+        later_signal = replace(
+            exact_signal_request(),
+            signal_id=later_signal_id,
+            admission_policy=VersionedPolicyRef(
+                "fixture-signal-admission",
+                "v2",
+            ),
+            idempotency_key="later-equivalent-signal",
+        )
+        system.discovery.admit_signal(later_signal, proof=proof())
+
+        reverse_duplicate_basis = replace(
+            exact_gate_request().basis,
+            duplicate_signal_id=later_signal_id,
+            duplicate_rule=VersionedPolicyRef("fixture-duplicate", "v1"),
+        )
+        reverse_duplicate_gate = replace(
+            exact_gate_request(),
+            decision_id=GateDecisionId.parse(
+                "00000000-0000-4000-8000-000000007095"
+            ),
+            basis=reverse_duplicate_basis,
+            outcome=GateOutcome.SUPPRESSED_DUPLICATE,
+            primary_reason=StructuredReason(
+                code="NOVELTY.EXACT_DUPLICATE",
+                basis=exact_gate_request().primary_reason.basis,
+                references=(
+                    ReasonReference(
+                        "DISCOVERY_SIGNAL",
+                        str(later_signal_id),
+                    ),
+                ),
+                explanation=(
+                    "An earlier Signal cannot be closed in favour of a later "
+                    "Signal authority event."
+                ),
+            ),
+            next_action=NextAction(
+                NextActionKind.CLOSE,
+                "CLOSE_EXACT_DUPLICATE",
+                instructions="Duplicate direction must follow authority order.",
+            ),
+            idempotency_key="reverse-duplicate-gate",
+        )
+        with pytest.raises(DiscoveryVersionConflict, match="earlier retained Signal"):
+            system.discovery.decide_gate(reverse_duplicate_gate, proof=proof())
+
+
 def test_signal_semantic_collision_and_gate_head_conflict_roll_back(
     tmp_path: Path,
 ) -> None:

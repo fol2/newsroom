@@ -3,8 +3,8 @@
 **Issue:** #208
 **Parent:** #143
 **Authorised base:** `main@074ba35b160de87762d57f438c9720f1b27d87b4`
-**Reviewed local executable-product commit:** `ed5b01982e1f125cb2d6144d44c29a5c8000d3a6`
-**Reviewed local executable-product tree:** `6f5ba1055661667c19eb7880cd9d789cb8043a1d`
+**Reviewed local executable-product commit:** `c7e8ecfcd8c48af01b1da1e0de8a04c483fe99ea`
+**Reviewed local executable-product tree:** `6fe927db09b8c589534c0caed4a66f39463ae5e1`
 **Status:** current-tree review checkpoint; remote exact-head qualification pending
 
 ## Review method
@@ -14,13 +14,13 @@ The review traced the full fixture-only path from retained Increment 3C authorit
 Machine evidence for this checkpoint:
 
 ```text
-Focused Increment 3D tests:                    77 passed
-Focused plus retained migration tests:         85 passed
+Focused Increment 3D tests:                    78 passed
+Focused plus retained migration tests:         86 passed
 Core shard 0: 385 passed
 Core shard 1: 366 passed
 Core shard 2: 337 passed, 7 intentional skips
-Core shard 3: 384 passed, 25 intentional skips
-Merged core topology: 1,472 passed, 32 intentional service-only skips
+Core shard 3: 385 passed, 25 intentional skips
+Merged core topology: 1,473 passed, 32 intentional service-only skips
 Clustering regression: pass
 Python compilation: pass
 Whitespace validation: pass
@@ -132,13 +132,19 @@ Several authenticated read methods converted caller-supplied values to strings b
 
 The review record retained the commit, tree and core-shard counts from the first revalidation correction even after later review-only and typed-read fixes advanced the reviewed product. That made the prose evidence stale despite the code and tests being current.
 
-**Correction:** the review record now names the exact latest reviewed executable-product commit and tree, records the then-current 76-case focused suite, 84-case retained migration set and 1,471-passed/32-intentional-skip core topology; the later P2-18 correction advances final evidence to 77 focused cases, 85 retained cases and 1,472 passed with the same 32 intentional service-only skips, and requires remote exact-head evidence to supersede these local identifiers after publication. The evidence-only commit containing this record is intentionally not self-hashed inside the record.
+**Correction:** the review record now names the exact latest reviewed executable-product commit and tree, records the then-current 76-case focused suite, 84-case retained migration set and 1,471-passed/32-intentional-skip core topology; the later P2-18 and P2-19 corrections advance final evidence to 78 focused cases, 86 retained cases and 1,473 passed with the same 32 intentional service-only skips, and requires remote exact-head evidence to supersede these local identifiers after publication. The evidence-only commit containing this record is intentionally not self-hashed inside the record.
 
 ### P2-18 — exact duplicate suppression could erase a distinct Signal purpose
 
 The duplicate Gate path originally required the target Signal to share the same source, Item and Revision, but it did not require the same deterministic purpose and discriminator. Two legitimate Signals derived from one Revision for different accepted purposes could therefore be collapsed as an exact duplicate even though Increment 3D explicitly permits several Signals only through distinct stable discriminators.
 
 **Correction:** both the transactional store and the v12 SQL outcome guard require the duplicate target to share the exact source, Item, Revision, purpose and discriminator. A focused regression creates two Signals from one Revision with distinct deterministic purposes and proves the second cannot be suppressed as an exact duplicate of the first.
+
+### P2-19 — duplicate direction could form an authority cycle
+
+The duplicate target was required to be retained and equivalent, but it was not required to precede the Signal being closed. Two equivalent Signals could therefore be suppressed in opposite directions, or an earlier Signal could be closed in favour of a later authority event. That would leave no stable prior duplicate survivor and make current duplicate lineage cyclic.
+
+**Correction:** the transactional store and v12 SQL guard compare immutable ledger sequence and require the duplicate target's Signal authority event to precede the current Signal. A regression proves an earlier Signal cannot name a later-admitted Signal as its exact duplicate.
 
 ## Boundary review
 
@@ -162,7 +168,7 @@ Signals, Gate Decisions and Leads remain unverified discovery records and never 
 
 ```text
 P1 findings:             0
-P2 findings corrected:  18
+P2 findings corrected:  19
 Unresolved P1/P2:        0 on the reviewed local product tree
 ```
 
