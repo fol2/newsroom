@@ -65,6 +65,7 @@ def test_projection_migration_history_contracts_and_schema_are_exact(
             (9, "complete_fixture_candidate_authority_v9"),
             (10, "source_registry_authority_v10"),
             (11, "check_transition_authority_v11"),
+            (12, "signal_gate_lead_authority_v12"),
         ]
         assert conn.execute(
             "SELECT COUNT(*) FROM projection_ontology_contracts"
