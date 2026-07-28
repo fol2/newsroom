@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from newsroom.authority._capability import _AuthorizedCommandGrant
+from newsroom.authority._check_store_support import _observed_item_id
 from newsroom.checks.check_models import (
     CheckAttemptRequest,
     CheckOutcomeRequest,
@@ -450,6 +451,24 @@ class _CheckStoreCommitCoreMixin:
                     request.canonical_bytes,
                     request.digest,
                     recorded_at,
+                ),
+            )
+            conn.executemany(
+                "INSERT INTO check_outcome_observed_items("
+                "outcome_id,item_key,item_digest,item_id) VALUES(?,?,?,?)",
+                tuple(
+                    (
+                        str(request.outcome_id),
+                        item.item_key,
+                        item.item_digest,
+                        str(
+                            _observed_item_id(
+                                definition_id=str(request.definition_id),
+                                item_key=item.item_key,
+                            )
+                        ),
+                    )
+                    for item in request.observed_items
                 ),
             )
             return self._check_outcome_for_event(

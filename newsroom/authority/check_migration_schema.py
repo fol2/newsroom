@@ -134,9 +134,15 @@ CHECK_AUTHORITY_SCHEMA_STATEMENTS: tuple[str, ...] = (
               OR parser_result_digest IS NOT NULL),
         CHECK(kind NOT IN('MALFORMED','SHAPE_DRIFT')
               OR parser_result_digest IS NOT NULL),
-        CHECK(kind!='BLOCKED'
+        CHECK(kind NOT IN('BLOCKED','QUARANTINED_DISABLED')
               OR (receipt_digest IS NULL AND capture_digest IS NULL
                   AND parser_result_digest IS NULL)),
+        CHECK(kind IN('BLOCKED','QUARANTINED_DISABLED')
+              OR receipt_digest IS NOT NULL),
+        CHECK(kind NOT IN('REDIRECTED','RATE_LIMITED','UNAUTHORISED',
+                          'NOT_FOUND','GONE','TRANSPORT_FAILED')
+              OR (capture_digest IS NULL AND parser_result_digest IS NULL)),
+        CHECK(observed_item_count=0 OR parser_result_digest IS NOT NULL),
         CHECK(kind NOT IN('SHAPE_DRIFT','QUARANTINED_DISABLED')
               OR quarantine!='NONE'),
         CHECK(length(reason_codes_bytes)>0),
@@ -144,6 +150,19 @@ CHECK_AUTHORITY_SCHEMA_STATEMENTS: tuple[str, ...] = (
         CHECK(length(observed_items_bytes)>0),
         CHECK(length(canonical_bytes)>0)
     ) STRICT""",
+    """CREATE TABLE check_outcome_observed_items(
+        outcome_id TEXT NOT NULL REFERENCES check_outcomes(outcome_id),
+        item_key TEXT NOT NULL,
+        item_digest TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        PRIMARY KEY(outcome_id,item_key),
+        UNIQUE(outcome_id,item_id),
+        CHECK(length(item_key)>0),
+        CHECK(length(item_digest)>0),
+        CHECK(length(item_id)>0)
+    ) STRICT""",
+    """CREATE INDEX idx_check_outcome_observed_item_id
+        ON check_outcome_observed_items(item_id,outcome_id)""",
     """CREATE TABLE baseline_decisions(
         decision_id TEXT PRIMARY KEY,
         definition_id TEXT NOT NULL REFERENCES source_definitions(definition_id),

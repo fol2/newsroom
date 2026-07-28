@@ -7,6 +7,7 @@ from newsroom.authority._check_store_decoding import (
     decode_check_outcome,
     decode_check_request,
 )
+from newsroom.authority._check_store_support import _observed_item_id
 from newsroom.authority._source_registry_decoding import canonical_row_value
 from newsroom.authority.persistence import AuthorityPersistenceError
 from newsroom.authority.types import EventId, UtcTimestamp
@@ -228,6 +229,36 @@ class _CheckStoreReadCoreMixin:
             [item.canonical_value() for item in request.observed_items],
             identity="Check Outcome",
         )
+        expected_observed_items = tuple(
+            (
+                item.item_key,
+                item.item_digest,
+                str(
+                    _observed_item_id(
+                        definition_id=str(request.definition_id),
+                        item_key=item.item_key,
+                    )
+                ),
+            )
+            for item in request.observed_items
+        )
+        actual_observed_items = tuple(
+            (
+                str(item["item_key"]),
+                str(item["item_digest"]),
+                str(item["item_id"]),
+            )
+            for item in conn.execute(
+                "SELECT item_key,item_digest,item_id "
+                "FROM check_outcome_observed_items WHERE outcome_id=? "
+                "ORDER BY item_key",
+                (str(request.outcome_id),),
+            ).fetchall()
+        )
+        if actual_observed_items != expected_observed_items:
+            raise AuthorityPersistenceError(
+                "Check Outcome observed-item index differs from canonical bytes"
+            )
         if str(request.outcome_id) != str(row["outcome_id"]):
             raise AuthorityPersistenceError(
                 "Check Outcome identity differs from canonical bytes"

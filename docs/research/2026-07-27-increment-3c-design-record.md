@@ -57,7 +57,7 @@ The authoritative Outcome preserves adapter proposal distinctions without copyin
 - transport failure; and
 - quarantined or disabled recommendation.
 
-The Outcome records exact receipt, Capture and Parser Result digests where present, exact candidate item-key and representation digests, timing, validator, incompleteness, quarantine recommendation and the source/version lineage consumed. It cannot record `no news`, editorial rejection, Signal, Lead or Candidate state.
+The Outcome records exact receipt, Capture and Parser Result digests where present, exact candidate item-key and representation digests, every exact observed item even when unchanged, timing, validator, incompleteness, quarantine recommendation and the source/version lineage consumed. Canonical observed-item bytes are mirrored into an immutable normalized index containing the deterministic Source Item identity so transition chronology and Occurrence admission do not depend on child-record commit order. It cannot record `no news`, editorial rejection, Signal, Lead or Candidate state.
 
 ## Existing source-lineage reuse
 
@@ -70,6 +70,8 @@ Increment 3C resolves valid proposal candidates into the v10 source authority:
 5. transition authority consumes exact retained source records rather than raw adapter fields.
 
 A parser or normalizer change over unchanged source state creates only a later Representation and Occurrence. It cannot allocate a new Revision or publisher transition.
+
+An Outcome is the observation-order anchor. If a process has committed an observed Outcome but has not yet committed its exact Occurrence, later proposal admission for that Source Item fails closed until the earlier lineage is resumed. This prevents a later worker from declaring first observation or activation while an earlier observed state is only partially materialised. Same-time ordering uses Outcome authority sequence. Exact replay can therefore recover its own already observed non-head Revision even when a later crash prefix has advanced the source-record head, without treating a previously observed historical state as reactivated.
 
 ## Baseline semantics
 
@@ -107,7 +109,7 @@ The transition catalogue remains source-observable and non-editorial:
 - `AGENDA_LATE_OCCURRENCE`; and
 - `AMBIGUOUS_ABSENCE`.
 
-Transition policy input is deterministic and versioned. Change facets describe source-observable differences only and never materiality. First observation is not newly published. Source-asserted time remains separate from observation and authority-record time.
+Transition policy input is deterministic and versioned. Change facets describe source-observable differences only and never materiality. First observation is not newly published. Source-asserted time remains separate from observation and authority-record time. Current-state and predecessor lookups are ordered by Check Outcome completion time and Outcome authority sequence, with Representation provenance ordered by production time. A delayed child-record commit therefore cannot move observable history backwards.
 
 ## Complete-snapshot and absence guard
 
@@ -137,11 +139,11 @@ The public facade exposes typed writes and policy-bounded authenticated reads on
 
 ## Migration and startup integrity
 
-Schema v11 contains immutable tables, semantic uniqueness constraints, exact foreign keys, guarded heads and update/delete triggers. It enforces one Baseline Decision per Check Outcome and one transition classification per Check Outcome and Source Item. Startup validation rehydrates every Check, baseline, transition and Finding record from its canonical payload and authority event; validates chronology, exact source/version lineage and head reconstruction; and rejects raw-SQL tampering, missing predecessors, duplicate classifications or impossible absence-based endings.
+Schema v11 contains immutable tables, semantic uniqueness constraints, exact foreign keys, guarded heads and update/delete triggers. It includes the normalized `check_outcome_observed_items` index alongside canonical Outcome bytes. It enforces one Baseline Decision per Check Outcome and one transition classification per Check Outcome and Source Item. Startup validation rehydrates every Check, baseline, transition and Finding record from its canonical payload and authority event; rederives the observed-item index; validates semantic observation chronology, exact source/version lineage and head reconstruction; and rejects raw-SQL tampering, missing predecessors, duplicate classifications or impossible absence-based endings.
 
 ## Implemented recovery and concurrency behavior
 
-Proposal admission pre-authorizes its full write plan, then commits each existing authority record independently. Exact deterministic identifiers and semantic lookups permit recovery after an Outcome-only prefix, after source-lineage commitment, or after baseline commitment but before required activation transitions. A retry resumes at the first missing record rather than wrapping the workflow in an unreviewed transaction.
+Proposal admission pre-authorizes its full write plan, then commits each existing authority record independently. Exact deterministic identifiers and semantic lookups permit recovery after an Outcome-only prefix, after source-lineage commitment, or after baseline commitment but before required activation transitions. A retry resumes at the first missing record rather than wrapping the workflow in an unreviewed transaction. Prior-state counts and latest-state reads are bounded to the current Outcome's semantic position, so future or late-committed records cannot alter the classification of an earlier replay.
 
 Competing workers share the single SQLite writer. The winner creates each record; a loser reloads the exact semantic winner and reports reuse rather than duplicate creation. A conflicting producer slot, historical-state reactivation without an explicit directive, changed baseline classification, or changed transition classification fails closed.
 

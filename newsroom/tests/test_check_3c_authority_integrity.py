@@ -91,6 +91,31 @@ def test_startup_rejects_observed_item_provenance_tampering(
         open_check_system(database)
 
 
+def test_startup_rejects_missing_observed_item_index_row(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "missing-observed-item-index.sqlite3"
+    seed_complete_fixture(database)
+
+    with sqlite3.connect(database) as conn:
+        trigger = _trigger_sql(
+            conn,
+            "immutable_check_outcome_observed_items_delete",
+        )
+        conn.execute(
+            "DROP TRIGGER immutable_check_outcome_observed_items_delete"
+        )
+        conn.execute("DELETE FROM check_outcome_observed_items")
+        conn.execute(trigger)
+        conn.commit()
+
+    with pytest.raises(
+        AuthorityPersistenceError,
+        match="observed-item index",
+    ):
+        open_check_system(database)
+
+
 def test_startup_rejects_missing_post_v11_occurrence_link(
     tmp_path: Path,
 ) -> None:
@@ -144,6 +169,14 @@ def test_check_tables_and_heads_are_immutable_under_normal_sql(
             conn.execute(
                 "UPDATE check_outcomes SET reason_codes_bytes=?",
                 (b"[]",),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="immutable Check Outcome observed item",
+        ):
+            conn.execute(
+                "UPDATE check_outcome_observed_items SET item_digest=?",
+                ("sha256:" + "0" * 64,),
             )
         with pytest.raises(sqlite3.IntegrityError, match="retained"):
             conn.execute("DELETE FROM observable_transitions")

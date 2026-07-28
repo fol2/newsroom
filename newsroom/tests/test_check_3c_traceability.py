@@ -11,7 +11,7 @@ from newsroom.checks import (
 
 
 def test_increment_3c_traceability_has_complete_unique_review_groups() -> None:
-    assert len(INCREMENT_3C_TRACEABILITY) == 13
+    assert len(INCREMENT_3C_TRACEABILITY) == 14
     assert len(INCREMENT_3C_TRACEABILITY) == len(set(INCREMENT_3C_TRACEABILITY))
     assert all(key.startswith("3C-") for key in INCREMENT_3C_TRACEABILITY)
     assert all(value for value in INCREMENT_3C_TRACEABILITY.values())
@@ -31,6 +31,7 @@ def test_increment_3c_traceability_has_complete_unique_review_groups() -> None:
     assert "newsroom.tests.test_check_3c_admission_findings" in flattened
     assert "newsroom.tests.test_check_3c_model_policies" in flattened
     assert "newsroom.tests.test_check_3c_concurrency" in flattened
+    assert "newsroom.tests.test_check_3c_semantic_chronology" in flattened
 
 
 def test_increment_3c_explicitly_excludes_later_authority_and_public_effects() -> None:

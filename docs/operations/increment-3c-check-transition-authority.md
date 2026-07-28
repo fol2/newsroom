@@ -44,6 +44,7 @@ Schema version 11 adds immutable tables for:
 check_requests
 check_attempts
 check_outcomes
+check_outcome_observed_items
 baseline_decisions
 baseline_manifest_entries
 baseline_decision_heads
@@ -53,7 +54,7 @@ operational_finding_occurrences
 discovery_occurrence_check_links
 ```
 
-The migration is forward-only and is named `check_transition_authority_v11`. Startup rehydrates canonical bytes and validates normalized columns, event envelopes, exact attempt order, Outcome lineage, baseline heads, transition Revision/Representation lineage, Finding lineage, post-v11 Occurrence links and complete ledger-event coverage. Trigger-bypassing SQL changes must cause reopen failure.
+The migration is forward-only and is named `check_transition_authority_v11`. Startup rehydrates canonical bytes and validates normalized columns, the immutable observed-item index, event envelopes, exact attempt order, Outcome lineage, baseline heads, semantic transition chronology, Revision/Representation lineage, Finding lineage, post-v11 Occurrence links and complete ledger-event coverage. Trigger-bypassing SQL changes must cause reopen failure.
 
 One Attempt has at most one Outcome. One Check Outcome may create at most one Baseline Decision and at most one transition classification per Source Item. A later call cannot reinterpret the same observation as a different baseline or transition.
 
@@ -63,13 +64,13 @@ One Attempt has at most one Outcome. One Check Outcome may create at most one Ba
 2. Start Attempt 1 as `PRIMARY`. Every later Attempt names the exact immediately preceding Attempt and uses the next ordinal.
 3. Execute the fixture adapter outside authority. The adapter returns evidence only and retains `authority_effect = NONE`.
 4. Admit the exact proposal. Admission verifies the current source version, Check Request and Attempt, Adapter Request and Parser Result lineage before authorizing writes.
-5. Record the Check Outcome. Empty, unchanged, changed, partial, truncated, blocked, redirected, rate-limited, unauthorised, not-found, gone, malformed, drifted and transport-failed results remain distinct.
+5. Record the Check Outcome. Empty, unchanged, changed, partial, truncated, blocked, redirected, rate-limited, unauthorised, not-found, gone, malformed, drifted and transport-failed results remain distinct. Every parsed observed item is retained canonically and in the normalized item-key/digest/Source-Item index, including unchanged items.
 6. Resolve or create stable Source Items, Source Revisions and producer-specific Representations. Re-observation creates another Occurrence rather than another Revision.
 7. Establish or advance the explicit source baseline when policy requires it.
 8. Record only deterministic observable transitions permitted by the source model and exact evidence.
 9. Open or reuse an Operational Finding for incomplete or failed source operation and append an exact occurrence.
 
-Exact replay returns the retained records. A crash after any prefix is resumed from the first missing command. A competing worker may lose a semantic race, but it reloads the winner's exact record and cannot report a duplicate creation.
+Exact replay returns the retained records. A crash after any prefix is resumed from the first missing command. A later Check for the same Source Item is held while an earlier observed Outcome still lacks its exact Occurrence. When later same-time source records already exist, replay may reuse only the exact current Outcome's retained non-head Revision or an unobserved current crash prefix; a previously observed non-head state still requires explicit reactivation. A competing worker may lose a semantic race, but it reloads the winner's exact record and cannot report a duplicate creation.
 
 ## Source-model policy matrix
 
@@ -115,6 +116,9 @@ A clean `SUCCESS_EMPTY` is not a Finding. Repeated occurrences reuse the stable 
 - A changed URL is locator evidence only and cannot silently choose Source Item continuity.
 - `404`, `410`, timeout, TLS failure, authentication failure or malformed input cannot independently establish deletion or withdrawal.
 - Re-observation requires a previously observed exact Revision.
+- Prior and current state are ordered by Check Outcome completion time and Outcome authority sequence, not by the later commit order of Occurrences or transitions.
+- The latest Representation is ordered by production time, so delayed parser-provenance commits cannot move the active representation backwards.
+- An observed Outcome with missing source lineage blocks later classification for that Source Item until crash recovery completes it.
 - Reactivation requires a retained ending transition and explicit change facets.
 - Replacement requires a separate related Source Item.
 - A transition directive is source-local, version-bound and may classify at most one transition for its item under one Outcome.
@@ -148,6 +152,7 @@ uv run python -m pytest -q \
   newsroom/tests/test_check_3c_admission_findings.py \
   newsroom/tests/test_check_3c_model_policies.py \
   newsroom/tests/test_check_3c_concurrency.py \
+  newsroom/tests/test_check_3c_semantic_chronology.py \
   newsroom/tests/test_check_3c_traceability.py
 uv run python -m pytest -q
 uv run python scripts/eval_clustering_metrics.py \
@@ -156,7 +161,7 @@ uv run python scripts/eval_clustering_metrics.py \
   --fail-on-regression
 ```
 
-Required exact-head evidence includes all permanent repository workflows, zero required skips, migration history and fingerprint checks, raw-SQL tamper rejection, exact replay, crash-prefix recovery, competing-worker convergence, one transition classification per Outcome/item, and current-head substantive review with zero unresolved P1/P2 findings or review threads.
+Required exact-head evidence includes all permanent repository workflows, zero required skips, migration history and fingerprint checks, canonical/normalized observed-item tie-out, raw-SQL tamper rejection, exact replay, crash-prefix recovery, semantic chronology under reverse commit order, competing-worker convergence, one transition classification per Outcome/item, and current-head substantive review with zero unresolved P1/P2 findings or review threads.
 
 ## Deferred by design
 

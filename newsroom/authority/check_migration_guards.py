@@ -301,6 +301,12 @@ CHECK_AUTHORITY_GUARD_STATEMENTS: tuple[str, ...] = (
     """CREATE TRIGGER immutable_check_outcomes_delete
         BEFORE DELETE ON check_outcomes BEGIN
         SELECT RAISE(ABORT,'Check Outcomes are retained'); END""",
+    """CREATE TRIGGER immutable_check_outcome_observed_items_update
+        BEFORE UPDATE ON check_outcome_observed_items BEGIN
+        SELECT RAISE(ABORT,'immutable Check Outcome observed item'); END""",
+    """CREATE TRIGGER immutable_check_outcome_observed_items_delete
+        BEFORE DELETE ON check_outcome_observed_items BEGIN
+        SELECT RAISE(ABORT,'Check Outcome observed items are retained'); END""",
     """CREATE TRIGGER immutable_baseline_decisions_update
         BEFORE UPDATE ON baseline_decisions BEGIN
         SELECT RAISE(ABORT,'immutable Baseline Decision'); END""",

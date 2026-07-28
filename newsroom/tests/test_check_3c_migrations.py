@@ -23,6 +23,7 @@ CHECK_TABLES = frozenset(
         "check_requests",
         "check_attempts",
         "check_outcomes",
+        "check_outcome_observed_items",
         "baseline_decisions",
         "baseline_manifest_entries",
         "baseline_decision_heads",
@@ -46,6 +47,7 @@ REQUIRED_TRIGGERS = frozenset(
         "observable_transition_occurrence_guard",
         "discovery_occurrence_check_link",
         "immutable_check_outcomes_update",
+        "immutable_check_outcome_observed_items_update",
         "immutable_observable_transitions_delete",
     }
 )

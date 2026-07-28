@@ -56,12 +56,22 @@ class _ProposalAdmissionPlanningMixin:
         else:
             source_item_request = item_request
 
+        if self._store.unresolved_prior_observed_outcome_for_item(
+            source_item_request.item_id,
+            completed_at=admission.completed_at,
+            exclude_outcome_id=admission.outcome_id,
+        ):
+            raise ProposalAdmissionConflict(
+                "prior observed Check Outcome lacks retained source Occurrence"
+            )
+
         latest = self._store.latest_source_revision(
             source_item_request.item_id
         )
         prior_observed = self._store.latest_observed_source_revision(
             source_item_request.item_id,
             exclude_outcome_id=admission.outcome_id,
+            before_completed_at=admission.completed_at,
         )
         if (
             latest is not None
@@ -73,6 +83,8 @@ class _ProposalAdmissionPlanningMixin:
             )
         state_digest = self._permitted_state_digest(parsed_item)
         directive = admission.transition_directive_for(parsed_item.item_key)
+        current_occurrence = None
+        prior_revision_occurrence_count = None
         if (
             latest is not None
             and latest.request.source_native_revision_token is None
@@ -95,14 +107,32 @@ class _ProposalAdmissionPlanningMixin:
                 revision_request.revision_identity_digest,
             )
             if revision is not None:
+                current_occurrence = (
+                    self._store.discovery_occurrence_for_outcome_revision_any(
+                        check_outcome_id=admission.outcome_id,
+                        revision_id=revision.request.revision_id,
+                    )
+                )
+                prior_revision_occurrence_count = (
+                    self._store.discovery_occurrence_count_for_revision(
+                        revision.request.revision_id,
+                        exclude_outcome_id=admission.outcome_id,
+                        before_completed_at=admission.completed_at,
+                    )
+                )
+                explicit_reactivation = (
+                    directive is not None
+                    and directive.kind
+                    is ObservableTransitionKind.REACTIVATED
+                )
                 if (
-                    directive is None
-                    or directive.kind
-                    is not ObservableTransitionKind.REACTIVATED
+                    current_occurrence is None
+                    and prior_revision_occurrence_count > 0
+                    and not explicit_reactivation
                 ):
                     raise ProposalAdmissionConflict(
-                        "observed source state matches a non-head Revision; "
-                        "explicit reactivation policy is required"
+                        "observed source state matches a previously observed "
+                        "non-head Revision; explicit reactivation policy is required"
                     )
                 revision_request = None
                 source_revision_request = revision.request
@@ -132,10 +162,14 @@ class _ProposalAdmissionPlanningMixin:
         else:
             source_representation_request = representation_request
 
-        occurrence = self._store.discovery_occurrence_for_outcome_revision_any(
-            check_outcome_id=admission.outcome_id,
-            revision_id=source_revision_request.revision_id,
-        )
+        occurrence = current_occurrence
+        if occurrence is None:
+            occurrence = (
+                self._store.discovery_occurrence_for_outcome_revision_any(
+                    check_outcome_id=admission.outcome_id,
+                    revision_id=source_revision_request.revision_id,
+                )
+            )
         if occurrence is not None:
             if (
                 occurrence.request.representation_id
@@ -160,6 +194,7 @@ class _ProposalAdmissionPlanningMixin:
                     self._store.discovery_occurrence_count_for_revision(
                         source_revision_request.revision_id,
                         exclude_outcome_id=admission.outcome_id,
+                        before_completed_at=admission.completed_at,
                     )
                     == 0
                 ),
@@ -168,14 +203,17 @@ class _ProposalAdmissionPlanningMixin:
             self._store.discovery_occurrence_count_for_item(
                 source_item_request.item_id,
                 exclude_outcome_id=admission.outcome_id,
+                before_completed_at=admission.completed_at,
             )
         )
-        prior_revision_occurrence_count = (
-            self._store.discovery_occurrence_count_for_revision(
-                source_revision_request.revision_id,
-                exclude_outcome_id=admission.outcome_id,
+        if prior_revision_occurrence_count is None:
+            prior_revision_occurrence_count = (
+                self._store.discovery_occurrence_count_for_revision(
+                    source_revision_request.revision_id,
+                    exclude_outcome_id=admission.outcome_id,
+                    before_completed_at=admission.completed_at,
+                )
             )
-        )
         return _ObservationPlan(
             parsed_item=parsed_item,
             item=item,

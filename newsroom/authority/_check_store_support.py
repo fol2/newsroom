@@ -56,9 +56,6 @@ _AGENDA_OPEN_TRANSITIONS = frozenset(
     }
 )
 
-
-
-
 def _outcome_observed_item_error(
     outcome: CheckOutcomeRequest,
     *,
@@ -71,13 +68,9 @@ def _outcome_observed_item_error(
         return "Discovery Occurrence Check Outcome is not typed"
     matches = []
     for observed in outcome.observed_items:
-        expected_item_id = deterministic_uuid4(
-            SourceItemId,
-            namespace="increment-3c-source-item-v1",
-            semantic_value={
-                "definition_id": str(outcome.definition_id),
-                "item_key": observed.item_key,
-            },
+        expected_item_id = _observed_item_id(
+            definition_id=str(outcome.definition_id),
+            item_key=observed.item_key,
         )
         if (
             str(expected_item_id) == revision_item_id
@@ -90,6 +83,20 @@ def _outcome_observed_item_error(
             "observed item in its Check Outcome"
         )
     return None
+
+
+def _observed_item_id(*, definition_id: str, item_key: str) -> SourceItemId:
+    """Derive the proposal-admission Source Item identity for one item key."""
+
+    return deterministic_uuid4(
+        SourceItemId,
+        namespace="increment-3c-source-item-v1",
+        semantic_value={
+            "definition_id": definition_id,
+            "item_key": item_key,
+        },
+    )
+
 
 _CHECK_RECORD_SPECS: dict[str, tuple[str, str, TrustScope]] = {
     CHECK_REQUEST_REGISTER_COMMAND: (
@@ -410,33 +417,51 @@ class _CheckStoreSupport:
         request: ObservableTransitionRequest,
     ) -> str | None:
         outcome = conn.execute(
-            "SELECT e.ledger_seq FROM check_outcomes o "
+            "SELECT o.completed_at,e.ledger_seq FROM check_outcomes o "
             "JOIN ledger_events e ON e.event_id=o.authority_event_id "
             "WHERE o.outcome_id=?",
             (str(request.check_outcome_id),),
         ).fetchone()
         if outcome is None:
             return "Observable Transition references an unretained Check Outcome"
+        completed_at = str(outcome["completed_at"])
         boundary = int(outcome["ledger_seq"])
-        prior = conn.execute(
-            "SELECT o.revision_id,e.ledger_seq "
-            "FROM discovery_occurrences o "
-            "JOIN source_revisions r ON r.revision_id=o.revision_id "
+        prior_outcome = conn.execute(
+            "SELECT i.outcome_id FROM check_outcome_observed_items i "
+            "JOIN check_outcomes o ON o.outcome_id=i.outcome_id "
             "JOIN ledger_events e ON e.event_id=o.authority_event_id "
-            "WHERE r.item_id=? AND o.check_outcome_id!=? "
-            "AND e.ledger_seq<? "
-            "ORDER BY e.ledger_seq DESC LIMIT 1",
+            "WHERE i.item_id=? AND i.outcome_id!=? "
+            "AND (o.completed_at<? OR "
+            "(o.completed_at=? AND e.ledger_seq<?)) "
+            "ORDER BY o.completed_at DESC,e.ledger_seq DESC LIMIT 1",
             (
                 str(request.item_id),
                 str(request.check_outcome_id),
+                completed_at,
+                completed_at,
                 boundary,
             ),
         ).fetchone()
-        prior_revision_id = (
-            None if prior is None else str(prior["revision_id"])
-        )
+        prior_revision_id = None
+        if prior_outcome is not None:
+            prior_occurrences = conn.execute(
+                "SELECT d.revision_id FROM discovery_occurrences d "
+                "JOIN source_revisions r ON r.revision_id=d.revision_id "
+                "WHERE d.check_outcome_id=? AND r.item_id=?",
+                (
+                    str(prior_outcome["outcome_id"]),
+                    str(request.item_id),
+                ),
+            ).fetchall()
+            if len(prior_occurrences) != 1:
+                return (
+                    "prior observed Check Outcome lacks one exact source "
+                    "Occurrence"
+                )
+            prior_revision_id = str(prior_occurrences[0]["revision_id"])
+
         if request.kind in _FIRST_OBSERVATION_TRANSITIONS:
-            if prior_revision_id is not None:
+            if prior_outcome is not None:
                 return (
                     "first or activation transition targets a previously "
                     "observed Source Item"
@@ -451,12 +476,21 @@ class _CheckStoreSupport:
             )
 
         latest_transition = conn.execute(
-            "SELECT t.kind,e.ledger_seq "
-            "FROM observable_transitions t "
-            "JOIN ledger_events e ON e.event_id=t.authority_event_id "
-            "WHERE t.item_id=? AND e.ledger_seq<? "
-            "ORDER BY e.ledger_seq DESC LIMIT 1",
-            (str(request.item_id), boundary),
+            "SELECT t.kind FROM observable_transitions t "
+            "JOIN check_outcomes o ON o.outcome_id=t.check_outcome_id "
+            "JOIN ledger_events oe ON oe.event_id=o.authority_event_id "
+            "JOIN ledger_events te ON te.event_id=t.authority_event_id "
+            "WHERE t.item_id=? "
+            "AND (o.completed_at<? OR "
+            "(o.completed_at=? AND oe.ledger_seq<?)) "
+            "ORDER BY o.completed_at DESC,oe.ledger_seq DESC,"
+            "te.ledger_seq DESC LIMIT 1",
+            (
+                str(request.item_id),
+                completed_at,
+                completed_at,
+                boundary,
+            ),
         ).fetchone()
         latest_kind = (
             None

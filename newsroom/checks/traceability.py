@@ -77,6 +77,13 @@ INCREMENT_3C_TRACEABILITY = {
         "newsroom.tests.test_check_3c_authority_store",
         "newsroom.tests.test_check_3c_authority_integrity",
     ),
+    "3C-14-SEMANTIC-OBSERVATION-CHRONOLOGY/DREC-021-DREC-023-CHG-034-CHG-036": (
+        "newsroom.authority.check_admission_lookup",
+        "newsroom.authority.check_store_support",
+        "newsroom.authority.check_migrations",
+        "newsroom.tests.test_check_3c_semantic_chronology",
+        "newsroom.tests.test_check_3c_authority_integrity",
+    ),
 }
 
 INCREMENT_3C_EXCLUSIONS = frozenset(
