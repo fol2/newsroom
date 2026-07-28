@@ -62,6 +62,25 @@ from ._discovery_decoding import (
 
 _Record = TypeVar("_Record")
 
+_SOURCE_OBSERVATION_COMPATIBILITY_COLUMNS = (
+    "adapter_policy_id",
+    "adapter_policy_version",
+    "extraction_scope_bytes",
+    "observation_model",
+    "baseline_policy_id",
+    "baseline_policy_version",
+    "baseline_kind",
+    "baseline_freshness_seconds",
+    "baseline_reset_requires_decision",
+    "baseline_notes",
+    "item_identity_policy_id",
+    "item_identity_policy_version",
+    "revision_policy_id",
+    "revision_policy_version",
+    "canonicalization_policy_id",
+    "canonicalization_policy_version",
+)
+
 _DISCOVERY_RECORD_SPECS: dict[str, tuple[str, str, TrustScope]] = {
     DISCOVERY_SIGNAL_ADMIT_COMMAND: (
         "discovery_signal",
@@ -426,6 +445,7 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
         expected = {
             "watch_condition_id": str(request.watch_condition_id),
             "lead_id": str(request.lead_id),
+            "gate_decision_id": str(request.gate_decision_id),
             "resume_transition_kind_count": len(request.resume_transition_kinds),
             "expected_occurrence": request.expected_occurrence,
             "corroborating_lead_id": None if request.corroborating_lead_id is None else str(request.corroborating_lead_id),
@@ -465,6 +485,7 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
         expected = {
             "decision_id": str(request.decision_id),
             "lead_id": str(request.lead_id),
+            "gate_decision_id": str(request.gate_decision_id),
             "decision_ordinal": request.decision_ordinal,
             "previous_decision_id": None if request.previous_decision_id is None else str(request.previous_decision_id),
             "outcome": request.outcome.value,
@@ -577,6 +598,10 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
             row = self._connection.execute(
                 "SELECT d.* FROM lead_disposition_heads h "
                 "JOIN lead_disposition_decisions d ON d.decision_id=h.current_decision_id "
+                "JOIN news_leads l ON l.lead_id=h.lead_id "
+                "JOIN discovery_gate_decision_heads g "
+                "ON g.signal_id=l.signal_id "
+                "AND g.current_decision_id=d.gate_decision_id "
                 "WHERE h.lead_id=?",
                 (str(lead_id),),
             ).fetchone()
@@ -649,11 +674,21 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
             disposition_row = self._connection.execute(
                 "SELECT d.* FROM lead_disposition_heads h "
                 "JOIN lead_disposition_decisions d ON d.decision_id=h.current_decision_id "
-                "WHERE h.lead_id=?",
-                (str(lead.request.lead_id),),
+                "WHERE h.lead_id=? AND d.gate_decision_id=?",
+                (str(lead.request.lead_id), str(gate.request.decision_id)),
             ).fetchone()
             if disposition_row is None:
-                raise DiscoveryStateError("News Lead has no current disposition")
+                return DiscoveryCurrentStatus(
+                    signal=signal,
+                    current_gate=gate,
+                    lead=lead,
+                    current_disposition=None,
+                    watch_condition=None,
+                    phase=DiscoveryCurrentPhase.LEAD_QUEUED,
+                    action_source=DiscoveryCurrentActionSource.GATE_DECISION,
+                    next_action=gate.request.next_action,
+                    urgency_route=lead.request.urgency.route,
+                )
             disposition = self._disposition_from_row(self._connection, disposition_row, replayed=False)
             watch = None
             if disposition.request.watch_condition_id is not None:
@@ -752,20 +787,28 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
             "SUCCESS_TRUNCATED",
         } or bool(outcome["incomplete"]) != request.incomplete:
             raise DiscoveryVersionConflict("Signal Check Outcome is not an admissible observation")
+        if str(version["recorded_at"]) > str(outcome["completed_at"]):
+            raise DiscoveryVersionConflict(
+                "Signal source version was not retained before its observation"
+            )
         if request.admitted_at.to_text() < max(
             str(outcome["completed_at"]), str(transition["observed_at"])
         ):
             raise DiscoveryVersionConflict("Signal admission precedes its exact evidence")
-        for finding_id in request.operational_finding_ids:
-            linked = conn.execute(
-                "SELECT 1 FROM operational_findings f "
-                "LEFT JOIN operational_finding_occurrences o "
-                "ON o.finding_id=f.finding_id AND o.outcome_id=? "
-                "WHERE f.finding_id=? AND (f.opened_by_outcome_id=? OR o.finding_id IS NOT NULL)",
-                (str(request.check_outcome_id), str(finding_id), str(request.check_outcome_id)),
-            ).fetchone()
-            if linked is None:
-                raise DiscoveryVersionConflict("Signal Operational Finding lineage differs from Outcome")
+        finding_rows = conn.execute(
+            "SELECT DISTINCT f.finding_id FROM operational_findings f "
+            "LEFT JOIN operational_finding_occurrences o "
+            "ON o.finding_id=f.finding_id AND o.outcome_id=? "
+            "WHERE f.opened_by_outcome_id=? OR o.finding_id IS NOT NULL "
+            "ORDER BY f.finding_id",
+            (str(request.check_outcome_id), str(request.check_outcome_id)),
+        ).fetchall()
+        exact_findings = tuple(str(row["finding_id"]) for row in finding_rows)
+        supplied_findings = tuple(str(value) for value in request.operational_finding_ids)
+        if supplied_findings != exact_findings:
+            raise DiscoveryVersionConflict(
+                "Signal Operational Finding lineage differs from exact Outcome findings"
+            )
 
     @classmethod
     def _require_source_contract_matches_lead(cls, conn: sqlite3.Connection, request: NewsLeadRequest) -> None:
@@ -803,6 +846,25 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
         if dependencies != tuple(value.canonical_value() for value in request.source_dependencies):
             raise DiscoveryVersionConflict("Lead dependencies differ from exact source version")
 
+    @staticmethod
+    def _source_versions_observation_compatible(
+        original: sqlite3.Row,
+        evaluated: sqlite3.Row,
+    ) -> bool:
+        """Return whether later source configuration preserves observed identity.
+
+        Locator, rights, coverage, source-role and portfolio changes are exactly
+        what the Gate re-evaluates.  Collection, parsing, item identity,
+        Revision equality, canonicalization, observation-model and baseline
+        changes require an explicit hold because the retained Representation
+        was not produced under the new contract.
+        """
+
+        return all(
+            original[column] == evaluated[column]
+            for column in _SOURCE_OBSERVATION_COMPATIBILITY_COLUMNS
+        )
+
     # ------------------------------------------------------------------
     # Commit methods
     # ------------------------------------------------------------------
@@ -820,11 +882,6 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
                 committed = self._commit_grant_in_transaction(conn, grant, recorded_at=self._clock().to_text())
                 row = self._row(conn, "discovery_signals", "authority_event_id", committed.event_id)
                 return self._signal_from_row(conn, row, replayed=True)
-            self._require_current_version(
-                conn,
-                definition_id=request.definition_id,
-                version_id=request.definition_version_id,
-            )
             self._require_exact_signal_lineage(conn, request)
             self._discovery_identifier_absent(conn, table="discovery_signals", column="signal_id", identifier=str(request.signal_id), identity="Discovery Signal identity")
             self._discovery_semantic_absent(conn, table="discovery_signals", semantic_digest=request.semantic_digest, identity="Discovery Signal semantics")
@@ -879,12 +936,17 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
                 return self._gate_from_row(conn, row, replayed=True)
             signal = self._row(conn, "discovery_signals", "signal_id", str(request.signal_id))
             if (
-                str(signal["definition_version_id"]) != str(request.evaluated_definition_version_id)
-                or str(signal["admission_policy_id"]) != request.signal_admission_policy.policy_id
+                str(signal["admission_policy_id"]) != request.signal_admission_policy.policy_id
                 or str(signal["admission_policy_version"]) != request.signal_admission_policy.policy_version
                 or request.decided_at.to_text() < str(signal["admitted_at"])
             ):
                 raise DiscoveryVersionConflict("Gate Decision differs from exact Signal authority")
+            original_version = self._row(
+                conn,
+                "source_definition_versions",
+                "version_id",
+                str(signal["definition_version_id"]),
+            )
             version = self._row(
                 conn,
                 "source_definition_versions",
@@ -893,11 +955,24 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
             )
             if str(version["definition_id"]) != str(signal["definition_id"]):
                 raise DiscoveryVersionConflict("Gate evaluated source version belongs to another source")
-            if request.basis.rights_current and (
+            if request.decided_at.to_text() < str(version["recorded_at"]):
+                raise DiscoveryVersionConflict(
+                    "Gate Decision precedes its evaluated source version"
+                )
+            if (
                 str(version["rights_decision_id"]) != request.rights_decision_id
                 or str(version["rights_policy_version"]) != request.rights_policy_version
             ):
                 raise DiscoveryVersionConflict("Gate rights basis differs from source version")
+            compatible = self._source_versions_observation_compatible(
+                original_version,
+                version,
+            )
+            if not compatible and request.basis.identity_integrity:
+                raise DiscoveryVersionConflict(
+                    "Gate cannot claim identity integrity across an incompatible "
+                    "source observation contract"
+                )
             if request.basis.policy_current:
                 self._require_current_version(
                     conn,
@@ -1024,7 +1099,6 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
                 raise DiscoveryVersionConflict("News Lead Gate Decision is not a promotion")
             exact = {
                 "definition_id": str(request.definition_id),
-                "definition_version_id": str(request.definition_version_id),
                 "item_id": str(request.item_id),
                 "revision_id": str(request.revision_id),
                 "representation_id": str(request.representation_id),
@@ -1033,6 +1107,16 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
             }
             if any(str(signal[key]) != value for key, value in exact.items()):
                 raise DiscoveryVersionConflict("News Lead lineage differs from promoted Signal")
+            if str(gate["evaluated_definition_version_id"]) != str(
+                request.definition_version_id
+            ):
+                raise DiscoveryVersionConflict(
+                    "News Lead source version differs from the promoting Gate"
+                )
+            if request.created_at.to_text() < str(gate["decided_at"]):
+                raise DiscoveryVersionConflict(
+                    "News Lead creation precedes its promoting Gate"
+                )
             if (
                 str(gate["coverage_obligation_id"]) != request.coverage.obligation_id
                 or str(gate["coverage_responsibility"]) != request.coverage.responsibility.value
@@ -1107,18 +1191,34 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
                 return self._watch_from_row(conn, row, replayed=True)
             lead = self._row(conn, "news_leads", "lead_id", str(request.lead_id))
             gate_head = conn.execute(
-                "SELECT d.outcome FROM discovery_gate_decision_heads h "
+                "SELECT d.decision_id,d.outcome,d.evaluated_definition_version_id,d.decided_at "
+                "FROM discovery_gate_decision_heads h "
                 "JOIN discovery_gate_decisions d ON d.decision_id=h.current_decision_id "
                 "WHERE h.signal_id=?",
                 (str(lead["signal_id"]),),
             ).fetchone()
-            if gate_head is None or str(gate_head["outcome"]) != GateOutcome.PROMOTED_TO_LEAD.value:
-                raise DiscoveryVersionConflict("Watch Condition requires a currently promoted Lead")
+            if (
+                gate_head is None
+                or str(gate_head["decision_id"]) != str(request.gate_decision_id)
+                or str(gate_head["outcome"])
+                != GateOutcome.PROMOTED_TO_LEAD.value
+            ):
+                raise DiscoveryVersionConflict(
+                    "Watch Condition requires the exact current promoting Gate"
+                )
             self._require_current_version(
                 conn,
                 definition_id=SourceDefinitionId.parse(str(lead["definition_id"])),
-                version_id=SourceDefinitionVersionId.parse(str(lead["definition_version_id"])),
+                version_id=SourceDefinitionVersionId.parse(
+                    str(gate_head["evaluated_definition_version_id"])
+                ),
             )
+            if request.recorded_at.value < UtcTimestamp.parse(
+                str(gate_head["decided_at"])
+            ).value:
+                raise DiscoveryVersionConflict(
+                    "Watch Condition predates its exact Gate Decision"
+                )
             if request.corroborating_lead_id is not None:
                 self._row(conn, "news_leads", "lead_id", str(request.corroborating_lead_id))
             self._discovery_identifier_absent(conn, table="discovery_watch_conditions", column="watch_condition_id", identifier=str(request.watch_condition_id), identity="Watch Condition identity")
@@ -1131,13 +1231,13 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
             try:
                 conn.execute(
                     "INSERT INTO discovery_watch_conditions("
-                    "watch_condition_id,lead_id,resume_transition_kinds_bytes,resume_transition_kind_count,expected_occurrence,"
+                    "watch_condition_id,lead_id,gate_decision_id,resume_transition_kinds_bytes,resume_transition_kind_count,expected_occurrence,"
                     "corroborating_lead_id,review_at,expires_at,operator_review_condition,closure_rule,watch_policy_id,"
                     "watch_policy_version,condition_recorded_at,semantic_digest,authority_event_id,authority_aggregate_version,"
-                    "canonical_bytes,canonical_digest,recorded_at) VALUES(" + ",".join("?" for _ in range(19)) + ")",
+                    "canonical_bytes,canonical_digest,recorded_at) VALUES(" + ",".join("?" for _ in range(20)) + ")",
                     (
                         str(request.watch_condition_id), str(request.lead_id),
-                        canonical_json_bytes([value.value for value in request.resume_transition_kinds]), len(request.resume_transition_kinds),
+                        str(request.gate_decision_id), canonical_json_bytes([value.value for value in request.resume_transition_kinds]), len(request.resume_transition_kinds),
                         request.expected_occurrence, None if request.corroborating_lead_id is None else str(request.corroborating_lead_id),
                         None if request.review_at is None else request.review_at.to_text(),
                         None if request.expires_at is None else request.expires_at.to_text(), request.operator_review_condition,
@@ -1167,20 +1267,44 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
                 return self._disposition_from_row(conn, row, replayed=True)
             lead = self._row(conn, "news_leads", "lead_id", str(request.lead_id))
             gate_head = conn.execute(
-                "SELECT d.outcome FROM discovery_gate_decision_heads h "
+                "SELECT d.decision_id,d.outcome,d.evaluated_definition_version_id,d.decided_at "
+                "FROM discovery_gate_decision_heads h "
                 "JOIN discovery_gate_decisions d ON d.decision_id=h.current_decision_id "
                 "WHERE h.signal_id=?",
                 (str(lead["signal_id"]),),
             ).fetchone()
-            if gate_head is None or str(gate_head["outcome"]) != GateOutcome.PROMOTED_TO_LEAD.value:
-                raise DiscoveryVersionConflict("Lead disposition requires a currently promoted Signal")
+            if (
+                gate_head is None
+                or str(gate_head["decision_id"]) != str(request.gate_decision_id)
+                or str(gate_head["outcome"])
+                != GateOutcome.PROMOTED_TO_LEAD.value
+            ):
+                raise DiscoveryVersionConflict(
+                    "Lead disposition requires the exact current promoting Gate"
+                )
             self._require_current_version(
                 conn,
                 definition_id=SourceDefinitionId.parse(str(lead["definition_id"])),
-                version_id=SourceDefinitionVersionId.parse(str(lead["definition_version_id"])),
+                version_id=SourceDefinitionVersionId.parse(
+                    str(gate_head["evaluated_definition_version_id"])
+                ),
             )
+            if request.decided_at.value < UtcTimestamp.parse(
+                str(gate_head["decided_at"])
+            ).value:
+                raise DiscoveryVersionConflict(
+                    "Lead disposition predates its exact Gate Decision"
+                )
             if bytes(lead["urgency_bytes"]) != canonical_json_bytes(request.urgency_route.canonical_value()):
                 raise DiscoveryVersionConflict("Lead disposition urgency differs from immutable Lead")
+            if (
+                request.decision_ordinal == 1
+                and str(request.gate_decision_id)
+                != str(lead["promoting_gate_decision_id"])
+            ):
+                raise DiscoveryVersionConflict(
+                    "initial Lead disposition must consume the Lead's promoting Gate"
+                )
             head = conn.execute(
                 "SELECT current_decision_id,current_decision_ordinal FROM lead_disposition_heads WHERE lead_id=?",
                 (str(request.lead_id),),
@@ -1194,6 +1318,10 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
                 watch = self._row(conn, "discovery_watch_conditions", "watch_condition_id", str(request.watch_condition_id))
                 if str(watch["lead_id"]) != str(request.lead_id):
                     raise DiscoveryVersionConflict("Lead disposition Watch Condition belongs to another Lead")
+                if str(watch["gate_decision_id"]) != str(request.gate_decision_id):
+                    raise DiscoveryVersionConflict(
+                        "Lead disposition Watch Condition belongs to another Gate"
+                    )
             self._discovery_identifier_absent(conn, table="lead_disposition_decisions", column="decision_id", identifier=str(request.decision_id), identity="Lead disposition identity")
             self._discovery_semantic_absent(conn, table="lead_disposition_decisions", semantic_digest=request.semantic_digest, identity="Lead disposition semantics")
             recorded_at = self._clock().to_text()
@@ -1204,13 +1332,14 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
             try:
                 conn.execute(
                     "INSERT INTO lead_disposition_decisions("
-                    "decision_id,lead_id,decision_ordinal,previous_decision_id,outcome,terminality,primary_reason_bytes,"
+                    "decision_id,lead_id,gate_decision_id,decision_ordinal,previous_decision_id,outcome,terminality,primary_reason_bytes,"
                     "supporting_reasons_bytes,supporting_reason_count,watch_condition_id,next_action_kind,next_action_code,"
                     "next_action_bytes,urgency_bytes,urgency_route,disposition_policy_id,disposition_policy_version,"
                     "reason_taxonomy_version,outcome_taxonomy_version,decided_at,semantic_digest,authority_event_id,"
-                    "authority_aggregate_version,canonical_bytes,canonical_digest,recorded_at) VALUES(" + ",".join("?" for _ in range(26)) + ")",
+                    "authority_aggregate_version,canonical_bytes,canonical_digest,recorded_at) VALUES(" + ",".join("?" for _ in range(27)) + ")",
                     (
-                        str(request.decision_id), str(request.lead_id), request.decision_ordinal, actual_previous,
+                        str(request.decision_id), str(request.lead_id), str(request.gate_decision_id),
+                        request.decision_ordinal, actual_previous,
                         request.outcome.value, request.terminality.value,
                         canonical_json_bytes(request.primary_reason.canonical_value()),
                         canonical_json_bytes([value.canonical_value() for value in request.supporting_reasons]),
@@ -1277,17 +1406,18 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
             "SELECT s.signal_id FROM discovery_signals s LEFT JOIN discovery_gate_decision_heads h "
             "ON h.signal_id=s.signal_id WHERE h.signal_id IS NULL LIMIT 1"
         ).fetchone()
-        # A Signal may exist as a recoverable crash prefix before its first Gate.
-        # It is therefore retained, but a Lead may never exist without a Gate/disposition.
+        # Signal-only and Lead-without-disposition prefixes are recoverable
+        # boundaries between independently authorised commands. A retained
+        # Lead must still point to its exact promoting Gate; admission replay
+        # completes a missing first disposition idempotently.
         orphan_lead = conn.execute(
             "SELECT l.lead_id FROM news_leads l "
             "LEFT JOIN discovery_gate_decisions g ON g.decision_id=l.promoting_gate_decision_id "
-            "LEFT JOIN lead_disposition_heads h ON h.lead_id=l.lead_id "
-            "WHERE g.decision_id IS NULL OR g.outcome!='SIGNAL_PROMOTED_TO_LEAD' "
-            "OR h.lead_id IS NULL LIMIT 1"
+            "WHERE g.decision_id IS NULL OR g.signal_id!=l.signal_id "
+            "OR g.outcome!='SIGNAL_PROMOTED_TO_LEAD' LIMIT 1"
         ).fetchone()
         if orphan_lead is not None:
-            raise AuthoritySchemaError("News Lead lacks exact promotion or disposition authority")
+            raise AuthoritySchemaError("News Lead lacks exact promotion authority")
         del missing_gate
 
     @staticmethod

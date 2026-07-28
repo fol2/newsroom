@@ -52,17 +52,44 @@ class DiscoveryCurrentStatus:
         else:
             if self.lead.request.signal_id != self.signal.request.signal_id:
                 raise ValueError("current Lead differs from Signal")
-            if self.current_disposition is None:
-                raise ValueError("Lead current status requires a disposition")
-            if (
-                self.current_disposition.request.lead_id
-                != self.lead.request.lead_id
-            ):
-                raise ValueError("current disposition differs from Lead")
-            if self.action_source is not DiscoveryCurrentActionSource.LEAD_DISPOSITION:
-                raise ValueError("Lead status must derive action from disposition")
             if self.urgency_route != self.lead.request.urgency.route:
                 raise ValueError("current status urgency differs from Lead")
+            if self.current_disposition is None:
+                if self.watch_condition is not None:
+                    raise ValueError(
+                        "Gate-bound Lead status cannot retain a Watch Condition"
+                    )
+                if (
+                    self.current_gate.request.outcome
+                    is not GateOutcome.PROMOTED_TO_LEAD
+                    or self.action_source
+                    is not DiscoveryCurrentActionSource.GATE_DECISION
+                    or self.phase is not DiscoveryCurrentPhase.LEAD_QUEUED
+                    or self.next_action != self.current_gate.request.next_action
+                ):
+                    raise ValueError(
+                        "Lead without a current Gate-bound disposition must derive "
+                        "its queued action from the promoting Gate"
+                    )
+            else:
+                if (
+                    self.current_disposition.request.lead_id
+                    != self.lead.request.lead_id
+                ):
+                    raise ValueError("current disposition differs from Lead")
+                if (
+                    self.current_disposition.request.gate_decision_id
+                    != self.current_gate.request.decision_id
+                ):
+                    raise ValueError("current disposition differs from current Gate")
+                if (
+                    self.action_source
+                    is not DiscoveryCurrentActionSource.LEAD_DISPOSITION
+                ):
+                    raise ValueError(
+                        "Lead status with a disposition must derive its action "
+                        "from that disposition"
+                    )
         if self.phase is DiscoveryCurrentPhase.SIGNAL_SUPPRESSED and self.current_gate.request.outcome not in {
             GateOutcome.SUPPRESSED_DUPLICATE,
             GateOutcome.SUPPRESSED_NON_CHANGE,

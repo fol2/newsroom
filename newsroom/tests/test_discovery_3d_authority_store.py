@@ -28,6 +28,7 @@ from .discovery_3d_authority_helpers import (
     SIGNAL_ID,
     exact_admission_request,
     exact_gate_request,
+    exact_lead_request,
     exact_signal_request,
     open_discovery_system,
     scopes,
@@ -206,6 +207,136 @@ def test_gate_revalidates_current_source_version(tmp_path: Path) -> None:
         with pytest.raises((DiscoveryVersionConflict, SourceVersionConflict), match="current"):
             system.discovery.decide_gate(exact_gate_request(), proof=proof())
 
+        revalidated_gate = replace(
+            exact_gate_request(),
+            evaluated_definition_version_id=second_version.version_id,
+            rights_decision_id=second_version.rights.rights_decision_id,
+            rights_policy_version=second_version.rights.rights_policy_version,
+            idempotency_key="fixture-gate-revalidated-v2",
+        )
+        current_lead = replace(
+            exact_lead_request(),
+            definition_version_id=second_version.version_id,
+            idempotency_key="fixture-lead-current-v2",
+        )
+        result = system.discovery.admit_signal_to_lead(
+            replace(
+                exact_admission_request(),
+                gate=revalidated_gate,
+                lead=current_lead,
+            ),
+            proof=proof(),
+        )
+        assert result.gate.request.evaluated_definition_version_id == (
+            second_version.version_id
+        )
+        assert result.lead is not None
+        assert result.lead.request.definition_version_id == second_version.version_id
+
+
+def test_signal_retains_exact_observation_after_source_version_advances(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    with open_discovery_system(database) as system:
+        seed_check_lineage(system)
+        second_version = replace(
+            version_request(),
+            version_id=SourceDefinitionVersionId.parse(
+                "00000000-0000-4000-8000-000000006206"
+            ),
+            version_number=2,
+            expected_previous_version_id=version_request().version_id,
+            locator="fixture://increment-3d/maintained-guidance-v2-signal",
+            change_reason="Advance source version before Signal admission.",
+            idempotency_key="fixture-check-source-version-v2-signal",
+        )
+        system.sources.record_definition_version(second_version, proof=proof())
+
+        signal = system.discovery.admit_signal(
+            exact_signal_request(),
+            proof=proof(),
+        )
+        assert signal.request.definition_version_id == version_request().version_id
+
+
+
+def test_repromotion_requires_a_new_gate_bound_disposition(tmp_path: Path) -> None:
+    from newsroom.discovery import TimeValidity
+    from .discovery_3d_helpers import disposition_request, reason
+
+    database = tmp_path / "authority.sqlite3"
+    created = _seed_and_admit(database)
+    assert created.lead is not None and created.initial_disposition is not None
+
+    hold_id = GateDecisionId.parse(
+        "00000000-0000-4000-8000-000000007097"
+    )
+    promote_id = GateDecisionId.parse(
+        "00000000-0000-4000-8000-000000007098"
+    )
+    hold_gate = replace(
+        exact_gate_request(),
+        decision_id=hold_id,
+        decision_ordinal=2,
+        previous_decision_id=GATE_ID,
+        basis=replace(
+            exact_gate_request().basis,
+            policy_current=False,
+            operationally_executable=False,
+            time_validity=TimeValidity.CURRENT,
+        ),
+        outcome=GateOutcome.OPERATIONAL_HOLD,
+        terminality=DecisionTerminality.PENDING_CONDITION,
+        primary_reason=reason("OPS.POLICY_STALE"),
+        next_action=NextAction(
+            NextActionKind.REVIEW,
+            "REVIEW_STALE_POLICY",
+            owner="discovery-operator",
+            instructions="Revalidate the current deterministic Gate policy.",
+        ),
+        idempotency_key="gate-hold-before-repromotion",
+    )
+    revalidated_gate = replace(
+        exact_gate_request(),
+        decision_id=promote_id,
+        decision_ordinal=3,
+        previous_decision_id=hold_id,
+        idempotency_key="gate-repromotion-v3",
+    )
+    replacement_disposition = replace(
+        disposition_request(),
+        decision_id=LeadDispositionDecisionId.parse(
+            "00000000-0000-4000-8000-000000007099"
+        ),
+        gate_decision_id=promote_id,
+        decision_ordinal=2,
+        previous_decision_id=DISPOSITION_ID,
+        idempotency_key="gate-bound-disposition-v2",
+    )
+
+    with open_discovery_system(database) as system:
+        system.discovery.decide_gate(hold_gate, proof=proof())
+        system.discovery.decide_gate(revalidated_gate, proof=proof())
+
+        with pytest.raises(LookupError, match="current Lead Disposition"):
+            system.discovery.current_disposition(LEAD_ID, proof=proof())
+
+        prefix = system.discovery.current_status(SIGNAL_ID, proof=proof())
+        assert prefix.lead == created.lead
+        assert prefix.current_gate.request.decision_id == promote_id
+        assert prefix.current_disposition is None
+        assert prefix.action_source.value == "GATE_DECISION"
+        assert prefix.phase.value == "LEAD_QUEUED"
+        assert prefix.next_action == revalidated_gate.next_action
+
+        retained = system.discovery.record_lead_disposition(
+            replacement_disposition,
+            proof=proof(),
+        )
+        completed = system.discovery.current_status(SIGNAL_ID, proof=proof())
+        assert completed.current_disposition == retained
+        assert completed.action_source.value == "LEAD_DISPOSITION"
 
 def test_startup_rejects_signal_and_gate_head_tampering(tmp_path: Path) -> None:
     signal_db = tmp_path / "signal-tamper.sqlite3"
@@ -293,7 +424,7 @@ def test_later_operational_gate_blocks_new_watch_or_disposition(
     )
     with open_discovery_system(database) as system:
         system.discovery.decide_gate(hold_gate, proof=proof())
-        with pytest.raises(DiscoveryVersionConflict, match="currently promoted"):
+        with pytest.raises(DiscoveryVersionConflict, match="exact current promoting Gate"):
             system.discovery.record_watch_condition(watch_request(), proof=proof())
         later_disposition = replace(
             disposition_request(),
@@ -305,7 +436,29 @@ def test_later_operational_gate_blocks_new_watch_or_disposition(
             outcome=disposition_request().outcome,
             idempotency_key="later-disposition-after-hold",
         )
-        with pytest.raises(DiscoveryVersionConflict, match="currently promoted"):
+        with pytest.raises(DiscoveryVersionConflict, match="exact current promoting Gate"):
             system.discovery.record_lead_disposition(
                 later_disposition, proof=proof()
             )
+
+
+def test_discovery_read_boundary_rejects_untyped_identities_before_lookup(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    with open_discovery_system(database) as system:
+        invalid_calls = (
+            lambda: system.discovery.signal("signal", proof=proof()),
+            lambda: system.discovery.current_gate("signal", proof=proof()),
+            lambda: system.discovery.gates("signal", limit=1, proof=proof()),
+            lambda: system.discovery.lead("lead", proof=proof()),
+            lambda: system.discovery.lead_for_signal("signal", proof=proof()),
+            lambda: system.discovery.watch_condition("watch", proof=proof()),
+            lambda: system.discovery.disposition("disposition", proof=proof()),
+            lambda: system.discovery.current_disposition("lead", proof=proof()),
+            lambda: system.discovery.dispositions("lead", limit=1, proof=proof()),
+            lambda: system.discovery.current_status("signal", proof=proof()),
+        )
+        for call in invalid_calls:
+            with pytest.raises(TypeError, match="identity must be typed"):
+                call()

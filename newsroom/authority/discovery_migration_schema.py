@@ -284,6 +284,8 @@ DISCOVERY_AUTHORITY_SCHEMA_STATEMENTS: tuple[str, ...] = (
     """CREATE TABLE discovery_watch_conditions(
         watch_condition_id TEXT PRIMARY KEY,
         lead_id TEXT NOT NULL REFERENCES news_leads(lead_id),
+        gate_decision_id TEXT NOT NULL
+            REFERENCES discovery_gate_decisions(decision_id),
         resume_transition_kinds_bytes BLOB NOT NULL,
         resume_transition_kind_count INTEGER NOT NULL
             CHECK(resume_transition_kind_count>=0),
@@ -325,6 +327,8 @@ DISCOVERY_AUTHORITY_SCHEMA_STATEMENTS: tuple[str, ...] = (
     """CREATE TABLE lead_disposition_decisions(
         decision_id TEXT PRIMARY KEY,
         lead_id TEXT NOT NULL REFERENCES news_leads(lead_id),
+        gate_decision_id TEXT NOT NULL
+            REFERENCES discovery_gate_decisions(decision_id),
         decision_ordinal INTEGER NOT NULL CHECK(decision_ordinal>0),
         previous_decision_id TEXT
             REFERENCES lead_disposition_decisions(decision_id),

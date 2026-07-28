@@ -265,6 +265,7 @@ def _fixture_requests() -> tuple[
     watch = WatchConditionRequest(
         watch_condition_id=watch_id,
         lead_id=lead_id,
+        gate_decision_id=gate_id,
         resume_transition_kinds=(ObservableTransitionKind.REVISED,),
         expected_occurrence="Fixture source publishes a later revision.",
         corroborating_lead_id=None,
@@ -279,6 +280,7 @@ def _fixture_requests() -> tuple[
     disposition = LeadDispositionDecisionRequest(
         decision_id=disposition_id,
         lead_id=lead_id,
+        gate_decision_id=gate_id,
         decision_ordinal=1,
         previous_decision_id=None,
         outcome=LeadDispositionOutcome.QUEUED_FOR_TRIAGE,

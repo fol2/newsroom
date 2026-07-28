@@ -169,6 +169,7 @@ def watch_request_from_bytes(data: bytes) -> WatchConditionRequest:
         return WatchConditionRequest(
             watch_condition_id=WatchConditionId.parse(item["watch_condition_id"]),
             lead_id=NewsLeadId.parse(item["lead_id"]),
+            gate_decision_id=GateDecisionId.parse(item["gate_decision_id"]),
             resume_transition_kinds=_transition_kinds(item["resume_transition_kinds"]),
             expected_occurrence=item["expected_occurrence"],
             corroborating_lead_id=(
@@ -194,6 +195,7 @@ def disposition_request_from_bytes(data: bytes) -> LeadDispositionDecisionReques
         return LeadDispositionDecisionRequest(
             decision_id=LeadDispositionDecisionId.parse(item["decision_id"]),
             lead_id=NewsLeadId.parse(item["lead_id"]),
+            gate_decision_id=GateDecisionId.parse(item["gate_decision_id"]),
             decision_ordinal=item["decision_ordinal"],
             previous_decision_id=(
                 None

@@ -1,6 +1,6 @@
 # Increment 3D Signal, deterministic-gate and Lead design record
 
-**Status:** Active implementation design checkpoint
+**Status:** Implemented review checkpoint; remote exact-head qualification pending
 **Issue:** #208
 **Parent:** #143
 **Programme:** #141
@@ -42,7 +42,7 @@ Source Revision + Representation + Observable Transition
 
 ## Authority composition
 
-The implementation extends the existing single-writer SQLite authority and ledger. Schema version 12 will add Signal, gate and Lead records around the merged v11 Check and source lineage. It will not create a second database, mutable workflow store or alternative event authority.
+The implementation extends the existing single-writer SQLite authority and ledger. Schema version 12 adds Signal, gate and Lead records around the merged v11 Check and source lineage. It will not create a second database, mutable workflow store or alternative event authority.
 
 Every committed record owns:
 
@@ -228,7 +228,7 @@ A Watch Condition is an immutable inspectable condition that may support a later
 
 An indefinite watch with no trigger, deadline, expiry or closure rule is invalid. Watch Conditions create no trigger, source access, model work or Candidate by themselves.
 
-A Lead Disposition Decision is immutable, ordered under one Lead and references the exact predecessor disposition where present. The current disposition head is rebuilt from decisions.
+A Lead Disposition Decision is immutable, ordered under one Lead and references the exact predecessor disposition where present. Every Watch Condition and Lead Disposition also names the exact current promoting Gate Decision it consumed. The current disposition head is rebuilt from decisions, but it is current executable action only while its Gate identity still equals the current Gate head.
 
 The complete accepted vocabulary is retained as a versioned contract, but Increment 3D activates only the foundation states that require no full triage or Candidate authority:
 
@@ -287,7 +287,7 @@ Reason codes are namespaced, versioned and append-only. Free text may explain bu
 
 ## Schema v12
 
-The planned checked migration adds immutable tables equivalent to:
+The checked migration adds immutable tables equivalent to:
 
 ```text
 discovery_signals
@@ -309,6 +309,7 @@ Required database constraints include:
 - one News Lead per promoted Signal;
 - one Lead references one exact promoting Gate Decision;
 - one disposition ordinal and predecessor chain per Lead;
+- exact Gate identity on every Watch Condition and disposition;
 - one guarded disposition head per Lead;
 - watch-required and hold-required outcome constraints;
 - immutable update/delete triggers;
@@ -334,7 +335,7 @@ The controller never invents an enclosing unreviewed transaction across separate
 
 Competing workers converge on the same Signal, Gate Decision, Lead and initial disposition. A loser reloads and verifies the exact semantic winner. A changed outcome, policy, duplicate target, urgency basis, reason or lineage conflicts rather than silently reusing authority.
 
-A later gate re-evaluation never deletes an existing Lead. Promotion is retained history. A later operational restriction creates later Gate and/or Lead Disposition history according to the exact policy; current status is rebuilt and the original promoting decision remains reconstructable.
+A later gate re-evaluation never deletes an existing Lead. Promotion is retained history. A later operational restriction creates a later Gate Decision and immediately makes any older disposition historical rather than current action. If the Signal is later promoted again, the existing Lead is reused, but the new Gate action remains authoritative until a new disposition explicitly binds that Gate. This crash prefix is inspectable and the original promoting decision remains reconstructable.
 
 ## Reads and current status
 

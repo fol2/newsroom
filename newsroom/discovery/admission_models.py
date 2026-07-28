@@ -48,13 +48,6 @@ class SignalLeadAdmissionRequest:
             raise SignalLeadAdmissionConflict(
                 "Gate Decision must consume the exact supplied Signal"
             )
-        if (
-            self.gate.evaluated_definition_version_id
-            != self.signal.definition_version_id
-        ):
-            raise SignalLeadAdmissionConflict(
-                "Gate evaluation version differs from the Signal source version"
-            )
         promoted = self.gate.outcome is GateOutcome.PROMOTED_TO_LEAD
         if promoted:
             if not isinstance(self.lead, NewsLeadRequest):
@@ -74,7 +67,7 @@ class SignalLeadAdmissionRequest:
                 != self.gate.decision_id
                 or self.lead.definition_id != self.signal.definition_id
                 or self.lead.definition_version_id
-                != self.signal.definition_version_id
+                != self.gate.evaluated_definition_version_id
                 or self.lead.item_id != self.signal.item_id
                 or self.lead.revision_id != self.signal.revision_id
                 or self.lead.representation_id != self.signal.representation_id
@@ -86,6 +79,8 @@ class SignalLeadAdmissionRequest:
                 )
             if (
                 self.initial_disposition.lead_id != self.lead.lead_id
+                or self.initial_disposition.gate_decision_id
+                != self.gate.decision_id
                 or self.initial_disposition.decision_ordinal != 1
                 or self.initial_disposition.previous_decision_id is not None
                 or self.initial_disposition.outcome

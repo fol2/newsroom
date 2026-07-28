@@ -116,6 +116,7 @@ def watch_condition_payload(value: Any) -> bytes:
             {
                 "watch_condition_id",
                 "lead_id",
+                "gate_decision_id",
                 "resume_transition_kinds",
                 "expected_occurrence",
                 "corroborating_lead_id",
@@ -131,6 +132,7 @@ def watch_condition_payload(value: Any) -> bytes:
         build=lambda item: WatchConditionRequest(
             watch_condition_id=WatchConditionId.parse(item["watch_condition_id"]),
             lead_id=NewsLeadId.parse(item["lead_id"]),
+            gate_decision_id=GateDecisionId.parse(item["gate_decision_id"]),
             resume_transition_kinds=_transition_kinds(
                 item["resume_transition_kinds"]
             ),
@@ -162,6 +164,7 @@ def lead_disposition_payload(value: Any) -> bytes:
             {
                 "decision_id",
                 "lead_id",
+                "gate_decision_id",
                 "decision_ordinal",
                 "previous_decision_id",
                 "outcome",
@@ -181,6 +184,7 @@ def lead_disposition_payload(value: Any) -> bytes:
         build=lambda item: LeadDispositionDecisionRequest(
             decision_id=LeadDispositionDecisionId.parse(item["decision_id"]),
             lead_id=NewsLeadId.parse(item["lead_id"]),
+            gate_decision_id=GateDecisionId.parse(item["gate_decision_id"]),
             decision_ordinal=item["decision_ordinal"],
             previous_decision_id=(
                 None

@@ -301,6 +301,8 @@ class _DiscoveryBoundary:
         signal_id: DiscoverySignalId,
         proof: AuthenticationProof,
     ) -> GateDecision:
+        if not isinstance(signal_id, DiscoverySignalId):
+            raise TypeError("Discovery Signal identity must be typed")
         self._authorize_read(
             proof,
             operation="read:discovery:current_gate",
@@ -319,6 +321,8 @@ class _DiscoveryBoundary:
         limit: int,
         proof: AuthenticationProof,
     ) -> tuple[GateDecision, ...]:
+        if not isinstance(signal_id, DiscoverySignalId):
+            raise TypeError("Discovery Signal identity must be typed")
         self._authorize_read(
             proof,
             operation="read:discovery:gates",
@@ -349,6 +353,8 @@ class _DiscoveryBoundary:
         signal_id: DiscoverySignalId,
         proof: AuthenticationProof,
     ) -> NewsLead:
+        if not isinstance(signal_id, DiscoverySignalId):
+            raise TypeError("Discovery Signal identity must be typed")
         self._authorize_read(
             proof,
             operation="read:discovery:lead_for_signal",
@@ -366,6 +372,8 @@ class _DiscoveryBoundary:
         watch_id: WatchConditionId,
         proof: AuthenticationProof,
     ) -> WatchCondition:
+        if not isinstance(watch_id, WatchConditionId):
+            raise TypeError("Watch Condition identity must be typed")
         self._authorize_read(
             proof,
             operation="read:discovery:watch",
@@ -383,6 +391,8 @@ class _DiscoveryBoundary:
         decision_id: LeadDispositionDecisionId,
         proof: AuthenticationProof,
     ) -> LeadDispositionDecision:
+        if not isinstance(decision_id, LeadDispositionDecisionId):
+            raise TypeError("Lead Disposition Decision identity must be typed")
         self._authorize_read(
             proof,
             operation="read:discovery:disposition",
@@ -400,6 +410,8 @@ class _DiscoveryBoundary:
         lead_id: NewsLeadId,
         proof: AuthenticationProof,
     ) -> LeadDispositionDecision:
+        if not isinstance(lead_id, NewsLeadId):
+            raise TypeError("News Lead identity must be typed")
         self._authorize_read(
             proof,
             operation="read:discovery:current_disposition",
@@ -418,6 +430,8 @@ class _DiscoveryBoundary:
         limit: int,
         proof: AuthenticationProof,
     ) -> tuple[LeadDispositionDecision, ...]:
+        if not isinstance(lead_id, NewsLeadId):
+            raise TypeError("News Lead identity must be typed")
         self._authorize_read(
             proof,
             operation="read:discovery:dispositions",
@@ -451,6 +465,8 @@ class _DiscoveryBoundary:
         signal_id: DiscoverySignalId,
         proof: AuthenticationProof,
     ) -> DiscoveryCurrentStatus:
+        if not isinstance(signal_id, DiscoverySignalId):
+            raise TypeError("Discovery Signal identity must be typed")
         self._authorize_read(
             proof,
             operation="read:discovery:current_status",

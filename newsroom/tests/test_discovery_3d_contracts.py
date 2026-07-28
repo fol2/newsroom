@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from newsroom.checks import ObservableTransitionKind
+from newsroom.checks import ObservableTransitionKind, OperationalFindingId
 from newsroom.discovery import (
     DecisionTerminality,
     DiscoveryContractError,
@@ -19,11 +19,9 @@ from newsroom.discovery import (
     TimeValidity,
     deterministic_gate_outcome,
     permitted_newness_for_transition,
-    permitted_newness_for_transition,
     UrgencyRoute,
 )
 from newsroom.discovery.models import LeadDispositionDecisionRequest
-from newsroom.checks import ObservableTransitionKind
 from newsroom.sources import VersionedPolicyRef
 
 from .discovery_3d_helpers import (
@@ -51,6 +49,23 @@ def test_signal_semantics_ignore_lifecycle_identity_and_record_time() -> None:
     )
     assert first.semantic_digest == second.semantic_digest
     assert first.digest != second.digest
+
+
+def test_signal_identity_ignores_operational_degradation_lineage() -> None:
+    complete = signal_request()
+    degraded = replace(
+        complete,
+        signal_id=OTHER_SIGNAL_ID,
+        incomplete=True,
+        operational_finding_ids=(
+            OperationalFindingId.parse(
+                "00000000-0000-4000-8000-000000007099"
+            ),
+        ),
+        idempotency_key="fixture-signal-degraded",
+    )
+    assert complete.semantic_digest == degraded.semantic_digest
+    assert complete.digest != degraded.digest
 
 
 def test_signal_discriminator_allocates_distinct_semantic_signal() -> None:
@@ -221,6 +236,7 @@ def test_increment_3d_rejects_later_candidate_dispositions() -> None:
         LeadDispositionDecisionRequest(
             decision_id=queued.decision_id,
             lead_id=queued.lead_id,
+            gate_decision_id=queued.gate_decision_id,
             decision_ordinal=1,
             previous_decision_id=None,
             outcome=LeadDispositionOutcome.ADMIT_NEW_CANDIDATE,
@@ -301,7 +317,7 @@ def test_gate_outcomes_require_exact_next_action_shape() -> None:
                 instructions="Promotion cannot close before Lead creation.",
             )
         )
-    with pytest.raises(DiscoveryContractError, match="may only close"):
+    with pytest.raises(DiscoveryContractError, match="explicit close"):
         gate_request(
             outcome=GateOutcome.SUPPRESSED_NON_CHANGE,
             basis=replace(
@@ -314,6 +330,36 @@ def test_gate_outcomes_require_exact_next_action_shape() -> None:
                 instructions="Non-change cannot enter triage.",
             ),
         )
+    for outcome, basis in (
+        (
+            GateOutcome.SUPPRESSED_NON_CHANGE,
+            replace(
+                promoted_basis(),
+                observable_newness=ObservableNewness.PARSER_ONLY,
+            ),
+        ),
+        (
+            GateOutcome.SUPPRESSED_DUPLICATE,
+            replace(
+                promoted_basis(),
+                duplicate_signal_id=OTHER_SIGNAL_ID,
+                duplicate_rule=VersionedPolicyRef("fixture-duplicate", "v1"),
+            ),
+        ),
+        (
+            GateOutcome.REJECTED_CLEAR_EXCLUSION,
+            replace(
+                promoted_basis(),
+                scope_disposition=ScopeDisposition.CLEAR_EXCLUSION,
+                clear_exclusion_rule=VersionedPolicyRef(
+                    "fixture-exclusion",
+                    "v1",
+                ),
+            ),
+        ),
+    ):
+        with pytest.raises(DiscoveryContractError, match="explicit close"):
+            gate_request(outcome=outcome, basis=basis, next_action=None)
 
 
 def test_lead_urgency_rejects_later_editorial_reason_basis() -> None:

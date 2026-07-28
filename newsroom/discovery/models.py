@@ -170,6 +170,12 @@ class DiscoverySignalRequest:
         value = self.canonical_value()
         value.pop("signal_id")
         value.pop("admitted_at")
+        # Operational degradation is retained lineage, not Signal identity.
+        # The same exact source transition/purpose cannot allocate a second
+        # Signal merely because its associated Finding set is represented
+        # differently by a later caller.
+        value.pop("incomplete")
+        value.pop("operational_finding_ids")
         return digest_canonical(value)
 
 
@@ -323,9 +329,9 @@ class GateDecisionRequest:
                 raise DiscoveryContractError(
                     "duplicate suppression is terminal for the exact Signal"
                 )
-            if self.next_action is not None and self.next_action.kind is not NextActionKind.CLOSE:
+            if self.next_action is None or self.next_action.kind is not NextActionKind.CLOSE:
                 raise DiscoveryContractError(
-                    "duplicate suppression may only close the exact Gate scope"
+                    "duplicate suppression requires an explicit close action"
                 )
         elif self.outcome is GateOutcome.SUPPRESSED_NON_CHANGE:
             if self.basis.observable_newness not in {
@@ -344,9 +350,9 @@ class GateDecisionRequest:
                 raise DiscoveryContractError(
                     "non-change suppression is terminal for the exact Signal"
                 )
-            if self.next_action is not None and self.next_action.kind is not NextActionKind.CLOSE:
+            if self.next_action is None or self.next_action.kind is not NextActionKind.CLOSE:
                 raise DiscoveryContractError(
-                    "non-change suppression may only close the exact Gate scope"
+                    "non-change suppression requires an explicit close action"
                 )
         elif self.outcome is GateOutcome.REJECTED_CLEAR_EXCLUSION:
             if self.basis.scope_disposition is not ScopeDisposition.CLEAR_EXCLUSION:
@@ -357,9 +363,9 @@ class GateDecisionRequest:
                 raise DiscoveryContractError(
                     "clear exclusion is terminal for the exact Signal"
                 )
-            if self.next_action is not None and self.next_action.kind is not NextActionKind.CLOSE:
+            if self.next_action is None or self.next_action.kind is not NextActionKind.CLOSE:
                 raise DiscoveryContractError(
-                    "clear exclusion may only close the exact Gate scope"
+                    "clear exclusion requires an explicit close action"
                 )
         elif self.outcome is GateOutcome.PROMOTED_TO_LEAD:
             if not all(
@@ -618,6 +624,7 @@ class NewsLeadRequest:
 class WatchConditionRequest:
     watch_condition_id: WatchConditionId
     lead_id: NewsLeadId
+    gate_decision_id: GateDecisionId
     resume_transition_kinds: tuple[ObservableTransitionKind, ...]
     expected_occurrence: str | None
     corroborating_lead_id: NewsLeadId | None
@@ -634,6 +641,10 @@ class WatchConditionRequest:
             raise DiscoveryContractError("Watch Condition identity must be typed")
         if not isinstance(self.lead_id, NewsLeadId):
             raise DiscoveryContractError("Watch Lead identity must be typed")
+        if not isinstance(self.gate_decision_id, GateDecisionId):
+            raise DiscoveryContractError(
+                "Watch Condition Gate Decision identity must be typed"
+            )
         if (
             not isinstance(self.resume_transition_kinds, tuple)
             or any(
@@ -708,6 +719,7 @@ class WatchConditionRequest:
         return {
             "watch_condition_id": str(self.watch_condition_id),
             "lead_id": str(self.lead_id),
+            "gate_decision_id": str(self.gate_decision_id),
             "resume_transition_kinds": [
                 item.value for item in self.resume_transition_kinds
             ],
@@ -749,6 +761,7 @@ class WatchConditionRequest:
 class LeadDispositionDecisionRequest:
     decision_id: LeadDispositionDecisionId
     lead_id: NewsLeadId
+    gate_decision_id: GateDecisionId
     decision_ordinal: int
     previous_decision_id: LeadDispositionDecisionId | None
     outcome: LeadDispositionOutcome
@@ -771,6 +784,10 @@ class LeadDispositionDecisionRequest:
             )
         if not isinstance(self.lead_id, NewsLeadId):
             raise DiscoveryContractError("Lead disposition Lead must be typed")
+        if not isinstance(self.gate_decision_id, GateDecisionId):
+            raise DiscoveryContractError(
+                "Lead disposition Gate Decision identity must be typed"
+            )
         if (
             isinstance(self.decision_ordinal, bool)
             or not isinstance(self.decision_ordinal, int)
@@ -905,6 +922,7 @@ class LeadDispositionDecisionRequest:
         return {
             "decision_id": str(self.decision_id),
             "lead_id": str(self.lead_id),
+            "gate_decision_id": str(self.gate_decision_id),
             "decision_ordinal": self.decision_ordinal,
             "previous_decision_id": (
                 None

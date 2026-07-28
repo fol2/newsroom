@@ -11,7 +11,7 @@ from newsroom.discovery import (
 
 
 def test_increment_3d_traceability_has_complete_unique_review_groups() -> None:
-    assert len(INCREMENT_3D_TRACEABILITY) == 12
+    assert len(INCREMENT_3D_TRACEABILITY) == 15
     assert len(INCREMENT_3D_TRACEABILITY) == len(set(INCREMENT_3D_TRACEABILITY))
     assert all(key.startswith("3D-") for key in INCREMENT_3D_TRACEABILITY)
     assert all(value for value in INCREMENT_3D_TRACEABILITY.values())
@@ -87,3 +87,21 @@ def test_discovery_package_has_no_external_io_or_later_workflow_imports() -> Non
                 )
                 for name in names
             ), (path, names)
+
+
+def test_increment_3d_operations_review_and_transport_cleanup_are_retained() -> None:
+    root = Path(__file__).resolve().parents[2]
+    required = (
+        root / "docs/operations/increment-3d-signal-lead-authority.md",
+        root / "docs/research/2026-07-28-increment-3d-design-record.md",
+        root / "docs/research/2026-07-28-increment-3d-substantive-review.md",
+    )
+    assert all(path.is_file() and path.stat().st_size > 1000 for path in required)
+
+    forbidden = (
+        root / ".github/increment-3d-store-manifest.json",
+        root / ".github/increment-3d-store-payload",
+        root / ".github/workflows/materialize-increment-3d-store.yml",
+        root / ".github/workflows/export-increment-3d-recovery-source.yml",
+    )
+    assert all(not path.exists() for path in forbidden)

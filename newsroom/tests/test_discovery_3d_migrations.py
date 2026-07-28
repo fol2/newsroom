@@ -586,7 +586,7 @@ def test_v12_gate_lead_watch_and_disposition_guards_fail_closed(tmp_path) -> Non
         with pytest.raises(sqlite3.IntegrityError, match="Watch Condition"):
             conn.execute(
                 """INSERT INTO discovery_watch_conditions(
-                    watch_condition_id,lead_id,resume_transition_kinds_bytes,
+                    watch_condition_id,lead_id,gate_decision_id,resume_transition_kinds_bytes,
                     resume_transition_kind_count,expected_occurrence,
                     corroborating_lead_id,review_at,expires_at,
                     operator_review_condition,closure_rule,watch_policy_id,
@@ -594,7 +594,7 @@ def test_v12_gate_lead_watch_and_disposition_guards_fail_closed(tmp_path) -> Non
                     authority_event_id,authority_aggregate_version,canonical_bytes,
                     canonical_digest,recorded_at
                 ) VALUES(
-                    '00000000-0000-4000-8000-000000007014',:lead_id,x'5b5d',0,
+                    '00000000-0000-4000-8000-000000007014',:lead_id,:gate_id,x'5b5d',0,
                     'Later fixture transition',NULL,
                     '2042-03-12T10:00:06.000000Z',NULL,NULL,'CLOSE_ON_REVIEW',
                     'fixture-watch','v1','2042-03-12T10:00:00.000000Z',
@@ -603,14 +603,15 @@ def test_v12_gate_lead_watch_and_disposition_guards_fail_closed(tmp_path) -> Non
                 )""",
                 {
                     "lead_id": lead_id,
+                    "gate_id": decision_id,
                     "event_id": _event_id(conn, "check_attempts"),
                 },
             )
 
-        with pytest.raises(sqlite3.IntegrityError, match="disposition lineage"):
+        with pytest.raises(sqlite3.IntegrityError, match="Lead/Gate mismatch"):
             conn.execute(
                 """INSERT INTO lead_disposition_decisions(
-                    decision_id,lead_id,decision_ordinal,previous_decision_id,
+                    decision_id,lead_id,gate_decision_id,decision_ordinal,previous_decision_id,
                     outcome,terminality,primary_reason_bytes,
                     supporting_reasons_bytes,supporting_reason_count,
                     watch_condition_id,next_action_kind,next_action_code,
@@ -620,7 +621,7 @@ def test_v12_gate_lead_watch_and_disposition_guards_fail_closed(tmp_path) -> Non
                     semantic_digest,authority_event_id,authority_aggregate_version,
                     canonical_bytes,canonical_digest,recorded_at
                 ) VALUES(
-                    '00000000-0000-4000-8000-000000007015',:lead_id,1,NULL,
+                    '00000000-0000-4000-8000-000000007015',:lead_id,:gate_id,1,NULL,
                     'LEAD_QUEUED_FOR_TRIAGE','PENDING_CONDITION',x'7b7d',x'5b5d',0,
                     NULL,'QUEUE_TRIAGE','QUEUE_FOR_TRIAGE',x'7b7d',x'7b7d','URGENT',
                     'fixture-disposition','v1','fixture-reasons-v1',
@@ -630,6 +631,7 @@ def test_v12_gate_lead_watch_and_disposition_guards_fail_closed(tmp_path) -> Non
                 )""",
                 {
                     "lead_id": lead_id,
+                    "gate_id": decision_id,
                     "event_id": _event_id(conn, "check_outcomes"),
                 },
             )

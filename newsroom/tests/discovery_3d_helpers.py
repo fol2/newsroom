@@ -270,6 +270,7 @@ def watch_request() -> WatchConditionRequest:
     return WatchConditionRequest(
         watch_condition_id=WATCH_ID,
         lead_id=LEAD_ID,
+        gate_decision_id=GATE_ID,
         resume_transition_kinds=(ObservableTransitionKind.REVISED,),
         expected_occurrence="Fixture source publishes a later revision.",
         corroborating_lead_id=None,
@@ -316,6 +317,7 @@ def disposition_request(
     return LeadDispositionDecisionRequest(
         decision_id=DISPOSITION_ID,
         lead_id=LEAD_ID,
+        gate_decision_id=GATE_ID,
         decision_ordinal=1 if is_initial else 2,
         previous_decision_id=None if is_initial else PRIOR_DISPOSITION_ID,
         outcome=outcome,

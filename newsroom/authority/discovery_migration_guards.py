@@ -259,7 +259,7 @@ DISCOVERY_AUTHORITY_GUARD_STATEMENTS: tuple[str, ...] = (
              AND t.kind=NEW.transition_kind
             WHERE s.signal_id=NEW.signal_id
               AND s.definition_id=NEW.definition_id
-              AND s.definition_version_id=NEW.definition_version_id
+              AND g.evaluated_definition_version_id=NEW.definition_version_id
               AND s.item_id=NEW.item_id
               AND s.revision_id=NEW.revision_id
               AND s.representation_id=NEW.representation_id
@@ -290,9 +290,18 @@ DISCOVERY_AUTHORITY_GUARD_STATEMENTS: tuple[str, ...] = (
     """CREATE TRIGGER watch_condition_chronology_guard
         BEFORE INSERT ON discovery_watch_conditions
         WHEN NOT EXISTS(
-            SELECT 1 FROM news_leads l
+            SELECT 1
+            FROM news_leads l
+            JOIN discovery_gate_decision_heads h
+              ON h.signal_id=l.signal_id
+             AND h.current_decision_id=NEW.gate_decision_id
+            JOIN discovery_gate_decisions g
+              ON g.decision_id=NEW.gate_decision_id
+             AND g.signal_id=l.signal_id
+             AND g.outcome='SIGNAL_PROMOTED_TO_LEAD'
             WHERE l.lead_id=NEW.lead_id
               AND NEW.condition_recorded_at>=l.created_at
+              AND NEW.condition_recorded_at>=g.decided_at
               AND (
                   NEW.corroborating_lead_id IS NULL
                   OR EXISTS(
@@ -302,26 +311,41 @@ DISCOVERY_AUTHORITY_GUARD_STATEMENTS: tuple[str, ...] = (
                   )
               )
         )
-        BEGIN SELECT RAISE(ABORT,'Watch Condition Lead mismatch'); END""",
+        BEGIN SELECT RAISE(ABORT,'Watch Condition Lead/Gate mismatch'); END""",
     """CREATE TRIGGER lead_disposition_chronology_guard
         BEFORE INSERT ON lead_disposition_decisions
         WHEN NOT EXISTS(
-            SELECT 1 FROM news_leads l
+            SELECT 1
+            FROM news_leads l
+            JOIN discovery_gate_decision_heads h
+              ON h.signal_id=l.signal_id
+             AND h.current_decision_id=NEW.gate_decision_id
+            JOIN discovery_gate_decisions g
+              ON g.decision_id=NEW.gate_decision_id
+             AND g.signal_id=l.signal_id
+             AND g.outcome='SIGNAL_PROMOTED_TO_LEAD'
             WHERE l.lead_id=NEW.lead_id
               AND NEW.decided_at>=l.created_at
+              AND NEW.decided_at>=g.decided_at
               AND NEW.urgency_route=l.urgency_route
               AND NEW.urgency_bytes=l.urgency_bytes
+              AND (
+                  (NEW.decision_ordinal=1
+                   AND NEW.gate_decision_id=l.promoting_gate_decision_id)
+                  OR NEW.decision_ordinal>1
+              )
               AND (
                   NEW.watch_condition_id IS NULL
                   OR EXISTS(
                       SELECT 1 FROM discovery_watch_conditions w
                       WHERE w.watch_condition_id=NEW.watch_condition_id
                         AND w.lead_id=NEW.lead_id
+                        AND w.gate_decision_id=NEW.gate_decision_id
                         AND w.condition_recorded_at<=NEW.decided_at
                   )
               )
         )
-        BEGIN SELECT RAISE(ABORT,'Lead disposition lineage mismatch'); END""",
+        BEGIN SELECT RAISE(ABORT,'Lead disposition Lead/Gate mismatch'); END""",
     """CREATE TRIGGER lead_disposition_outcome_guard
         BEFORE INSERT ON lead_disposition_decisions
         WHEN (NEW.outcome='LEAD_QUEUED_FOR_TRIAGE' AND NOT(
