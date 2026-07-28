@@ -1,21 +1,24 @@
 name: Export Increment 3D source
 
 on:
-  pull_request:
+  push:
+    branches:
+      - agent/increment-3d-signal-lead-authority
+    paths:
+      - .github/workflows/export-increment-3d-source.yml
 
 permissions:
   contents: read
 
 jobs:
   export:
-    if: github.event.pull_request.head.ref == 'agent/increment-3d-signal-lead-authority'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out exact branch head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
           show-progress: false
 
@@ -37,7 +40,7 @@ jobs:
       - name: Upload source archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: newsroom-increment-3d-source-${{ github.event.pull_request.head.sha }}
+          name: newsroom-increment-3d-source-${{ github.sha }}
           path: |
             /tmp/newsroom-increment-3d-source.tgz
             /tmp/newsroom-increment-3d-source.sha256
@@ -46,4 +49,3 @@ jobs:
           compression-level: 0
           overwrite: false
           include-hidden-files: false
-          archive: true
