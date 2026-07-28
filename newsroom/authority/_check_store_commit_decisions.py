@@ -279,11 +279,13 @@ class _CheckStoreCommitDecisionMixin:
                     "Observable Transition differs from exact Check or source contract"
                 )
             if (
-                request.kind is not ObservableTransitionKind.AMBIGUOUS_ABSENCE
-                and bool(outcome["incomplete"])
+                bool(outcome["incomplete"])
+                and request.kind
+                is not ObservableTransitionKind.AMBIGUOUS_ABSENCE
+                and request.current_revision_id is None
             ):
                 raise CheckVersionConflict(
-                    "incomplete Outcome cannot authoritatively end or change state"
+                    "incomplete Outcome cannot infer state without a current Revision"
                 )
             if request.prior_revision_id is not None:
                 prior = self._revision_row(
@@ -320,6 +322,16 @@ class _CheckStoreCommitDecisionMixin:
                     raise CheckStateError(
                         "related Source Item belongs to another definition"
                     )
+            classified = conn.execute(
+                "SELECT transition_id,semantic_digest "
+                "FROM observable_transitions "
+                "WHERE check_outcome_id=? AND item_id=?",
+                (str(request.check_outcome_id), str(request.item_id)),
+            ).fetchone()
+            if classified is not None:
+                raise CheckSemanticCollision(
+                    "one Check Outcome cannot classify two transitions for one item"
+                )
             self._check_identifier_absent(
                 conn,
                 table="observable_transitions",

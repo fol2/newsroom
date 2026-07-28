@@ -6,7 +6,10 @@ from newsroom.checks.admission_models import (
     ProposalAdmissionConflict,
     ProposalAdmissionRequest,
 )
-from newsroom.checks.types import TriggerKind
+from newsroom.checks.types import (
+    ObservableTransitionKind,
+    TriggerKind,
+)
 from newsroom.discovery_adapters import ParsedItem
 from newsroom.sources import SourceDefinitionVersion
 from newsroom.sources.policy import (
@@ -56,6 +59,10 @@ class _ProposalAdmissionPlanningMixin:
         latest = self._store.latest_source_revision(
             source_item_request.item_id
         )
+        prior_observed = self._store.latest_observed_source_revision(
+            source_item_request.item_id,
+            exclude_outcome_id=admission.outcome_id,
+        )
         if (
             latest is not None
             and latest.request.observed_at.to_text()
@@ -65,6 +72,7 @@ class _ProposalAdmissionPlanningMixin:
                 "an older proposal cannot advance a later retained Revision head"
             )
         state_digest = self._permitted_state_digest(parsed_item)
+        directive = admission.transition_directive_for(parsed_item.item_key)
         if (
             latest is not None
             and latest.request.source_native_revision_token is None
@@ -87,11 +95,19 @@ class _ProposalAdmissionPlanningMixin:
                 revision_request.revision_identity_digest,
             )
             if revision is not None:
-                raise ProposalAdmissionConflict(
-                    "observed source state matches a non-head Revision; "
-                    "explicit reactivation policy is required"
-                )
-            source_revision_request = revision_request
+                if (
+                    directive is None
+                    or directive.kind
+                    is not ObservableTransitionKind.REACTIVATED
+                ):
+                    raise ProposalAdmissionConflict(
+                        "observed source state matches a non-head Revision; "
+                        "explicit reactivation policy is required"
+                    )
+                revision_request = None
+                source_revision_request = revision.request
+            else:
+                source_revision_request = revision_request
 
         representation_request = self._representation_request(
             admission,
@@ -141,21 +157,38 @@ class _ProposalAdmissionPlanningMixin:
                     source_representation_request.representation_id
                 ),
                 first_observation=(
-                    not self._store.has_discovery_occurrence_for_revision(
-                        source_revision_request.revision_id
+                    self._store.discovery_occurrence_count_for_revision(
+                        source_revision_request.revision_id,
+                        exclude_outcome_id=admission.outcome_id,
                     )
+                    == 0
                 ),
             )
+        prior_item_occurrence_count = (
+            self._store.discovery_occurrence_count_for_item(
+                source_item_request.item_id,
+                exclude_outcome_id=admission.outcome_id,
+            )
+        )
+        prior_revision_occurrence_count = (
+            self._store.discovery_occurrence_count_for_revision(
+                source_revision_request.revision_id,
+                exclude_outcome_id=admission.outcome_id,
+            )
+        )
         return _ObservationPlan(
             parsed_item=parsed_item,
             item=item,
             item_request=item_request,
+            prior_revision=prior_observed,
             revision=revision,
             revision_request=revision_request,
             representation=representation,
             representation_request=representation_request,
             occurrence=occurrence,
             occurrence_request=occurrence_request,
+            prior_item_occurrence_count=prior_item_occurrence_count,
+            prior_revision_occurrence_count=prior_revision_occurrence_count,
         )
 
     def _authorize_plan(

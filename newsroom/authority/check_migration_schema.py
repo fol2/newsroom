@@ -140,7 +140,7 @@ CHECK_AUTHORITY_SCHEMA_STATEMENTS: tuple[str, ...] = (
         definition_id TEXT NOT NULL REFERENCES source_definitions(definition_id),
         definition_version_id TEXT NOT NULL,
         check_request_id TEXT NOT NULL REFERENCES check_requests(request_id),
-        check_outcome_id TEXT NOT NULL,
+        check_outcome_id TEXT NOT NULL UNIQUE,
         kind TEXT NOT NULL CHECK(kind IN('ESTABLISH','RESET','REBUILD')),
         disposition TEXT NOT NULL CHECK(disposition IN('MAINTAINED_BASELINE_ONLY','BOUNDED_BACKFILL','FIRST_OBSERVED_ACTIVE','FUTURE_EXPECTATIONS_ONLY','EXPLICIT_DELTA_SEQUENCE','MANUAL_HOLD')),
         observation_model TEXT NOT NULL CHECK(observation_model IN('APPEND_ONLY','MUTABLE_ITEM','COMPLETE_CURRENT_STATE','ROLLING_LIST','EXPLICIT_DELTA','PLANNED_AGENDA')),
@@ -241,6 +241,7 @@ CHECK_AUTHORITY_SCHEMA_STATEMENTS: tuple[str, ...] = (
         canonical_digest TEXT NOT NULL,
         recorded_at TEXT NOT NULL,
         UNIQUE(transition_id,definition_id),
+        UNIQUE(check_outcome_id,item_id),
         FOREIGN KEY(definition_version_id,definition_id)
             REFERENCES source_definition_versions(version_id,definition_id),
         FOREIGN KEY(check_outcome_id,definition_id,definition_version_id)

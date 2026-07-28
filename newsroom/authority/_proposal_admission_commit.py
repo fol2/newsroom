@@ -37,9 +37,7 @@ _Record = TypeVar("_Record")
 
 class _ProposalAdmissionCommitMixin:
     @staticmethod
-    def _state(record: Any, *, existing: bool) -> AdmissionRecordState:
-        if existing:
-            return AdmissionRecordState.REUSED
+    def _committed_state(record: Any) -> AdmissionRecordState:
         return (
             AdmissionRecordState.REPLAYED
             if record.replayed
@@ -54,9 +52,10 @@ class _ProposalAdmissionCommitMixin:
         commit: Callable[..., _Record],
         reload: Callable[[], _Record | None],
         identity: str,
-    ) -> _Record:
+    ) -> tuple[_Record, AdmissionRecordState]:
         try:
-            return commit(grant, request=request)
+            record = commit(grant, request=request)
+            return record, self._committed_state(record)
         except (
             SourceIdentifierReuse,
             SourceSemanticCollision,
@@ -68,7 +67,7 @@ class _ProposalAdmissionCommitMixin:
                 raise ProposalAdmissionConflict(
                     f"{identity} conflicted and cannot be resolved"
                 ) from exc
-            return existing
+            return existing, AdmissionRecordState.REUSED
 
     def _commit_plan(
         self,
@@ -77,11 +76,11 @@ class _ProposalAdmissionCommitMixin:
         plan = authorized.plan
         if plan.item is not None:
             item = plan.item
-            item_existing = True
+            item_state = AdmissionRecordState.REUSED
         else:
             assert plan.item_request is not None
             assert authorized.item_grant is not None
-            item = self._commit_or_reload(
+            item, item_state = self._commit_or_reload(
                 request=plan.item_request,
                 grant=authorized.item_grant,
                 commit=self._store.commit_source_item,
@@ -101,15 +100,14 @@ class _ProposalAdmissionCommitMixin:
                 raise ProposalAdmissionConflict(
                     "concurrent Source Item resolution changed exact identity"
                 )
-            item_existing = False
 
         if plan.revision is not None:
             revision = plan.revision
-            revision_existing = True
+            revision_state = AdmissionRecordState.REUSED
         else:
             assert plan.revision_request is not None
             assert authorized.revision_grant is not None
-            revision = self._commit_or_reload(
+            revision, revision_state = self._commit_or_reload(
                 request=plan.revision_request,
                 grant=authorized.revision_grant,
                 commit=self._store.commit_source_revision,
@@ -128,15 +126,14 @@ class _ProposalAdmissionCommitMixin:
                 raise ProposalAdmissionConflict(
                     "concurrent Revision resolution changed exact source state"
                 )
-            revision_existing = False
 
         if plan.representation is not None:
             representation = plan.representation
-            representation_existing = True
+            representation_state = AdmissionRecordState.REUSED
         else:
             assert plan.representation_request is not None
             assert authorized.representation_grant is not None
-            representation = self._commit_or_reload(
+            representation, representation_state = self._commit_or_reload(
                 request=plan.representation_request,
                 grant=authorized.representation_grant,
                 commit=self._store.commit_discovery_representation,
@@ -157,14 +154,13 @@ class _ProposalAdmissionCommitMixin:
                 raise ProposalAdmissionConflict(
                     "concurrent Representation resolution changed exact output"
                 )
-            representation_existing = False
 
         if plan.occurrence is not None:
             occurrence = plan.occurrence
-            occurrence_existing = True
+            occurrence_state = AdmissionRecordState.REPLAYED
         else:
             assert authorized.occurrence_grant is not None
-            occurrence = self._commit_or_reload(
+            occurrence, occurrence_state = self._commit_or_reload(
                 request=plan.occurrence_request,
                 grant=authorized.occurrence_grant,
                 commit=self._store.commit_discovery_occurrence,
@@ -182,7 +178,6 @@ class _ProposalAdmissionCommitMixin:
                 raise ProposalAdmissionConflict(
                     "concurrent Occurrence resolution changed exact observation"
                 )
-            occurrence_existing = False
 
         return AdmittedSourceObservation(
             item_key=plan.parsed_item.item_key,
@@ -190,20 +185,10 @@ class _ProposalAdmissionCommitMixin:
             revision=revision,
             representation=representation,
             occurrence=occurrence,
-            item_state=self._state(item, existing=item_existing),
-            revision_state=self._state(
-                revision,
-                existing=revision_existing,
-            ),
-            representation_state=self._state(
-                representation,
-                existing=representation_existing,
-            ),
-            occurrence_state=(
-                AdmissionRecordState.REPLAYED
-                if occurrence_existing
-                else self._state(occurrence, existing=False)
-            ),
+            item_state=item_state,
+            revision_state=revision_state,
+            representation_state=representation_state,
+            occurrence_state=occurrence_state,
         )
 
     def _commit_finding(

@@ -89,8 +89,9 @@ CHECK_AUTHORITY_GUARD_STATEMENTS: tuple[str, ...] = (
               AND o.definition_id=NEW.definition_id
               AND o.definition_version_id=NEW.definition_version_id
               AND (
-                  NEW.kind='AMBIGUOUS_ABSENCE'
-                  OR o.incomplete=0
+                  o.incomplete=0
+                  OR NEW.kind='AMBIGUOUS_ABSENCE'
+                  OR NEW.current_revision_id IS NOT NULL
               )
         )
         BEGIN SELECT RAISE(ABORT,'observable transition source contract mismatch'); END""",

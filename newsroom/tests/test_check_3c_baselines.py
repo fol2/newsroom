@@ -46,12 +46,15 @@ def test_baseline_disposition_is_bound_to_observation_model() -> None:
     )
     assert active.entries[0].item_id == ITEM_ID
 
+    empty_active = baseline_decision(
+        observation_model=ObservationModel.COMPLETE_CURRENT_STATE,
+        disposition=BaselineDisposition.FIRST_OBSERVED_ACTIVE,
+        entries=(),
+    )
+    assert empty_active.entries == ()
+
     with pytest.raises(CheckContractError):
-        baseline_decision(
-            observation_model=ObservationModel.COMPLETE_CURRENT_STATE,
-            disposition=BaselineDisposition.FIRST_OBSERVED_ACTIVE,
-            entries=(),
-        )
+        baseline_decision(entries=())
 
 
 def test_baseline_reset_and_rebuild_require_exact_predecessor() -> None:

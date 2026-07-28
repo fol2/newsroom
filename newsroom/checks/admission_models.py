@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 import hashlib
 from typing import Any, TypeVar
@@ -34,6 +34,7 @@ from .record_models import (
     OperationalFinding,
     OperationalFindingOccurrence,
 )
+from .transition_planning import BaselineControl, TransitionDirective
 from .types import (
     CheckAttemptId,
     CheckAuthorityError,
@@ -123,6 +124,8 @@ class ProposalAdmissionRequest:
     check_attempt_id: CheckAttemptId
     adapter_request: AdapterRequest
     proposal: ObservationProposal
+    baseline_control: BaselineControl = field(default_factory=BaselineControl)
+    transition_directives: tuple[TransitionDirective, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.check_request_id, CheckRequestId):
@@ -133,6 +136,38 @@ class ProposalAdmissionRequest:
             raise CheckContractError("proposal admission adapter request must be typed")
         if not isinstance(self.proposal, ObservationProposal):
             raise CheckContractError("proposal admission proposal must be typed")
+        if not isinstance(self.baseline_control, BaselineControl):
+            raise CheckContractError("proposal admission baseline control must be typed")
+        if (
+            not isinstance(self.transition_directives, tuple)
+            or any(
+                not isinstance(item, TransitionDirective)
+                for item in self.transition_directives
+            )
+        ):
+            raise CheckContractError(
+                "proposal admission transition directives must be typed"
+            )
+        expected_directives = tuple(
+            sorted(
+                self.transition_directives,
+                key=lambda item: (
+                    item.item_key,
+                    item.kind.value,
+                    item.transition_discriminator,
+                ),
+            )
+        )
+        if self.transition_directives != expected_directives:
+            raise CheckContractError(
+                "proposal admission transition directives must be sorted"
+            )
+        if len(self.transition_directives) != len(
+            {item.item_key for item in self.transition_directives}
+        ):
+            raise CheckContractError(
+                "one Check Outcome can classify at most one transition per item"
+            )
         expected = (
             self.adapter_request.request_id,
             self.adapter_request.source_definition_id,
@@ -179,6 +214,11 @@ class ProposalAdmissionRequest:
                 "check_attempt_id": str(self.check_attempt_id),
                 "adapter_request_digest": self.adapter_request.digest,
                 "proposal_digest": self.proposal.digest,
+                "baseline_control": self.baseline_control.canonical_value(),
+                "transition_directives": [
+                    item.canonical_value()
+                    for item in self.transition_directives
+                ],
             }
         )
 
@@ -197,6 +237,19 @@ class ProposalAdmissionRequest:
         ):
             return self.proposal.parser_result.items
         return ()
+
+    def transition_directive_for(
+        self,
+        item_key: str,
+    ) -> TransitionDirective | None:
+        return next(
+            (
+                directive
+                for directive in self.transition_directives
+                if directive.item_key == item_key
+            ),
+            None,
+        )
 
     @property
     def completed_at(self) -> UtcTimestamp:

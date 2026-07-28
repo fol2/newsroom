@@ -27,6 +27,10 @@ def test_increment_3c_traceability_has_complete_unique_review_groups() -> None:
     assert "newsroom.tests.test_check_3c_agenda" in flattened
     assert "newsroom.tests.test_check_3c_findings" in flattened
     assert "newsroom.tests.test_check_3c_traceability" in flattened
+    assert "newsroom.tests.test_check_3c_admission" in flattened
+    assert "newsroom.tests.test_check_3c_admission_findings" in flattened
+    assert "newsroom.tests.test_check_3c_model_policies" in flattened
+    assert "newsroom.tests.test_check_3c_concurrency" in flattened
 
 
 def test_increment_3c_explicitly_excludes_later_authority_and_public_effects() -> None:

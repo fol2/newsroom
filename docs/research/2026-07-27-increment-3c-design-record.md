@@ -1,6 +1,6 @@
 # Increment 3C Check, baseline and observable-transition design record
 
-**Status:** Active implementation design
+**Status:** Implemented review design; final qualification pending
 **Issue:** #207
 **Parent:** #143
 **Authorised base:** `main@707519cebcc18fd8010b9b1b608b361ab2f6de03`
@@ -34,9 +34,9 @@ Every committed record owns one authenticated and authorised command, one ledger
 
 - A Check Request semantic key binds the exact trigger identity and version, Source Definition Version, coverage obligation and contribution, rights decision, adapter/parser/normalizer contract, baseline/revision/transition policies and bounded request purpose. A retry reuses the Request.
 - Each Check Attempt has a separate identity and ordinal under one Request. Attempts retain started, terminal or retained state without overwriting earlier Attempts.
-- One Check Outcome belongs to one exact Attempt. A later recovery creates a later Attempt and Outcome.
-- Baseline Decision identity binds the exact Source Definition Version, Check Outcome, observation model, baseline policy, included item/revision set and reason. Reset/rebuild creates a later decision and preserves prior history.
-- Observable Transition identity binds exact prior/current Revision or the exact absence/explicit-delta evidence, transition policy and transition discriminator. Equivalent replay produces at most one semantic transition.
+- One Check Outcome belongs to one exact Attempt. A later recovery creates a later Attempt and Outcome. One exact Outcome cannot later be reinterpreted by changing its baseline control or item transition classification.
+- Baseline Decision identity binds the exact Source Definition Version, Check Outcome, observation model, baseline policy, included and excluded item/revision manifest and reason. Reset/rebuild creates a later decision and preserves prior history. At most one Baseline Decision may consume one Check Outcome.
+- Observable Transition identity binds exact prior/current Revision or the exact absence/explicit-delta evidence, transition policy and transition discriminator. Equivalent replay produces at most one semantic transition, and one Check Outcome may classify at most one transition per Source Item.
 - Operational Finding identity is a stable operational case. Each contributing failure remains separately retained through the exact Attempt and Outcome; grouping does not erase occurrences.
 
 Deterministic request factories may derive UUIDv4 identifiers from retained namespace material only where the identifier remains an opaque internal identity. Digest equality is used for semantic collision and idempotency, never as a lifecycle identity replacement.
@@ -77,8 +77,8 @@ Baseline actions are explicit typed decisions:
 
 - maintained document: establish initial state without `newly published` or `revised`;
 - bounded backfill: include only the approved freshness window while retaining excluded identities in the decision manifest;
-- complete current state: optionally emit `FIRST_OBSERVED_ACTIVE` under the approved policy without asserting start time;
-- Planned Agenda: retain future expectations only and create no occurrence, Lead or Candidate;
+- complete current state: retain an explicit baseline, including a valid empty complete snapshot, and emit `ACTIVATED` for included first-observed items without asserting their real start time;
+- Planned Agenda: retain future expectations only, preserving past or unknown entries as explicit exclusions; normal source observation still creates an Occurrence, but no Lead or Candidate;
 - explicit delta: retain exact sequence/cursor basis; and
 - reset/rebuild: preserve the predecessor baseline and block uncontrolled re-emission.
 
@@ -121,7 +121,7 @@ Absence-based ending is permitted only when all exact guards are present in one 
 - no transport, parser, rights, policy, permission or version change explaining absence; and
 - an allowed transition under the exact transition policy.
 
-Append-only, rolling-list, partial, truncated, failed, malformed, redirected, unauthorised and blocked outcomes cannot clear, cancel, delete or withdraw by absence. They may create `AMBIGUOUS_ABSENCE` or an Operational Finding only.
+Append-only, rolling-list, partial, truncated, failed, malformed, redirected, unauthorised and blocked outcomes cannot clear, cancel, delete or withdraw by absence. Rolling or incomplete absence may create `AMBIGUOUS_ABSENCE`; independently valid present items from partial or truncated output may still advance their exact Revision and current-item transition while the degraded Outcome also creates an Operational Finding.
 
 ## Planned Agenda boundary
 
@@ -129,7 +129,7 @@ Agenda transition records are expectation-only. Creation, reschedule, cancellati
 
 ## Operational Findings
 
-Integrity, source-contract, rights, policy, identity, baseline, parser, shape, transport, confirmation and quarantine conditions create a typed Operational Finding case or occurrence. A Finding is not a successful unchanged Outcome, editorial rejection, Coverage Gap or evidence conclusion. Closure is a later immutable decision and never erases contributing Attempts or Outcomes.
+Integrity, source-contract, rights, policy, identity, baseline, parser, shape, transport, confirmation and quarantine conditions create a typed Operational Finding case or occurrence. A Finding is not a successful unchanged Outcome, editorial rejection, Coverage Gap or evidence conclusion. Finding closure semantics are deferred; no current operation mutates or erases the stable case or its contributing Attempts and Outcomes.
 
 ## Read and command boundary
 
@@ -137,7 +137,15 @@ The public facade exposes typed writes and policy-bounded authenticated reads on
 
 ## Migration and startup integrity
 
-Schema v11 contains immutable tables, semantic uniqueness constraints, exact foreign keys, guarded heads and update/delete triggers. Startup validation rehydrates every Check, baseline, transition and Finding record from its canonical payload and authority event; validates chronology, exact source/version lineage and head reconstruction; and rejects raw-SQL tampering, missing predecessors, duplicate semantic transitions or impossible absence-based endings.
+Schema v11 contains immutable tables, semantic uniqueness constraints, exact foreign keys, guarded heads and update/delete triggers. It enforces one Baseline Decision per Check Outcome and one transition classification per Check Outcome and Source Item. Startup validation rehydrates every Check, baseline, transition and Finding record from its canonical payload and authority event; validates chronology, exact source/version lineage and head reconstruction; and rejects raw-SQL tampering, missing predecessors, duplicate classifications or impossible absence-based endings.
+
+## Implemented recovery and concurrency behavior
+
+Proposal admission pre-authorizes its full write plan, then commits each existing authority record independently. Exact deterministic identifiers and semantic lookups permit recovery after an Outcome-only prefix, after source-lineage commitment, or after baseline commitment but before required activation transitions. A retry resumes at the first missing record rather than wrapping the workflow in an unreviewed transaction.
+
+Competing workers share the single SQLite writer. The winner creates each record; a loser reloads the exact semantic winner and reports reuse rather than duplicate creation. A conflicting producer slot, historical-state reactivation without an explicit directive, changed baseline classification, or changed transition classification fails closed.
+
+The operational runbook is `docs/operations/increment-3c-check-transition-authority.md`.
 
 ## Normative traceability
 

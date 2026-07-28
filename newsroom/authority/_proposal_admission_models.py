@@ -69,12 +69,15 @@ class _ObservationPlan:
     parsed_item: ParsedItem
     item: SourceItem | None
     item_request: SourceItemRequest | None
+    prior_revision: SourceRevision | None
     revision: SourceRevision | None
     revision_request: SourceRevisionRequest | None
     representation: DiscoveryRepresentation | None
     representation_request: DiscoveryRepresentationRequest | None
     occurrence: DiscoveryOccurrence | None
     occurrence_request: DiscoveryOccurrenceRequest
+    prior_item_occurrence_count: int
+    prior_revision_occurrence_count: int
 
 
 @dataclass(frozen=True, slots=True)

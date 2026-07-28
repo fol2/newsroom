@@ -53,6 +53,11 @@ from .traceability import (
     INCREMENT_3C_TRACEABILITY,
 )
 from .transition_models import ObservableTransitionRequest
+from .transition_planning import (
+    BaselineAction,
+    BaselineControl,
+    TransitionDirective,
+)
 from .types import (
     BaselineDecisionId,
     BaselineDecisionKind,
@@ -89,6 +94,8 @@ __all__ = [
     "AdmittedSourceObservation",
     "AbsenceEndingGuard",
     "AgendaMissGuard",
+    "BaselineAction",
+    "BaselineControl",
     "BaselineDecision",
     "BaselineDecisionId",
     "BaselineDecisionKind",
@@ -146,6 +153,7 @@ __all__ = [
     "ProposalAdmissionResult",
     "QuarantineDisposition",
     "TransitionBasis",
+    "TransitionDirective",
     "TriggerKind",
     "TriggerRef",
     "deterministic_uuid4",

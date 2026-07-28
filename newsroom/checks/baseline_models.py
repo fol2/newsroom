@@ -386,22 +386,6 @@ class BaselineDecisionRequest:
                 raise CheckContractError(
                     "maintained baseline requires one logical item"
                 )
-        included = [
-            item
-            for item in self.entries
-            if item.disposition is BaselineEntryDisposition.INCLUDED
-        ]
-        if (
-            self.disposition
-            in {
-                BaselineDisposition.FIRST_OBSERVED_ACTIVE,
-                BaselineDisposition.FUTURE_EXPECTATIONS_ONLY,
-            }
-            and not included
-        ):
-            raise CheckContractError(
-                "active or agenda baseline requires included entries"
-            )
 
     @property
     def item_keys_digest(self) -> str:
