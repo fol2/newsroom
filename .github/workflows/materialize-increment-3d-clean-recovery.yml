@@ -1,0 +1,104 @@
+name: Materialize Increment 3D clean authority recovery
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-test-and-push:
+    if: github.event.pull_request.head.ref == 'agent/increment-3d-signal-lead-authority'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-3d-signal-lead-authority
+          fetch-depth: 0
+          show-progress: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+      - name: Verify and apply exact clean recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64,gzip,hashlib,subprocess
+          from pathlib import Path
+          base='d595a10470b7957f282196f502956d756dd5e789'
+          if subprocess.check_output(['git','rev-parse','HEAD^'],text=True).strip()!=base: raise SystemExit('transport parent differs')
+          if subprocess.check_output(['git','rev-parse',f'{base}^{{tree}}'],text=True).strip()!='6b4df6921855dbbb59f843dfe7580800478c542c': raise SystemExit('base tree differs')
+          changed=sorted(subprocess.check_output(['git','diff','--name-only',f'{base}..HEAD','--'],text=True).splitlines())
+          workflow='.github/workflows/materialize-increment-3d-clean-recovery.yml'
+          payload=[p for p in changed if p.startswith('.github/increment-3d-clean-recovery-payload/')]
+          if len(changed)!=47 or len(payload)!=46 or workflow not in changed: raise SystemExit(f'transport inventory differs: {changed!r}')
+          parts=[]
+          for name in payload:
+              raw=Path(name).read_bytes()
+              if not raw.endswith(b'\n') or raw.count(b'\n')!=1: raise SystemExit(f'noncanonical payload chunk: {name}')
+              parts.append(raw[:-1].decode('ascii'))
+          encoded=''.join(parts)
+          if len(encoded)!=87004: raise SystemExit('base64 size differs')
+          compressed=base64.b64decode(encoded,validate=True)
+          if len(compressed)!=65252 or hashlib.sha256(compressed).hexdigest()!='1adc595cd7a353283d2c1c3b713776642054c569f06b04df0404de2f740e76bb': raise SystemExit('gzip evidence differs')
+          patch=gzip.decompress(compressed)
+          if len(patch)!=326461 or hashlib.sha256(patch).hexdigest()!='c1745d5bb8e6e0415d278ff14fa078b4d4b550cfaf32e42ebf3ae475a02cb89a': raise SystemExit('patch evidence differs')
+          Path('/tmp/increment-3d-clean-recovery.patch').write_bytes(patch)
+          PY
+          git apply --check /tmp/increment-3d-clean-recovery.patch
+          git apply /tmp/increment-3d-clean-recovery.patch
+          rm -rf .github/increment-3d-clean-recovery-payload
+          rm -f .github/workflows/materialize-increment-3d-clean-recovery.yml
+          python -m compileall -q newsroom scripts
+          git diff --check
+      - name: Install locked environment
+        run: uv lock --check && uv sync --dev --locked
+      - name: Run focused and complete regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_discovery_3d_contracts.py \
+            newsroom/tests/test_discovery_3d_payloads.py \
+            newsroom/tests/test_discovery_3d_policy.py \
+            newsroom/tests/test_discovery_3d_traceability.py \
+            newsroom/tests/test_discovery_3d_migrations.py \
+            newsroom/tests/test_discovery_3d_authority_store.py \
+            newsroom/tests/test_discovery_3d_admission.py \
+            newsroom/tests/test_check_3c_authority_store.py \
+            newsroom/tests/test_check_3c_authority_integrity.py \
+            newsroom/tests/test_check_3c_migrations.py \
+            newsroom/tests/test_check_3c_admission.py \
+            newsroom/tests/test_check_3c_admission_findings.py \
+            newsroom/tests/test_source_3a_authority.py \
+            newsroom/tests/test_source_3a_lifecycle_integrity.py
+          uv run --no-sync python -m pytest -q
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+      - name: Commit verified clean authority recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          test "$(git write-tree)" = 'c0aa0b055026094e37701d71c8cfc5a5618966ef'
+          test -z "$(git diff --name-only)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(discovery): add single-writer Signal and Lead authority'
+          git push origin HEAD:agent/increment-3d-signal-lead-authority
