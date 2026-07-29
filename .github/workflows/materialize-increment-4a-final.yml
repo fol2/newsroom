@@ -44,20 +44,43 @@ jobs:
         env:
           EXPECTED_TREE: f7544bbd84d060ec37cf68e4a3a93d0e7735c4e1
         run: |
-          set -euo pipefail
-          test "$(git branch --show-current)" = "agent/increment-4a-extraction-run-authority"
+          set -euxo pipefail
           START_SHA="$(git rev-parse HEAD)"
+          printf 'branch=%s\nhead=%s\nevent_head=%s\n' \
+            "$(git branch --show-current)" "$START_SHA" \
+            '${{ github.event.pull_request.head.sha }}'
+          test "$(git branch --show-current)" = "agent/increment-4a-extraction-run-authority"
           test "$START_SHA" = "${{ github.event.pull_request.head.sha }}"
           test -d .github/increment-4a-transport
           test -f .github/increment-4a-transport-final/part-00
+          find .github/increment-4a-transport -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
 
-          find .github/increment-4a-transport -maxdepth 1 -type f -name 'part-*' -print0 \
-            | sort -z \
-            | xargs -0 cat > "$RUNNER_TEMP/increment-4a-series.patch.gz.b64"
-          test "$(wc -c < "$RUNNER_TEMP/increment-4a-series.patch.gz.b64")" -eq 82320
-          printf '%s  %s\n' \
-            '9202191659db917d72933e903b5ed3681d3fe19f9486a248c02ce7dd2ee2e3ef' \
-            "$RUNNER_TEMP/increment-4a-series.patch.gz.b64" | sha256sum --check --strict -
+          cat \
+            .github/increment-4a-transport/part-00 \
+            .github/increment-4a-transport/part-01 \
+            .github/increment-4a-transport/part-02a \
+            .github/increment-4a-transport/part-02b \
+            .github/increment-4a-transport/part-03a \
+            .github/increment-4a-transport/part-03b \
+            .github/increment-4a-transport/part-04a \
+            .github/increment-4a-transport/part-04b \
+            .github/increment-4a-transport/part-05a \
+            .github/increment-4a-transport/part-05b \
+            .github/increment-4a-transport/part-06a \
+            .github/increment-4a-transport/part-06b \
+            .github/increment-4a-transport/part-07a \
+            .github/increment-4a-transport/part-07b \
+            .github/increment-4a-transport/part-08a \
+            .github/increment-4a-transport/part-08b \
+            .github/increment-4a-transport/part-09a \
+            .github/increment-4a-transport/part-09b \
+            .github/increment-4a-transport/part-10a \
+            > "$RUNNER_TEMP/increment-4a-series.patch.gz.b64"
+          SERIES_B64_BYTES="$(wc -c < "$RUNNER_TEMP/increment-4a-series.patch.gz.b64")"
+          SERIES_B64_SHA="$(sha256sum "$RUNNER_TEMP/increment-4a-series.patch.gz.b64" | cut -d' ' -f1)"
+          printf 'series_b64_bytes=%s\nseries_b64_sha=%s\n' "$SERIES_B64_BYTES" "$SERIES_B64_SHA"
+          test "$SERIES_B64_BYTES" -eq 82320
+          test "$SERIES_B64_SHA" = '9202191659db917d72933e903b5ed3681d3fe19f9486a248c02ce7dd2ee2e3ef'
           base64 --decode "$RUNNER_TEMP/increment-4a-series.patch.gz.b64" \
             > "$RUNNER_TEMP/increment-4a-series.patch.gz"
           test "$(wc -c < "$RUNNER_TEMP/increment-4a-series.patch.gz")" -eq 61740
@@ -122,7 +145,9 @@ jobs:
           test ! -e .github/workflows/materialize-increment-4a-final.yml
           git add -A
           git diff --cached --check
-          test "$(git write-tree)" = "$EXPECTED_TREE"
+          ACTUAL_TREE="$(git write-tree)"
+          printf 'actual_tree=%s\nexpected_tree=%s\n' "$ACTUAL_TREE" "$EXPECTED_TREE"
+          test "$ACTUAL_TREE" = "$EXPECTED_TREE"
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
