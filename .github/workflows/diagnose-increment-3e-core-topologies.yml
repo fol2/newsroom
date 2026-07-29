@@ -62,12 +62,12 @@ jobs:
           ) -> None:
               text = lane.read_text(encoding='utf-8')
               old = (
-                  f'_CORE_SHARD_COUNT = {current_shards}\\n'
-                  f'_CORE_WORKER_COUNT = {current_workers}\\n'
+                  f'_CORE_SHARD_COUNT = {current_shards}\n'
+                  f'_CORE_WORKER_COUNT = {current_workers}\n'
               )
               new = (
-                  f'_CORE_SHARD_COUNT = {shards}\\n'
-                  f'_CORE_WORKER_COUNT = {workers}\\n'
+                  f'_CORE_SHARD_COUNT = {shards}\n'
+                  f'_CORE_WORKER_COUNT = {workers}\n'
               )
               if text.count(old) != 1:
                   raise SystemExit(
