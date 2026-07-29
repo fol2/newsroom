@@ -1,0 +1,60 @@
+name: Export Increment 4A Python toolchain subset
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  export-toolchain:
+    if: github.event.pull_request.head.ref == 'agent/increment-4a-python-toolchain-export'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact authorised source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-4a-python-toolchain-export
+          fetch-depth: 0
+          show-progress: false
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: false
+
+      - name: Sync and archive pure-Python test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+          root='.venv/lib/python3.12/site-packages'
+          test -d "$root/neo4j"
+          test -d "$root/xdist"
+          test -d "$root/execnet"
+          mkdir -p "$RUNNER_TEMP/increment-4a-toolchain"
+          tar -C "$root" -czf "$RUNNER_TEMP/increment-4a-toolchain/pure-python-site-packages.tar.gz" \
+            neo4j neo4j-*.dist-info \
+            xdist pytest_xdist-*.dist-info \
+            execnet execnet-*.dist-info
+          sha256sum "$RUNNER_TEMP/increment-4a-toolchain/pure-python-site-packages.tar.gz" \
+            > "$RUNNER_TEMP/increment-4a-toolchain/manifest.txt"
+
+      - name: Upload exact toolchain subset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        with:
+          name: increment-4a-python-toolchain
+          path: ${{ runner.temp }}/increment-4a-toolchain
+          if-no-files-found: error
+          retention-days: 1
