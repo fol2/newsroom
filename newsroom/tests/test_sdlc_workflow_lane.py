@@ -149,15 +149,17 @@ def test_core_lane_passes_one_deadline_to_both_gates(
     artifact.mkdir()
     deadline = LaneDeadline(200, 55_000)
     observed: list[LaneDeadline] = []
+    specifications: list[dict[str, object]] = []
 
     monkeypatch.setattr(lane_module, "start_lane_deadline", lambda *_args: deadline)
-    monkeypatch.setattr(
-        lane_module,
-        "_spec",
-        lambda **kwargs: SimpleNamespace(
+
+    def capture_spec(**kwargs):
+        specifications.append(kwargs)
+        return SimpleNamespace(
             gate_id=kwargs["gate_id"], phase=kwargs["phase"]
-        ),
-    )
+        )
+
+    monkeypatch.setattr(lane_module, "_spec", capture_spec)
 
     def execute(*, contract, spec, deadline):
         observed.append(deadline)
@@ -178,6 +180,14 @@ def test_core_lane_passes_one_deadline_to_both_gates(
         ("core-deterministic", "tests"),
     ]
     assert observed == [deadline, deadline]
+    source_spec = next(
+        item for item in specifications if item["gate_id"] == "source-integrity"
+    )
+    core_spec = next(
+        item for item in specifications if item["gate_id"] == "core-deterministic"
+    )
+    assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD" not in source_spec["static_env"]
+    assert core_spec["static_env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
 
 
 def test_static_environment_excludes_ambient_secrets(
@@ -345,7 +355,8 @@ def test_core_test_shards_are_fixed_deterministic_and_complete(
     test_root = tmp_path / "newsroom/tests"
     test_root.mkdir(parents=True)
     expected: list[str] = []
-    for index, size in enumerate((900, 800, 700, 600, 500, 400, 300, 200)):
+    for index in range(lane_module._CORE_SHARD_COUNT):
+        size = (lane_module._CORE_SHARD_COUNT - index) * 100
         path = test_root / f"test_{index}.py"
         path.write_text("#" * size + "\n", encoding="utf-8")
         expected.append(path.relative_to(tmp_path).as_posix())
@@ -354,7 +365,7 @@ def test_core_test_shards_are_fixed_deterministic_and_complete(
     second = lane_module._core_test_shards(tmp_path)
 
     assert first == second
-    assert len(first) == lane_module._CORE_SHARD_COUNT == 8
+    assert len(first) == lane_module._CORE_SHARD_COUNT == 16
     assert lane_module._CORE_WORKER_COUNT == 4
     assert lane_module._CORE_WORKER_COUNT < lane_module._CORE_SHARD_COUNT
     assert all(first)

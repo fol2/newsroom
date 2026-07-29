@@ -97,7 +97,7 @@ _SERVICE_CONFIGURATION = {
     "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
 }
 _CORE_TESTS = ("newsroom/tests",)
-_CORE_SHARD_COUNT = 8
+_CORE_SHARD_COUNT = 16
 _CORE_WORKER_COUNT = 4
 _CACHE_KEY_ENV = "NEWSROOM_SDLC_CACHE_KEY"
 _CACHE_HIT_ENV = "NEWSROOM_SDLC_CACHE_HIT"
@@ -404,6 +404,7 @@ def _expected_spec(
             str(route["head_sha"]),
         )
     elif key == ("core-deterministic", "tests"):
+        environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
         report = (
             artifact_root
             / "gates"
