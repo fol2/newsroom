@@ -370,10 +370,15 @@ class _CandidateAdmissionBoundary:
             raise IntegratedStateError(
                 "retrieval context must cover the complete fixture structural mapping"
             )
-        state_digest = self._adapter.reconcile_generation(
-            generation_id=str(context.metadata.generation_id),
-            expected_batches=batches,
-        )
+        try:
+            state_digest = self._adapter.reconcile_generation(
+                generation_id=str(context.metadata.generation_id),
+                expected_batches=batches,
+            )
+        except Neo4jIdentityConflict:
+            raise Neo4jIdentityConflict(
+                "current Neo4j read differs from retained retrieval context"
+            ) from None
         if state_digest != validation.projection_state_digest:
             raise Neo4jIdentityConflict(
                 "Neo4j graph state differs from retained validation"

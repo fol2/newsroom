@@ -28,6 +28,10 @@ from newsroom.projection.neo4j import (
 )
 from newsroom.projection.neo4j._adapter import _open_neo4j_adapter
 
+from .discovery_projection_3e_neo4j_helpers import (
+    run_actual_service_projects_complete_lineage_and_recovers_graph_loss,
+    run_actual_service_replacement_generation_becomes_only_active_lineage,
+)
 from .authority_helpers import FIXED_NOW
 from .projection_b1_helpers import FAMILY_ID, projection_contracts
 from .projection_b2_helpers import (
@@ -746,3 +750,20 @@ def test_actual_service_tombstone_does_not_resurrect_after_wipe_rebuild(
             restarted.close()
     finally:
         _cleanup(config, generation_id)
+
+def test_actual_service_3e_projects_complete_lineage_and_recovers_graph_loss(
+    tmp_path: Path,
+) -> None:
+    run_actual_service_projects_complete_lineage_and_recovers_graph_loss(
+        tmp_path,
+        _service_config(),
+    )
+
+
+def test_actual_service_3e_replacement_generation_becomes_only_active_lineage(
+    tmp_path: Path,
+) -> None:
+    run_actual_service_replacement_generation_becomes_only_active_lineage(
+        tmp_path,
+        _service_config(),
+    )

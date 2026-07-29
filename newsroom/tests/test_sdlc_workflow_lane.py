@@ -615,6 +615,8 @@ def test_optional_core_skips_are_exact_actual_service_cases() -> None:
         'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_public_round_trip_duplicate_and_generation_isolation',
         'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_requires_explicit_authentication_configuration',
         'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_wrong_projector_credential_fails_closed_without_secret',
+        'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_3e_projects_complete_lineage_and_recovers_graph_loss',
+        'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_3e_replacement_generation_becomes_only_active_lineage',
         'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_active_generation_revalidates_after_incremental_delivery',
         'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_active_read_resolves_only_authority_promoted_generation',
         'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_graph_loss_and_process_restart_rebuild_from_authority',
@@ -710,6 +712,8 @@ def test_service_configuration_is_exact(
     artifact = tmp_path / "artifact-exact"
     artifact.mkdir()
     monkeypatch.setenv("NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED", "1")
+    monkeypatch.setenv("NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED", "1")
+    monkeypatch.setenv("NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_URI", "bolt://remote.example:7687")
     monkeypatch.setenv("NEWSROOM_NEO4J_DATABASE", "neo4j")

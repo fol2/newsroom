@@ -44,6 +44,7 @@ from .models import (
     Neo4jStructuralRead,
     Neo4jWriteError,
     StructuralActiveReadRequest,
+    StructuralActiveReconciliationRequest,
     StructuralBatch,
     StructuralDeliveryRequest,
     StructuralGraphNodeView,
@@ -56,6 +57,7 @@ from .models import (
     StructuralReadMetadata,
     StructuralReadRequest,
     StructuralReadResponse,
+    StructuralReconciliationView,
     StructuralRelation,
 )
 from .qualification import (
@@ -84,6 +86,24 @@ from .traceability import (
 
 def __getattr__(name: str):
     if name in {
+        "DiscoveryCoverageHealthReadRequest",
+        "DiscoveryHealthAuthorityFacade",
+        "DiscoveryHealthReadError",
+        "DiscoverySourceHealthReadRequest",
+    }:
+        from . import discovery_health_reads as _discovery_health_reads
+
+        return getattr(_discovery_health_reads, name)
+    if name in {
+        "DiscoveryLineageProjectionFacade",
+        "DiscoveryLineageReadError",
+        "DiscoveryLineageReadRequest",
+        "DiscoveryLineageSubject",
+    }:
+        from . import discovery_lineage_reads as _discovery_lineage_reads
+
+        return getattr(_discovery_lineage_reads, name)
+    if name in {
         "CompleteNeo4jProjector",
         "CompleteProjectionAuthoritySystem",
         "open_complete_projection_authority_system",
@@ -103,6 +123,14 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "DiscoveryCoverageHealthReadRequest",
+    "DiscoveryHealthAuthorityFacade",
+    "DiscoveryHealthReadError",
+    "DiscoverySourceHealthReadRequest",
+    "DiscoveryLineageSubject",
+    "DiscoveryLineageReadRequest",
+    "DiscoveryLineageReadError",
+    "DiscoveryLineageProjectionFacade",
     "AdmittedRelationProjection",
     "CompleteDeliveryRequest",
     "CompleteDerivativeType",
@@ -162,6 +190,7 @@ __all__ = [
     "QUALIFYING_PROFILES",
     "RuntimeProfile",
     "StructuralActiveReadRequest",
+    "StructuralActiveReconciliationRequest",
     "StructuralBatch",
     "StructuralDeliveryRequest",
     "StructuralGraphNodeView",
@@ -174,6 +203,7 @@ __all__ = [
     "StructuralReadMetadata",
     "StructuralReadRequest",
     "StructuralReadResponse",
+    "StructuralReconciliationView",
     "StructuralRelation",
     "complete_generation_names",
     "expected_complete_projection_state",

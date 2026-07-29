@@ -13,10 +13,18 @@ from .models import ProjectionContractError
 class ProjectionNodeType(StrEnum):
     AUTHORITY_AGGREGATE = "AUTHORITY_AGGREGATE"
     AUTHORITY_VERSION = "AUTHORITY_VERSION"
+    SOURCE_DEFINITION = "SOURCE_DEFINITION"
+    SOURCE_DEFINITION_VERSION = "SOURCE_DEFINITION_VERSION"
     SOURCE_ITEM = "SOURCE_ITEM"
     SOURCE_REVISION = "SOURCE_REVISION"
     SOURCE_REPRESENTATION = "SOURCE_REPRESENTATION"
+    DISCOVERY_OCCURRENCE = "DISCOVERY_OCCURRENCE"
+    CHECK_REQUEST = "CHECK_REQUEST"
+    CHECK_ATTEMPT = "CHECK_ATTEMPT"
+    CHECK_OUTCOME = "CHECK_OUTCOME"
+    OBSERVABLE_TRANSITION = "OBSERVABLE_TRANSITION"
     SIGNAL = "SIGNAL"
+    GATE_DECISION = "GATE_DECISION"
     LEAD = "LEAD"
     PAYLOAD = "PAYLOAD"
     LEDGER_EVENT = "LEDGER_EVENT"
@@ -24,10 +32,24 @@ class ProjectionNodeType(StrEnum):
 
 class ProjectionRelationType(StrEnum):
     HAS_VERSION = "HAS_VERSION"
+    HAS_DEFINITION_VERSION = "HAS_DEFINITION_VERSION"
+    DEFINES_ITEM = "DEFINES_ITEM"
+    REQUESTED_CHECK = "REQUESTED_CHECK"
+    ATTEMPTED_AS = "ATTEMPTED_AS"
+    PRODUCED_CHECK_OUTCOME = "PRODUCED_CHECK_OUTCOME"
     HAS_REVISION = "HAS_REVISION"
     HAS_REPRESENTATION = "HAS_REPRESENTATION"
+    OBSERVED_AS = "OBSERVED_AS"
+    PRODUCED_OCCURRENCE = "PRODUCED_OCCURRENCE"
+    TRANSITION_OF_ITEM = "TRANSITION_OF_ITEM"
+    CLASSIFIED_BY_TRANSITION = "CLASSIFIED_BY_TRANSITION"
     PRODUCED_SIGNAL = "PRODUCED_SIGNAL"
+    EMITTED_SIGNAL = "EMITTED_SIGNAL"
+    DECIDED_BY_GATE = "DECIDED_BY_GATE"
     PROMOTED_TO_LEAD = "PROMOTED_TO_LEAD"
+    OPENED_LEAD = "OPENED_LEAD"
+    DUPLICATE_OF_SIGNAL = "DUPLICATE_OF_SIGNAL"
+    REPLACED_BY_ITEM = "REPLACED_BY_ITEM"
     DERIVED_FROM = "DERIVED_FROM"
     CONTAINS_PAYLOAD = "CONTAINS_PAYLOAD"
     PROJECTED_FROM_EVENT = "PROJECTED_FROM_EVENT"
@@ -191,11 +213,29 @@ class OntologyRegistry:
         return tuple(self._by_key[key] for key in sorted(self._by_key))
 
 
+_NATIVE_ONTOLOGY_V1_NODE_TYPES = frozenset(
+    {
+        ProjectionNodeType.AUTHORITY_AGGREGATE,
+        ProjectionNodeType.AUTHORITY_VERSION,
+        ProjectionNodeType.SOURCE_ITEM,
+        ProjectionNodeType.SOURCE_REVISION,
+        ProjectionNodeType.SOURCE_REPRESENTATION,
+        ProjectionNodeType.SIGNAL,
+        ProjectionNodeType.LEAD,
+        ProjectionNodeType.PAYLOAD,
+        ProjectionNodeType.LEDGER_EVENT,
+    }
+)
+
+
 def native_ontology_v1() -> OntologyContract:
+    # Keep the accepted Increment 1 ontology byte-for-byte stable when later
+    # structural families add enum members. New families must use a separate
+    # versioned ontology contract instead of silently widening ontology-v1.
     common_identity = frozenset({"canonical_id", "entity_type"})
     nodes = tuple(
         OntologyNodeDefinition(item, common_identity)
-        for item in ProjectionNodeType
+        for item in sorted(_NATIVE_ONTOLOGY_V1_NODE_TYPES, key=lambda value: value.value)
     )
     provenance = frozenset({"authority_event_id", "ledger_seq"})
     relations = (
@@ -204,9 +244,9 @@ def native_ontology_v1() -> OntologyContract:
         OntologyRelationDefinition(ProjectionRelationType.HAS_REPRESENTATION, frozenset({ProjectionNodeType.SOURCE_REVISION}), frozenset({ProjectionNodeType.SOURCE_REPRESENTATION}), provenance),
         OntologyRelationDefinition(ProjectionRelationType.PRODUCED_SIGNAL, frozenset({ProjectionNodeType.SOURCE_REVISION, ProjectionNodeType.SOURCE_REPRESENTATION}), frozenset({ProjectionNodeType.SIGNAL}), provenance),
         OntologyRelationDefinition(ProjectionRelationType.PROMOTED_TO_LEAD, frozenset({ProjectionNodeType.SIGNAL}), frozenset({ProjectionNodeType.LEAD}), provenance),
-        OntologyRelationDefinition(ProjectionRelationType.DERIVED_FROM, frozenset(ProjectionNodeType), frozenset(ProjectionNodeType), provenance),
+        OntologyRelationDefinition(ProjectionRelationType.DERIVED_FROM, _NATIVE_ONTOLOGY_V1_NODE_TYPES, _NATIVE_ONTOLOGY_V1_NODE_TYPES, provenance),
         OntologyRelationDefinition(ProjectionRelationType.CONTAINS_PAYLOAD, frozenset({ProjectionNodeType.AUTHORITY_VERSION, ProjectionNodeType.LEDGER_EVENT}), frozenset({ProjectionNodeType.PAYLOAD}), provenance),
-        OntologyRelationDefinition(ProjectionRelationType.PROJECTED_FROM_EVENT, frozenset(item for item in ProjectionNodeType if item is not ProjectionNodeType.LEDGER_EVENT), frozenset({ProjectionNodeType.LEDGER_EVENT}), provenance),
+        OntologyRelationDefinition(ProjectionRelationType.PROJECTED_FROM_EVENT, frozenset(item for item in _NATIVE_ONTOLOGY_V1_NODE_TYPES if item is not ProjectionNodeType.LEDGER_EVENT), frozenset({ProjectionNodeType.LEDGER_EVENT}), provenance),
     )
     return OntologyContract(
         ontology_id="newsroom.structural",

@@ -560,6 +560,40 @@ class StructuralRebuildResult:
 
 
 @dataclass(frozen=True, slots=True)
+class StructuralActiveReconciliationRequest:
+    family_id: str
+
+    def __post_init__(self) -> None:
+        require_token(self.family_id, field="projection_family_id")
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralReconciliationView:
+    family_id: str
+    generation_id: ProjectionGenerationId
+    checkpoint_ledger_seq: int
+    projection_state_digest: str
+    serving_time: UtcTimestamp
+
+    def __post_init__(self) -> None:
+        require_token(self.family_id, field="projection_family_id")
+        if not isinstance(self.generation_id, ProjectionGenerationId):
+            raise ProjectionContractError(
+                "structural reconciliation generation identity must be typed"
+            )
+        _require_non_negative_int(
+            self.checkpoint_ledger_seq, field="checkpoint_ledger_seq"
+        )
+        validate_sha256_digest(
+            self.projection_state_digest, field="projection_state_digest"
+        )
+        if not isinstance(self.serving_time, UtcTimestamp):
+            raise ProjectionContractError(
+                "structural reconciliation serving time must be typed"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class StructuralActiveReadRequest:
     family_id: str
     canonical_ids: tuple[str, ...]
@@ -721,5 +755,6 @@ __all__ = [
     "StructuralReadMetadata",
     "StructuralReadRequest",
     "StructuralReadResponse",
+    "StructuralReconciliationView",
     "StructuralRelation",
 ]

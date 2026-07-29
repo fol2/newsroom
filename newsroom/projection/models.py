@@ -329,6 +329,7 @@ class ProjectionStatusMetadata:
     dead_letter_count: int
     trust_scope: TrustScope
     serving_time: UtcTimestamp
+    authority_watermark_ledger_seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
