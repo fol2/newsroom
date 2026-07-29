@@ -29,8 +29,82 @@ jobs:
 
       - name: Apply and verify the bounded correction
         run: |
-          git apply --check --recount .github/increment-3e-core-balance.patch
-          git apply --recount .github/increment-3e-core-balance.patch
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str) -> None:
+              text = path.read_text(encoding="utf-8")
+              if text.count(old) != 1:
+                  raise SystemExit(
+                      f"expected one exact replacement in {path}: {old[:80]!r}"
+                  )
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          lane = Path("scripts/sdlc/workflow_lane.py")
+          replace_once(
+              lane,
+              '_CORE_SHARD_COUNT = 8\n_CORE_WORKER_COUNT = 4\n',
+              '_CORE_SHARD_COUNT = 16\n_CORE_WORKER_COUNT = 4\n',
+          )
+          replace_once(
+              lane,
+              '    elif key == ("core-deterministic", "tests"):\n        report = (\n',
+              '    elif key == ("core-deterministic", "tests"):\n'
+              '        environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"\n'
+              '        report = (\n',
+          )
+
+          tests = Path("newsroom/tests/test_sdlc_workflow_lane.py")
+          replace_once(
+              tests,
+              '    observed: list[LaneDeadline] = []\n\n'
+              '    monkeypatch.setattr(lane_module, "start_lane_deadline", lambda *_args: deadline)\n'
+              '    monkeypatch.setattr(\n'
+              '        lane_module,\n'
+              '        "_spec",\n'
+              '        lambda **kwargs: SimpleNamespace(\n'
+              '            gate_id=kwargs["gate_id"], phase=kwargs["phase"]\n'
+              '        ),\n'
+              '    )\n',
+              '    observed: list[LaneDeadline] = []\n'
+              '    specifications: list[dict[str, object]] = []\n\n'
+              '    monkeypatch.setattr(lane_module, "start_lane_deadline", lambda *_args: deadline)\n\n'
+              '    def capture_spec(**kwargs):\n'
+              '        specifications.append(kwargs)\n'
+              '        return SimpleNamespace(\n'
+              '            gate_id=kwargs["gate_id"], phase=kwargs["phase"]\n'
+              '        )\n\n'
+              '    monkeypatch.setattr(lane_module, "_spec", capture_spec)\n',
+          )
+          replace_once(
+              tests,
+              '    assert observed == [deadline, deadline]\n\n\n'
+              'def test_static_environment_excludes_ambient_secrets(\n',
+              '    assert observed == [deadline, deadline]\n'
+              '    source_spec = next(\n'
+              '        item for item in specifications if item["gate_id"] == "source-integrity"\n'
+              '    )\n'
+              '    core_spec = next(\n'
+              '        item for item in specifications if item["gate_id"] == "core-deterministic"\n'
+              '    )\n'
+              '    assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD" not in source_spec["static_env"]\n'
+              '    assert core_spec["static_env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"\n\n\n'
+              'def test_static_environment_excludes_ambient_secrets(\n',
+          )
+          replace_once(
+              tests,
+              '    for index, size in enumerate((900, 800, 700, 600, 500, 400, 300, 200)):\n'
+              '        path = test_root / f"test_{index}.py"\n',
+              '    for index in range(lane_module._CORE_SHARD_COUNT):\n'
+              '        size = (lane_module._CORE_SHARD_COUNT - index) * 100\n'
+              '        path = test_root / f"test_{index}.py"\n',
+          )
+          replace_once(
+              tests,
+              '    assert len(first) == lane_module._CORE_SHARD_COUNT == 8\n',
+              '    assert len(first) == lane_module._CORE_SHARD_COUNT == 16\n',
+          )
+          PY
           uv run python -m pytest -q newsroom/tests/test_sdlc_workflow_lane.py
           git diff --check
 
