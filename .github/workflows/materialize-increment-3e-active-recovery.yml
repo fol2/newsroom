@@ -1,0 +1,122 @@
+name: Materialize Increment 3E active-generation recovery correction
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-test-and-push:
+    if: github.event.pull_request.head.ref == 'agent/increment-3e-discovery-projection-health'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact Increment 3E branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-3e-discovery-projection-health
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+
+      - name: Verify and apply exact active-generation recovery correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import gzip
+          import hashlib
+          import subprocess
+          from pathlib import Path
+
+          parent = '14fa621a26cea4eebb2e8061324a1ccd81cfcc61'
+          parent_tree = '3f4d5ba419658fda46c9b8e8aac4046003c2b0a8'
+          expected_tree = '67da00ce50b87d367f474115668c5b2ec2bac725'
+          payload_path = Path('.github/increment-3e-active-recovery.patch.gz.b64')
+          workflow = '.github/workflows/materialize-increment-3e-active-recovery.yml'
+
+          if subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() != parent:
+              raise SystemExit('Increment 3E recovery transport parent differs')
+          if subprocess.check_output(['git', 'rev-parse', f'{parent}^{{tree}}'], text=True).strip() != parent_tree:
+              raise SystemExit('Increment 3E recovery parent tree differs')
+          changed = tuple(sorted(subprocess.check_output(
+              ['git', 'diff', '--name-only', f'{parent}..HEAD', '--'], text=True
+          ).splitlines()))
+          expected_changes = tuple(sorted((str(payload_path), workflow)))
+          if changed != expected_changes:
+              raise SystemExit(f'Increment 3E recovery transport inventory differs: {changed!r}')
+
+          encoded = payload_path.read_text(encoding='ascii').strip()
+          if len(encoded) != 5116:
+              raise SystemExit('Increment 3E recovery base64 size differs')
+          compressed = base64.b64decode(encoded, validate=True)
+          if len(compressed) != 3837 or hashlib.sha256(compressed).hexdigest() != 'd0012a6e36f3261dbe315554378f3e93430424491451ae19e3082447f811aac4':
+              raise SystemExit('Increment 3E recovery compressed payload differs')
+          patch = gzip.decompress(compressed)
+          if len(patch) != 12836 or hashlib.sha256(patch).hexdigest() != 'a5375f9cbbbeea78e577ea5e74f3c3c8a7d71e88714af8d9b127c3b6c9f85f91':
+              raise SystemExit('Increment 3E recovery patch differs')
+          Path('/tmp/increment-3e-active-recovery.patch').write_bytes(patch)
+          Path('/tmp/increment-3e-active-recovery-tree').write_text(expected_tree, encoding='ascii')
+          PY
+          git apply --check /tmp/increment-3e-active-recovery.patch
+          git apply /tmp/increment-3e-active-recovery.patch
+          rm -f .github/increment-3e-active-recovery.patch.gz.b64
+          rm -f .github/workflows/materialize-increment-3e-active-recovery.yml
+          python -m compileall -q newsroom scripts
+          git diff --check
+
+      - name: Install locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Run focused and complete regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_discovery_projection_3e_lifecycle.py \
+            newsroom/tests/test_integrated_c1_workflow_contract.py \
+            newsroom/tests/test_projection_b2_contracts.py \
+            newsroom/tests/test_discovery_projection_3e_traceability.py
+          uv run --no-sync python -m pytest -q
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+      - name: Commit verified active-generation recovery correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          test "$(git write-tree)" = "$(cat /tmp/increment-3e-active-recovery-tree)"
+          test -z "$(git diff --name-only)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(projection): recover active lineage through replacement'
+          git push origin HEAD:agent/increment-3e-discovery-projection-health
