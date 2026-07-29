@@ -67,6 +67,133 @@ jobs:
           path.write_text(text, encoding='utf-8')
           PY
           uv run python .github/increment-3e-persistent-core-apply.py
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str) -> None:
+              text = path.read_text(encoding='utf-8')
+              if text.count(old) != 1:
+                  raise SystemExit(
+                      f'expected one exact replacement in {path}: {old[:100]!r}'
+                  )
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          def replace_span(
+              path: Path,
+              start_marker: str,
+              end_marker: str,
+              replacement: str,
+          ) -> None:
+              text = path.read_text(encoding='utf-8')
+              start = text.find(start_marker)
+              end = text.find(end_marker, start + len(start_marker))
+              if start < 0 or end < 0 or text.find(start_marker, start + 1) >= 0:
+                  raise SystemExit(
+                      f'unable to select one exact span in {path}: {start_marker!r}'
+                  )
+              path.write_text(
+                  text[:start] + replacement + text[end:],
+                  encoding='utf-8',
+              )
+
+          lane = Path('scripts/sdlc/workflow_lane.py')
+          replace_span(
+              lane,
+              'def _core_worker_command(',
+              'def _run_pytest_shard(',
+              '''def _core_worker_command(
+              *,
+              report: Path,
+              basetemp: Path,
+          ) -> tuple[str, ...]:
+              test_paths = tuple(_CORE_TESTS)
+              if test_paths != ("newsroom/tests",):
+                  raise WorkflowLaneError("core_test_topology")
+              return (
+                  sys.executable,
+                  "-m",
+                  "pytest",
+                  "-q",
+                  "--assert=plain",
+                  "-p",
+                  "no:cacheprovider",
+                  "-p",
+                  "xdist.plugin",
+                  "-n",
+                  str(_CORE_WORKER_COUNT),
+                  f"--dist={_CORE_DISTRIBUTION}",
+                  "--max-worker-restart=0",
+                  *test_paths,
+                  f"--basetemp={basetemp}",
+                  f"--junitxml={report}",
+              )
+
+
+          ''',
+          )
+          replace_once(
+              lane,
+              '''    test_files = _core_test_files(root)
+              with tempfile.TemporaryDirectory(prefix="newsroom-core-workers-") as raw_temp:
+                  command = _core_worker_command(
+                      test_files=test_files,
+                      report=report,
+                      basetemp=Path(raw_temp) / "pytest",
+                  )
+          ''',
+              '''    _core_test_files(root)
+              with tempfile.TemporaryDirectory(prefix="newsroom-core-workers-") as raw_temp:
+                  command = _core_worker_command(
+                      report=report,
+                      basetemp=Path(raw_temp) / "pytest",
+                  )
+          ''',
+          )
+
+          tests = Path('newsroom/tests/test_sdlc_workflow_lane.py')
+          replace_span(
+              tests,
+              'def test_core_worker_command_is_pinned_persistent_and_file_scoped(',
+              'def test_persistent_core_dependency_is_exactly_pinned(',
+              '''def test_core_worker_command_is_pinned_persistent_and_file_scoped(
+              tmp_path: Path,
+          ) -> None:
+              report = tmp_path / "report.xml"
+              basetemp = tmp_path / "basetemp"
+              command = lane_module._core_worker_command(
+                  report=report,
+                  basetemp=basetemp,
+              )
+
+              assert lane_module._CORE_WORKER_COUNT == 6
+              assert lane_module._CORE_DISTRIBUTION == "loadfile"
+              assert command[:13] == (
+                  sys.executable,
+                  "-m",
+                  "pytest",
+                  "-q",
+                  "--assert=plain",
+                  "-p",
+                  "no:cacheprovider",
+                  "-p",
+                  "xdist.plugin",
+                  "-n",
+                  "6",
+                  "--dist=loadfile",
+                  "--max-worker-restart=0",
+              )
+              assert command[13:14] == lane_module._CORE_TESTS == (
+                  "newsroom/tests",
+              )
+              assert command[-2:] == (
+                  f"--basetemp={basetemp}",
+                  f"--junitxml={report}",
+              )
+
+
+          ''',
+          )
+          PY
           uv lock
           uv sync --dev --locked
           uv run --no-sync python -m compileall -q newsroom scripts
