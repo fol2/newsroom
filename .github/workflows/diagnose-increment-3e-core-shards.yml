@@ -1,0 +1,146 @@
+name: Diagnose Increment 3E core shards
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.event.pull_request.head.ref == 'agent/increment-3e-corrective-hardening'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install locked environment
+        run: |
+          python -m pip install --disable-pip-version-check uv
+          uv sync --frozen --dev
+
+      - name: Measure exact deterministic shard topology
+        id: diagnose
+        continue-on-error: true
+        run: |
+          mkdir -p core-shard-diagnostics
+          uv run python - <<'PY'
+          from __future__ import annotations
+
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import time
+
+          from scripts.sdlc import workflow_lane
+
+          root = Path.cwd()
+          output = root / "core-shard-diagnostics"
+          shards = workflow_lane._core_test_shards(root)
+          environment = os.environ.copy()
+          environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+          environment["PYTHONHASHSEED"] = "0"
+          environment["PYTHONUTF8"] = "1"
+
+          def run(index: int, files: tuple[str, ...]) -> dict[str, object]:
+              report = output / f"shard-{index:02d}.xml"
+              log = output / f"shard-{index:02d}.log"
+              basetemp = output / f"pytest-{index:02d}"
+              command = (
+                  sys.executable,
+                  "-m",
+                  "pytest",
+                  "-q",
+                  "--assert=plain",
+                  "-p",
+                  "no:cacheprovider",
+                  *files,
+                  f"--basetemp={basetemp}",
+                  f"--junitxml={report}",
+              )
+              started = time.monotonic()
+              timed_out = False
+              try:
+                  with log.open("wb") as stream:
+                      completed = subprocess.run(
+                          command,
+                          cwd=root,
+                          env=environment,
+                          stdout=stream,
+                          stderr=subprocess.STDOUT,
+                          check=False,
+                          timeout=240,
+                      )
+                  returncode = completed.returncode
+              except subprocess.TimeoutExpired:
+                  timed_out = True
+                  returncode = 124
+              duration = time.monotonic() - started
+              return {
+                  "index": index,
+                  "duration_seconds": round(duration, 3),
+                  "returncode": returncode,
+                  "timed_out": timed_out,
+                  "file_count": len(files),
+                  "files": list(files),
+                  "report_exists": report.is_file(),
+                  "log_size_bytes": log.stat().st_size if log.is_file() else 0,
+              }
+
+          results: list[dict[str, object]] = []
+          with ThreadPoolExecutor(max_workers=workflow_lane._CORE_WORKER_COUNT) as pool:
+              futures = {
+                  pool.submit(run, index, files): index
+                  for index, files in enumerate(shards)
+              }
+              for future in as_completed(futures):
+                  result = future.result()
+                  results.append(result)
+                  print(json.dumps(result, sort_keys=True), flush=True)
+
+          results.sort(key=lambda item: int(item["index"]))
+          summary = {
+              "head_sha": os.environ.get("GITHUB_SHA"),
+              "shard_count": workflow_lane._CORE_SHARD_COUNT,
+              "worker_count": workflow_lane._CORE_WORKER_COUNT,
+              "maximum_duration_seconds": max(
+                  float(item["duration_seconds"]) for item in results
+              ),
+              "results": results,
+          }
+          (output / "summary.json").write_text(
+              json.dumps(summary, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          if any(int(item["returncode"]) != 0 for item in results):
+              raise SystemExit(1)
+          PY
+
+      - name: Upload shard diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: increment-3e-core-shard-diagnostics-${{ github.event.pull_request.head.sha }}
+          path: core-shard-diagnostics
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+          archive: true
+
+      - name: Enforce diagnostic completion
+        if: steps.diagnose.outcome != 'success'
+        run: exit 1
