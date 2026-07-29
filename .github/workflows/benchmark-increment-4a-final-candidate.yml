@@ -1,0 +1,152 @@
+name: Benchmark final Increment 4A candidate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark-final-candidate:
+    if: github.event.pull_request.head.ref == 'agent/increment-4a-final-benchmark'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact staged candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-4a-final-benchmark
+          fetch-depth: 0
+          show-progress: false
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+
+      - name: Reconstruct and verify exact reviewed candidate
+        shell: bash
+        env:
+          BASE_SHA: a220e7f8eaa924e99696ba1972aced5885f39b58
+          BASE_TREE: 372bbf76dccd032d852456eaa3bf1fb7349b5631
+          FINAL_TREE: 8ded96364a1d68c3a6125238f8faf7919630147d
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONHASHSEED: '0'
+          PYTHONUTF8: '1'
+        run: |
+          set -euo pipefail
+          START_SHA="$(git rev-parse HEAD)"
+          test "$START_SHA" = '${{ github.event.pull_request.head.sha }}'
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD^^{tree})" = "$BASE_TREE"
+          mapfile -t staged < <(git diff --name-only "$BASE_SHA" "$START_SHA" | LC_ALL=C sort)
+          test "${#staged[@]}" -eq 2
+          test "${staged[0]}" = '.github/increment-4a-final-benchmark/final-candidate.patch.gz'
+          test "${staged[1]}" = '.github/workflows/benchmark-increment-4a-final-candidate.yml'
+
+          cp .github/increment-4a-final-benchmark/final-candidate.patch.gz \
+            "$RUNNER_TEMP/final-candidate.patch.gz"
+          test "$(wc -c < "$RUNNER_TEMP/final-candidate.patch.gz")" -eq 14084
+          printf '%s  %s\n' \
+            '9236dae6d9981a447ebc6340833faedb9a49dbdd47eed3c72c93a9be6b012858' \
+            "$RUNNER_TEMP/final-candidate.patch.gz" | sha256sum --check --strict -
+          gzip --decompress --stdout "$RUNNER_TEMP/final-candidate.patch.gz" \
+            > "$RUNNER_TEMP/final-candidate.patch"
+          test "$(wc -c < "$RUNNER_TEMP/final-candidate.patch")" -eq 51647
+          printf '%s  %s\n' \
+            'b4f5087d98458e23f2e44dd939d853cc3ca3322813074d36313e6736007c221a' \
+            "$RUNNER_TEMP/final-candidate.patch" | sha256sum --check --strict -
+          git apply --check "$RUNNER_TEMP/final-candidate.patch"
+          git apply "$RUNNER_TEMP/final-candidate.patch"
+          rm -rf .github/increment-4a-final-benchmark
+          rm -f .github/workflows/benchmark-increment-4a-final-candidate.yml
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          rm -rf .pytest_cache
+
+          git diff --check
+          python -m compileall -q newsroom scripts
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          uv lock --check
+          uv sync --dev --locked
+
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            newsroom/tests/test_extraction_4a_*.py \
+            newsroom/tests/test_authority_a2a_extraction.py \
+            newsroom/tests/test_authority_a2b_extraction.py \
+            newsroom/tests/test_discovery_3d_migrations.py \
+            newsroom/tests/test_projection_b1_migrations.py \
+            -W error::ResourceWarning \
+            --junitxml="$RUNNER_TEMP/final-focused.xml"
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          rm -rf .pytest_cache
+          git add -A
+          git diff --cached --check
+          test "$(git write-tree)" = "$FINAL_TREE"
+          git reset
+
+          mkdir -p .increment-4a-benchmark
+          for repeat in 1 2 3; do
+            report=".increment-4a-benchmark/repeat-${repeat}.xml"
+            metrics=".increment-4a-benchmark/repeat-${repeat}.metrics"
+            rm -f "$report" "$metrics"
+            /usr/bin/time \
+              -f 'elapsed_seconds=%e user_seconds=%U system_seconds=%S max_rss_kb=%M' \
+              -o "$metrics" \
+              timeout --signal=TERM --kill-after=2s 55s \
+              uv run --no-sync python -m scripts.sdlc.workflow_lane core-tests \
+                --repo-root . \
+                --report "$report"
+            printf 'REPEAT=%s %s\n' "$repeat" "$(cat "$metrics")"
+          done
+
+          python - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          import hashlib
+
+          root = Path('.increment-4a-benchmark')
+          identities = []
+          summaries = []
+          for repeat in (1, 2, 3):
+              report = root / f'repeat-{repeat}.xml'
+              document = ET.parse(report).getroot()
+              cases = list(document.iter('testcase'))
+              failures = sum(1 for case in cases if case.find('failure') is not None)
+              errors = sum(1 for case in cases if case.find('error') is not None)
+              skipped = sum(1 for case in cases if case.find('skipped') is not None)
+              ids = tuple(sorted(
+                  (case.attrib.get('classname', ''), case.attrib.get('name', ''))
+                  for case in cases
+              ))
+              identity = hashlib.sha256(repr(ids).encode()).hexdigest()
+              identities.append(identity)
+              summaries.append((len(cases), failures, errors, skipped, identity))
+          assert len(set(identities)) == 1, summaries
+          for tests, failures, errors, skipped, _ in summaries:
+              assert tests >= 1630, summaries
+              assert failures == 0, summaries
+              assert errors == 0, summaries
+              assert skipped == 34, summaries
+          print('JUNIT_SUMMARIES', summaries)
+          PY
