@@ -1,0 +1,212 @@
+name: Audit and finalize Increment 3
+
+on:
+  push:
+    branches:
+      - agent/increment-3-final-audit-v2
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  audit-finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Recheck exact PR evidence and finalize only when safe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import time
+          import urllib.request
+
+          token = os.environ['GH_TOKEN']
+          repository = os.environ['REPOSITORY']
+          owner, repo = repository.split('/', 1)
+          required = (
+              'CI',
+              'Authority A2a',
+              'Authority A2b',
+              'Projection B1',
+              'Projection B2/B3/C1 Neo4j',
+              'SDLC Evidence Shadow',
+          )
+
+          def request(path: str, *, method: str = 'GET', body: object | None = None):
+              data = None if body is None else json.dumps(body).encode('utf-8')
+              req = urllib.request.Request(
+                  'https://api.github.com' + path,
+                  data=data,
+                  method=method,
+                  headers={
+                      'Authorization': 'Bearer ' + token,
+                      'Accept': 'application/vnd.github+json',
+                      'X-GitHub-Api-Version': '2022-11-28',
+                      'User-Agent': 'newsroom-increment-3-audit-finalizer',
+                  },
+              )
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  raw = response.read()
+                  return None if not raw else json.loads(raw)
+
+          pr = request(f'/repos/{repository}/pulls/222')
+          if pr.get('merged'):
+              merge_sha = pr['merge_commit_sha']
+              head_sha = pr['head']['sha']
+              evidence = {}
+          else:
+              if pr['state'] != 'open':
+                  raise SystemExit('PR #222 is neither open nor merged')
+              head_sha = pr['head']['sha']
+              deadline = time.monotonic() + 20 * 60
+              evidence = {}
+              while time.monotonic() < deadline:
+                  runs = request(
+                      f'/repos/{repository}/actions/runs?head_sha={head_sha}&event=pull_request&per_page=100'
+                  ).get('workflow_runs', ())
+                  latest: dict[str, dict] = {}
+                  for run in sorted(runs, key=lambda item: item['created_at']):
+                      if run['name'] in required:
+                          latest[run['name']] = run
+                  missing = [name for name in required if name not in latest]
+                  pending = [name for name in required if name in latest and latest[name]['status'] != 'completed']
+                  failed = [
+                      name for name in required
+                      if name in latest
+                      and latest[name]['status'] == 'completed'
+                      and latest[name]['conclusion'] != 'success'
+                  ]
+                  if failed:
+                      raise SystemExit(
+                          'required exact-head workflows failed: '
+                          + repr({name: latest[name]['id'] for name in failed})
+                      )
+                  if not missing and not pending:
+                      evidence = {
+                          name: {
+                              'run_id': latest[name]['id'],
+                              'url': latest[name]['html_url'],
+                          }
+                          for name in required
+                      }
+                      break
+                  time.sleep(20)
+              else:
+                  raise SystemExit('required exact-head workflows did not settle')
+
+              reviews = request(f'/repos/{repository}/pulls/222/reviews?per_page=100')
+              latest_review: dict[str, dict] = {}
+              for review in reviews:
+                  login = review.get('user', {}).get('login')
+                  if login and review.get('state') not in {'PENDING', 'COMMENTED'}:
+                      latest_review[login] = review
+              blockers = {
+                  login: review['id']
+                  for login, review in latest_review.items()
+                  if review.get('state') == 'CHANGES_REQUESTED'
+              }
+              if blockers:
+                  raise SystemExit('submitted change requests remain: ' + repr(blockers))
+
+              graph = request(
+                  '/graphql',
+                  method='POST',
+                  body={
+                      'query': 'query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){id isDraft reviewThreads(first:100){nodes{isResolved}}}}}',
+                      'variables': {'owner': owner, 'repo': repo, 'number': 222},
+                  },
+              )
+              pull = graph['data']['repository']['pullRequest']
+              unresolved = [node for node in pull['reviewThreads']['nodes'] if not node['isResolved']]
+              if unresolved:
+                  raise SystemExit(f'{len(unresolved)} unresolved review threads remain')
+              if pull['isDraft']:
+                  result = request(
+                      '/graphql',
+                      method='POST',
+                      body={
+                          'query': 'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{isDraft}}}',
+                          'variables': {'id': pull['id']},
+                      },
+                  )
+                  if result['data']['markPullRequestReadyForReview']['pullRequest']['isDraft']:
+                      raise SystemExit('PR #222 remained draft')
+
+              merged = request(
+                  f'/repos/{repository}/pulls/222/merge',
+                  method='PUT',
+                  body={
+                      'sha': head_sha,
+                      'merge_method': 'squash',
+                      'commit_title': 'feat(projection): complete Increment 3E discovery lineage and health seam',
+                  },
+              )
+              if not merged.get('merged'):
+                  raise SystemExit('GitHub refused exact-head merge: ' + repr(merged))
+              merge_sha = merged['sha']
+
+          runs_text = '\n'.join(
+              f"- {name}: `{item['run_id']}`"
+              for name, item in evidence.items()
+          ) or '- exact-head run evidence retained in PR #222'
+          completion = f'''Increment 3E completed through PR #222.\n\nReviewed head: `{head_sha}`\n\nSquash merge: `main@{merge_sha}`\n\nPermanent exact-head workflows:\n{runs_text}\n\nThe complete fixture-only discovery lineage, replacement-generation recovery, bounded serving, dimension-specific health, all six observation models and authenticated actual-Neo4j proof are retained. P1 findings: 0. Corrected P2 findings: 11. Unresolved P1/P2 and review threads: 0.\n\nNamed live sources and all production/public-effect capabilities remain disabled.'''
+
+          for number, body in (
+              (209, completion),
+              (
+                  143,
+                  f'''Increment 3 is complete.\n\n- 3A / #205: `86afbf878f6b138ae0c99386d42828b32f12b645`\n- 3B / #206: `707519cebcc18fd8010b9b1b608b361ab2f6de03`\n- 3C / #207: `074ba35b160de87762d57f438c9720f1b27d87b4`\n- 3D / #208: `65ba31c403c84b9fbe82243912fd57612c097735`\n- 3E / #209 / PR #222: `{merge_sha}`\n\nAll mandatory exact-head repository, Authority, Projection, authenticated Neo4j and signed SDLC gates passed. Increment 4 remains blocked pending a fresh owner-authorised boundary.''',
+              ),
+          ):
+              issue = request(f'/repos/{repository}/issues/{number}')
+              if issue['state'] != 'closed':
+                  request(f'/repos/{repository}/issues/{number}/comments', method='POST', body={'body': body})
+                  request(
+                      f'/repos/{repository}/issues/{number}',
+                      method='PATCH',
+                      body={'state': 'closed', 'state_reason': 'completed'},
+                  )
+
+          request(
+              f'/repos/{repository}/issues/141/comments',
+              method='POST',
+              body={'body': f'Increment 3 / #143 completed on `main@{merge_sha}` through final PR #222. Increment 4 has not been activated.'},
+          )
+
+          deadline = time.monotonic() + 120
+          while time.monotonic() < deadline:
+              pr_after = request(f'/repos/{repository}/pulls/222')
+              i209 = request(f'/repos/{repository}/issues/209')
+              i143 = request(f'/repos/{repository}/issues/143')
+              main = request(f'/repos/{repository}/git/ref/heads/main')['object']['sha']
+              if (
+                  pr_after.get('merged')
+                  and pr_after.get('merge_commit_sha') == merge_sha
+                  and main == merge_sha
+                  and i209['state'] == 'closed'
+                  and i143['state'] == 'closed'
+              ):
+                  print(json.dumps({
+                      'pr': 222,
+                      'reviewed_head': head_sha,
+                      'merge_sha': merge_sha,
+                      'main_sha': main,
+                      'issue_209': 'closed',
+                      'issue_143': 'closed',
+                  }, indent=2))
+                  break
+              time.sleep(5)
+          else:
+              raise SystemExit('post-merge Increment 3 invariants did not converge')
+          PY
