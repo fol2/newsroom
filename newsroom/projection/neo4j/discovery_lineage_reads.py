@@ -508,6 +508,8 @@ class DiscoveryLineageProjectionFacade:
     ) -> DiscoveryHealthAssessment:
         if not isinstance(request, DiscoveryLineageReadRequest):
             raise TypeError("projection health requires a typed lineage request")
+        if not isinstance(assessed_at, UtcTimestamp):
+            raise TypeError("projection health requires a typed assessment time")
         try:
             self.__eligibility(
                 tuple(subject.identifier for subject in request.subjects),
@@ -658,6 +660,14 @@ class DiscoveryLineageProjectionFacade:
                     )
                 )
 
+        # A live status read commonly follows the caller's timestamp. Preserve
+        # every authority evidence clock and move only the final assessment time
+        # forward so the evidence chronology remains explicit and valid.
+        effective_assessed_at = assessed_at
+        for item in evidence:
+            if item.observed_at.value > effective_assessed_at.value:
+                effective_assessed_at = item.observed_at
+
         return assess_projection_health(
             ProjectionHealthInput(
                 family_id=DISCOVERY_LINEAGE_FAMILY_ID,
@@ -686,7 +696,7 @@ class DiscoveryLineageProjectionFacade:
                 ),
             ),
             policy=policy,
-            assessed_at=assessed_at,
+            assessed_at=effective_assessed_at,
         )
 
 
