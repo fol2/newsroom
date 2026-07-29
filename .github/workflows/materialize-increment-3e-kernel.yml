@@ -1,0 +1,126 @@
+name: Materialize Increment 3E discovery lineage kernel
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-test-and-push:
+    if: github.event.pull_request.head.ref == 'agent/increment-3e-discovery-projection-health'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out exact Increment 3E branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-3e-discovery-projection-health
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+
+      - name: Verify and apply exact discovery-lineage kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import gzip
+          import hashlib
+          import subprocess
+          from pathlib import Path
+
+          base = '15beb5e6d1aa0af9464bf89ca4d31cb1a05ed42d'
+          base_tree = 'bc590d045cbe9c7e5b94097e94771e51bf95f4ea'
+          expected_tree = 'fb3877b784b5de9f8ea8620b3676fa781c1b0548'
+          payload_path = Path('.github/increment-3e-kernel.patch.b64')
+          workflow = '.github/workflows/materialize-increment-3e-kernel.yml'
+
+          if subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() != base:
+              raise SystemExit('Increment 3E transport parent differs')
+          if subprocess.check_output(['git', 'rev-parse', f'{base}^{{tree}}'], text=True).strip() != base_tree:
+              raise SystemExit('Increment 3E base tree differs')
+
+          changed = tuple(sorted(subprocess.check_output(
+              ['git', 'diff', '--name-only', f'{base}..HEAD', '--'], text=True
+          ).splitlines()))
+          expected = tuple(sorted((str(payload_path), workflow)))
+          if changed != expected:
+              raise SystemExit(f'Increment 3E transport inventory differs: {changed!r}')
+
+          encoded = payload_path.read_text(encoding='ascii').strip()
+          if len(encoded) != 19208:
+              raise SystemExit('Increment 3E base64 size differs')
+          compressed = base64.b64decode(encoded, validate=True)
+          if len(compressed) != 14404:
+              raise SystemExit('Increment 3E gzip size differs')
+          if hashlib.sha256(compressed).hexdigest() != 'bcdeefe73ea5bbb5a6984ff5ec758d7ba4585122ed1faa2131fb2689b85548f9':
+              raise SystemExit('Increment 3E gzip digest differs')
+          patch = gzip.decompress(compressed)
+          if len(patch) != 90702:
+              raise SystemExit('Increment 3E patch size differs')
+          if hashlib.sha256(patch).hexdigest() != '84b810c77e16960d1ca411aee5d7c3459bb1d955095384b1f5c9d0352309f7c1':
+              raise SystemExit('Increment 3E patch digest differs')
+          Path('/tmp/increment-3e-kernel.patch').write_bytes(patch)
+          Path('/tmp/increment-3e-expected-tree').write_text(expected_tree, encoding='ascii')
+          PY
+          git apply --check /tmp/increment-3e-kernel.patch
+          git apply /tmp/increment-3e-kernel.patch
+          rm -f .github/increment-3e-kernel.patch.b64
+          rm -f .github/workflows/materialize-increment-3e-kernel.yml
+          python -m compileall -q newsroom scripts
+          git diff --check
+
+      - name: Install locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Run focused and complete regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m pytest -q newsroom/tests/test_discovery_projection_3e_*.py
+          uv run --no-sync python -m pytest -q
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+      - name: Commit verified discovery-lineage kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          test "$(git write-tree)" = "$(cat /tmp/increment-3e-expected-tree)"
+          test -z "$(git diff --name-only)"
+          test ! -e .github/increment-3e-kernel.patch.b64
+          test ! -e .github/workflows/materialize-increment-3e-kernel.yml
+          test ! -e .github/workflows/export-increment-3e-source.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(projection): add discovery lineage and health kernel'
+          git push origin HEAD:agent/increment-3e-discovery-projection-health
