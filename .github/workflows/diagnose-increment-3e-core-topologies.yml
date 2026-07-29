@@ -1,4 +1,4 @@
-name: Diagnose Increment 3E persistent core worker counts
+name: Diagnose Increment 3E exact persistent core command
 
 on:
   pull_request:
@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Materialize the persistent-worker candidate in the disposable checkout
+      - name: Materialize the six-worker candidate in the disposable checkout
         run: |
           python -m pip install --disable-pip-version-check uv
           uv sync --frozen --dev
@@ -41,10 +41,22 @@ jobs:
                   "    '''def test_persistent_core_runner_invokes_one_session_and_propagates_failure(",
                   "    r'''def test_persistent_core_runner_invokes_one_session_and_propagates_failure(",
               ),
+              (
+                  '_CORE_WORKER_COUNT = 4\\n_CORE_DISTRIBUTION = "loadfile"\\n',
+                  '_CORE_WORKER_COUNT = 6\\n_CORE_DISTRIBUTION = "loadfile"\\n',
+              ),
+              (
+                  'assert lane_module._CORE_WORKER_COUNT == 4',
+                  'assert lane_module._CORE_WORKER_COUNT == 6',
+              ),
+              (
+                  '        "4",\\n        "--dist=loadfile",',
+                  '        "6",\\n        "--dist=loadfile",',
+              ),
           )
           for old, new in replacements:
               if text.count(old) != 1:
-                  raise SystemExit(f'unexpected apply-script string marker: {old!r}')
+                  raise SystemExit(f'unexpected apply-script marker: {old!r}')
               text = text.replace(old, new, 1)
           path.write_text(text, encoding='utf-8')
           PY
@@ -60,7 +72,7 @@ jobs:
             newsroom/tests/test_sdlc_workflow_orchestrator.py
           git diff --check
 
-      - name: Measure persistent worker counts on the full exact inventory
+      - name: Measure the exact repository core command at six and eight workers
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONHASHSEED: '0'
@@ -79,34 +91,39 @@ jobs:
           import xml.etree.ElementTree as ET
 
           root = Path.cwd()
-          proof_root = root / '.increment-3e-worker-count-diagnostics'
+          lane = root / 'scripts/sdlc/workflow_lane.py'
+          proof_root = root / '.increment-3e-exact-core-diagnostics'
           if proof_root.exists() or proof_root.is_symlink():
               raise SystemExit('diagnostic root already exists')
           proof_root.mkdir()
 
+          def set_workers(current: int, target: int) -> None:
+              text = lane.read_text(encoding='utf-8')
+              old = f'_CORE_WORKER_COUNT = {current}\\n'
+              new = f'_CORE_WORKER_COUNT = {target}\\n'
+              if text.count(old) != 1:
+                  raise SystemExit(f'unexpected worker constant: {current}')
+              lane.write_text(text.replace(old, new, 1), encoding='utf-8')
+
           results: list[dict[str, object]] = []
-          for workers in (6, 8, 10, 12):
-              run_root = proof_root / f'workers-{workers:02d}'
+          current_workers = 6
+          for workers in (6, 6, 8, 8):
+              if workers != current_workers:
+                  set_workers(current_workers, workers)
+                  current_workers = workers
+              attempt = 1 + sum(1 for item in results if item['workers'] == workers)
+              run_root = proof_root / f'workers-{workers:02d}-attempt-{attempt}'
               run_root.mkdir()
               report = run_root / 'pytest.xml'
-              basetemp = run_root / 'pytest-temp'
               command = (
                   sys.executable,
                   '-m',
-                  'pytest',
-                  '-q',
-                  '--assert=plain',
-                  '-p',
-                  'no:cacheprovider',
-                  '-p',
-                  'xdist.plugin',
-                  '-n',
-                  str(workers),
-                  '--dist=loadfile',
-                  '--max-worker-restart=0',
-                  'newsroom/tests',
-                  f'--basetemp={basetemp}',
-                  f'--junitxml={report}',
+                  'scripts.sdlc.workflow_lane',
+                  'core-tests',
+                  '--repo-root',
+                  '.',
+                  '--report',
+                  report.relative_to(root).as_posix(),
               )
               started = time.monotonic()
               timed_out = False
@@ -142,6 +159,7 @@ jobs:
 
               result = {
                   'workers': workers,
+                  'attempt': attempt,
                   'elapsed_seconds': elapsed,
                   'returncode': returncode,
                   'timed_out': timed_out,
@@ -154,6 +172,8 @@ jobs:
               results.append(result)
               print(json.dumps(result, sort_keys=True), flush=True)
 
+          if current_workers != 6:
+              set_workers(current_workers, 6)
           shutil.rmtree(proof_root)
           valid = [
               item
@@ -164,6 +184,6 @@ jobs:
               and item['error_count'] == 0
           ]
           print(json.dumps({'results': results, 'valid': valid}, sort_keys=True), flush=True)
-          if not valid:
-              raise SystemExit('no persistent worker count completed the exact inventory')
+          if len(valid) != len(results):
+              raise SystemExit('an exact persistent core attempt did not complete cleanly')
           PY
