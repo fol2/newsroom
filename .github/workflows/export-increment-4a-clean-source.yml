@@ -1,0 +1,47 @@
+name: Export exact clean Increment 4A source
+
+on:
+  push:
+    branches:
+      - agent/increment-4a-clean-source-export
+
+permissions:
+  contents: read
+
+jobs:
+  export-clean-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact clean source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: 66fb5cf1d501a41143658e0dae6d9a47d411dc0a
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Archive and identify exact clean source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = '66fb5cf1d501a41143658e0dae6d9a47d411dc0a'
+          test "$(git rev-parse HEAD^{tree})" = 'f7544bbd84d060ec37cf68e4a3a93d0e7735c4e1'
+          mkdir -p "$RUNNER_TEMP/increment-4a-clean-source"
+          git archive \
+            --format=tar.gz \
+            --prefix=newsroom/ \
+            --output="$RUNNER_TEMP/increment-4a-clean-source/newsroom-66fb5cf.tar.gz" \
+            HEAD
+          {
+            printf 'commit_sha=%s\n' "$(git rev-parse HEAD)"
+            printf 'tree_sha=%s\n' "$(git rev-parse HEAD^{tree})"
+            sha256sum "$RUNNER_TEMP/increment-4a-clean-source/newsroom-66fb5cf.tar.gz"
+          } > "$RUNNER_TEMP/increment-4a-clean-source/manifest.txt"
+
+      - name: Upload exact clean source
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-4a-clean-source-66fb5cf
+          path: ${{ runner.temp }}/increment-4a-clean-source
+          if-no-files-found: error
+          retention-days: 7
