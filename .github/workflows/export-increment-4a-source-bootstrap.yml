@@ -4,12 +4,16 @@ on:
   push:
     branches:
       - agent/increment-4a-source-bootstrap
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
   export-exact-authorised-source:
+    if: github.head_ref == 'agent/increment-4a-source-bootstrap' || github.ref_name == 'agent/increment-4a-source-bootstrap'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
