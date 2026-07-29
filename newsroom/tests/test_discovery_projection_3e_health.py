@@ -43,13 +43,28 @@ VERSION_ID = SourceDefinitionVersionId.parse(
 OUTCOME_ID = CheckOutcomeId.parse(
     "00000000-0000-4000-8000-000000006003"
 )
-EVIDENCE = (
-    HealthEvidenceReference(
-        "CHECK_OUTCOME",
-        str(OUTCOME_ID),
-        RECENT,
-        "sha256:" + "a" * 64,
-    ),
+VERSION_EVIDENCE = HealthEvidenceReference(
+    "SOURCE_DEFINITION_VERSION",
+    str(VERSION_ID),
+    OLD,
+    "sha256:" + "b" * 64,
+)
+OUTCOME_EVIDENCE = HealthEvidenceReference(
+    "CHECK_OUTCOME",
+    str(OUTCOME_ID),
+    RECENT,
+    "sha256:" + "a" * 64,
+)
+EVIDENCE = tuple(
+    sorted(
+        (VERSION_EVIDENCE, OUTCOME_EVIDENCE),
+        key=lambda item: (
+            item.evidence_type,
+            item.identifier,
+            str(item.observed_at),
+            item.digest or "",
+        ),
+    )
 )
 
 
@@ -63,6 +78,8 @@ def source_input(
     semantic_valid: bool | None = True,
 ) -> SourceObservationHealthInput:
     if kind is None:
+        if semantic_valid is True:
+            semantic_valid = None
         return SourceObservationHealthInput(
             DEFINITION_ID,
             VERSION_ID,
@@ -76,7 +93,7 @@ def source_input(
             True,
             True,
             semantic_valid,
-            (),
+            (VERSION_EVIDENCE,),
         )
     return SourceObservationHealthInput(
         DEFINITION_ID,
@@ -124,6 +141,114 @@ def test_health_assessment_rejects_future_evidence() -> None:
             evidence=(evidence,),
             assessed_at=NOW,
         )
+
+
+def test_healthy_assessment_requires_positive_evidence() -> None:
+    with pytest.raises(
+        DiscoveryHealthContractError,
+        match="requires positive evidence",
+    ):
+        DiscoveryHealthAssessment(
+            dimension=DiscoveryHealthDimension.CHECK_EXECUTION,
+            state=DiscoveryHealthState.HEALTHY,
+            scope_type="SOURCE_DEFINITION_VERSION",
+            scope_id=str(VERSION_ID),
+            reason_code="CHECK_SUCCEEDED",
+            policy=POLICY,
+            evidence=(),
+            assessed_at=NOW,
+        )
+
+
+def test_source_health_requires_exact_version_and_outcome_evidence() -> None:
+    with pytest.raises(
+        DiscoveryHealthContractError,
+        match="definition-version evidence",
+    ):
+        SourceObservationHealthInput(
+            DEFINITION_ID,
+            VERSION_ID,
+            OUTCOME_ID,
+            CheckOutcomeKind.SUCCESS_UNCHANGED,
+            QuarantineDisposition.NONE,
+            RECENT,
+            RECENT,
+            RECENT,
+            OLD,
+            True,
+            True,
+            True,
+            (OUTCOME_EVIDENCE,),
+        )
+
+    wrong_outcome = HealthEvidenceReference(
+        "CHECK_OUTCOME",
+        "00000000-0000-4000-8000-000000009999",
+        RECENT,
+        "sha256:" + "9" * 64,
+    )
+    with pytest.raises(
+        DiscoveryHealthContractError,
+        match="exact Check outcome evidence",
+    ):
+        SourceObservationHealthInput(
+            DEFINITION_ID,
+            VERSION_ID,
+            OUTCOME_ID,
+            CheckOutcomeKind.SUCCESS_UNCHANGED,
+            QuarantineDisposition.NONE,
+            RECENT,
+            RECENT,
+            RECENT,
+            OLD,
+            True,
+            True,
+            True,
+            tuple(
+                sorted(
+                    (VERSION_EVIDENCE, wrong_outcome),
+                    key=lambda item: (
+                        item.evidence_type,
+                        item.identifier,
+                        str(item.observed_at),
+                        item.digest or "",
+                    ),
+                )
+            ),
+        )
+
+
+def test_projection_health_without_positive_status_and_validation_is_unknown() -> None:
+    generation = ProjectionGenerationId.parse(
+        "00000000-0000-4000-8000-000000008099"
+    )
+    assessed = assess_projection_health(
+        ProjectionHealthInput(
+            family_id="graph.discovery_lineage",
+            generation_id=generation,
+            generation_state=ProjectionGenerationState.ACTIVE,
+            service_available=True,
+            query_valid=True,
+            contracts_current=True,
+            reconciliation_valid=True,
+            contiguous_ledger_seq=20,
+            authority_watermark_ledger_seq=20,
+            open_gap_count=0,
+            dead_letter_count=0,
+            evidence=(
+                HealthEvidenceReference(
+                    "PROJECTION_STATUS",
+                    str(generation),
+                    RECENT,
+                    "sha256:" + "8" * 64,
+                ),
+            ),
+        ),
+        policy=POLICY,
+        assessed_at=NOW,
+    )
+    assert assessed.state is DiscoveryHealthState.UNKNOWN
+    assert assessed.reason_code == "PROJECTION_POSITIVE_EVIDENCE_NOT_ESTABLISHED"
 
 
 def test_successful_unchanged_is_healthy_and_quiet_history_is_not_stale() -> None:
@@ -189,7 +314,20 @@ def test_projection_health_attributes_service_gap_lag_and_tamper_separately() ->
         authority_watermark_ledger_seq=20,
         open_gap_count=0,
         dead_letter_count=0,
-        evidence=(),
+        evidence=(
+            HealthEvidenceReference(
+                "PROJECTION_STATUS",
+                str(generation),
+                RECENT,
+                "sha256:" + "c" * 64,
+            ),
+            HealthEvidenceReference(
+                "PROJECTION_VALIDATION",
+                "sha256:" + "d" * 64,
+                RECENT,
+                "sha256:" + "e" * 64,
+            ),
+        ),
     )
     healthy = assess_projection_health(
         ProjectionHealthInput(**base), policy=POLICY, assessed_at=NOW
@@ -245,12 +383,23 @@ def path(
     return CoveragePathHealthInput(
         name,
         "COV-021",
-        CoverageResponsibility.ACTIVE,
+        (
+            CoverageResponsibility.OPERATIONAL_RESILIENCE
+            if substitute
+            else CoverageResponsibility.ACTIVE
+        ),
         CoverageContribution.DETECTION_PATH,
         frozenset({function}),
         state,
         substitute,
-        (),
+        (
+            HealthEvidenceReference(
+                "COVERAGE_PATH",
+                name,
+                RECENT,
+                "sha256:" + "f" * 64,
+            ),
+        ),
     )
 
 
@@ -328,3 +477,36 @@ def test_empty_coverage_path_set_is_unknown_not_healthy() -> None:
 
     assert assessed.state is DiscoveryHealthState.UNKNOWN
     assert assessed.reason_code == "COVERAGE_ANCHOR_NOT_DEFINED"
+
+
+def test_coverage_substitute_requires_retained_contingency_contract() -> None:
+    with pytest.raises(
+        DiscoveryHealthContractError,
+        match="operational-resilience contingency",
+    ):
+        path(
+            "self-declared-substitute",
+            PortfolioFunction.COMPARATOR,
+            DiscoveryHealthState.HEALTHY,
+            substitute=True,
+        )
+
+
+def test_coverage_path_evidence_is_canonical() -> None:
+    evidence = HealthEvidenceReference(
+        "COVERAGE_PATH",
+        "duplicate-evidence",
+        RECENT,
+        "sha256:" + "f" * 64,
+    )
+    with pytest.raises(DiscoveryHealthContractError, match="sorted and unique"):
+        CoveragePathHealthInput(
+            "duplicate-evidence",
+            "COV-021",
+            CoverageResponsibility.ACTIVE,
+            CoverageContribution.DETECTION_PATH,
+            frozenset({PortfolioFunction.ANCHOR}),
+            DiscoveryHealthState.HEALTHY,
+            False,
+            (evidence, evidence),
+        )

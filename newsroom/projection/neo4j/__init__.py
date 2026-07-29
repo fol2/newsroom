@@ -44,6 +44,7 @@ from .models import (
     Neo4jStructuralRead,
     Neo4jWriteError,
     StructuralActiveReadRequest,
+    StructuralActiveReconciliationRequest,
     StructuralBatch,
     StructuralDeliveryRequest,
     StructuralGraphNodeView,
@@ -56,6 +57,7 @@ from .models import (
     StructuralReadMetadata,
     StructuralReadRequest,
     StructuralReadResponse,
+    StructuralReconciliationView,
     StructuralRelation,
 )
 from .qualification import (
@@ -86,6 +88,7 @@ def __getattr__(name: str):
     if name in {
         "DiscoveryCoverageHealthReadRequest",
         "DiscoveryHealthAuthorityFacade",
+        "DiscoveryHealthReadError",
         "DiscoverySourceHealthReadRequest",
     }:
         from . import discovery_health_reads as _discovery_health_reads
@@ -122,6 +125,7 @@ def __getattr__(name: str):
 __all__ = [
     "DiscoveryCoverageHealthReadRequest",
     "DiscoveryHealthAuthorityFacade",
+    "DiscoveryHealthReadError",
     "DiscoverySourceHealthReadRequest",
     "DiscoveryLineageSubject",
     "DiscoveryLineageReadRequest",
@@ -186,6 +190,7 @@ __all__ = [
     "QUALIFYING_PROFILES",
     "RuntimeProfile",
     "StructuralActiveReadRequest",
+    "StructuralActiveReconciliationRequest",
     "StructuralBatch",
     "StructuralDeliveryRequest",
     "StructuralGraphNodeView",
@@ -198,6 +203,7 @@ __all__ = [
     "StructuralReadMetadata",
     "StructuralReadRequest",
     "StructuralReadResponse",
+    "StructuralReconciliationView",
     "StructuralRelation",
     "complete_generation_names",
     "expected_complete_projection_state",

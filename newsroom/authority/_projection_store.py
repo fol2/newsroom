@@ -3826,7 +3826,17 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 },
                 source_contract_current=True,
                 semantic_lineage_valid=semantic_lineage_valid,
-                evidence=tuple(evidence),
+                evidence=tuple(
+                    sorted(
+                        evidence,
+                        key=lambda item: (
+                            item.evidence_type,
+                            item.identifier,
+                            str(item.observed_at),
+                            item.digest or "",
+                        ),
+                    )
+                ),
             )
 
     def discovery_coverage_path_contracts(

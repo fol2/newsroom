@@ -52,10 +52,13 @@ from newsroom.projection.models import (
 from newsroom.projection.ontology import ProjectionNodeType
 from .models import (
     Neo4jConnectionError,
+    Neo4jIdentityConflict,
     Neo4jReadError,
     StructuralActiveReadRequest,
+    StructuralActiveReconciliationRequest,
     StructuralReadAuthoritySelection,
     StructuralReadResponse,
+    StructuralReconciliationView,
 )
 
 
@@ -173,6 +176,7 @@ class DiscoveryLineageProjectionFacade:
 
     __slots__ = (
         "__active_read",
+        "__reconcile_active",
         "__status",
         "__validation",
         "__gaps",
@@ -186,6 +190,10 @@ class DiscoveryLineageProjectionFacade:
         active_read: Callable[
             [StructuralActiveReadRequest, AuthenticationProof],
             StructuralReadResponse,
+        ],
+        reconcile_active: Callable[
+            [StructuralActiveReconciliationRequest, AuthenticationProof],
+            StructuralReconciliationView,
         ],
         status: Callable[[str, AuthenticationProof], ProjectionStatusMetadata],
         validation: Callable[
@@ -203,6 +211,7 @@ class DiscoveryLineageProjectionFacade:
         eligibility: Callable[[tuple[object, ...], AuthenticationProof], None],
     ) -> None:
         self.__active_read = active_read
+        self.__reconcile_active = reconcile_active
         self.__status = status
         self.__validation = validation
         self.__gaps = gaps
@@ -215,6 +224,9 @@ class DiscoveryLineageProjectionFacade:
         projections = getattr(system, "projections")
         return cls(
             active_read=lambda request, proof: structural.read_active(
+                request, proof=proof
+            ),
+            reconcile_active=lambda request, proof: structural.reconcile_active(
                 request, proof=proof
             ),
             status=lambda family_id, proof: projections.status(
@@ -394,6 +406,36 @@ class DiscoveryLineageProjectionFacade:
                 "discovery-lineage read exceeded its bounded result limit"
             )
 
+    @staticmethod
+    def _validate_reconciliation(
+        reconciliation: StructuralReconciliationView,
+        *,
+        status: ProjectionStatusMetadata,
+    ) -> None:
+        if (
+            reconciliation.family_id != DISCOVERY_LINEAGE_FAMILY_ID
+            or reconciliation.generation_id != status.generation_id
+            or reconciliation.checkpoint_ledger_seq != status.contiguous_ledger_seq
+        ):
+            raise DiscoveryLineageReadError(
+                "discovery-lineage reconciliation differs from authority"
+            )
+
+    def _reconcile(
+        self,
+        *,
+        status: ProjectionStatusMetadata,
+        proof: AuthenticationProof,
+    ) -> StructuralReconciliationView:
+        reconciliation = self.__reconcile_active(
+            StructuralActiveReconciliationRequest(
+                family_id=DISCOVERY_LINEAGE_FAMILY_ID
+            ),
+            proof,
+        )
+        self._validate_reconciliation(reconciliation, status=status)
+        return reconciliation
+
     def read(
         self,
         request: DiscoveryLineageReadRequest,
@@ -413,6 +455,7 @@ class DiscoveryLineageProjectionFacade:
             ) from exc
         status = self.status(proof=proof)
         self._validate_status(status, require_fresh=True)
+        self._reconcile(status=status, proof=proof)
         response = self.__active_read(request.active_request(), proof)
         self._validate_response(request, response, status=status)
         return response
@@ -493,7 +536,7 @@ class DiscoveryLineageProjectionFacade:
                 if "projection validation evidence is absent" not in str(exc):
                     raise
                 validation = None
-        reconciliation_valid = (
+        retained_validation_valid = (
             None
             if validation is None
             else (
@@ -511,17 +554,25 @@ class DiscoveryLineageProjectionFacade:
 
         service_available: bool | None = None
         query_valid: bool | None = None
+        reconciliation_valid = retained_validation_valid
         if status.generation_state is ProjectionGenerationState.ACTIVE:
             try:
+                self._reconcile(status=status, proof=proof)
                 response = self.__active_read(request.active_request(), proof)
             except Neo4jConnectionError:
                 service_available = False
                 query_valid = False
-            except (Neo4jReadError, ProjectionStateError):
+            except (
+                Neo4jIdentityConflict,
+                Neo4jReadError,
+                ProjectionStateError,
+            ):
                 service_available = True
+                reconciliation_valid = False
                 query_valid = False
             else:
                 service_available = True
+                reconciliation_valid = retained_validation_valid
                 try:
                     self._validate_response(request, response, status=status)
                 except DiscoveryLineageReadError:
@@ -622,7 +673,17 @@ class DiscoveryLineageProjectionFacade:
                 ),
                 open_gap_count=status.open_gap_count,
                 dead_letter_count=status.dead_letter_count,
-                evidence=tuple(evidence),
+                evidence=tuple(
+                    sorted(
+                        evidence,
+                        key=lambda item: (
+                            item.evidence_type,
+                            item.identifier,
+                            str(item.observed_at),
+                            item.digest or "",
+                        ),
+                    )
+                ),
             ),
             policy=policy,
             assessed_at=assessed_at,

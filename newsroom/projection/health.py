@@ -138,6 +138,10 @@ class DiscoveryHealthAssessment:
             raise DiscoveryHealthContractError(
                 "health evidence must be a bounded tuple"
             )
+        if self.state is DiscoveryHealthState.HEALTHY and not self.evidence:
+            raise DiscoveryHealthContractError(
+                "healthy assessment requires positive evidence"
+            )
         if any(not isinstance(item, HealthEvidenceReference) for item in self.evidence):
             raise DiscoveryHealthContractError(
                 "health evidence references must be typed"
@@ -228,6 +232,16 @@ class SourceObservationHealthInput:
             raise DiscoveryHealthContractError(
                 "outcome evidence cannot exist without an outcome"
             )
+        if self.outcome_id is not None and (
+            self.quarantine is None or self.outcome_completed_at is None
+        ):
+            raise DiscoveryHealthContractError(
+                "outcome identity requires quarantine and completion evidence"
+            )
+        if self.outcome_id is None and self.semantic_lineage_valid is not None:
+            raise DiscoveryHealthContractError(
+                "semantic lineage cannot be assessed without an outcome"
+            )
         for field_name, value in (
             ("outcome_completed_at", self.outcome_completed_at),
             ("last_complete_observation_at", self.last_complete_observation_at),
@@ -248,8 +262,67 @@ class SourceObservationHealthInput:
             raise DiscoveryHealthContractError(
                 "semantic lineage validity must be boolean or unknown"
             )
-        if not isinstance(self.evidence, tuple):
-            raise DiscoveryHealthContractError("source health evidence must be a tuple")
+        if (
+            not isinstance(self.evidence, tuple)
+            or len(self.evidence) > 64
+            or any(
+                not isinstance(item, HealthEvidenceReference)
+                for item in self.evidence
+            )
+        ):
+            raise DiscoveryHealthContractError(
+                "source health evidence must be a bounded typed tuple"
+            )
+        evidence_keys = [
+            (item.evidence_type, item.identifier, str(item.observed_at), item.digest)
+            for item in self.evidence
+        ]
+        if evidence_keys != sorted(set(evidence_keys)):
+            raise DiscoveryHealthContractError(
+                "source health evidence must be sorted and unique"
+            )
+        version_evidence = tuple(
+            item
+            for item in self.evidence
+            if item.evidence_type == "SOURCE_DEFINITION_VERSION"
+            and item.identifier == str(self.definition_version_id)
+        )
+        if len(version_evidence) != 1:
+            raise DiscoveryHealthContractError(
+                "source health requires exact definition-version evidence"
+            )
+        outcome_evidence = tuple(
+            item for item in self.evidence if item.evidence_type == "CHECK_OUTCOME"
+        )
+        if self.outcome_id is None:
+            if outcome_evidence:
+                raise DiscoveryHealthContractError(
+                    "source health cannot retain outcome evidence without an outcome"
+                )
+        else:
+            matching_outcome = tuple(
+                item
+                for item in outcome_evidence
+                if item.identifier == str(self.outcome_id)
+                and item.observed_at == self.outcome_completed_at
+            )
+            if len(outcome_evidence) != 1 or len(matching_outcome) != 1:
+                raise DiscoveryHealthContractError(
+                    "source health requires exact Check outcome evidence"
+                )
+            assert self.outcome_completed_at is not None
+            for field_name, value in (
+                ("last_complete_observation_at", self.last_complete_observation_at),
+                (
+                    "last_successful_observation_at",
+                    self.last_successful_observation_at,
+                ),
+                ("last_source_change_at", self.last_source_change_at),
+            ):
+                if value is not None and value.value > self.outcome_completed_at.value:
+                    raise DiscoveryHealthContractError(
+                        f"{field_name} cannot follow the latest Check outcome"
+                    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,9 +381,24 @@ class ProjectionHealthInput:
         # beyond the latest non-projection authority event while recording its
         # own delivery, validation and promotion evidence.  Lag is the only
         # invalid health direction: the assessor compares ``<`` below.
-        if not isinstance(self.evidence, tuple):
+        if (
+            not isinstance(self.evidence, tuple)
+            or len(self.evidence) > 256
+            or any(
+                not isinstance(item, HealthEvidenceReference)
+                for item in self.evidence
+            )
+        ):
             raise DiscoveryHealthContractError(
-                "projection health evidence must be a tuple"
+                "projection health evidence must be a bounded typed tuple"
+            )
+        evidence_keys = [
+            (item.evidence_type, item.identifier, str(item.observed_at), item.digest)
+            for item in self.evidence
+        ]
+        if evidence_keys != sorted(set(evidence_keys)):
+            raise DiscoveryHealthContractError(
+                "projection health evidence must be sorted and unique"
             )
 
 
@@ -346,8 +434,34 @@ class CoveragePathHealthInput:
             raise DiscoveryHealthContractError(
                 "coverage substitution flag must be boolean"
             )
-        if not isinstance(self.evidence, tuple):
-            raise DiscoveryHealthContractError("coverage evidence must be a tuple")
+        if self.qualifies_as_substitute and (
+            self.responsibility
+            is not CoverageResponsibility.OPERATIONAL_RESILIENCE
+            or PortfolioFunction.EXPLICIT_CONTINGENCY
+            not in self.portfolio_functions
+        ):
+            raise DiscoveryHealthContractError(
+                "coverage substitute requires an operational-resilience contingency"
+            )
+        if (
+            not isinstance(self.evidence, tuple)
+            or len(self.evidence) > 64
+            or any(
+                not isinstance(item, HealthEvidenceReference)
+                for item in self.evidence
+            )
+        ):
+            raise DiscoveryHealthContractError(
+                "coverage evidence must be a bounded typed tuple"
+            )
+        evidence_keys = [
+            (item.evidence_type, item.identifier, str(item.observed_at), item.digest)
+            for item in self.evidence
+        ]
+        if evidence_keys != sorted(set(evidence_keys)):
+            raise DiscoveryHealthContractError(
+                "coverage evidence must be sorted and unique"
+            )
 
 
 def _assessment(
@@ -608,6 +722,11 @@ def assess_projection_health(
     ):
         state = DiscoveryHealthState.UNKNOWN
         reason = "PROJECTION_VALIDATION_NOT_ESTABLISHED"
+    elif not {"PROJECTION_STATUS", "PROJECTION_VALIDATION"} <= {
+        item.evidence_type for item in projection.evidence
+    }:
+        state = DiscoveryHealthState.UNKNOWN
+        reason = "PROJECTION_POSITIVE_EVIDENCE_NOT_ESTABLISHED"
     else:
         state = DiscoveryHealthState.HEALTHY
         reason = "PROJECTION_ACTIVE_AND_RECONCILED"

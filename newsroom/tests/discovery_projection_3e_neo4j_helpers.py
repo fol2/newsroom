@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -21,6 +20,7 @@ from newsroom.projection.neo4j import (
     DiscoveryLineageReadError,
     DiscoveryLineageReadRequest,
     DiscoveryLineageSubject,
+    Neo4jIdentityConflict,
     Neo4jProjectorConfig,
     StructuralGenerationValidationRequest,
     StructuralRebuildRequest,
@@ -46,16 +46,6 @@ from .discovery_projection_3e_helpers import (
 )
 from .test_discovery_projection_3e_authority import seed_complete_lineage
 
-
-_REQUIRED_FLAG = "NEWSROOM_NEO4J_INCREMENT_3E_SERVICE_REQUIRED"
-
-
-def _service_config() -> Neo4jProjectorConfig:
-    if os.environ.get(_REQUIRED_FLAG) != "1":
-        pytest.skip(
-            "Increment 3E actual Neo4j proof runs only in the permanent graph gate"
-        )
-    return Neo4jProjectorConfig.from_environment()
 
 
 def _subjects() -> tuple[DiscoveryLineageSubject, ...]:
@@ -232,10 +222,10 @@ def _cleanup(config: Neo4jProjectorConfig, *generation_ids: ProjectionGeneration
         adapter.close()
 
 
-def test_actual_service_projects_complete_lineage_and_recovers_graph_loss(
+def run_actual_service_projects_complete_lineage_and_recovers_graph_loss(
     tmp_path: Path,
+    config: Neo4jProjectorConfig,
 ) -> None:
-    config = _service_config()
     database = tmp_path / "authority.sqlite3"
     seed_complete_lineage(database)
     generation_id: ProjectionGenerationId | None = None
@@ -289,10 +279,7 @@ def test_actual_service_projects_complete_lineage_and_recovers_graph_loss(
         restarted = open_lineage_projection_service_system(database, config)
         try:
             facade = DiscoveryLineageProjectionFacade.from_system(restarted)
-            with pytest.raises(
-                DiscoveryLineageReadError,
-                match="missing a governed subject",
-            ):
+            with pytest.raises(Neo4jIdentityConflict, match="differs"):
                 facade.read(_read_request(), proof=proof())
 
             replay = restarted.structural.rebuild(
@@ -311,10 +298,10 @@ def test_actual_service_projects_complete_lineage_and_recovers_graph_loss(
         _cleanup(config, generation_id)
 
 
-def test_actual_service_replacement_generation_becomes_only_active_lineage(
+def run_actual_service_replacement_generation_becomes_only_active_lineage(
     tmp_path: Path,
+    config: Neo4jProjectorConfig,
 ) -> None:
-    config = _service_config()
     database = tmp_path / "authority.sqlite3"
     seed_complete_lineage(database)
     generations: list[ProjectionGenerationId] = []

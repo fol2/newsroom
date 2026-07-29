@@ -40,7 +40,9 @@ def test_increment_3e_traceability_covers_every_review_unit() -> None:
         "newsroom.projection.discovery_lineage",
         "newsroom.projection.health",
         "newsroom.projection.neo4j.discovery_lineage_reads",
-        "newsroom.tests.test_discovery_projection_3e_neo4j_service",
+        "newsroom.tests.test_discovery_projection_3e_observation_models",
+        "newsroom.tests.test_integrated_c1_workflow_contract",
+        "newsroom.tests.test_projection_b3_neo4j_service",
         "scripts.sdlc.workflow_lane",
     } <= flattened
 

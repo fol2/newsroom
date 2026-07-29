@@ -22,6 +22,7 @@ from newsroom.projection.neo4j import (
     DiscoveryLineageReadRequest,
     DiscoveryLineageSubject,
     Neo4jConnectionError,
+    Neo4jIdentityConflict,
 )
 from newsroom.sources import SourceDefinitionVersionId, SourceLifecycleStage
 
@@ -156,10 +157,7 @@ def test_graph_loss_fails_closed_and_health_is_quarantined(tmp_path: Path) -> No
         facade = DiscoveryLineageProjectionFacade.from_system(system)
         adapter.cleanup_generation(str(generation.generation_id))
 
-        with pytest.raises(
-            DiscoveryLineageReadError,
-            match="missing a governed subject",
-        ):
+        with pytest.raises(Neo4jIdentityConflict, match="differs"):
             facade.read(_request(), proof=proof())
 
         assessment = facade.assess_projection(
@@ -375,3 +373,34 @@ def test_retired_source_fails_serving_and_rebuild_does_not_resurrect_lineage(
             facade.read(_request(), proof=proof())
     finally:
         replacement_system.close()
+
+
+
+def test_lineage_reads_reconcile_the_active_generation_before_serving(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    seed_complete_lineage(database)
+    adapter = MemoryNeo4jAdapter()
+    system = open_lineage_projection_system(database, adapter)
+    try:
+        _activate(system)
+        facade = DiscoveryLineageProjectionFacade.from_system(system)
+        reconciliation_count = adapter.reconcile_count
+        adapter.reconciliation_mismatch = True
+
+        with pytest.raises(Neo4jIdentityConflict, match="differs"):
+            facade.read(_request(), proof=proof())
+        assert adapter.reconcile_count == reconciliation_count + 1
+
+        assessment = facade.assess_projection(
+            _request(),
+            policy=_POLICY,
+            assessed_at=LATER,
+            proof=proof(),
+        )
+        assert assessment.state is DiscoveryHealthState.QUARANTINED
+        assert assessment.reason_code == "PROJECTION_VALIDATION_FAILED"
+        assert adapter.reconcile_count == reconciliation_count + 2
+    finally:
+        system.close()

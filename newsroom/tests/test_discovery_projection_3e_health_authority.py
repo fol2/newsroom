@@ -13,6 +13,7 @@ from newsroom.projection import (
 )
 from newsroom.projection.neo4j import (
     DiscoveryCoverageHealthReadRequest,
+    DiscoveryHealthReadError,
     DiscoverySourceHealthReadRequest,
 )
 from newsroom.sources.types import SourceDefinitionId
@@ -134,6 +135,28 @@ def test_coverage_health_uses_retained_anchor_contract_not_source_count(
         assert available.reason_code == "COVERAGE_ACTIVE_ANCHOR_AVAILABLE"
         assert missing.state is DiscoveryHealthState.UNKNOWN
         assert missing.reason_code == "COVERAGE_ANCHOR_NOT_DEFINED"
+    finally:
+        system.close()
+
+
+def test_missing_source_health_is_a_stable_public_read_error(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    seed_complete_lineage(database)
+    system = _open(database)
+    try:
+        missing = SourceDefinitionId.parse(
+            "00000000-0000-4000-8000-000000009999"
+        )
+        with pytest.raises(
+            DiscoveryHealthReadError,
+            match="not currently eligible",
+        ):
+            system.health.source(
+                _source_request(missing),
+                proof=proof(),
+            )
     finally:
         system.close()
 

@@ -48,13 +48,31 @@ from .projection_b1_helpers import (
 )
 
 
+class _MemoryDeliveryStore(dict[tuple[str, int], StructuralBatch]):
+    """Current fake graph batches with graph-loss-aware marker cleanup."""
+
+    def __init__(
+        self,
+        markers: dict[tuple[str, int], StructuralBatch],
+    ) -> None:
+        super().__init__()
+        self._markers = markers
+
+    def clear(self) -> None:
+        super().clear()
+        self._markers.clear()
+
+
 @dataclass
 class MemoryNeo4jAdapter:
     fail_writes: bool = False
     reconciliation_mismatch: bool = False
 
     def __post_init__(self) -> None:
-        self.deliveries: dict[tuple[str, int], StructuralBatch] = {}
+        self._delivery_markers: dict[tuple[str, int], StructuralBatch] = {}
+        self.deliveries: dict[tuple[str, int], StructuralBatch] = (
+            _MemoryDeliveryStore(self._delivery_markers)
+        )
         self.bootstrap_count = 0
         self.apply_count = 0
         self.cleanup_count = 0
@@ -76,7 +94,7 @@ class MemoryNeo4jAdapter:
         if self.fail_writes:
             raise Neo4jWriteError("fixed fake write failure")
         key = (str(batch.generation_id), batch.ledger_seq)
-        existing = self.deliveries.get(key)
+        existing = self._delivery_markers.get(key)
         if existing is not None:
             if (
                 existing.source_event_id != batch.source_event_id
@@ -88,6 +106,7 @@ class MemoryNeo4jAdapter:
                 )
             outcome = Neo4jApplyOutcome.DUPLICATE
         else:
+            self._delivery_markers[key] = batch
             self.deliveries[key] = batch
             outcome = Neo4jApplyOutcome.APPLIED
         return Neo4jApplyResult(
@@ -182,22 +201,38 @@ class MemoryNeo4jAdapter:
         expected_batches: tuple[StructuralBatch, ...],
     ) -> str:
         self.reconcile_count += 1
-        digest = _expected_projection_state_digest(
+        expected_digest = _expected_projection_state_digest(
             generation_id, expected_batches
         )
-        if self.reconciliation_mismatch:
+        actual_batches = tuple(
+            batch
+            for (stored_generation, _ledger_seq), batch in sorted(
+                self._delivery_markers.items(), key=lambda item: item[0]
+            )
+            if stored_generation == generation_id
+        )
+        actual_digest = _expected_projection_state_digest(
+            generation_id, actual_batches
+        )
+        if (
+            self.reconciliation_mismatch
+            or actual_digest != expected_digest
+        ):
             raise Neo4jIdentityConflict(
                 "fake graph state differs from retained authority"
             )
-        return digest
+        return actual_digest
 
     def cleanup_generation(self, generation_id: str) -> int:
         self.cleanup_count += 1
-        selected = [
+        selected = {
             key for key in self.deliveries if key[0] == generation_id
-        ]
+        } | {
+            key for key in self._delivery_markers if key[0] == generation_id
+        }
         for key in selected:
-            del self.deliveries[key]
+            self.deliveries.pop(key, None)
+            self._delivery_markers.pop(key, None)
         return len(selected)
 
     def corrupt_delivery_digest(

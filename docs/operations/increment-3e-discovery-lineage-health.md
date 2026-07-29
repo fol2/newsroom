@@ -32,7 +32,7 @@ uv run python scripts/eval_clustering_metrics.py \
   --fail-on-regression
 ```
 
-The permanent authenticated Neo4j workflow must execute both mandatory `test_discovery_projection_3e_neo4j_service` cases with zero skips, failures or errors.
+The permanent authenticated Neo4j workflow must execute all eight allow-listed `test_projection_b3_neo4j_service` cases exactly once, including both Increment 3E lineage cases, with zero skips, failures or errors.
 
 ## Replacement-generation rebuild
 

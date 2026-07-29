@@ -72,6 +72,7 @@ def test_public_projector_exposes_only_bounded_structural_operations() -> None:
         "deliver",
         "read",
         "read_active",
+        "reconcile_active",
         "rebuild",
         "validate_generation",
     }
@@ -79,6 +80,7 @@ def test_public_projector_exposes_only_bounded_structural_operations() -> None:
         "__deliver",
         "__read",
         "__read_active",
+        "__reconcile_active",
         "__rebuild",
         "__validate",
     }

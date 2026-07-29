@@ -214,7 +214,6 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
     monkeypatch.setenv("NEWSROOM_NEO4J_PROJECTOR_PASSWORD", "secret")
     monkeypatch.setenv("NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED", "1")
-    monkeypatch.setenv("NEWSROOM_NEO4J_INCREMENT_3E_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_URI", "bolt://localhost:7687")
@@ -251,7 +250,6 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
     static = captured["spec"]["static_env"]
     assert static["NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED"] == "1"
     assert static["NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED"] == "1"
-    assert static["NEWSROOM_NEO4J_INCREMENT_3E_SERVICE_REQUIRED"] == "1"
     assert static["NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED"] == "1"
     assert static["NEWSROOM_NEO4J_SERVICE_REQUIRED"] == "1"
     assert static["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
@@ -603,8 +601,6 @@ def test_optional_core_skips_are_exact_actual_service_cases() -> None:
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_replacement_generation_recovers_from_authority_only',
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_revocation_and_tombstone_remove_current_derivatives',
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_wrong_watermark_generation_and_vector_dimension_fail_closed',
-        'newsroom.tests.test_discovery_projection_3e_neo4j_service::test_actual_service_projects_complete_lineage_and_recovers_graph_loss',
-        'newsroom.tests.test_discovery_projection_3e_neo4j_service::test_actual_service_replacement_generation_becomes_only_active_lineage',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_increment_2_proof_admits_replays_and_restarts',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[fulltext]',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[relation]',
@@ -619,6 +615,8 @@ def test_optional_core_skips_are_exact_actual_service_cases() -> None:
         'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_public_round_trip_duplicate_and_generation_isolation',
         'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_requires_explicit_authentication_configuration',
         'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_wrong_projector_credential_fails_closed_without_secret',
+        'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_3e_projects_complete_lineage_and_recovers_graph_loss',
+        'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_3e_replacement_generation_becomes_only_active_lineage',
         'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_active_generation_revalidates_after_incremental_delivery',
         'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_active_read_resolves_only_authority_promoted_generation',
         'newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_graph_loss_and_process_restart_rebuild_from_authority',
@@ -715,7 +713,6 @@ def test_service_configuration_is_exact(
     artifact.mkdir()
     monkeypatch.setenv("NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED", "1")
-    monkeypatch.setenv("NEWSROOM_NEO4J_INCREMENT_3E_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_URI", "bolt://remote.example:7687")

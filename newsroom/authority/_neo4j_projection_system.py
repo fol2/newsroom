@@ -19,6 +19,7 @@ from .models import SemanticCommand
 from .persistence import (
     AuthorityCommands,
     AuthorityEvents,
+    AuthorityPersistenceError,
     CommittedCommand,
     EventReadPolicy,
 )
@@ -51,6 +52,7 @@ from newsroom.projection.neo4j._adapter import _open_neo4j_adapter
 from newsroom.projection.neo4j.discovery_health_reads import (
     DiscoveryCoverageHealthReadRequest,
     DiscoveryHealthAuthorityFacade,
+    DiscoveryHealthReadError,
     DiscoverySourceHealthReadRequest,
 )
 from newsroom.projection.neo4j.models import (
@@ -63,6 +65,7 @@ from newsroom.projection.neo4j.models import (
     Neo4jStructuralRead,
     Neo4jWriteError,
     StructuralActiveReadRequest,
+    StructuralActiveReconciliationRequest,
     StructuralBatch,
     StructuralDeliveryRequest,
     StructuralGenerationValidationRequest,
@@ -73,6 +76,7 @@ from newsroom.projection.neo4j.models import (
     StructuralReadMetadata,
     StructuralReadRequest,
     StructuralReadResponse,
+    StructuralReconciliationView,
     StructuralRelation,
 )
 from newsroom.projection.neo4j.qualification import (
@@ -133,6 +137,7 @@ class Neo4jStructuralProjector:
         "__deliver",
         "__read",
         "__read_active",
+        "__reconcile_active",
         "__rebuild",
         "__validate",
     )
@@ -152,6 +157,10 @@ class Neo4jStructuralProjector:
             [StructuralActiveReadRequest, AuthenticationProof],
             StructuralReadResponse,
         ],
+        reconcile_active: Callable[
+            [StructuralActiveReconciliationRequest, AuthenticationProof],
+            StructuralReconciliationView,
+        ],
         rebuild: Callable[
             [StructuralRebuildRequest, AuthenticationProof],
             StructuralRebuildResult,
@@ -164,6 +173,7 @@ class Neo4jStructuralProjector:
         self.__deliver = deliver
         self.__read = read
         self.__read_active = read_active
+        self.__reconcile_active = reconcile_active
         self.__rebuild = rebuild
         self.__validate = validate_generation
 
@@ -190,6 +200,14 @@ class Neo4jStructuralProjector:
         proof: AuthenticationProof,
     ) -> StructuralReadResponse:
         return self.__read_active(request, proof)
+
+    def reconcile_active(
+        self,
+        request: StructuralActiveReconciliationRequest,
+        *,
+        proof: AuthenticationProof,
+    ) -> StructuralReconciliationView:
+        return self.__reconcile_active(request, proof)
 
     def rebuild(
         self,
@@ -759,6 +777,40 @@ class _Neo4jProjectionBoundary:
             ),
         )
 
+    def reconcile_active(
+        self,
+        request: StructuralActiveReconciliationRequest,
+        proof: AuthenticationProof,
+    ) -> StructuralReconciliationView:
+        if not isinstance(request, StructuralActiveReconciliationRequest):
+            raise TypeError("active reconciliation requires a typed request")
+        with self._operation_lock:
+            authenticated = self._projection_boundary._authenticate_read(proof)
+            self._projection_boundary._authorize_read(
+                family_id=request.family_id,
+                operation="neo4j-structural-active-reconcile",
+                semantic_value={"family_id": request.family_id},
+                authenticated=authenticated,
+            )
+            metadata = self._store.projection_active_generation_metadata(
+                request.family_id
+            )
+            expected = self._expected_validation_batches(
+                metadata.generation.generation_id,
+                metadata.contiguous_ledger_seq,
+            )
+            digest = self._adapter.reconcile_generation(
+                generation_id=str(metadata.generation.generation_id),
+                expected_batches=expected,
+            )
+            return StructuralReconciliationView(
+                family_id=request.family_id,
+                generation_id=metadata.generation.generation_id,
+                checkpoint_ledger_seq=metadata.contiguous_ledger_seq,
+                projection_state_digest=digest,
+                serving_time=metadata.serving_time,
+            )
+
     def read_active(
         self,
         request: StructuralActiveReadRequest,
@@ -884,7 +936,12 @@ class _Neo4jProjectionBoundary:
             },
             authenticated=authenticated,
         )
-        self._store.require_discovery_lineage_subjects_eligible(identifiers)
+        try:
+            self._store.require_discovery_lineage_subjects_eligible(identifiers)
+        except AuthorityPersistenceError as exc:
+            raise ProjectionStateError(
+                "discovery-lineage subject is not currently eligible"
+            ) from exc
 
     def source_health(
         self,
@@ -907,9 +964,14 @@ class _Neo4jProjectionBoundary:
             },
             authenticated=authenticated,
         )
-        source = self._store.discovery_source_health_input(
-            request.definition_id
-        )
+        try:
+            source = self._store.discovery_source_health_input(
+                request.definition_id
+            )
+        except (AuthorityPersistenceError, ProjectionStateError) as exc:
+            raise DiscoveryHealthReadError(
+                "discovery-lineage subject is not currently eligible"
+            ) from exc
         return assess_source_health(
             source,
             policy=request.policy,
@@ -950,9 +1012,14 @@ class _Neo4jProjectionBoundary:
         for contract in self._store.discovery_coverage_path_contracts(
             request.obligation_id
         ):
-            source = self._store.discovery_source_health_input(
-                contract.definition_id
-            )
+            try:
+                source = self._store.discovery_source_health_input(
+                    contract.definition_id
+                )
+            except (AuthorityPersistenceError, ProjectionStateError) as exc:
+                raise DiscoveryHealthReadError(
+                    "discovery-lineage subject is not currently eligible"
+                ) from exc
             assessments = assess_source_health(
                 source,
                 policy=request.policy,
@@ -1231,6 +1298,7 @@ def _open_with_adapter(
                 deliver=graph_boundary.deliver,
                 read=graph_boundary.read,
                 read_active=graph_boundary.read_active,
+                reconcile_active=graph_boundary.reconcile_active,
                 rebuild=graph_boundary.rebuild,
                 validate_generation=graph_boundary.validate_generation,
             ),

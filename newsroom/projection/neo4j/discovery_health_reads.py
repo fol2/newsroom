@@ -9,7 +9,12 @@ from newsroom.projection.health import (
     DiscoveryHealthAssessment,
     HealthPolicy,
 )
+from newsroom.projection.models import ProjectionStateError
 from newsroom.sources.types import SourceDefinitionId
+
+
+class DiscoveryHealthReadError(ProjectionStateError):
+    """A bounded public health read cannot resolve eligible authority."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,5 +110,6 @@ class DiscoveryHealthAuthorityFacade:
 __all__ = [
     "DiscoveryCoverageHealthReadRequest",
     "DiscoveryHealthAuthorityFacade",
+    "DiscoveryHealthReadError",
     "DiscoverySourceHealthReadRequest",
 ]

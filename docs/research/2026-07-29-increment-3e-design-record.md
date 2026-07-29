@@ -235,7 +235,7 @@ The API exposes no Neo4j driver, arbitrary Cypher, caller-selected label, relati
 
 ## Observation-model and transition coverage
 
-The projector is deliberately event-contract generic: it maps the accepted Check Outcome and Observable Transition authority records without branching on source observation model or transition kind. Repository-owned Increment 3C fixtures remain the authority evidence for `APPEND_ONLY`, `MUTABLE_ITEM`, `COMPLETE_CURRENT_STATE`, `ROLLING_LIST`, `EXPLICIT_DELTA` and `PLANNED_AGENDA`, including first observation, revision, activation, ending, explicit-delta and agenda transitions. Increment 3E proves that those retained event contracts use the same fixed projection mapping and cannot select caller-defined graph schema.
+The projector is deliberately event-contract generic: it maps the accepted Check Outcome and Observable Transition authority records without branching on source observation model or transition kind. Repository-owned Increment 3C fixtures remain the authority source for `APPEND_ONLY`, `MUTABLE_ITEM`, `COMPLETE_CURRENT_STATE`, `ROLLING_LIST`, `EXPLICIT_DELTA` and `PLANNED_AGENDA`. Increment 3E directly replays one meaningful transition from every accepted model—`FIRST_OBSERVED`, `REVISED`, `ACTIVATED`, `AMBIGUOUS_ABSENCE`, `ESCALATED` and `AGENDA_CREATED`—and proves that each retained transition reaches the same fixed governed node and `TRANSITION_OF_ITEM` / `CLASSIFIED_BY_TRANSITION` relations without caller-selected graph schema.
 
 ## Evidence plan
 

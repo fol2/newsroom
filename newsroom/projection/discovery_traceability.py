@@ -8,6 +8,7 @@ INCREMENT_3E_TRACEABILITY = {
         "newsroom.tests.test_discovery_projection_3e_authority",
         "newsroom.tests.test_check_3c_model_policies",
         "newsroom.tests.test_check_3c_transitions",
+        "newsroom.tests.test_discovery_projection_3e_observation_models",
         "docs.research.2026-07-29-increment-3e-design-record",
     ),
     "3E-02-ORDERED-CHECKPOINT-GAP-DEADLETTER/GRAG-024-GRAG-025": (
@@ -21,7 +22,7 @@ INCREMENT_3E_TRACEABILITY = {
         "newsroom.projection.neo4j._adapter",
         "newsroom.authority._neo4j_projection_system",
         "newsroom.tests.test_discovery_projection_3e_lifecycle",
-        "newsroom.tests.test_discovery_projection_3e_neo4j_service",
+        "newsroom.tests.test_projection_b3_neo4j_service",
     ),
     "3E-04-ATTRIBUTABLE-HEALTH/DOUT-001-DOUT-012/DOPS-001-DOPS-012": (
         "newsroom.projection.health",
@@ -47,7 +48,8 @@ INCREMENT_3E_TRACEABILITY = {
     "3E-07-ACTUAL-NEO4J-EVIDENCE/GRAG-042-GRAG-045": (
         ".github.workflows.projection-b2-neo4j",
         "scripts.sdlc.workflow_lane",
-        "newsroom.tests.test_discovery_projection_3e_neo4j_service",
+        "newsroom.tests.test_projection_b3_neo4j_service",
+        "newsroom.tests.test_integrated_c1_workflow_contract",
         "newsroom.tests.test_sdlc_workflow_lane",
         "docs.operations.increment-3e-discovery-lineage-health",
     ),
