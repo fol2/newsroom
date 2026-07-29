@@ -44,10 +44,18 @@ jobs:
           test -d "$root/xdist"
           test -d "$root/execnet"
           mkdir -p "$RUNNER_TEMP/increment-4a-toolchain"
-          tar -C "$root" -czf "$RUNNER_TEMP/increment-4a-toolchain/pure-python-site-packages.tar.gz" \
-            neo4j neo4j-*.dist-info \
-            xdist pytest_xdist-*.dist-info \
-            execnet execnet-*.dist-info
+          (
+            cd "$root"
+            shopt -s nullglob
+            entries=(
+              neo4j neo4j-*.dist-info
+              xdist pytest_xdist-*.dist-info
+              execnet execnet-*.dist-info
+            )
+            test "${#entries[@]}" -ge 6
+            tar -czf "$RUNNER_TEMP/increment-4a-toolchain/pure-python-site-packages.tar.gz" \
+              "${entries[@]}"
+          )
           sha256sum "$RUNNER_TEMP/increment-4a-toolchain/pure-python-site-packages.tar.gz" \
             > "$RUNNER_TEMP/increment-4a-toolchain/manifest.txt"
 
