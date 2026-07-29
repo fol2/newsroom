@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 import os
-import stat
 import sys
 
 import pytest
@@ -314,17 +313,17 @@ def test_source_check_compiles_exact_sources_and_runs_locked_integrity(
         )
 
 
-def test_core_test_command_runs_fixed_shards_and_conditional_clustering(
+def test_core_test_command_runs_persistent_workers_and_conditional_clustering(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     report = tmp_path / "report.xml"
-    shard_calls: list[tuple[Path, Path]] = []
+    worker_calls: list[tuple[Path, Path]] = []
     clustering_calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(
         lane_module,
-        "_run_core_pytest_shards",
-        lambda *, root, report: shard_calls.append((root, report)) or 0,
+        "_run_core_pytest_workers",
+        lambda *, root, report: worker_calls.append((root, report)) or 0,
     )
     monkeypatch.setattr(
         lane_module,
@@ -335,13 +334,13 @@ def test_core_test_command_runs_fixed_shards_and_conditional_clustering(
     )
 
     assert core_tests(repo_root=tmp_path, report=report, clustering=True) == 0
-    assert shard_calls == [(tmp_path.resolve(), report.resolve())]
+    assert worker_calls == [(tmp_path.resolve(), report.resolve())]
     assert len(clustering_calls) == 1
     assert clustering_calls[0][1] == "scripts/eval_clustering_metrics.py"
 
     monkeypatch.setattr(
         lane_module,
-        "_run_core_pytest_shards",
+        "_run_core_pytest_workers",
         lambda **_kwargs: 7,
     )
     clustering_calls.clear()
@@ -349,58 +348,41 @@ def test_core_test_command_runs_fixed_shards_and_conditional_clustering(
     assert clustering_calls == []
 
 
-def test_core_test_shards_are_fixed_deterministic_and_complete(
+def test_core_test_inventory_is_sorted_complete_and_rejects_symlinks(
     tmp_path: Path,
 ) -> None:
     test_root = tmp_path / "newsroom/tests"
     test_root.mkdir(parents=True)
     expected: list[str] = []
-    for index in range(lane_module._CORE_SHARD_COUNT):
-        size = (lane_module._CORE_SHARD_COUNT - index) * 100
+    for index in range(lane_module._CORE_WORKER_COUNT):
         path = test_root / f"test_{index}.py"
-        path.write_text("#" * size + "\n", encoding="utf-8")
+        path.write_text("def test_ok(): assert True\n", encoding="utf-8")
         expected.append(path.relative_to(tmp_path).as_posix())
 
-    first = lane_module._core_test_shards(tmp_path)
-    second = lane_module._core_test_shards(tmp_path)
+    assert lane_module._core_test_files(tmp_path) == tuple(sorted(expected))
 
-    assert first == second
-    assert len(first) == lane_module._CORE_SHARD_COUNT == 16
-    assert lane_module._CORE_WORKER_COUNT == 5
-    assert lane_module._CORE_WORKER_COUNT < lane_module._CORE_SHARD_COUNT
-    assert all(first)
-    flattened = tuple(item for shard in first for item in shard)
-    assert len(flattened) == len(set(flattened))
-    assert tuple(sorted(flattened)) == tuple(sorted(expected))
-
-
-def test_core_test_inventory_rejects_symlinked_test_file(tmp_path: Path) -> None:
-    test_root = tmp_path / "newsroom/tests"
-    test_root.mkdir(parents=True)
-    for index in range(4):
-        (test_root / f"test_{index}.py").write_text(
-            "def test_ok(): assert True\n", encoding="utf-8"
-        )
     if os.name != "posix":
         pytest.skip("symlink evidence is POSIX-specific")
     target = test_root / "outside.py"
     target.write_text("def test_outside(): assert True\n", encoding="utf-8")
     (test_root / "test_link.py").symlink_to(target)
-
     with pytest.raises(WorkflowLaneError, match="core_test_file"):
         lane_module._core_test_files(tmp_path)
 
 
-def test_core_shard_command_is_server_owned_and_isolated(tmp_path: Path) -> None:
+def test_core_worker_command_is_pinned_persistent_and_file_scoped(
+    tmp_path: Path,
+) -> None:
     report = tmp_path / "report.xml"
     basetemp = tmp_path / "basetemp"
-    command = lane_module._core_shard_command(
-        test_files=("newsroom/tests/test_one.py", "newsroom/tests/test_two.py"),
+    command = lane_module._core_worker_command(
         report=report,
         basetemp=basetemp,
     )
 
-    assert command[:8] == (
+    assert lane_module._CORE_WORKER_COUNT == 6
+    assert lane_module._CORE_DISTRIBUTION == "loadfile"
+    assert command[:13] == (
         sys.executable,
         "-m",
         "pytest",
@@ -408,13 +390,25 @@ def test_core_shard_command_is_server_owned_and_isolated(tmp_path: Path) -> None
         "--assert=plain",
         "-p",
         "no:cacheprovider",
-        "newsroom/tests/test_one.py",
+        "-p",
+        "xdist.plugin",
+        "-n",
+        "6",
+        "--dist=loadfile",
+        "--max-worker-restart=0",
     )
-    assert command[8] == "newsroom/tests/test_two.py"
+    assert command[13:14] == lane_module._CORE_TESTS == (
+        "newsroom/tests",
+    )
     assert command[-2:] == (
         f"--basetemp={basetemp}",
         f"--junitxml={report}",
     )
+
+
+def test_persistent_core_dependency_is_exactly_pinned() -> None:
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert pyproject.count('"pytest-xdist==3.8.0"') == 2
 
 
 def test_service_shards_cover_exact_inventory_deterministically(
@@ -497,84 +491,37 @@ def _junit_case(name: str) -> str:
     )
 
 
-def test_core_shard_reports_merge_to_one_exact_private_report(
-    tmp_path: Path,
-) -> None:
-    reports = tuple(
-        tmp_path / f"shard-{index}.xml"
-        for index in range(lane_module._CORE_SHARD_COUNT)
-    )
-    for index, path in enumerate(reports):
-        path.write_text(_junit_case(f"test_{index}"), encoding="utf-8")
-    expected = lane_module.summarize_junit(
-        tmp_path, tuple(path.name for path in reports)
-    )
-    merged = tmp_path / "pytest.xml"
-
-    lane_module._merge_core_junit_reports(
-        root=tmp_path, report=merged, shard_reports=reports
-    )
-
-    actual = lane_module.summarize_junit(tmp_path, (merged.name,))
-    assert actual.test_count == expected.test_count
-    assert actual.test_count == lane_module._CORE_SHARD_COUNT
-    assert actual.test_ids_digest == expected.test_ids_digest
-    assert actual.duration_ms == expected.duration_ms
-    assert stat.S_IMODE(merged.stat().st_mode) == 0o600
-
-
-def test_core_shard_merge_rejects_duplicate_test_identity(
-    tmp_path: Path,
-) -> None:
-    reports = tuple(
-        tmp_path / f"shard-{index}.xml"
-        for index in range(lane_module._CORE_SHARD_COUNT)
-    )
-    for path in reports:
-        path.write_text(_junit_case("duplicate"), encoding="utf-8")
-
-    with pytest.raises(lane_module.JUnitEvidenceError, match="duplicate_testcase"):
-        lane_module._merge_core_junit_reports(
-            root=tmp_path,
-            report=tmp_path / "pytest.xml",
-            shard_reports=reports,
-        )
-
-
-def test_parallel_core_runner_merges_all_shards_and_propagates_failure(
+def test_persistent_core_runner_invokes_one_session_and_propagates_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    test_root = tmp_path / "newsroom/tests"
+    test_root.mkdir(parents=True)
+    for index in range(lane_module._CORE_WORKER_COUNT):
+        (test_root / f"test_{index}.py").write_text(
+            "def test_ok(): assert True\n",
+            encoding="utf-8",
+        )
     report = tmp_path / "pytest.xml"
-    shards = tuple(
-        (f"newsroom/tests/test_{index}.py",)
-        for index in range(lane_module._CORE_SHARD_COUNT)
-    )
-    monkeypatch.setattr(lane_module, "_core_test_shards", lambda _root: shards)
+    calls: list[tuple[tuple[str, ...], Path, bool]] = []
 
-    def fake_run(*, argv, root, log):
-        assert root == tmp_path
-        report_argument = next(
-            item for item in argv if str(item).startswith("--junitxml=")
-        )
-        shard_report = Path(str(report_argument).split("=", 1)[1])
-        index = int(shard_report.stem.rsplit("-", 1)[1])
-        shard_report.write_text(
-            _junit_case(f"test_{index}"), encoding="utf-8"
-        )
-        log.write_text(f"shard {index}\n", encoding="utf-8")
-        return 9 if index == 2 else 0
+    def run(argv, *, cwd, check):
+        calls.append((tuple(argv), cwd, check))
+        return SimpleNamespace(returncode=9)
 
-    monkeypatch.setattr(lane_module, "_run_pytest_shard", fake_run)
+    monkeypatch.setattr(lane_module.subprocess, "run", run)
 
-    assert lane_module._run_core_pytest_shards(
-        root=tmp_path, report=report
+    assert lane_module._run_core_pytest_workers(
+        root=tmp_path,
+        report=report,
     ) == 9
-    assert (
-        lane_module.summarize_junit(tmp_path, (report.name,)).test_count
-        == lane_module._CORE_SHARD_COUNT
-    )
-    assert not tuple(tmp_path.glob("pytest-shard-*.xml"))
+    assert len(calls) == 1
+    command, cwd, check = calls[0]
+    assert cwd == tmp_path
+    assert check is False
+    assert command.count("xdist.plugin") == 1
+    assert "--dist=loadfile" in command
+    assert "--max-worker-restart=0" in command
 
 
 def test_parallel_service_runner_merges_all_shards_and_propagates_failure(
@@ -903,27 +850,25 @@ def test_finalizer_rejects_unexpected_command_spec_digest(
         )
 
 
-def test_finalizer_discards_interrupted_core_shard_reports(
+def test_finalizer_discards_interrupted_service_shard_reports(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     contract = _contract(tmp_path)
-    route = _route()
+    route = _route(service=True)
     artifact = tmp_path / "artifact-interrupted-shards"
-    run_path = artifact / "gates/core-deterministic/tests/command-run.json"
+    run_path = artifact / "gates/service-neo4j/tests/command-run.json"
     report = run_path.parent / "reports/pytest.xml"
     report.parent.mkdir(parents=True)
-    partials = (
-        report.with_name("pytest-shard-00.xml"),
-        report.with_name(
-            f"pytest-shard-{lane_module._CORE_SHARD_COUNT - 1:02d}.xml"
-        ),
+    partials = tuple(
+        report.with_name(f"pytest-shard-{index:02d}.xml")
+        for index in range(lane_module._SERVICE_SHARD_COUNT)
     )
     for index, path in enumerate(partials):
         path.write_text(_junit_case(f"partial_{index}"), encoding="utf-8")
     context = SimpleNamespace(runner_environment="github-hosted")
     command = _run(
-        "core-deterministic",
+        "service-neo4j",
         "tests",
         "BUDGET_EXCEEDED",
     ).as_dict()
@@ -942,7 +887,7 @@ def test_finalizer_discards_interrupted_core_shard_reports(
     monkeypatch.setattr(
         lane_module,
         "_layout",
-        lambda *_args: (("core-deterministic", "tests", run_path, report),),
+        lambda *_args: (("service-neo4j", "tests", run_path, report),),
     )
     monkeypatch.setattr(
         lane_module,
@@ -972,12 +917,12 @@ def test_finalizer_discards_interrupted_core_shard_reports(
     output = lane_module.finalize_lane(
         repo_root=tmp_path,
         route_path="route.json",
-        lane_id="core",
+        lane_id="service",
         artifact_root="artifact-interrupted-shards",
     )
 
     assert output.gate_results == (
-        ("core-deterministic", "tests", "BUDGET_EXCEEDED"),
+        ("service-neo4j", "tests", "BUDGET_EXCEEDED"),
     )
     assert all(not path.exists() for path in partials)
 
@@ -985,14 +930,14 @@ def test_finalizer_discards_interrupted_core_shard_reports(
 def test_shard_report_cleanup_rejects_unexpected_identity(tmp_path: Path) -> None:
     report = tmp_path / "pytest.xml"
     unexpected = report.with_name(
-        f"pytest-shard-{lane_module._CORE_SHARD_COUNT:02d}.xml"
+        f"pytest-shard-{lane_module._SERVICE_SHARD_COUNT:02d}.xml"
     )
     unexpected.write_text(_junit_case("unexpected"), encoding="utf-8")
 
     with pytest.raises(WorkflowLaneError, match="shard_report_identity"):
         lane_module._discard_incomplete_shard_reports(
             report=report,
-            shard_count=lane_module._CORE_SHARD_COUNT,
+            shard_count=lane_module._SERVICE_SHARD_COUNT,
         )
 
 

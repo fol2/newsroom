@@ -660,13 +660,15 @@ class DiscoveryLineageProjectionFacade:
                     )
                 )
 
-        # A live status read commonly follows the caller's timestamp. Preserve
-        # every authority evidence clock and move only the final assessment time
-        # forward so the evidence chronology remains explicit and valid.
-        effective_assessed_at = assessed_at
-        for item in evidence:
-            if item.observed_at.value > effective_assessed_at.value:
-                effective_assessed_at = item.observed_at
+        # The live status observation is taken inside this assessment call and
+        # may therefore follow the caller's lower-bound timestamp. Persisted
+        # validation, gap and dead-letter evidence is never allowed to move the
+        # assessment clock forward; future retained evidence still fails closed.
+        effective_assessed_at = (
+            status.serving_time
+            if status.serving_time.value > assessed_at.value
+            else assessed_at
+        )
 
         return assess_projection_health(
             ProjectionHealthInput(

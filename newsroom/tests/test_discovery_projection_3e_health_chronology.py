@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
+
+import pytest
 
 from newsroom.authority import UtcTimestamp
 from newsroom.projection import (
     DISCOVERY_LINEAGE_FAMILY_ID,
+    DiscoveryHealthContractError,
     DiscoveryHealthState,
 )
 from newsroom.projection.neo4j import DiscoveryLineageProjectionFacade
@@ -51,14 +56,77 @@ def test_active_projection_health_advances_current_assessment_after_evidence(
             "PROJECTION_STATUS",
             "PROJECTION_VALIDATION",
         }
-        expected_assessed_at = max(
-            [requested_at, *(item.observed_at for item in assessment.evidence)],
-            key=lambda value: value.value,
-        )
-        assert assessment.assessed_at == expected_assessed_at
+        assert assessment.assessed_at == status_evidence.observed_at
         assert all(
             item.observed_at.value <= assessment.assessed_at.value
             for item in assessment.evidence
         )
+    finally:
+        system.close()
+
+
+
+def test_persisted_future_validation_evidence_still_fails_closed(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    seed_complete_lineage(database)
+    system = open_lineage_projection_system(database, MemoryNeo4jAdapter())
+    try:
+        _activate(system)
+        status = system.projections.status(
+            DISCOVERY_LINEAGE_FAMILY_ID,
+            proof=proof(),
+        )
+        assert status.generation_id is not None
+        validation = system.projections.validation(
+            status.generation_id,
+            proof=proof(),
+        )
+        future = UtcTimestamp(
+            status.serving_time.value + timedelta(seconds=1)
+        )
+        facade = DiscoveryLineageProjectionFacade(
+            active_read=lambda request, auth: system.structural.read_active(
+                request,
+                proof=auth,
+            ),
+            reconcile_active=lambda request, auth: system.structural.reconcile_active(
+                request,
+                proof=auth,
+            ),
+            status=lambda _family_id, _auth: status,
+            validation=lambda _generation_id, _auth: replace(
+                validation,
+                recorded_at=future,
+            ),
+            gaps=lambda generation_id, limit, auth: system.projections.gaps(
+                generation_id,
+                limit=limit,
+                proof=auth,
+            ),
+            dead_letters=lambda generation_id, limit, auth: (
+                system.projections.dead_letters(
+                    generation_id,
+                    limit=limit,
+                    proof=auth,
+                )
+            ),
+            eligibility=lambda identifiers, auth: system.health.require_lineage_eligible(
+                identifiers,
+                proof=auth,
+            ),
+        )
+
+        with pytest.raises(
+            DiscoveryHealthContractError,
+            match="evidence cannot follow",
+        ):
+            facade.assess_projection(
+                _request(),
+                policy=_POLICY,
+                assessed_at=status.serving_time,
+                proof=proof(),
+            )
     finally:
         system.close()
