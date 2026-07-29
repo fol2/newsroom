@@ -165,7 +165,7 @@ text = text.replace(
     "test_core_test_command_runs_persistent_workers_and_conditional_clustering",
     1,
 )
-if text.count("_run_core_pytest_shards") != 2:
+if text.count("_run_core_pytest_shards") != 3:
     raise SystemExit("unexpected legacy core runner references")
 text = text.replace("_run_core_pytest_shards", "_run_core_pytest_workers")
 text = text.replace("shard_calls", "worker_calls")
