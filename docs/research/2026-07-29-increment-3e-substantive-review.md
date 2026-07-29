@@ -83,12 +83,18 @@ The workflow accepted at least six B3 cases and named only three, so a missing 3
 
 **Correction:** the workflow requires exactly eight B3 actual-service cases and names every one, including both 3E cases. Skips, failures, errors, duplicates and omissions fail the job.
 
+### P2-10 — actual-service graph-loss proof attempted to rewrite ACTIVE history
+
+The first authenticated graph-loss proof replayed a destructive rebuild command after the generation had already been promoted. The projection authority correctly rejected that operation because an `ACTIVE` generation is immutable projection history.
+
+**Correction:** exact rebuild replay remains available only while a generation is `BUILDING`. Once promoted, graph loss is recovered by creating, rebuilding, reconciling and atomically promoting a replacement generation while retiring the prior ACTIVE generation. A direct unit regression and the authenticated Neo4j case now prove that boundary.
+
 ## Authority and resilience review
 
 - Structural mappings are fixed, versioned and allow-listed; no arbitrary Cypher, labels, relation types or properties are accepted.
 - Governed lifecycle IDs are graph keys. Titles, locators, digests and mutable status do not become identity.
 - Required unsupported or out-of-order events create retained gaps/dead letters and block contiguous qualification.
-- Exact replay is idempotent. Graph loss can reapply retained graph mutations without creating duplicate authority events.
+- Exact replay is idempotent while a generation remains BUILDING. Graph loss after activation is recovered through a replacement generation without mutating the prior ACTIVE history.
 - Replacement generations rebuild from retained SQLite authority, reconcile against actual graph state and replace the prior ACTIVE generation through authority.
 - Retired or rejected source authority becomes projection-ineligible; serving fails closed and replacement rebuild does not resurrect covered lineage.
 - Last complete observation, last successful observation and last source change remain distinct.
@@ -115,7 +121,7 @@ arbitrary Cypher, driver or mutation access
 
 ```text
 P1 findings:             0
-P2 findings corrected:  9
+P2 findings corrected:  10
 Unresolved P1/P2:        0 on the reviewed local product tree
 ```
 

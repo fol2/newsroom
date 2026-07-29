@@ -50,7 +50,7 @@ A failed, stale, gapped, dead-lettered, wrong-contract or graph-tampered generat
 
 Graph loss is an availability incident, not an authority loss. A bounded read against missing governed roots must fail closed. Projection health becomes `UNAVAILABLE` for service outage or `QUARANTINED` for graph inconsistency; neither state becomes source unchanged, no prior match or editorial rejection.
 
-Recover by rebuilding a replacement generation from SQLite authority and re-running reconciliation and promotion. Exact rebuild replay may reapply graph mutations after graph loss while replaying the same retained authority command; it must not create another authority event.
+Recover by rebuilding a replacement generation from SQLite authority and re-running reconciliation and promotion. Exact rebuild replay is limited to a generation that remains `BUILDING`; an `ACTIVE` generation is immutable projection history and graph-loss recovery must replace it rather than destructively rewriting it.
 
 Relation deletion, endpoint mutation, unexpected identity, count mismatch, wrong ontology/projector metadata or missing governed roots must fail reconciliation or bounded serving.
 

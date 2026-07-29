@@ -14,6 +14,7 @@ from newsroom.projection import (
     ProjectionGenerationId,
     ProjectionGenerationPromotionRequest,
     ProjectionGenerationState,
+    ProjectionStateError,
 )
 from newsroom.projection.neo4j import (
     DiscoveryLineageProjectionFacade,
@@ -229,6 +230,7 @@ def run_actual_service_projects_complete_lineage_and_recovers_graph_loss(
     database = tmp_path / "authority.sqlite3"
     seed_complete_lineage(database)
     generation_id: ProjectionGenerationId | None = None
+    replacement_generation_id: ProjectionGenerationId | None = None
     rebuild_request: StructuralRebuildRequest | None = None
 
     system = open_lineage_projection_service_system(database, config)
@@ -264,9 +266,14 @@ def run_actual_service_projects_complete_lineage_and_recovers_graph_loss(
         _assert_complete_lineage(initial)
         before_replay = system.events.after(0, limit=1_000, proof=proof())
 
-        replay = system.structural.rebuild(rebuild_request, proof=proof())
-        assert replay.authority_command_replayed is True
-        assert replay.recorded_delivery_count == 0
+        # A promoted generation is immutable projection history. Exact rebuild
+        # replay is allowed only while the target remains BUILDING; graph loss
+        # after activation must be repaired through a replacement generation.
+        with pytest.raises(
+            ProjectionStateError,
+            match="only a building generation can be destructively rebuilt",
+        ):
+            system.structural.rebuild(rebuild_request, proof=proof())
         assert system.events.after(0, limit=1_000, proof=proof()) == before_replay
         assert facade.read(_read_request(), proof=proof()) == initial
     finally:
@@ -282,20 +289,52 @@ def run_actual_service_projects_complete_lineage_and_recovers_graph_loss(
             with pytest.raises(Neo4jIdentityConflict, match="differs"):
                 facade.read(_read_request(), proof=proof())
 
-            replay = restarted.structural.rebuild(
-                rebuild_request,
+            replacement = _register_and_create(
+                restarted,
+                suffix="graph-loss-replacement",
+            )
+            replacement_generation_id = replacement.generation_id
+            replacement_rebuild = restarted.structural.rebuild(
+                _rebuild_request(
+                    restarted,
+                    replacement,
+                    key="3e-service-graph-loss-replacement-rebuild",
+                ),
                 proof=proof(),
             )
-            assert replay.authority_command_replayed is True
-            assert replay.reapplied_delivery_count > 0
+            replacement_validation = _validate(
+                restarted,
+                replacement.generation_id,
+                replacement_rebuild.checkpoint_ledger_seq,
+                key="3e-service-graph-loss-replacement-validate",
+            )
+            promotion = _promote(
+                restarted,
+                replacement.generation_id,
+                replacement_validation,
+                key="3e-service-graph-loss-replacement-promote",
+                prior_generation_id=generation_id,
+            )
+            assert promotion.generation.state is ProjectionGenerationState.ACTIVE
+            assert promotion.prior_generation is not None
+            assert (
+                promotion.prior_generation.state
+                is ProjectionGenerationState.RETIRED
+            )
             restored = facade.read(_read_request(), proof=proof())
+            assert restored.metadata.generation_id == replacement.generation_id
             assert restored.nodes
             assert restored.relations
             _assert_complete_lineage(restored)
         finally:
             restarted.close()
     finally:
-        _cleanup(config, generation_id)
+        cleanup_ids = tuple(
+            item
+            for item in (generation_id, replacement_generation_id)
+            if item is not None
+        )
+        _cleanup(config, *cleanup_ids)
 
 
 def run_actual_service_replacement_generation_becomes_only_active_lineage(

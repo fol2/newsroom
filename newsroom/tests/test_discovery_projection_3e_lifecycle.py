@@ -247,6 +247,53 @@ def test_rebuild_replay_recovers_graph_loss_without_new_authority_events(
         system.close()
 
 
+def test_active_generation_requires_replacement_instead_of_rebuild_replay(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    seed_complete_lineage(database)
+    adapter = MemoryNeo4jAdapter()
+    system = open_lineage_projection_system(database, adapter)
+    try:
+        generation = register_generation(system)
+        request = StructuralRebuildRequest(
+            generation_id=generation.generation_id,
+            expected_authority_version=generation.authority_aggregate_version,
+            through_ledger_seq=_source_watermark(system),
+            reason_code="INCREMENT_3E_ACTIVE_REBUILD_REPLAY",
+            idempotency_key="3e-active-rebuild-replay",
+        )
+        rebuilt = system.structural.rebuild(request, proof=proof())
+        validation = _validate(
+            system,
+            generation.generation_id,
+            rebuilt.checkpoint_ledger_seq,
+            key="3e-active-rebuild-validate",
+        )
+        promoted = _promote(
+            system,
+            generation.generation_id,
+            validation,
+            key="3e-active-rebuild-promote",
+        )
+        assert promoted.generation.state is ProjectionGenerationState.ACTIVE
+        events_before = system.events.after(0, limit=1_000, proof=proof())
+
+        with pytest.raises(
+            ProjectionStateError,
+            match="only a building generation can be destructively rebuilt",
+        ):
+            system.structural.rebuild(request, proof=proof())
+
+        assert system.events.after(0, limit=1_000, proof=proof()) == events_before
+        assert (
+            _generation(system, generation.generation_id).state
+            is ProjectionGenerationState.ACTIVE
+        )
+    finally:
+        system.close()
+
+
 def test_required_gap_and_dead_letter_block_lineage_validation(tmp_path: Path) -> None:
     database = tmp_path / "authority.sqlite3"
     seed_complete_lineage(database)
