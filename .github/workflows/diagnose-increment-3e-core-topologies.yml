@@ -1,4 +1,4 @@
-name: Diagnose Increment 3E core hotspots
+name: Diagnose Increment 3E tmpfs core runtime
 
 on:
   pull_request:
@@ -12,6 +12,8 @@ jobs:
     if: github.event.pull_request.head.ref == 'agent/increment-3e-corrective-hardening'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      TMPDIR: /dev/shm
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -23,24 +25,29 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Verify bounded tmpfs scratch
+        run: |
+          test -d /dev/shm
+          test ! -L /dev/shm
+          test -w /dev/shm
+          df -B1 /dev/shm
+
       - name: Install locked environment
         run: |
           python -m pip install --disable-pip-version-check uv
           uv sync --frozen --dev
 
-      - name: Measure repository-owned core hotspots
+      - name: Measure repository-owned core on tmpfs scratch
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONHASHSEED: '0'
           PYTHONUTF8: '1'
         run: |
           uv run python - <<'PY'
-          from collections import defaultdict
           import json
           from pathlib import Path
           import tempfile
           import time
-          import xml.etree.ElementTree as ET
 
           from scripts.sdlc import workflow_lane
 
@@ -48,7 +55,7 @@ jobs:
           workflow_lane._CORE_SHARD_COUNT = 16
           workflow_lane._CORE_WORKER_COUNT = 5
           with tempfile.TemporaryDirectory(
-              prefix='.newsroom-hotspots-',
+              prefix='.newsroom-tmpfs-diagnostic-',
               dir=root,
           ) as raw:
               report = Path(raw) / 'pytest.xml'
@@ -57,59 +64,14 @@ jobs:
                   root=root,
                   report=report,
               )
-              wall_seconds = round(time.monotonic() - started, 3)
+              result = {
+                  'tmpdir': str(Path(tempfile.gettempdir()).resolve()),
+                  'wall_seconds': round(time.monotonic() - started, 3),
+                  'returncode': code,
+                  'shard_count': workflow_lane._CORE_SHARD_COUNT,
+                  'workers': workflow_lane._CORE_WORKER_COUNT,
+              }
+              print(json.dumps(result, sort_keys=True), flush=True)
               if code:
                   raise SystemExit(code)
-
-              document = ET.parse(report).getroot()
-              cases = []
-              modules = defaultdict(float)
-              for case in document.iter('testcase'):
-                  duration = float(case.attrib.get('time', '0') or '0')
-                  classname = case.attrib.get('classname', '')
-                  name = case.attrib.get('name', '')
-                  cases.append(
-                      {
-                          'seconds': round(duration, 6),
-                          'classname': classname,
-                          'name': name,
-                      }
-                  )
-                  modules[classname] += duration
-              cases.sort(
-                  key=lambda item: (
-                      -float(item['seconds']),
-                      str(item['classname']),
-                      str(item['name']),
-                  )
-              )
-              module_rows = [
-                  {
-                      'seconds': round(duration, 6),
-                      'classname': classname,
-                  }
-                  for classname, duration in modules.items()
-              ]
-              module_rows.sort(
-                  key=lambda item: (
-                      -float(item['seconds']),
-                      str(item['classname']),
-                  )
-              )
-              print(
-                  json.dumps(
-                      {
-                          'wall_seconds': wall_seconds,
-                          'test_count': len(cases),
-                          'summed_test_seconds': round(
-                              sum(float(item['seconds']) for item in cases),
-                              6,
-                          ),
-                          'top_testcases': cases[:50],
-                          'top_modules': module_rows[:40],
-                      },
-                      sort_keys=True,
-                  ),
-                  flush=True,
-              )
           PY
