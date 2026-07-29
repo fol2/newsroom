@@ -1,4 +1,4 @@
-name: Diagnose Increment 3E partitioned core topologies
+name: Diagnose Increment 3E core hotspots
 
 on:
   pull_request:
@@ -11,7 +11,7 @@ jobs:
   diagnose:
     if: github.event.pull_request.head.ref == 'agent/increment-3e-corrective-hardening'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -28,68 +28,88 @@ jobs:
           python -m pip install --disable-pip-version-check uv
           uv sync --frozen --dev
 
-      - name: Measure repository-owned partitioned core runner
+      - name: Measure repository-owned core hotspots
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONHASHSEED: '0'
           PYTHONUTF8: '1'
         run: |
           uv run python - <<'PY'
+          from collections import defaultdict
           import json
           from pathlib import Path
           import tempfile
           import time
+          import xml.etree.ElementTree as ET
 
           from scripts.sdlc import workflow_lane
 
           root = Path.cwd()
-          original_core_files = workflow_lane._core_test_files(root)
-          service_paths = frozenset(workflow_lane._repository_service_tests(root))
-          partitioned_core_files = tuple(
-              item for item in original_core_files if item[0] not in service_paths
-          )
-          if not service_paths or len(partitioned_core_files) >= len(original_core_files):
-              raise SystemExit('service partition was not established')
-          if {item[0] for item in partitioned_core_files} & service_paths:
-              raise SystemExit('core/service test overlap remains')
-          workflow_lane._core_test_files = lambda _root: partitioned_core_files
+          workflow_lane._CORE_SHARD_COUNT = 16
+          workflow_lane._CORE_WORKER_COUNT = 5
+          with tempfile.TemporaryDirectory(
+              prefix='.newsroom-hotspots-',
+              dir=root,
+          ) as raw:
+              report = Path(raw) / 'pytest.xml'
+              started = time.monotonic()
+              code = workflow_lane._run_core_pytest_shards(
+                  root=root,
+                  report=report,
+              )
+              wall_seconds = round(time.monotonic() - started, 3)
+              if code:
+                  raise SystemExit(code)
 
-          print(
-              json.dumps(
-                  {
-                      'all_file_count': len(original_core_files),
-                      'core_file_count': len(partitioned_core_files),
-                      'service_file_count': len(service_paths),
-                      'service_files': sorted(service_paths),
-                  },
-                  sort_keys=True,
-              ),
-              flush=True,
-          )
-
-          summaries = []
-          for shard_count, workers in ((16, 5), (24, 5), (32, 5), (32, 6)):
-              workflow_lane._CORE_SHARD_COUNT = shard_count
-              workflow_lane._CORE_WORKER_COUNT = workers
-              with tempfile.TemporaryDirectory(
-                  prefix='.newsroom-topology-',
-                  dir=root,
-              ) as raw:
-                  report = Path(raw) / 'pytest.xml'
-                  started = time.monotonic()
-                  code = workflow_lane._run_core_pytest_shards(
-                      root=root,
-                      report=report,
+              document = ET.parse(report).getroot()
+              cases = []
+              modules = defaultdict(float)
+              for case in document.iter('testcase'):
+                  duration = float(case.attrib.get('time', '0') or '0')
+                  classname = case.attrib.get('classname', '')
+                  name = case.attrib.get('name', '')
+                  cases.append(
+                      {
+                          'seconds': round(duration, 6),
+                          'classname': classname,
+                          'name': name,
+                      }
                   )
-                  summary = {
-                      'shard_count': shard_count,
-                      'workers': workers,
-                      'wall_seconds': round(time.monotonic() - started, 3),
-                      'returncode': code,
+                  modules[classname] += duration
+              cases.sort(
+                  key=lambda item: (
+                      -float(item['seconds']),
+                      str(item['classname']),
+                      str(item['name']),
+                  )
+              )
+              module_rows = [
+                  {
+                      'seconds': round(duration, 6),
+                      'classname': classname,
                   }
-                  summaries.append(summary)
-                  print(json.dumps(summary, sort_keys=True), flush=True)
-                  if code:
-                      raise SystemExit(code)
-          print(json.dumps({'summaries': summaries}, sort_keys=True), flush=True)
+                  for classname, duration in modules.items()
+              ]
+              module_rows.sort(
+                  key=lambda item: (
+                      -float(item['seconds']),
+                      str(item['classname']),
+                  )
+              )
+              print(
+                  json.dumps(
+                      {
+                          'wall_seconds': wall_seconds,
+                          'test_count': len(cases),
+                          'summed_test_seconds': round(
+                              sum(float(item['seconds']) for item in cases),
+                              6,
+                          ),
+                          'top_testcases': cases[:50],
+                          'top_modules': module_rows[:40],
+                      },
+                      sort_keys=True,
+                  ),
+                  flush=True,
+              )
           PY
