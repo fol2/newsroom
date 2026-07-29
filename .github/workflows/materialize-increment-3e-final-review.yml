@@ -1,0 +1,154 @@
+name: Materialize Increment 3E final reviewed product
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-test-and-push:
+    if: github.event.pull_request.head.ref == 'agent/increment-3e-discovery-projection-health'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out exact Increment 3E branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-3e-discovery-projection-health
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+
+      - name: Verify and apply exact final reviewed non-workflow product
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import gzip
+          import hashlib
+          import subprocess
+          from pathlib import Path
+
+          transport_parent = 'd332e43b538622fa662521ff120db3b2ec24e303'
+          clean_product = 'df7447c3b2148e63e6bd14693487f2f851ae118b'
+          clean_tree = 'cbd670cb9908d01b4a5f55306ef34f6d02ee0691'
+          expected_tree = '9db661f60bf6442e21207a0def801bdc033fd156'
+          payload_dir = Path('.github/increment-3e-final-review-payload')
+          workflow = '.github/workflows/materialize-increment-3e-final-review.yml'
+          export_workflow = '.github/workflows/export-increment-3e-recovery.yml'
+          recovered_dir = Path('.github/increment-3e-lost-local')
+          expected_chunks = {
+              'part-00.txt': (3000, '7c7194fc163248a798642902410e8c64fa8f398e5a0466ef062427e990dcdee3'),
+              'part-01.txt': (3000, '6281e9209daf820b5527633f22dc56036d3398b5cea104535f18d3babc483791'),
+              'part-02.txt': (3000, '665ccf4f7db0418725d95768652bb75cc3ef99743facbc034527293e824ccc82'),
+              'part-03.txt': (3000, 'a983aebdcdf224fd9b75af8ee6b4cfe90816789fe40aec2775fdf50613b15f3f'),
+              'part-04.txt': (3000, '2fd7e69a65be14453af507f7bb455d8bf07cb27b51953ea457af80b020b3c3e0'),
+              'part-05.txt': (3000, 'a5d9d71ed697db582ca68229f5c85c8e845eaaf40cd2f46dad9065dc2721edb0'),
+              'part-06.txt': (3000, '5d49ab4314b32cec14995f72696d082eb7bfed8235a7d7c1e523237903ca3547'),
+              'part-07.txt': (2540, 'f54f2e6aeaf550149e8601f139cdcf09d3808331847d7dbe296d5bcf40e406c0'),
+          }
+
+          if subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() != transport_parent:
+              raise SystemExit('Increment 3E final transport parent differs')
+          if subprocess.check_output(['git', 'rev-parse', f'{clean_product}^{{tree}}'], text=True).strip() != clean_tree:
+              raise SystemExit('Increment 3E clean product tree differs')
+
+          expected_changes = tuple(sorted((
+              export_workflow,
+              workflow,
+              *(str(recovered_dir / f'part-{index:02d}.txt') for index in range(5)),
+              *(str(payload_dir / name) for name in expected_chunks),
+          )))
+          changed = tuple(sorted(subprocess.check_output(
+              ['git', 'diff', '--name-only', f'{clean_product}..HEAD', '--'],
+              text=True,
+          ).splitlines()))
+          if changed != expected_changes:
+              raise SystemExit(f'Increment 3E final transport inventory differs: {changed!r}')
+
+          encoded_parts: list[str] = []
+          for name, (expected_size, expected_digest) in sorted(expected_chunks.items()):
+              path = payload_dir / name
+              data = path.read_bytes()
+              if len(data) != expected_size:
+                  raise SystemExit(f'Increment 3E payload size differs: {name}')
+              if hashlib.sha256(data).hexdigest() != expected_digest:
+                  raise SystemExit(f'Increment 3E payload digest differs: {name}')
+              encoded_parts.append(data.decode('ascii'))
+          encoded = ''.join(encoded_parts)
+          if len(encoded) != 23540:
+              raise SystemExit('Increment 3E base64 size differs')
+          compressed = base64.b64decode(encoded, validate=True)
+          if len(compressed) != 17654 or hashlib.sha256(compressed).hexdigest() != '614e6ecda3804ce34e80f6c3197693e3c933f4b6e9d5c4dc0348dc4cdf0f0b11':
+              raise SystemExit('Increment 3E compressed payload differs')
+          patch = gzip.decompress(compressed)
+          if len(patch) != 84978 or hashlib.sha256(patch).hexdigest() != 'e19df9a22cad080b467bb4c5f571079d50b898c827f1f9b9bea4a6e3f9f25535':
+              raise SystemExit('Increment 3E final patch differs')
+          Path('/tmp/increment-3e-final-review.patch').write_bytes(patch)
+          Path('/tmp/increment-3e-final-review-tree').write_text(expected_tree, encoding='ascii')
+          PY
+          git apply --check /tmp/increment-3e-final-review.patch
+          git apply /tmp/increment-3e-final-review.patch
+          rm -rf .github/increment-3e-lost-local
+          rm -rf .github/increment-3e-final-review-payload
+          rm -f .github/workflows/export-increment-3e-recovery.yml
+          rm -f .github/workflows/materialize-increment-3e-final-review.yml
+          python -m compileall -q newsroom scripts
+          git diff --check
+
+      - name: Install locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Run focused and complete regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_discovery_projection_3e_*.py \
+            newsroom/tests/test_sdlc_classifier.py \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            newsroom/tests/test_integrated_c1_sdlc_contract.py \
+            newsroom/tests/test_integrated_c1_workflow_contract.py
+          uv run --no-sync python -m pytest -q
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+      - name: Commit verified Increment 3E reviewed product
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          test "$(git write-tree)" = "$(cat /tmp/increment-3e-final-review-tree)"
+          test -z "$(git diff --name-only)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(projection): complete Increment 3E reviewed product'
+          git push origin HEAD:agent/increment-3e-discovery-projection-health
