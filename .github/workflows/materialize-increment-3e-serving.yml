@@ -1,4 +1,4 @@
-name: Materialize Increment 3E lifecycle and serving
+name: Materialize Increment 3E lifecycle and serving v2
 
 on:
   pull_request:
@@ -31,7 +31,7 @@ jobs:
           cache-suffix: newsroom-py312
           prune-cache: false
           cache-python: false
-      - name: Verify and apply exact 3E lifecycle and serving patch
+      - name: Verify and apply exact 3E serving and cycle correction
         shell: bash
         run: |
           set -euo pipefail
@@ -40,42 +40,55 @@ jobs:
           import base64, gzip, hashlib, subprocess
           from pathlib import Path
 
-          parent = 'fef35e62331b5d7dfbe86eccf64e36051e93d417'
-          parent_tree = '3643a8763bcc4d9eb1e06c9ec3ba2ea71db7ce51'
-          expected_tree = '9e40fb71c715799645046e92259886a7d4370a55'
+          parent = 'b7a7e7bac317c9369c06cb38d3d0182fc72db12e'
+          parent_tree = '3c7e17033903ebbde1fcca7cc31e108593a6d131'
+          expected_tree = '269e7c656bbe4a3b9d64f2b8dd37b58a1274d9fc'
           payload_dir = Path('.github/increment-3e-serving-payload')
+          fix_path = Path('.github/increment-3e-serving-cycle-fix.patch.b64')
           workflow = '.github/workflows/materialize-increment-3e-serving.yml'
 
           if subprocess.check_output(['git','rev-parse','HEAD^'], text=True).strip() != parent:
-              raise SystemExit('3E serving transport parent differs')
+              raise SystemExit('3E serving v2 parent differs')
           if subprocess.check_output(['git','rev-parse',f'{parent}^{{tree}}'], text=True).strip() != parent_tree:
-              raise SystemExit('3E serving parent tree differs')
-          payload_paths = tuple(sorted(str(p) for p in payload_dir.glob('part-*.txt')))
+              raise SystemExit('3E serving v2 parent tree differs')
           changed = tuple(sorted(subprocess.check_output(
               ['git','diff','--name-only',f'{parent}..HEAD','--'], text=True
           ).splitlines()))
-          expected = tuple(sorted((*payload_paths, workflow)))
-          if len(payload_paths) != 6 or changed != expected:
-              raise SystemExit(f'3E serving transport inventory differs: {changed!r}')
+          if changed != tuple(sorted((str(fix_path), workflow))):
+              raise SystemExit(f'3E serving v2 transport inventory differs: {changed!r}')
+
+          payload_paths = tuple(sorted(str(p) for p in payload_dir.glob('part-*.txt')))
+          if len(payload_paths) != 6:
+              raise SystemExit('3E serving v2 inherited payload count differs')
           encoded = ''.join(Path(p).read_text(encoding='ascii').strip() for p in payload_paths)
           if len(encoded) != 16680:
               raise SystemExit('3E serving base64 size differs')
           compressed = base64.b64decode(encoded, validate=True)
-          if len(compressed) != 12510:
-              raise SystemExit('3E serving gzip size differs')
-          if hashlib.sha256(compressed).hexdigest() != '9effe43105940bb114b3b9fd48d11846b8cf5b32670bad793b4eadc316a08eaa':
-              raise SystemExit('3E serving gzip digest differs')
+          if len(compressed) != 12510 or hashlib.sha256(compressed).hexdigest() != '9effe43105940bb114b3b9fd48d11846b8cf5b32670bad793b4eadc316a08eaa':
+              raise SystemExit('3E serving compressed payload differs')
           patch = gzip.decompress(compressed)
-          if len(patch) != 66047:
-              raise SystemExit('3E serving patch size differs')
-          if hashlib.sha256(patch).hexdigest() != '5b0917d4dda8f21659533df96fd95ac68ce25e37b2eaa461756c63bed5c95745':
-              raise SystemExit('3E serving patch digest differs')
+          if len(patch) != 66047 or hashlib.sha256(patch).hexdigest() != '5b0917d4dda8f21659533df96fd95ac68ce25e37b2eaa461756c63bed5c95745':
+              raise SystemExit('3E serving patch differs')
           Path('/tmp/increment-3e-serving.patch').write_bytes(patch)
+
+          fix_encoded = fix_path.read_text(encoding='ascii').strip()
+          if len(fix_encoded) != 672:
+              raise SystemExit('3E cycle fix base64 size differs')
+          fix_compressed = base64.b64decode(fix_encoded, validate=True)
+          if len(fix_compressed) != 502 or hashlib.sha256(fix_compressed).hexdigest() != '9aa7519e533906987a85fbbd792814bc1e568af23bf8c183c8bf5da99c820850':
+              raise SystemExit('3E cycle fix compressed payload differs')
+          fix_patch = gzip.decompress(fix_compressed)
+          if len(fix_patch) != 1148 or hashlib.sha256(fix_patch).hexdigest() != '096ce99f3e351724c63b2568d53a8ccf536fafa4dcba477217e86b543993ddd9':
+              raise SystemExit('3E cycle fix patch differs')
+          Path('/tmp/increment-3e-cycle-fix.patch').write_bytes(fix_patch)
           Path('/tmp/increment-3e-serving-tree').write_text(expected_tree, encoding='ascii')
           PY
           git apply --check /tmp/increment-3e-serving.patch
           git apply /tmp/increment-3e-serving.patch
+          git apply --check /tmp/increment-3e-cycle-fix.patch
+          git apply /tmp/increment-3e-cycle-fix.patch
           rm -rf .github/increment-3e-serving-payload
+          rm -f .github/increment-3e-serving-cycle-fix.patch.b64
           rm -f .github/workflows/materialize-increment-3e-serving.yml
           python -m compileall -q newsroom scripts
           git diff --check
