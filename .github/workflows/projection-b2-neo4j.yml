@@ -171,9 +171,9 @@ jobs:
               if "test_projection_b3_neo4j_service"
               in case.attrib.get("classname", "")
           ]
-          if len(rebuild) < 6:
+          if len(rebuild) != 8:
               raise SystemExit(
-                  f"expected at least 6 B3 actual-service tests, found {len(rebuild)}"
+                  f"expected exactly 8 B3 actual-service tests, found {len(rebuild)}"
               )
           if any(case.find("skipped") is not None for case in rebuild):
               raise SystemExit("B3 actual-service rebuild tests were skipped")
@@ -186,6 +186,11 @@ jobs:
               "test_actual_service_active_read_resolves_only_authority_promoted_generation",
               "test_actual_service_active_generation_revalidates_after_incremental_delivery",
               "test_actual_service_promotion_rejects_graph_loss_after_validation",
+              "test_actual_service_graph_loss_and_process_restart_rebuild_from_authority",
+              "test_actual_service_rebuild_cleanup_cannot_cross_generation_namespace",
+              "test_actual_service_tombstone_does_not_resurrect_after_wipe_rebuild",
+              "test_actual_service_3e_projects_complete_lineage_and_recovers_graph_loss",
+              "test_actual_service_3e_replacement_generation_becomes_only_active_lineage",
           }
           executed_names = [case.attrib.get("name") for case in rebuild]
           for test_name in sorted(required_b3_tests):
