@@ -354,7 +354,7 @@ def test_core_test_shards_are_fixed_deterministic_and_complete(
     second = lane_module._core_test_shards(tmp_path)
 
     assert first == second
-    assert len(first) == lane_module._CORE_SHARD_COUNT == 4
+    assert len(first) == lane_module._CORE_SHARD_COUNT == 8
     assert all(first)
     flattened = tuple(item for shard in first for item in shard)
     assert len(flattened) == len(set(flattened))
@@ -486,7 +486,10 @@ def _junit_case(name: str) -> str:
 def test_core_shard_reports_merge_to_one_exact_private_report(
     tmp_path: Path,
 ) -> None:
-    reports = tuple(tmp_path / f"shard-{index}.xml" for index in range(4))
+    reports = tuple(
+        tmp_path / f"shard-{index}.xml"
+        for index in range(lane_module._CORE_SHARD_COUNT)
+    )
     for index, path in enumerate(reports):
         path.write_text(_junit_case(f"test_{index}"), encoding="utf-8")
     expected = lane_module.summarize_junit(
@@ -499,7 +502,8 @@ def test_core_shard_reports_merge_to_one_exact_private_report(
     )
 
     actual = lane_module.summarize_junit(tmp_path, (merged.name,))
-    assert actual.test_count == expected.test_count == 4
+    assert actual.test_count == expected.test_count
+    assert actual.test_count == lane_module._CORE_SHARD_COUNT
     assert actual.test_ids_digest == expected.test_ids_digest
     assert actual.duration_ms == expected.duration_ms
     assert stat.S_IMODE(merged.stat().st_mode) == 0o600
@@ -508,7 +512,10 @@ def test_core_shard_reports_merge_to_one_exact_private_report(
 def test_core_shard_merge_rejects_duplicate_test_identity(
     tmp_path: Path,
 ) -> None:
-    reports = tuple(tmp_path / f"shard-{index}.xml" for index in range(4))
+    reports = tuple(
+        tmp_path / f"shard-{index}.xml"
+        for index in range(lane_module._CORE_SHARD_COUNT)
+    )
     for path in reports:
         path.write_text(_junit_case("duplicate"), encoding="utf-8")
 
@@ -525,7 +532,10 @@ def test_parallel_core_runner_merges_all_shards_and_propagates_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     report = tmp_path / "pytest.xml"
-    shards = tuple((f"newsroom/tests/test_{index}.py",) for index in range(4))
+    shards = tuple(
+        (f"newsroom/tests/test_{index}.py",)
+        for index in range(lane_module._CORE_SHARD_COUNT)
+    )
     monkeypatch.setattr(lane_module, "_core_test_shards", lambda _root: shards)
 
     def fake_run(*, argv, root, log):
@@ -546,7 +556,10 @@ def test_parallel_core_runner_merges_all_shards_and_propagates_failure(
     assert lane_module._run_core_pytest_shards(
         root=tmp_path, report=report
     ) == 9
-    assert lane_module.summarize_junit(tmp_path, (report.name,)).test_count == 4
+    assert (
+        lane_module.summarize_junit(tmp_path, (report.name,)).test_count
+        == lane_module._CORE_SHARD_COUNT
+    )
     assert not tuple(tmp_path.glob("pytest-shard-*.xml"))
 
 
@@ -873,6 +886,99 @@ def test_finalizer_rejects_unexpected_command_spec_digest(
             route_path="route.json",
             lane_id="core",
             artifact_root="artifact",
+        )
+
+
+def test_finalizer_discards_interrupted_core_shard_reports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract(tmp_path)
+    route = _route()
+    artifact = tmp_path / "artifact-interrupted-shards"
+    run_path = artifact / "gates/core-deterministic/tests/command-run.json"
+    report = run_path.parent / "reports/pytest.xml"
+    report.parent.mkdir(parents=True)
+    partials = (
+        report.with_name("pytest-shard-00.xml"),
+        report.with_name(
+            f"pytest-shard-{lane_module._CORE_SHARD_COUNT - 1:02d}.xml"
+        ),
+    )
+    for index, path in enumerate(partials):
+        path.write_text(_junit_case(f"partial_{index}"), encoding="utf-8")
+    context = SimpleNamespace(runner_environment="github-hosted")
+    command = _run(
+        "core-deterministic",
+        "tests",
+        "BUDGET_EXCEEDED",
+    ).as_dict()
+    monkeypatch.setattr(
+        lane_module, "_context_route", lambda **_kwargs: (contract, context, route)
+    )
+    monkeypatch.setattr(lane_module, "_existing_artifact_root", lambda *_args: artifact)
+    monkeypatch.setattr(
+        lane_module, "_validate_route", lambda _contract, value: route
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_load_json",
+        lambda _root, value: route if Path(value).name == "route.json" else command,
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_layout",
+        lambda *_args: (("core-deterministic", "tests", run_path, report),),
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_expected_spec",
+        lambda **_kwargs: SimpleNamespace(digest=command["command_spec_digest"]),
+    )
+    monkeypatch.setattr(
+        lane_module,
+        "_evidence",
+        lambda **_kwargs: {
+            "schema_version": "newsroom.sdlc.evidence.v1",
+            "result": "BUDGET_EXCEEDED",
+        },
+    )
+
+    def create_envelope(**_kwargs):
+        assert not tuple(report.parent.glob("pytest-shard-*.xml"))
+        return SimpleNamespace(
+            envelope_identity="sha256:" + "6" * 64,
+            as_dict=lambda: {"schema_version": "test-envelope"},
+        )
+
+    monkeypatch.setattr(lane_module, "create_envelope", create_envelope)
+    monkeypatch.setattr(lane_module, "validate_envelope", lambda _value: None)
+    monkeypatch.setattr(lane_module, "artifact_name", lambda _context: "artifact")
+
+    output = lane_module.finalize_lane(
+        repo_root=tmp_path,
+        route_path="route.json",
+        lane_id="core",
+        artifact_root="artifact-interrupted-shards",
+    )
+
+    assert output.gate_results == (
+        ("core-deterministic", "tests", "BUDGET_EXCEEDED"),
+    )
+    assert all(not path.exists() for path in partials)
+
+
+def test_shard_report_cleanup_rejects_unexpected_identity(tmp_path: Path) -> None:
+    report = tmp_path / "pytest.xml"
+    unexpected = report.with_name(
+        f"pytest-shard-{lane_module._CORE_SHARD_COUNT:02d}.xml"
+    )
+    unexpected.write_text(_junit_case("unexpected"), encoding="utf-8")
+
+    with pytest.raises(WorkflowLaneError, match="shard_report_identity"):
+        lane_module._discard_incomplete_shard_reports(
+            report=report,
+            shard_count=lane_module._CORE_SHARD_COUNT,
         )
 
 

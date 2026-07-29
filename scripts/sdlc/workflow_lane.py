@@ -97,7 +97,7 @@ _SERVICE_CONFIGURATION = {
     "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
 }
 _CORE_TESTS = ("newsroom/tests",)
-_CORE_SHARD_COUNT = 4
+_CORE_SHARD_COUNT = 8
 _CACHE_KEY_ENV = "NEWSROOM_SDLC_CACHE_KEY"
 _CACHE_HIT_ENV = "NEWSROOM_SDLC_CACHE_HIT"
 _MAX_CACHE_KEY_CHARS = 512
@@ -524,6 +524,41 @@ def _report_summary(
     )
 
 
+def _discard_incomplete_shard_reports(
+    *,
+    report: Path,
+    shard_count: int,
+) -> None:
+    if (
+        isinstance(shard_count, bool)
+        or not isinstance(shard_count, int)
+        or shard_count <= 0
+    ):
+        raise WorkflowLaneError("shard_report_count")
+    expected = frozenset(
+        report.with_name(
+            f"{report.stem}-shard-{index:02d}{report.suffix}"
+        )
+        for index in range(shard_count)
+    )
+    candidates = tuple(
+        sorted(
+            report.parent.glob(
+                f"{report.stem}-shard-*{report.suffix}"
+            )
+        )
+    )
+    if any(path not in expected for path in candidates):
+        raise WorkflowLaneError("shard_report_identity")
+    for path in candidates:
+        if path.is_symlink() or not path.is_file():
+            raise WorkflowLaneError("shard_report_cleanup")
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise WorkflowLaneError("shard_report_cleanup") from exc
+
+
 def _evidence(
     *,
     repo_root: Path,
@@ -736,6 +771,11 @@ def finalize_lane(
     gate_results: list[tuple[str, str, str]] = []
     optional = _OPTIONAL_CORE_TEST_IDS if lane_id == "core" else ()
     prepared: list[tuple[Path, object]] = []
+    shard_count = (
+        _CORE_SHARD_COUNT
+        if lane_id == "core"
+        else _SERVICE_SHARD_COUNT
+    )
     for gate_id, phase, run_path, report in _layout(output, lane_id):
         try:
             command_run = _validate_command_run(_load_json(root, run_path))
@@ -755,6 +795,11 @@ def finalize_lane(
         if command_run["command_spec_digest"] != expected.digest:
             raise WorkflowLaneError("command_spec_digest")
         files.append(("command_run", run_path.relative_to(output).as_posix()))
+        if gate_id in {
+            "core-deterministic",
+            "service-neo4j",
+        }:
+            _discard_incomplete_shard_reports(report=report, shard_count=shard_count)
         summary = _report_summary(
             repo_root=root,
             artifact_root=output,
