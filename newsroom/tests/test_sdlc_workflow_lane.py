@@ -355,6 +355,8 @@ def test_core_test_shards_are_fixed_deterministic_and_complete(
 
     assert first == second
     assert len(first) == lane_module._CORE_SHARD_COUNT == 8
+    assert lane_module._CORE_WORKER_COUNT == 4
+    assert lane_module._CORE_WORKER_COUNT < lane_module._CORE_SHARD_COUNT
     assert all(first)
     flattened = tuple(item for shard in first for item in shard)
     assert len(flattened) == len(set(flattened))
@@ -387,16 +389,17 @@ def test_core_shard_command_is_server_owned_and_isolated(tmp_path: Path) -> None
         basetemp=basetemp,
     )
 
-    assert command[:7] == (
+    assert command[:8] == (
         sys.executable,
         "-m",
         "pytest",
         "-q",
+        "--assert=plain",
         "-p",
         "no:cacheprovider",
         "newsroom/tests/test_one.py",
     )
-    assert command[7] == "newsroom/tests/test_two.py"
+    assert command[8] == "newsroom/tests/test_two.py"
     assert command[-2:] == (
         f"--basetemp={basetemp}",
         f"--junitxml={report}",

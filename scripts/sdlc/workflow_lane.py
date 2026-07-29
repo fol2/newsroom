@@ -98,6 +98,7 @@ _SERVICE_CONFIGURATION = {
 }
 _CORE_TESTS = ("newsroom/tests",)
 _CORE_SHARD_COUNT = 8
+_CORE_WORKER_COUNT = 4
 _CACHE_KEY_ENV = "NEWSROOM_SDLC_CACHE_KEY"
 _CACHE_HIT_ENV = "NEWSROOM_SDLC_CACHE_HIT"
 _MAX_CACHE_KEY_CHARS = 512
@@ -923,6 +924,7 @@ def _core_shard_command(
         "-m",
         "pytest",
         "-q",
+        "--assert=plain",
         "-p",
         "no:cacheprovider",
         *test_files,
@@ -1120,7 +1122,7 @@ def _run_core_pytest_shards(*, root: Path, report: Path) -> int:
             )
             for index in range(_CORE_SHARD_COUNT)
         )
-        with ThreadPoolExecutor(max_workers=_CORE_SHARD_COUNT) as executor:
+        with ThreadPoolExecutor(max_workers=_CORE_WORKER_COUNT) as executor:
             futures = tuple(
                 executor.submit(
                     _run_pytest_shard,
