@@ -1,0 +1,39 @@
+name: Temporary Increment 4A source export
+
+on:
+  push:
+    branches:
+      - agent/increment-4a-extraction-authority
+
+permissions:
+  contents: read
+
+jobs:
+  export-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact branch head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Build source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${GITHUB_SHA}" > /tmp/NEWSROOM_SOURCE_HEAD
+          tar \
+            --exclude='./.git' \
+            --exclude='./.github/workflows/increment-4a-source-export-temp.yml' \
+            -czf /tmp/newsroom-source.tar.gz .
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-4a-source-${{ github.sha }}
+          path: |
+            /tmp/newsroom-source.tar.gz
+            /tmp/NEWSROOM_SOURCE_HEAD
+          if-no-files-found: error
+          retention-days: 1
