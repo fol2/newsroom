@@ -68,8 +68,9 @@ jobs:
           from xml.etree import ElementTree as ET
           import hashlib
           import json
+          import os
 
-          root = Path("$RUNNER_TEMP/increment-4a-core-timings")
+          root = Path(os.environ["RUNNER_TEMP"]) / "increment-4a-core-timings"
           report = root / "pytest.xml"
           document = ET.parse(report).getroot()
           cases = list(document.iter("testcase"))
