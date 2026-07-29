@@ -51,24 +51,28 @@ jobs:
           from pathlib import Path
 
           base = '15beb5e6d1aa0af9464bf89ca4d31cb1a05ed42d'
+          transport_parent = 'c4fa0f431d13d29749a58f9072dc1dc230e32f6b'
           base_tree = 'bc590d045cbe9c7e5b94097e94771e51bf95f4ea'
           expected_tree = 'fb3877b784b5de9f8ea8620b3676fa781c1b0548'
-          payload_path = Path('.github/increment-3e-kernel.patch.b64')
+          payload_dir = Path('.github/increment-3e-kernel-payload')
           workflow = '.github/workflows/materialize-increment-3e-kernel.yml'
 
-          if subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() != base:
-              raise SystemExit('Increment 3E transport parent differs')
+          if subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() != transport_parent:
+              raise SystemExit('Increment 3E repaired transport parent differs')
           if subprocess.check_output(['git', 'rev-parse', f'{base}^{{tree}}'], text=True).strip() != base_tree:
               raise SystemExit('Increment 3E base tree differs')
 
+          payload_paths = tuple(sorted(payload_dir.glob('part-*.txt')))
+          if len(payload_paths) != 5:
+              raise SystemExit(f'Increment 3E chunk count differs: {len(payload_paths)}')
           changed = tuple(sorted(subprocess.check_output(
               ['git', 'diff', '--name-only', f'{base}..HEAD', '--'], text=True
           ).splitlines()))
-          expected = tuple(sorted((str(payload_path), workflow)))
+          expected = tuple(sorted((*map(str, payload_paths), workflow)))
           if changed != expected:
-              raise SystemExit(f'Increment 3E transport inventory differs: {changed!r}')
+              raise SystemExit(f'Increment 3E repaired transport inventory differs: {changed!r}')
 
-          encoded = payload_path.read_text(encoding='ascii').strip()
+          encoded = ''.join(path.read_text(encoding='ascii').strip() for path in payload_paths)
           if len(encoded) != 19208:
               raise SystemExit('Increment 3E base64 size differs')
           compressed = base64.b64decode(encoded, validate=True)
@@ -86,7 +90,7 @@ jobs:
           PY
           git apply --check /tmp/increment-3e-kernel.patch
           git apply /tmp/increment-3e-kernel.patch
-          rm -f .github/increment-3e-kernel.patch.b64
+          rm -rf .github/increment-3e-kernel-payload
           rm -f .github/workflows/materialize-increment-3e-kernel.yml
           python -m compileall -q newsroom scripts
           git diff --check
@@ -117,7 +121,7 @@ jobs:
           git diff --cached --check
           test "$(git write-tree)" = "$(cat /tmp/increment-3e-expected-tree)"
           test -z "$(git diff --name-only)"
-          test ! -e .github/increment-3e-kernel.patch.b64
+          test ! -e .github/increment-3e-kernel-payload
           test ! -e .github/workflows/materialize-increment-3e-kernel.yml
           test ! -e .github/workflows/export-increment-3e-source.yml
           git config user.name 'github-actions[bot]'
