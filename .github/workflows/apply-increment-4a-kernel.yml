@@ -41,7 +41,22 @@ jobs:
           test -d .github/increment-4a-kernel
           test "$(git branch --show-current)" = "agent/increment-4a-extraction-run-authority"
 
-          cat .github/increment-4a-kernel/part-* > "$RUNNER_TEMP/increment-4a-kernel.patch.gz.b64"
+          cat \
+            .github/increment-4a-kernel/part-00-segments/seg-00 \
+            .github/increment-4a-kernel/part-00-segments/seg-01 \
+            .github/increment-4a-kernel/part-00-segments/seg-02 \
+            .github/increment-4a-kernel/part-00-segments/seg-03 \
+            .github/increment-4a-kernel/part-00-segments/seg-04 \
+            .github/increment-4a-kernel/part-00-segments/seg-05 \
+            .github/increment-4a-kernel/part-00-segments/seg-06 \
+            .github/increment-4a-kernel/part-00-segments/seg-07 \
+            .github/increment-4a-kernel/part-01 \
+            .github/increment-4a-kernel/part-02 \
+            .github/increment-4a-kernel/part-03 \
+            .github/increment-4a-kernel/part-04 \
+            .github/increment-4a-kernel/part-05 \
+            .github/increment-4a-kernel/part-06 \
+            > "$RUNNER_TEMP/increment-4a-kernel.patch.gz.b64"
           test "$(wc -c < "$RUNNER_TEMP/increment-4a-kernel.patch.gz.b64")" -eq 55188
           printf '%s  %s\n' \
             '5cbabc48cea736cdae9edd7cdddb35c4aa3969f26e8df23ac403685507f03f84' \
@@ -69,6 +84,7 @@ jobs:
           find . -type d -name __pycache__ -prune -exec rm -rf {} +
           python -m pip install --disable-pip-version-check --quiet 'pytest==9.0.2'
           python -m pytest -q newsroom/tests/test_extraction_4a_authority.py -p no:cacheprovider
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
           test -z "$(find . -type d -name __pycache__ -print -quit)"
           test ! -e .github/workflows/apply-increment-4a-kernel.yml
