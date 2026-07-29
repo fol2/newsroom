@@ -29,6 +29,27 @@ jobs:
 
       - name: Apply measured corrections and refresh lock
         run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/increment-3e-persistent-core-apply.py')
+          text = path.read_text(encoding='utf-8')
+          replacements = (
+              (
+                  "    '''def test_core_test_inventory_is_sorted_complete_and_rejects_symlinks(",
+                  "    r'''def test_core_test_inventory_is_sorted_complete_and_rejects_symlinks(",
+              ),
+              (
+                  "    '''def test_persistent_core_runner_invokes_one_session_and_propagates_failure(",
+                  "    r'''def test_persistent_core_runner_invokes_one_session_and_propagates_failure(",
+              ),
+          )
+          for old, new in replacements:
+              if text.count(old) != 1:
+                  raise SystemExit(f'unexpected apply-script string marker: {old!r}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
           uv run python .github/increment-3e-persistent-core-apply.py
           uv lock
           uv sync --dev --locked
