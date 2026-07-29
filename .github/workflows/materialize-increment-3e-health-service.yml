@@ -1,4 +1,4 @@
-name: Materialize Increment 3E health and lineage hardening
+name: Materialize Increment 3E final hardening without workflow mutation
 
 on:
   pull_request:
@@ -34,7 +34,7 @@ jobs:
           cache-suffix: newsroom-py312
           prune-cache: false
           cache-python: false
-      - name: Verify and apply exact health and hardening patches
+      - name: Verify and apply exact complete Increment 3E product
         shell: bash
         run: |
           set -euo pipefail
@@ -47,23 +47,30 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          parent = '04135a922ec4218dcad877033e2d38892f2c00d8'
-          parent_tree = '56a663442afcc0fa0ffc46f326fe492e9a917096'
-          expected_tree = '876745cc708516fe8e43d0ecaf6af6ccc30d7685'
+          transport_parent = 'baa2e2c0d9f8f904ff662a7b9b24545a6e3feb8f'
+          transport_parent_tree = 'dff90f3dee703e8ff69b1090fd030945953e1d62'
+          product_parent = '04135a922ec4218dcad877033e2d38892f2c00d8'
+          product_parent_tree = '56a663442afcc0fa0ffc46f326fe492e9a917096'
+          intermediate_tree = '876745cc708516fe8e43d0ecaf6af6ccc30d7685'
+          final_tree = 'bd0ba7f234a74c6f2e5546f98901495995836f1d'
+          nonworkflow_tree = 'cbd670cb9908d01b4a5f55306ef34f6d02ee0691'
           payload_dir = Path('.github/increment-3e-health-service-payload')
           hardening_path = Path('.github/increment-3e-post-health-hardening.patch.b64')
+          final_hardening_path = Path('.github/increment-3e-final-hardening.patch.b64')
           workflow = '.github/workflows/materialize-increment-3e-health-service.yml'
 
-          if subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() != parent:
-              raise SystemExit('Increment 3E hardening transport parent differs')
-          if subprocess.check_output(['git', 'rev-parse', f'{parent}^{{tree}}'], text=True).strip() != parent_tree:
-              raise SystemExit('Increment 3E hardening parent tree differs')
+          if subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() != transport_parent:
+              raise SystemExit('Increment 3E final transport parent differs')
+          if subprocess.check_output(['git', 'rev-parse', f'{transport_parent}^{{tree}}'], text=True).strip() != transport_parent_tree:
+              raise SystemExit('Increment 3E final transport parent tree differs')
+          if subprocess.check_output(['git', 'rev-parse', f'{product_parent}^{{tree}}'], text=True).strip() != product_parent_tree:
+              raise SystemExit('Increment 3E product parent tree differs')
           changed = tuple(sorted(subprocess.check_output(
-              ['git', 'diff', '--name-only', f'{parent}..HEAD', '--'], text=True
+              ['git', 'diff', '--name-only', f'{transport_parent}..HEAD', '--'], text=True
           ).splitlines()))
-          expected_changes = tuple(sorted((str(hardening_path), workflow)))
+          expected_changes = tuple(sorted((str(final_hardening_path), workflow)))
           if changed != expected_changes:
-              raise SystemExit(f'Increment 3E hardening transport inventory differs: {changed!r}')
+              raise SystemExit(f'Increment 3E final transport inventory differs: {changed!r}')
 
           payload_paths = tuple(sorted(str(path) for path in payload_dir.glob('part-*.txt')))
           if len(payload_paths) != 8:
@@ -89,7 +96,20 @@ jobs:
           if len(hardening_patch) != 27739 or hashlib.sha256(hardening_patch).hexdigest() != 'cc31eb4a6ef897f39d7ed6f39b62116909d0a324d5e08b4a727ba335a53d8d0d':
               raise SystemExit('Increment 3E hardening patch differs')
           Path('/tmp/increment-3e-hardening.patch').write_bytes(hardening_patch)
-          Path('/tmp/increment-3e-final-tree').write_text(expected_tree, encoding='ascii')
+
+          final_encoded = final_hardening_path.read_text(encoding='ascii').strip()
+          if len(final_encoded) != 12828:
+              raise SystemExit('Increment 3E final hardening base64 size differs')
+          final_compressed = base64.b64decode(final_encoded, validate=True)
+          if len(final_compressed) != 9621 or hashlib.sha256(final_compressed).hexdigest() != '5a899bf25ebaa02b4e183306f02a82f4cfdad2c8f12c9417561690db7ef208ef':
+              raise SystemExit('Increment 3E final hardening compressed payload differs')
+          final_patch = gzip.decompress(final_compressed)
+          if len(final_patch) != 39852 or hashlib.sha256(final_patch).hexdigest() != 'f81fb1a22fb428e4ffc6953123bda01012bc3ca399b94f5db27fe41d856b5e8e':
+              raise SystemExit('Increment 3E final hardening patch differs')
+          Path('/tmp/increment-3e-final-hardening.patch').write_bytes(final_patch)
+          Path('/tmp/increment-3e-intermediate-tree').write_text(intermediate_tree, encoding='ascii')
+          Path('/tmp/increment-3e-final-tree').write_text(final_tree, encoding='ascii')
+          Path('/tmp/increment-3e-nonworkflow-tree').write_text(nonworkflow_tree, encoding='ascii')
           PY
           git apply --check /tmp/increment-3e-health-service.patch
           git apply /tmp/increment-3e-health-service.patch
@@ -97,9 +117,18 @@ jobs:
           git apply /tmp/increment-3e-hardening.patch
           rm -rf .github/increment-3e-health-service-payload
           rm -f .github/increment-3e-post-health-hardening.patch.b64
+          rm -f .github/increment-3e-final-hardening.patch.b64
           rm -f .github/workflows/materialize-increment-3e-health-service.yml
+          git add -A
+          test "$(git write-tree)" = "$(cat /tmp/increment-3e-intermediate-tree)"
+          git reset
+          git apply --check /tmp/increment-3e-final-hardening.patch
+          git apply /tmp/increment-3e-final-hardening.patch
           python -m compileall -q newsroom scripts
           git diff --check
+          git add -A
+          test "$(git write-tree)" = "$(cat /tmp/increment-3e-final-tree)"
+          git reset
       - name: Install locked environment
         shell: bash
         run: |
@@ -112,6 +141,7 @@ jobs:
           set -euo pipefail
           uv run --no-sync python -m pytest -q \
             newsroom/tests/test_discovery_projection_3e_*.py \
+            newsroom/tests/test_projection_b2_contracts.py \
             newsroom/tests/test_sdlc_classifier.py \
             newsroom/tests/test_sdlc_workflow_lane.py \
             newsroom/tests/test_integrated_c1_sdlc_contract.py
@@ -120,15 +150,16 @@ jobs:
             --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
             --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
             --fail-on-regression
-      - name: Commit verified health and lineage hardening
+      - name: Commit verified non-workflow Increment 3E product
         shell: bash
         run: |
           set -euo pipefail
+          git show 65ba31c403c84b9fbe82243912fd57612c097735:.github/workflows/projection-b2-neo4j.yml > .github/workflows/projection-b2-neo4j.yml
           git add -A
           git diff --cached --check
-          test "$(git write-tree)" = "$(cat /tmp/increment-3e-final-tree)"
+          test "$(git write-tree)" = "$(cat /tmp/increment-3e-nonworkflow-tree)"
           test -z "$(git diff --name-only)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'feat(projection): add 3E health, service, and lineage hardening'
+          git commit -m 'feat(projection): complete Increment 3E product except permanent workflow'
           git push origin HEAD:agent/increment-3e-discovery-projection-health
