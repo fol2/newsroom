@@ -28,7 +28,9 @@ from .types import TrustScope, UtcTimestamp
 from newsroom.projection.mapping import (
     ProjectionIdentitySource,
     StructuralIdentityContext,
+    canonical_identity_reference,
     canonical_node_id,
+    canonical_node_identity_source,
 )
 from newsroom.projection.models import (
     DeliveryRecordView,
@@ -866,15 +868,9 @@ def _build_structural_batch(
         node_by_alias[binding.alias] = StructuralNode(
             canonical_id=canonical_id,
             node_type=binding.node_type,
-            identity_source=binding.identity_source.value,
+            identity_source=canonical_node_identity_source(binding),
             identity_reference_digest=digest_canonical(
-                {
-                    "identity_contract": "newsroom-neo4j-node-reference-v1",
-                    "canonical_id": canonical_id,
-                    "node_type": binding.node_type.value,
-                    "identity_source": binding.identity_source.value,
-                    "payload_field": binding.payload_field,
-                }
+                canonical_identity_reference(binding, context)
             ),
             first_ledger_seq=event.ledger_seq,
             first_source_event_id=event.event_id,

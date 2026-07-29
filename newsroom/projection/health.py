@@ -250,7 +250,7 @@ class ProjectionHealthInput:
     family_id: str
     generation_id: ProjectionGenerationId | None
     generation_state: ProjectionGenerationState | None
-    service_available: bool
+    service_available: bool | None
     query_valid: bool | None
     contracts_current: bool | None
     reconciliation_valid: bool | None
@@ -296,10 +296,11 @@ class ProjectionHealthInput:
                 raise DiscoveryHealthContractError(
                     f"{field_name} must be a non-negative integer"
                 )
-        if self.contiguous_ledger_seq > self.authority_watermark_ledger_seq:
-            raise DiscoveryHealthContractError(
-                "projection checkpoint cannot exceed authority watermark"
-            )
+        # Projection-authority events share the same immutable ledger as source
+        # authority.  A contiguous projection checkpoint may therefore advance
+        # beyond the latest non-projection authority event while recording its
+        # own delivery, validation and promotion evidence.  Lag is the only
+        # invalid health direction: the assessor compares ``<`` below.
         if not isinstance(self.evidence, tuple):
             raise DiscoveryHealthContractError(
                 "projection health evidence must be a tuple"
@@ -572,7 +573,7 @@ def assess_projection_health(
     if projection.generation_id is None:
         state = DiscoveryHealthState.UNKNOWN
         reason = "PROJECTION_GENERATION_NOT_ESTABLISHED"
-    elif not projection.service_available:
+    elif projection.service_available is False:
         state = DiscoveryHealthState.UNAVAILABLE
         reason = "PROJECTION_SERVICE_UNAVAILABLE"
     elif projection.contracts_current is False:

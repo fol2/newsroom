@@ -3387,6 +3387,27 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                         (str(generation_id),),
                     ).fetchone()[0]
                 )
+            mapping = self._projection_contracts.mappings.resolve_digest(
+                definition.mapping_contract_digest
+            )
+            event_types = tuple(
+                sorted({item.event_type for item in mapping.mappings})
+            )
+            if event_types:
+                placeholders = ",".join("?" for _item in event_types)
+                mapped_watermark = int(
+                    self._connection.execute(
+                        "SELECT COALESCE(MAX(ledger_seq),0) FROM ledger_events "
+                        f"WHERE event_type IN ({placeholders})",
+                        event_types,
+                    ).fetchone()[0]
+                )
+            else:
+                mapped_watermark = 0
+            # A generation may have consumed later explicitly optional events.
+            # Those events must not make this family stale, while its retained
+            # checkpoint must never appear to exceed the reported watermark.
+            authority_watermark = max(checkpoint, mapped_watermark)
             return ProjectionStatusMetadata(
                 family_id=family_id,
                 family_kind=definition.family_kind,
@@ -3400,6 +3421,7 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 dead_letter_count=dead_letters,
                 trust_scope=TrustScope.ADMITTED,
                 serving_time=self._clock(),
+                authority_watermark_ledger_seq=authority_watermark,
             )
 
     def projection_generation(

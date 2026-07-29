@@ -108,67 +108,72 @@ class MemoryNeo4jAdapter:
         limit: int,
     ) -> Neo4jStructuralRead:
         selected = set(canonical_ids)
-        nodes: dict[str, StructuralGraphNodeView] = {}
-        relations: list[StructuralGraphRelationView] = []
-        for (stored_generation, sequence), batch in sorted(
-            self.deliveries.items(), key=lambda item: item[0]
-        ):
-            if stored_generation != generation_id or sequence > maximum_ledger_seq:
-                continue
-            for relation in batch.relations:
-                if (
-                    relation.source_canonical_id not in selected
-                    and relation.target_canonical_id not in selected
-                ):
-                    continue
-                relations.append(
-                    StructuralGraphRelationView(
-                        relation_key=relation.relation_key,
-                        relation_type=relation.relation_type,
-                        source_canonical_id=relation.source_canonical_id,
-                        target_canonical_id=relation.target_canonical_id,
-                        ledger_seq=relation.ledger_seq,
-                        source_event_id=relation.source_event_id,
-                        source_event_type=relation.source_event_type,
-                        source_event_digest=relation.source_event_digest,
-                        aggregate_type=relation.aggregate_type,
-                        aggregate_id=relation.aggregate_id,
-                        aggregate_version=relation.aggregate_version,
-                        payload_id=relation.payload_id,
-                        payload_digest=relation.payload_digest,
-                        object_admission_id=relation.object_admission_id,
-                        principal_id=relation.principal_id,
-                        trust_scope=relation.trust_scope,
-                        security_scope=relation.security_scope,
-                        retention_scope=relation.retention_scope,
-                        recorded_at=relation.recorded_at,
-                    )
-                )
-                selected.update(
-                    {
-                        relation.source_canonical_id,
-                        relation.target_canonical_id,
-                    }
-                )
-            for node in batch.nodes:
-                if node.canonical_id in selected:
-                    nodes[node.canonical_id] = StructuralGraphNodeView(
-                        canonical_id=node.canonical_id,
-                        node_type=node.node_type,
-                        identity_source=node.identity_source,
-                        identity_reference_digest=(
-                            node.identity_reference_digest
-                        ),
-                        first_ledger_seq=node.first_ledger_seq,
-                        first_source_event_id=node.first_source_event_id,
-                        first_source_event_digest=(
-                            node.first_source_event_digest
-                        ),
-                    )
-        return Neo4jStructuralRead(
-            nodes=tuple(nodes[key] for key in sorted(nodes))[:limit],
-            relations=tuple(relations[:limit]),
+        batches = tuple(
+            batch
+            for (stored_generation, sequence), batch in sorted(
+                self.deliveries.items(), key=lambda item: item[0]
+            )
+            if stored_generation == generation_id
+            and sequence <= maximum_ledger_seq
         )
+        stored_nodes = {
+            node.canonical_id: node
+            for batch in batches
+            for node in batch.nodes
+        }
+        selected_relations = tuple(
+            relation
+            for batch in batches
+            for relation in batch.relations
+            if relation.source_canonical_id in selected
+            or relation.target_canonical_id in selected
+        )[:limit]
+        selected_node_ids = selected | {
+            endpoint
+            for relation in selected_relations
+            for endpoint in (
+                relation.source_canonical_id,
+                relation.target_canonical_id,
+            )
+        }
+        nodes = tuple(
+            StructuralGraphNodeView(
+                canonical_id=node.canonical_id,
+                node_type=node.node_type,
+                identity_source=node.identity_source,
+                identity_reference_digest=node.identity_reference_digest,
+                first_ledger_seq=node.first_ledger_seq,
+                first_source_event_id=node.first_source_event_id,
+                first_source_event_digest=node.first_source_event_digest,
+            )
+            for canonical_id in sorted(selected_node_ids)
+            if (node := stored_nodes.get(canonical_id)) is not None
+        )[:limit]
+        relations = tuple(
+            StructuralGraphRelationView(
+                relation_key=relation.relation_key,
+                relation_type=relation.relation_type,
+                source_canonical_id=relation.source_canonical_id,
+                target_canonical_id=relation.target_canonical_id,
+                ledger_seq=relation.ledger_seq,
+                source_event_id=relation.source_event_id,
+                source_event_type=relation.source_event_type,
+                source_event_digest=relation.source_event_digest,
+                aggregate_type=relation.aggregate_type,
+                aggregate_id=relation.aggregate_id,
+                aggregate_version=relation.aggregate_version,
+                payload_id=relation.payload_id,
+                payload_digest=relation.payload_digest,
+                object_admission_id=relation.object_admission_id,
+                principal_id=relation.principal_id,
+                trust_scope=relation.trust_scope,
+                security_scope=relation.security_scope,
+                retention_scope=relation.retention_scope,
+                recorded_at=relation.recorded_at,
+            )
+            for relation in selected_relations
+        )
+        return Neo4jStructuralRead(nodes=nodes, relations=relations)
 
     def reconcile_generation(
         self,

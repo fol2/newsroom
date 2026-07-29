@@ -174,6 +174,42 @@ def test_complete_increment3_lineage_projects_through_existing_authority(
             ProjectionRelationType.OPENED_LEAD,
         } <= relation_types
 
+        # The governed lifecycle identity is independent of whether an ID was
+        # carried as the aggregate identity in its own event or as a typed
+        # payload reference in a later event.  One fixture entity must remain
+        # one graph node across the whole lineage.
+        canonical_ids_by_type = {
+            node_type: {
+                node.canonical_id
+                for batch in batches
+                for node in batch.nodes
+                if node.node_type is node_type
+            }
+            for node_type in node_types
+        }
+        for node_type in {
+            ProjectionNodeType.SOURCE_DEFINITION,
+            ProjectionNodeType.SOURCE_DEFINITION_VERSION,
+            ProjectionNodeType.SOURCE_ITEM,
+            ProjectionNodeType.SOURCE_REVISION,
+            ProjectionNodeType.SOURCE_REPRESENTATION,
+            ProjectionNodeType.DISCOVERY_OCCURRENCE,
+            ProjectionNodeType.CHECK_REQUEST,
+            ProjectionNodeType.CHECK_ATTEMPT,
+            ProjectionNodeType.CHECK_OUTCOME,
+            ProjectionNodeType.OBSERVABLE_TRANSITION,
+            ProjectionNodeType.SIGNAL,
+            ProjectionNodeType.GATE_DECISION,
+            ProjectionNodeType.LEAD,
+        }:
+            assert len(canonical_ids_by_type[node_type]) == 1
+        assert all(
+            node.identity_source == "GOVERNED_ID"
+            for batch in batches
+            for node in batch.nodes
+            if node.node_type is not ProjectionNodeType.LEDGER_EVENT
+        )
+
         status = system.projections.status(
             DISCOVERY_LINEAGE_FAMILY_ID,
             proof=proof(),

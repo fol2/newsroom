@@ -15,6 +15,13 @@ from newsroom.projection import (
     native_ontology_v1,
     native_structural_mapping_v1,
 )
+from newsroom.projection.mapping import (
+    StructuralIdentityContext,
+    StructuralNodeBinding,
+    canonical_identity_reference,
+    canonical_node_id,
+    canonical_node_identity_source,
+)
 
 
 EXPECTED_EVENTS = frozenset(
@@ -157,3 +164,36 @@ def test_registry_composes_discovery_family_without_replacing_existing_families(
     assert registry.ontologies.resolve(DISCOVERY_LINEAGE_ONTOLOGY_ID).contract_digest == (
         family.ontology_contract_digest
     )
+
+
+def test_governed_identity_converges_aggregate_and_payload_references() -> None:
+    aggregate = StructuralNodeBinding(
+        "signal",
+        ProjectionNodeType.SIGNAL,
+        ProjectionIdentitySource.AGGREGATE,
+        identity_namespace="signal",
+    )
+    reference = StructuralNodeBinding(
+        "signal",
+        ProjectionNodeType.SIGNAL,
+        ProjectionIdentitySource.PAYLOAD_FIELD,
+        "signal_id",
+        identity_namespace="signal",
+    )
+    context = StructuralIdentityContext(
+        aggregate_type="discovery_signal",
+        aggregate_id="00000000-0000-4000-8000-000000007009",
+        aggregate_version=1,
+        event_id="00000000-0000-4000-8000-000000009001",
+        payload_id="00000000-0000-4000-8000-000000009002",
+        payload={"signal_id": "00000000-0000-4000-8000-000000007009"},
+    )
+
+    assert canonical_node_id(aggregate, context) == canonical_node_id(
+        reference, context
+    )
+    assert canonical_identity_reference(
+        aggregate, context
+    ) == canonical_identity_reference(reference, context)
+    assert canonical_node_identity_source(aggregate) == "GOVERNED_ID"
+    assert canonical_node_identity_source(reference) == "GOVERNED_ID"

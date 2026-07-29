@@ -65,6 +65,11 @@ def _node(
         node_type=node_type,
         identity_source=identity_source,
         payload_field=payload_field,
+        identity_namespace=(
+            None
+            if node_type is ProjectionNodeType.LEDGER_EVENT
+            else node_type.value.lower()
+        ),
     )
 
 

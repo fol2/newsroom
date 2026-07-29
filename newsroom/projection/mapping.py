@@ -26,6 +26,7 @@ class StructuralNodeBinding:
     node_type: ProjectionNodeType
     identity_source: ProjectionIdentitySource
     payload_field: str | None = None
+    identity_namespace: str | None = None
 
     def __post_init__(self) -> None:
         require_token(self.alias, field="projection_node_alias")
@@ -39,14 +40,32 @@ class StructuralNodeBinding:
             raise ProjectionContractError(
                 "payload_field applies only to PAYLOAD_FIELD identities"
             )
+        if self.identity_namespace is not None:
+            require_token(
+                self.identity_namespace,
+                field="projection_identity_namespace",
+            )
+            if self.identity_source not in {
+                ProjectionIdentitySource.AGGREGATE,
+                ProjectionIdentitySource.PAYLOAD_FIELD,
+            }:
+                raise ProjectionContractError(
+                    "governed identity namespaces require aggregate or payload-field identity"
+                )
 
     def canonical_value(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "alias": self.alias,
             "node_type": self.node_type.value,
             "identity_source": self.identity_source.value,
             "payload_field": self.payload_field,
         }
+        # Keep pre-3E contract digests byte-for-byte stable.  The optional
+        # namespace is emitted only for mappings that deliberately opt into
+        # governed lifecycle identity convergence.
+        if self.identity_namespace is not None:
+            value["identity_namespace"] = self.identity_namespace
+        return value
 
 
 def _require_identity_text(value: str, *, field: str) -> str:
@@ -86,14 +105,37 @@ class StructuralIdentityContext:
             raise ProjectionContractError("projection identity payload must be a mapping")
 
 
-def canonical_node_id(
+def canonical_identity_reference(
     binding: StructuralNodeBinding,
     context: StructuralIdentityContext,
-) -> str:
+) -> dict[str, object]:
     if not isinstance(binding, StructuralNodeBinding):
-        raise ProjectionContractError("canonical node ID requires typed binding")
+        raise ProjectionContractError(
+            "canonical node identity requires typed binding"
+        )
     if not isinstance(context, StructuralIdentityContext):
-        raise ProjectionContractError("canonical node ID requires typed context")
+        raise ProjectionContractError(
+            "canonical node identity requires typed context"
+        )
+    if binding.identity_namespace is not None:
+        if binding.identity_source is ProjectionIdentitySource.AGGREGATE:
+            value: object = context.aggregate_id
+        else:
+            field = binding.payload_field or ""
+            if field not in context.payload:
+                raise ProjectionContractError(
+                    f"projection identity payload field is absent: {field}"
+                )
+            value = context.payload[field]
+            if not isinstance(value, (str, int)) or isinstance(value, bool):
+                raise ProjectionContractError(
+                    "projection identity payload field must be string or integer"
+                )
+        return governed_identity_reference(
+            binding.node_type,
+            binding.identity_namespace,
+            value,
+        )
     if binding.identity_source is ProjectionIdentitySource.AGGREGATE:
         identity: object = {
             "aggregate_type": context.aggregate_type,
@@ -121,14 +163,68 @@ def canonical_node_id(
                 "projection identity payload field must be string or integer"
             )
         identity = {"payload_field": field, "value": value}
+    return {
+        "identity_contract": "newsroom-projection-id-v1",
+        "node_type": binding.node_type.value,
+        "identity_source": binding.identity_source.value,
+        "identity": identity,
+    }
+
+
+def canonical_node_identity_source(binding: StructuralNodeBinding) -> str:
+    if not isinstance(binding, StructuralNodeBinding):
+        raise ProjectionContractError(
+            "canonical node identity source requires typed binding"
+        )
+    if binding.identity_namespace is not None:
+        return "GOVERNED_ID"
+    return binding.identity_source.value
+
+
+def governed_identity_reference(
+    node_type: ProjectionNodeType,
+    identity_namespace: str,
+    value: str | int,
+) -> dict[str, object]:
+    if not isinstance(node_type, ProjectionNodeType):
+        raise ProjectionContractError(
+            "governed node identity requires a typed node type"
+        )
+    require_token(
+        identity_namespace,
+        field="projection_identity_namespace",
+    )
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        raise ProjectionContractError(
+            "governed node identity value must be string or integer"
+        )
+    if isinstance(value, str):
+        _require_identity_text(value, field="projection_governed_identity")
+    return {
+        "identity_contract": "newsroom-projection-governed-id-v1",
+        "node_type": node_type.value,
+        "identity_namespace": identity_namespace,
+        "value": value,
+    }
+
+
+def canonical_governed_node_id(
+    node_type: ProjectionNodeType,
+    identity_namespace: str,
+    value: str | int,
+) -> str:
     digest = digest_canonical(
-        {
-            "identity_contract": "newsroom-projection-id-v1",
-            "node_type": binding.node_type.value,
-            "identity_source": binding.identity_source.value,
-            "identity": identity,
-        }
+        governed_identity_reference(node_type, identity_namespace, value)
     ).removeprefix("sha256:")
+    return f"npid:v1:{node_type.value.lower()}:{digest}"
+
+
+def canonical_node_id(
+    binding: StructuralNodeBinding,
+    context: StructuralIdentityContext,
+) -> str:
+    reference = canonical_identity_reference(binding, context)
+    digest = digest_canonical(reference).removeprefix("sha256:")
     return f"npid:v1:{binding.node_type.value.lower()}:{digest}"
 
 

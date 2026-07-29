@@ -84,6 +84,15 @@ from .traceability import (
 
 def __getattr__(name: str):
     if name in {
+        "DiscoveryLineageProjectionFacade",
+        "DiscoveryLineageReadError",
+        "DiscoveryLineageReadRequest",
+        "DiscoveryLineageSubject",
+    }:
+        from . import discovery_lineage_reads as _discovery_lineage_reads
+
+        return getattr(_discovery_lineage_reads, name)
+    if name in {
         "CompleteNeo4jProjector",
         "CompleteProjectionAuthoritySystem",
         "open_complete_projection_authority_system",
@@ -103,6 +112,10 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "DiscoveryLineageSubject",
+    "DiscoveryLineageReadRequest",
+    "DiscoveryLineageReadError",
+    "DiscoveryLineageProjectionFacade",
     "AdmittedRelationProjection",
     "CompleteDeliveryRequest",
     "CompleteDerivativeType",
