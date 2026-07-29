@@ -1,0 +1,81 @@
+diff --git a/scripts/sdlc/workflow_lane.py b/scripts/sdlc/workflow_lane.py
+--- a/scripts/sdlc/workflow_lane.py
++++ b/scripts/sdlc/workflow_lane.py
+@@ -99,7 +99,7 @@ _SERVICE_CONFIGURATION = {
+     "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
+ }
+ _CORE_TESTS = ("newsroom/tests",)
+-_CORE_SHARD_COUNT = 8
++_CORE_SHARD_COUNT = 16
+ _CORE_WORKER_COUNT = 4
+ _CACHE_KEY_ENV = "NEWSROOM_SDLC_CACHE_KEY"
+ _CACHE_HIT_ENV = "NEWSROOM_SDLC_CACHE_HIT"
+@@ -406,6 +406,7 @@ def _expected_spec(
+             str(route["head_sha"]),
+         )
+     elif key == ("core-deterministic", "tests"):
++        environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+         report = (
+             artifact_root
+             / "gates"
+diff --git a/newsroom/tests/test_sdlc_workflow_lane.py b/newsroom/tests/test_sdlc_workflow_lane.py
+--- a/newsroom/tests/test_sdlc_workflow_lane.py
++++ b/newsroom/tests/test_sdlc_workflow_lane.py
+@@ -151,17 +151,22 @@ def test_core_lane_passes_one_deadline_to_both_gates(
+     artifact.mkdir()
+     deadline = LaneDeadline(200, 55_000)
+     observed: list[LaneDeadline] = []
++    specifications: list[dict[str, object]] = []
+ 
+     monkeypatch.setattr(lane_module, "start_lane_deadline", lambda *_args: deadline)
+-    monkeypatch.setattr(
+-        lane_module,
+-        "_spec",
+-        lambda **kwargs: SimpleNamespace(
+-            gate_id=kwargs["gate_id"], phase=kwargs["phase"]
+-        ),
+-    )
++
++    def capture_spec(**kwargs):
++        specifications.append(kwargs)
++        return SimpleNamespace(
++            gate_id=kwargs["gate_id"], phase=kwargs["phase"]
++        )
++
++    monkeypatch.setattr(lane_module, "_spec", capture_spec)
+ 
+     def execute(*, contract, spec, deadline):
+         observed.append(deadline)
+@@ -180,6 +185,16 @@ def test_core_lane_passes_one_deadline_to_both_gates(
+         ("core-deterministic", "tests"),
+     ]
+     assert observed == [deadline, deadline]
++    source_spec = next(
++        item for item in specifications if item["gate_id"] == "source-integrity"
++    )
++    core_spec = next(
++        item for item in specifications if item["gate_id"] == "core-deterministic"
++    )
++    assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD" not in source_spec["static_env"]
++    assert (
++        core_spec["static_env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
++    )
+@@ -347,8 +362,9 @@ def test_core_test_shards_are_fixed_deterministic_and_complete(
+     test_root = tmp_path / "newsroom/tests"
+     test_root.mkdir(parents=True)
+     expected: list[str] = []
+-    for index, size in enumerate((900, 800, 700, 600, 500, 400, 300, 200)):
++    for index in range(lane_module._CORE_SHARD_COUNT):
++        size = (lane_module._CORE_SHARD_COUNT - index) * 100
+         path = test_root / f"test_{index}.py"
+         path.write_text("#" * size + "\n", encoding="utf-8")
+         expected.append(path.relative_to(tmp_path).as_posix())
+@@ -357,7 +373,7 @@ def test_core_test_shards_are_fixed_deterministic_and_complete(
+     second = lane_module._core_test_shards(tmp_path)
+ 
+     assert first == second
+-    assert len(first) == lane_module._CORE_SHARD_COUNT == 8
++    assert len(first) == lane_module._CORE_SHARD_COUNT == 16
+     assert lane_module._CORE_WORKER_COUNT == 4
+     assert lane_module._CORE_WORKER_COUNT < lane_module._CORE_SHARD_COUNT
+     assert all(first)
