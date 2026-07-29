@@ -51,39 +51,39 @@ jobs:
           from pathlib import Path
 
           base = '15beb5e6d1aa0af9464bf89ca4d31cb1a05ed42d'
-          transport_parent = 'c4fa0f431d13d29749a58f9072dc1dc230e32f6b'
+          transport_parent = 'f6cd0b3a4a17ea5d26aa78f2886444c18c2393c3'
           base_tree = 'bc590d045cbe9c7e5b94097e94771e51bf95f4ea'
-          expected_tree = 'fb3877b784b5de9f8ea8620b3676fa781c1b0548'
+          expected_tree = 'd20606c0c294bbfccbe2d7ff595475c1ea102a9c'
           payload_dir = Path('.github/increment-3e-kernel-payload')
           workflow = '.github/workflows/materialize-increment-3e-kernel.yml'
 
           if subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() != transport_parent:
-              raise SystemExit('Increment 3E repaired transport parent differs')
+              raise SystemExit('Increment 3E corrected transport parent differs')
           if subprocess.check_output(['git', 'rev-parse', f'{base}^{{tree}}'], text=True).strip() != base_tree:
               raise SystemExit('Increment 3E base tree differs')
 
           payload_paths = tuple(sorted(payload_dir.glob('part-*.txt')))
-          if len(payload_paths) != 5:
+          if len(payload_paths) != 10:
               raise SystemExit(f'Increment 3E chunk count differs: {len(payload_paths)}')
           changed = tuple(sorted(subprocess.check_output(
               ['git', 'diff', '--name-only', f'{base}..HEAD', '--'], text=True
           ).splitlines()))
           expected = tuple(sorted((*map(str, payload_paths), workflow)))
           if changed != expected:
-              raise SystemExit(f'Increment 3E repaired transport inventory differs: {changed!r}')
+              raise SystemExit(f'Increment 3E corrected transport inventory differs: {changed!r}')
 
           encoded = ''.join(path.read_text(encoding='ascii').strip() for path in payload_paths)
-          if len(encoded) != 19208:
+          if len(encoded) != 19772:
               raise SystemExit('Increment 3E base64 size differs')
           compressed = base64.b64decode(encoded, validate=True)
-          if len(compressed) != 14404:
+          if len(compressed) != 14827:
               raise SystemExit('Increment 3E gzip size differs')
-          if hashlib.sha256(compressed).hexdigest() != 'bcdeefe73ea5bbb5a6984ff5ec758d7ba4585122ed1faa2131fb2689b85548f9':
+          if hashlib.sha256(compressed).hexdigest() != '81f6b85957813514d3268bbfc8d3c1b60ca48a75095923c8d517e978de510108':
               raise SystemExit('Increment 3E gzip digest differs')
           patch = gzip.decompress(compressed)
-          if len(patch) != 90702:
+          if len(patch) != 91508:
               raise SystemExit('Increment 3E patch size differs')
-          if hashlib.sha256(patch).hexdigest() != '84b810c77e16960d1ca411aee5d7c3459bb1d955095384b1f5c9d0352309f7c1':
+          if hashlib.sha256(patch).hexdigest() != '3686b55641cfca20daeb2df377c185f168e4f4828a26db436d63924cf8ccfea2':
               raise SystemExit('Increment 3E patch digest differs')
           Path('/tmp/increment-3e-kernel.patch').write_bytes(patch)
           Path('/tmp/increment-3e-expected-tree').write_text(expected_tree, encoding='ascii')
