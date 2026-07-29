@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/increment-4a-extraction-authority
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
