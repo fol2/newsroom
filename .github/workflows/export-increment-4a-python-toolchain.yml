@@ -1,4 +1,4 @@
-name: Export Increment 4A Python toolchain subset
+name: Benchmark exact Increment 4A core topology
 
 on:
   pull_request:
@@ -8,15 +8,67 @@ permissions:
   contents: read
 
 jobs:
-  export-toolchain:
+  benchmark-core:
     if: github.event.pull_request.head.ref == 'agent/increment-4a-python-toolchain-export'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: loadfile5
+            workers: 5
+            distribution: loadfile
+            explicit: '0'
+            no_warnings: '0'
+            no_bytecode: '0'
+          - profile: loadfile5-no-warnings
+            workers: 5
+            distribution: loadfile
+            explicit: '0'
+            no_warnings: '1'
+            no_bytecode: '0'
+          - profile: loadfile5-explicit
+            workers: 5
+            distribution: loadfile
+            explicit: '1'
+            no_warnings: '0'
+            no_bytecode: '0'
+          - profile: loadfile5-explicit-no-warnings
+            workers: 5
+            distribution: loadfile
+            explicit: '1'
+            no_warnings: '1'
+            no_bytecode: '0'
+          - profile: worksteal4
+            workers: 4
+            distribution: worksteal
+            explicit: '0'
+            no_warnings: '0'
+            no_bytecode: '0'
+          - profile: worksteal4-no-warnings
+            workers: 4
+            distribution: worksteal
+            explicit: '0'
+            no_warnings: '1'
+            no_bytecode: '0'
+          - profile: loadfile5-no-bytecode
+            workers: 5
+            distribution: loadfile
+            explicit: '0'
+            no_warnings: '0'
+            no_bytecode: '1'
+          - profile: worksteal4-no-bytecode
+            workers: 4
+            distribution: worksteal
+            explicit: '0'
+            no_warnings: '0'
+            no_bytecode: '1'
     steps:
-      - name: Check out exact authorised source
+      - name: Check out exact clean Increment 4A head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: agent/increment-4a-python-toolchain-export
+          ref: a220e7f8eaa924e99696ba1972aced5885f39b58
           fetch-depth: 0
           show-progress: false
           persist-credentials: false
@@ -31,38 +83,65 @@ jobs:
         with:
           version: '0.8.0'
           github-token: ''
-          enable-cache: false
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
 
-      - name: Sync and archive pure-Python test dependencies
+      - name: Verify exact source and sync locked environment
         shell: bash
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = 'a220e7f8eaa924e99696ba1972aced5885f39b58'
+          test "$(git rev-parse HEAD^{tree})" = '372bbf76dccd032d852456eaa3bf1fb7349b5631'
+          git diff --check
           uv lock --check
           uv sync --dev --locked
-          root='.venv/lib/python3.12/site-packages'
-          test -d "$root/neo4j"
-          test -d "$root/xdist"
-          test -d "$root/execnet"
-          mkdir -p "$RUNNER_TEMP/increment-4a-toolchain"
-          (
-            cd "$root"
-            shopt -s nullglob
-            entries=(
-              neo4j neo4j-*.dist-info
-              xdist pytest_xdist-*.dist-info
-              execnet execnet-*.dist-info
-            )
-            test "${#entries[@]}" -ge 6
-            tar -czf "$RUNNER_TEMP/increment-4a-toolchain/pure-python-site-packages.tar.gz" \
-              "${entries[@]}"
-          )
-          sha256sum "$RUNNER_TEMP/increment-4a-toolchain/pure-python-site-packages.tar.gz" \
-            > "$RUNNER_TEMP/increment-4a-toolchain/manifest.txt"
 
-      - name: Upload exact toolchain subset
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
-        with:
-          name: increment-4a-python-toolchain
-          path: ${{ runner.temp }}/increment-4a-toolchain
-          if-no-files-found: error
-          retention-days: 1
+      - name: Benchmark complete deterministic inventory
+        shell: bash
+        env:
+          PROFILE: ${{ matrix.profile }}
+          WORKERS: ${{ matrix.workers }}
+          DISTRIBUTION: ${{ matrix.distribution }}
+          EXPLICIT: ${{ matrix.explicit }}
+          NO_WARNINGS: ${{ matrix.no_warnings }}
+          NO_BYTECODE: ${{ matrix.no_bytecode }}
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONHASHSEED: '0'
+          PYTHONUTF8: '1'
+        run: |
+          set -euo pipefail
+          args=(
+            -q --assert=plain
+            -p no:cacheprovider
+            -p xdist.plugin
+            -n "$WORKERS"
+            --dist="$DISTRIBUTION"
+            --max-worker-restart=0
+          )
+          if test "$NO_WARNINGS" = '1'; then
+            args+=( -p no:warnings )
+          fi
+          if test "$EXPLICIT" = '1'; then
+            mapfile -t test_files < <(find newsroom/tests -type f -name 'test_*.py' -print | LC_ALL=C sort)
+            test "${#test_files[@]}" -eq 194
+            args+=( "${test_files[@]}" )
+          else
+            args+=( newsroom/tests )
+          fi
+          if test "$NO_BYTECODE" = '1'; then
+            export PYTHONDONTWRITEBYTECODE=1
+          fi
+          rm -rf "$RUNNER_TEMP/core-$PROFILE"
+          printf 'BENCHMARK profile=%s workers=%s distribution=%s explicit=%s no_warnings=%s no_bytecode=%s nproc=%s\n' \
+            "$PROFILE" "$WORKERS" "$DISTRIBUTION" "$EXPLICIT" \
+            "$NO_WARNINGS" "$NO_BYTECODE" "$(nproc)"
+          /usr/bin/time -f 'BENCHMARK elapsed_seconds=%e user_seconds=%U system_seconds=%S max_rss_kb=%M' \
+            timeout --signal=TERM --kill-after=5s 80s \
+            uv run --no-sync python -m pytest "${args[@]}" \
+              --basetemp="$RUNNER_TEMP/core-$PROFILE" \
+              --junitxml="$RUNNER_TEMP/core-$PROFILE.xml"
