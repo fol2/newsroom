@@ -1,0 +1,110 @@
+name: Materialize Increment 3E lifecycle and serving
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-test-and-push:
+    if: github.event.pull_request.head.ref == 'agent/increment-3e-discovery-projection-health'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-3e-discovery-projection-health
+          fetch-depth: 0
+          show-progress: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+      - name: Verify and apply exact 3E lifecycle and serving patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          import base64, gzip, hashlib, subprocess
+          from pathlib import Path
+
+          parent = 'fef35e62331b5d7dfbe86eccf64e36051e93d417'
+          parent_tree = '3643a8763bcc4d9eb1e06c9ec3ba2ea71db7ce51'
+          expected_tree = '9e40fb71c715799645046e92259886a7d4370a55'
+          payload_dir = Path('.github/increment-3e-serving-payload')
+          workflow = '.github/workflows/materialize-increment-3e-serving.yml'
+
+          if subprocess.check_output(['git','rev-parse','HEAD^'], text=True).strip() != parent:
+              raise SystemExit('3E serving transport parent differs')
+          if subprocess.check_output(['git','rev-parse',f'{parent}^{{tree}}'], text=True).strip() != parent_tree:
+              raise SystemExit('3E serving parent tree differs')
+          payload_paths = tuple(sorted(str(p) for p in payload_dir.glob('part-*.txt')))
+          changed = tuple(sorted(subprocess.check_output(
+              ['git','diff','--name-only',f'{parent}..HEAD','--'], text=True
+          ).splitlines()))
+          expected = tuple(sorted((*payload_paths, workflow)))
+          if len(payload_paths) != 6 or changed != expected:
+              raise SystemExit(f'3E serving transport inventory differs: {changed!r}')
+          encoded = ''.join(Path(p).read_text(encoding='ascii').strip() for p in payload_paths)
+          if len(encoded) != 16680:
+              raise SystemExit('3E serving base64 size differs')
+          compressed = base64.b64decode(encoded, validate=True)
+          if len(compressed) != 12510:
+              raise SystemExit('3E serving gzip size differs')
+          if hashlib.sha256(compressed).hexdigest() != '9effe43105940bb114b3b9fd48d11846b8cf5b32670bad793b4eadc316a08eaa':
+              raise SystemExit('3E serving gzip digest differs')
+          patch = gzip.decompress(compressed)
+          if len(patch) != 66047:
+              raise SystemExit('3E serving patch size differs')
+          if hashlib.sha256(patch).hexdigest() != '5b0917d4dda8f21659533df96fd95ac68ce25e37b2eaa461756c63bed5c95745':
+              raise SystemExit('3E serving patch digest differs')
+          Path('/tmp/increment-3e-serving.patch').write_bytes(patch)
+          Path('/tmp/increment-3e-serving-tree').write_text(expected_tree, encoding='ascii')
+          PY
+          git apply --check /tmp/increment-3e-serving.patch
+          git apply /tmp/increment-3e-serving.patch
+          rm -rf .github/increment-3e-serving-payload
+          rm -f .github/workflows/materialize-increment-3e-serving.yml
+          python -m compileall -q newsroom scripts
+          git diff --check
+      - name: Install locked environment
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+      - name: Run focused and complete regressions
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_discovery_projection_3e_*.py \
+            newsroom/tests/test_projection_b1_*.py \
+            newsroom/tests/test_projection_b2_*.py \
+            newsroom/tests/test_projection_b3_*.py
+          uv run --no-sync python -m pytest -q
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+      - name: Commit verified 3E lifecycle and serving
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          test "$(git write-tree)" = "$(cat /tmp/increment-3e-serving-tree)"
+          test -z "$(git diff --name-only)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(projection): add 3E lifecycle and bounded serving'
+          git push origin HEAD:agent/increment-3e-discovery-projection-health
