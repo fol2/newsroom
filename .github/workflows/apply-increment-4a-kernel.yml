@@ -76,13 +76,26 @@ jobs:
 
           git apply --check "$RUNNER_TEMP/increment-4a-kernel.patch"
           git apply "$RUNNER_TEMP/increment-4a-kernel.patch"
+          python - <<'PYFIX'
+          from pathlib import Path
+
+          path = Path("newsroom/authority/_extraction_store_common.py")
+          text = path.read_text()
+          old = '            "WHERE d.blob_digest=? AND dv.state IN(" \n'
+          new = '            "WHERE d.blob_digest=? AND dv.state IN("\n'
+          if text.count(old) != 1:
+              raise SystemExit(
+                  f"expected one checked trailing-space target, found {text.count(old)}"
+              )
+          path.write_text(text.replace(old, new))
+          PYFIX
           rm -rf .github/increment-4a-kernel
           rm -f .github/workflows/apply-increment-4a-kernel.yml
 
           git diff --check
           python -m compileall -q newsroom
           find . -type d -name __pycache__ -prune -exec rm -rf {} +
-          python -m pip install --disable-pip-version-check --quiet 'pytest==9.0.2'
+          python -m pip install --disable-pip-version-check --quiet . 'pytest==9.0.2'
           python -m pytest -q newsroom/tests/test_extraction_4a_authority.py -p no:cacheprovider
           find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
