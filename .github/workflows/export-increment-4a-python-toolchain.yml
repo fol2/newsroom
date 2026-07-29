@@ -1,4 +1,4 @@
-name: Benchmark exact Increment 4A core topology
+name: Export exact Increment 4A core timings
 
 on:
   pull_request:
@@ -8,62 +8,10 @@ permissions:
   contents: read
 
 jobs:
-  benchmark-core:
+  export-core-timings:
     if: github.event.pull_request.head.ref == 'agent/increment-4a-python-toolchain-export'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - profile: loadfile5
-            workers: 5
-            distribution: loadfile
-            explicit: '0'
-            no_warnings: '0'
-            no_bytecode: '0'
-          - profile: loadfile5-no-warnings
-            workers: 5
-            distribution: loadfile
-            explicit: '0'
-            no_warnings: '1'
-            no_bytecode: '0'
-          - profile: loadfile5-explicit
-            workers: 5
-            distribution: loadfile
-            explicit: '1'
-            no_warnings: '0'
-            no_bytecode: '0'
-          - profile: loadfile5-explicit-no-warnings
-            workers: 5
-            distribution: loadfile
-            explicit: '1'
-            no_warnings: '1'
-            no_bytecode: '0'
-          - profile: worksteal4
-            workers: 4
-            distribution: worksteal
-            explicit: '0'
-            no_warnings: '0'
-            no_bytecode: '0'
-          - profile: worksteal4-no-warnings
-            workers: 4
-            distribution: worksteal
-            explicit: '0'
-            no_warnings: '1'
-            no_bytecode: '0'
-          - profile: loadfile5-no-bytecode
-            workers: 5
-            distribution: loadfile
-            explicit: '0'
-            no_warnings: '0'
-            no_bytecode: '1'
-          - profile: worksteal4-no-bytecode
-            workers: 4
-            distribution: worksteal
-            explicit: '0'
-            no_warnings: '0'
-            no_bytecode: '1'
     steps:
       - name: Check out exact clean Increment 4A head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -91,8 +39,12 @@ jobs:
           prune-cache: false
           cache-python: false
 
-      - name: Verify exact source and sync locked environment
+      - name: Verify source and execute complete timing inventory
         shell: bash
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONHASHSEED: '0'
+          PYTHONUTF8: '1'
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = 'a220e7f8eaa924e99696ba1972aced5885f39b58'
@@ -100,48 +52,64 @@ jobs:
           git diff --check
           uv lock --check
           uv sync --dev --locked
+          mkdir -p "$RUNNER_TEMP/increment-4a-core-timings"
+          /usr/bin/time -f 'elapsed_seconds=%e user_seconds=%U system_seconds=%S max_rss_kb=%M' \
+            -o "$RUNNER_TEMP/increment-4a-core-timings/process-metrics.txt" \
+            uv run --no-sync python -m pytest \
+              -q --assert=plain \
+              -p no:cacheprovider \
+              -p xdist.plugin \
+              -n 4 --dist=worksteal --max-worker-restart=0 \
+              newsroom/tests \
+              --basetemp="$RUNNER_TEMP/timing-pytest" \
+              --junitxml="$RUNNER_TEMP/increment-4a-core-timings/pytest.xml"
+          python - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          import hashlib
+          import json
 
-      - name: Benchmark complete deterministic inventory
-        shell: bash
-        env:
-          PROFILE: ${{ matrix.profile }}
-          WORKERS: ${{ matrix.workers }}
-          DISTRIBUTION: ${{ matrix.distribution }}
-          EXPLICIT: ${{ matrix.explicit }}
-          NO_WARNINGS: ${{ matrix.no_warnings }}
-          NO_BYTECODE: ${{ matrix.no_bytecode }}
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
-          PYTHONHASHSEED: '0'
-          PYTHONUTF8: '1'
-        run: |
-          set -euo pipefail
-          args=(
-            -q --assert=plain
-            -p no:cacheprovider
-            -p xdist.plugin
-            -n "$WORKERS"
-            --dist="$DISTRIBUTION"
-            --max-worker-restart=0
+          root = Path("$RUNNER_TEMP/increment-4a-core-timings")
+          report = root / "pytest.xml"
+          document = ET.parse(report).getroot()
+          cases = list(document.iter("testcase"))
+          by_module: dict[str, dict[str, float | int]] = {}
+          for case in cases:
+              classname = case.attrib.get("classname", "")
+              parts = classname.split(".")
+              module = ".".join(parts[:3])
+              entry = by_module.setdefault(module, {"seconds": 0.0, "test_count": 0})
+              entry["seconds"] = round(float(entry["seconds"]) + float(case.attrib.get("time", "0")), 6)
+              entry["test_count"] = int(entry["test_count"]) + 1
+          inventory = sorted(
+              path.as_posix()
+              for path in Path("newsroom/tests").glob("test_*.py")
           )
-          if test "$NO_WARNINGS" = '1'; then
-            args+=( -p no:warnings )
-          fi
-          if test "$EXPLICIT" = '1'; then
-            mapfile -t test_files < <(find newsroom/tests -type f -name 'test_*.py' -print | LC_ALL=C sort)
-            test "${#test_files[@]}" -eq 194
-            args+=( "${test_files[@]}" )
-          else
-            args+=( newsroom/tests )
-          fi
-          if test "$NO_BYTECODE" = '1'; then
-            export PYTHONDONTWRITEBYTECODE=1
-          fi
-          rm -rf "$RUNNER_TEMP/core-$PROFILE"
-          printf 'BENCHMARK profile=%s workers=%s distribution=%s explicit=%s no_warnings=%s no_bytecode=%s nproc=%s\n' \
-            "$PROFILE" "$WORKERS" "$DISTRIBUTION" "$EXPLICIT" \
-            "$NO_WARNINGS" "$NO_BYTECODE" "$(nproc)"
-          /usr/bin/time -f 'BENCHMARK elapsed_seconds=%e user_seconds=%U system_seconds=%S max_rss_kb=%M' \
-            timeout --signal=TERM --kill-after=5s 80s \
-            uv run --no-sync python -m pytest "${args[@]}" \
-              --basetemp="$RUNNER_TEMP/core-$PROFILE" \
-              --junitxml="$RUNNER_TEMP/core-$PROFILE.xml"
+          payload = {
+              "schema_version": "newsroom.sdlc.core-timings.v1",
+              "head_sha": "a220e7f8eaa924e99696ba1972aced5885f39b58",
+              "tree_sha": "372bbf76dccd032d852456eaa3bf1fb7349b5631",
+              "inventory_count": len(inventory),
+              "inventory_digest": "sha256:" + hashlib.sha256(("\n".join(inventory) + "\n").encode()).hexdigest(),
+              "testcase_count": len(cases),
+              "modules": dict(sorted(by_module.items())),
+          }
+          (root / "timings.json").write_text(
+              json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          with (root / "manifest.txt").open("w", encoding="utf-8") as stream:
+              for path in sorted(root.iterdir()):
+                  if path.name == "manifest.txt":
+                      continue
+                  stream.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n")
+          PY
+
+      - name: Upload exact timing evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        with:
+          name: increment-4a-core-timings-a220e7f8
+          path: ${{ runner.temp }}/increment-4a-core-timings
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
