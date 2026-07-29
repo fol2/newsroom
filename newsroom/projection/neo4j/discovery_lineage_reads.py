@@ -508,6 +508,8 @@ class DiscoveryLineageProjectionFacade:
     ) -> DiscoveryHealthAssessment:
         if not isinstance(request, DiscoveryLineageReadRequest):
             raise TypeError("projection health requires a typed lineage request")
+        if not isinstance(assessed_at, UtcTimestamp):
+            raise TypeError("projection health requires a typed assessment time")
         try:
             self.__eligibility(
                 tuple(subject.identifier for subject in request.subjects),
@@ -555,9 +557,14 @@ class DiscoveryLineageProjectionFacade:
         service_available: bool | None = None
         query_valid: bool | None = None
         reconciliation_valid = retained_validation_valid
+        reconciliation: StructuralReconciliationView | None = None
+        response: StructuralReadResponse | None = None
         if status.generation_state is ProjectionGenerationState.ACTIVE:
             try:
-                self._reconcile(status=status, proof=proof)
+                reconciliation = self._reconcile(
+                    status=status,
+                    proof=proof,
+                )
                 response = self.__active_read(request.active_request(), proof)
             except Neo4jConnectionError:
                 service_available = False
@@ -658,6 +665,21 @@ class DiscoveryLineageProjectionFacade:
                     )
                 )
 
+        # Status, successful reconciliation and a returned active read are live
+        # observations taken inside this assessment call. They may follow the
+        # caller's lower-bound timestamp and must bound the health decision.
+        # Persisted validation, gap and dead-letter evidence cannot advance the
+        # clock; future retained evidence therefore still fails closed.
+        live_observations = [assessed_at, status.serving_time]
+        if reconciliation is not None:
+            live_observations.append(reconciliation.serving_time)
+        if response is not None:
+            live_observations.append(response.metadata.serving_time)
+        effective_assessed_at = max(
+            live_observations,
+            key=lambda item: item.value,
+        )
+
         return assess_projection_health(
             ProjectionHealthInput(
                 family_id=DISCOVERY_LINEAGE_FAMILY_ID,
@@ -686,7 +708,7 @@ class DiscoveryLineageProjectionFacade:
                 ),
             ),
             policy=policy,
-            assessed_at=assessed_at,
+            assessed_at=effective_assessed_at,
         )
 
 
