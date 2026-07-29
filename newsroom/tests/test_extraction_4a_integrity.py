@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+from datetime import timedelta
 import json
 import sqlite3
 from pathlib import Path
@@ -11,7 +13,12 @@ from newsroom.authority.persistence import (
     AuthorityPersistenceError,
     AuthoritySchemaError,
 )
-from newsroom.extraction import ExtractionContractError
+from newsroom.extraction import (
+    DeterministicFixtureExtractor,
+    ExtractionContractError,
+    ExtractionFailureCode,
+    ExtractionOutcome,
+)
 
 from .extraction_4a_helpers import (
     contract_request,
@@ -20,6 +27,7 @@ from .extraction_4a_helpers import (
     run_request,
     seed_extraction_fixture,
 )
+from .source_3a_helpers import SOURCE_NOW
 
 
 def _seed_complete(tmp_path: Path):
@@ -33,6 +41,35 @@ def _seed_complete(tmp_path: Path):
         )
     assert result.output is not None
     assert result.proposal_set is not None
+    return state, result
+
+
+def _seed_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    state = seed_extraction_fixture(tmp_path)
+    contract = contract_request()
+    request = run_request(state, timeout_ms=10)
+    current = [SOURCE_NOW]
+    original_produce = DeterministicFixtureExtractor.produce
+
+    def slow_produce(self, *, contract, request):
+        produced = original_produce(self, contract=contract, request=request)
+        current[0] = dataclasses.replace(
+            current[0], value=current[0].value + timedelta(milliseconds=11)
+        )
+        return produced
+
+    monkeypatch.setattr(
+        DeterministicFixtureExtractor,
+        "produce",
+        slow_produce,
+    )
+    with open_extraction_system(state, clock=lambda: current[0]) as system:
+        system.extraction.register_contract(
+            contract, proof=extraction_proof()
+        )
+        result = system.extraction.execute(request, proof=extraction_proof())
+    assert result.outcome is ExtractionOutcome.RETRYABLE_FAILURE
+    assert result.failure_code is ExtractionFailureCode.EXECUTION_TIMEOUT
     return state, result
 
 
@@ -116,6 +153,55 @@ def test_sqlite_immutable_guards_reject_mutation(
             conn.execute(statement)
     finally:
         conn.close()
+
+
+def test_timeout_failure_guard_and_reopen_integrity_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, result = _seed_timeout(tmp_path, monkeypatch)
+    conn = sqlite3.connect(state.database)
+    try:
+        trigger = _disable_trigger(
+            conn, "immutable_extraction_run_version_update"
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
+            conn.execute(
+                "UPDATE extraction_run_versions SET outcome='BLOCKING_FAILURE' "
+                "WHERE run_version_id=?",
+                (str(result.request.run_version_id),),
+            )
+
+        row = conn.execute(
+            "SELECT canonical_bytes FROM extraction_run_versions "
+            "WHERE run_version_id=?",
+            (str(result.request.run_version_id),),
+        ).fetchone()
+        assert row is not None
+        value = json.loads(bytes(row[0]).decode("utf-8"))
+        value["outcome"] = "BLOCKING_FAILURE"
+        data = canonical_json_bytes(value)
+        conn.execute("PRAGMA ignore_check_constraints=ON")
+        conn.execute(
+            "UPDATE extraction_run_versions SET outcome=?,canonical_bytes=?,"
+            "canonical_digest=? WHERE run_version_id=?",
+            (
+                "BLOCKING_FAILURE",
+                data,
+                digest_bytes(data),
+                str(result.request.run_version_id),
+            ),
+        )
+        conn.execute(trigger)
+        conn.execute("PRAGMA ignore_check_constraints=OFF")
+        conn.commit()
+    finally:
+        conn.close()
+    _expect_reopen_failure(
+        state,
+        "CHECK constraint failed in extraction_run_versions|"
+        "incompatible with its outcome",
+    )
 
 
 def test_reopen_rejects_output_contract_and_retention_tamper(

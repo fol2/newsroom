@@ -20,6 +20,7 @@ from newsroom.extraction.policy import (
     EXTRACTOR_CONTRACT_REGISTER_COMMAND,
 )
 from newsroom.extraction.types import (
+    ExtractionFailureCode,
     ExtractionOutputId,
     ProposalEnvelopeId,
     ProposalSetId,
@@ -199,7 +200,13 @@ class _ExtractionCommitMixin:
                 raise AuthorityPersistenceError(
                     "extraction producer ended before it started"
                 )
-            production.usage.require_within(request.budget)
+            production.usage.require_within(
+                request.budget,
+                allow_elapsed_timeout=(
+                    production.failure_code
+                    is ExtractionFailureCode.EXECUTION_TIMEOUT
+                ),
+            )
             if production.usage.input_bytes != request.input_binding.input_bytes:
                 raise AuthorityPersistenceError(
                     "producer input usage differs from exact passage bytes"

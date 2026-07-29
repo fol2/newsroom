@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
+from newsroom.authority import UtcTimestamp
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.extraction import (
     DeterministicFixtureExtractor,
@@ -31,12 +33,14 @@ from newsroom.extraction import (
     ProposalPredicateHint,
     VersionedExtractionComponent,
 )
+from newsroom.extraction.types import authority_elapsed_ms
 
 from .extraction_4a_helpers import (
     contract_request,
     run_request,
     seed_extraction_fixture,
 )
+from .source_3a_helpers import SOURCE_NOW
 
 
 def _passage_id(value: int) -> ExtractionPassageId:
@@ -152,6 +156,39 @@ def test_usage_must_fit_the_exact_fixed_budget() -> None:
             proposal_count=1,
             evidence_range_count=1,
         ).require_within(budget)
+    ExtractionUsage(
+        elapsed_ms=300_001,
+        input_bytes=10,
+        output_bytes=0,
+        proposal_count=0,
+        evidence_range_count=0,
+    ).require_within(budget, allow_elapsed_timeout=True)
+    with pytest.raises(ExtractionContractError, match="must exceed"):
+        ExtractionUsage(
+            elapsed_ms=10,
+            input_bytes=10,
+            output_bytes=0,
+            proposal_count=0,
+            evidence_range_count=0,
+        ).require_within(budget, allow_elapsed_timeout=True)
+    with pytest.raises(ExtractionContractError, match="elapsed_ms"):
+        ExtractionUsage(
+            elapsed_ms=86_400_001,
+            input_bytes=10,
+            output_bytes=0,
+            proposal_count=0,
+            evidence_range_count=0,
+        )
+
+
+def test_authority_elapsed_time_uses_a_strict_ceiling_at_millisecond_precision() -> None:
+    exact = UtcTimestamp(SOURCE_NOW.value + timedelta(milliseconds=10))
+    over = UtcTimestamp(SOURCE_NOW.value + timedelta(microseconds=10_001))
+
+    assert authority_elapsed_ms(SOURCE_NOW, exact) == 10
+    assert authority_elapsed_ms(SOURCE_NOW, over) == 11
+    with pytest.raises(ExtractionContractError, match="cannot be negative"):
+        authority_elapsed_ms(exact, SOURCE_NOW)
 
 
 def test_contract_and_run_canonical_identity_excludes_idempotency_key(
@@ -368,6 +405,18 @@ def test_produced_extraction_outcome_matrix_prevents_false_success() -> None:
         ),
     )
     assert internal_failure.raw_output_value is None
+
+    timeout_failure = dataclasses.replace(
+        internal_failure,
+        failure_code=ExtractionFailureCode.EXECUTION_TIMEOUT,
+    )
+    assert timeout_failure.outcome is ExtractionOutcome.RETRYABLE_FAILURE
+    assert timeout_failure.raw_output_value is None
+    with pytest.raises(ExtractionContractError, match="incompatible"):
+        dataclasses.replace(
+            timeout_failure,
+            outcome=ExtractionOutcome.BLOCKING_FAILURE,
+        )
 
     with pytest.raises(ExtractionContractError, match="incompatible"):
         dataclasses.replace(

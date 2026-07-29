@@ -116,6 +116,20 @@ The first exact clean-head SDLC run completed every deterministic test without f
 
 **Correction:** source-integrity and the complete deterministic suite now start concurrently against the same immutable lane deadline because they are independent reads over the exact checked-out tree and produce separate command/evidence records. The complete `newsroom/tests` execution remains one pinned six-worker pytest session with `--dist=loadfile`; controlled four-CPU measurements rejected worker-count inflation and alternative schedulers because they reduced or failed to create dependable headroom. No test is removed, selected away, reclassified, skipped or moved to a non-blocking lane, and the 55-second command and lane deadlines remain unchanged. The workflow contract has direct evidence that both gates receive the same deadline and rendezvous concurrently, waits for peer cleanup before propagating an infrastructure defect, and returns their evidence in canonical source-then-core order.
 
+### P2-17 — a measured timeout could erase the attempted Run Version
+
+The first boundary replaced producer-reported elapsed time with authority timestamps only after normalisation, then applied the ordinary within-budget validator. An otherwise well-formed attempt that had actually exceeded its timeout therefore failed the complete transaction instead of retaining the required immutable failed attempt. It could also leave returned untrusted output available to later code before the over-time condition was classified.
+
+**Correction:** authority now measures the complete producer-and-normalisation interval and gives over-time execution a dedicated allow-listed `EXECUTION_TIMEOUT` code under `RETRYABLE_FAILURE`. Returned output and proposals are discarded before persistence, all non-time resource limits remain fixed, elapsed usage must be strictly greater than the request timeout, and SQLite plus typed startup reconstruction enforce the exact outcome/code pairing. Focused evidence proves no Output or Proposal Set is created, reopen succeeds for an honest timeout, exact replay does not invoke the producer, a later contiguous version may succeed, and trigger-bypassing incompatible timeout tampering prevents reopen. Because 4A authorises only an in-process deterministic fixture, this is honest post-return classification rather than a claim of external-process cancellation; interruptible Graphiti/model execution remains deferred.
+
+### P2-18 — repeated fixture construction consumed the remaining signed margin
+
+The first exact-head run after P2-16 completed every ordinary CI, Authority and authenticated-service workflow, but the signed core command still required 54.313 seconds on the four-CPU hosted runner. The retained exact-clean-head timing artifact then showed 27.241 aggregate testcase-seconds inside the new Increment 4A modules repeatedly rebuilding the same closed 2.2 MB source, governed-object and extraction authority fixture. The setup was valid but redundant: each test paid for identical migrations, source lineage, immutable object admission, hydration decisions and bilingual passage bindings.
+
+**Correction:** the Increment 4A test helper now builds one closed fixture template per pytest process and gives every test a private SQLite copy plus private governed-object bytes. Pytest workers remain separate processes; no writable database or object state crosses test or worker boundaries. Clone creation is fail-clean, rejects symlink and non-empty destinations, fixes the root and object-directory modes at `0700`, the SQLite file at `0600`, and retained CAS blobs at immutable `0400`. Direct regression evidence proves distinct inodes, exact retained bytes and bindings, SQL mutation isolation, object-tamper isolation, template immutability and fail-closed destination reuse. Fresh, upgrade, rollback and raw-SQL integrity tests still build and exercise their own checked databases, so migration coverage is not replaced by the template. The permanent complete command remains the same pinned six-worker `--dist=loadfile` inventory with warnings, all 194 test files, canonical JUnit evidence and the original 55-second command and lane deadlines; only redundant identical test setup is removed.
+
+A content-addressed pre-publication GitHub benchmark reconstructed the reviewed candidate tree and ran the exact permanent `core-tests` wrapper three times under the unchanged 55-second timeout. All three runs produced the same 1,634 JUnit identities — 1,600 pass and 34 intentional local service skips — with zero failure or error, completing in 50.91, 49.09 and 48.33 seconds. This establishes measured hosted-runner headroom without changing the signed contract; final qualification still belongs to the ordinary permanent workflows on the clean PR head.
+
 ## Authority and runtime boundary review
 
 The reviewed implementation has no import or callable surface for:
@@ -136,16 +150,23 @@ The deterministic fixture producer is exact-type constrained, uses approved repo
 ## Local evidence at this review point
 
 ```text
-Dedicated `test_extraction_4a_*` inventory:             62 passed
-Authority A2a/A2b extraction bridge evidence:          2 passed
+Dedicated `test_extraction_4a_*` inventory:             66 passed
+Authority A2a/A2b extraction bridge evidence:           2 passed
 Predecessor discovery/projection migration regression: 11 passed
-Current focused total:                                75 passed
-Required focused skips:                                0
-Focused failures/errors:                               0
-Reviewed product/test tree:                            `c56886d3a8cbc5e7fa8830028ae2be891087589e`
-Current complete repository inventory:              1,594 passed
-Intentional local actual-service skips:                 34
-Complete-inventory failures/errors:                      0
+Current extraction-authority focused total:            79 passed
+SDLC core-lane contract evidence:                       42 passed
+Combined final local qualification:                    121 passed
+Required local qualification skips:                      0
+Local qualification failures/errors:                     0
+Final local complete passing cases:                  1,600
+Final local intentional actual-service skips:              34
+Final local complete outcome identities:               1,634
+Final local pytest/wall duration:                 45.55s / 45.97s
+Final local complete JUnit digest: sha256:2ffb27fd095efb43700d5cd819c208cac10dbb4619f4f0af87732156ba05c29f
+Hosted exact-wrapper benchmark:              50.91s / 49.09s / 48.33s
+Hosted benchmark JUnit identities:              1,634 each, exact match
+Final clean PR tree:                    pending exact-head materialisation
+Final exact-head complete inventory:      pending permanent CI evidence
 Clustering regression evaluation:                      pass
 Clustering evaluation rows:                             240
 Clustering baseline regressions:                          0
@@ -154,15 +175,15 @@ Fresh and v12-to-v13 checked migration:                pass
 Compile and diff checks:                               pass
 ```
 
-The current 75-case count is the exact local focused inventory at this review point: all dedicated Increment 4A tests, the two permanent Authority-lane bridge tests, and both inherited migration regression files. The PR completion record must still use final JUnit and workflow artifacts rather than treating this prose count as self-updating.
+The current 79-case extraction-authority count is the exact local focused inventory at this review point: all dedicated Increment 4A tests, the two permanent Authority-lane bridge tests, and both inherited migration regression files. The final local qualification also executes all 42 SDLC core-lane contract tests, producing one 121-test JUnit record with zero skip, failure or error. This local record validates the reviewed source and materialisation contract but does not replace final exact-head GitHub workflow artifacts.
 
-The complete repository inventory for the reviewed product/test tree executed all 194 repository test files and produced 1,594 passing cases plus 34 intentional local actual-service skips (1,628 total outcomes), zero failures and zero errors. The independent file-isolated run produced the same 1,628 unique test identities with zero failed files and zero JUnit parse errors. The 240-row clustering dataset matched its pinned digest and baseline with no regression. The evidence-record update that contains these results is documentation-only; final merge qualification still belongs to the exact pushed PR head and its workflow artifacts. Local service skips are never accepted as final service qualification: the permanent authenticated-Neo4j workflow must execute its required inventory without required skip/failure/error on that exact reviewed PR head.
+The complete local inventory executed all 194 repository test files through the exact pinned six-worker `--dist=loadfile` command and produced 1,600 passing cases plus 34 intentional local actual-service skips (1,634 total outcome identities), zero failures and zero errors. Pytest completed in 45.55 seconds and the complete command in 45.97 seconds; the retained JUnit digest is `sha256:2ffb27fd095efb43700d5cd819c208cac10dbb4619f4f0af87732156ba05c29f`. Local actual-service skips are never accepted as final service qualification: the permanent authenticated-Neo4j workflow must execute its mandatory inventory without required skip, failure or error on the exact reviewed PR head. The 240-row clustering dataset matched its pinned digest and baseline with no regression. Final merge qualification belongs to the exact pushed clean PR head and its workflow artifacts.
 
 ## Review disposition
 
 ```text
 P1 findings:             0
-P2 findings corrected:  16
+P2 findings corrected:  18
 Unresolved P1/P2:        0 on the reviewed local product tree
 Review threads:          0 at the time of local review
 ```

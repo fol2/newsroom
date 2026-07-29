@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import atexit
+import shutil
+import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -75,6 +79,23 @@ class ExtractionFixtureState:
     commands: object
     schemas: object
     input_binding: ExtractionInputBinding
+
+
+_TEMPLATE_LOCK = threading.Lock()
+_TEMPLATE_ROOT: Path | None = None
+_TEMPLATE_STATE: ExtractionFixtureState | None = None
+
+
+def _remove_template_root() -> None:
+    global _TEMPLATE_ROOT, _TEMPLATE_STATE
+    root = _TEMPLATE_ROOT
+    _TEMPLATE_ROOT = None
+    _TEMPLATE_STATE = None
+    if root is not None:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+atexit.register(_remove_template_root)
 
 
 def extraction_proof() -> AuthenticationProof:
@@ -156,7 +177,7 @@ def _seed_source(database: Path) -> None:
         system.close()
 
 
-def seed_extraction_fixture(root: Path) -> ExtractionFixtureState:
+def _build_extraction_fixture(root: Path) -> ExtractionFixtureState:
     database = root / "authority.sqlite3"
     object_root = root / "objects"
     _seed_source(database)
@@ -259,6 +280,76 @@ def seed_extraction_fixture(root: Path) -> ExtractionFixtureState:
     )
 
 
+def _template_state() -> ExtractionFixtureState:
+    global _TEMPLATE_ROOT, _TEMPLATE_STATE
+    with _TEMPLATE_LOCK:
+        if _TEMPLATE_STATE is None:
+            root = Path(tempfile.mkdtemp(prefix="newsroom-extraction-4a-template-"))
+            try:
+                state = _build_extraction_fixture(root)
+            except BaseException:
+                shutil.rmtree(root, ignore_errors=True)
+                raise
+            _TEMPLATE_ROOT = root
+            _TEMPLATE_STATE = state
+        return _TEMPLATE_STATE
+
+
+def seed_extraction_fixture(root: Path) -> ExtractionFixtureState:
+    """Clone an isolated authority fixture from one process-local template.
+
+    The full source/object/extraction authority history is expensive to rebuild
+    and is identical for every 4A test.  Each caller still receives its own
+    SQLite file and object directory; only the closed, immutable seed is reused.
+    Pytest workers are separate processes, so no writable state crosses worker
+    boundaries.
+    """
+
+    if root.is_symlink():
+        raise ValueError("extraction fixture root must be a real directory")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    selected_root = root.resolve()
+    if not selected_root.is_dir():
+        raise ValueError("extraction fixture root must be a real directory")
+    selected_root.chmod(0o700)
+    database = selected_root / "authority.sqlite3"
+    object_root = selected_root / "objects"
+    if (
+        database.exists()
+        or database.is_symlink()
+        or object_root.exists()
+        or object_root.is_symlink()
+    ):
+        raise ValueError("extraction fixture destination must be empty")
+
+    template = _template_state()
+    try:
+        shutil.copy2(template.database, database, follow_symlinks=False)
+        database.chmod(0o600)
+        shutil.copytree(
+            template.object_root,
+            object_root,
+            copy_function=shutil.copy2,
+            symlinks=False,
+        )
+    except Exception:
+        database.unlink(missing_ok=True)
+        shutil.rmtree(object_root, ignore_errors=True)
+        raise
+    object_root.chmod(0o700)
+    for path in object_root.rglob("*"):
+        if path.is_symlink():
+            raise ValueError("extraction fixture template cannot contain symlinks")
+        path.chmod(0o700 if path.is_dir() else 0o400)
+    return ExtractionFixtureState(
+        database=database,
+        object_root=object_root,
+        commands=template.commands,
+        schemas=template.schemas,
+        input_binding=template.input_binding,
+    )
+
+
 def contract_request(
     *,
     contract_id: ExtractorContractId = CONTRACT_ID,
@@ -280,6 +371,7 @@ def run_request(
     version_number: int = 1,
     previous: ExtractionRunVersionId | None = None,
     contract_id: ExtractorContractId = CONTRACT_ID,
+    timeout_ms: int = 10_000,
     key: str = "increment-4a-run-v1",
 ) -> ExtractionRunRequest:
     return ExtractionRunRequest(
@@ -290,7 +382,7 @@ def run_request(
         contract_id=contract_id,
         input_binding=state.input_binding,
         budget=ExtractionBudget(
-            timeout_ms=10_000,
+            timeout_ms=timeout_ms,
             max_input_bytes=64 * 1024,
             max_output_bytes=256 * 1024,
             max_proposals=100,

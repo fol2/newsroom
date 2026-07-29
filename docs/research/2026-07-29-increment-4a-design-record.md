@@ -20,6 +20,7 @@ The typed domain package is `newsroom.extraction`. It contains:
 - exact source, revision, representation, governed-object admission and hydration bindings;
 - finite execution budget and usage contracts using bounded integers rather than floating point;
 - complete, partial, retryable-failure, blocking-failure and invalid-output outcomes;
+- authority-measured execution time with an immutable proposal-free timeout outcome;
 - canonical structured output validation;
 - generic proposal envelopes with exact passage provenance, local subject/object placeholders, confidence basis points and explicit uncertainty codes;
 - a deterministic bilingual fixture extractor through the final proposal-producer protocol; and
@@ -93,12 +94,14 @@ These values are proposal metadata only. They cannot allocate Canonical Entity i
 
 Fixture output is deterministic over the canonical invocation. Failure scenarios are repository-owned typed scenarios; callers cannot inject arbitrary exception text, policy, tools, egress or cost values.
 
+The 4A fixture producer is in-process and non-interruptible by design. Authority measures the complete producer-and-normalisation interval. If it exceeds the request's fixed timeout, returned structured output and proposals are discarded before commit and the attempt is retained as `RETRYABLE_FAILURE/EXECUTION_TIMEOUT`. The over-time usage must be strictly above the bound while every other resource/cost field remains within its fixed limit. Exact replay returns that retained attempt without invoking the producer; a later contiguous version may retry. Interruptible external adapter cancellation remains explicitly deferred.
+
 ## Security and read policy
 
 - Commands require explicit write scopes through the existing authentication and authorization ledger.
 - Metadata, proposal and raw-output reads use separate policy-owned scopes and bounded limits.
 - Raw structured bytes are excluded from dataclass representation and are never returned by metadata reads.
-- Producer failures retain only allow-listed reason codes and bounded redacted detail.
+- Producer failures retain only allow-listed reason codes and bounded redacted detail; timeout classification retains no returned output or proposals.
 - No credential-bearing field exists in the public extraction contract.
 - Import/API guards reject Graphiti, model-provider SDKs, arbitrary Cypher and governed graph-writer surfaces.
 

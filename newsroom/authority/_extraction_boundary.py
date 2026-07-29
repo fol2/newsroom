@@ -37,6 +37,7 @@ from newsroom.extraction.types import (
     ExtractionRunId,
     ExtractionRunVersionId,
     ExtractorContractId,
+    authority_elapsed_ms,
 )
 
 from ._extraction_store import _ExtractionAuthorityStore
@@ -199,13 +200,37 @@ class _ExtractionBoundary:
                             failure_code=ExtractionFailureCode.POLICY_BLOCKED,
                         )
         ended_at = self._clock()
-        elapsed_ms = int(
-            (ended_at.value - started_at.value).total_seconds() * 1000
-        )
-        production = replace(
-            production,
-            usage=replace(production.usage, elapsed_ms=elapsed_ms),
-        )
+        elapsed_ms = authority_elapsed_ms(started_at, ended_at)
+        if elapsed_ms > request.budget.timeout_ms:
+            # The deterministic producer runs in-process in 4A. Authority
+            # therefore classifies a returned over-budget attempt rather than
+            # pretending it completed successfully. Any untrusted output and
+            # proposals are discarded before persistence; only bounded,
+            # redacted resource usage survives in an immutable retryable
+            # attempt. Interruptible external-adapter execution remains a
+            # separately owner-authorised later boundary.
+            production = ProducedExtraction(
+                outcome=ExtractionOutcome.RETRYABLE_FAILURE,
+                failure_code=ExtractionFailureCode.EXECUTION_TIMEOUT,
+                validation=None,
+                raw_output_value=None,
+                proposals=(),
+                usage=ExtractionUsage(
+                    elapsed_ms=elapsed_ms,
+                    input_bytes=request.input_binding.input_bytes,
+                    output_bytes=0,
+                    proposal_count=0,
+                    evidence_range_count=0,
+                    request_tokens=production.usage.request_tokens,
+                    response_tokens=production.usage.response_tokens,
+                    cost_microunits=production.usage.cost_microunits,
+                ),
+            )
+        else:
+            production = replace(
+                production,
+                usage=replace(production.usage, elapsed_ms=elapsed_ms),
+            )
         return self._store.commit_extraction_run(
             grant,
             request=request,

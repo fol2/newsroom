@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import closing
 import dataclasses
+from datetime import timedelta
 import sqlite3
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from .extraction_4a_helpers import (
     run_request,
     seed_extraction_fixture,
 )
+from .source_3a_helpers import SOURCE_NOW
 
 
 def _with_raw(
@@ -250,6 +252,96 @@ def test_unexpected_producer_exception_is_redacted_retryable_authority(
 
     assert secret.encode("utf-8") not in state.database.read_bytes()
     assert secret not in repr(result)
+
+
+def test_execution_timeout_is_retained_without_output_and_replays_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = seed_extraction_fixture(tmp_path)
+    contract = contract_request()
+    request = run_request(state, timeout_ms=10)
+    current = [SOURCE_NOW]
+    original_produce = DeterministicFixtureExtractor.produce
+
+    def slow_produce(self, *, contract, request):
+        produced = original_produce(self, contract=contract, request=request)
+        current[0] = dataclasses.replace(
+            current[0],
+            value=current[0].value + timedelta(microseconds=10_001),
+        )
+        return produced
+
+    monkeypatch.setattr(
+        DeterministicFixtureExtractor,
+        "produce",
+        slow_produce,
+    )
+    with open_extraction_system(state, clock=lambda: current[0]) as system:
+        system.extraction.register_contract(contract, proof=extraction_proof())
+        result = system.extraction.execute(request, proof=extraction_proof())
+
+    assert result.outcome is ExtractionOutcome.RETRYABLE_FAILURE
+    assert result.failure_code is ExtractionFailureCode.EXECUTION_TIMEOUT
+    assert result.usage.elapsed_ms == 11
+    assert result.output is None
+    assert result.proposal_set is None
+
+    with closing(sqlite3.connect(state.database)) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM extraction_run_versions WHERE run_version_id=?",
+            (str(request.run_version_id),),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM extraction_outputs WHERE run_version_id=?",
+            (str(request.run_version_id),),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM extraction_proposal_sets WHERE run_version_id=?",
+            (str(request.run_version_id),),
+        ).fetchone()[0] == 0
+
+    def forbidden_produce(*_args, **_kwargs):
+        raise AssertionError("exact replay reran the producer")
+
+    monkeypatch.setattr(
+        DeterministicFixtureExtractor,
+        "produce",
+        forbidden_produce,
+    )
+    with open_extraction_system(state, clock=lambda: current[0]) as system:
+        replay = system.extraction.execute(request, proof=extraction_proof())
+        assert replay.replayed is True
+        assert replay.event_id == result.event_id
+        assert replay.canonical_digest == result.canonical_digest
+        assert replay.failure_code is ExtractionFailureCode.EXECUTION_TIMEOUT
+
+        monkeypatch.setattr(
+            DeterministicFixtureExtractor,
+            "produce",
+            original_produce,
+        )
+        retry = system.extraction.execute(
+            run_request(
+                state,
+                run_id=request.run_id,
+                run_version_id=RUN_VERSION_2_ID,
+                version_number=2,
+                previous=request.run_version_id,
+                timeout_ms=10,
+                key="execution-timeout-retry-v2",
+            ),
+            proof=extraction_proof(),
+        )
+        assert retry.outcome is ExtractionOutcome.SUCCESS
+        assert retry.failure_code is ExtractionFailureCode.NONE
+        history = system.extraction.run_history(
+            request.run_id, limit=10, proof=extraction_proof()
+        )
+        assert [item.failure_code for item in history] == [
+            ExtractionFailureCode.NONE,
+            ExtractionFailureCode.EXECUTION_TIMEOUT,
+        ]
 
 
 def test_contract_rejection_is_redacted_blocking_authority(

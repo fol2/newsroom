@@ -44,6 +44,7 @@ from .types import (
     bounded_int,
     bounded_text,
     bounded_token,
+    authority_elapsed_ms,
     canonical_digest,
     sorted_text_tuple,
 )
@@ -533,6 +534,7 @@ _ALLOWED_FAILURE_CODES_BY_OUTCOME: dict[
         {
             ExtractionFailureCode.FIXTURE_RETRYABLE,
             ExtractionFailureCode.PRODUCER_INTERNAL_ERROR,
+            ExtractionFailureCode.EXECUTION_TIMEOUT,
         }
     ),
     ExtractionOutcome.BLOCKING_FAILURE: frozenset(
@@ -879,7 +881,12 @@ class ExtractionRunVersion:
         _require_outcome_failure_code(self.outcome, self.failure_code)
         if not isinstance(self.usage, ExtractionUsage):
             raise ExtractionContractError("run usage must be typed")
-        self.usage.require_within(self.request.budget)
+        self.usage.require_within(
+            self.request.budget,
+            allow_elapsed_timeout=(
+                self.failure_code is ExtractionFailureCode.EXECUTION_TIMEOUT
+            ),
+        )
         if self.output is None:
             if self.outcome.may_retain_output:
                 raise ExtractionContractError("run outcome requires retained output")
@@ -936,8 +943,9 @@ class ExtractionRunVersion:
         )
         if self.canonical_digest != expected_digest:
             raise ExtractionContractError("run-version canonical digest differs")
-        measured_elapsed_ms = int(
-            (self.ended_at.value - self.started_at.value).total_seconds() * 1000
+        measured_elapsed_ms = authority_elapsed_ms(
+            self.started_at,
+            self.ended_at,
         )
         if self.usage.elapsed_ms != measured_elapsed_ms:
             raise ExtractionContractError(

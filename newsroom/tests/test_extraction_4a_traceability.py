@@ -146,13 +146,16 @@ def test_operations_and_substantive_review_retain_stop_and_evidence_boundaries()
         "Persist-before-admission ordering",
         "TOMBSTONED",
         "authority.extraction.read_raw",
+        "EXECUTION_TIMEOUT",
         "Issue #226 / Increment 4B remains blocked",
         "real Graphiti, model or embedding execution",
     ):
         assert phrase in operations
     for phrase in (
         "P1 findings:             0",
-        "P2 findings corrected:  16",
+        "P2 findings corrected:  18",
+        "P2-17",
+        "P2-18",
         "Unresolved P1/P2:        0",
         "This is not final merge evidence",
         "Issue #226 remains blocked",

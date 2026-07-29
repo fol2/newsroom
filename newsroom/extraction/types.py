@@ -5,7 +5,15 @@ from enum import StrEnum
 from typing import Iterable
 
 from newsroom.authority.canonical import digest_canonical, validate_sha256_digest
-from newsroom.authority.types import UUIDv4Id, require_scope, require_token
+from newsroom.authority.types import (
+    UUIDv4Id,
+    UtcTimestamp,
+    require_scope,
+    require_token,
+)
+
+
+_MAX_RETAINED_ELAPSED_MS = 24 * 60 * 60 * 1000
 
 
 class ExtractionAuthorityError(RuntimeError):
@@ -138,6 +146,31 @@ class ExtractionFailureCode(StrEnum):
     OUTPUT_SCHEMA_INVALID = "OUTPUT_SCHEMA_INVALID"
     POLICY_BLOCKED = "POLICY_BLOCKED"
     PRODUCER_INTERNAL_ERROR = "PRODUCER_INTERNAL_ERROR"
+    EXECUTION_TIMEOUT = "EXECUTION_TIMEOUT"
+
+
+def authority_elapsed_ms(
+    started_at: UtcTimestamp,
+    ended_at: UtcTimestamp,
+) -> int:
+    """Return authority elapsed time rounded up to the next millisecond."""
+
+    if not isinstance(started_at, UtcTimestamp) or not isinstance(
+        ended_at, UtcTimestamp
+    ):
+        raise ExtractionContractError(
+            "authority elapsed timestamps must be typed"
+        )
+    delta = ended_at.value - started_at.value
+    if delta.days < 0:
+        raise ExtractionContractError(
+            "authority elapsed time cannot be negative"
+        )
+    microseconds = (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000
+        + delta.microseconds
+    )
+    return (microseconds + 999) // 1000
 
 
 def bounded_text(
@@ -327,7 +360,12 @@ class ExtractionUsage:
     cost_microunits: int = 0
 
     def __post_init__(self) -> None:
-        bounded_int(self.elapsed_ms, field="elapsed_ms", minimum=0, maximum=300_000)
+        bounded_int(
+            self.elapsed_ms,
+            field="elapsed_ms",
+            minimum=0,
+            maximum=_MAX_RETAINED_ELAPSED_MS,
+        )
         bounded_int(
             self.input_bytes,
             field="input_bytes",
@@ -371,12 +409,29 @@ class ExtractionUsage:
             maximum=10_000_000_000,
         )
 
-    def require_within(self, budget: ExtractionBudget) -> None:
+    def require_within(
+        self,
+        budget: ExtractionBudget,
+        *,
+        allow_elapsed_timeout: bool = False,
+    ) -> None:
         if not isinstance(budget, ExtractionBudget):
             raise ExtractionContractError("usage budget must be typed")
+        if not isinstance(allow_elapsed_timeout, bool):
+            raise ExtractionContractError(
+                "elapsed-timeout allowance must be boolean"
+            )
+        if allow_elapsed_timeout:
+            if self.elapsed_ms <= budget.timeout_ms:
+                raise ExtractionContractError(
+                    "execution-timeout usage must exceed the fixed timeout"
+                )
+        elif self.elapsed_ms > budget.timeout_ms:
+            raise ExtractionContractError(
+                "extraction usage exceeds the fixed timeout"
+            )
         if (
-            self.elapsed_ms > budget.timeout_ms
-            or self.input_bytes > budget.max_input_bytes
+            self.input_bytes > budget.max_input_bytes
             or self.output_bytes > budget.max_output_bytes
             or self.proposal_count > budget.max_proposals
             or self.evidence_range_count > budget.max_evidence_ranges

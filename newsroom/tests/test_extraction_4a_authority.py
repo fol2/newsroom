@@ -46,6 +46,62 @@ def _uuid(identifier: int, *, kind):
     return kind.parse(f"00000000-0000-4000-8000-{identifier:012d}")
 
 
+def test_extraction_fixture_clones_are_isolated_and_preserve_blob_modes(
+    tmp_path: Path,
+) -> None:
+    first = seed_extraction_fixture(tmp_path / "first")
+    second = seed_extraction_fixture(tmp_path / "second")
+
+    assert first.database != second.database
+    assert first.object_root != second.object_root
+    assert first.input_binding == second.input_binding
+    assert first.database.stat().st_mode & 0o777 == 0o600
+    assert second.database.stat().st_mode & 0o777 == 0o600
+
+    first_blobs = tuple(
+        sorted(path for path in first.object_root.rglob("*") if path.is_file())
+    )
+    second_blobs = tuple(
+        sorted(path for path in second.object_root.rglob("*") if path.is_file())
+    )
+    assert len(first_blobs) == len(second_blobs) == 2
+    retained_blob_bytes = tuple(path.read_bytes() for path in second_blobs)
+    for first_blob, second_blob in zip(first_blobs, second_blobs, strict=True):
+        assert first_blob.read_bytes() == second_blob.read_bytes()
+        assert first_blob.stat().st_mode & 0o777 == 0o400
+        assert second_blob.stat().st_mode & 0o777 == 0o400
+        assert (first_blob.stat().st_dev, first_blob.stat().st_ino) != (
+            second_blob.stat().st_dev,
+            second_blob.stat().st_ino,
+        )
+
+    with closing(sqlite3.connect(first.database)) as connection:
+        connection.execute("CREATE TABLE clone_isolation_probe(value TEXT)")
+        connection.execute("INSERT INTO clone_isolation_probe VALUES ('first')")
+        connection.commit()
+    first_blobs[0].chmod(0o600)
+    first_blobs[0].write_bytes(b"isolated object tamper")
+
+    third = seed_extraction_fixture(tmp_path / "third")
+    third_blobs = tuple(
+        sorted(path for path in third.object_root.rglob("*") if path.is_file())
+    )
+    for untouched in (second, third):
+        with closing(sqlite3.connect(untouched.database)) as connection:
+            assert (
+                connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE name='clone_isolation_probe'"
+                ).fetchone()
+                is None
+            )
+    assert tuple(path.read_bytes() for path in second_blobs) == retained_blob_bytes
+    assert tuple(path.read_bytes() for path in third_blobs) == retained_blob_bytes
+    assert all(path.stat().st_mode & 0o777 == 0o400 for path in third_blobs)
+    with pytest.raises(ValueError, match="destination must be empty"):
+        seed_extraction_fixture(tmp_path / "second")
+
+
 def test_extraction_authority_commits_reads_replays_and_reopens(
     tmp_path: Path,
 ) -> None:

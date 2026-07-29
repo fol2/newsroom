@@ -66,13 +66,13 @@ extraction_proposal_evidence
 Migration checksum:
 
 ```text
-sha256:daad9b0d2693e497b8344ab344ec732cb982fb671ed0fda6f7edd6ae5ae83722
+sha256:c3e5ae627dda1c04bebc50952786413d977bd399e67b7f5b87452794f08f49ab
 ```
 
 The complete checked schema fingerprint for this source tree is:
 
 ```text
-sha256:286164e6d5831e33dd23085fd0708d23703a4c8001489020b1034c564e9feafa
+sha256:62eb9596a324b75a3ec96cc0db6e182217fa30fc6b64fd5b801cf784dfdea9b4
 ```
 
 The migration is forward-only from v12, preserves all predecessor authority and rolls back atomically if any v13 statement or history check fails. A database with a newer version, missing migration, wrong name/checksum, incomplete table set or different fingerprint fails closed.
@@ -136,11 +136,13 @@ Supported outcomes are:
 | --- | --- | --- | --- |
 | `SUCCESS` | Complete approved structured output. | Valid, retained | One non-empty retained set |
 | `PARTIAL` | Honest bounded partial extraction. | Valid, retained | Retained partial set |
-| `RETRYABLE_FAILURE` | No authoritative output; a later exact version may retry. Unexpected producer exceptions are reduced to the allow-listed `PRODUCER_INTERNAL_ERROR` code without retaining exception text. | None | None |
+| `RETRYABLE_FAILURE` | No authoritative output; a later exact version may retry. Unexpected producer exceptions are reduced to `PRODUCER_INTERNAL_ERROR`. An authority-measured attempt that exceeds its fixed timeout is retained as `EXECUTION_TIMEOUT`. Neither path retains arbitrary exception text, returned structured output or proposals. | None | None |
 | `BLOCKING_FAILURE` | Terminal contract or policy failure, including a deterministic producer contract that is not one of the approved repository scenarios. | None | None |
 | `INVALID_OUTPUT` | Malformed or out-of-contract output retained for diagnosis. | Invalid, retained | None |
 
-Times remain distinct: producer start, producer end and authoritative recording time. Integer usage fields record elapsed milliseconds, input/output bytes, proposal/evidence counts, request/response token placeholders and cost microunits. Boolean, float, negative, excessive or budget-breaking values fail closed.
+Times remain distinct: producer start, producer end and authoritative recording time. Integer usage fields record elapsed milliseconds, input/output bytes, proposal/evidence counts, request/response token placeholders and cost microunits. Elapsed time is derived from authority timestamps rather than trusted producer data. A normal outcome must remain at or below the fixed timeout; `EXECUTION_TIMEOUT` must be strictly over it. All other resource and cost limits remain enforced for every outcome. Boolean, float, negative, excessive or incompatible values fail closed.
+
+The 4A producer is an in-process deterministic fixture. The boundary therefore classifies an attempt after it returns: if the complete producer-and-normalisation interval exceeded the request timeout, any returned output and proposals are discarded before persistence and an immutable proposal-free retryable version is recorded. This does not claim interruptible external execution. Subprocess, network cancellation and real Graphiti/model timeout handling remain part of a separately authorised adapter/runtime boundary.
 
 ## Structured output validation
 
@@ -247,7 +249,7 @@ source/object authority through their own facades
 ledger/audit records through existing authority inspection
 ```
 
-Do not log raw structured output, source passage text, credentials or arbitrary producer exception text. Retained failures use allow-listed reason codes only; unexpected producer exception messages are neither persisted nor exposed through representations or typed reads.
+Do not log raw structured output, source passage text, credentials or arbitrary producer exception text. Retained failures use allow-listed reason codes only; unexpected producer exception messages are neither persisted nor exposed through representations or typed reads. A timed-out attempt is diagnosed through its immutable `EXECUTION_TIMEOUT` code and authority-derived timestamps/usage, not through discarded producer output.
 
 ## Security boundary
 
@@ -267,7 +269,7 @@ Before schema v13 opens a database, rollback is branch deletion or an ordinary r
 - fix forward with a checked migration if the retained contract must change; and
 - keep every real Graphiti/model lane disabled unless a separate owner decision is recorded.
 
-An incident involving malformed or proposal-inconsistent output is contained by retaining an `INVALID_OUTPUT` version with no proposals. A producer that falsely marks exact conforming output as invalid, or uses an unapproved deterministic contract, is recorded as a proposal-free `BLOCKING_FAILURE`. An unexpected producer exception is recorded as a proposal-free `RETRYABLE_FAILURE` with only `PRODUCER_INTERNAL_ERROR`; its exception text is discarded. An incident involving rights or deletion is contained by current-use denial; history remains available subject to the governing lawful-retention policy.
+An incident involving malformed or proposal-inconsistent output is contained by retaining an `INVALID_OUTPUT` version with no proposals. A producer that falsely marks exact conforming output as invalid, or uses an unapproved deterministic contract, is recorded as a proposal-free `BLOCKING_FAILURE`. An unexpected producer exception is recorded as a proposal-free `RETRYABLE_FAILURE` with only `PRODUCER_INTERNAL_ERROR`; its exception text is discarded. An over-time attempt is recorded as proposal-free `EXECUTION_TIMEOUT`; returned output is discarded, exact replay cannot rerun the producer, and a later contiguous version may retry. An incident involving rights or deletion is contained by current-use denial; history remains available subject to the governing lawful-retention policy.
 
 ## Explicit exclusions and next boundary
 
