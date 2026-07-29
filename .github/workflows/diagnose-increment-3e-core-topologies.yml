@@ -1,4 +1,4 @@
-name: Diagnose Increment 3E tmpfs core runtime
+name: Diagnose Increment 3E persistent pytest workers
 
 on:
   pull_request:
@@ -12,8 +12,6 @@ jobs:
     if: github.event.pull_request.head.ref == 'agent/increment-3e-corrective-hardening'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    env:
-      TMPDIR: /dev/shm
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -25,19 +23,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Verify bounded tmpfs scratch
-        run: |
-          test -d /dev/shm
-          test ! -L /dev/shm
-          test -w /dev/shm
-          df -B1 /dev/shm
-
-      - name: Install locked environment
+      - name: Install locked environment and pinned diagnostic plugin
         run: |
           python -m pip install --disable-pip-version-check uv
           uv sync --frozen --dev
+          uv pip install pytest-xdist==3.8.0
 
-      - name: Measure repository-owned core on tmpfs scratch
+      - name: Measure persistent file-level workers
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONHASHSEED: '0'
@@ -46,32 +38,63 @@ jobs:
           uv run python - <<'PY'
           import json
           from pathlib import Path
+          import subprocess
+          import sys
           import tempfile
           import time
-
-          from scripts.sdlc import workflow_lane
+          import xml.etree.ElementTree as ET
 
           root = Path.cwd()
-          workflow_lane._CORE_SHARD_COUNT = 16
-          workflow_lane._CORE_WORKER_COUNT = 5
           with tempfile.TemporaryDirectory(
-              prefix='.newsroom-tmpfs-diagnostic-',
+              prefix='.newsroom-xdist-',
               dir=root,
           ) as raw:
-              report = Path(raw) / 'pytest.xml'
-              started = time.monotonic()
-              code = workflow_lane._run_core_pytest_shards(
-                  root=root,
-                  report=report,
+              temporary = Path(raw)
+              report = temporary / 'pytest.xml'
+              basetemp = temporary / 'pytest'
+              command = (
+                  sys.executable,
+                  '-m',
+                  'pytest',
+                  '-q',
+                  '--assert=plain',
+                  '-p',
+                  'no:cacheprovider',
+                  '-p',
+                  'xdist.plugin',
+                  '-n',
+                  '4',
+                  '--dist=loadfile',
+                  'newsroom/tests',
+                  f'--basetemp={basetemp}',
+                  f'--junitxml={report}',
               )
+              started = time.monotonic()
+              completed = subprocess.run(command, cwd=root, check=False)
+              wall_seconds = round(time.monotonic() - started, 3)
+              test_count = 0
+              failures = 0
+              errors = 0
+              skipped = 0
+              if report.is_file():
+                  document = ET.parse(report).getroot()
+                  test_count = len(tuple(document.iter('testcase')))
+                  failures = len(tuple(document.iter('failure')))
+                  errors = len(tuple(document.iter('error')))
+                  skipped = len(tuple(document.iter('skipped')))
               result = {
-                  'tmpdir': str(Path(tempfile.gettempdir()).resolve()),
-                  'wall_seconds': round(time.monotonic() - started, 3),
-                  'returncode': code,
-                  'shard_count': workflow_lane._CORE_SHARD_COUNT,
-                  'workers': workflow_lane._CORE_WORKER_COUNT,
+                  'returncode': completed.returncode,
+                  'wall_seconds': wall_seconds,
+                  'workers': 4,
+                  'distribution': 'loadfile',
+                  'test_count': test_count,
+                  'failures': failures,
+                  'errors': errors,
+                  'skipped': skipped,
               }
               print(json.dumps(result, sort_keys=True), flush=True)
-              if code:
-                  raise SystemExit(code)
+              if completed.returncode:
+                  raise SystemExit(completed.returncode)
+              if test_count < 1500 or failures or errors:
+                  raise SystemExit('persistent worker evidence is incomplete')
           PY
