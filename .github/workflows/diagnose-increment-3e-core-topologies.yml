@@ -1,4 +1,4 @@
-name: Diagnose Increment 3E exact persistent core command
+name: Diagnose Increment 3E deterministic single-wave core
 
 on:
   pull_request:
@@ -23,56 +23,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Materialize the six-worker candidate in the disposable checkout
+      - name: Install the locked repository environment
         run: |
           python -m pip install --disable-pip-version-check uv
           uv sync --frozen --dev
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path('.github/increment-3e-persistent-core-apply.py')
-          text = path.read_text(encoding='utf-8')
-          replacements = (
-              (
-                  "    '''def test_core_test_inventory_is_sorted_complete_and_rejects_symlinks(",
-                  "    r'''def test_core_test_inventory_is_sorted_complete_and_rejects_symlinks(",
-              ),
-              (
-                  "    '''def test_persistent_core_runner_invokes_one_session_and_propagates_failure(",
-                  "    r'''def test_persistent_core_runner_invokes_one_session_and_propagates_failure(",
-              ),
-              (
-                  '_CORE_WORKER_COUNT = 4\\n_CORE_DISTRIBUTION = "loadfile"\\n',
-                  '_CORE_WORKER_COUNT = 6\\n_CORE_DISTRIBUTION = "loadfile"\\n',
-              ),
-              (
-                  'assert lane_module._CORE_WORKER_COUNT == 4',
-                  'assert lane_module._CORE_WORKER_COUNT == 6',
-              ),
-              (
-                  '        "4",\\n        "--dist=loadfile",',
-                  '        "6",\\n        "--dist=loadfile",',
-              ),
-          )
-          for old, new in replacements:
-              if text.count(old) != 1:
-                  raise SystemExit(f'unexpected apply-script marker: {old!r}')
-              text = text.replace(old, new, 1)
-          path.write_text(text, encoding='utf-8')
-          PY
-          uv run python .github/increment-3e-persistent-core-apply.py
-          uv lock
-          uv sync --dev --locked
           uv run --no-sync python -m compileall -q newsroom scripts
-          uv run --no-sync python -m pytest -q \
-            newsroom/tests/test_sdlc_workflow_lane.py \
-            newsroom/tests/test_discovery_projection_3e_health_chronology.py \
-            newsroom/tests/test_discovery_projection_3e_health.py \
-            newsroom/tests/test_integrated_c1_workflow_contract.py \
-            newsroom/tests/test_sdlc_workflow_orchestrator.py
-          git diff --check
 
-      - name: Measure the exact repository core command at six and eight workers
+      - name: Measure deterministic one-wave shard topologies
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONHASHSEED: '0'
@@ -92,27 +49,45 @@ jobs:
 
           root = Path.cwd()
           lane = root / 'scripts/sdlc/workflow_lane.py'
-          proof_root = root / '.increment-3e-exact-core-diagnostics'
+          proof_root = root / '.increment-3e-single-wave-diagnostics'
           if proof_root.exists() or proof_root.is_symlink():
               raise SystemExit('diagnostic root already exists')
           proof_root.mkdir()
 
-          def set_workers(current: int, target: int) -> None:
+          def set_topology(
+              current_shards: int,
+              current_workers: int,
+              shards: int,
+              workers: int,
+          ) -> None:
               text = lane.read_text(encoding='utf-8')
-              old = f'_CORE_WORKER_COUNT = {current}\\n'
-              new = f'_CORE_WORKER_COUNT = {target}\\n'
+              old = (
+                  f'_CORE_SHARD_COUNT = {current_shards}\\n'
+                  f'_CORE_WORKER_COUNT = {current_workers}\\n'
+              )
+              new = (
+                  f'_CORE_SHARD_COUNT = {shards}\\n'
+                  f'_CORE_WORKER_COUNT = {workers}\\n'
+              )
               if text.count(old) != 1:
-                  raise SystemExit(f'unexpected worker constant: {current}')
+                  raise SystemExit(
+                      f'unexpected topology constants: {current_shards}/{current_workers}'
+                  )
               lane.write_text(text.replace(old, new, 1), encoding='utf-8')
 
           results: list[dict[str, object]] = []
-          current_workers = 6
-          for workers in (6, 6, 8, 8):
-              if workers != current_workers:
-                  set_workers(current_workers, workers)
-                  current_workers = workers
-              attempt = 1 + sum(1 for item in results if item['workers'] == workers)
-              run_root = proof_root / f'workers-{workers:02d}-attempt-{attempt}'
+          current_shards = 16
+          current_workers = 5
+          for shards, workers in ((6, 6), (8, 8), (10, 10), (12, 12)):
+              set_topology(
+                  current_shards,
+                  current_workers,
+                  shards,
+                  workers,
+              )
+              current_shards = shards
+              current_workers = workers
+              run_root = proof_root / f'shards-{shards:02d}-workers-{workers:02d}'
               run_root.mkdir()
               report = run_root / 'pytest.xml'
               command = (
@@ -158,8 +133,8 @@ jobs:
                   skip_count = len(tuple(document.iter('skipped')))
 
               result = {
+                  'shards': shards,
                   'workers': workers,
-                  'attempt': attempt,
                   'elapsed_seconds': elapsed,
                   'returncode': returncode,
                   'timed_out': timed_out,
@@ -172,8 +147,7 @@ jobs:
               results.append(result)
               print(json.dumps(result, sort_keys=True), flush=True)
 
-          if current_workers != 6:
-              set_workers(current_workers, 6)
+          set_topology(current_shards, current_workers, 16, 5)
           shutil.rmtree(proof_root)
           valid = [
               item
@@ -185,5 +159,5 @@ jobs:
           ]
           print(json.dumps({'results': results, 'valid': valid}, sort_keys=True), flush=True)
           if len(valid) != len(results):
-              raise SystemExit('an exact persistent core attempt did not complete cleanly')
+              raise SystemExit('a deterministic single-wave topology did not complete cleanly')
           PY
