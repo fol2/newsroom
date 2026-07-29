@@ -49,9 +49,13 @@ Projector checkpoints, required gaps, retries, dead letters, generation contract
 The initial family is a separate structural family rather than an extension of legacy links, events or clusters:
 
 ```text
-family:     DISCOVERY_LINEAGE
-ontology:   newsroom.discovery-lineage.v1
-projector:  newsroom.discovery-lineage-projector.v1
+family:             graph.discovery_lineage
+definition version: discovery-lineage-family-v1
+ontology ID:        newsroom.discovery-lineage
+ontology version:   discovery-lineage-ontology-v1
+mapping ID:         newsroom.discovery-lineage
+mapping version:    discovery-lineage-mapping-v1
+projector version:  discovery-lineage-projector-v1
 ```
 
 A generation contract binds:
@@ -71,37 +75,45 @@ Wrong family, ontology, projector, source watermark, generation identity, endpoi
 
 Governed lifecycle IDs are graph keys. Human titles, locators, URLs, content digests, parser keys and mutable statuses are properties only.
 
-Initial node labels:
+Initial node-type allow-list:
 
 ```text
-SourceDefinition
-SourceDefinitionVersion
-SourceItem
-SourceRevision
-DiscoveryRepresentation
-DiscoveryOccurrence
-CheckOutcome
-ObservableTransition
-DiscoverySignal
-GateDecision
-NewsLead
+SOURCE_DEFINITION
+SOURCE_DEFINITION_VERSION
+SOURCE_ITEM
+SOURCE_REVISION
+SOURCE_REPRESENTATION
+DISCOVERY_OCCURRENCE
+CHECK_REQUEST
+CHECK_ATTEMPT
+CHECK_OUTCOME
+OBSERVABLE_TRANSITION
+SIGNAL
+GATE_DECISION
+LEAD
+LEDGER_EVENT
 ```
 
 Initial relationship allow-list:
 
 ```text
-HAS_VERSION
+HAS_DEFINITION_VERSION
 DEFINES_ITEM
+REQUESTED_CHECK
+ATTEMPTED_AS
+PRODUCED_CHECK_OUTCOME
 HAS_REVISION
 HAS_REPRESENTATION
 OBSERVED_AS
-PRODUCED_BY_CHECK
+PRODUCED_OCCURRENCE
+TRANSITION_OF_ITEM
 CLASSIFIED_BY_TRANSITION
+PRODUCED_SIGNAL
 EMITTED_SIGNAL
 DECIDED_BY_GATE
 PROMOTED_TO_LEAD
-DUPLICATE_OF_SIGNAL
-REPLACED_BY_ITEM
+OPENED_LEAD
+PROJECTED_FROM_EVENT
 ```
 
 Every relation is parameterised and derived from exact retained authority. Callers cannot choose labels, relationship types, properties, Cypher fragments or mutation order.
@@ -196,7 +208,7 @@ Required semantics:
 - Semantic-lineage health derives from retained cross-record integrity, not graph reachability.
 - `UNKNOWN` is used when the required positive evidence has not yet been established.
 
-Health observations and assessments are typed, bounded and explainable. Each assessment retains the exact evidence identities, observation window, policy version, state, reason and assessed time. Mutable cache rows may accelerate reads but cannot replace retained evidence or assessment history.
+Health inputs and returned assessments are typed, bounded and explainable. Each assessment identifies the exact retained evidence, observation timestamps, policy version, state, reason and assessed time. Increment 3E computes this inspection seam from SQLite authority at read time; it does not introduce a second mutable health authority or claim durable assessment-history storage.
 
 ## Coverage availability
 
@@ -220,6 +232,10 @@ Allowed read shapes include:
 - bounded node/relation provenance inspection for reconciliation support.
 
 The API exposes no Neo4j driver, arbitrary Cypher, caller-selected label, relationship type, property name, unbounded traversal or cross-family discovery.
+
+## Observation-model and transition coverage
+
+The projector is deliberately event-contract generic: it maps the accepted Check Outcome and Observable Transition authority records without branching on source observation model or transition kind. Repository-owned Increment 3C fixtures remain the authority evidence for `APPEND_ONLY`, `MUTABLE_ITEM`, `COMPLETE_CURRENT_STATE`, `ROLLING_LIST`, `EXPLICIT_DELTA` and `PLANNED_AGENDA`, including first observation, revision, activation, ending, explicit-delta and agenda transitions. Increment 3E proves that those retained event contracts use the same fixed projection mapping and cannot select caller-defined graph schema.
 
 ## Evidence plan
 

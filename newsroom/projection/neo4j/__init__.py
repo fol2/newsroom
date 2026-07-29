@@ -84,6 +84,14 @@ from .traceability import (
 
 def __getattr__(name: str):
     if name in {
+        "DiscoveryCoverageHealthReadRequest",
+        "DiscoveryHealthAuthorityFacade",
+        "DiscoverySourceHealthReadRequest",
+    }:
+        from . import discovery_health_reads as _discovery_health_reads
+
+        return getattr(_discovery_health_reads, name)
+    if name in {
         "DiscoveryLineageProjectionFacade",
         "DiscoveryLineageReadError",
         "DiscoveryLineageReadRequest",
@@ -112,6 +120,9 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "DiscoveryCoverageHealthReadRequest",
+    "DiscoveryHealthAuthorityFacade",
+    "DiscoverySourceHealthReadRequest",
     "DiscoveryLineageSubject",
     "DiscoveryLineageReadRequest",
     "DiscoveryLineageReadError",

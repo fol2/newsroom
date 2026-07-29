@@ -18,9 +18,11 @@ from newsroom.projection import (
 from newsroom.projection.mapping import (
     StructuralIdentityContext,
     StructuralNodeBinding,
+    canonical_governed_node_id,
     canonical_identity_reference,
     canonical_node_id,
     canonical_node_identity_source,
+    structural_node_identity_available,
 )
 
 
@@ -102,6 +104,8 @@ def test_discovery_lineage_contract_is_separate_complete_and_versioned() -> None
         ProjectionRelationType.DECIDED_BY_GATE,
         ProjectionRelationType.PROMOTED_TO_LEAD,
         ProjectionRelationType.OPENED_LEAD,
+        ProjectionRelationType.DUPLICATE_OF_SIGNAL,
+        ProjectionRelationType.REPLACED_BY_ITEM,
     } <= ontology.relation_types
 
 
@@ -137,8 +141,10 @@ def test_mapping_uses_governed_identity_fields_not_titles_locators_or_digests() 
         "attempt_id",
         "check_outcome_id",
         "definition_id",
+        "basis.duplicate_signal_id",
         "definition_version_id",
         "item_id",
+        "related_item_id",
         "promoting_gate_decision_id",
         "representation_id",
         "request_id",
@@ -197,3 +203,202 @@ def test_governed_identity_converges_aggregate_and_payload_references() -> None:
     ) == canonical_identity_reference(reference, context)
     assert canonical_node_identity_source(aggregate) == "GOVERNED_ID"
     assert canonical_node_identity_source(reference) == "GOVERNED_ID"
+
+
+def test_optional_nested_governed_id_bindings_are_fail_closed_and_exact() -> None:
+    mapping = discovery_lineage_mapping_v1(discovery_lineage_ontology_v1())
+    gate = mapping.resolve("discovery.gate.decided")
+    transition = mapping.resolve("source.observable_transition.recorded")
+    assert gate is not None and transition is not None
+
+    duplicate = next(node for node in gate.nodes if node.alias == "duplicate_signal")
+    related = next(node for node in transition.nodes if node.alias == "related_item")
+    assert duplicate.optional is True
+    assert duplicate.payload_field == "basis.duplicate_signal_id"
+    assert related.optional is True
+    assert related.payload_field == "related_item_id"
+
+    duplicate_id = "00000000-0000-4000-8000-000000007010"
+    related_id = "00000000-0000-4000-8000-000000006010"
+    context = StructuralIdentityContext(
+        aggregate_type="discovery_gate_decision",
+        aggregate_id="00000000-0000-4000-8000-000000007011",
+        aggregate_version=1,
+        event_id="00000000-0000-4000-8000-000000009011",
+        payload_id="00000000-0000-4000-8000-000000009012",
+        payload={
+            "basis": {"duplicate_signal_id": duplicate_id},
+            "related_item_id": related_id,
+        },
+    )
+    assert structural_node_identity_available(duplicate, context) is True
+    assert structural_node_identity_available(related, context) is True
+    assert canonical_node_id(duplicate, context) == canonical_governed_node_id(
+        ProjectionNodeType.SIGNAL, "signal", duplicate_id
+    )
+    assert canonical_node_id(related, context) == canonical_governed_node_id(
+        ProjectionNodeType.SOURCE_ITEM, "source_item", related_id
+    )
+
+    absent = StructuralIdentityContext(
+        aggregate_type=context.aggregate_type,
+        aggregate_id=context.aggregate_id,
+        aggregate_version=context.aggregate_version,
+        event_id=context.event_id,
+        payload_id=context.payload_id,
+        payload={"basis": {"duplicate_signal_id": None}, "related_item_id": None},
+    )
+    assert structural_node_identity_available(duplicate, absent) is False
+    assert structural_node_identity_available(related, absent) is False
+
+
+def test_duplicate_and_replacement_relations_are_optional_but_allow_listed() -> None:
+    mapping = discovery_lineage_mapping_v1(discovery_lineage_ontology_v1())
+    gate = mapping.resolve("discovery.gate.decided")
+    transition = mapping.resolve("source.observable_transition.recorded")
+    assert gate is not None and transition is not None
+    assert any(
+        relation.relation_type is ProjectionRelationType.DUPLICATE_OF_SIGNAL
+        and relation.source_alias == "signal"
+        and relation.target_alias == "duplicate_signal"
+        for relation in gate.relations
+    )
+    assert any(
+        relation.relation_type is ProjectionRelationType.REPLACED_BY_ITEM
+        and relation.source_alias == "item"
+        and relation.target_alias == "related_item"
+        for relation in transition.relations
+    )
+
+
+def _synthetic_batch(event_type: str, payload: dict[str, object]):
+    from newsroom.authority import EventId, UtcTimestamp, digest_canonical
+    from newsroom.authority._neo4j_projection_system import _build_structural_batch
+    from newsroom.authority._projection_store import _ProjectionDeliverySource
+    from newsroom.authority.persistence import LedgerEventRecord
+    from newsroom.projection import (
+        ProjectionGenerationId,
+        ProjectionGenerationState,
+        ProjectionGenerationView,
+    )
+
+    ontology = discovery_lineage_ontology_v1()
+    mapping_contract = discovery_lineage_mapping_v1(ontology)
+    family = discovery_lineage_family_v1(ontology, mapping_contract)
+    mapping = mapping_contract.resolve(event_type)
+    assert mapping is not None
+    generation = ProjectionGenerationView(
+        generation_id=ProjectionGenerationId.parse(
+            "00000000-0000-4000-8000-000000009100"
+        ),
+        family_id=family.family_id,
+        state=ProjectionGenerationState.BUILDING,
+        lifecycle_version=1,
+        authority_aggregate_version=1,
+        validated_through_ledger_seq=None,
+        created_at=UtcTimestamp.parse("2042-01-01T00:00:00.000000Z"),
+        updated_at=UtcTimestamp.parse("2042-01-01T00:00:00.000000Z"),
+    )
+    event = LedgerEventRecord(
+        ledger_seq=10,
+        event_id="00000000-0000-4000-8000-000000009101",
+        event_type=event_type,
+        event_schema_version=1,
+        aggregate_type="fixture_aggregate",
+        aggregate_id="00000000-0000-4000-8000-000000009102",
+        aggregate_version=1,
+        recorded_at="2042-01-01T00:00:00.000000Z",
+        command_id="00000000-0000-4000-8000-000000009103",
+        producer_version="fixture-producer-v1",
+        command_definition_version="fixture-command-v1",
+        command_definition_digest="sha256:" + "a" * 64,
+        payload_id="00000000-0000-4000-8000-000000009104",
+        payload_mode="INLINE",
+        payload_schema_version="fixture-schema-v1",
+        payload_schema_contract_version="fixture-contract-v1",
+        payload_schema_contract_digest="sha256:" + "b" * 64,
+        payload_canonicalizer_version="fixture-canonicalizer-v1",
+        payload_digest="sha256:" + "c" * 64,
+        object_admission_id=None,
+        principal_id="principal.alpha",
+        authentication_context_id="00000000-0000-4000-8000-000000009105",
+        authorization_request_digest="sha256:" + "d" * 64,
+        authorization_decision_id="00000000-0000-4000-8000-000000009106",
+        correlation_id=None,
+        causation_kind=None,
+        causation_identifier=None,
+        causation_external_system=None,
+        security_scope="authority.discovery",
+        retention_scope="authority.audit",
+        trust_scope="ADMITTED",
+    )
+    return _build_structural_batch(
+        _ProjectionDeliverySource(
+            generation=generation,
+            family=family,
+            mapping_contract=mapping_contract,
+            mapping=mapping,
+            policy_omitted=False,
+            event=event,
+            source_event_digest=digest_canonical(
+                {"event": str(EventId.parse(event.event_id))}
+            ),
+            payload=payload,
+            payload_is_mapping=True,
+            tombstoned_object_admission_ids=(),
+        )
+    )
+
+
+def test_optional_duplicate_and_replacement_relations_materialize_only_with_evidence() -> None:
+    signal_id = "00000000-0000-4000-8000-000000007001"
+    duplicate_id = "00000000-0000-4000-8000-000000007002"
+    gate_id = "00000000-0000-4000-8000-000000007003"
+    duplicate = _synthetic_batch(
+        "discovery.gate.decided",
+        {
+            "signal_id": signal_id,
+            "decision_id": gate_id,
+            "basis": {"duplicate_signal_id": duplicate_id},
+        },
+    )
+    ordinary = _synthetic_batch(
+        "discovery.gate.decided",
+        {
+            "signal_id": signal_id,
+            "decision_id": gate_id,
+            "basis": {"duplicate_signal_id": None},
+        },
+    )
+    assert sum(
+        relation.relation_type is ProjectionRelationType.DUPLICATE_OF_SIGNAL
+        for relation in duplicate.relations
+    ) == 1
+    assert not any(
+        relation.relation_type is ProjectionRelationType.DUPLICATE_OF_SIGNAL
+        for relation in ordinary.relations
+    )
+
+    item_id = "00000000-0000-4000-8000-000000006001"
+    related_item_id = "00000000-0000-4000-8000-000000006002"
+    transition_payload = {
+        "item_id": item_id,
+        "related_item_id": related_item_id,
+        "check_outcome_id": "00000000-0000-4000-8000-000000006003",
+        "transition_id": "00000000-0000-4000-8000-000000006004",
+    }
+    replacement = _synthetic_batch(
+        "source.observable_transition.recorded", transition_payload
+    )
+    nonreplacement = _synthetic_batch(
+        "source.observable_transition.recorded",
+        {**transition_payload, "related_item_id": None},
+    )
+    assert sum(
+        relation.relation_type is ProjectionRelationType.REPLACED_BY_ITEM
+        for relation in replacement.relations
+    ) == 1
+    assert not any(
+        relation.relation_type is ProjectionRelationType.REPLACED_BY_ITEM
+        for relation in nonreplacement.relations
+    )

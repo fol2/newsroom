@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -7,20 +8,26 @@ import pytest
 from newsroom.authority import UtcTimestamp
 from newsroom.projection import (
     DISCOVERY_LINEAGE_FAMILY_ID,
+    DiscoveryHealthDimension,
     DiscoveryHealthState,
     HealthPolicy,
     ProjectionGenerationCreateRequest,
     ProjectionGenerationId,
+    ProjectionRelationType,
 )
 from newsroom.projection.neo4j import (
     DiscoveryLineageProjectionFacade,
+    DiscoverySourceHealthReadRequest,
     DiscoveryLineageReadError,
     DiscoveryLineageReadRequest,
     DiscoveryLineageSubject,
     Neo4jConnectionError,
 )
+from newsroom.sources import SourceDefinitionVersionId, SourceLifecycleStage
 
-from .check_3c_helpers import DEFINITION_ID
+from .check_3c_authority_helpers import version_request
+from .check_3c_helpers import DEFINITION_ID, LATER, VERSION_ID
+from .discovery_3d_authority_helpers import open_discovery_system
 from .discovery_3d_helpers import LEAD_ID, SIGNAL_ID
 from .discovery_projection_3e_helpers import (
     MemoryNeo4jAdapter,
@@ -158,11 +165,81 @@ def test_graph_loss_fails_closed_and_health_is_quarantined(tmp_path: Path) -> No
         assessment = facade.assess_projection(
             _request(),
             policy=_POLICY,
-            assessed_at=UtcTimestamp.now(),
+            assessed_at=LATER,
             proof=proof(),
         )
         assert assessment.state is DiscoveryHealthState.QUARANTINED
         assert assessment.reason_code == "PROJECTION_VALIDATION_FAILED"
+    finally:
+        system.close()
+
+
+class _UnexpectedRelationAdapter(MemoryNeo4jAdapter):
+    def read(self, **kwargs):
+        response = super().read(**kwargs)
+        assert response.relations
+        return replace(
+            response,
+            relations=(
+                replace(
+                    response.relations[0],
+                    relation_type=ProjectionRelationType.DERIVED_FROM,
+                ),
+                *response.relations[1:],
+            ),
+        )
+
+
+def test_bounded_read_rejects_relation_outside_discovery_ontology(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    seed_complete_lineage(database)
+    adapter = _UnexpectedRelationAdapter()
+    system = open_lineage_projection_system(database, adapter)
+    try:
+        _activate(system)
+        with pytest.raises(
+            DiscoveryLineageReadError,
+            match="unexpected relation type",
+        ):
+            DiscoveryLineageProjectionFacade.from_system(system).read(
+                _request(), proof=proof()
+            )
+    finally:
+        system.close()
+
+
+class _InvalidEndpointTypeAdapter(MemoryNeo4jAdapter):
+    def read(self, **kwargs):
+        response = super().read(**kwargs)
+        assert response.relations
+        lead = DiscoveryLineageSubject(LEAD_ID).canonical_id
+        return replace(
+            response,
+            relations=(
+                replace(response.relations[0], target_canonical_id=lead),
+                *response.relations[1:],
+            ),
+        )
+
+
+def test_bounded_read_rejects_relation_endpoint_type_tamper(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    seed_complete_lineage(database)
+    adapter = _InvalidEndpointTypeAdapter()
+    system = open_lineage_projection_system(database, adapter)
+    try:
+        _activate(system)
+        with pytest.raises(
+            DiscoveryLineageReadError,
+            match="endpoints violate the ontology",
+        ):
+            DiscoveryLineageProjectionFacade.from_system(system).read(
+                _request(), proof=proof()
+            )
     finally:
         system.close()
 
@@ -186,10 +263,115 @@ def test_projection_health_distinguishes_service_unavailability(
         ).assess_projection(
             _request(),
             policy=_POLICY,
-            assessed_at=UtcTimestamp.now(),
+            assessed_at=LATER,
             proof=proof(),
         )
         assert assessment.state is DiscoveryHealthState.UNAVAILABLE
         assert assessment.reason_code == "PROJECTION_SERVICE_UNAVAILABLE"
     finally:
         system.close()
+
+
+def test_retired_source_fails_serving_and_rebuild_does_not_resurrect_lineage(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    seed_complete_lineage(database)
+
+    retired_version_id = SourceDefinitionVersionId.parse(
+        "00000000-0000-4000-8000-000000009801"
+    )
+    authority = open_discovery_system(database)
+    try:
+        authority.sources.record_definition_version(
+            replace(
+                version_request(),
+                version_id=retired_version_id,
+                version_number=2,
+                expected_previous_version_id=VERSION_ID,
+                locator="fixture://increment-3e/retired-guidance",
+                lifecycle_stage=SourceLifecycleStage.RETIRED,
+                change_reason="Retire the fixture source from current projection serving.",
+                idempotency_key="increment-3e-retire-source",
+            ),
+            proof=proof(),
+        )
+    finally:
+        authority.close()
+
+    replacement_adapter = MemoryNeo4jAdapter()
+    replacement_system = open_lineage_projection_system(
+        database, replacement_adapter
+    )
+    try:
+        facade = DiscoveryLineageProjectionFacade.from_system(
+            replacement_system
+        )
+        replacement = register_generation(replacement_system)
+        source_health = replacement_system.health.source(
+            DiscoverySourceHealthReadRequest(
+                definition_id=DEFINITION_ID,
+                policy=_POLICY,
+                assessed_at=LATER,
+            ),
+            proof=proof(),
+        )
+        source_contract = next(
+            item
+            for item in source_health
+            if item.dimension is DiscoveryHealthDimension.SOURCE_CONTRACT
+        )
+        assert source_contract.state is DiscoveryHealthState.BLOCKED
+        assert source_contract.reason_code == "SOURCE_RIGHTS_NOT_CURRENT"
+
+        with pytest.raises(
+            DiscoveryLineageReadError,
+            match="not currently eligible",
+        ):
+            facade.read(_request(), proof=proof())
+        with pytest.raises(
+            DiscoveryLineageReadError,
+            match="health subject is not currently eligible",
+        ):
+            facade.assess_projection(
+                _request(),
+                policy=_POLICY,
+                assessed_at=LATER,
+                proof=proof(),
+            )
+
+        rebuilt = _rebuild(
+            replacement_system,
+            replacement,
+            key="3e-retired-source-rebuild",
+        )
+        assert rebuilt.recorded_delivery_count == 0
+        assert rebuilt.ignored_optional_count > 0
+        assert rebuilt.checkpoint_ledger_seq >= rebuilt.through_ledger_seq
+        assert not {
+            node.canonical_id
+            for (generation_id, _sequence), batch
+            in replacement_adapter.deliveries.items()
+            if generation_id == str(replacement.generation_id)
+            for node in batch.nodes
+        }
+
+        validation = _validate(
+            replacement_system,
+            replacement.generation_id,
+            rebuilt.checkpoint_ledger_seq,
+            key="3e-retired-source-validate",
+        )
+        _promote(
+            replacement_system,
+            replacement.generation_id,
+            validation,
+            key="3e-retired-source-promote",
+        )
+        with pytest.raises(
+            DiscoveryLineageReadError,
+            match="not currently eligible",
+        ):
+            facade.read(_request(), proof=proof())
+    finally:
+        replacement_system.close()

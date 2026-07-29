@@ -31,6 +31,7 @@ from newsroom.projection.mapping import (
     canonical_identity_reference,
     canonical_node_id,
     canonical_node_identity_source,
+    structural_node_identity_available,
 )
 from newsroom.projection.models import (
     DeliveryRecordView,
@@ -47,6 +48,11 @@ from newsroom.projection.models import (
     ProjectionStateError,
 )
 from newsroom.projection.neo4j._adapter import _open_neo4j_adapter
+from newsroom.projection.neo4j.discovery_health_reads import (
+    DiscoveryCoverageHealthReadRequest,
+    DiscoveryHealthAuthorityFacade,
+    DiscoverySourceHealthReadRequest,
+)
 from newsroom.projection.neo4j.models import (
     Neo4jApplyResult,
     Neo4jAuthorityCommitPending,
@@ -208,6 +214,7 @@ class Neo4jProjectionAuthoritySystem:
         "events",
         "projections",
         "structural",
+        "health",
         "compatibility",
         "__close",
     )
@@ -219,6 +226,7 @@ class Neo4jProjectionAuthoritySystem:
         events: AuthorityEvents,
         projections: NativeProjections,
         structural: Neo4jStructuralProjector,
+        health: DiscoveryHealthAuthorityFacade,
         compatibility: Neo4jCompatibility,
         close: Callable[[], None],
     ) -> None:
@@ -226,6 +234,7 @@ class Neo4jProjectionAuthoritySystem:
         self.events = events
         self.projections = projections
         self.structural = structural
+        self.health = health
         self.compatibility = compatibility
         self.__close = close
 
@@ -399,7 +408,43 @@ class _Neo4jProjectionBoundary:
                 request.generation_id, ledger_seq
             )
             if source.mapping is None:
-                ignored += 1
+                if not source.policy_omitted:
+                    ignored += 1
+                    continue
+                current = self._store.projection_generation(
+                    request.generation_id
+                )
+                result = self.deliver(
+                    StructuralDeliveryRequest(
+                        generation_id=request.generation_id,
+                        expected_authority_version=(
+                            current.authority_aggregate_version
+                        ),
+                        ledger_seq=ledger_seq,
+                        idempotency_key=(
+                            "rebuild-policy-omission:"
+                            + digest_canonical(
+                                {
+                                    "rebuild_idempotency_key": (
+                                        request.idempotency_key
+                                    ),
+                                    "generation_id": str(
+                                        request.generation_id
+                                    ),
+                                    "ledger_seq": ledger_seq,
+                                }
+                            )
+                        ),
+                    ),
+                    proof,
+                )
+                if (
+                    result.outcome
+                    is ProjectionDeliveryOutcome.IGNORED_OPTIONAL
+                ):
+                    ignored += 1
+                else:
+                    blocked += 1
                 continue
             if state is not None:
                 if (
@@ -817,6 +862,126 @@ class _Neo4jProjectionBoundary:
             relations=graph.relations,
         )
 
+    def require_lineage_eligible(
+        self,
+        identifiers: tuple[object, ...],
+        proof: AuthenticationProof,
+    ) -> None:
+        if (
+            not isinstance(identifiers, tuple)
+            or not identifiers
+            or len(identifiers) > 64
+        ):
+            raise TypeError(
+                "lineage eligibility requires bounded governed identities"
+            )
+        authenticated = self._projection_boundary._authenticate_read(proof)
+        self._projection_boundary._authorize_read(
+            family_id="graph.discovery_lineage",
+            operation="discovery-lineage-eligibility",
+            semantic_value={
+                "identifiers": [str(value) for value in identifiers],
+            },
+            authenticated=authenticated,
+        )
+        self._store.require_discovery_lineage_subjects_eligible(identifiers)
+
+    def source_health(
+        self,
+        request: DiscoverySourceHealthReadRequest,
+        proof: AuthenticationProof,
+    ):
+        from newsroom.projection.health import assess_source_health
+
+        if not isinstance(request, DiscoverySourceHealthReadRequest):
+            raise TypeError("source health read requires a typed request")
+        authenticated = self._projection_boundary._authenticate_read(proof)
+        self._projection_boundary._authorize_read(
+            family_id="graph.discovery_lineage",
+            operation="discovery-source-health",
+            semantic_value={
+                "definition_id": str(request.definition_id),
+                "policy_id": request.policy.policy_id,
+                "policy_version": request.policy.policy_version,
+                "assessed_at": request.assessed_at.to_text(),
+            },
+            authenticated=authenticated,
+        )
+        source = self._store.discovery_source_health_input(
+            request.definition_id
+        )
+        return assess_source_health(
+            source,
+            policy=request.policy,
+            assessed_at=request.assessed_at,
+        )
+
+    def coverage_health(
+        self,
+        request: DiscoveryCoverageHealthReadRequest,
+        proof: AuthenticationProof,
+    ):
+        from newsroom.projection.health import (
+            CoveragePathHealthInput,
+            assess_coverage_availability,
+            assess_source_health,
+            summarize_source_path_state,
+        )
+        from newsroom.sources.types import (
+            CoverageResponsibility,
+            PortfolioFunction,
+        )
+
+        if not isinstance(request, DiscoveryCoverageHealthReadRequest):
+            raise TypeError("coverage health read requires a typed request")
+        authenticated = self._projection_boundary._authenticate_read(proof)
+        self._projection_boundary._authorize_read(
+            family_id="graph.discovery_lineage",
+            operation="discovery-coverage-health",
+            semantic_value={
+                "obligation_id": request.obligation_id,
+                "policy_id": request.policy.policy_id,
+                "policy_version": request.policy.policy_version,
+                "assessed_at": request.assessed_at.to_text(),
+            },
+            authenticated=authenticated,
+        )
+        paths = []
+        for contract in self._store.discovery_coverage_path_contracts(
+            request.obligation_id
+        ):
+            source = self._store.discovery_source_health_input(
+                contract.definition_id
+            )
+            assessments = assess_source_health(
+                source,
+                policy=request.policy,
+                assessed_at=request.assessed_at,
+            )
+            paths.append(
+                CoveragePathHealthInput(
+                    path_id=contract.path_id,
+                    obligation_id=contract.obligation_id,
+                    responsibility=contract.responsibility,
+                    contribution=contract.contribution,
+                    portfolio_functions=contract.portfolio_functions,
+                    state=summarize_source_path_state(assessments),
+                    qualifies_as_substitute=(
+                        PortfolioFunction.EXPLICIT_CONTINGENCY
+                        in contract.portfolio_functions
+                        and contract.responsibility
+                        is CoverageResponsibility.OPERATIONAL_RESILIENCE
+                    ),
+                    evidence=source.evidence,
+                )
+            )
+        return assess_coverage_availability(
+            tuple(paths),
+            obligation_id=request.obligation_id,
+            policy=request.policy,
+            assessed_at=request.assessed_at,
+        )
+
     def _record_without_graph(
         self,
         *,
@@ -864,6 +1029,8 @@ def _build_structural_batch(
     )
     node_by_alias: dict[str, StructuralNode] = {}
     for binding in mapping.nodes:
+        if not structural_node_identity_available(binding, context):
+            continue
         canonical_id = canonical_node_id(binding, context)
         node_by_alias[binding.alias] = StructuralNode(
             canonical_id=canonical_id,
@@ -880,8 +1047,10 @@ def _build_structural_batch(
     trust_scope = TrustScope(event.trust_scope)
     relations: list[StructuralRelation] = []
     for binding in mapping.relations:
-        source_node = node_by_alias[binding.source_alias]
-        target_node = node_by_alias[binding.target_alias]
+        source_node = node_by_alias.get(binding.source_alias)
+        target_node = node_by_alias.get(binding.target_alias)
+        if source_node is None or target_node is None:
+            continue
         relation_key = digest_canonical(
             {
                 "relation_contract": "newsroom-neo4j-structural-relation-v1",
@@ -1064,6 +1233,11 @@ def _open_with_adapter(
                 read_active=graph_boundary.read_active,
                 rebuild=graph_boundary.rebuild,
                 validate_generation=graph_boundary.validate_generation,
+            ),
+            health=DiscoveryHealthAuthorityFacade(
+                source=graph_boundary.source_health,
+                coverage=graph_boundary.coverage_health,
+                eligibility=graph_boundary.require_lineage_eligible,
             ),
             compatibility=compatibility,
             close=close,

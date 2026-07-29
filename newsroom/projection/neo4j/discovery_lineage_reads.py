@@ -177,6 +177,7 @@ class DiscoveryLineageProjectionFacade:
         "__validation",
         "__gaps",
         "__dead_letters",
+        "__eligibility",
     )
 
     def __init__(
@@ -199,12 +200,14 @@ class DiscoveryLineageProjectionFacade:
             [ProjectionGenerationId, int, AuthenticationProof],
             tuple[ProjectionDeadLetterView, ...],
         ],
+        eligibility: Callable[[tuple[object, ...], AuthenticationProof], None],
     ) -> None:
         self.__active_read = active_read
         self.__status = status
         self.__validation = validation
         self.__gaps = gaps
         self.__dead_letters = dead_letters
+        self.__eligibility = eligibility
 
     @classmethod
     def from_system(cls, system: object) -> DiscoveryLineageProjectionFacade:
@@ -228,12 +231,25 @@ class DiscoveryLineageProjectionFacade:
                     generation_id, limit=limit, proof=proof
                 )
             ),
+            eligibility=lambda identifiers, proof: (
+                system.health.require_lineage_eligible(
+                    identifiers, proof=proof
+                )
+            ),
         )
 
     @staticmethod
     def _current_family():
         return discovery_lineage_contract_registry().family(
             DISCOVERY_LINEAGE_FAMILY_ID
+        )
+
+    @classmethod
+    def _current_ontology(cls):
+        registry = discovery_lineage_contract_registry()
+        family = registry.family(DISCOVERY_LINEAGE_FAMILY_ID)
+        return registry.ontologies.resolve_digest(
+            family.ontology_contract_digest
         )
 
     @classmethod
@@ -306,6 +322,31 @@ class DiscoveryLineageProjectionFacade:
                 "discovery-lineage read metadata differs from authority"
             )
 
+        ontology = cls._current_ontology()
+        if any(node.node_type not in ontology.node_types for node in response.nodes):
+            raise DiscoveryLineageReadError(
+                "discovery-lineage read returned an unexpected node type"
+            )
+        if any(
+            relation.relation_type not in ontology.relation_types
+            for relation in response.relations
+        ):
+            raise DiscoveryLineageReadError(
+                "discovery-lineage read returned an unexpected relation type"
+            )
+        if any(
+            node.identity_source
+            != (
+                "EVENT"
+                if node.node_type is ProjectionNodeType.LEDGER_EVENT
+                else "GOVERNED_ID"
+            )
+            for node in response.nodes
+        ):
+            raise DiscoveryLineageReadError(
+                "discovery-lineage read returned an invalid identity source"
+            )
+
         nodes_by_id = {node.canonical_id: node for node in response.nodes}
         if len(nodes_by_id) != len(response.nodes):
             raise DiscoveryLineageReadError(
@@ -334,6 +375,20 @@ class DiscoveryLineageProjectionFacade:
             raise DiscoveryLineageReadError(
                 "discovery-lineage relation endpoint is missing"
             )
+        relation_contracts = {
+            item.relation_type: item for item in ontology.relations
+        }
+        for relation in response.relations:
+            contract = relation_contracts[relation.relation_type]
+            source = nodes_by_id[relation.source_canonical_id]
+            target = nodes_by_id[relation.target_canonical_id]
+            if (
+                source.node_type not in contract.source_types
+                or target.node_type not in contract.target_types
+            ):
+                raise DiscoveryLineageReadError(
+                    "discovery-lineage relation endpoints violate the ontology"
+                )
         if len(response.nodes) > request.limit or len(response.relations) > request.limit:
             raise DiscoveryLineageReadError(
                 "discovery-lineage read exceeded its bounded result limit"
@@ -347,6 +402,15 @@ class DiscoveryLineageProjectionFacade:
     ) -> StructuralReadResponse:
         if not isinstance(request, DiscoveryLineageReadRequest):
             raise TypeError("discovery-lineage read requires a typed request")
+        try:
+            self.__eligibility(
+                tuple(subject.identifier for subject in request.subjects),
+                proof,
+            )
+        except ProjectionStateError as exc:
+            raise DiscoveryLineageReadError(
+                "discovery-lineage subject is not currently eligible"
+            ) from exc
         status = self.status(proof=proof)
         self._validate_status(status, require_fresh=True)
         response = self.__active_read(request.active_request(), proof)
@@ -401,6 +465,15 @@ class DiscoveryLineageProjectionFacade:
     ) -> DiscoveryHealthAssessment:
         if not isinstance(request, DiscoveryLineageReadRequest):
             raise TypeError("projection health requires a typed lineage request")
+        try:
+            self.__eligibility(
+                tuple(subject.identifier for subject in request.subjects),
+                proof,
+            )
+        except ProjectionStateError as exc:
+            raise DiscoveryLineageReadError(
+                "discovery-lineage health subject is not currently eligible"
+            ) from exc
         status = self.status(proof=proof)
         family = self._current_family()
         contracts_current = (

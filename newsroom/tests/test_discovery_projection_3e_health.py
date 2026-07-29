@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import pytest
+
 from newsroom.authority import UtcTimestamp
 from newsroom.checks import CheckOutcomeId, CheckOutcomeKind, QuarantineDisposition
 from newsroom.projection import (
     CoveragePathHealthInput,
+    DiscoveryHealthAssessment,
+    DiscoveryHealthContractError,
     DiscoveryHealthDimension,
     DiscoveryHealthState,
     HealthEvidenceReference,
@@ -15,6 +19,7 @@ from newsroom.projection import (
     assess_coverage_availability,
     assess_projection_health,
     assess_source_health,
+    summarize_source_path_state,
 )
 from newsroom.sources import (
     CoverageContribution,
@@ -97,6 +102,30 @@ def assessments_by_dimension(value: SourceObservationHealthInput):
     }
 
 
+def test_health_assessment_rejects_future_evidence() -> None:
+    future = UtcTimestamp.parse("2042-03-12T10:06:00.000000Z")
+    evidence = HealthEvidenceReference(
+        evidence_type="CHECK_OUTCOME",
+        identifier="future-outcome",
+        observed_at=future,
+        digest="sha256:" + "9" * 64,
+    )
+    with pytest.raises(
+        DiscoveryHealthContractError,
+        match="evidence cannot follow",
+    ):
+        DiscoveryHealthAssessment(
+            dimension=DiscoveryHealthDimension.CHECK_EXECUTION,
+            state=DiscoveryHealthState.HEALTHY,
+            scope_type="SOURCE_DEFINITION_VERSION",
+            scope_id="future-source",
+            reason_code="CHECK_SUCCEEDED",
+            policy=POLICY,
+            evidence=(evidence,),
+            assessed_at=NOW,
+        )
+
+
 def test_successful_unchanged_is_healthy_and_quiet_history_is_not_stale() -> None:
     assessed = assessments_by_dimension(
         source_input(
@@ -170,6 +199,11 @@ def test_projection_health_attributes_service_gap_lag_and_tamper_separately() ->
         policy=POLICY,
         assessed_at=NOW,
     )
+    unknown = assess_projection_health(
+        ProjectionHealthInput(**{**base, "service_available": None}),
+        policy=POLICY,
+        assessed_at=NOW,
+    )
     blocked = assess_projection_health(
         ProjectionHealthInput(**{**base, "open_gap_count": 1}),
         policy=POLICY,
@@ -194,6 +228,8 @@ def test_projection_health_attributes_service_gap_lag_and_tamper_separately() ->
 
     assert healthy.state is DiscoveryHealthState.HEALTHY
     assert unavailable.state is DiscoveryHealthState.UNAVAILABLE
+    assert unknown.state is DiscoveryHealthState.UNKNOWN
+    assert unknown.reason_code == "PROJECTION_SERVICE_NOT_ASSESSED"
     assert blocked.state is DiscoveryHealthState.BLOCKED
     assert stale.state is DiscoveryHealthState.STALE
     assert quarantined.state is DiscoveryHealthState.QUARANTINED
@@ -252,3 +288,43 @@ def test_only_explicit_contingency_can_degrade_instead_of_block() -> None:
 
     assert assessed.state is DiscoveryHealthState.DEGRADED
     assert assessed.reason_code == "COVERAGE_EXPLICIT_CONTINGENCY_ACTIVE"
+
+
+def test_review_quarantine_is_not_reported_as_healthy() -> None:
+    assessed = assessments_by_dimension(
+        source_input(
+            CheckOutcomeKind.SHAPE_DRIFT,
+            quarantine=QuarantineDisposition.REVIEW,
+        )
+    )
+
+    assert assessed[DiscoveryHealthDimension.SOURCE_ACCESS].state is DiscoveryHealthState.QUARANTINED
+    assert assessed[DiscoveryHealthDimension.PARSER].state is DiscoveryHealthState.QUARANTINED
+    assert assessed[DiscoveryHealthDimension.CHECK_EXECUTION].state is DiscoveryHealthState.QUARANTINED
+
+
+def test_source_path_collapse_requires_positive_health_in_every_dimension() -> None:
+    healthy = tuple(assessments_by_dimension(source_input(CheckOutcomeKind.SUCCESS_UNCHANGED)).values())
+    assert summarize_source_path_state(healthy) is DiscoveryHealthState.HEALTHY
+
+    quarantined = tuple(
+        assessments_by_dimension(
+            source_input(
+                CheckOutcomeKind.SHAPE_DRIFT,
+                quarantine=QuarantineDisposition.REVIEW,
+            )
+        ).values()
+    )
+    assert summarize_source_path_state(quarantined) is DiscoveryHealthState.QUARANTINED
+
+
+def test_empty_coverage_path_set_is_unknown_not_healthy() -> None:
+    assessed = assess_coverage_availability(
+        (),
+        obligation_id="COV-EMPTY",
+        policy=POLICY,
+        assessed_at=NOW,
+    )
+
+    assert assessed.state is DiscoveryHealthState.UNKNOWN
+    assert assessed.reason_code == "COVERAGE_ANCHOR_NOT_DEFINED"

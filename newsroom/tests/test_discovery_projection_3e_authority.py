@@ -250,3 +250,63 @@ def test_exact_lineage_replay_does_not_duplicate_graph_authority(
         ) == 1
     finally:
         system.close()
+
+
+def test_discovery_lineage_is_one_connected_governed_path(tmp_path: Path) -> None:
+    database = tmp_path / "authority.sqlite3"
+    seed_complete_lineage(database)
+    adapter = MemoryNeo4jAdapter()
+    system = open_lineage_projection_system(database, adapter)
+    try:
+        generation = register_generation(system)
+        deliver_authority_history(system, generation)
+
+        batches = tuple(adapter.deliveries.values())
+        nodes = {
+            node.canonical_id: node
+            for batch in batches
+            for node in batch.nodes
+            if node.node_type is not ProjectionNodeType.LEDGER_EVENT
+        }
+        relations = {
+            (
+                relation.source_canonical_id,
+                relation.target_canonical_id,
+                relation.relation_type,
+            )
+            for batch in batches
+            for relation in batch.relations
+            if relation.relation_type
+            is not ProjectionRelationType.PROJECTED_FROM_EVENT
+        }
+        assert len(nodes) == 13
+        assert len(relations) == 16
+
+        source = next(
+            canonical_id
+            for canonical_id, node in nodes.items()
+            if node.node_type is ProjectionNodeType.SOURCE_DEFINITION
+        )
+        lead = next(
+            canonical_id
+            for canonical_id, node in nodes.items()
+            if node.node_type is ProjectionNodeType.LEAD
+        )
+        adjacency: dict[str, set[str]] = {}
+        for left, right, _relation_type in relations:
+            adjacency.setdefault(left, set()).add(right)
+            adjacency.setdefault(right, set()).add(left)
+
+        reached = {source}
+        frontier = [source]
+        while frontier:
+            current = frontier.pop()
+            for adjacent in adjacency.get(current, set()):
+                if adjacent not in reached:
+                    reached.add(adjacent)
+                    frontier.append(adjacent)
+
+        assert lead in reached
+        assert reached == set(nodes)
+    finally:
+        system.close()

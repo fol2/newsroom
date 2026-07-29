@@ -102,6 +102,8 @@ def test_relation_contract_is_exact_and_has_no_generic_predicate() -> None:
         "DECIDED_BY_GATE",
         "PROMOTED_TO_LEAD",
         "OPENED_LEAD",
+        "DUPLICATE_OF_SIGNAL",
+        "REPLACED_BY_ITEM",
         "DERIVED_FROM",
         "CONTAINS_PAYLOAD",
         "PROJECTED_FROM_EVENT",

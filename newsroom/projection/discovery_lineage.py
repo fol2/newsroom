@@ -59,6 +59,8 @@ def _node(
     node_type: ProjectionNodeType,
     identity_source: ProjectionIdentitySource,
     payload_field: str | None = None,
+    *,
+    optional: bool = False,
 ) -> StructuralNodeBinding:
     return StructuralNodeBinding(
         alias=alias,
@@ -70,6 +72,7 @@ def _node(
             if node_type is ProjectionNodeType.LEDGER_EVENT
             else node_type.value.lower()
         ),
+        optional=optional,
     )
 
 
@@ -195,6 +198,18 @@ def discovery_lineage_ontology_v1() -> OntologyContract:
             ProjectionRelationType.OPENED_LEAD,
             frozenset({ProjectionNodeType.GATE_DECISION}),
             frozenset({ProjectionNodeType.LEAD}),
+            provenance,
+        ),
+        OntologyRelationDefinition(
+            ProjectionRelationType.DUPLICATE_OF_SIGNAL,
+            frozenset({ProjectionNodeType.SIGNAL}),
+            frozenset({ProjectionNodeType.SIGNAL}),
+            provenance,
+        ),
+        OntologyRelationDefinition(
+            ProjectionRelationType.REPLACED_BY_ITEM,
+            frozenset({ProjectionNodeType.SOURCE_ITEM}),
+            frozenset({ProjectionNodeType.SOURCE_ITEM}),
             provenance,
         ),
         OntologyRelationDefinition(
@@ -502,6 +517,13 @@ def discovery_lineage_mapping_v1(
                     "item_id",
                 ),
                 _node(
+                    "related_item",
+                    ProjectionNodeType.SOURCE_ITEM,
+                    ProjectionIdentitySource.PAYLOAD_FIELD,
+                    "related_item_id",
+                    optional=True,
+                ),
+                _node(
                     "check_outcome",
                     ProjectionNodeType.CHECK_OUTCOME,
                     ProjectionIdentitySource.PAYLOAD_FIELD,
@@ -519,6 +541,11 @@ def discovery_lineage_mapping_v1(
                     ProjectionRelationType.TRANSITION_OF_ITEM,
                     "item",
                     "transition",
+                ),
+                _relation(
+                    ProjectionRelationType.REPLACED_BY_ITEM,
+                    "item",
+                    "related_item",
                 ),
                 _relation(
                     ProjectionRelationType.CLASSIFIED_BY_TRANSITION,
@@ -584,6 +611,13 @@ def discovery_lineage_mapping_v1(
                     "signal_id",
                 ),
                 _node(
+                    "duplicate_signal",
+                    ProjectionNodeType.SIGNAL,
+                    ProjectionIdentitySource.PAYLOAD_FIELD,
+                    "basis.duplicate_signal_id",
+                    optional=True,
+                ),
+                _node(
                     "gate",
                     ProjectionNodeType.GATE_DECISION,
                     ProjectionIdentitySource.AGGREGATE,
@@ -595,6 +629,11 @@ def discovery_lineage_mapping_v1(
                     ProjectionRelationType.DECIDED_BY_GATE,
                     "signal",
                     "gate",
+                ),
+                _relation(
+                    ProjectionRelationType.DUPLICATE_OF_SIGNAL,
+                    "signal",
+                    "duplicate_signal",
                 ),
                 _relation(
                     ProjectionRelationType.PROJECTED_FROM_EVENT,

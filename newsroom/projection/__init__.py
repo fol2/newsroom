@@ -57,6 +57,7 @@ from .health import (
     assess_coverage_availability,
     assess_projection_health,
     assess_source_health,
+    summarize_source_path_state,
 )
 from .mapping import (
     ProjectionIdentitySource,
@@ -231,6 +232,7 @@ __all__ = [
     "assess_coverage_availability",
     "assess_projection_health",
     "assess_source_health",
+    "summarize_source_path_state",
     "canonical_node_id",
     "discovery_lineage_contract_registry",
     "discovery_lineage_family_v1",

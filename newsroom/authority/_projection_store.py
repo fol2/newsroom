@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 import json
 import sqlite3
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._capability import _AuthorizedCommandGrant
 from ._event_store import _EventAuthorityStore
@@ -52,6 +52,16 @@ from newsroom.projection.models import (
 )
 from newsroom.projection.policy import ProjectionContractRegistry
 
+if TYPE_CHECKING:
+    from newsroom.projection.health import SourceObservationHealthInput
+    from newsroom.sources.types import (
+        CoverageContribution,
+        CoverageResponsibility,
+        PortfolioFunction,
+        SourceDefinitionId,
+        SourceDefinitionVersionId,
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class _ProjectionDeliverySource:
@@ -59,6 +69,7 @@ class _ProjectionDeliverySource:
     family: ProjectionFamilyDefinition
     mapping_contract: StructuralMappingContract
     mapping: StructuralEventMapping | None
+    policy_omitted: bool
     event: LedgerEventRecord
     source_event_digest: str
     payload: Mapping[str, object]
@@ -82,6 +93,25 @@ class _ProjectionRebuildDeliveryState:
     attempt_count: int
     source_event_id: EventId
     source_event_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class _DiscoveryCoveragePathContract:
+    definition_id: SourceDefinitionId
+    definition_version_id: SourceDefinitionVersionId
+    obligation_id: str
+    responsibility: CoverageResponsibility
+    contribution: CoverageContribution
+    portfolio_functions: frozenset[PortfolioFunction]
+
+    @property
+    def path_id(self) -> str:
+        return (
+            "coverage:"
+            + str(self.definition_version_id)
+            + ":"
+            + self.obligation_id
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2304,6 +2334,12 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     "projection delivery cannot target its own authority event"
                 )
             mapping = mapping_contract.resolve(source.event_type)
+            if (
+                family.family_id == "graph.discovery_lineage"
+                and mapping is not None
+                and not self._discovery_event_projection_eligible(conn, source)
+            ):
+                mapping = None
             complete_required = (
                 family.complete_projection_contract_digest is not None
             )
@@ -3254,11 +3290,21 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                         "projection tombstone lacks covered object admissions"
                     )
 
+            mapping = mapping_contract.resolve(event.event_type)
+            policy_omitted = (
+                family.family_id == "graph.discovery_lineage"
+                and mapping is not None
+                and not self._discovery_event_projection_eligible(conn, event)
+            )
+            if policy_omitted:
+                mapping = None
+
             return _ProjectionDeliverySource(
                 generation=generation,
                 family=family,
                 mapping_contract=mapping_contract,
-                mapping=mapping_contract.resolve(event.event_type),
+                mapping=mapping,
+                policy_omitted=policy_omitted,
                 event=event,
                 source_event_digest=source_event_digest,
                 payload=payload,
@@ -3423,6 +3469,422 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                 serving_time=self._clock(),
                 authority_watermark_ledger_seq=authority_watermark,
             )
+
+    @staticmethod
+    def _discovery_lineage_definition_id(
+        conn: sqlite3.Connection, identifier: object
+    ):
+        from newsroom.checks.types import (
+            CheckAttemptId,
+            CheckRequestId,
+            ObservableTransitionId,
+        )
+        from newsroom.discovery.types import (
+            DiscoverySignalId,
+            GateDecisionId,
+            NewsLeadId,
+        )
+        from newsroom.sources.types import (
+            CheckOutcomeId,
+            DiscoveryOccurrenceId,
+            DiscoveryRepresentationId,
+            SourceDefinitionId,
+            SourceDefinitionVersionId,
+            SourceItemId,
+            SourceRevisionId,
+        )
+
+        if isinstance(identifier, SourceDefinitionId):
+            return identifier
+        table: str
+        key: str
+        if isinstance(identifier, SourceDefinitionVersionId):
+            table, key = "source_definition_versions", "version_id"
+        elif isinstance(identifier, SourceItemId):
+            table, key = "source_items", "item_id"
+        elif isinstance(identifier, SourceRevisionId):
+            table, key = "source_revisions", "revision_id"
+        elif isinstance(identifier, DiscoveryRepresentationId):
+            table, key = "discovery_representations", "representation_id"
+        elif isinstance(identifier, DiscoveryOccurrenceId):
+            table, key = "discovery_occurrences", "occurrence_id"
+        elif isinstance(identifier, CheckRequestId):
+            table, key = "check_requests", "request_id"
+        elif isinstance(identifier, CheckOutcomeId):
+            table, key = "check_outcomes", "outcome_id"
+        elif isinstance(identifier, ObservableTransitionId):
+            table, key = "observable_transitions", "transition_id"
+        elif isinstance(identifier, DiscoverySignalId):
+            table, key = "discovery_signals", "signal_id"
+        elif isinstance(identifier, NewsLeadId):
+            table, key = "news_leads", "lead_id"
+        elif isinstance(identifier, CheckAttemptId):
+            row = conn.execute(
+                "SELECT r.definition_id FROM check_attempts a "
+                "JOIN check_requests r ON r.request_id=a.request_id "
+                "WHERE a.attempt_id=?",
+                (str(identifier),),
+            ).fetchone()
+            if row is None:
+                raise AuthorityPersistenceError(
+                    "discovery-lineage Check Attempt is absent"
+                )
+            return SourceDefinitionId.parse(str(row["definition_id"]))
+        elif isinstance(identifier, GateDecisionId):
+            row = conn.execute(
+                "SELECT s.definition_id FROM discovery_gate_decisions g "
+                "JOIN discovery_signals s ON s.signal_id=g.signal_id "
+                "WHERE g.decision_id=?",
+                (str(identifier),),
+            ).fetchone()
+            if row is None:
+                raise AuthorityPersistenceError(
+                    "discovery-lineage Gate Decision is absent"
+                )
+            return SourceDefinitionId.parse(str(row["definition_id"]))
+        else:
+            raise TypeError(
+                "discovery-lineage eligibility requires governed identities"
+            )
+        row = conn.execute(
+            f"SELECT definition_id FROM {table} WHERE {key}=?",
+            (str(identifier),),
+        ).fetchone()
+        if row is None:
+            raise AuthorityPersistenceError(
+                "discovery-lineage governed identity is absent"
+            )
+        return SourceDefinitionId.parse(str(row["definition_id"]))
+
+    @staticmethod
+    def _require_discovery_definition_projection_eligible(
+        conn: sqlite3.Connection, definition_id: object
+    ) -> None:
+        from newsroom.sources.types import (
+            SourceDefinitionId,
+            SourceLifecycleStage,
+        )
+
+        if not isinstance(definition_id, SourceDefinitionId):
+            raise TypeError("projection eligibility requires a typed definition ID")
+        row = conn.execute(
+            "SELECT v.lifecycle_stage FROM source_definition_version_heads h "
+            "JOIN source_definition_versions v "
+            "ON v.version_id=h.current_version_id "
+            "WHERE h.definition_id=?",
+            (str(definition_id),),
+        ).fetchone()
+        if row is None:
+            raise AuthorityPersistenceError(
+                "discovery-lineage definition has no current version"
+            )
+        lifecycle = SourceLifecycleStage(str(row["lifecycle_stage"]))
+        if lifecycle in {
+            SourceLifecycleStage.RETIRED,
+            SourceLifecycleStage.REJECTED,
+        }:
+            raise ProjectionStateError(
+                "discovery-lineage source is not currently projection-eligible"
+            )
+
+    def require_discovery_lineage_subjects_eligible(
+        self, identifiers: tuple[object, ...]
+    ) -> None:
+        if (
+            not isinstance(identifiers, tuple)
+            or not identifiers
+            or len(identifiers) > 64
+        ):
+            raise TypeError(
+                "discovery-lineage eligibility requires bounded identities"
+            )
+        with self._lock:
+            definitions = {
+                self._discovery_lineage_definition_id(
+                    self._connection, identifier
+                )
+                for identifier in identifiers
+            }
+            for definition_id in definitions:
+                self._require_discovery_definition_projection_eligible(
+                    self._connection, definition_id
+                )
+
+    def _discovery_event_projection_eligible(
+        self, conn: sqlite3.Connection, event: LedgerEventRecord
+    ) -> bool:
+        from newsroom.checks.types import (
+            CheckAttemptId,
+            CheckRequestId,
+            ObservableTransitionId,
+        )
+        from newsroom.discovery.types import (
+            DiscoverySignalId,
+            GateDecisionId,
+            NewsLeadId,
+        )
+        from newsroom.sources.types import (
+            CheckOutcomeId,
+            DiscoveryOccurrenceId,
+            DiscoveryRepresentationId,
+            SourceDefinitionId,
+            SourceDefinitionVersionId,
+            SourceItemId,
+            SourceRevisionId,
+        )
+
+        identifier_types = {
+            "source.definition.registered": SourceDefinitionId,
+            "source.definition.version.recorded": SourceDefinitionVersionId,
+            "source.item.registered": SourceItemId,
+            "source.revision.recorded": SourceRevisionId,
+            "discovery.representation.recorded": DiscoveryRepresentationId,
+            "discovery.occurrence.recorded": DiscoveryOccurrenceId,
+            "check.request.registered": CheckRequestId,
+            "check.attempt.started": CheckAttemptId,
+            "check.outcome.recorded": CheckOutcomeId,
+            "source.observable_transition.recorded": ObservableTransitionId,
+            "discovery.signal.admitted": DiscoverySignalId,
+            "discovery.gate.decided": GateDecisionId,
+            "discovery.lead.opened": NewsLeadId,
+        }
+        identifier_type = identifier_types.get(event.event_type)
+        if identifier_type is None:
+            return True
+        identifier = identifier_type.parse(event.aggregate_id)
+        definition_id = self._discovery_lineage_definition_id(conn, identifier)
+        try:
+            self._require_discovery_definition_projection_eligible(
+                conn, definition_id
+            )
+        except ProjectionStateError:
+            return False
+        return True
+
+    def discovery_source_health_input(
+        self, definition_id: SourceDefinitionId
+    ) -> SourceObservationHealthInput:
+        from newsroom.checks.types import (
+            CheckOutcomeKind,
+            ObservableTransitionKind,
+            QuarantineDisposition,
+        )
+        from newsroom.projection.health import (
+            HealthEvidenceReference,
+            SourceObservationHealthInput,
+        )
+        from newsroom.sources.types import (
+            CheckOutcomeId,
+            SourceDefinitionId,
+            SourceDefinitionVersionId,
+            SourceLifecycleStage,
+        )
+
+        if not isinstance(definition_id, SourceDefinitionId):
+            raise TypeError(
+                "source health lookup requires a typed Source Definition ID"
+            )
+        with self._lock:
+            version = self._connection.execute(
+                "SELECT v.version_id,v.lifecycle_stage,v.canonical_digest,"
+                "v.recorded_at FROM source_definition_version_heads h "
+                "JOIN source_definition_versions v "
+                "ON v.version_id=h.current_version_id "
+                "WHERE h.definition_id=?",
+                (str(definition_id),),
+            ).fetchone()
+            if version is None:
+                raise AuthorityPersistenceError(
+                    "source health definition has no current version"
+                )
+            version_id = SourceDefinitionVersionId.parse(
+                str(version["version_id"])
+            )
+            lifecycle_stage = SourceLifecycleStage(
+                str(version["lifecycle_stage"])
+            )
+            outcome = self._connection.execute(
+                "SELECT o.outcome_id,o.kind,o.quarantine,o.completed_at,"
+                "o.canonical_digest FROM check_outcomes o "
+                "JOIN ledger_events e ON e.event_id=o.authority_event_id "
+                "WHERE o.definition_id=? AND o.definition_version_id=? "
+                "ORDER BY o.completed_at DESC,e.ledger_seq DESC LIMIT 1",
+                (str(definition_id), str(version_id)),
+            ).fetchone()
+
+            successful = self._connection.execute(
+                "SELECT completed_at FROM check_outcomes "
+                "WHERE definition_id=? AND definition_version_id=? "
+                "AND kind IN "
+                "('SUCCESS_EMPTY','SUCCESS_UNCHANGED','SUCCESS_CHANGED',"
+                "'SUCCESS_PARTIAL','SUCCESS_TRUNCATED') "
+                "ORDER BY completed_at DESC,recorded_at DESC LIMIT 1",
+                (str(definition_id), str(version_id)),
+            ).fetchone()
+            complete = self._connection.execute(
+                "SELECT completed_at FROM check_outcomes "
+                "WHERE definition_id=? AND definition_version_id=? "
+                "AND kind IN "
+                "('SUCCESS_EMPTY','SUCCESS_UNCHANGED','SUCCESS_CHANGED') "
+                "ORDER BY completed_at DESC,recorded_at DESC LIMIT 1",
+                (str(definition_id), str(version_id)),
+            ).fetchone()
+            transition = self._connection.execute(
+                "SELECT transition_id,kind,observed_at,canonical_digest "
+                "FROM observable_transitions "
+                "WHERE definition_id=? AND definition_version_id=? "
+                "AND kind NOT IN "
+                "('REOBSERVED','AMBIGUOUS_ABSENCE',"
+                "'AGENDA_MISSED_EXPECTATION') "
+                "ORDER BY observed_at DESC,recorded_at DESC LIMIT 1",
+                (str(definition_id), str(version_id)),
+            ).fetchone()
+
+            evidence = [
+                HealthEvidenceReference(
+                    evidence_type="SOURCE_DEFINITION_VERSION",
+                    identifier=str(version_id),
+                    observed_at=UtcTimestamp.parse(str(version["recorded_at"])),
+                    digest=str(version["canonical_digest"]),
+                )
+            ]
+            outcome_id = None
+            outcome_kind = None
+            quarantine = None
+            outcome_completed_at = None
+            if outcome is not None:
+                outcome_id = CheckOutcomeId.parse(str(outcome["outcome_id"]))
+                outcome_kind = CheckOutcomeKind(str(outcome["kind"]))
+                quarantine = QuarantineDisposition(str(outcome["quarantine"]))
+                outcome_completed_at = UtcTimestamp.parse(
+                    str(outcome["completed_at"])
+                )
+                evidence.append(
+                    HealthEvidenceReference(
+                        evidence_type="CHECK_OUTCOME",
+                        identifier=str(outcome_id),
+                        observed_at=outcome_completed_at,
+                        digest=str(outcome["canonical_digest"]),
+                    )
+                )
+            if transition is not None:
+                transition_kind = ObservableTransitionKind(
+                    str(transition["kind"])
+                )
+                evidence.append(
+                    HealthEvidenceReference(
+                        evidence_type=(
+                            "OBSERVABLE_TRANSITION:"
+                            + transition_kind.value
+                        ),
+                        identifier=str(transition["transition_id"]),
+                        observed_at=UtcTimestamp.parse(
+                            str(transition["observed_at"])
+                        ),
+                        digest=str(transition["canonical_digest"]),
+                    )
+                )
+
+            semantic_lineage_valid: bool | None
+            if outcome is None:
+                semantic_lineage_valid = None
+            else:
+                semantic_lineage_valid = not (
+                    outcome_kind is CheckOutcomeKind.QUARANTINED_DISABLED
+                    or quarantine
+                    in {
+                        QuarantineDisposition.REVIEW,
+                        QuarantineDisposition.QUARANTINE,
+                    }
+                )
+            return SourceObservationHealthInput(
+                definition_id=definition_id,
+                definition_version_id=version_id,
+                outcome_id=outcome_id,
+                outcome_kind=outcome_kind,
+                quarantine=quarantine,
+                outcome_completed_at=outcome_completed_at,
+                last_complete_observation_at=(
+                    None
+                    if complete is None
+                    else UtcTimestamp.parse(str(complete["completed_at"]))
+                ),
+                last_successful_observation_at=(
+                    None
+                    if successful is None
+                    else UtcTimestamp.parse(str(successful["completed_at"]))
+                ),
+                last_source_change_at=(
+                    None
+                    if transition is None
+                    else UtcTimestamp.parse(str(transition["observed_at"]))
+                ),
+                rights_current=lifecycle_stage
+                not in {
+                    SourceLifecycleStage.RETIRED,
+                    SourceLifecycleStage.REJECTED,
+                },
+                source_contract_current=True,
+                semantic_lineage_valid=semantic_lineage_valid,
+                evidence=tuple(evidence),
+            )
+
+    def discovery_coverage_path_contracts(
+        self, obligation_id: str
+    ) -> tuple[_DiscoveryCoveragePathContract, ...]:
+        from newsroom.authority.types import require_token
+        from newsroom.sources.types import (
+            CoverageContribution,
+            CoverageResponsibility,
+            PortfolioFunction,
+            SourceDefinitionId,
+            SourceDefinitionVersionId,
+        )
+
+        require_token(obligation_id, field="coverage_obligation_id")
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT v.definition_id,m.version_id,m.obligation_id,"
+                "m.responsibility,m.contribution "
+                "FROM source_version_coverage_mappings m "
+                "JOIN source_definition_versions v ON v.version_id=m.version_id "
+                "JOIN source_definition_version_heads h "
+                "ON h.current_version_id=m.version_id "
+                "WHERE m.obligation_id=? "
+                "ORDER BY v.definition_id,m.version_id",
+                (obligation_id,),
+            ).fetchall()
+            contracts: list[_DiscoveryCoveragePathContract] = []
+            for row in rows:
+                version_id = SourceDefinitionVersionId.parse(
+                    str(row["version_id"])
+                )
+                functions = frozenset(
+                    PortfolioFunction(str(item["portfolio_function"]))
+                    for item in self._connection.execute(
+                        "SELECT portfolio_function "
+                        "FROM source_version_portfolio_functions "
+                        "WHERE version_id=? ORDER BY portfolio_function",
+                        (str(version_id),),
+                    ).fetchall()
+                )
+                contracts.append(
+                    _DiscoveryCoveragePathContract(
+                        definition_id=SourceDefinitionId.parse(
+                            str(row["definition_id"])
+                        ),
+                        definition_version_id=version_id,
+                        obligation_id=str(row["obligation_id"]),
+                        responsibility=CoverageResponsibility(
+                            str(row["responsibility"])
+                        ),
+                        contribution=CoverageContribution(
+                            str(row["contribution"])
+                        ),
+                        portfolio_functions=functions,
+                    )
+                )
+            return tuple(contracts)
 
     def projection_generation(
         self, generation_id: ProjectionGenerationId

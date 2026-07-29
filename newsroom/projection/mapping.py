@@ -27,6 +27,7 @@ class StructuralNodeBinding:
     identity_source: ProjectionIdentitySource
     payload_field: str | None = None
     identity_namespace: str | None = None
+    optional: bool = False
 
     def __post_init__(self) -> None:
         require_token(self.alias, field="projection_node_alias")
@@ -52,6 +53,12 @@ class StructuralNodeBinding:
                 raise ProjectionContractError(
                     "governed identity namespaces require aggregate or payload-field identity"
                 )
+        if not isinstance(self.optional, bool):
+            raise ProjectionContractError("node optionality must be boolean")
+        if self.optional and self.identity_source is not ProjectionIdentitySource.PAYLOAD_FIELD:
+            raise ProjectionContractError(
+                "optional structural nodes require payload-field identity"
+            )
 
     def canonical_value(self) -> dict[str, object]:
         value: dict[str, object] = {
@@ -65,7 +72,45 @@ class StructuralNodeBinding:
         # governed lifecycle identity convergence.
         if self.identity_namespace is not None:
             value["identity_namespace"] = self.identity_namespace
+        if self.optional:
+            value["optional"] = True
         return value
+
+
+_MISSING = object()
+
+
+def _payload_path_value(payload: Mapping[str, object], path: str) -> object:
+    current: object = payload
+    for segment in path.split("."):
+        if not isinstance(current, Mapping) or segment not in current:
+            return _MISSING
+        current = current[segment]
+    return current
+
+
+def structural_node_identity_available(
+    binding: StructuralNodeBinding,
+    context: StructuralIdentityContext,
+) -> bool:
+    if not isinstance(binding, StructuralNodeBinding):
+        raise ProjectionContractError(
+            "structural node availability requires typed binding"
+        )
+    if not isinstance(context, StructuralIdentityContext):
+        raise ProjectionContractError(
+            "structural node availability requires typed context"
+        )
+    if binding.identity_source is not ProjectionIdentitySource.PAYLOAD_FIELD:
+        return True
+    value = _payload_path_value(context.payload, binding.payload_field or "")
+    if value is _MISSING or value is None:
+        if binding.optional:
+            return False
+        raise ProjectionContractError(
+            f"projection identity payload field is absent: {binding.payload_field or ''}"
+        )
+    return True
 
 
 def _require_identity_text(value: str, *, field: str) -> str:
@@ -122,11 +167,11 @@ def canonical_identity_reference(
             value: object = context.aggregate_id
         else:
             field = binding.payload_field or ""
-            if field not in context.payload:
+            value = _payload_path_value(context.payload, field)
+            if value is _MISSING or value is None:
                 raise ProjectionContractError(
                     f"projection identity payload field is absent: {field}"
                 )
-            value = context.payload[field]
             if not isinstance(value, (str, int)) or isinstance(value, bool):
                 raise ProjectionContractError(
                     "projection identity payload field must be string or integer"
@@ -153,11 +198,11 @@ def canonical_identity_reference(
         identity = {"payload_id": context.payload_id}
     else:
         field = binding.payload_field or ""
-        if field not in context.payload:
+        value = _payload_path_value(context.payload, field)
+        if value is _MISSING or value is None:
             raise ProjectionContractError(
                 f"projection identity payload field is absent: {field}"
             )
-        value = context.payload[field]
         if not isinstance(value, (str, int)) or isinstance(value, bool):
             raise ProjectionContractError(
                 "projection identity payload field must be string or integer"

@@ -11,6 +11,9 @@ from newsroom.authority import (
     UtcTimestamp,
 )
 from newsroom.authority._neo4j_projection_system import _open_with_adapter
+from newsroom.authority.neo4j_projection_system import (
+    open_neo4j_projection_authority_system,
+)
 from newsroom.checks.policy import merge_discovery_check_authority_registries
 from newsroom.discovery.policy import merge_discovery_signal_lead_registries
 from newsroom.projection import (
@@ -20,6 +23,7 @@ from newsroom.projection import (
     discovery_lineage_contract_registry,
 )
 from newsroom.sources.policy import merge_source_registry_authority_registries
+from newsroom.projection.neo4j import Neo4jProjectorConfig
 
 from .authority_event_helpers import payload_schemas, registry_v1
 from .check_3c_authority_helpers import authenticator
@@ -120,12 +124,37 @@ def open_lineage_projection_system(
     )
 
 
+def open_lineage_projection_service_system(
+    path: Path,
+    config: Neo4jProjectorConfig,
+    *,
+    clock: Callable[[], UtcTimestamp] | None = None,
+):
+    command_registry, schemas = increment3_registries()
+    return open_neo4j_projection_authority_system(
+        path=path,
+        registry=command_registry,
+        payload_schemas=schemas,
+        contracts=discovery_lineage_contract_registry(),
+        authenticator=authenticator(),
+        authorizer=StaticAuthorizer(
+            policy_version="discovery-lineage-authz-v1",
+            grants_by_principal={"principal.alpha": lineage_scopes()},
+        ),
+        event_read_policy=lineage_event_read_policy(),
+        projection_read_policy=lineage_projection_read_policy(),
+        neo4j_config=config,
+        clock=clock or UtcTimestamp.now,
+    )
+
+
 __all__ = [
     "MemoryNeo4jAdapter",
     "increment3_registries",
     "lineage_event_read_policy",
     "lineage_projection_read_policy",
     "lineage_scopes",
+    "open_lineage_projection_service_system",
     "open_lineage_projection_system",
     "proof",
 ]

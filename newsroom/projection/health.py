@@ -130,6 +130,10 @@ class DiscoveryHealthAssessment:
         require_token(self.reason_code, field="health_reason_code")
         if not isinstance(self.policy, HealthPolicy):
             raise DiscoveryHealthContractError("health policy must be typed")
+        if not isinstance(self.assessed_at, UtcTimestamp):
+            raise DiscoveryHealthContractError(
+                "health assessed time must be a typed UTC timestamp"
+            )
         if not isinstance(self.evidence, tuple) or len(self.evidence) > 64:
             raise DiscoveryHealthContractError(
                 "health evidence must be a bounded tuple"
@@ -138,6 +142,13 @@ class DiscoveryHealthAssessment:
             raise DiscoveryHealthContractError(
                 "health evidence references must be typed"
             )
+        if any(
+            item.observed_at.value > self.assessed_at.value
+            for item in self.evidence
+        ):
+            raise DiscoveryHealthContractError(
+                "health evidence cannot follow the assessment time"
+            )
         evidence_keys = [
             (item.evidence_type, item.identifier, str(item.observed_at), item.digest)
             for item in self.evidence
@@ -145,10 +156,6 @@ class DiscoveryHealthAssessment:
         if evidence_keys != sorted(set(evidence_keys)):
             raise DiscoveryHealthContractError(
                 "health evidence must be sorted and unique"
-            )
-        if not isinstance(self.assessed_at, UtcTimestamp):
-            raise DiscoveryHealthContractError(
-                "health assessed time must be a typed UTC timestamp"
             )
         for field_name, value in (
             ("last_complete_observation_at", self.last_complete_observation_at),
@@ -460,7 +467,7 @@ def assess_source_health(
         access_reason = "SOURCE_ACCESS_NOT_ATTEMPTED"
         parser_reason = "PARSER_NOT_ATTEMPTED"
         check_reason = "CHECK_NOT_ATTEMPTED"
-    elif quarantine == "QUARANTINE" or kind == "QUARANTINED_DISABLED":
+    elif quarantine in {"REVIEW", "QUARANTINE"} or kind == "QUARANTINED_DISABLED":
         access_state = parser_state = check_state = DiscoveryHealthState.QUARANTINED
         access_reason = parser_reason = check_reason = "OUTCOME_QUARANTINED"
     elif kind in {"BLOCKED", "UNAUTHORISED"}:
@@ -576,6 +583,9 @@ def assess_projection_health(
     elif projection.service_available is False:
         state = DiscoveryHealthState.UNAVAILABLE
         reason = "PROJECTION_SERVICE_UNAVAILABLE"
+    elif projection.service_available is None:
+        state = DiscoveryHealthState.UNKNOWN
+        reason = "PROJECTION_SERVICE_NOT_ASSESSED"
     elif projection.contracts_current is False:
         state = DiscoveryHealthState.BLOCKED
         reason = "PROJECTION_CONTRACT_MISMATCH"
@@ -613,6 +623,57 @@ def assess_projection_health(
     )
 
 
+def summarize_source_path_state(
+    assessments: tuple[DiscoveryHealthAssessment, ...],
+) -> DiscoveryHealthState:
+    """Collapse dimension-specific source evidence for coverage-path routing.
+
+    The collapse is deliberately conservative: semantic quarantine and explicit
+    contract blocks outrank availability, while a fresh successful source is
+    healthy only when every required source dimension is positively healthy.
+    """
+
+    if not isinstance(assessments, tuple) or not assessments:
+        raise DiscoveryHealthContractError(
+            "source path state requires typed health assessments"
+        )
+    if any(not isinstance(item, DiscoveryHealthAssessment) for item in assessments):
+        raise DiscoveryHealthContractError(
+            "source path state assessments must be typed"
+        )
+    by_dimension = {item.dimension: item.state for item in assessments}
+    if len(by_dimension) != len(assessments):
+        raise DiscoveryHealthContractError(
+            "source path state dimensions must be unique"
+        )
+    required = {
+        DiscoveryHealthDimension.SOURCE_ACCESS,
+        DiscoveryHealthDimension.SOURCE_CONTRACT,
+        DiscoveryHealthDimension.PARSER,
+        DiscoveryHealthDimension.CHECK_EXECUTION,
+        DiscoveryHealthDimension.OBSERVATION_FRESHNESS,
+        DiscoveryHealthDimension.SEMANTIC_LINEAGE,
+    }
+    if not required <= by_dimension.keys():
+        raise DiscoveryHealthContractError(
+            "source path state lacks required health dimensions"
+        )
+    states = tuple(by_dimension[item] for item in sorted(required, key=lambda value: value.value))
+    if DiscoveryHealthState.QUARANTINED in states:
+        return DiscoveryHealthState.QUARANTINED
+    if DiscoveryHealthState.BLOCKED in states:
+        return DiscoveryHealthState.BLOCKED
+    if DiscoveryHealthState.UNAVAILABLE in states:
+        return DiscoveryHealthState.UNAVAILABLE
+    if DiscoveryHealthState.STALE in states:
+        return DiscoveryHealthState.STALE
+    if DiscoveryHealthState.DEGRADED in states:
+        return DiscoveryHealthState.DEGRADED
+    if all(state is DiscoveryHealthState.HEALTHY for state in states):
+        return DiscoveryHealthState.HEALTHY
+    return DiscoveryHealthState.UNKNOWN
+
+
 def assess_coverage_availability(
     paths: tuple[CoveragePathHealthInput, ...],
     *,
@@ -621,9 +682,9 @@ def assess_coverage_availability(
     assessed_at: UtcTimestamp,
 ) -> DiscoveryHealthAssessment:
     require_token(obligation_id, field="coverage_obligation_id")
-    if not isinstance(paths, tuple) or not paths:
+    if not isinstance(paths, tuple):
         raise DiscoveryHealthContractError(
-            "coverage assessment requires at least one typed path"
+            "coverage assessment paths must be a tuple"
         )
     if any(not isinstance(item, CoveragePathHealthInput) for item in paths):
         raise DiscoveryHealthContractError("coverage paths must be typed")
@@ -708,4 +769,5 @@ __all__ = [
     "assess_coverage_availability",
     "assess_projection_health",
     "assess_source_health",
+    "summarize_source_path_state",
 ]
