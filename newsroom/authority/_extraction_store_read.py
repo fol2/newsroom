@@ -181,6 +181,31 @@ class _ExtractionReadMixin:
             passages, request.input_binding.passages, strict=True
         ):
             passage_bytes = canonical_json_bytes(passage.canonical_value())
+            self._require_columns(
+                retained,
+                {
+                    "run_id": str(request.run_id),
+                    "passage_id": str(passage.passage_id),
+                    "admission_id": str(passage.admission_id),
+                    "access_decision_id": str(passage.access_decision_id),
+                    "hydration_policy_contract_digest": (
+                        passage.hydration_policy_contract_digest
+                    ),
+                    "principal_id": passage.principal_id,
+                    "authority_domain": passage.authority_domain,
+                    "purpose": passage.purpose,
+                    "object_class": passage.object_class,
+                    "allowed_use": passage.allowed_use,
+                    "security_scope": passage.security_scope,
+                    "retention_scope": passage.retention_scope,
+                    "byte_offset": passage.byte_offset,
+                    "byte_length": passage.byte_length,
+                    "blob_digest": passage.blob_digest,
+                    "text_digest": passage.text_digest,
+                    "language": passage.language,
+                },
+                identity="extraction run passage",
+            )
             if (
                 bytes(retained["canonical_bytes"]) != passage_bytes
                 or str(retained["canonical_digest"]) != digest_bytes(passage_bytes)
@@ -205,30 +230,59 @@ class _ExtractionReadMixin:
                 ),
                 "input_binding_digest": request.input_binding.digest,
                 "budget_digest": request.budget.digest,
-                "fixture_case": request.fixture_case.value,
                 "stable_semantic_digest": request.stable_run_semantic_digest,
                 "canonical_digest": digest_bytes(stable_bytes),
             },
             identity="extraction run",
         )
-        if bytes(stable["canonical_bytes"]) != stable_bytes:
+        budget_bytes = canonical_json_bytes(request.budget.canonical_value())
+        if (
+            bytes(stable["canonical_bytes"]) != stable_bytes
+            or bytes(stable["budget_bytes"]) != budget_bytes
+            or str(stable["budget_digest"]) != digest_bytes(budget_bytes)
+        ):
             raise AuthorityPersistenceError("stable run canonical bytes differ")
+        first = conn.execute(
+            "SELECT authority_event_id,recorded_at FROM extraction_run_versions "
+            "WHERE run_id=? AND version_number=1",
+            (str(request.run_id),),
+        ).fetchone()
+        if (
+            first is None
+            or str(stable["created_by_event_id"])
+            != str(first["authority_event_id"])
+            or str(stable["created_at"]) != str(first["recorded_at"])
+        ):
+            raise AuthorityPersistenceError(
+                "stable run creation lineage differs from first version"
+            )
         return request
 
     def _output_for_version(
-        self, conn: sqlite3.Connection, row: sqlite3.Row
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        schema_contract_digest: str,
     ) -> ExtractionOutputView | None:
         output = conn.execute(
             "SELECT * FROM extraction_outputs WHERE run_version_id=?",
             (str(row["run_version_id"]),),
         ).fetchone()
+        outcome = ExtractionOutcome(str(row["outcome"]))
         if output is None:
-            if int(row["output_bytes"]) != 0:
+            if int(row["output_bytes"]) != 0 or outcome.may_retain_output:
                 raise AuthorityPersistenceError(
-                    "run reports output bytes without retained output"
+                    "run outcome or usage requires retained output"
                 )
             return None
         data = bytes(output["canonical_bytes"])
+        validation = ExtractionOutputValidation(str(output["validation_state"]))
+        expected_validation = (
+            ExtractionOutputValidation.INVALID
+            if outcome is ExtractionOutcome.INVALID_OUTPUT
+            else ExtractionOutputValidation.VALID
+        )
         if (
             len(data) != int(output["byte_length"])
             or digest_bytes(data) != str(output["canonical_digest"])
@@ -236,9 +290,15 @@ class _ExtractionReadMixin:
                 self._decode_json_blob(data, identity="structured output")
             )
             != data
+            or str(output["run_id"]) != str(row["run_id"])
+            or str(output["run_version_id"]) != str(row["run_version_id"])
+            or str(output["schema_contract_digest"])
+            != schema_contract_digest
+            or validation is not expected_validation
+            or str(output["retained_at"]) != str(row["recorded_at"])
         ):
             raise AuthorityPersistenceError(
-                "retained structured output bytes are inconsistent"
+                "retained structured output lineage is inconsistent"
             )
         if int(row["output_bytes"]) != len(data):
             raise AuthorityPersistenceError("run output usage differs")
@@ -248,9 +308,7 @@ class _ExtractionReadMixin:
             run_version_id=ExtractionRunVersionId.parse(
                 str(output["run_version_id"])
             ),
-            validation=ExtractionOutputValidation(
-                str(output["validation_state"])
-            ),
+            validation=validation,
             schema_contract_digest=str(output["schema_contract_digest"]),
             byte_length=int(output["byte_length"]),
             canonical_digest=str(output["canonical_digest"]),
@@ -261,8 +319,11 @@ class _ExtractionReadMixin:
         self, conn: sqlite3.Connection, proposal_row: sqlite3.Row
     ) -> tuple[EvidenceRange, ...]:
         rows = conn.execute(
-            "SELECT * FROM extraction_proposal_evidence WHERE proposal_id=? "
-            "ORDER BY evidence_ordinal",
+            "SELECT e.*,p.byte_length AS passage_byte_length "
+            "FROM extraction_proposal_evidence e "
+            "JOIN extraction_run_passages p "
+            "ON p.run_id=e.run_id AND p.passage_id=e.passage_id "
+            "WHERE e.proposal_id=? ORDER BY e.evidence_ordinal",
             (str(proposal_row["proposal_id"]),),
         ).fetchall()
         evidence: list[EvidenceRange] = []
@@ -282,6 +343,7 @@ class _ExtractionReadMixin:
                 or bytes(row["canonical_bytes"]) != data
                 or str(row["canonical_digest"]) != digest_bytes(data)
                 or str(row["run_id"]) != str(proposal_row["run_id"])
+                or int(row["end_byte"]) > int(row["passage_byte_length"])
             ):
                 raise AuthorityPersistenceError(
                     "proposal evidence normalized columns differ"
@@ -305,14 +367,25 @@ class _ExtractionReadMixin:
         return ExtractionPassageId.parse(value)
 
     def _proposal_from_row(
-        self, conn: sqlite3.Connection, row: sqlite3.Row
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        expected_proposal_set_id: str,
+        expected_output_id: str,
+        expected_run_id: str,
+        expected_run_version_id: str,
+        expected_contract_digest: str,
+        expected_retained_at: str,
     ) -> ProposalEnvelope:
         evidence = self._evidence_for_proposal(conn, row)
+        uncertainty_bytes = bytes(row["uncertainty_codes_bytes"])
+        rationale_bytes = bytes(row["rationale_codes_bytes"])
         uncertainties = self._decode_json_blob(
-            bytes(row["uncertainty_codes_bytes"]), identity="uncertainty codes"
+            uncertainty_bytes, identity="uncertainty codes"
         )
         rationales = self._decode_json_blob(
-            bytes(row["rationale_codes_bytes"]), identity="rationale codes"
+            rationale_bytes, identity="rationale codes"
         )
         if not isinstance(uncertainties, list) or not isinstance(rationales, list):
             raise AuthorityPersistenceError("proposal code lists are invalid")
@@ -350,7 +423,17 @@ class _ExtractionReadMixin:
         }
         data = canonical_json_bytes(value)
         if (
-            bytes(row["canonical_bytes"]) != data
+            str(row["proposal_set_id"]) != expected_proposal_set_id
+            or str(row["output_id"]) != expected_output_id
+            or str(row["run_id"]) != expected_run_id
+            or str(row["run_version_id"]) != expected_run_version_id
+            or str(row["producer_contract_digest"])
+            != expected_contract_digest
+            or str(row["retained_at"]) != expected_retained_at
+            or uncertainty_bytes
+            != canonical_json_bytes(list(draft.uncertainty_codes))
+            or rationale_bytes != canonical_json_bytes(list(draft.rationale_codes))
+            or bytes(row["canonical_bytes"]) != data
             or str(row["canonical_digest"]) != digest_bytes(data)
             or str(row["semantic_digest"]) != draft.digest
         ):
@@ -384,6 +467,8 @@ class _ExtractionReadMixin:
         conn: sqlite3.Connection,
         row: sqlite3.Row,
         output: ExtractionOutputView | None,
+        *,
+        producer_contract_digest: str,
     ) -> ProposalSet | None:
         retained = conn.execute(
             "SELECT * FROM extraction_proposal_sets WHERE run_version_id=?",
@@ -397,13 +482,27 @@ class _ExtractionReadMixin:
             return None
         if output is None:
             raise AuthorityPersistenceError("proposal set exists without output")
+        expected_set_id = str(retained["proposal_set_id"])
+        expected_output_id = str(output.output_id)
+        expected_run_id = str(row["run_id"])
+        expected_run_version_id = str(row["run_version_id"])
+        expected_retained_at = str(row["recorded_at"])
         proposal_rows = conn.execute(
             "SELECT * FROM extraction_proposals WHERE proposal_set_id=? "
             "ORDER BY local_id",
-            (str(retained["proposal_set_id"]),),
+            (expected_set_id,),
         ).fetchall()
         proposals = tuple(
-            self._proposal_from_row(conn, proposal_row)
+            self._proposal_from_row(
+                conn,
+                proposal_row,
+                expected_proposal_set_id=expected_set_id,
+                expected_output_id=expected_output_id,
+                expected_run_id=expected_run_id,
+                expected_run_version_id=expected_run_version_id,
+                expected_contract_digest=producer_contract_digest,
+                expected_retained_at=expected_retained_at,
+            )
             for proposal_row in proposal_rows
         )
         if (
@@ -412,29 +511,37 @@ class _ExtractionReadMixin:
         ):
             raise AuthorityPersistenceError("proposal-set count differs")
         value = {
-            "proposal_set_id": str(retained["proposal_set_id"]),
+            "proposal_set_id": expected_set_id,
             "output_id": str(retained["output_id"]),
             "run_id": str(retained["run_id"]),
             "run_version_id": str(retained["run_version_id"]),
+            "producer_contract_digest": str(
+                retained["producer_contract_digest"]
+            ),
             "proposal_digests": [item.canonical_digest for item in proposals],
         }
         data = canonical_json_bytes(value)
         if (
-            bytes(retained["canonical_bytes"]) != data
+            str(retained["output_id"]) != expected_output_id
+            or str(retained["run_id"]) != expected_run_id
+            or str(retained["run_version_id"]) != expected_run_version_id
+            or str(retained["producer_contract_digest"])
+            != producer_contract_digest
+            or str(retained["retained_at"]) != expected_retained_at
+            or output.retained_at.to_text() != expected_retained_at
+            or bytes(retained["canonical_bytes"]) != data
             or str(retained["canonical_digest"]) != digest_bytes(data)
-            or str(retained["output_id"]) != str(output.output_id)
         ):
             raise AuthorityPersistenceError("proposal-set canonical record differs")
         return ProposalSet(
-            proposal_set_id=ProposalSetId.parse(
-                str(retained["proposal_set_id"])
-            ),
+            proposal_set_id=ProposalSetId.parse(expected_set_id),
             output_id=output.output_id,
-            run_id=ExtractionRunId.parse(str(retained["run_id"])),
+            run_id=ExtractionRunId.parse(expected_run_id),
             run_version_id=ExtractionRunVersionId.parse(
-                str(retained["run_version_id"])
+                expected_run_version_id
             ),
             proposals=proposals,
+            producer_contract_digest=producer_contract_digest,
             canonical_digest=str(retained["canonical_digest"]),
             retained_at=UtcTimestamp.parse(str(retained["retained_at"])),
         )
@@ -447,6 +554,12 @@ class _ExtractionReadMixin:
         replayed: bool,
     ) -> ExtractionRunVersion:
         request = self._request_for_version_row(conn, row)
+        contract = self._contract_row(conn, str(request.contract_id))
+        contract_digest = str(contract["canonical_digest"])
+        if str(row["contract_canonical_digest"]) != contract_digest:
+            raise AuthorityPersistenceError(
+                "run-version extractor contract digest differs"
+            )
         usage = ExtractionUsage(
             elapsed_ms=int(row["elapsed_ms"]),
             input_bytes=int(row["input_bytes"]),
@@ -483,10 +596,20 @@ class _ExtractionReadMixin:
             raise AuthorityPersistenceError(
                 "run-version normalized columns differ from canonical authority"
             )
-        output = self._output_for_version(conn, row)
-        proposal_set = self._proposal_set_for_version(conn, row, output)
+        output = self._output_for_version(
+            conn,
+            row,
+            schema_contract_digest=str(contract["output_schema_digest"]),
+        )
+        proposal_set = self._proposal_set_for_version(
+            conn,
+            row,
+            output,
+            producer_contract_digest=contract_digest,
+        )
         return ExtractionRunVersion(
             request=request,
+            contract_canonical_digest=contract_digest,
             event_id=EventId.parse(str(row["authority_event_id"])),
             aggregate_version=int(row["authority_aggregate_version"]),
             recorded_at=UtcTimestamp.parse(str(row["recorded_at"])),

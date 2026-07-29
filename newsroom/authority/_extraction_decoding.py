@@ -18,7 +18,6 @@ from newsroom.extraction.types import (
     ExtractionRunId,
     ExtractionRunVersionId,
     ExtractorContractId,
-    FixtureExtractionCase,
     VersionedExtractionComponent,
 )
 from newsroom.sources import (
@@ -151,7 +150,6 @@ def decode_extraction_run(
                 max_response_tokens=int(budget["max_response_tokens"]),
                 max_cost_microunits=int(budget["max_cost_microunits"]),
             ),
-            fixture_case=FixtureExtractionCase(str(value["fixture_case"])),
             idempotency_key=idempotency_key,
         )
     except (KeyError, TypeError, ValueError) as exc:

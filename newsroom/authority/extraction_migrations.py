@@ -21,7 +21,7 @@ _OUTCOMES = (
 )
 _FAILURE_CODES = (
     "'NONE','FIXTURE_PARTIAL','FIXTURE_RETRYABLE','FIXTURE_BLOCKED',"
-    "'OUTPUT_SCHEMA_INVALID','POLICY_BLOCKED'"
+    "'OUTPUT_SCHEMA_INVALID','POLICY_BLOCKED','PRODUCER_INTERNAL_ERROR'"
 )
 _PROPOSAL_KINDS = (
     "'ENTITY_MENTION','ENTITY_EQUIVALENCE','RELATION','CLAIM'"
@@ -80,10 +80,6 @@ EXTRACTION_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
         input_binding_digest TEXT NOT NULL,
         budget_bytes BLOB NOT NULL,
         budget_digest TEXT NOT NULL,
-        fixture_case TEXT NOT NULL CHECK(fixture_case IN(
-            'BILINGUAL_COMPLETE','BILINGUAL_PARTIAL','RETRYABLE_FAILURE',
-            'BLOCKING_FAILURE','INVALID_OUTPUT'
-        )),
         stable_semantic_digest TEXT NOT NULL UNIQUE,
         created_by_event_id TEXT NOT NULL REFERENCES ledger_events(event_id),
         canonical_bytes BLOB NOT NULL,
@@ -159,7 +155,13 @@ EXTRACTION_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
            OR (version_number>1 AND previous_run_version_id IS NOT NULL)),
         CHECK(started_at<=ended_at AND ended_at<=recorded_at),
         CHECK((outcome='SUCCESS' AND failure_code='NONE')
-           OR (outcome!='SUCCESS' AND failure_code!='NONE')),
+           OR (outcome='PARTIAL' AND failure_code='FIXTURE_PARTIAL')
+           OR (outcome='RETRYABLE_FAILURE' AND failure_code IN(
+                'FIXTURE_RETRYABLE','PRODUCER_INTERNAL_ERROR'))
+           OR (outcome='BLOCKING_FAILURE' AND failure_code IN(
+                'FIXTURE_BLOCKED','POLICY_BLOCKED'))
+           OR (outcome='INVALID_OUTPUT'
+               AND failure_code='OUTPUT_SCHEMA_INVALID')),
         CHECK(length(request_bytes)>0),
         CHECK(length(canonical_bytes)>0)
     ) STRICT""",

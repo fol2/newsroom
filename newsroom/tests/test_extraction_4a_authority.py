@@ -9,7 +9,9 @@ import pytest
 from newsroom.authority import HydrationRequest
 from newsroom.authority.object_policy import merge_authority_registries
 from newsroom.extraction import (
+    DeterministicFixtureExtractor,
     ExtractionContractError,
+    ExtractionFailureCode,
     ExtractionOutcome,
     ExtractionOutputValidation,
     ExtractionRightsDenied,
@@ -132,10 +134,6 @@ def test_partial_failure_invalid_and_retry_version_semantics(
 ) -> None:
     state = seed_extraction_fixture(tmp_path)
     with open_extraction_system(state) as system:
-        system.extraction.register_contract(
-            contract_request(), proof=extraction_proof()
-        )
-
         cases = (
             (
                 4201,
@@ -167,18 +165,29 @@ def test_partial_failure_invalid_and_retry_version_semantics(
             ),
         )
         retained = {}
+        contract_ids = {}
         for number, fixture_case, outcome, has_output, proposal_count in cases:
+            contract_id = _uuid(number + 100_000, kind=ExtractorContractId)
+            system.extraction.register_contract(
+                contract_request(
+                    contract_id=contract_id,
+                    fixture_case=fixture_case,
+                    key=f"contract-{number}",
+                ),
+                proof=extraction_proof(),
+            )
             request = run_request(
                 state,
                 run_id=_uuid(number, kind=ExtractionRunId),
                 run_version_id=_uuid(number + 1, kind=ExtractionRunVersionId),
-                fixture_case=fixture_case,
+                contract_id=contract_id,
                 key=f"run-{number}-v1",
             )
             result = system.extraction.execute(
                 request, proof=extraction_proof()
             )
             retained[fixture_case] = result
+            contract_ids[fixture_case] = contract_id
             assert result.outcome is outcome
             assert (result.output is not None) is has_output
             assert (
@@ -197,7 +206,7 @@ def test_partial_failure_invalid_and_retry_version_semantics(
             run_version_id=_uuid(4213, kind=ExtractionRunVersionId),
             version_number=2,
             previous=retryable.request.run_version_id,
-            fixture_case=FixtureExtractionCase.RETRYABLE_FAILURE,
+            contract_id=contract_ids[FixtureExtractionCase.RETRYABLE_FAILURE],
             key="run-4211-v2",
         )
         retry_v2 = system.extraction.execute(
@@ -222,7 +231,7 @@ def test_partial_failure_invalid_and_retry_version_semantics(
                     run_version_id=_uuid(4223, kind=ExtractionRunVersionId),
                     version_number=2,
                     previous=blocking.request.run_version_id,
-                    fixture_case=FixtureExtractionCase.BLOCKING_FAILURE,
+                    contract_id=contract_ids[FixtureExtractionCase.BLOCKING_FAILURE],
                     key="run-4221-v2",
                 ),
                 proof=extraction_proof(),
@@ -231,6 +240,7 @@ def test_partial_failure_invalid_and_retry_version_semantics(
 
 def test_contract_identity_and_contract_change_fail_closed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = seed_extraction_fixture(tmp_path)
     with open_extraction_system(state) as system:
@@ -280,17 +290,28 @@ def test_contract_identity_and_contract_change_fail_closed(
             ),
             contract_id=changed.contract_id,
         )
-        with pytest.raises(ExtractionContractError, match="incompatible contract"):
-            system.extraction.execute(
-                changed_run, proof=extraction_proof()
-            )
+        def must_not_run(*_args, **_kwargs):
+            raise AssertionError("incompatible contract reached the producer")
+
+        monkeypatch.setattr(
+            DeterministicFixtureExtractor,
+            "produce",
+            must_not_run,
+        )
+        blocked = system.extraction.execute(
+            changed_run, proof=extraction_proof()
+        )
+        assert blocked.outcome is ExtractionOutcome.BLOCKING_FAILURE
+        assert blocked.failure_code is ExtractionFailureCode.POLICY_BLOCKED
+        assert blocked.output is None
+        assert blocked.proposal_set is None
 
     with sqlite3.connect(state.database) as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM extraction_run_versions "
             "WHERE run_version_id=?",
             (str(changed_run.run_version_id),),
-        ).fetchone()[0] == 0
+        ).fetchone()[0] == 1
 
 
 def test_read_scopes_are_distinct_and_execute_is_authorized_before_work(

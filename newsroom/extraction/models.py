@@ -37,7 +37,6 @@ from .types import (
     ExtractionRunVersionId,
     ExtractionUsage,
     ExtractorContractId,
-    FixtureExtractionCase,
     ProposalEnvelopeId,
     ProposalPredicateHint,
     ProposalSetId,
@@ -209,6 +208,10 @@ class ExtractionPassageInput:
         )
         canonical_digest(self.blob_digest, field="passage_blob_digest")
         canonical_digest(self.text_digest, field="passage_text_digest")
+        if self.byte_offset != 0 or self.text_digest != self.blob_digest:
+            raise ExtractionContractError(
+                "fixture extraction passage must bind one complete admitted object"
+            )
         bounded_text(self.language, field="passage_language", maximum_bytes=35)
         if self.text is not None:
             bounded_text(
@@ -217,16 +220,15 @@ class ExtractionPassageInput:
                 maximum_bytes=16 * 1024 * 1024,
             )
             encoded = self.text.encode("utf-8")
-            if self.byte_offset != 0 or self.byte_length != len(encoded):
+            if self.byte_length != len(encoded):
                 raise ExtractionContractError(
-                    "fixture extraction passage must bind the complete governed object"
+                    "fixture extraction passage length differs from governed bytes"
                 )
             actual = digest_bytes(encoded)
             if actual != self.text_digest or actual != self.blob_digest:
                 raise ExtractionContractError(
                     "fixture passage bytes must match the admitted blob identity"
                 )
-
 
     def require_text(self) -> str:
         if self.text is None:
@@ -327,7 +329,6 @@ class ExtractionRunRequest:
     contract_id: ExtractorContractId
     input_binding: ExtractionInputBinding
     budget: ExtractionBudget
-    fixture_case: FixtureExtractionCase
     idempotency_key: str
 
     def __post_init__(self) -> None:
@@ -362,8 +363,6 @@ class ExtractionRunRequest:
             raise ExtractionContractError("extraction budget must be typed")
         if self.input_binding.input_bytes > self.budget.max_input_bytes:
             raise ExtractionContractError("input bytes exceed the fixed extraction budget")
-        if not isinstance(self.fixture_case, FixtureExtractionCase):
-            raise ExtractionContractError("fixture extraction case must be typed")
         bounded_text(
             self.idempotency_key,
             field="idempotency_key",
@@ -383,7 +382,6 @@ class ExtractionRunRequest:
             "contract_id": str(self.contract_id),
             "input_binding": self.input_binding.canonical_value(),
             "budget": self.budget.canonical_value(),
-            "fixture_case": self.fixture_case.value,
         }
 
     @property
@@ -401,7 +399,6 @@ class ExtractionRunRequest:
                 "contract_id": str(self.contract_id),
                 "input_binding": self.input_binding.canonical_value(),
                 "budget": self.budget.canonical_value(),
-                "fixture_case": self.fixture_case.value,
             }
         )
 
@@ -437,12 +434,25 @@ class ProposalDraft:
             self.predicate_hint, ProposalPredicateHint
         ):
             raise ExtractionContractError("proposal predicate hint must be typed")
-        if self.kind is ExtractionProposalKind.RELATION:
+        if self.kind is ExtractionProposalKind.ENTITY_MENTION:
+            if self.object_placeholder is not None:
+                raise ExtractionContractError(
+                    "entity mention proposal cannot carry an object placeholder"
+                )
+        elif self.kind is ExtractionProposalKind.ENTITY_EQUIVALENCE:
+            if self.object_placeholder is None:
+                raise ExtractionContractError(
+                    "entity equivalence proposal needs two placeholders"
+                )
+        elif self.kind is ExtractionProposalKind.RELATION:
             if self.object_placeholder is None or self.predicate_hint is None:
                 raise ExtractionContractError(
                     "relation proposal needs object and predicate placeholders"
                 )
-        elif self.predicate_hint is not None:
+        if (
+            self.kind is not ExtractionProposalKind.RELATION
+            and self.predicate_hint is not None
+        ):
             raise ExtractionContractError(
                 "only relation proposals can carry predicate hints"
             )
@@ -514,6 +524,39 @@ class ProposalDraft:
         return digest_canonical(self.canonical_value())
 
 
+_ALLOWED_FAILURE_CODES_BY_OUTCOME: dict[
+    ExtractionOutcome, frozenset[ExtractionFailureCode]
+] = {
+    ExtractionOutcome.SUCCESS: frozenset({ExtractionFailureCode.NONE}),
+    ExtractionOutcome.PARTIAL: frozenset({ExtractionFailureCode.FIXTURE_PARTIAL}),
+    ExtractionOutcome.RETRYABLE_FAILURE: frozenset(
+        {
+            ExtractionFailureCode.FIXTURE_RETRYABLE,
+            ExtractionFailureCode.PRODUCER_INTERNAL_ERROR,
+        }
+    ),
+    ExtractionOutcome.BLOCKING_FAILURE: frozenset(
+        {
+            ExtractionFailureCode.FIXTURE_BLOCKED,
+            ExtractionFailureCode.POLICY_BLOCKED,
+        }
+    ),
+    ExtractionOutcome.INVALID_OUTPUT: frozenset(
+        {ExtractionFailureCode.OUTPUT_SCHEMA_INVALID}
+    ),
+}
+
+
+def _require_outcome_failure_code(
+    outcome: ExtractionOutcome, failure_code: ExtractionFailureCode
+) -> None:
+    allowed = _ALLOWED_FAILURE_CODES_BY_OUTCOME[outcome]
+    if failure_code not in allowed:
+        raise ExtractionContractError(
+            "extraction failure code is incompatible with its outcome"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ProducedExtraction:
     outcome: ExtractionOutcome
@@ -528,6 +571,7 @@ class ProducedExtraction:
             raise ExtractionContractError("extraction outcome must be typed")
         if not isinstance(self.failure_code, ExtractionFailureCode):
             raise ExtractionContractError("extraction failure code must be typed")
+        _require_outcome_failure_code(self.outcome, self.failure_code)
         if not isinstance(self.usage, ExtractionUsage):
             raise ExtractionContractError("extraction usage must be typed")
         if self.raw_output_value is None:
@@ -540,6 +584,10 @@ class ProducedExtraction:
                     "complete, partial, or invalid outcome requires retained output"
                 )
         else:
+            if not isinstance(self.raw_output_value, dict):
+                raise ExtractionContractError(
+                    "retained structured output must be a canonical object"
+                )
             raw = canonical_json_bytes(self.raw_output_value)
             if not raw:
                 raise ExtractionContractError("retained structured output is empty")
@@ -731,6 +779,7 @@ class ProposalSet:
     run_id: ExtractionRunId
     run_version_id: ExtractionRunVersionId
     proposals: tuple[ProposalEnvelope, ...]
+    producer_contract_digest: str
     canonical_digest: str
     retained_at: UtcTimestamp
 
@@ -758,6 +807,15 @@ class ProposalSet:
             for item in self.proposals
         ):
             raise ExtractionContractError("proposal set lineage differs")
+        canonical_digest(
+            self.producer_contract_digest,
+            field="proposal_set_producer_contract_digest",
+        )
+        if any(
+            item.producer_contract_digest != self.producer_contract_digest
+            for item in self.proposals
+        ):
+            raise ExtractionContractError("proposal producer contract differs")
         canonical_digest(self.canonical_digest, field="proposal_set_digest")
         expected_digest = digest_canonical(
             {
@@ -765,6 +823,7 @@ class ProposalSet:
                 "output_id": str(self.output_id),
                 "run_id": str(self.run_id),
                 "run_version_id": str(self.run_version_id),
+                "producer_contract_digest": self.producer_contract_digest,
                 "proposal_digests": [
                     item.canonical_digest for item in self.proposals
                 ],
@@ -774,11 +833,14 @@ class ProposalSet:
             raise ExtractionContractError("proposal set digest differs")
         if not isinstance(self.retained_at, UtcTimestamp):
             raise ExtractionContractError("proposal set retention time must be typed")
+        if any(item.retained_at != self.retained_at for item in self.proposals):
+            raise ExtractionContractError("proposal retention chronology differs")
 
 
 @dataclass(frozen=True, slots=True)
 class ExtractionRunVersion:
     request: ExtractionRunRequest
+    contract_canonical_digest: str
     event_id: EventId
     aggregate_version: int
     recorded_at: UtcTimestamp
@@ -795,6 +857,10 @@ class ExtractionRunVersion:
     def __post_init__(self) -> None:
         if not isinstance(self.request, ExtractionRunRequest):
             raise ExtractionContractError("run request must be retained")
+        canonical_digest(
+            self.contract_canonical_digest,
+            field="run_version_contract_canonical_digest",
+        )
         if not isinstance(self.event_id, EventId):
             raise ExtractionContractError("run event must be typed")
         if self.aggregate_version != 1:
@@ -810,6 +876,7 @@ class ExtractionRunVersion:
             raise ExtractionContractError("run outcome must be typed")
         if not isinstance(self.failure_code, ExtractionFailureCode):
             raise ExtractionContractError("run failure code must be typed")
+        _require_outcome_failure_code(self.outcome, self.failure_code)
         if not isinstance(self.usage, ExtractionUsage):
             raise ExtractionContractError("run usage must be typed")
         self.usage.require_within(self.request.budget)
@@ -824,6 +891,17 @@ class ExtractionRunVersion:
                 or self.output.run_version_id != self.request.run_version_id
             ):
                 raise ExtractionContractError("output lineage differs from run")
+            if self.output.retained_at != self.recorded_at:
+                raise ExtractionContractError("output retention chronology differs")
+            expected_validation = (
+                ExtractionOutputValidation.INVALID
+                if self.outcome is ExtractionOutcome.INVALID_OUTPUT
+                else ExtractionOutputValidation.VALID
+            )
+            if self.output.validation is not expected_validation:
+                raise ExtractionContractError(
+                    "output validation differs from run outcome"
+                )
         if self.proposal_set is not None:
             if self.output is None:
                 raise ExtractionContractError("proposal set requires output")
@@ -834,6 +912,10 @@ class ExtractionRunVersion:
                 or self.proposal_set.output_id != self.output.output_id
             ):
                 raise ExtractionContractError("proposal-set lineage differs from run")
+            if self.proposal_set.retained_at != self.recorded_at:
+                raise ExtractionContractError(
+                    "proposal-set retention chronology differs"
+                )
         if self.outcome.may_retain_proposals != (self.proposal_set is not None):
             if not (
                 self.outcome is ExtractionOutcome.PARTIAL
@@ -841,6 +923,26 @@ class ExtractionRunVersion:
             ):
                 raise ExtractionContractError("run proposal state differs from outcome")
         canonical_digest(self.canonical_digest, field="run_version_digest")
+        expected_digest = digest_canonical(
+            {
+                "request": self.request.canonical_value(),
+                "contract_canonical_digest": self.contract_canonical_digest,
+                "outcome": self.outcome.value,
+                "failure_code": self.failure_code.value,
+                "started_at": self.started_at.to_text(),
+                "ended_at": self.ended_at.to_text(),
+                "usage": self.usage.canonical_value(),
+            }
+        )
+        if self.canonical_digest != expected_digest:
+            raise ExtractionContractError("run-version canonical digest differs")
+        measured_elapsed_ms = int(
+            (self.ended_at.value - self.started_at.value).total_seconds() * 1000
+        )
+        if self.usage.elapsed_ms != measured_elapsed_ms:
+            raise ExtractionContractError(
+                "run usage elapsed time differs from authority timestamps"
+            )
         if not isinstance(self.replayed, bool):
             raise ExtractionContractError("run replay flag must be boolean")
 

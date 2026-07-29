@@ -3,12 +3,12 @@ from __future__ import annotations
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 
 from .fixtures import (
-    EXPECTED_FIXTURE_CONTRACT_SEMANTIC_DIGEST,
     FIXTURE_EN_LANGUAGE,
     FIXTURE_EN_TEXT,
     FIXTURE_PRODUCER_KIND,
     FIXTURE_ZH_HK_LANGUAGE,
     FIXTURE_ZH_HK_TEXT,
+    fixture_case_for_contract,
 )
 from .models import (
     ExtractorContractRequest,
@@ -19,7 +19,6 @@ from .models import (
 from .types import (
     EvidenceRange,
     ExtractionContractError,
-    ExtractionExecutionProfile,
     ExtractionFailureCode,
     ExtractionOutcome,
     ExtractionOutputValidation,
@@ -51,32 +50,27 @@ class DeterministicFixtureExtractor:
     producer_kind = FIXTURE_PRODUCER_KIND
 
     @staticmethod
-    def _validate_contract(contract: ExtractorContractRequest) -> None:
+    def _validate_contract(
+        contract: ExtractorContractRequest,
+    ) -> FixtureExtractionCase:
         if not isinstance(contract, ExtractorContractRequest):
             raise TypeError("fixture extractor needs a typed contract")
-        if (
-            contract.execution_profile
-            is not ExtractionExecutionProfile.FIXTURE_REPLAY_ONLY
-            or contract.producer_kind != FIXTURE_PRODUCER_KIND
-            or contract.semantic_digest
-            != EXPECTED_FIXTURE_CONTRACT_SEMANTIC_DIGEST
-        ):
-            raise ExtractionContractError(
-                "deterministic fixture extractor rejects an incompatible contract"
-            )
+        return fixture_case_for_contract(contract)
 
     @staticmethod
     def _validate_passages(request: ExtractionRunRequest):
-        by_language = {
-            passage.language: passage
-            for passage in request.input_binding.passages
-        }
-        en = by_language.get(FIXTURE_EN_LANGUAGE)
-        zh = by_language.get(FIXTURE_ZH_HK_LANGUAGE)
-        if en is None or zh is None or len(by_language) != 2:
+        passages = request.input_binding.passages
+        by_language = {passage.language: passage for passage in passages}
+        if (
+            len(passages) != 2
+            or len(by_language) != 2
+            or set(by_language) != {FIXTURE_EN_LANGUAGE, FIXTURE_ZH_HK_LANGUAGE}
+        ):
             raise ExtractionContractError(
                 "deterministic bilingual fixture requires exact en-GB and zh-HK passages"
             )
+        en = by_language[FIXTURE_EN_LANGUAGE]
+        zh = by_language[FIXTURE_ZH_HK_LANGUAGE]
         if en.require_text() != FIXTURE_EN_TEXT or zh.require_text() != FIXTURE_ZH_HK_TEXT:
             raise ExtractionContractError(
                 "deterministic fixture output is rejected outside approved fixture bytes"
@@ -91,7 +85,7 @@ class DeterministicFixtureExtractor:
     ) -> ExtractionUsage:
         output_bytes = 0 if raw is None else len(canonical_json_bytes(raw))
         return ExtractionUsage(
-            elapsed_ms=1,
+            elapsed_ms=0,
             input_bytes=request.input_binding.input_bytes,
             output_bytes=output_bytes,
             proposal_count=len(proposals),
@@ -107,12 +101,10 @@ class DeterministicFixtureExtractor:
         contract: ExtractorContractRequest,
         request: ExtractionRunRequest,
     ) -> ProducedExtraction:
-        self._validate_contract(contract)
+        case = self._validate_contract(contract)
         if not isinstance(request, ExtractionRunRequest):
             raise TypeError("fixture extractor needs a typed run request")
         en, zh = self._validate_passages(request)
-        case = request.fixture_case
-
         if case is FixtureExtractionCase.RETRYABLE_FAILURE:
             return ProducedExtraction(
                 outcome=ExtractionOutcome.RETRYABLE_FAILURE,
@@ -219,6 +211,15 @@ class DeterministicFixtureExtractor:
                 {"local_id": item.local_id, "text": item.subject_placeholder}
                 for item in proposals
                 if item.kind is ExtractionProposalKind.ENTITY_MENTION
+            ],
+            "equivalences": [
+                {
+                    "local_id": item.local_id,
+                    "subject": item.subject_placeholder,
+                    "object": item.object_placeholder,
+                }
+                for item in proposals
+                if item.kind is ExtractionProposalKind.ENTITY_EQUIVALENCE
             ],
             "relations": [
                 {

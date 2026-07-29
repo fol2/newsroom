@@ -2,12 +2,15 @@
 
 from .fixtures import (
     EXPECTED_FIXTURE_CONTRACT_SEMANTIC_DIGEST,
+    EXPECTED_FIXTURE_CONTRACT_SEMANTIC_DIGESTS,
+    FIXTURE_ALLOWED_TEXT_DIGESTS,
     FIXTURE_EN_LANGUAGE,
     FIXTURE_EN_TEXT,
     FIXTURE_PRODUCER_KIND,
     FIXTURE_ZH_HK_LANGUAGE,
     FIXTURE_ZH_HK_TEXT,
     deterministic_fixture_contract_request,
+    fixture_case_for_contract,
 )
 from .models import (
     ExtractionInputBinding,
@@ -34,6 +37,14 @@ from .policy import (
     merge_extraction_authority_registries,
 )
 from .producer import DeterministicFixtureExtractor
+from .output_schema import (
+    FIXTURE_OUTPUT_SCHEMA,
+    FIXTURE_OUTPUT_SCHEMA_DIGEST,
+    FIXTURE_OUTPUT_SCHEMA_ID,
+    FIXTURE_OUTPUT_SCHEMA_NAME,
+    FIXTURE_OUTPUT_SCHEMA_VERSION,
+    validate_fixture_production,
+)
 from .types import (
     EvidenceRange,
     ExtractionAuthorityError,
@@ -63,9 +74,30 @@ from .types import (
     VersionedExtractionComponent,
 )
 
+from .traceability import (
+    ExtractionTraceabilityRow,
+    INCREMENT_4A_ADR_ANCHORS,
+    INCREMENT_4A_DEFERRED,
+    INCREMENT_4A_EXCLUSIONS,
+    INCREMENT_4A_TRACEABILITY,
+)
+
+
 __all__ = [
+    "ExtractionTraceabilityRow",
+    "INCREMENT_4A_ADR_ANCHORS",
+    "INCREMENT_4A_TRACEABILITY",
+    "INCREMENT_4A_EXCLUSIONS",
+    "INCREMENT_4A_DEFERRED",
     "DeterministicFixtureExtractor",
+    "FIXTURE_OUTPUT_SCHEMA",
+    "FIXTURE_OUTPUT_SCHEMA_DIGEST",
+    "FIXTURE_OUTPUT_SCHEMA_ID",
+    "FIXTURE_OUTPUT_SCHEMA_NAME",
+    "FIXTURE_OUTPUT_SCHEMA_VERSION",
     "EXPECTED_FIXTURE_CONTRACT_SEMANTIC_DIGEST",
+    "EXPECTED_FIXTURE_CONTRACT_SEMANTIC_DIGESTS",
+    "FIXTURE_ALLOWED_TEXT_DIGESTS",
     "EXTRACTION_COMMAND_TYPES",
     "EXTRACTION_RUN_EXECUTE_COMMAND",
     "EXTRACTOR_CONTRACT_REGISTER_COMMAND",
@@ -117,5 +149,7 @@ __all__ = [
     "deterministic_fixture_contract_request",
     "extraction_command_definitions",
     "extraction_payload_contracts",
+    "fixture_case_for_contract",
     "merge_extraction_authority_registries",
+    "validate_fixture_production",
 ]

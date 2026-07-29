@@ -1,9 +1,9 @@
 # Increment 4A Extraction Run authority design record
 
-**Status:** Active implementation design  
-**Issue:** #225  
-**Parent:** #144  
-**Authorised base:** `main@d03441ef2fa26b5dc83f65d1797abf2b381d8f1a`  
+**Status:** Active implementation design
+**Issue:** #225
+**Parent:** #144
+**Authorised base:** `main@d03441ef2fa26b5dc83f65d1797abf2b381d8f1a`
 **Runtime boundary:** repository-owned deterministic fixture extraction and approved retained replay only
 
 ## Purpose

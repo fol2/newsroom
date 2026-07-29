@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Callable
 
 from newsroom.authority._security import _AuthorizationRequest
@@ -13,17 +14,24 @@ from newsroom.extraction.models import (
     ExtractionRunMetadata,
     ExtractionRunRequest,
     ExtractionRunVersion,
+    ExtractionUsage,
     ExtractorContract,
     ExtractorContractRequest,
     ProposalEnvelope,
     ProposalProducer,
+    ProducedExtraction,
 )
+from newsroom.extraction.fixtures import fixture_case_for_contract
+from newsroom.extraction.output_schema import normalize_fixture_production
 from newsroom.extraction.policy import (
     EXTRACTION_RUN_EXECUTE_COMMAND,
     EXTRACTOR_CONTRACT_REGISTER_COMMAND,
 )
 from newsroom.extraction.producer import DeterministicFixtureExtractor
 from newsroom.extraction.types import (
+    ExtractionContractError,
+    ExtractionFailureCode,
+    ExtractionOutcome,
     ExtractionOutputId,
     ExtractionReadPolicy,
     ExtractionRunId,
@@ -84,6 +92,31 @@ class _ExtractionBoundary:
         grant = self._command_service._authorize_for_commit(command, proof=proof)
         return self._store.commit_extractor_contract(grant, request=request)
 
+    @staticmethod
+    def _failed_production(
+        request: ExtractionRunRequest,
+        *,
+        outcome: ExtractionOutcome,
+        failure_code: ExtractionFailureCode,
+    ) -> ProducedExtraction:
+        return ProducedExtraction(
+            outcome=outcome,
+            failure_code=failure_code,
+            validation=None,
+            raw_output_value=None,
+            proposals=(),
+            usage=ExtractionUsage(
+                elapsed_ms=0,
+                input_bytes=request.input_binding.input_bytes,
+                output_bytes=0,
+                proposal_count=0,
+                evidence_range_count=0,
+                request_tokens=0,
+                response_tokens=0,
+                cost_microunits=0,
+            ),
+        )
+
     def execute(
         self,
         request: ExtractionRunRequest,
@@ -115,11 +148,64 @@ class _ExtractionBoundary:
             principal_id=grant.authentication.principal_id,
         )
         started_at = self._clock()
-        production = self._producer.produce(
-            contract=contract.request,
-            request=request,
-        )
+        try:
+            # Contract compatibility is checked before any producer code sees
+            # the rights-permitted passage bytes. An incompatible attempt is
+            # still retained honestly as a blocking Run Version.
+            fixture_case_for_contract(contract.request)
+        except ExtractionContractError:
+            production = self._failed_production(
+                request,
+                outcome=ExtractionOutcome.BLOCKING_FAILURE,
+                failure_code=ExtractionFailureCode.POLICY_BLOCKED,
+            )
+        else:
+            try:
+                produced = self._producer.produce(
+                    contract=contract.request,
+                    request=request,
+                )
+            except ExtractionContractError:
+                production = self._failed_production(
+                    request,
+                    outcome=ExtractionOutcome.BLOCKING_FAILURE,
+                    failure_code=ExtractionFailureCode.POLICY_BLOCKED,
+                )
+            except Exception:
+                # Arbitrary producer exception text is deliberately discarded.
+                production = self._failed_production(
+                    request,
+                    outcome=ExtractionOutcome.RETRYABLE_FAILURE,
+                    failure_code=ExtractionFailureCode.PRODUCER_INTERNAL_ERROR,
+                )
+            else:
+                if not isinstance(produced, ProducedExtraction):
+                    production = self._failed_production(
+                        request,
+                        outcome=ExtractionOutcome.RETRYABLE_FAILURE,
+                        failure_code=ExtractionFailureCode.PRODUCER_INTERNAL_ERROR,
+                    )
+                else:
+                    try:
+                        production = normalize_fixture_production(
+                            contract=contract.request,
+                            request=request,
+                            production=produced,
+                        )
+                    except ExtractionContractError:
+                        production = self._failed_production(
+                            request,
+                            outcome=ExtractionOutcome.BLOCKING_FAILURE,
+                            failure_code=ExtractionFailureCode.POLICY_BLOCKED,
+                        )
         ended_at = self._clock()
+        elapsed_ms = int(
+            (ended_at.value - started_at.value).total_seconds() * 1000
+        )
+        production = replace(
+            production,
+            usage=replace(production.usage, elapsed_ms=elapsed_ms),
+        )
         return self._store.commit_extraction_run(
             grant,
             request=request,

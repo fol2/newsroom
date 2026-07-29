@@ -14,6 +14,7 @@ from newsroom.extraction.models import (
     ProducedExtraction,
     ProposalDraft,
 )
+from newsroom.extraction.output_schema import validate_fixture_production
 from newsroom.extraction.policy import (
     EXTRACTION_RUN_EXECUTE_COMMAND,
     EXTRACTOR_CONTRACT_REGISTER_COMMAND,
@@ -151,7 +152,6 @@ class _ExtractionCommitMixin:
         request: ExtractionRunRequest,
         draft: ProposalDraft,
         producer_contract_digest: str,
-        retained_at: str,
     ) -> tuple[dict[str, object], bytes, str]:
         value = {
             "proposal_id": str(proposal_id),
@@ -221,6 +221,16 @@ class _ExtractionCommitMixin:
                 raise AuthorityPersistenceError(
                     "unapproved extractor producer entered the authority store"
                 )
+            if not replay:
+                assert production is not None
+                retained_contract = self._contract_from_row(
+                    conn, contract_row, replayed=False
+                )
+                validate_fixture_production(
+                    contract=retained_contract.request,
+                    request=request,
+                    production=production,
+                )
             if replay:
                 committed = self._commit_grant_in_transaction(
                     conn, grant, recorded_at=now.to_text()
@@ -272,7 +282,6 @@ class _ExtractionCommitMixin:
                     or str(run["input_binding_digest"])
                     != request.input_binding.digest
                     or str(run["budget_digest"]) != request.budget.digest
-                    or str(run["fixture_case"]) != request.fixture_case.value
                     or str(run["stable_semantic_digest"])
                     != request.stable_run_semantic_digest
                 ):
@@ -296,9 +305,9 @@ class _ExtractionCommitMixin:
                     "INSERT INTO extraction_runs("
                     "run_id,contract_id,definition_id,definition_version_id,"
                     "item_id,revision_id,representation_id,input_binding_digest,"
-                    "budget_bytes,budget_digest,fixture_case,stable_semantic_digest,"
+                    "budget_bytes,budget_digest,stable_semantic_digest,"
                     "created_by_event_id,canonical_bytes,canonical_digest,created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         str(request.run_id),
                         str(request.contract_id),
@@ -310,7 +319,6 @@ class _ExtractionCommitMixin:
                         request.input_binding.digest,
                         canonical_json_bytes(request.budget.canonical_value()),
                         request.budget.digest,
-                        request.fixture_case.value,
                         request.stable_run_semantic_digest,
                         committed.event_id,
                         stable_bytes,
@@ -440,7 +448,6 @@ class _ExtractionCommitMixin:
                             producer_contract_digest=str(
                                 contract_row["canonical_digest"]
                             ),
-                            retained_at=recorded_at,
                         )
                         for proposal_id, draft in identities
                     ]
@@ -449,6 +456,9 @@ class _ExtractionCommitMixin:
                         "output_id": str(output_id),
                         "run_id": str(request.run_id),
                         "run_version_id": str(request.run_version_id),
+                        "producer_contract_digest": str(
+                            contract_row["canonical_digest"]
+                        ),
                         "proposal_digests": [record[2] for record in records],
                     }
                     set_bytes = canonical_json_bytes(set_value)

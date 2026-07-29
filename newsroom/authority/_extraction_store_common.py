@@ -413,7 +413,6 @@ class _ExtractionStoreSupport:
                 principal_id=principal_id,
             )
 
-
     def preflight_extraction(
         self,
         request: ExtractionRunRequest,
@@ -439,15 +438,6 @@ class _ExtractionStoreSupport:
             contract = self._contract_from_row(
                 self._connection, row, replayed=False
             )
-            if (
-                contract.request.execution_profile.value
-                != "FIXTURE_REPLAY_ONLY"
-                or contract.request.producer_kind
-                != "DETERMINISTIC_FIXTURE"
-            ):
-                raise ExtractionStateError(
-                    "unapproved extractor contract entered fixture preflight"
-                )
             return contract
 
     @staticmethod
@@ -486,7 +476,6 @@ class _ExtractionStoreSupport:
             "contract_id": str(request.contract_id),
             "input_binding": request.input_binding.canonical_value(),
             "budget": request.budget.canonical_value(),
-            "fixture_case": request.fixture_case.value,
             "stable_semantic_digest": request.stable_run_semantic_digest,
         }
 

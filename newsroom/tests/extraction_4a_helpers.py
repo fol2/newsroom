@@ -259,9 +259,15 @@ def seed_extraction_fixture(root: Path) -> ExtractionFixtureState:
     )
 
 
-def contract_request(*, key: str = "increment-4a-contract-v1"):
+def contract_request(
+    *,
+    contract_id: ExtractorContractId = CONTRACT_ID,
+    fixture_case: FixtureExtractionCase = FixtureExtractionCase.BILINGUAL_COMPLETE,
+    key: str = "increment-4a-contract-v1",
+):
     return deterministic_fixture_contract_request(
-        contract_id=CONTRACT_ID,
+        contract_id=contract_id,
+        fixture_case=fixture_case,
         idempotency_key=key,
     )
 
@@ -273,7 +279,7 @@ def run_request(
     run_version_id: ExtractionRunVersionId = RUN_VERSION_1_ID,
     version_number: int = 1,
     previous: ExtractionRunVersionId | None = None,
-    fixture_case: FixtureExtractionCase = FixtureExtractionCase.BILINGUAL_COMPLETE,
+    contract_id: ExtractorContractId = CONTRACT_ID,
     key: str = "increment-4a-run-v1",
 ) -> ExtractionRunRequest:
     return ExtractionRunRequest(
@@ -281,7 +287,7 @@ def run_request(
         run_version_id=run_version_id,
         version_number=version_number,
         expected_previous_version_id=previous,
-        contract_id=CONTRACT_ID,
+        contract_id=contract_id,
         input_binding=state.input_binding,
         budget=ExtractionBudget(
             timeout_ms=10_000,
@@ -293,7 +299,6 @@ def run_request(
             max_response_tokens=0,
             max_cost_microunits=0,
         ),
-        fixture_case=fixture_case,
         idempotency_key=key,
     )
 

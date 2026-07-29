@@ -233,16 +233,14 @@ def _create_v11_database(path) -> None:
     path.chmod(0o600)
 
 
-def test_checked_v12_migration_creates_and_reopens_exact_schema(tmp_path) -> None:
+def test_checked_v12_migration_remains_present_in_current_schema(tmp_path) -> None:
     database = tmp_path / "authority.sqlite3"
     open_source_system(database).close()
 
     conn = sqlite3.connect(database)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == (
-            DISCOVERY_AUTHORITY_SCHEMA_VERSION
-        )
-        assert SCHEMA_VERSION == DISCOVERY_AUTHORITY_SCHEMA_VERSION
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert SCHEMA_VERSION >= DISCOVERY_AUTHORITY_SCHEMA_VERSION
         row = conn.execute(
             "SELECT name,checksum FROM authority_migrations WHERE version=?",
             (DISCOVERY_AUTHORITY_SCHEMA_VERSION,),
@@ -268,7 +266,11 @@ def test_checked_v12_migration_creates_and_reopens_exact_schema(tmp_path) -> Non
     finally:
         conn.close()
 
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+    assert next(
+        entry
+        for entry in EXPECTED_MIGRATION_HISTORY
+        if entry[0] == DISCOVERY_AUTHORITY_SCHEMA_VERSION
+    ) == (
         DISCOVERY_AUTHORITY_SCHEMA_VERSION,
         DISCOVERY_AUTHORITY_MIGRATION_NAME,
         DISCOVERY_AUTHORITY_MIGRATION_CHECKSUM,
@@ -276,7 +278,7 @@ def test_checked_v12_migration_creates_and_reopens_exact_schema(tmp_path) -> Non
     open_source_system(database).close()
 
 
-def test_checked_v11_database_upgrades_to_v12_without_rewriting_history(
+def test_checked_v11_database_upgrades_through_v12_to_current_without_rewriting_history(
     tmp_path,
 ) -> None:
     database = tmp_path / "authority.sqlite3"
@@ -304,15 +306,18 @@ def test_checked_v11_database_upgrades_to_v12_without_rewriting_history(
             "SELECT version,name,checksum,applied_at FROM authority_migrations "
             "ORDER BY version"
         ).fetchall()
-        assert after[:-1] == before
-        assert after[-1][:3] == (
+        assert after[: len(before)] == before
+        assert [tuple(row[:3]) for row in after[len(before) :]] == [
+            entry
+            for entry in EXPECTED_MIGRATION_HISTORY
+            if entry[0] > CHECK_AUTHORITY_SCHEMA_VERSION
+        ]
+        assert tuple(after[len(before)][:3]) == (
             DISCOVERY_AUTHORITY_SCHEMA_VERSION,
             DISCOVERY_AUTHORITY_MIGRATION_NAME,
             DISCOVERY_AUTHORITY_MIGRATION_CHECKSUM,
         )
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == (
-            DISCOVERY_AUTHORITY_SCHEMA_VERSION
-        )
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     finally:
         conn.close()
 

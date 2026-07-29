@@ -39,7 +39,6 @@ from .types import (
     ExtractionRunId,
     ExtractionRunVersionId,
     ExtractorContractId,
-    FixtureExtractionCase,
 )
 
 EXTRACTOR_CONTRACT_REGISTER_COMMAND = "extraction.contract.register"
@@ -145,7 +144,6 @@ def _run_payload(value: Any) -> bytes:
                 "contract_id",
                 "input_binding",
                 "budget",
-                "fixture_case",
             }
         ),
     )
@@ -272,8 +270,6 @@ def _run_payload(value: Any) -> bytes:
         )
     if passage_ids != sorted(set(passage_ids)):
         raise PayloadSchemaValidationError("passages must be sorted and unique")
-    if item["fixture_case"] not in {member.value for member in FixtureExtractionCase}:
-        raise PayloadSchemaValidationError("unknown deterministic fixture case")
     return canonical_json_bytes(item)
 
 
@@ -380,7 +376,6 @@ def _golden_run() -> ExtractionRunRequest:
             max_response_tokens=0,
             max_cost_microunits=0,
         ),
-        fixture_case=FixtureExtractionCase.BILINGUAL_COMPLETE,
         idempotency_key="increment-4a-run-v1",
     )
 
