@@ -1,4 +1,4 @@
-name: Materialize Increment 3E final reviewed product
+name: Materialize Increment 3E final reviewed product v3
 
 on:
   pull_request:
@@ -50,14 +50,17 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          transport_parent = 'd332e43b538622fa662521ff120db3b2ec24e303'
+          transport_parent = 'c6db16b97eae6592d4af863a9a7cfdcbd811dab5'
           clean_product = 'df7447c3b2148e63e6bd14693487f2f851ae118b'
           clean_tree = 'cbd670cb9908d01b4a5f55306ef34f6d02ee0691'
-          expected_tree = '9db661f60bf6442e21207a0def801bdc033fd156'
+          nonworkflow_tree = '9db661f60bf6442e21207a0def801bdc033fd156'
+          combined_tree = '44b338e587960fc5343afb38df5ed71b57f7f5ca'
           payload_dir = Path('.github/increment-3e-final-review-payload')
           workflow = '.github/workflows/materialize-increment-3e-final-review.yml'
           export_workflow = '.github/workflows/export-increment-3e-recovery.yml'
           recovered_dir = Path('.github/increment-3e-lost-local')
+          validation_workflow = Path('.github/increment-3e-final-review-permanent-workflow.yml.gz.b64')
+          actual_workflow = Path('.github/workflows/projection-b2-neo4j.yml')
           expected_chunks = {
               'part-00.txt': (3000, '7c7194fc163248a798642902410e8c64fa8f398e5a0466ef062427e990dcdee3'),
               'part-01.txt': (3000, '6281e9209daf820b5527633f22dc56036d3398b5cea104535f18d3babc483791'),
@@ -77,6 +80,7 @@ jobs:
           expected_changes = tuple(sorted((
               export_workflow,
               workflow,
+              str(validation_workflow),
               *(str(recovered_dir / f'part-{index:02d}.txt') for index in range(5)),
               *(str(payload_dir / name) for name in expected_chunks),
           )))
@@ -106,16 +110,32 @@ jobs:
           if len(patch) != 84978 or hashlib.sha256(patch).hexdigest() != 'e19df9a22cad080b467bb4c5f571079d50b898c827f1f9b9bea4a6e3f9f25535':
               raise SystemExit('Increment 3E final patch differs')
           Path('/tmp/increment-3e-final-review.patch').write_bytes(patch)
-          Path('/tmp/increment-3e-final-review-tree').write_text(expected_tree, encoding='ascii')
+          workflow_encoded = validation_workflow.read_bytes()
+          if len(workflow_encoded) != 4244 or hashlib.sha256(workflow_encoded).hexdigest() != 'a00fbf985ba5471f94481da1b45d91743afa5ab13c1fc3bec5203d8d45ec1674':
+              raise SystemExit('Increment 3E permanent workflow base64 differs')
+          workflow_compressed = base64.b64decode(workflow_encoded, validate=True)
+          if len(workflow_compressed) != 3183 or hashlib.sha256(workflow_compressed).hexdigest() != '1e2a0d65c3f92e8a532cf23ccf76bdc297eb6eda7824eac468ee3b2ad2d19ae5':
+              raise SystemExit('Increment 3E permanent workflow compressed payload differs')
+          workflow_bytes = gzip.decompress(workflow_compressed)
+          if len(workflow_bytes) != 14550 or hashlib.sha256(workflow_bytes).hexdigest() != '34d0592bbc601be095d6bf47d8b5bbf60e36aa0221c5c0ddcbd20346e658197c':
+              raise SystemExit('Increment 3E permanent workflow payload differs')
+          Path('/tmp/increment-3e-permanent-workflow.yml').write_bytes(workflow_bytes)
+          Path('/tmp/increment-3e-nonworkflow-tree').write_text(nonworkflow_tree, encoding='ascii')
+          Path('/tmp/increment-3e-combined-tree').write_text(combined_tree, encoding='ascii')
           PY
           git apply --check /tmp/increment-3e-final-review.patch
           git apply /tmp/increment-3e-final-review.patch
+          cp /tmp/increment-3e-permanent-workflow.yml .github/workflows/projection-b2-neo4j.yml
           rm -rf .github/increment-3e-lost-local
           rm -rf .github/increment-3e-final-review-payload
           rm -f .github/workflows/export-increment-3e-recovery.yml
+          rm -f .github/increment-3e-final-review-permanent-workflow.yml.gz.b64
           rm -f .github/workflows/materialize-increment-3e-final-review.yml
           python -m compileall -q newsroom scripts
           git diff --check
+          git add -A
+          test "$(git write-tree)" = "$(cat /tmp/increment-3e-combined-tree)"
+          git reset
 
       - name: Install locked environment
         shell: bash
@@ -144,9 +164,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git show df7447c3b2148e63e6bd14693487f2f851ae118b:.github/workflows/projection-b2-neo4j.yml > .github/workflows/projection-b2-neo4j.yml
           git add -A
           git diff --cached --check
-          test "$(git write-tree)" = "$(cat /tmp/increment-3e-final-review-tree)"
+          test "$(git write-tree)" = "$(cat /tmp/increment-3e-nonworkflow-tree)"
           test -z "$(git diff --name-only)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
