@@ -1,15 +1,15 @@
 name: Export exact clean Increment 4A source
 
 on:
-  push:
-    branches:
-      - agent/increment-4a-clean-source-export
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
 
 jobs:
   export-clean-source:
+    if: github.event.pull_request.head.ref == 'agent/increment-4a-clean-source-export'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
