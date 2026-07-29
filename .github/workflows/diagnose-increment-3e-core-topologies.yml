@@ -1,163 +1,124 @@
-name: Diagnose Increment 3E deterministic single-wave core
+name: Apply Increment 3E permanent six-worker core
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  apply:
     if: github.event.pull_request.head.ref == 'agent/increment-3e-corrective-hardening'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
-          persist-credentials: false
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
 
-      - name: Install the locked repository environment
+      - name: Install locked tooling
         run: |
           python -m pip install --disable-pip-version-check uv
           uv sync --frozen --dev
-          uv run --no-sync python -m compileall -q newsroom scripts
 
-      - name: Measure deterministic one-wave shard topologies
+      - name: Apply the measured permanent correction
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONHASHSEED: '0'
           PYTHONUTF8: '1'
         run: |
-          uv run --no-sync python - <<'PY'
-          from __future__ import annotations
+          python - <<'PY'
+          from pathlib import Path
 
-          import json
+          path = Path('.github/increment-3e-persistent-core-apply.py')
+          text = path.read_text(encoding='utf-8')
+          replacements = (
+              (
+                  "    '''def test_core_test_inventory_is_sorted_complete_and_rejects_symlinks(",
+                  "    r'''def test_core_test_inventory_is_sorted_complete_and_rejects_symlinks(",
+              ),
+              (
+                  "    '''def test_persistent_core_runner_invokes_one_session_and_propagates_failure(",
+                  "    r'''def test_persistent_core_runner_invokes_one_session_and_propagates_failure(",
+              ),
+              (
+                  "'_CORE_WORKER_COUNT = 4\\n_CORE_DISTRIBUTION = \"loadfile\"\\n'",
+                  "'_CORE_WORKER_COUNT = 6\\n_CORE_DISTRIBUTION = \"loadfile\"\\n'",
+              ),
+              (
+                  '    assert lane_module._CORE_WORKER_COUNT == 4\n',
+                  '    assert lane_module._CORE_WORKER_COUNT == 6\n',
+              ),
+              (
+                  '        "4",\n',
+                  '        "6",\n',
+              ),
+          )
+          for old, new in replacements:
+              if text.count(old) != 1:
+                  raise SystemExit(f'unexpected apply-script marker: {old!r}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          uv run python .github/increment-3e-persistent-core-apply.py
+          uv lock
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            newsroom/tests/test_discovery_projection_3e_health_chronology.py \
+            newsroom/tests/test_discovery_projection_3e_health.py \
+            newsroom/tests/test_integrated_c1_workflow_contract.py \
+            newsroom/tests/test_sdlc_workflow_orchestrator.py
+          git diff --check
+
+      - name: Prove the exact full core command twice within bounded margin
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONHASHSEED: '0'
+          PYTHONUTF8: '1'
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            proof_root=".increment-3e-core-proof-${attempt}"
+            mkdir "${proof_root}"
+            timeout --signal=TERM --kill-after=2s 52s \
+              uv run --no-sync python -m scripts.sdlc.workflow_lane core-tests \
+                --repo-root . \
+                --report "${proof_root}/pytest.xml"
+            PROOF_ROOT="${proof_root}" uv run --no-sync python - <<'PY'
           import os
           from pathlib import Path
-          import shutil
-          import subprocess
-          import sys
-          import time
           import xml.etree.ElementTree as ET
 
-          root = Path.cwd()
-          lane = root / 'scripts/sdlc/workflow_lane.py'
-          proof_root = root / '.increment-3e-single-wave-diagnostics'
-          if proof_root.exists() or proof_root.is_symlink():
-              raise SystemExit('diagnostic root already exists')
-          proof_root.mkdir()
-
-          def set_topology(
-              current_shards: int,
-              current_workers: int,
-              shards: int,
-              workers: int,
-          ) -> None:
-              text = lane.read_text(encoding='utf-8')
-              old = (
-                  f'_CORE_SHARD_COUNT = {current_shards}\n'
-                  f'_CORE_WORKER_COUNT = {current_workers}\n'
-              )
-              new = (
-                  f'_CORE_SHARD_COUNT = {shards}\n'
-                  f'_CORE_WORKER_COUNT = {workers}\n'
-              )
-              if text.count(old) != 1:
-                  raise SystemExit(
-                      f'unexpected topology constants: {current_shards}/{current_workers}'
-                  )
-              lane.write_text(text.replace(old, new, 1), encoding='utf-8')
-
-          results: list[dict[str, object]] = []
-          current_shards = 16
-          current_workers = 5
-          for shards, workers in ((6, 6), (8, 8), (10, 10), (12, 12)):
-              set_topology(
-                  current_shards,
-                  current_workers,
-                  shards,
-                  workers,
-              )
-              current_shards = shards
-              current_workers = workers
-              run_root = proof_root / f'shards-{shards:02d}-workers-{workers:02d}'
-              run_root.mkdir()
-              report = run_root / 'pytest.xml'
-              command = (
-                  sys.executable,
-                  '-m',
-                  'scripts.sdlc.workflow_lane',
-                  'core-tests',
-                  '--repo-root',
-                  '.',
-                  '--report',
-                  report.relative_to(root).as_posix(),
-              )
-              started = time.monotonic()
-              timed_out = False
-              try:
-                  completed = subprocess.run(
-                      command,
-                      cwd=root,
-                      env=os.environ.copy(),
-                      stdout=subprocess.PIPE,
-                      stderr=subprocess.STDOUT,
-                      check=False,
-                      timeout=75,
-                  )
-                  returncode = completed.returncode
-                  output = completed.stdout.decode('utf-8', errors='replace')
-              except subprocess.TimeoutExpired as exc:
-                  timed_out = True
-                  returncode = 124
-                  raw = exc.stdout or b''
-                  output = raw.decode('utf-8', errors='replace')
-              elapsed = round(time.monotonic() - started, 3)
-
-              test_count = 0
-              failure_count = 0
-              error_count = 0
-              skip_count = 0
-              if report.is_file() and not report.is_symlink():
-                  document = ET.parse(report).getroot()
-                  test_count = len(tuple(document.iter('testcase')))
-                  failure_count = len(tuple(document.iter('failure')))
-                  error_count = len(tuple(document.iter('error')))
-                  skip_count = len(tuple(document.iter('skipped')))
-
-              result = {
-                  'shards': shards,
-                  'workers': workers,
-                  'elapsed_seconds': elapsed,
-                  'returncode': returncode,
-                  'timed_out': timed_out,
-                  'test_count': test_count,
-                  'failure_count': failure_count,
-                  'error_count': error_count,
-                  'skip_count': skip_count,
-                  'output_tail': output[-1200:],
-              }
-              results.append(result)
-              print(json.dumps(result, sort_keys=True), flush=True)
-
-          set_topology(current_shards, current_workers, 16, 5)
-          shutil.rmtree(proof_root)
-          valid = [
-              item
-              for item in results
-              if item['returncode'] == 0
-              and item['test_count'] >= 1500
-              and item['failure_count'] == 0
-              and item['error_count'] == 0
-          ]
-          print(json.dumps({'results': results, 'valid': valid}, sort_keys=True), flush=True)
-          if len(valid) != len(results):
-              raise SystemExit('a deterministic single-wave topology did not complete cleanly')
+          report = Path(os.environ['PROOF_ROOT']) / 'pytest.xml'
+          document = ET.parse(report).getroot()
+          cases = tuple(document.iter('testcase'))
+          assert len(cases) >= 1_500, len(cases)
+          assert not tuple(document.iter('failure'))
+          assert not tuple(document.iter('error'))
           PY
+            rm -rf "${proof_root}"
+          done
+
+      - name: Publish permanent code only
+        run: |
+          set -euo pipefail
+          rm .github/increment-3e-persistent-core-apply.py
+          rm .github/workflows/diagnose-increment-3e-core-topologies.yml
+          rm -f .github/.increment-3e-persistent-core-trigger
+          test ! -e .github/workflows/finalize-increment-3-20260729.yml
+          test ! -e .github/increment-3e-stable-response.patch.gz.b64
+          git config user.name newsroom-ci
+          git config user.email newsroom-ci@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          test -z "$(git diff --name-only)"
+          git commit -m "perf(sdlc): use persistent file-scoped core workers"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
