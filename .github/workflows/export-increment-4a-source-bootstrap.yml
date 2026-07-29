@@ -1,0 +1,47 @@
+name: Export Increment 4A source bootstrap
+
+on:
+  push:
+    branches:
+      - agent/increment-4a-source-bootstrap
+
+permissions:
+  contents: read
+
+jobs:
+  export-exact-authorised-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out bootstrap branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Export exact authorised Increment 4 base
+        shell: bash
+        env:
+          AUTHORISED_SHA: d03441ef2fa26b5dc83f65d1797abf2b381d8f1a
+        run: |
+          set -euo pipefail
+          git cat-file -e "${AUTHORISED_SHA}^{commit}"
+          mkdir -p "$RUNNER_TEMP/increment-4a-source"
+          git archive \
+            --format=tar.gz \
+            --prefix=newsroom/ \
+            --output="$RUNNER_TEMP/increment-4a-source/newsroom-${AUTHORISED_SHA}.tar.gz" \
+            "$AUTHORISED_SHA"
+          {
+            printf 'commit_sha=%s\n' "$AUTHORISED_SHA"
+            printf 'tree_sha=%s\n' "$(git rev-parse "${AUTHORISED_SHA}^{tree}")"
+            sha256sum "$RUNNER_TEMP/increment-4a-source/newsroom-${AUTHORISED_SHA}.tar.gz"
+          } > "$RUNNER_TEMP/increment-4a-source/manifest.txt"
+
+      - name: Upload exact source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment-4a-authorised-source-d03441e
+          path: ${{ runner.temp }}/increment-4a-source
+          if-no-files-found: error
+          retention-days: 7
