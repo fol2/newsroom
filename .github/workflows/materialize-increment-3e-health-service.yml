@@ -1,0 +1,121 @@
+name: Materialize Increment 3E authority health and actual-service proof
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-test-and-push:
+    if: github.event.pull_request.head.ref == 'agent/increment-3e-discovery-projection-health'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out exact Increment 3E branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-3e-discovery-projection-health
+          fetch-depth: 0
+          show-progress: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+      - name: Verify and apply exact health and service patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import gzip
+          import hashlib
+          import subprocess
+          from pathlib import Path
+
+          parent = '8498993297850f3bb8baf9f3b402b44eccd355ae'
+          parent_tree = '269e7c656bbe4a3b9d64f2b8dd37b58a1274d9fc'
+          expected_tree = '78befa864f567c3c3ff857d02ab968b4c902d4d7'
+          payload_dir = Path('.github/increment-3e-health-service-payload')
+          workflow = '.github/workflows/materialize-increment-3e-health-service.yml'
+
+          if subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() != parent:
+              raise SystemExit('Increment 3E health transport parent differs')
+          if subprocess.check_output(['git', 'rev-parse', f'{parent}^{{tree}}'], text=True).strip() != parent_tree:
+              raise SystemExit('Increment 3E health parent tree differs')
+
+          payload_paths = tuple(sorted(str(path) for path in payload_dir.glob('part-*.txt')))
+          changed = tuple(sorted(subprocess.check_output(
+              ['git', 'diff', '--name-only', f'{parent}..HEAD', '--'], text=True
+          ).splitlines()))
+          expected_changes = tuple(sorted((*payload_paths, workflow)))
+          if len(payload_paths) != 8 or changed != expected_changes:
+              raise SystemExit(f'Increment 3E health transport inventory differs: {changed!r}')
+
+          encoded = ''.join(Path(path).read_text(encoding='ascii').strip() for path in payload_paths)
+          if len(encoded) != 23260:
+              raise SystemExit('Increment 3E health base64 size differs')
+          compressed = base64.b64decode(encoded, validate=True)
+          if len(compressed) != 17443:
+              raise SystemExit('Increment 3E health gzip size differs')
+          if hashlib.sha256(compressed).hexdigest() != 'a1f5c834806fa9dd5cb993fe1504551d07ad1cc70a2a2b8d389f2e13d9c13017':
+              raise SystemExit('Increment 3E health gzip digest differs')
+          patch = gzip.decompress(compressed)
+          if len(patch) != 76573:
+              raise SystemExit('Increment 3E health patch size differs')
+          if hashlib.sha256(patch).hexdigest() != 'db1a02258bc7e7ad2f6127c9676b4aec13a9ef1fc0e7237e16f450d76f02d33b':
+              raise SystemExit('Increment 3E health patch digest differs')
+          Path('/tmp/increment-3e-health-service.patch').write_bytes(patch)
+          Path('/tmp/increment-3e-health-service-tree').write_text(expected_tree, encoding='ascii')
+          PY
+          git apply --check /tmp/increment-3e-health-service.patch
+          git apply /tmp/increment-3e-health-service.patch
+          rm -rf .github/increment-3e-health-service-payload
+          rm -f .github/workflows/materialize-increment-3e-health-service.yml
+          python -m compileall -q newsroom scripts
+          git diff --check
+      - name: Install locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+      - name: Run focused and complete regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_discovery_projection_3e_*.py \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            newsroom/tests/test_integrated_c1_sdlc_contract.py
+          uv run --no-sync python -m pytest -q
+          uv run --no-sync python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+      - name: Commit verified health and service proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          test "$(git write-tree)" = "$(cat /tmp/increment-3e-health-service-tree)"
+          test -z "$(git diff --name-only)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(projection): add 3E authority health and actual-service proof'
+          git push origin HEAD:agent/increment-3e-discovery-projection-health
