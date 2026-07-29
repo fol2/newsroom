@@ -366,7 +366,7 @@ def test_core_test_shards_are_fixed_deterministic_and_complete(
 
     assert first == second
     assert len(first) == lane_module._CORE_SHARD_COUNT == 16
-    assert lane_module._CORE_WORKER_COUNT == 4
+    assert lane_module._CORE_WORKER_COUNT == 5
     assert lane_module._CORE_WORKER_COUNT < lane_module._CORE_SHARD_COUNT
     assert all(first)
     flattened = tuple(item for shard in first for item in shard)
