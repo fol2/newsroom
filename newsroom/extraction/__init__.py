@@ -1,0 +1,153 @@
+"""Governed deterministic Extraction Run and proposal contracts."""
+
+from .decoding import (
+    extraction_attempt_from_value,
+    extraction_output_from_value,
+    extraction_run_from_value,
+    extractor_contract_from_value,
+    proposal_set_from_value,
+)
+from .fixtures import (
+    FIXTURE_EN_PASSAGE,
+    FIXTURE_ZH_HANT_PASSAGE,
+    fixture_attempt_request,
+    fixture_contract_request,
+    fixture_output_request,
+    fixture_proposal_set_request,
+    fixture_run_request,
+    fixture_structured_output,
+)
+from .models import (
+    ExtractionAttemptRequest,
+    ExtractionOutputRequest,
+    ExtractionPassageRef,
+    ExtractionResourceBounds,
+    ExtractionRunRequest,
+    ExtractorContractRequest,
+    ProposalEndpoint,
+    ProposalEnvelope,
+    ProposalSetRequest,
+)
+from .policy import (
+    EXTRACTION_ATTEMPT_RECORD_COMMAND,
+    EXTRACTION_COMMAND_TYPES,
+    EXTRACTION_OUTPUT_RETAIN_COMMAND,
+    EXTRACTION_PROPOSAL_SET_RETAIN_COMMAND,
+    EXTRACTION_RUN_REGISTER_COMMAND,
+    EXTRACTOR_CONTRACT_REGISTER_COMMAND,
+    extraction_command_definitions,
+    extraction_payload_contracts,
+    merge_extraction_authority_registries,
+)
+from .records import (
+    ExtractionAttempt,
+    ExtractionOutput,
+    ExtractionReplayBundle,
+    ExtractionRun,
+    ExtractorContract,
+    ProposalSet,
+)
+from .types import (
+    ExtractionAttemptId,
+    ExtractionAttemptOutcome,
+    ExtractionContractError,
+    ExtractionExecutionProfile,
+    ExtractionIdentifierReuse,
+    ExtractionOutputId,
+    ExtractionOutputKind,
+    ExtractionProducerKind,
+    ExtractionReadPolicy,
+    ExtractionRightsBlocked,
+    ExtractionRunId,
+    ExtractionSemanticCollision,
+    ExtractionStateError,
+    ExtractionVersionConflict,
+    ExtractorContractId,
+    ProposalEndpointKind,
+    ProposalEnvelopeId,
+    ProposalKind,
+    ProposalSetCompleteness,
+    ProposalSetId,
+    ProposalUncertainty,
+    RUNTIME_AUTHORITY_DISABLED,
+)
+
+_AUTHORITY_FACADE_NAMES = {
+    "GovernedExtraction",
+    "GovernedExtractionAuthoritySystem",
+    "open_governed_extraction_authority_system",
+}
+
+
+def __getattr__(name: str):
+    if name in _AUTHORITY_FACADE_NAMES:
+        from newsroom.authority import extraction_system as _system
+
+        return getattr(_system, name)
+    raise AttributeError(name)
+
+
+__all__ = [
+    "EXTRACTION_ATTEMPT_RECORD_COMMAND",
+    "EXTRACTION_COMMAND_TYPES",
+    "EXTRACTION_OUTPUT_RETAIN_COMMAND",
+    "EXTRACTION_PROPOSAL_SET_RETAIN_COMMAND",
+    "EXTRACTION_RUN_REGISTER_COMMAND",
+    "EXTRACTOR_CONTRACT_REGISTER_COMMAND",
+    "ExtractionAttempt",
+    "ExtractionAttemptId",
+    "ExtractionAttemptOutcome",
+    "ExtractionAttemptRequest",
+    "ExtractionContractError",
+    "ExtractionExecutionProfile",
+    "ExtractionIdentifierReuse",
+    "ExtractionOutput",
+    "ExtractionOutputId",
+    "ExtractionOutputKind",
+    "ExtractionOutputRequest",
+    "ExtractionPassageRef",
+    "ExtractionProducerKind",
+    "ExtractionReadPolicy",
+    "ExtractionReplayBundle",
+    "ExtractionResourceBounds",
+    "ExtractionRightsBlocked",
+    "ExtractionRun",
+    "ExtractionRunId",
+    "ExtractionRunRequest",
+    "ExtractionSemanticCollision",
+    "ExtractionStateError",
+    "ExtractionVersionConflict",
+    "ExtractorContract",
+    "ExtractorContractId",
+    "ExtractorContractRequest",
+    "FIXTURE_EN_PASSAGE",
+    "FIXTURE_ZH_HANT_PASSAGE",
+    "GovernedExtraction",
+    "GovernedExtractionAuthoritySystem",
+    "ProposalEndpoint",
+    "ProposalEndpointKind",
+    "ProposalEnvelope",
+    "ProposalEnvelopeId",
+    "ProposalKind",
+    "ProposalSet",
+    "ProposalSetCompleteness",
+    "ProposalSetId",
+    "ProposalSetRequest",
+    "ProposalUncertainty",
+    "RUNTIME_AUTHORITY_DISABLED",
+    "extraction_attempt_from_value",
+    "extraction_command_definitions",
+    "extraction_output_from_value",
+    "extraction_payload_contracts",
+    "extraction_run_from_value",
+    "extractor_contract_from_value",
+    "fixture_attempt_request",
+    "fixture_contract_request",
+    "fixture_output_request",
+    "fixture_proposal_set_request",
+    "fixture_run_request",
+    "fixture_structured_output",
+    "merge_extraction_authority_registries",
+    "open_governed_extraction_authority_system",
+    "proposal_set_from_value",
+]
