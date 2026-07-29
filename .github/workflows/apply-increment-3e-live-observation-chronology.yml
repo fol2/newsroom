@@ -1,0 +1,307 @@
+name: Apply Increment 3E live observation chronology correction
+
+on:
+  push:
+    branches:
+      - agent/increment-3e-corrective-hardening
+    paths:
+      - .github/workflows/apply-increment-3e-live-observation-chronology.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install locked tooling
+        run: |
+          python -m pip install --disable-pip-version-check uv
+          uv sync --frozen --dev
+
+      - name: Apply and verify the bounded chronology correction
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONHASHSEED: '0'
+          PYTHONUTF8: '1'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str) -> None:
+              text = path.read_text(encoding='utf-8')
+              if text.count(old) != 1:
+                  raise SystemExit(
+                      f'expected one exact replacement in {path}: {old[:120]!r}'
+                  )
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          def replace_span(
+              path: Path,
+              start_marker: str,
+              end_marker: str,
+              replacement: str,
+          ) -> None:
+              text = path.read_text(encoding='utf-8')
+              start = text.find(start_marker)
+              end = text.find(end_marker, start + len(start_marker))
+              if start < 0 or end < 0 or text.find(start_marker, start + 1) >= 0:
+                  raise SystemExit(
+                      f'unable to select one exact span in {path}: {start_marker!r}'
+                  )
+              path.write_text(
+                  text[:start] + replacement + text[end:],
+                  encoding='utf-8',
+              )
+
+          production = Path(
+              'newsroom/projection/neo4j/discovery_lineage_reads.py'
+          )
+          replace_once(
+              production,
+              '''        service_available: bool | None = None
+          query_valid: bool | None = None
+          reconciliation_valid = retained_validation_valid
+          if status.generation_state is ProjectionGenerationState.ACTIVE:
+              try:
+                  self._reconcile(status=status, proof=proof)
+                  response = self.__active_read(request.active_request(), proof)
+              except Neo4jConnectionError:
+                  service_available = False
+                  query_valid = False
+              except (
+                  Neo4jIdentityConflict,
+                  Neo4jReadError,
+                  ProjectionStateError,
+              ):
+                  service_available = True
+                  reconciliation_valid = False
+                  query_valid = False
+              else:
+                  service_available = True
+                  reconciliation_valid = retained_validation_valid
+                  try:
+                      self._validate_response(request, response, status=status)
+                  except DiscoveryLineageReadError:
+                      query_valid = False
+                  else:
+                      query_valid = True
+          ''',
+              '''        service_available: bool | None = None
+          query_valid: bool | None = None
+          reconciliation_valid = retained_validation_valid
+          reconciliation: StructuralReconciliationView | None = None
+          response: StructuralReadResponse | None = None
+          if status.generation_state is ProjectionGenerationState.ACTIVE:
+              try:
+                  reconciliation = self._reconcile(status=status, proof=proof)
+                  response = self.__active_read(request.active_request(), proof)
+              except Neo4jConnectionError:
+                  service_available = False
+                  query_valid = False
+              except (
+                  Neo4jIdentityConflict,
+                  Neo4jReadError,
+                  ProjectionStateError,
+              ):
+                  service_available = True
+                  reconciliation_valid = False
+                  query_valid = False
+              else:
+                  service_available = True
+                  reconciliation_valid = retained_validation_valid
+                  try:
+                      self._validate_response(request, response, status=status)
+                  except DiscoveryLineageReadError:
+                      query_valid = False
+                  else:
+                      query_valid = True
+          ''',
+          )
+          replace_once(
+              production,
+              '''        # The live status observation is taken inside this assessment call and
+          # may therefore follow the caller's lower-bound timestamp. Persisted
+          # validation, gap and dead-letter evidence is never allowed to move the
+          # assessment clock forward; future retained evidence still fails closed.
+          effective_assessed_at = (
+              status.serving_time
+              if status.serving_time.value > assessed_at.value
+              else assessed_at
+          )
+          ''',
+              '''        # Status, successful reconciliation and a returned active read are live
+          # observations taken inside this assessment call. They may follow the
+          # caller's lower-bound timestamp and must bound the health decision.
+          # Persisted validation, gap and dead-letter evidence cannot advance the
+          # clock; future retained evidence therefore still fails closed.
+          live_observations = [assessed_at, status.serving_time]
+          if reconciliation is not None:
+              live_observations.append(reconciliation.serving_time)
+          if response is not None:
+              live_observations.append(response.metadata.serving_time)
+          effective_assessed_at = max(
+              live_observations,
+              key=lambda item: item.value,
+          )
+          ''',
+          )
+
+          tests = Path(
+              'newsroom/tests/test_discovery_projection_3e_health_chronology.py'
+          )
+          replace_span(
+              tests,
+              'def test_active_projection_health_advances_current_assessment_after_evidence(',
+              'def test_persisted_future_validation_evidence_still_fails_closed(',
+              '''def test_active_projection_health_advances_after_all_live_observations(
+              tmp_path: Path,
+          ) -> None:
+              database = tmp_path / "authority.sqlite3"
+              seed_complete_lineage(database)
+              system = open_lineage_projection_system(database, MemoryNeo4jAdapter())
+              try:
+                  generation = _activate(system)
+                  requested_at = UtcTimestamp.now()
+                  status = system.projections.status(
+                      DISCOVERY_LINEAGE_FAMILY_ID,
+                      proof=proof(),
+                  )
+                  assert status.generation_id is not None
+                  reconciliation_time = UtcTimestamp(
+                      status.serving_time.value + timedelta(seconds=1)
+                  )
+                  read_time = UtcTimestamp(
+                      status.serving_time.value + timedelta(seconds=2)
+                  )
+                  observed: dict[str, UtcTimestamp] = {}
+
+                  def reconcile_active(request, auth):
+                      result = system.structural.reconcile_active(
+                          request,
+                          proof=auth,
+                      )
+                      observed["reconciliation"] = reconciliation_time
+                      return replace(result, serving_time=reconciliation_time)
+
+                  def active_read(request, auth):
+                      result = system.structural.read_active(
+                          request,
+                          proof=auth,
+                      )
+                      observed["read"] = read_time
+                      return replace(
+                          result,
+                          metadata=replace(
+                              result.metadata,
+                              serving_time=read_time,
+                          ),
+                      )
+
+                  facade = DiscoveryLineageProjectionFacade(
+                      active_read=active_read,
+                      reconcile_active=reconcile_active,
+                      status=lambda _family_id, _auth: status,
+                      validation=lambda generation_id, auth: (
+                          system.projections.validation(
+                              generation_id,
+                              proof=auth,
+                          )
+                      ),
+                      gaps=lambda generation_id, limit, auth: (
+                          system.projections.gaps(
+                              generation_id,
+                              limit=limit,
+                              proof=auth,
+                          )
+                      ),
+                      dead_letters=lambda generation_id, limit, auth: (
+                          system.projections.dead_letters(
+                              generation_id,
+                              limit=limit,
+                              proof=auth,
+                          )
+                      ),
+                      eligibility=lambda identifiers, auth: (
+                          system.health.require_lineage_eligible(
+                              identifiers,
+                              proof=auth,
+                          )
+                      ),
+                  )
+
+                  assessment = facade.assess_projection(
+                      _request(),
+                      policy=_POLICY,
+                      assessed_at=requested_at,
+                      proof=proof(),
+                  )
+
+                  status_evidence = next(
+                      item
+                      for item in assessment.evidence
+                      if item.evidence_type == "PROJECTION_STATUS"
+                  )
+                  assert status_evidence.identifier == str(generation.generation_id)
+                  assert status_evidence.observed_at.value > requested_at.value
+                  assert observed == {
+                      "reconciliation": reconciliation_time,
+                      "read": read_time,
+                  }
+                  assert assessment.scope_id == DISCOVERY_LINEAGE_FAMILY_ID
+                  assert assessment.state is DiscoveryHealthState.HEALTHY
+                  assert assessment.reason_code == "PROJECTION_ACTIVE_AND_RECONCILED"
+                  assert {item.evidence_type for item in assessment.evidence} >= {
+                      "PROJECTION_STATUS",
+                      "PROJECTION_VALIDATION",
+                  }
+                  assert assessment.assessed_at == read_time
+                  assert assessment.assessed_at == max(
+                      (
+                          requested_at,
+                          status_evidence.observed_at,
+                          reconciliation_time,
+                          read_time,
+                      ),
+                      key=lambda item: item.value,
+                  )
+                  assert all(
+                      item.observed_at.value <= assessment.assessed_at.value
+                      for item in assessment.evidence
+                  )
+              finally:
+                  system.close()
+
+
+          ''',
+          )
+          PY
+          uv run --no-sync python -m compileall -q newsroom scripts
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_discovery_projection_3e_health_chronology.py \
+            newsroom/tests/test_discovery_projection_3e_health.py \
+            newsroom/tests/test_discovery_projection_3e_reads.py \
+            newsroom/tests/test_sdlc_workflow_lane.py
+          git diff --check
+
+      - name: Publish code only and remove one-shot workflow
+        run: |
+          set -euo pipefail
+          rm .github/workflows/apply-increment-3e-live-observation-chronology.yml
+          git config user.name newsroom-ci
+          git config user.email newsroom-ci@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          test -z "$(git diff --name-only)"
+          git commit -m "fix(projection): bound health by all live observations"
+          git push origin HEAD:${GITHUB_REF_NAME}
