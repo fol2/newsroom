@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -276,7 +277,24 @@ def run_actual_service_projects_complete_lineage_and_recovers_graph_loss(
         ):
             system.structural.rebuild(rebuild_request, proof=proof())
         assert system.events.after(0, limit=1_000, proof=proof()) == before_replay
-        assert facade.read(read_request, proof=proof()) == initial
+
+        # The rejected rebuild cannot change lineage or authority-selected read
+        # metadata. The read observation itself is fresh, so serving_time may
+        # advance and is checked separately rather than frozen into equality.
+        after_rejected_rebuild = facade.read(read_request, proof=proof())
+        assert after_rejected_rebuild.nodes == initial.nodes
+        assert after_rejected_rebuild.relations == initial.relations
+        assert (
+            replace(
+                after_rejected_rebuild.metadata,
+                serving_time=initial.metadata.serving_time,
+            )
+            == initial.metadata
+        )
+        assert (
+            after_rejected_rebuild.metadata.serving_time.value
+            >= initial.metadata.serving_time.value
+        )
     finally:
         system.close()
 
