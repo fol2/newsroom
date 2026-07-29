@@ -89,6 +89,12 @@ The first authenticated graph-loss proof replayed a destructive rebuild command 
 
 **Correction:** exact rebuild replay remains available only while a generation is `BUILDING`. Once promoted, graph loss is recovered by creating, rebuilding, reconciling and atomically promoting a replacement generation while retiring the prior ACTIVE generation. A direct unit regression and the authenticated Neo4j case now prove that boundary.
 
+### P2-11 — the actual-service invariance assertion compared different valid-time reads
+
+The first corrected ACTIVE-generation proof compared complete lineage responses created from separate `UtcTimestamp.now()` requests. That made the assertion sensitive to query-valid-time metadata even when the graph and retained authority were unchanged.
+
+**Correction:** the before/after invariance assertion now reuses one exact typed read request. The proof therefore compares the same subject set, valid time and limit while separately proving that the rejected ACTIVE rebuild records no authority event.
+
 ## Authority and resilience review
 
 - Structural mappings are fixed, versioned and allow-listed; no arbitrary Cypher, labels, relation types or properties are accepted.
@@ -121,7 +127,7 @@ arbitrary Cypher, driver or mutation access
 
 ```text
 P1 findings:             0
-P2 findings corrected:  10
+P2 findings corrected:  11
 Unresolved P1/P2:        0 on the reviewed local product tree
 ```
 

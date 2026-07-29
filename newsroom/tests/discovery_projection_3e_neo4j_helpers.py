@@ -258,7 +258,8 @@ def run_actual_service_projects_complete_lineage_and_recovers_graph_loss(
         assert promoted.generation.state is ProjectionGenerationState.ACTIVE
 
         facade = DiscoveryLineageProjectionFacade.from_system(system)
-        initial = facade.read(_read_request(), proof=proof())
+        read_request = _read_request()
+        initial = facade.read(read_request, proof=proof())
         assert {node.node_type for node in initial.nodes} >= {
             subject.node_type for subject in _subjects()
         }
@@ -275,7 +276,7 @@ def run_actual_service_projects_complete_lineage_and_recovers_graph_loss(
         ):
             system.structural.rebuild(rebuild_request, proof=proof())
         assert system.events.after(0, limit=1_000, proof=proof()) == before_replay
-        assert facade.read(_read_request(), proof=proof()) == initial
+        assert facade.read(read_request, proof=proof()) == initial
     finally:
         system.close()
 
