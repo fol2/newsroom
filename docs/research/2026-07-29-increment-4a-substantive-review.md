@@ -92,6 +92,30 @@ The first boundary allowed an incompatible deterministic contract, malformed pro
 
 **Correction:** deterministic contract and policy failures now commit a terminal `BLOCKING_FAILURE`; unexpected producer exceptions commit a proposal-free `RETRYABLE_FAILURE` with `PRODUCER_INTERNAL_ERROR`; and malformed or proposal-inconsistent structured output commits `INVALID_OUTPUT` with retained canonical bytes and no proposals. Exception text is discarded, elapsed time is derived from authority timestamps, exact replay returns the retained failure without invoking the producer, and startup revalidates every outcome/failure-code pairing.
 
+### P2-13 — complete-suite prose counted skipped outcomes as passes
+
+The first evidence summary copied the file-isolated JUnit `tests` total into the passing-case field. That total includes skipped outcomes, so the prose overstated the complete local result by the exact 34 authenticated-service skips even though it separately disclosed those skips.
+
+**Correction:** the evidence record now distinguishes 1,593 passing cases from 34 intentional local actual-service skips, records 1,627 only as the total outcome/identity count, and continues to require the permanent authenticated-Neo4j workflow to execute its mandatory service inventory without required skip, failure or error.
+
+### P2-14 — focused SQLite inspection helpers leaked connections
+
+Several focused tests used `sqlite3.Connection` as a transaction context manager and implicitly assumed that leaving the context closed the connection. Python 3.13 correctly reported those connections as unclosed resources, adding noise to the evidence lane and making a real store leak harder to detect.
+
+**Correction:** every Increment 4A direct-SQL inspection now wraps the connection with `contextlib.closing`, and the focused inventory passes with `ResourceWarning` promoted to an error. Product open/reopen failure paths remain covered separately.
+
+### P2-15 — read authorization provenance guard lacked direct evidence
+
+The extraction read boundary already compared the authorizer's returned authentication context and request digest with the exact server-derived request, but the first focused suite proved only allowed and missing-scope outcomes. A defective or compromised authorizer returning an allowed decision for another semantic request therefore lacked direct Increment 4A regression evidence.
+
+**Correction:** a focused security test now returns a syntactically valid allowed decision with a forged authorization-request digest. The boundary rejects it before any store read, fixing the fail-closed provenance check as permanent evidence.
+
+### P2-16 — complete core evidence exhausted the shared signed lane budget
+
+The first exact clean-head SDLC run completed every deterministic test without failure or required skip, but the six-worker file-scoped pool consumed 53.013 seconds after source-integrity work had already used part of the immutable 55-second core-lane deadline. The signed decision correctly returned `BUDGET_EXCEEDED` rather than treating successful tests as timely evidence.
+
+**Correction:** source-integrity and the complete deterministic suite now start concurrently against the same immutable lane deadline because they are independent reads over the exact checked-out tree and produce separate command/evidence records. The complete `newsroom/tests` execution remains one pinned six-worker pytest session with `--dist=loadfile`; controlled four-CPU measurements rejected worker-count inflation and alternative schedulers because they reduced or failed to create dependable headroom. No test is removed, selected away, reclassified, skipped or moved to a non-blocking lane, and the 55-second command and lane deadlines remain unchanged. The workflow contract has direct evidence that both gates receive the same deadline and rendezvous concurrently, waits for peer cleanup before propagating an infrastructure defect, and returns their evidence in canonical source-then-core order.
+
 ## Authority and runtime boundary review
 
 The reviewed implementation has no import or callable surface for:
@@ -112,14 +136,14 @@ The deterministic fixture producer is exact-type constrained, uses approved repo
 ## Local evidence at this review point
 
 ```text
-Dedicated `test_extraction_4a_*` inventory:             61 passed
+Dedicated `test_extraction_4a_*` inventory:             62 passed
 Authority A2a/A2b extraction bridge evidence:          2 passed
 Predecessor discovery/projection migration regression: 11 passed
-Current focused total:                                74 passed
+Current focused total:                                75 passed
 Required focused skips:                                0
 Focused failures/errors:                               0
-Reviewed product/test tree:                            `f9624653973dbef4a7ae7f95abae1408483470a6`
-Current complete repository inventory:              1,627 passed
+Reviewed product/test tree:                            `c56886d3a8cbc5e7fa8830028ae2be891087589e`
+Current complete repository inventory:              1,594 passed
 Intentional local actual-service skips:                 34
 Complete-inventory failures/errors:                      0
 Clustering regression evaluation:                      pass
@@ -130,15 +154,15 @@ Fresh and v12-to-v13 checked migration:                pass
 Compile and diff checks:                               pass
 ```
 
-The current 74-case count is the exact local focused inventory at this review point: all dedicated Increment 4A tests, the two permanent Authority-lane bridge tests, and both inherited migration regression files. The PR completion record must still use final JUnit and workflow artifacts rather than treating this prose count as self-updating.
+The current 75-case count is the exact local focused inventory at this review point: all dedicated Increment 4A tests, the two permanent Authority-lane bridge tests, and both inherited migration regression files. The PR completion record must still use final JUnit and workflow artifacts rather than treating this prose count as self-updating.
 
-The complete file-isolated repository inventory for the reviewed product/test tree executed all 194 repository test files and produced 1,627 passing cases, 34 intentional local actual-service skips, zero failures, zero errors, zero failed files and zero JUnit parse errors. The 240-row clustering dataset matched its pinned digest and baseline with no regression. The evidence-record update that contains these results is documentation-only; final merge qualification still belongs to the exact pushed PR head and its workflow artifacts. Local service skips are never accepted as final service qualification: the permanent authenticated-Neo4j workflow must execute its required inventory without required skip/failure/error on that exact reviewed PR head.
+The complete repository inventory for the reviewed product/test tree executed all 194 repository test files and produced 1,594 passing cases plus 34 intentional local actual-service skips (1,628 total outcomes), zero failures and zero errors. The independent file-isolated run produced the same 1,628 unique test identities with zero failed files and zero JUnit parse errors. The 240-row clustering dataset matched its pinned digest and baseline with no regression. The evidence-record update that contains these results is documentation-only; final merge qualification still belongs to the exact pushed PR head and its workflow artifacts. Local service skips are never accepted as final service qualification: the permanent authenticated-Neo4j workflow must execute its required inventory without required skip/failure/error on that exact reviewed PR head.
 
 ## Review disposition
 
 ```text
 P1 findings:             0
-P2 findings corrected:  12
+P2 findings corrected:  16
 Unresolved P1/P2:        0 on the reviewed local product tree
 Review threads:          0 at the time of local review
 ```

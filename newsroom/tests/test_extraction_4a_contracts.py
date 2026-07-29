@@ -170,19 +170,39 @@ def test_contract_and_run_canonical_identity_excludes_idempotency_key(
     assert first_run.digest == replay_run.digest
     assert first_run.stable_run_semantic_digest == replay_run.stable_run_semantic_digest
 
-    changed_prompt = VersionedExtractionComponent(
-        component_id=first_contract.prompt.component_id,
-        component_version="v2",
-        contract_digest="sha256:" + "f" * 64,
+    component_fields = (
+        "framework",
+        "model",
+        "prompt",
+        "output_schema",
+        "code",
+        "normalisation",
+        "policy",
     )
-    changed = dataclasses.replace(
-        first_contract,
-        contract_id=ExtractorContractId.parse(
-            "00000000-0000-4000-8000-000000004901"
-        ),
-        prompt=changed_prompt,
-    )
-    assert changed.semantic_digest != first_contract.semantic_digest
+    semantic_digests = {first_contract.semantic_digest}
+    for offset, field_name in enumerate(component_fields, start=1):
+        original = getattr(first_contract, field_name)
+        changed_component = VersionedExtractionComponent(
+            component_id=original.component_id,
+            component_version=f"{original.component_version}-changed",
+            contract_digest="sha256:" + f"{offset:x}" * 64,
+        )
+        changed = dataclasses.replace(
+            first_contract,
+            contract_id=ExtractorContractId.parse(
+                f"00000000-0000-4000-8000-{4900 + offset:012d}"
+            ),
+            **{field_name: changed_component},
+        )
+        assert changed.semantic_digest not in semantic_digests
+        semantic_digests.add(changed.semantic_digest)
+        changed_run = dataclasses.replace(first_run, contract_id=changed.contract_id)
+        assert (
+            changed_run.stable_run_semantic_digest
+            != first_run.stable_run_semantic_digest
+        )
+
+    assert len(semantic_digests) == 1 + len(component_fields)
 
 
 def test_fixture_scenario_is_versioned_contract_policy_not_run_input(

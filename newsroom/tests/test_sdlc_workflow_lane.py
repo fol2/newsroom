@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import os
 import sys
+import threading
 
 import pytest
 
@@ -136,7 +137,8 @@ def test_execute_uses_the_caller_shared_deadline(
     _execute(contract=contract, spec=first, deadline=deadline)
     _execute(contract=contract, spec=second, deadline=deadline)
 
-    assert observed == [deadline, deadline]
+    assert len(observed) == 2
+    assert all(item is deadline for item in observed)
 
 
 def test_core_lane_passes_one_deadline_to_both_gates(
@@ -187,6 +189,93 @@ def test_core_lane_passes_one_deadline_to_both_gates(
     )
     assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD" not in source_spec["static_env"]
     assert core_spec["static_env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+
+
+def test_core_lane_starts_independent_gates_concurrently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract(tmp_path)
+    artifact = tmp_path / "artifact-concurrent"
+    artifact.mkdir()
+    deadline = LaneDeadline(300, 55_000)
+    rendezvous = threading.Barrier(2, timeout=2)
+    started: list[tuple[str, str]] = []
+    observed_deadlines: list[LaneDeadline] = []
+
+    monkeypatch.setattr(lane_module, "start_lane_deadline", lambda *_args: deadline)
+    monkeypatch.setattr(
+        lane_module,
+        "_expected_spec",
+        lambda **kwargs: SimpleNamespace(
+            gate_id=kwargs["gate_id"], phase=kwargs["phase"]
+        ),
+    )
+
+    def execute(*, contract, spec, deadline):
+        started.append((spec.gate_id, spec.phase))
+        observed_deadlines.append(deadline)
+        rendezvous.wait()
+        return _run(spec.gate_id, spec.phase)
+
+    monkeypatch.setattr(lane_module, "_execute", execute)
+
+    records = _run_core(
+        root=tmp_path,
+        artifact_root=artifact,
+        contract=contract,
+        route=_route(),
+    )
+
+    assert set(started) == {
+        ("source-integrity", "source"),
+        ("core-deterministic", "tests"),
+    }
+    assert len(observed_deadlines) == 2
+    assert all(item is deadline for item in observed_deadlines)
+    assert [(gate, phase) for gate, phase, *_ in records] == [
+        ("source-integrity", "source"),
+        ("core-deterministic", "tests"),
+    ]
+
+
+def test_core_lane_waits_for_peer_cleanup_before_propagating_defect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract(tmp_path)
+    artifact = tmp_path / "artifact-concurrent-defect"
+    artifact.mkdir()
+    deadline = LaneDeadline(400, 55_000)
+    rendezvous = threading.Barrier(2, timeout=2)
+    peer_finished = threading.Event()
+
+    monkeypatch.setattr(lane_module, "start_lane_deadline", lambda *_args: deadline)
+    monkeypatch.setattr(
+        lane_module,
+        "_expected_spec",
+        lambda **kwargs: SimpleNamespace(
+            gate_id=kwargs["gate_id"], phase=kwargs["phase"]
+        ),
+    )
+
+    def execute(*, contract, spec, deadline):
+        rendezvous.wait()
+        if spec.gate_id == "source-integrity":
+            raise RuntimeError("source-integrity-defect")
+        peer_finished.set()
+        return _run(spec.gate_id, spec.phase)
+
+    monkeypatch.setattr(lane_module, "_execute", execute)
+
+    with pytest.raises(RuntimeError, match="source-integrity-defect"):
+        _run_core(
+            root=tmp_path,
+            artifact_root=artifact,
+            contract=contract,
+            route=_route(),
+        )
+    assert peer_finished.is_set()
 
 
 def test_static_environment_excludes_ambient_secrets(

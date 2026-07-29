@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import sqlite3
 from pathlib import Path
 
@@ -27,7 +28,7 @@ def test_extraction_commands_retain_exact_authority_event_envelopes(
         )
 
     assert run.outcome is ExtractionOutcome.SUCCESS
-    with sqlite3.connect(state.database) as conn:
+    with closing(sqlite3.connect(state.database)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT c.command_type,c.aggregate_type,c.aggregate_id,"

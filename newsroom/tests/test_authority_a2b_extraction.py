@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import sqlite3
 from pathlib import Path
 
@@ -63,7 +64,7 @@ def test_extraction_rechecks_governed_object_lifecycle_before_exact_replay(
         with pytest.raises(ExtractionRightsDenied):
             reopened.extraction.execute(request, proof=extraction_proof())
 
-    with sqlite3.connect(state.database) as conn:
+    with closing(sqlite3.connect(state.database)) as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM extraction_run_versions"
         ).fetchone()[0] == 1

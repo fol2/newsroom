@@ -614,7 +614,6 @@ def _run_core(
         gate_id="source-integrity",
         phase="source",
     )
-    source_run = _execute(contract=contract, spec=source_spec, deadline=deadline)
     test_spec = _expected_spec(
         root=root,
         artifact_root=artifact_root,
@@ -623,7 +622,26 @@ def _run_core(
         gate_id="core-deterministic",
         phase="tests",
     )
-    test_run = _execute(contract=contract, spec=test_spec, deadline=deadline)
+    # Both gates are independent reads over the exact checked-out tree. Running
+    # them concurrently preserves the single immutable lane deadline while
+    # preventing the short source-integrity gate from consuming part of the
+    # deterministic-suite command budget. Each gate still receives the same
+    # deadline object and produces its own command/evidence record.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        source_future = executor.submit(
+            _execute,
+            contract=contract,
+            spec=source_spec,
+            deadline=deadline,
+        )
+        test_future = executor.submit(
+            _execute,
+            contract=contract,
+            spec=test_spec,
+            deadline=deadline,
+        )
+        source_run = source_future.result()
+        test_run = test_future.result()
     return (
         ("source-integrity", "source", source_run, None, source_dir),
         ("core-deterministic", "tests", test_run, None, test_dir),

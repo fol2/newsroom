@@ -22,11 +22,15 @@ from .extraction_4a_helpers import (
     RUN_ID,
     RUN_VERSION_1_ID,
     contract_request,
+    extraction_authenticator,
+    extraction_authorizer,
     extraction_proof,
+    extraction_read_policy,
     open_extraction_system,
     run_request,
     seed_extraction_fixture,
 )
+from .source_3a_helpers import SOURCE_NOW
 
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -131,6 +135,31 @@ def test_boundary_rejects_any_non_repository_owned_producer() -> None:
             producer=FakeAdapter(),  # type: ignore[arg-type]
             clock=None,  # type: ignore[arg-type]
         )
+
+
+def test_read_boundary_rejects_forged_authorization_provenance() -> None:
+    delegate = extraction_authorizer()
+
+    class ForgedAuthorizer:
+        def authorize(self, context, request, *, now):
+            decision = delegate.authorize(context, request, now=now)
+            return dataclasses.replace(
+                decision,
+                authorization_request_digest="sha256:" + "0" * 64,
+            )
+
+    boundary = _ExtractionBoundary(
+        store=None,  # type: ignore[arg-type]
+        command_service=None,  # type: ignore[arg-type]
+        authenticator=extraction_authenticator(),
+        authorizer=ForgedAuthorizer(),
+        read_policy=extraction_read_policy(),
+        producer=DeterministicFixtureExtractor(),
+        clock=lambda: SOURCE_NOW,
+    )
+
+    with pytest.raises(PermissionError, match="authorization provenance differs"):
+        boundary.metadata(RUN_VERSION_1_ID, extraction_proof())
 
 
 def test_source_prompt_injection_cannot_change_fixture_output_or_authority(

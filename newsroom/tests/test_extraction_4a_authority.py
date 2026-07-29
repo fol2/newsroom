@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import dataclasses
 import sqlite3
 from pathlib import Path
@@ -113,7 +114,7 @@ def test_extraction_authority_commits_reads_replays_and_reopens(
         )
         assert len(proposals) == 4
 
-    with sqlite3.connect(state.database) as conn:
+    with closing(sqlite3.connect(state.database)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM extraction_runs").fetchone()[0] == 1
         assert conn.execute(
             "SELECT COUNT(*) FROM extraction_run_versions"
@@ -306,7 +307,7 @@ def test_contract_identity_and_contract_change_fail_closed(
         assert blocked.output is None
         assert blocked.proposal_set is None
 
-    with sqlite3.connect(state.database) as conn:
+    with closing(sqlite3.connect(state.database)) as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM extraction_run_versions "
             "WHERE run_version_id=?",
@@ -351,7 +352,7 @@ def test_read_scopes_are_distinct_and_execute_is_authorized_before_work(
             system.extraction.execute(
                 run_request(other_state), proof=extraction_proof()
             )
-    with sqlite3.connect(other_state.database) as conn:
+    with closing(sqlite3.connect(other_state.database)) as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM extraction_run_versions"
         ).fetchone()[0] == 0

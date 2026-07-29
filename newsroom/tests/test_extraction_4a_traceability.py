@@ -152,7 +152,7 @@ def test_operations_and_substantive_review_retain_stop_and_evidence_boundaries()
         assert phrase in operations
     for phrase in (
         "P1 findings:             0",
-        "P2 findings corrected:  12",
+        "P2 findings corrected:  16",
         "Unresolved P1/P2:        0",
         "This is not final merge evidence",
         "Issue #226 remains blocked",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import dataclasses
 import sqlite3
 from pathlib import Path
@@ -182,7 +183,7 @@ def test_malformed_valid_output_is_retained_as_invalid_without_proposals(
         )
         assert retained_raw.canonical_bytes == canonical_json_bytes(raw)
 
-    with sqlite3.connect(state.database) as conn:
+    with closing(sqlite3.connect(state.database)) as conn:
         expected = {
             "extraction_runs": 1,
             "extraction_run_passages": 2,
@@ -362,7 +363,7 @@ def test_unexpected_authority_normalisation_error_aborts_without_attempt(
         with pytest.raises(RuntimeError, match="authority-normalisation-defect"):
             system.extraction.execute(request, proof=extraction_proof())
 
-    with sqlite3.connect(state.database) as conn:
+    with closing(sqlite3.connect(state.database)) as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM extraction_run_versions"
         ).fetchone()[0] == 0

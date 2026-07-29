@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import dataclasses
 import sqlite3
 from pathlib import Path
@@ -84,7 +85,7 @@ def test_idempotency_key_cannot_be_rebound_to_new_contract_or_run_semantics(
                 changed_run, proof=extraction_proof()
             )
 
-    with sqlite3.connect(state.database) as conn:
+    with closing(sqlite3.connect(state.database)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM extractor_contracts").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM extraction_runs").fetchone()[0] == 1
         assert conn.execute(
@@ -135,7 +136,7 @@ def test_semantic_duplicate_run_and_identifier_reuse_fail_closed(
         assert metadata.run_version_id == retained.request.run_version_id
         assert metadata.outcome == retained.outcome
 
-    with sqlite3.connect(state.database) as conn:
+    with closing(sqlite3.connect(state.database)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM extraction_runs").fetchone()[0] == 1
         assert conn.execute(
             "SELECT COUNT(*) FROM extraction_run_versions"
