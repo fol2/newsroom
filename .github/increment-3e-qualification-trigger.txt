@@ -1,1 +1,0 @@
-One-shot branch marker. The next connector-authored commit removes this file so permanent pull-request workflows execute against a clean final tree.
