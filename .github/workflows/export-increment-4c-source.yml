@@ -1,0 +1,45 @@
+name: Export exact clean Increment 4C checkpoint
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  export-source:
+    if: github.event.pull_request.head.ref == 'agent/increment-4c-source-export'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact clean Increment 4C checkpoint
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: 194028a973a806d4e8d3fa6b89be638182848626
+          fetch-depth: 0
+          show-progress: false
+          persist-credentials: false
+
+      - name: Build content-addressed source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = '194028a973a806d4e8d3fa6b89be638182848626'
+          test "$(git rev-parse HEAD^{tree})" = 'c8abafff5328fde8598003494bbca1b8c11cdb6f'
+          git archive --format=tar --prefix=newsroom/ HEAD | gzip -n > "$RUNNER_TEMP/increment-4c-source.tar.gz"
+          printf '%s\n' 'commit=194028a973a806d4e8d3fa6b89be638182848626' > "$RUNNER_TEMP/manifest.txt"
+          printf '%s\n' 'tree=c8abafff5328fde8598003494bbca1b8c11cdb6f' >> "$RUNNER_TEMP/manifest.txt"
+          printf 'archive_sha256=%s\n' "$(sha256sum "$RUNNER_TEMP/increment-4c-source.tar.gz" | cut -d' ' -f1)" >> "$RUNNER_TEMP/manifest.txt"
+          cat "$RUNNER_TEMP/manifest.txt"
+
+      - name: Upload exact source archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        with:
+          name: increment-4c-clean-source-194028a
+          path: |
+            ${{ runner.temp }}/increment-4c-source.tar.gz
+            ${{ runner.temp }}/manifest.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
