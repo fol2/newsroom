@@ -76,8 +76,9 @@ def test_fresh_schema_v15_history_registry_tables_and_view_are_exact(
     state = seed_entity_fixture(tmp_path)
     conn = sqlite3.connect(state.extraction.database)
     try:
-        assert EDITORIAL_RELATION_SCHEMA_VERSION == SCHEMA_VERSION == 15
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+        assert EDITORIAL_RELATION_SCHEMA_VERSION == 15
+        assert SCHEMA_VERSION == 16
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(conn) == EXPECTED_SCHEMA_FINGERPRINT
         assert conn.execute(
             "SELECT name,checksum FROM authority_migrations WHERE version=?",
@@ -186,7 +187,7 @@ def test_checked_v14_to_v15_upgrade_preserves_extraction_and_entity_authority(
 
     after = sqlite3.connect(state.extraction.database)
     try:
-        assert after.execute("PRAGMA user_version").fetchone()[0] == 15
+        assert after.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(after) == EXPECTED_SCHEMA_FINGERPRINT
         assert {
             table: after.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
