@@ -1,0 +1,50 @@
+name: Export exact clean Increment 4B checkpoint
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  export-clean-source:
+    if: github.event.pull_request.head.ref == 'agent/increment-4b-clean-source-export'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact clean Increment 4B checkpoint
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: a4f947cd8810823f0760c4b7d9ac4477d6d768e4
+          fetch-depth: 0
+          show-progress: false
+          persist-credentials: false
+
+      - name: Build content-addressed source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 'a4f947cd8810823f0760c4b7d9ac4477d6d768e4'
+          test "$(git rev-parse HEAD^{tree})" = '7f14cffd1efbf233eda915d486e0207570fa5b93'
+          mkdir -p "$RUNNER_TEMP/increment-4b-clean-source"
+          git archive --format=tar --prefix=newsroom/ HEAD \
+            | gzip -n -9 > "$RUNNER_TEMP/increment-4b-clean-source/newsroom-a4f947cd.tar.gz"
+          archive="$RUNNER_TEMP/increment-4b-clean-source/newsroom-a4f947cd.tar.gz"
+          sha256sum "$archive" > "$RUNNER_TEMP/increment-4b-clean-source/SHA256SUMS"
+          {
+            printf 'SOURCE_COMMIT=%s\n' "$(git rev-parse HEAD)"
+            printf 'SOURCE_TREE=%s\n' "$(git rev-parse HEAD^{tree})"
+            printf 'ARCHIVE_BYTES=%s\n' "$(wc -c < "$archive")"
+            printf 'ARCHIVE_SHA256=%s\n' "$(sha256sum "$archive" | cut -d' ' -f1)"
+          } > "$RUNNER_TEMP/increment-4b-clean-source/source.env"
+          cat "$RUNNER_TEMP/increment-4b-clean-source/source.env"
+
+      - name: Upload exact source archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        with:
+          name: increment-4b-clean-source-a4f947cd
+          path: ${{ runner.temp }}/increment-4b-clean-source
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
