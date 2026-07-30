@@ -5,7 +5,10 @@ from dataclasses import replace
 
 from newsroom.authority._capability import _AuthorizedCommandGrant
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
-from newsroom.authority.persistence import AuthorityPersistenceError
+from newsroom.authority.persistence import (
+    AuthorityPersistenceError,
+    ExpectedVersionConflict,
+)
 from newsroom.authority.types import EventId, TrustScope, UtcTimestamp
 from newsroom.relations.editorial_models import (
     EDITORIAL_PREDICATE_REGISTRY_V1,
@@ -26,6 +29,7 @@ from newsroom.relations.editorial_types import (
     EditorialRelationCurrentState,
     EditorialRelationDecisionAction,
     EditorialRelationDecisionConflict,
+    EditorialRelationIdentifierReuse,
     EditorialRelationProjectionAction,
     EditorialRelationStaleDecision,
     EditorialRelationStateError,
@@ -71,10 +75,25 @@ class _EditorialRelationCommitMixin:
         with self._lock, self._transaction() as conn:
             now = self._clock()
             grant.authentication.require_current(now)
-            if grant.replay_of_command_id is not None:
+            recorded_at = now.to_text()
+            # Reconcile idempotency inside the serialized transaction. Two callers
+            # can both be authorized before either commits; the second must become
+            # exact replay rather than a stale-head failure.
+            try:
                 committed = self._commit_grant_in_transaction(
-                    conn, grant, recorded_at=now.to_text()
+                    conn, grant, recorded_at=recorded_at
                 )
+            except ExpectedVersionConflict as exc:
+                if conn.execute(
+                    "SELECT 1 FROM editorial_relation_proposal_versions "
+                    "WHERE proposal_version_id=?",
+                    (str(request.proposal_version_id),),
+                ).fetchone() is not None:
+                    raise EditorialRelationIdentifierReuse(
+                        "editorial relation proposal version identity is already retained"
+                    ) from exc
+                raise
+            if committed.replayed:
                 row = self._editorial_row_for_event(
                     conn,
                     table="editorial_relation_proposal_versions",
@@ -160,20 +179,6 @@ class _EditorialRelationCommitMixin:
 
             subject_digest = self._retain_editorial_endpoint(conn, request.subject)
             object_digest = self._retain_editorial_endpoint(conn, request.object)
-            recorded_at = now.to_text()
-            committed = self._commit_grant_in_transaction(
-                conn, grant, recorded_at=recorded_at
-            )
-            if committed.replayed:
-                row = self._editorial_row_for_event(
-                    conn,
-                    table="editorial_relation_proposal_versions",
-                    event_id=committed.event_id,
-                    identity="editorial relation proposal version",
-                )
-                return self._editorial_proposal_version_from_row(
-                    conn, row, replayed=True
-                )
 
             if request.version_number == 1:
                 contract = EDITORIAL_PREDICATE_REGISTRY_V1.contract(
@@ -451,10 +456,23 @@ class _EditorialRelationCommitMixin:
         with self._lock, self._transaction() as conn:
             now = self._clock()
             grant.authentication.require_current(now)
-            if grant.replay_of_command_id is not None:
+            recorded_at = now.to_text()
+            # Recheck idempotency under the sole-writer lock so an identical
+            # concurrent decision returns the retained decision rather than stale.
+            try:
                 committed = self._commit_grant_in_transaction(
-                    conn, grant, recorded_at=now.to_text()
+                    conn, grant, recorded_at=recorded_at
                 )
+            except ExpectedVersionConflict as exc:
+                if conn.execute(
+                    "SELECT 1 FROM editorial_relation_decisions WHERE decision_id=?",
+                    (str(request.decision_id),),
+                ).fetchone() is not None:
+                    raise EditorialRelationIdentifierReuse(
+                        "editorial relation decision identity is already retained"
+                    ) from exc
+                raise
+            if committed.replayed:
                 row = self._editorial_row_for_event(
                     conn,
                     table="editorial_relation_decisions",
@@ -550,19 +568,6 @@ class _EditorialRelationCommitMixin:
                     identifier=str(request.assertion_id),
                     identity="editorial relation assertion identity",
                 )
-
-            recorded_at = now.to_text()
-            committed = self._commit_grant_in_transaction(
-                conn, grant, recorded_at=recorded_at
-            )
-            if committed.replayed:
-                row = self._editorial_row_for_event(
-                    conn,
-                    table="editorial_relation_decisions",
-                    event_id=committed.event_id,
-                    identity="editorial relation decision",
-                )
-                return self._editorial_decision_from_row(conn, row, replayed=True)
 
             decision_version = request.expected_previous_decision_version + 1
             conn.execute(

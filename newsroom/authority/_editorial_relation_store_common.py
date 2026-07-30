@@ -19,7 +19,9 @@ from newsroom.entities.types import (
     CanonicalEntityId,
     CanonicalEntityVersionId,
     EntityResolutionDependencyId,
+    EntityRightsDenied,
 )
+from newsroom.extraction.types import ExtractionRightsDenied
 from newsroom.relations.editorial_models import (
     EDITORIAL_PREDICATE_REGISTRY_V1,
     CanonicalEntityRelationEndpoint,
@@ -429,12 +431,15 @@ class _EditorialRelationStoreSupport:
         visited_assertions: set[str] | None = None,
     ) -> None:
         if isinstance(endpoint, CanonicalEntityRelationEndpoint):
-            self._require_candidate_current(
-                conn,
-                entity_id=endpoint.entity_id,
-                version_id=endpoint.entity_version_id,
-            )
-            self._require_entity_current(conn, endpoint.entity_id)
+            try:
+                self._require_candidate_current(
+                    conn,
+                    entity_id=endpoint.entity_id,
+                    version_id=endpoint.entity_version_id,
+                )
+                self._require_entity_current(conn, endpoint.entity_id)
+            except EntityRightsDenied as exc:
+                raise EditorialRelationRightsDenied(str(exc)) from exc
             return
         if isinstance(endpoint, SourceRevisionRelationEndpoint):
             row = conn.execute(
@@ -478,6 +483,27 @@ class _EditorialRelationStoreSupport:
                     "story candidate endpoint version is no longer current"
                 )
             return
+        if isinstance(endpoint, EventHypothesisRelationEndpoint):
+            rows = conn.execute(
+                "SELECT candidate_id,version_number FROM story_candidate_versions "
+                "WHERE hypothesis_version_id=?",
+                (str(endpoint.hypothesis_version_id),),
+            ).fetchall()
+            if not rows:
+                raise EditorialRelationStateError(
+                    "event hypothesis endpoint has no retained workflow authority"
+                )
+            for row in rows:
+                latest = conn.execute(
+                    "SELECT MAX(version_number) FROM story_candidate_versions "
+                    "WHERE candidate_id=?",
+                    (str(row["candidate_id"]),),
+                ).fetchone()[0]
+                if int(row["version_number"]) == int(latest):
+                    return
+            raise EditorialRelationStaleDecision(
+                "event hypothesis endpoint has no current workflow version"
+            )
         if isinstance(endpoint, RelationAssertionRelationEndpoint):
             visited = (
                 visited_assertions if visited_assertions is not None else set()
@@ -493,14 +519,14 @@ class _EditorialRelationStoreSupport:
             )
             visited.remove(key)
             return
-        # Event-hypothesis versions are immutable workflow identities in this
-        # increment. Their existence and current semantics are supplied by exact
-        # workflow evidence; there is intentionally no mutable graph lookup here.
 
     def _validate_editorial_extraction_evidence(
         self, conn: sqlite3.Connection, evidence: ExtractionRelationEvidence
     ) -> None:
-        proposal = self._source_proposal(conn, evidence.source_proposal_id)
+        try:
+            proposal = self._source_proposal(conn, evidence.source_proposal_id)
+        except ExtractionRightsDenied as exc:
+            raise EditorialRelationRightsDenied(str(exc)) from exc
         if (
             proposal.canonical_digest != evidence.source_proposal_digest
             or proposal.run_id != evidence.run_id
@@ -577,7 +603,10 @@ class _EditorialRelationStoreSupport:
                     "entity resolution dependency is not retained"
                 )
             dependency = self._dependency_from_row(conn, row, replayed=False)
-            self._require_dependency_current(conn, dependency)
+            try:
+                self._require_dependency_current(conn, dependency)
+            except (EntityRightsDenied, ExtractionRightsDenied) as exc:
+                raise EditorialRelationRightsDenied(str(exc)) from exc
             if str(dependency.dependent_proposal_id) not in source_proposal_ids:
                 raise EditorialRelationStateError(
                     "relation dependency does not bind supplied extraction evidence"

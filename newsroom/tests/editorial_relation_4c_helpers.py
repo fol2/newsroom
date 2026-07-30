@@ -38,7 +38,6 @@ from newsroom.relations import (
     EditorialRelationReadPolicy,
     EditorialRelationSupersessionId,
     EditorialRelationTemporalScope,
-    EventHypothesisRelationEndpoint,
     ExtractionRelationEvidence,
 )
 
@@ -73,6 +72,7 @@ def _id(identifier_type: type, suffix: int):
     )
 
 
+ZH_MENTION_ID = _id(type(EN_MENTION_ID), 4202)
 ZH_NEW_PROPOSAL_ID = _id(EntityResolutionProposalId, 4701)
 ZH_NEW_PROPOSAL_V1_ID = _id(EntityResolutionProposalVersionId, 4702)
 ZH_ENTITY_ID = _id(CanonicalEntityId, 4703)
@@ -88,7 +88,15 @@ RELATION_ACCEPT_DECISION_ID = _id(EditorialRelationDecisionId, 4724)
 RELATION_HOLD_DECISION_ID = _id(EditorialRelationDecisionId, 4725)
 RELATION_SECOND_DECISION_ID = _id(EditorialRelationDecisionId, 4726)
 RELATION_SUPERSESSION_ID = _id(EditorialRelationSupersessionId, 4727)
+RELATION_SECOND_PROPOSAL_ID = _id(EditorialRelationProposalId, 4751)
+RELATION_SECOND_PROPOSAL_V1_ID = _id(EditorialRelationProposalVersionId, 4752)
+RELATION_SECOND_ASSERTION_ID = _id(EditorialRelationAssertionId, 4753)
+RELATION_SECOND_ACCEPT_DECISION_ID = _id(EditorialRelationDecisionId, 4754)
+RELATION_SUPERSEDE_DECISION_ID = _id(EditorialRelationDecisionId, 4755)
 RELATION_HYPOTHESIS_VERSION_ID = _id(IntegratedHypothesisVersionId, 4731)
+COMPETING_RESOLUTION_PROPOSAL_ID = _id(EntityResolutionProposalId, 4741)
+COMPETING_RESOLUTION_PROPOSAL_V1_ID = _id(EntityResolutionProposalVersionId, 4742)
+COMPETING_RELATION_DEPENDENCY_ID = _id(EntityResolutionDependencyId, 4743)
 
 RELATION_SCOPES = frozenset(
     {
@@ -182,7 +190,7 @@ def _zh_new_entity_proposal_request(
         source_proposal_id=state.zh_source.proposal_id,
         expected_source_proposal_digest=state.zh_source.canonical_digest,
         kind=EntityResolutionProposalKind.MENTION_TO_NEW_ENTITY,
-        subject_mention_id=_id(type(EN_MENTION_ID), 4202),
+        subject_mention_id=ZH_MENTION_ID,
         object_mention_id=None,
         candidate_entity_id=None,
         candidate_entity_version_id=None,
@@ -212,7 +220,7 @@ def seed_relation_fixture(
         system.entities.admit_mention(
             mention_request(
                 state.zh_source,
-                mention_id=_id(type(EN_MENTION_ID), 4202),
+                mention_id=ZH_MENTION_ID,
                 language="zh-HK",
                 key="relation-fixture-zh-mention-v1",
             ),
@@ -280,6 +288,42 @@ def seed_relation_fixture(
     )
 
 
+
+def competing_unresolved_dependency(
+    state: EditorialRelationFixtureState,
+) -> EntityResolutionDependencyId:
+    request = EntityResolutionProposalRequest(
+        proposal_id=COMPETING_RESOLUTION_PROPOSAL_ID,
+        proposal_version_id=COMPETING_RESOLUTION_PROPOSAL_V1_ID,
+        version_number=1,
+        expected_previous_version_id=None,
+        source_proposal_id=state.entity.zh_source.proposal_id,
+        expected_source_proposal_digest=state.entity.zh_source.canonical_digest,
+        kind=EntityResolutionProposalKind.MENTION_TO_ENTITY,
+        subject_mention_id=ZH_MENTION_ID,
+        object_mention_id=None,
+        candidate_entity_id=ENTITY_ID,
+        candidate_entity_version_id=ENTITY_VERSION_ID,
+        confidence_basis_points=5_000,
+        uncertainty_codes=("CONFLICTING_IDENTITY_BASIS",),
+        basis_codes=("EDITORIAL_REVIEW_REQUIRED",),
+        idempotency_key="relation-fixture-competing-resolution-v1",
+    )
+    with open_entity_system_after_relation(state) as system:
+        proposal = system.entities.propose_resolution(
+            request, proof=extraction_proof()
+        )
+        dependency = system.entities.bind_resolution_dependency(
+            dependency_request(
+                state.entity,
+                proposal,
+                dependency_id=COMPETING_RELATION_DEPENDENCY_ID,
+                key="relation-fixture-competing-dependency-v1",
+            ),
+            proof=extraction_proof(),
+        )
+    return dependency.dependency_id
+
 def relation_proposal_request(
     state: EditorialRelationFixtureState,
     *,
@@ -304,7 +348,7 @@ def relation_proposal_request(
         end_byte=evidence_range.end_byte,
         evidence_text_digest=evidence_range.evidence_text_digest,
     )
-    predicate = EditorialPredicateCode.ABOUT_EVENT
+    predicate = EditorialPredicateCode.SAME_PROCESS_AS
     contract = EDITORIAL_PREDICATE_REGISTRY_V1.contract(predicate)
     dependencies = (
         state.accepted_dependencies if dependency_ids is None else dependency_ids
@@ -321,8 +365,9 @@ def relation_proposal_request(
             entity_id=ENTITY_ID,
             entity_version_id=ENTITY_VERSION_ID,
         ),
-        object=EventHypothesisRelationEndpoint(
-            hypothesis_version_id=RELATION_HYPOTHESIS_VERSION_ID
+        object=CanonicalEntityRelationEndpoint(
+            entity_id=ZH_ENTITY_ID,
+            entity_version_id=ZH_ENTITY_VERSION_ID,
         ),
         temporal_scope=EditorialRelationTemporalScope(
             valid_from=None,
@@ -337,7 +382,7 @@ def relation_proposal_request(
             producer_version="fixture-increment-4c-v1",
             contract_digest=source.producer_contract_digest,
         ),
-        statement="The admitted entity is about the retained event hypothesis.",
+        statement="The two admitted entities participate in the same governed process.",
         confidence_basis_points=9_100,
         uncertainty_codes=("EDITORIAL_REVIEW_REQUIRED",),
         basis_codes=("EXACT_EXTRACTION_EVIDENCE",),
@@ -378,6 +423,7 @@ def relation_decision_request(
 
 __all__ = [name for name in globals() if name.isupper()] + [
     "EditorialRelationFixtureState",
+    "competing_unresolved_dependency",
     "open_entity_system_after_relation",
     "open_relation_system",
     "relation_authorizer",

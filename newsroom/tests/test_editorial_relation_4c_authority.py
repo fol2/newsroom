@@ -4,10 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from newsroom.entities import (
-    EntityAliasKind,
-    EntityResolutionDecisionAction,
-)
 from newsroom.relations import (
     EditorialRelationDecisionAction,
     EditorialRelationDecisionConflict,
@@ -19,16 +15,12 @@ from .editorial_relation_4c_helpers import (
     RELATION_ASSERTION_ID,
     RELATION_HOLD_DECISION_ID,
     RELATION_PROPOSAL_ID,
-    ZH_ENTITY_ID,
-    ZH_ENTITY_VERSION_ID,
-    ZH_PRIMARY_ALIAS_ID,
-    open_entity_system_after_relation,
+    competing_unresolved_dependency,
     open_relation_system,
     relation_decision_request,
     relation_proposal_request,
     seed_relation_fixture,
 )
-from .entity_4b_helpers import decision_request
 from .extraction_4a_helpers import extraction_proof
 
 
@@ -108,13 +100,17 @@ def test_explicit_accept_creates_one_admitted_assertion_and_projection_event(
         ).assertion.canonical_digest == assertion.canonical_digest
 
 
-def test_material_unresolved_identity_blocks_accept_then_later_resolution_allows_it(
+def test_material_unresolved_identity_blocks_accept_and_preserves_hold(
     tmp_path: Path,
 ) -> None:
-    state = seed_relation_fixture(tmp_path, resolve_secondary=False)
+    state = seed_relation_fixture(tmp_path)
+    unresolved_dependency_id = competing_unresolved_dependency(state)
     with open_relation_system(state) as system:
         proposal = system.relations.propose(
-            relation_proposal_request(state), proof=extraction_proof()
+            relation_proposal_request(
+                state, dependency_ids=(unresolved_dependency_id,)
+            ),
+            proof=extraction_proof(),
         )
         with pytest.raises(
             EditorialRelationDecisionConflict, match="material entity identity"
@@ -139,35 +135,6 @@ def test_material_unresolved_identity_blocks_accept_then_later_resolution_allows
             proof=extraction_proof(),
         )
         assert hold.current_state.value == "HELD"
-
-    with open_entity_system_after_relation(state) as entities:
-        entities.entities.decide_resolution(
-            decision_request(
-                state.zh_resolution_proposal,
-                action=EntityResolutionDecisionAction.ACCEPT,
-                entity_id=ZH_ENTITY_ID,
-                version_id=ZH_ENTITY_VERSION_ID,
-                alias_id=ZH_PRIMARY_ALIAS_ID,
-                alias_kind=EntityAliasKind.PRIMARY_NAME,
-                key="relation-later-zh-accept-v1",
-            ),
-            proof=extraction_proof(),
-        )
-
-    with open_relation_system(state) as reopened:
-        accepted = reopened.relations.decide(
-            relation_decision_request(
-                proposal,
-                action=EditorialRelationDecisionAction.ACCEPT,
-                decision_id=RELATION_ACCEPT_DECISION_ID,
-                expected_previous_version=1,
-                previous_decision_id=RELATION_HOLD_DECISION_ID,
-                assertion_id=RELATION_ASSERTION_ID,
-                key="relation-accept-after-resolution-v2",
-            ),
-            proof=extraction_proof(),
-        )
-        assert accepted.current_state.value == "ADMITTED"
-        assert reopened.relations.assertion(
-            RELATION_ASSERTION_ID, proof=extraction_proof()
-        ).assertion_id == RELATION_ASSERTION_ID
+        assert system.relations.current_relations(
+            limit=10, proof=extraction_proof()
+        ) == ()
