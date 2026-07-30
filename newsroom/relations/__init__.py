@@ -1,4 +1,4 @@
-"""Governed editorial-relation contracts for Increment 2A."""
+"""Governed editorial-relation contracts for Increment 2 and Increment 4."""
 
 from .fixture_v2 import (
     INTEGRATED_FIXTURE_V2,
@@ -65,16 +65,138 @@ _AUTHORITY_FACADE_NAMES = {
     "open_governed_relation_authority_system",
 }
 
+_EDITORIAL_MODEL_NAMES = {
+    "CanonicalEntityRelationEndpoint",
+    "EDITORIAL_PREDICATE_REGISTRY_V1",
+    "EditorialPredicateContract",
+    "EditorialPredicateEndpointPair",
+    "EditorialPredicateRegistry",
+    "EditorialRelationAssertion",
+    "EditorialRelationCurrentView",
+    "EditorialRelationDecision",
+    "EditorialRelationDecisionRequest",
+    "EditorialRelationEndpoint",
+    "EditorialRelationEvidence",
+    "EditorialRelationProducer",
+    "EditorialRelationProjectionEvent",
+    "EditorialRelationProposal",
+    "EditorialRelationProposalRequest",
+    "EditorialRelationProposalVersion",
+    "EditorialRelationReadPolicy",
+    "EditorialRelationTemporalScope",
+    "EventHypothesisRelationEndpoint",
+    "ExtractionRelationEvidence",
+    "RelationAssertionRelationEndpoint",
+    "SourceRevisionRelationEndpoint",
+    "StoryCandidateRelationEndpoint",
+}
+
+_EDITORIAL_POLICY_NAMES = {
+    "EDITORIAL_RELATION_COMMAND_TYPES",
+    "EDITORIAL_RELATION_DECISION_COMMAND",
+    "EDITORIAL_RELATION_PROPOSAL_COMMAND",
+    "editorial_relation_command_definitions",
+    "editorial_relation_payload_contracts",
+    "merge_editorial_relation_authority_registries",
+}
+
+_EDITORIAL_TYPE_NAMES = {
+    "EditorialPredicateCode",
+    "EditorialPredicateDirectionality",
+    "EditorialPredicateTemporalSemantics",
+    "EditorialRelationAssertionId",
+    "EditorialRelationAssertionLifecycle",
+    "EditorialRelationAuthorityError",
+    "EditorialRelationContractError",
+    "EditorialRelationCurrentState",
+    "EditorialRelationDecisionAction",
+    "EditorialRelationDecisionConflict",
+    "EditorialRelationDecisionId",
+    "EditorialRelationEndpointKind",
+    "EditorialRelationEvidenceKind",
+    "EditorialRelationIdentifierReuse",
+    "EditorialRelationProducerKind",
+    "EditorialRelationProjectionAction",
+    "EditorialRelationProposalId",
+    "EditorialRelationProposalVersionId",
+    "EditorialRelationRightsDenied",
+    "EditorialRelationSemanticCollision",
+    "EditorialRelationStaleDecision",
+    "EditorialRelationStateError",
+    "EditorialRelationSupersessionId",
+}
 
 def __getattr__(name: str):
     if name in _AUTHORITY_FACADE_NAMES:
         from newsroom.authority import relation_system as _system
 
         return getattr(_system, name)
+    if name in _EDITORIAL_MODEL_NAMES:
+        from . import editorial_models as _editorial_models
+
+        return getattr(_editorial_models, name)
+    if name in _EDITORIAL_POLICY_NAMES:
+        from . import editorial_policy as _editorial_policy
+
+        return getattr(_editorial_policy, name)
+    if name in _EDITORIAL_TYPE_NAMES:
+        from . import editorial_types as _editorial_types
+
+        return getattr(_editorial_types, name)
     raise AttributeError(name)
 
 
 __all__ = [
+    "CanonicalEntityRelationEndpoint",
+    "EDITORIAL_PREDICATE_REGISTRY_V1",
+    "EDITORIAL_RELATION_COMMAND_TYPES",
+    "EDITORIAL_RELATION_DECISION_COMMAND",
+    "EDITORIAL_RELATION_PROPOSAL_COMMAND",
+    "EditorialPredicateCode",
+    "EditorialPredicateContract",
+    "EditorialPredicateDirectionality",
+    "EditorialPredicateEndpointPair",
+    "EditorialPredicateRegistry",
+    "EditorialPredicateTemporalSemantics",
+    "EditorialRelationAssertionLifecycle",
+    "EditorialRelationCurrentView",
+    "EditorialRelationDecision",
+    "EditorialRelationDecisionAction",
+    "EditorialRelationDecisionConflict",
+    "EditorialRelationDecisionId",
+    "EditorialRelationEvidence",
+    "EditorialRelationEvidenceKind",
+    "EditorialRelationIdentifierReuse",
+    "EditorialRelationProducer",
+    "EditorialRelationProducerKind",
+    "EditorialRelationProposalVersion",
+    "EditorialRelationProposalVersionId",
+    "EditorialRelationRightsDenied",
+    "EditorialRelationSemanticCollision",
+    "EditorialRelationStaleDecision",
+    "EditorialRelationSupersessionId",
+    "EventHypothesisRelationEndpoint",
+    "ExtractionRelationEvidence",
+    "EditorialRelationAssertion",
+    "EditorialRelationAssertionId",
+    "EditorialRelationAuthorityError",
+    "EditorialRelationContractError",
+    "EditorialRelationCurrentState",
+    "EditorialRelationEndpoint",
+    "EditorialRelationProjectionAction",
+    "EditorialRelationProjectionEvent",
+    "EditorialRelationProposal",
+    "EditorialRelationProposalId",
+    "EditorialRelationProposalRequest",
+    "EditorialRelationReadPolicy",
+    "EditorialRelationStateError",
+    "EditorialRelationTemporalScope",
+    "RelationAssertionRelationEndpoint",
+    "SourceRevisionRelationEndpoint",
+    "StoryCandidateRelationEndpoint",
+    "editorial_relation_command_definitions",
+    "editorial_relation_payload_contracts",
+    "merge_editorial_relation_authority_registries",
     "FixturePassageLifecycleLink",
     "FixturePassageObject",
     "GovernedRelationAuthoritySystem",
