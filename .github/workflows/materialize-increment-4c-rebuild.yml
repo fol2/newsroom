@@ -1,0 +1,92 @@
+name: Materialize Increment 4C current projection rebuild
+
+on:
+  pull_request:
+    types: [synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-rebuild:
+    if: github.event.pull_request.head.ref == 'agent/increment-4c-general-relation-authority' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out staged Increment 4C rebuild head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-4c-general-relation-authority
+          fetch-depth: 0
+          show-progress: false
+          persist-credentials: true
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+      - name: Verify, apply, qualify and publish clean rebuild slice
+        shell: bash
+        env:
+          BASE_SHA: 9cdd97130a34657c1291b1b2f3468b914d06481e
+          BASE_TREE: e7f670b6d40d8fc3be02afa581411d0332c74a34
+          FINAL_TREE: 2cd9ddc0160f08b3e6b0f01c154944c9de6ad2e2
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONHASHSEED: '0'
+          PYTHONUTF8: '1'
+        run: |
+          set -euo pipefail
+          START_SHA="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$BASE_SHA" "$START_SHA"
+          test "$(git rev-parse "$BASE_SHA^{tree}")" = "$BASE_TREE"
+          mapfile -t staged < <(git diff --name-only "$BASE_SHA" "$START_SHA" | LC_ALL=C sort)
+          test "${#staged[@]}" -eq 3
+          test "${staged[0]}" = '.github/increment-4c-rebuild/part-00.b64'
+          test "${staged[1]}" = '.github/increment-4c-rebuild/part-01.b64'
+          test "${staged[2]}" = '.github/workflows/materialize-increment-4c-rebuild.yml'
+          test "$(wc -c < .github/increment-4c-rebuild/part-00.b64)" -eq 4800
+          test "$(wc -c < .github/increment-4c-rebuild/part-01.b64)" -eq 964
+          printf '%s  %s\n' 'cbfe270df4fcbce2fa77fc8b5781e9ef575996643b62d26ec5a3dae97c8ae06c' .github/increment-4c-rebuild/part-00.b64 | sha256sum --check --strict -
+          printf '%s  %s\n' '16f04bb770a05c4214dc37ff36e425f11cdf601516bdbd4fc3f9b4e407186351' .github/increment-4c-rebuild/part-01.b64 | sha256sum --check --strict -
+          cat .github/increment-4c-rebuild/part-00.b64 .github/increment-4c-rebuild/part-01.b64 > "$RUNNER_TEMP/rebuild.patch.gz.b64"
+          test "$(wc -c < "$RUNNER_TEMP/rebuild.patch.gz.b64")" -eq 5764
+          printf '%s  %s\n' 'c19fee845c9f02eadbe69597e27c14f971f04683b1b93d958c7e07bd874f7e5d' "$RUNNER_TEMP/rebuild.patch.gz.b64" | sha256sum --check --strict -
+          base64 --decode "$RUNNER_TEMP/rebuild.patch.gz.b64" > "$RUNNER_TEMP/rebuild.patch.gz"
+          test "$(wc -c < "$RUNNER_TEMP/rebuild.patch.gz")" -eq 4323
+          printf '%s  %s\n' 'c2b7b7a823062692eb61c466f9141462885d438ba93e6491eeba497275fda939' "$RUNNER_TEMP/rebuild.patch.gz" | sha256sum --check --strict -
+          gzip --decompress --stdout "$RUNNER_TEMP/rebuild.patch.gz" > "$RUNNER_TEMP/rebuild.patch"
+          test "$(wc -c < "$RUNNER_TEMP/rebuild.patch")" -eq 20962
+          printf '%s  %s\n' 'a533fdaef959ff2106e1b5e5e20fbc05bec021525a6494cdc1f851add0db8e9a' "$RUNNER_TEMP/rebuild.patch" | sha256sum --check --strict -
+          git apply --check "$RUNNER_TEMP/rebuild.patch"
+          git apply "$RUNNER_TEMP/rebuild.patch"
+          rm -rf .github/increment-4c-rebuild
+          rm -f .github/workflows/materialize-increment-4c-rebuild.yml
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          rm -rf .pytest_cache
+          git diff --check
+          python -m compileall -q newsroom/authority newsroom/relations
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m pytest -q newsroom/tests/test_editorial_relation_4c_*.py newsroom/tests/test_relation_2a_authority.py newsroom/tests/test_relation_2a_contracts.py newsroom/tests/test_relation_2a_lifecycle_integrity.py newsroom/tests/test_relation_2a_traceability.py newsroom/tests/test_extraction_4a_migrations.py newsroom/tests/test_entity_4b_migrations.py -W error::ResourceWarning --junitxml="$RUNNER_TEMP/increment-4c-rebuild.xml"
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          rm -rf .pytest_cache
+          git add -A
+          git diff --cached --check
+          ACTUAL_TREE="$(git write-tree)"
+          printf 'actual_tree=%s\nexpected_tree=%s\n' "$ACTUAL_TREE" "$FINAL_TREE"
+          test "$ACTUAL_TREE" = "$FINAL_TREE"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(relation): add rights-safe current projection rebuild'
+          git push origin HEAD:agent/increment-4c-general-relation-authority
