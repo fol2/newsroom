@@ -45,6 +45,7 @@ ENTITY_TABLES = {
     "entity_reversal_decisions",
     "entity_reversal_expected_versions",
     "entity_reversal_restorations",
+    "entity_reversal_supersessions",
     "entity_split_allocations",
     "entity_split_decisions",
     "entity_split_successors",

@@ -12,15 +12,20 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, dig
 from newsroom.authority.persistence import AuthorityPersistenceError
 from newsroom.authority.types import PayloadMode, TrustScope, UtcTimestamp
 from newsroom.entities.models import (
+    EntityMergeDecisionRequest,
     EntityMention,
     EntityMentionAdmissionRequest,
+    EntityReversalDecisionRequest,
     EntityResolutionDecisionRequest,
+    EntityResolutionDependency,
     EntityResolutionProposalRequest,
+    EntitySplitDecisionRequest,
 )
 from newsroom.entities.policy import (
     ENTITY_MENTION_ADMIT_COMMAND,
     ENTITY_MERGE_DECIDE_COMMAND,
     ENTITY_RESOLUTION_DECIDE_COMMAND,
+    ENTITY_RESOLUTION_DEPENDENCY_BIND_COMMAND,
     ENTITY_RESOLUTION_PROPOSE_COMMAND,
     ENTITY_REVERSAL_DECIDE_COMMAND,
     ENTITY_SPLIT_DECIDE_COMMAND,
@@ -29,16 +34,21 @@ from newsroom.entities.types import (
     CanonicalEntityId,
     CanonicalEntityVersionId,
     EntityAliasId,
+    EntityCreationDecisionKind,
     EntityDecisionConflict,
     EntityIdentifierReuse,
     EntityMentionId,
+    EntityMergeDecisionId,
+    EntityReversalDecisionId,
     EntityResolutionDecisionId,
+    EntityResolutionDependencyId,
     EntityResolutionProposalId,
     EntityResolutionProposalVersionId,
     EntityRightsDenied,
     EntitySemanticCollision,
     EntityStaleDecision,
     EntityStateError,
+    EntitySplitDecisionId,
 )
 from newsroom.extraction.models import ProposalEnvelope
 from newsroom.extraction.types import ExtractionProposalKind, ProposalEnvelopeId
@@ -60,6 +70,11 @@ _RECORD_SPECS: dict[str, tuple[str, str, TrustScope]] = {
         "entity.resolution.decided",
         TrustScope.ADMITTED,
     ),
+    ENTITY_RESOLUTION_DEPENDENCY_BIND_COMMAND: (
+        "entity_resolution_dependency",
+        "entity.resolution.dependency.bound",
+        TrustScope.PROPOSED,
+    ),
     ENTITY_MERGE_DECIDE_COMMAND: (
         "entity_merge_decision",
         "entity.merge.decided",
@@ -78,6 +93,14 @@ _RECORD_SPECS: dict[str, tuple[str, str, TrustScope]] = {
 }
 
 
+def _deterministic_v4(identifier_type: type, domain: bytes, value: str):
+    digest = hashlib.sha256(domain + b"\0" + value.encode("ascii")).digest()
+    raw = bytearray(digest[:16])
+    raw[6] = (raw[6] & 0x0F) | 0x40
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    return identifier_type(UUID(bytes=bytes(raw)))
+
+
 def deterministic_decision_id(request: EntityResolutionDecisionRequest) -> EntityResolutionDecisionId:
     """Derive a stable opaque UUIDv4-shaped identity from exact decision semantics.
 
@@ -87,13 +110,33 @@ def deterministic_decision_id(request: EntityResolutionDecisionRequest) -> Entit
     changed semantic request cannot silently reuse it.
     """
 
-    digest = hashlib.sha256(
-        b"newsroom.entity-resolution-decision.v1\0" + request.digest.encode("ascii")
-    ).digest()
-    raw = bytearray(digest[:16])
-    raw[6] = (raw[6] & 0x0F) | 0x40
-    raw[8] = (raw[8] & 0x3F) | 0x80
-    return EntityResolutionDecisionId(UUID(bytes=bytes(raw)))
+    return _deterministic_v4(
+        EntityResolutionDecisionId,
+        b"newsroom.entity-resolution-decision.v1",
+        request.digest,
+    )
+
+
+def deterministic_lineage_version_id(
+    *, decision_kind: str, decision_id: str, entity_id: CanonicalEntityId, role: str
+) -> CanonicalEntityVersionId:
+    return _deterministic_v4(
+        CanonicalEntityVersionId,
+        b"newsroom.entity-lineage-version.v1",
+        f"{decision_kind}:{decision_id}:{entity_id}:{role}",
+    )
+
+
+def deterministic_projection_event_id(
+    *, source_event_id: str, entity_id: CanonicalEntityId
+):
+    from newsroom.authority.types import EventId
+
+    return _deterministic_v4(
+        EventId,
+        b"newsroom.entity-projection-event.v1",
+        f"{source_event_id}:{entity_id}",
+    )
 
 
 class _EntityStoreSupport:
@@ -278,17 +321,167 @@ class _EntityStoreSupport:
     def _require_mention_current(
         self, conn: sqlite3.Connection, mention: EntityMention
     ) -> None:
-        version_row = conn.execute(
-            "SELECT * FROM extraction_run_versions WHERE run_version_id=?",
-            (str(mention.run_version_id),),
-        ).fetchone()
-        if version_row is None:
-            raise AuthorityPersistenceError("entity mention run version is missing")
-        result = self._run_version_from_row(conn, version_row, replayed=False)
         try:
-            self._revalidate_result_current(conn, result)
+            # Mentions retain an exact 4A Proposal Envelope identity.  Resolve that
+            # proposal through the extraction authority so current-use validation
+            # covers the complete immutable Run Version, not only the evidence
+            # passage copied into the mention.  This prevents a rights-invalid run
+            # from being treated as partially usable by later entity authority.
+            proposal = self._source_proposal(conn, mention.source_proposal_id)
         except PermissionError as exc:
             raise EntityRightsDenied(str(exc)) from exc
+        if (
+            proposal.canonical_digest != mention.source_proposal_digest
+            or proposal.proposal_set_id != mention.proposal_set_id
+            or proposal.output_id != mention.output_id
+            or proposal.run_id != mention.run_id
+            or proposal.run_version_id != mention.run_version_id
+            or not any(
+                evidence.passage_id == mention.passage_id
+                and evidence.start_byte == mention.start_byte
+                and evidence.end_byte == mention.end_byte
+                and evidence.evidence_text_digest == mention.evidence_text_digest
+                for evidence in proposal.evidence
+            )
+        ):
+            raise AuthorityPersistenceError(
+                "entity mention current proposal provenance differs"
+            )
+
+    def _require_mention_id_current(
+        self, conn: sqlite3.Connection, mention_id: EntityMentionId
+    ) -> EntityMention:
+        mention = self._mention_from_row(
+            conn, self._mention_row(conn, mention_id), replayed=False
+        )
+        self._require_mention_current(conn, mention)
+        return mention
+
+    def _require_resolution_proposal_current(
+        self, conn: sqlite3.Connection, proposal_id: EntityResolutionProposalId
+    ):
+        row = conn.execute(
+            "SELECT v.* FROM entity_resolution_proposal_heads h "
+            "JOIN entity_resolution_proposal_versions v "
+            "ON v.proposal_version_id=h.current_proposal_version_id "
+            "WHERE h.resolution_proposal_id=?",
+            (str(proposal_id),),
+        ).fetchone()
+        if row is None:
+            raise EntityStateError("entity resolution proposal is not retained")
+        proposal = self._proposal_version_from_row(conn, row, replayed=False)
+        self._require_mention_id_current(conn, proposal.subject_mention_id)
+        if proposal.object_mention_id is not None:
+            self._require_mention_id_current(conn, proposal.object_mention_id)
+        return proposal
+
+    def _require_dependency_current(
+        self,
+        conn: sqlite3.Connection,
+        dependency: EntityResolutionDependency,
+    ) -> None:
+        dependent = self._source_proposal(conn, dependency.dependent_proposal_id)
+        if (
+            dependent.kind is not ExtractionProposalKind.RELATION
+            or dependent.canonical_digest != dependency.dependent_proposal_digest
+        ):
+            raise AuthorityPersistenceError(
+                "dependent extraction proposal provenance differs"
+            )
+        proposal = self._require_resolution_proposal_current(
+            conn, dependency.resolution_proposal_id
+        )
+        if (
+            proposal.proposal_version_id != dependency.proposal_version_id
+            or proposal.canonical_digest != dependency.proposal_version_digest
+        ):
+            raise EntityStaleDecision(
+                "resolution dependency no longer names the current proposal"
+            )
+
+    def _require_entity_current(
+        self,
+        conn: sqlite3.Connection,
+        entity_id: CanonicalEntityId,
+    ) -> None:
+        row = conn.execute(
+            "SELECT * FROM canonical_entities WHERE entity_id=?",
+            (str(entity_id),),
+        ).fetchone()
+        if row is None:
+            raise EntityStateError("canonical entity is not retained")
+        entity = self._entity_from_row(conn, row)
+
+        if entity.created_by_kind is EntityCreationDecisionKind.RESOLUTION:
+            decision = conn.execute(
+                "SELECT resolution_proposal_id,accepted_entity_id "
+                "FROM entity_resolution_decisions WHERE decision_id=?",
+                (entity.created_by_decision_id,),
+            ).fetchone()
+            if (
+                decision is None
+                or str(decision["accepted_entity_id"]) != str(entity.entity_id)
+            ):
+                raise AuthorityPersistenceError(
+                    "canonical entity resolution provenance is inconsistent"
+                )
+            self._require_resolution_proposal_current(
+                conn,
+                EntityResolutionProposalId.parse(
+                    str(decision["resolution_proposal_id"])
+                ),
+            )
+            return
+
+        if entity.created_by_kind is EntityCreationDecisionKind.MERGE:
+            decision_row = conn.execute(
+                "SELECT * FROM entity_merge_decisions WHERE merge_decision_id=?",
+                (entity.created_by_decision_id,),
+            ).fetchone()
+            if decision_row is None:
+                raise AuthorityPersistenceError(
+                    "canonical entity merge provenance is missing"
+                )
+            decision = self._merge_decision_from_row(
+                conn, decision_row, replayed=False
+            )
+            if decision.successor_entity_id != entity.entity_id:
+                raise AuthorityPersistenceError(
+                    "canonical entity merge provenance differs"
+                )
+            for proposal_id in decision.basis_resolution_proposal_ids:
+                self._require_resolution_proposal_current(conn, proposal_id)
+            return
+
+        if entity.created_by_kind is EntityCreationDecisionKind.SPLIT:
+            decision_row = conn.execute(
+                "SELECT * FROM entity_split_decisions WHERE split_decision_id=?",
+                (entity.created_by_decision_id,),
+            ).fetchone()
+            if decision_row is None:
+                raise AuthorityPersistenceError(
+                    "canonical entity split provenance is missing"
+                )
+            decision = self._split_decision_from_row(
+                conn, decision_row, replayed=False
+            )
+            if entity.entity_id not in {item.entity_id for item in decision.successors}:
+                raise AuthorityPersistenceError(
+                    "canonical entity split provenance differs"
+                )
+            allocations = tuple(
+                item for item in decision.allocations
+                if item.successor_entity_id == entity.entity_id
+            )
+            if not allocations:
+                raise AuthorityPersistenceError(
+                    "split successor has no mention provenance"
+                )
+            for allocation in allocations:
+                self._require_mention_id_current(conn, allocation.mention_id)
+            return
+
+        raise AuthorityPersistenceError("unknown canonical entity creation provenance")
 
     @staticmethod
     def _proposal_head_row(
@@ -354,4 +547,9 @@ class _EntityStoreSupport:
         return canonical_json_bytes(list(values))
 
 
-__all__ = ["_EntityStoreSupport", "deterministic_decision_id"]
+__all__ = [
+    "_EntityStoreSupport",
+    "deterministic_decision_id",
+    "deterministic_lineage_version_id",
+    "deterministic_projection_event_id",
+]

@@ -33,7 +33,8 @@ _RESOLUTION_ACTIONS = "'ACCEPT','REJECT','HOLD','UNRESOLVED'"
 _RESOLUTION_STATES = "'PROPOSED','HELD','UNRESOLVED','ACCEPTED','REJECTED','REVERSED'"
 _ENTITY_LIFECYCLES = "'ACTIVE','MERGED','SPLIT','REVERSED','RETIRED'"
 _LINEAGE_KINDS = "'MERGE','SPLIT','REVERSAL'"
-_REVERSAL_TARGETS = "'RESOLUTION','MERGE','SPLIT'"
+_ENTITY_CREATION_KINDS = "'RESOLUTION','MERGE','SPLIT'"
+_REVERSAL_TARGETS = "'MERGE','SPLIT'"
 _PROJECTION_ACTIONS = "'UPSERT','REMOVE'"
 
 
@@ -226,13 +227,13 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
     f"""CREATE TABLE canonical_entities(
         entity_id TEXT PRIMARY KEY,
         entity_kind TEXT NOT NULL CHECK(entity_kind IN({_ENTITY_KINDS})),
-        created_by_decision_id TEXT NOT NULL UNIQUE
-            REFERENCES entity_resolution_decisions(decision_id)
-            DEFERRABLE INITIALLY DEFERRED,
+        created_by_kind TEXT NOT NULL
+            CHECK(created_by_kind IN({_ENTITY_CREATION_KINDS})),
+        created_by_decision_id TEXT NOT NULL,
         initial_version_id TEXT NOT NULL UNIQUE
             REFERENCES canonical_entity_versions(entity_version_id)
             DEFERRABLE INITIALLY DEFERRED,
-        authority_event_id TEXT NOT NULL UNIQUE REFERENCES ledger_events(event_id),
+        authority_event_id TEXT NOT NULL REFERENCES ledger_events(event_id),
         authority_aggregate_version INTEGER NOT NULL CHECK(authority_aggregate_version=1),
         canonical_bytes BLOB NOT NULL,
         canonical_digest TEXT NOT NULL,
@@ -254,7 +255,7 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
         preferred_continuation_entity_id TEXT
             REFERENCES canonical_entities(entity_id)
             DEFERRABLE INITIALLY DEFERRED,
-        authority_event_id TEXT NOT NULL UNIQUE REFERENCES ledger_events(event_id),
+        authority_event_id TEXT NOT NULL REFERENCES ledger_events(event_id),
         authority_aggregate_version INTEGER NOT NULL CHECK(authority_aggregate_version=1),
         canonical_bytes BLOB NOT NULL,
         canonical_digest TEXT NOT NULL,
@@ -360,18 +361,23 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
         predecessor_ordinal INTEGER NOT NULL CHECK(predecessor_ordinal>0),
         entity_id TEXT NOT NULL REFERENCES canonical_entities(entity_id),
         expected_entity_version_id TEXT NOT NULL,
+        merged_entity_version_id TEXT NOT NULL,
         canonical_bytes BLOB NOT NULL,
         canonical_digest TEXT NOT NULL,
         PRIMARY KEY(merge_decision_id,predecessor_ordinal),
         UNIQUE(merge_decision_id,entity_id),
         FOREIGN KEY(expected_entity_version_id,entity_id)
             REFERENCES canonical_entity_versions(entity_version_id,entity_id),
+        FOREIGN KEY(merged_entity_version_id,entity_id)
+            REFERENCES canonical_entity_versions(entity_version_id,entity_id)
+            DEFERRABLE INITIALLY DEFERRED,
         CHECK(length(canonical_bytes)>0)
     ) WITHOUT ROWID, STRICT""",
     """CREATE TABLE entity_split_decisions(
         split_decision_id TEXT PRIMARY KEY,
         source_entity_id TEXT NOT NULL REFERENCES canonical_entities(entity_id),
         expected_source_version_id TEXT NOT NULL,
+        source_split_version_id TEXT NOT NULL,
         successor_count INTEGER NOT NULL CHECK(successor_count>=2),
         reason_code TEXT NOT NULL,
         decision_policy_version TEXT NOT NULL,
@@ -383,6 +389,9 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
         recorded_at TEXT NOT NULL,
         FOREIGN KEY(expected_source_version_id,source_entity_id)
             REFERENCES canonical_entity_versions(entity_version_id,entity_id),
+        FOREIGN KEY(source_split_version_id,source_entity_id)
+            REFERENCES canonical_entity_versions(entity_version_id,entity_id)
+            DEFERRABLE INITIALLY DEFERRED,
         CHECK(length(canonical_bytes)>0)
     ) STRICT""",
     """CREATE TABLE entity_split_successors(
@@ -424,6 +433,7 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
         canonical_bytes BLOB NOT NULL,
         canonical_digest TEXT NOT NULL,
         recorded_at TEXT NOT NULL,
+        UNIQUE(target_kind,target_decision_id),
         CHECK(length(canonical_bytes)>0)
     ) STRICT""",
     """CREATE TABLE entity_reversal_expected_versions(
@@ -445,26 +455,50 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
         PRIMARY KEY(reversal_decision_id,restoration_ordinal),
         UNIQUE(reversal_decision_id,entity_id),
         FOREIGN KEY(entity_version_id,entity_id)
-            REFERENCES canonical_entity_versions(entity_version_id,entity_id),
+            REFERENCES canonical_entity_versions(entity_version_id,entity_id)
+            DEFERRABLE INITIALLY DEFERRED,
+        CHECK(length(canonical_bytes)>0)
+    ) WITHOUT ROWID, STRICT""",
+    """CREATE TABLE entity_reversal_supersessions(
+        reversal_decision_id TEXT NOT NULL
+            REFERENCES entity_reversal_decisions(reversal_decision_id),
+        supersession_ordinal INTEGER NOT NULL CHECK(supersession_ordinal>0),
+        entity_id TEXT NOT NULL REFERENCES canonical_entities(entity_id),
+        entity_version_id TEXT NOT NULL,
+        canonical_bytes BLOB NOT NULL,
+        canonical_digest TEXT NOT NULL,
+        PRIMARY KEY(reversal_decision_id,supersession_ordinal),
+        UNIQUE(reversal_decision_id,entity_id),
+        FOREIGN KEY(entity_version_id,entity_id)
+            REFERENCES canonical_entity_versions(entity_version_id,entity_id)
+            DEFERRABLE INITIALLY DEFERRED,
         CHECK(length(canonical_bytes)>0)
     ) WITHOUT ROWID, STRICT""",
     """CREATE TABLE entity_resolution_dependencies(
+        dependency_id TEXT PRIMARY KEY,
         dependent_proposal_id TEXT NOT NULL
             REFERENCES extraction_proposals(proposal_id),
+        dependent_proposal_digest TEXT NOT NULL,
         resolution_proposal_id TEXT NOT NULL
             REFERENCES entity_resolution_proposals(resolution_proposal_id),
         proposal_version_id TEXT NOT NULL,
+        proposal_version_digest TEXT NOT NULL,
         material INTEGER NOT NULL CHECK(material IN(0,1)),
+        request_digest TEXT NOT NULL,
+        authority_event_id TEXT NOT NULL UNIQUE
+            REFERENCES ledger_events(event_id),
+        authority_aggregate_version INTEGER NOT NULL
+            CHECK(authority_aggregate_version=1),
         canonical_bytes BLOB NOT NULL,
         canonical_digest TEXT NOT NULL,
         recorded_at TEXT NOT NULL,
-        PRIMARY KEY(dependent_proposal_id,resolution_proposal_id),
+        UNIQUE(dependent_proposal_id,resolution_proposal_id),
         FOREIGN KEY(proposal_version_id,resolution_proposal_id)
             REFERENCES entity_resolution_proposal_versions(
                 proposal_version_id,resolution_proposal_id
             ),
         CHECK(length(canonical_bytes)>0)
-    ) WITHOUT ROWID, STRICT""",
+    ) STRICT""",
     f"""CREATE TABLE entity_preferred_identities(
         entity_id TEXT PRIMARY KEY REFERENCES canonical_entities(entity_id),
         current_entity_version_id TEXT NOT NULL,
@@ -483,7 +517,7 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
     ) STRICT""",
     f"""CREATE TABLE entity_projection_events(
         projection_event_id TEXT PRIMARY KEY,
-        source_event_id TEXT NOT NULL UNIQUE REFERENCES ledger_events(event_id),
+        source_event_id TEXT NOT NULL REFERENCES ledger_events(event_id),
         source_ledger_seq INTEGER NOT NULL CHECK(source_ledger_seq>0),
         action TEXT NOT NULL CHECK(action IN({_PROJECTION_ACTIONS})),
         entity_id TEXT NOT NULL REFERENCES canonical_entities(entity_id),
@@ -497,10 +531,12 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
             REFERENCES canonical_entity_versions(entity_version_id,entity_id),
         CHECK((action='UPSERT' AND preferred_entity_id IS NOT NULL)
            OR (action='REMOVE' AND preferred_entity_id IS NULL)),
-        CHECK(length(canonical_bytes)>0)
+        CHECK(length(canonical_bytes)>0),
+        UNIQUE(source_event_id,entity_id)
     ) STRICT""",
     f"""CREATE VIEW entity_dependent_admission_guard AS
-        SELECT d.dependent_proposal_id,
+        SELECT d.dependency_id,
+               d.dependent_proposal_id,
                d.resolution_proposal_id,
                d.proposal_version_id,
                d.material,
@@ -777,20 +813,39 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
         SELECT RAISE(ABORT,'entity resolution decision heads are retained'); END""",
     """CREATE TRIGGER canonical_entity_creation_guard
         BEFORE INSERT ON canonical_entities
-        WHEN NOT EXISTS(
-            SELECT 1
-            FROM entity_resolution_decisions d
-            JOIN entity_resolution_proposals p
-              ON p.resolution_proposal_id=d.resolution_proposal_id
-            JOIN entity_mentions m ON m.mention_id=p.subject_mention_id
-            WHERE d.decision_id=NEW.created_by_decision_id
-              AND d.action='ACCEPT'
-              AND d.accepted_entity_id=NEW.entity_id
-              AND d.accepted_entity_version_id=NEW.initial_version_id
-              AND p.proposal_kind='MENTION_TO_NEW_ENTITY'
-              AND m.entity_kind=NEW.entity_kind
-        )
-        BEGIN SELECT RAISE(ABORT,'canonical entity requires accepted new-entity decision'); END""",
+        WHEN (NEW.created_by_kind='RESOLUTION' AND NOT EXISTS(
+                SELECT 1
+                FROM entity_resolution_decisions d
+                JOIN entity_resolution_proposals p
+                  ON p.resolution_proposal_id=d.resolution_proposal_id
+                JOIN entity_mentions m ON m.mention_id=p.subject_mention_id
+                WHERE d.decision_id=NEW.created_by_decision_id
+                  AND d.action='ACCEPT'
+                  AND d.accepted_entity_id=NEW.entity_id
+                  AND d.accepted_entity_version_id=NEW.initial_version_id
+                  AND p.proposal_kind='MENTION_TO_NEW_ENTITY'
+                  AND m.entity_kind=NEW.entity_kind
+             ))
+          OR (NEW.created_by_kind='MERGE' AND NOT EXISTS(
+                SELECT 1 FROM entity_merge_decisions d
+                JOIN canonical_entities p
+                  ON p.entity_id=d.preferred_continuation_entity_id
+                WHERE d.merge_decision_id=NEW.created_by_decision_id
+                  AND d.successor_entity_id=NEW.entity_id
+                  AND d.successor_entity_version_id=NEW.initial_version_id
+                  AND p.entity_kind=NEW.entity_kind
+             ))
+          OR (NEW.created_by_kind='SPLIT' AND NOT EXISTS(
+                SELECT 1 FROM entity_split_decisions d
+                JOIN entity_split_successors s
+                  ON s.split_decision_id=d.split_decision_id
+                JOIN canonical_entities p ON p.entity_id=d.source_entity_id
+                WHERE d.split_decision_id=NEW.created_by_decision_id
+                  AND s.entity_id=NEW.entity_id
+                  AND s.entity_version_id=NEW.initial_version_id
+                  AND p.entity_kind=NEW.entity_kind
+             ))
+        BEGIN SELECT RAISE(ABORT,'canonical entity creation lineage mismatch'); END""",
     """CREATE TRIGGER immutable_canonical_entity_update
         BEFORE UPDATE ON canonical_entities BEGIN
         SELECT RAISE(ABORT,'canonical entity identity is immutable'); END""",
@@ -810,6 +865,74 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
                   AND h.current_version_number=NEW.version_number-1
              ))
         BEGIN SELECT RAISE(ABORT,'canonical entity version does not extend current head'); END""",
+    """CREATE TRIGGER canonical_entity_version_lineage_guard
+        BEFORE INSERT ON canonical_entity_versions
+        WHEN (NEW.lineage_decision_kind IS NULL AND (
+                NEW.version_number!=1 OR NEW.lifecycle!='ACTIVE'
+                OR NEW.lineage_decision_id IS NOT NULL
+                OR NEW.preferred_continuation_entity_id!=NEW.entity_id
+             ))
+          OR (NEW.lineage_decision_kind='MERGE' AND NOT (
+                (NEW.version_number=1 AND NEW.lifecycle='ACTIVE'
+                 AND NEW.preferred_continuation_entity_id=NEW.entity_id
+                 AND EXISTS(
+                    SELECT 1 FROM entity_merge_decisions d
+                    WHERE d.merge_decision_id=NEW.lineage_decision_id
+                      AND d.successor_entity_id=NEW.entity_id
+                      AND d.successor_entity_version_id=NEW.entity_version_id
+                 ))
+                OR
+                (NEW.version_number>1 AND NEW.lifecycle='MERGED'
+                 AND EXISTS(
+                    SELECT 1 FROM entity_merge_decisions d
+                    JOIN entity_merge_predecessors p
+                      ON p.merge_decision_id=d.merge_decision_id
+                    WHERE d.merge_decision_id=NEW.lineage_decision_id
+                      AND p.entity_id=NEW.entity_id
+                      AND p.expected_entity_version_id=NEW.previous_entity_version_id
+                      AND p.merged_entity_version_id=NEW.entity_version_id
+                      AND d.successor_entity_id=NEW.preferred_continuation_entity_id
+                 ))
+             ))
+          OR (NEW.lineage_decision_kind='SPLIT' AND NOT (
+                (NEW.version_number=1 AND NEW.lifecycle='ACTIVE'
+                 AND NEW.preferred_continuation_entity_id=NEW.entity_id
+                 AND EXISTS(
+                    SELECT 1 FROM entity_split_successors s
+                    WHERE s.split_decision_id=NEW.lineage_decision_id
+                      AND s.entity_id=NEW.entity_id
+                      AND s.entity_version_id=NEW.entity_version_id
+                 ))
+                OR
+                (NEW.version_number>1 AND NEW.lifecycle='SPLIT'
+                 AND NEW.preferred_continuation_entity_id IS NULL
+                 AND EXISTS(
+                    SELECT 1 FROM entity_split_decisions d
+                    WHERE d.split_decision_id=NEW.lineage_decision_id
+                      AND d.source_entity_id=NEW.entity_id
+                      AND d.expected_source_version_id=NEW.previous_entity_version_id
+                      AND d.source_split_version_id=NEW.entity_version_id
+                 ))
+             ))
+          OR (NEW.lineage_decision_kind='REVERSAL' AND NOT (
+                (NEW.lifecycle='ACTIVE'
+                 AND NEW.preferred_continuation_entity_id=NEW.entity_id
+                 AND EXISTS(
+                    SELECT 1 FROM entity_reversal_restorations r
+                    WHERE r.reversal_decision_id=NEW.lineage_decision_id
+                      AND r.entity_id=NEW.entity_id
+                      AND r.entity_version_id=NEW.entity_version_id
+                 ))
+                OR
+                (NEW.lifecycle='REVERSED'
+                 AND EXISTS(
+                    SELECT 1 FROM entity_reversal_supersessions s
+                    WHERE s.reversal_decision_id=NEW.lineage_decision_id
+                      AND s.entity_id=NEW.entity_id
+                      AND s.entity_version_id=NEW.entity_version_id
+                 ))
+             ))
+        BEGIN SELECT RAISE(ABORT,'canonical entity version lineage mismatch'); END""",
     """CREATE TRIGGER immutable_canonical_entity_version_update
         BEFORE UPDATE ON canonical_entity_versions BEGIN
         SELECT RAISE(ABORT,'canonical entity versions are immutable'); END""",
@@ -928,6 +1051,18 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
             WHERE merge_decision_id=NEW.merge_decision_id
         )
         BEGIN SELECT RAISE(ABORT,'invalid entity merge predecessor'); END""",
+    """CREATE TRIGGER immutable_entity_merge_decision_update
+        BEFORE UPDATE ON entity_merge_decisions BEGIN
+        SELECT RAISE(ABORT,'entity merge decisions are immutable'); END""",
+    """CREATE TRIGGER immutable_entity_merge_decision_delete
+        BEFORE DELETE ON entity_merge_decisions BEGIN
+        SELECT RAISE(ABORT,'entity merge decisions are retained'); END""",
+    """CREATE TRIGGER immutable_entity_merge_predecessor_update
+        BEFORE UPDATE ON entity_merge_predecessors BEGIN
+        SELECT RAISE(ABORT,'entity merge predecessors are immutable'); END""",
+    """CREATE TRIGGER immutable_entity_merge_predecessor_delete
+        BEFORE DELETE ON entity_merge_predecessors BEGIN
+        SELECT RAISE(ABORT,'entity merge predecessors are retained'); END""",
     """CREATE TRIGGER entity_split_successor_count_guard
         BEFORE INSERT ON entity_split_successors
         WHEN NEW.successor_ordinal>(
@@ -952,13 +1087,27 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
               AND r.entity_id=d.source_entity_id
         )
         BEGIN SELECT RAISE(ABORT,'entity split allocation lineage mismatch'); END""",
+    """CREATE TRIGGER immutable_entity_split_decision_update
+        BEFORE UPDATE ON entity_split_decisions BEGIN
+        SELECT RAISE(ABORT,'entity split decisions are immutable'); END""",
+    """CREATE TRIGGER immutable_entity_split_decision_delete
+        BEFORE DELETE ON entity_split_decisions BEGIN
+        SELECT RAISE(ABORT,'entity split decisions are retained'); END""",
+    """CREATE TRIGGER immutable_entity_split_successor_update
+        BEFORE UPDATE ON entity_split_successors BEGIN
+        SELECT RAISE(ABORT,'entity split successors are immutable'); END""",
+    """CREATE TRIGGER immutable_entity_split_successor_delete
+        BEFORE DELETE ON entity_split_successors BEGIN
+        SELECT RAISE(ABORT,'entity split successors are retained'); END""",
+    """CREATE TRIGGER immutable_entity_split_allocation_update
+        BEFORE UPDATE ON entity_split_allocations BEGIN
+        SELECT RAISE(ABORT,'entity split allocations are immutable'); END""",
+    """CREATE TRIGGER immutable_entity_split_allocation_delete
+        BEFORE DELETE ON entity_split_allocations BEGIN
+        SELECT RAISE(ABORT,'entity split allocations are retained'); END""",
     """CREATE TRIGGER entity_reversal_target_guard
         BEFORE INSERT ON entity_reversal_decisions
-        WHEN (NEW.target_kind='RESOLUTION' AND NOT EXISTS(
-                SELECT 1 FROM entity_resolution_decisions d
-                WHERE d.decision_id=NEW.target_decision_id
-             ))
-          OR (NEW.target_kind='MERGE' AND NOT EXISTS(
+        WHEN (NEW.target_kind='MERGE' AND NOT EXISTS(
                 SELECT 1 FROM entity_merge_decisions d
                 WHERE d.merge_decision_id=NEW.target_decision_id
              ))
@@ -967,18 +1116,53 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
                 WHERE d.split_decision_id=NEW.target_decision_id
              ))
         BEGIN SELECT RAISE(ABORT,'entity reversal target is missing'); END""",
+    """CREATE TRIGGER immutable_entity_reversal_decision_update
+        BEFORE UPDATE ON entity_reversal_decisions BEGIN
+        SELECT RAISE(ABORT,'entity reversal decisions are immutable'); END""",
+    """CREATE TRIGGER immutable_entity_reversal_decision_delete
+        BEFORE DELETE ON entity_reversal_decisions BEGIN
+        SELECT RAISE(ABORT,'entity reversal decisions are retained'); END""",
+    """CREATE TRIGGER immutable_entity_reversal_expected_version_update
+        BEFORE UPDATE ON entity_reversal_expected_versions BEGIN
+        SELECT RAISE(ABORT,'entity reversal expected versions are immutable'); END""",
+    """CREATE TRIGGER immutable_entity_reversal_expected_version_delete
+        BEFORE DELETE ON entity_reversal_expected_versions BEGIN
+        SELECT RAISE(ABORT,'entity reversal expected versions are retained'); END""",
+    """CREATE TRIGGER immutable_entity_reversal_restoration_update
+        BEFORE UPDATE ON entity_reversal_restorations BEGIN
+        SELECT RAISE(ABORT,'entity reversal restorations are immutable'); END""",
+    """CREATE TRIGGER immutable_entity_reversal_restoration_delete
+        BEFORE DELETE ON entity_reversal_restorations BEGIN
+        SELECT RAISE(ABORT,'entity reversal restorations are retained'); END""",
+    """CREATE TRIGGER immutable_entity_reversal_supersession_update
+        BEFORE UPDATE ON entity_reversal_supersessions BEGIN
+        SELECT RAISE(ABORT,'entity reversal supersessions are immutable'); END""",
+    """CREATE TRIGGER immutable_entity_reversal_supersession_delete
+        BEFORE DELETE ON entity_reversal_supersessions BEGIN
+        SELECT RAISE(ABORT,'entity reversal supersessions are retained'); END""",
     """CREATE TRIGGER entity_resolution_dependency_guard
         BEFORE INSERT ON entity_resolution_dependencies
         WHEN NOT EXISTS(
             SELECT 1 FROM extraction_proposals p
             WHERE p.proposal_id=NEW.dependent_proposal_id
-              AND p.proposal_kind IN('RELATION','CLAIM')
+              AND p.proposal_kind='RELATION'
+              AND p.canonical_digest=NEW.dependent_proposal_digest
         ) OR NOT EXISTS(
             SELECT 1 FROM entity_resolution_proposal_heads h
+            JOIN entity_resolution_proposal_versions v
+              ON v.proposal_version_id=h.current_proposal_version_id
+             AND v.resolution_proposal_id=h.resolution_proposal_id
             WHERE h.resolution_proposal_id=NEW.resolution_proposal_id
               AND h.current_proposal_version_id=NEW.proposal_version_id
+              AND v.canonical_digest=NEW.proposal_version_digest
         )
         BEGIN SELECT RAISE(ABORT,'entity resolution dependency lineage mismatch'); END""",
+    """CREATE TRIGGER immutable_entity_resolution_dependency_update
+        BEFORE UPDATE ON entity_resolution_dependencies BEGIN
+        SELECT RAISE(ABORT,'entity resolution dependencies are immutable'); END""",
+    """CREATE TRIGGER immutable_entity_resolution_dependency_delete
+        BEFORE DELETE ON entity_resolution_dependencies BEGIN
+        SELECT RAISE(ABORT,'entity resolution dependencies are retained'); END""",
     """CREATE TRIGGER entity_preferred_identity_insert_guard
         BEFORE INSERT ON entity_preferred_identities
         WHEN NOT EXISTS(
@@ -991,6 +1175,40 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
             WHERE e.entity_id=NEW.preferred_entity_id
         )
         BEGIN SELECT RAISE(ABORT,'preferred entity projection differs from authority'); END""",
+    """CREATE TRIGGER entity_preferred_identity_lineage_guard
+        BEFORE INSERT ON entity_preferred_identities
+        WHEN (NEW.decided_by_kind='MERGE' AND NOT EXISTS(
+                SELECT 1 FROM entity_merge_decisions d
+                WHERE d.merge_decision_id=NEW.decided_by_id
+                  AND (d.successor_entity_id=NEW.entity_id OR EXISTS(
+                      SELECT 1 FROM entity_merge_predecessors p
+                      WHERE p.merge_decision_id=d.merge_decision_id
+                        AND p.entity_id=NEW.entity_id
+                  ))
+             ))
+          OR (NEW.decided_by_kind='SPLIT' AND NOT EXISTS(
+                SELECT 1 FROM entity_split_decisions d
+                WHERE d.split_decision_id=NEW.decided_by_id
+                  AND (d.source_entity_id=NEW.entity_id OR EXISTS(
+                      SELECT 1 FROM entity_split_successors s
+                      WHERE s.split_decision_id=d.split_decision_id
+                        AND s.entity_id=NEW.entity_id
+                  ))
+             ))
+          OR (NEW.decided_by_kind='REVERSAL' AND NOT EXISTS(
+                SELECT 1 FROM entity_reversal_decisions d
+                WHERE d.reversal_decision_id=NEW.decided_by_id
+                  AND (EXISTS(
+                      SELECT 1 FROM entity_reversal_restorations r
+                      WHERE r.reversal_decision_id=d.reversal_decision_id
+                        AND r.entity_id=NEW.entity_id
+                  ) OR EXISTS(
+                      SELECT 1 FROM entity_reversal_supersessions s
+                      WHERE s.reversal_decision_id=d.reversal_decision_id
+                        AND s.entity_id=NEW.entity_id
+                  ))
+             ))
+        BEGIN SELECT RAISE(ABORT,'preferred entity projection lineage mismatch'); END""",
     """CREATE TRIGGER entity_preferred_identity_update_guard
         BEFORE UPDATE ON entity_preferred_identities
         WHEN NEW.entity_id!=OLD.entity_id
@@ -1006,6 +1224,40 @@ ENTITY_AUTHORITY_MIGRATION_STATEMENTS: tuple[str, ...] = (
               WHERE e.entity_id=NEW.preferred_entity_id
           )
         BEGIN SELECT RAISE(ABORT,'invalid preferred entity projection update'); END""",
+    """CREATE TRIGGER entity_preferred_identity_update_lineage_guard
+        BEFORE UPDATE ON entity_preferred_identities
+        WHEN (NEW.decided_by_kind='MERGE' AND NOT EXISTS(
+                SELECT 1 FROM entity_merge_decisions d
+                WHERE d.merge_decision_id=NEW.decided_by_id
+                  AND (d.successor_entity_id=NEW.entity_id OR EXISTS(
+                      SELECT 1 FROM entity_merge_predecessors p
+                      WHERE p.merge_decision_id=d.merge_decision_id
+                        AND p.entity_id=NEW.entity_id
+                  ))
+             ))
+          OR (NEW.decided_by_kind='SPLIT' AND NOT EXISTS(
+                SELECT 1 FROM entity_split_decisions d
+                WHERE d.split_decision_id=NEW.decided_by_id
+                  AND (d.source_entity_id=NEW.entity_id OR EXISTS(
+                      SELECT 1 FROM entity_split_successors s
+                      WHERE s.split_decision_id=d.split_decision_id
+                        AND s.entity_id=NEW.entity_id
+                  ))
+             ))
+          OR (NEW.decided_by_kind='REVERSAL' AND NOT EXISTS(
+                SELECT 1 FROM entity_reversal_decisions d
+                WHERE d.reversal_decision_id=NEW.decided_by_id
+                  AND (EXISTS(
+                      SELECT 1 FROM entity_reversal_restorations r
+                      WHERE r.reversal_decision_id=d.reversal_decision_id
+                        AND r.entity_id=NEW.entity_id
+                  ) OR EXISTS(
+                      SELECT 1 FROM entity_reversal_supersessions s
+                      WHERE s.reversal_decision_id=d.reversal_decision_id
+                        AND s.entity_id=NEW.entity_id
+                  ))
+             ))
+        BEGIN SELECT RAISE(ABORT,'preferred entity projection lineage mismatch'); END""",
     """CREATE TRIGGER entity_preferred_identity_delete_guard
         BEFORE DELETE ON entity_preferred_identities BEGIN
         SELECT RAISE(ABORT,'preferred entity projection requires explicit rebuild'); END""",

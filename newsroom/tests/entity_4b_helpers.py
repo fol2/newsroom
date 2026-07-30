@@ -17,6 +17,8 @@ from newsroom.entities import (
     EntityReadPolicy,
     EntityResolutionDecisionAction,
     EntityResolutionDecisionRequest,
+    EntityResolutionDependencyId,
+    EntityResolutionDependencyRequest,
     EntityResolutionProposalId,
     EntityResolutionProposalKind,
     EntityResolutionProposalRequest,
@@ -24,7 +26,11 @@ from newsroom.entities import (
     classify_entity_script,
     normalize_entity_text,
 )
-from newsroom.extraction import ExtractionProposalKind, ProposalEnvelope
+from newsroom.extraction import (
+    ExtractionProposalKind,
+    FixtureExtractionCase,
+    ProposalEnvelope,
+)
 
 from .extraction_4a_helpers import (
     ExtractionFixtureState,
@@ -34,6 +40,7 @@ from .extraction_4a_helpers import (
     open_extraction_system,
     run_request,
     seed_extraction_fixture,
+    seed_homonym_extraction_fixture,
 )
 from .source_3a_helpers import SOURCE_NOW
 
@@ -52,6 +59,7 @@ ENTITY_ID = _id(CanonicalEntityId, 4231)
 ENTITY_VERSION_ID = _id(CanonicalEntityVersionId, 4232)
 EN_ALIAS_ID = _id(EntityAliasId, 4233)
 ZH_ALIAS_ID = _id(EntityAliasId, 4234)
+DEPENDENCY_ID = _id(EntityResolutionDependencyId, 4241)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +68,18 @@ class EntityFixtureState:
     en_source: ProposalEnvelope
     zh_source: ProposalEnvelope
     equivalence_source: ProposalEnvelope
+    relation_source: ProposalEnvelope
+
+
+@dataclass(frozen=True, slots=True)
+class HomonymEntityFixtureState:
+    extraction: ExtractionFixtureState
+    en_transit_source: ProposalEnvelope
+    en_association_source: ProposalEnvelope
+    zh_transit_source: ProposalEnvelope
+    zh_association_source: ProposalEnvelope
+    equivalence_transit_source: ProposalEnvelope
+    equivalence_association_source: ProposalEnvelope
 
 
 ENTITY_SCOPES = frozenset(
@@ -67,6 +87,7 @@ ENTITY_SCOPES = frozenset(
         "authority.entity.mention",
         "authority.entity.propose",
         "authority.entity.decide",
+        "authority.entity.dependency",
         "authority.entity.merge",
         "authority.entity.split",
         "authority.entity.reverse",
@@ -123,11 +144,63 @@ def seed_entity_fixture(root: Path) -> EntityFixtureState:
         for proposal in proposals
         if proposal.kind is ExtractionProposalKind.ENTITY_EQUIVALENCE
     )
-    return EntityFixtureState(state, en, zh, equivalence)
+    relation = next(
+        proposal
+        for proposal in proposals
+        if proposal.kind is ExtractionProposalKind.RELATION
+    )
+    return EntityFixtureState(state, en, zh, equivalence, relation)
+
+
+def seed_homonym_entity_fixture(root: Path) -> HomonymEntityFixtureState:
+    state = seed_homonym_extraction_fixture(root)
+    system = open_extraction_system(state)
+    try:
+        contract = contract_request(
+            fixture_case=FixtureExtractionCase.BILINGUAL_HOMONYM,
+            key="increment-4b-homonym-contract-v1",
+        )
+        system.extraction.register_contract(contract, proof=extraction_proof())
+        result = system.extraction.execute(
+            run_request(
+                state,
+                contract_id=contract.contract_id,
+                key="increment-4b-homonym-run-v1",
+            ),
+            proof=extraction_proof(),
+        )
+        assert result.proposal_set is not None
+        by_local_id = {
+            proposal.local_id: proposal
+            for proposal in result.proposal_set.proposals
+        }
+    finally:
+        system.close()
+    return HomonymEntityFixtureState(
+        extraction=state,
+        en_transit_source=by_local_id[
+            "entity.chan-chi-ming.harbour-transit.en"
+        ],
+        en_association_source=by_local_id[
+            "entity.chan-chi-ming.harbour-association.en"
+        ],
+        zh_transit_source=by_local_id[
+            "entity.chan-chi-ming.harbour-transit.zh-hk"
+        ],
+        zh_association_source=by_local_id[
+            "entity.chan-chi-ming.harbour-association.zh-hk"
+        ],
+        equivalence_transit_source=by_local_id[
+            "equivalence.chan-chi-ming.harbour-transit.bilingual"
+        ],
+        equivalence_association_source=by_local_id[
+            "equivalence.chan-chi-ming.harbour-association.bilingual"
+        ],
+    )
 
 
 def open_entity_system(
-    state: EntityFixtureState,
+    state: EntityFixtureState | HomonymEntityFixtureState,
     *,
     scopes: frozenset[str] | None = None,
 ):
@@ -148,12 +221,13 @@ def mention_request(
     mention_id: EntityMentionId,
     language: str,
     key: str,
+    entity_kind: EntityKind = EntityKind.GOVERNMENT_BODY,
 ) -> EntityMentionAdmissionRequest:
     return EntityMentionAdmissionRequest(
         mention_id=mention_id,
         source_proposal_id=source.proposal_id,
         expected_source_proposal_digest=source.canonical_digest,
-        entity_kind=EntityKind.GOVERNMENT_BODY,
+        entity_kind=entity_kind,
         language=language,
         script=classify_entity_script(source.subject_placeholder),
         normalized_text=normalize_entity_text(source.subject_placeholder),
@@ -188,6 +262,25 @@ def new_entity_proposal_request(
     )
 
 
+def dependency_request(
+    state: EntityFixtureState,
+    proposal,
+    *,
+    dependency_id: EntityResolutionDependencyId = DEPENDENCY_ID,
+    material: bool = True,
+    key: str = "entity-resolution-dependency-v1",
+) -> EntityResolutionDependencyRequest:
+    return EntityResolutionDependencyRequest(
+        dependency_id=dependency_id,
+        dependent_proposal_id=state.relation_source.proposal_id,
+        expected_dependent_proposal_digest=state.relation_source.canonical_digest,
+        resolution_proposal_id=proposal.proposal_id,
+        expected_resolution_proposal_version_id=proposal.proposal_version_id,
+        expected_resolution_proposal_digest=proposal.canonical_digest,
+        material=material,
+        idempotency_key=key,
+    )
+
 def decision_request(
     proposal,
     *,
@@ -219,11 +312,14 @@ def decision_request(
 
 __all__ = [name for name in globals() if name.isupper()] + [
     "EntityFixtureState",
+    "HomonymEntityFixtureState",
     "decision_request",
+    "dependency_request",
     "entity_authorizer",
     "entity_read_policy",
     "mention_request",
     "new_entity_proposal_request",
     "open_entity_system",
     "seed_entity_fixture",
+    "seed_homonym_entity_fixture",
 ]

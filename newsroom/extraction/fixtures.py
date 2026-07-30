@@ -5,11 +5,7 @@ from types import MappingProxyType
 from newsroom.authority.canonical import digest_bytes, digest_canonical
 
 from .models import ExtractorContractRequest
-from .output_schema import (
-    FIXTURE_OUTPUT_SCHEMA_DIGEST,
-    FIXTURE_OUTPUT_SCHEMA_ID,
-    FIXTURE_OUTPUT_SCHEMA_VERSION,
-)
+from .output_schema import fixture_output_schema_contract
 from .types import (
     ExtractionContractError,
     ExtractionExecutionProfile,
@@ -23,6 +19,13 @@ FIXTURE_EN_TEXT = (
     "The revision supersedes the earlier notice."
 )
 FIXTURE_ZH_HK_TEXT = "香港運輸署發布經修訂的道路安全指引。該修訂取代較早前的公告。"
+FIXTURE_HOMONYM_EN_TEXT = (
+    "Chan Chi Ming of Harbour Transit Limited met Chan Chi Ming of "
+    "Harbour Transport Association."
+)
+FIXTURE_HOMONYM_ZH_HK_TEXT = (
+    "港灣運輸有限公司的陳志明與港灣交通協會的陳志明會面。"
+)
 
 FIXTURE_EN_LANGUAGE = "en-GB"
 FIXTURE_ZH_HK_LANGUAGE = "zh-HK"
@@ -31,6 +34,30 @@ FIXTURE_ALLOWED_TEXT_DIGESTS = (
     digest_bytes(FIXTURE_EN_TEXT.encode("utf-8")),
     digest_bytes(FIXTURE_ZH_HK_TEXT.encode("utf-8")),
 )
+FIXTURE_HOMONYM_ALLOWED_TEXT_DIGESTS = (
+    digest_bytes(FIXTURE_HOMONYM_EN_TEXT.encode("utf-8")),
+    digest_bytes(FIXTURE_HOMONYM_ZH_HK_TEXT.encode("utf-8")),
+)
+
+
+def fixture_texts_for_case(
+    fixture_case: FixtureExtractionCase,
+) -> tuple[str, str]:
+    if not isinstance(fixture_case, FixtureExtractionCase):
+        raise ExtractionContractError("fixture case must be typed")
+    if fixture_case is FixtureExtractionCase.BILINGUAL_HOMONYM:
+        return FIXTURE_HOMONYM_EN_TEXT, FIXTURE_HOMONYM_ZH_HK_TEXT
+    return FIXTURE_EN_TEXT, FIXTURE_ZH_HK_TEXT
+
+
+def fixture_allowed_text_digests_for_case(
+    fixture_case: FixtureExtractionCase,
+) -> tuple[str, str]:
+    if not isinstance(fixture_case, FixtureExtractionCase):
+        raise ExtractionContractError("fixture case must be typed")
+    if fixture_case is FixtureExtractionCase.BILINGUAL_HOMONYM:
+        return FIXTURE_HOMONYM_ALLOWED_TEXT_DIGESTS
+    return FIXTURE_ALLOWED_TEXT_DIGESTS
 
 
 def _component(
@@ -63,10 +90,27 @@ FIXTURE_PROMPT_COMPONENT = _component(
         "source_is_untrusted_data": True,
     },
 )
-FIXTURE_OUTPUT_SCHEMA_COMPONENT = VersionedExtractionComponent(
-    component_id=FIXTURE_OUTPUT_SCHEMA_ID,
-    component_version=FIXTURE_OUTPUT_SCHEMA_VERSION,
-    contract_digest=FIXTURE_OUTPUT_SCHEMA_DIGEST,
+def _fixture_output_schema_component(
+    fixture_case: FixtureExtractionCase,
+) -> VersionedExtractionComponent:
+    component_id, component_version, contract_digest = (
+        fixture_output_schema_contract(fixture_case)
+    )
+    return VersionedExtractionComponent(
+        component_id=component_id,
+        component_version=component_version,
+        contract_digest=contract_digest,
+    )
+
+
+FIXTURE_OUTPUT_SCHEMA_COMPONENT = _fixture_output_schema_component(
+    FixtureExtractionCase.BILINGUAL_COMPLETE
+)
+FIXTURE_OUTPUT_SCHEMA_COMPONENTS = MappingProxyType(
+    {
+        fixture_case: _fixture_output_schema_component(fixture_case)
+        for fixture_case in FixtureExtractionCase
+    }
 )
 FIXTURE_CODE_COMPONENT = _component(
     "newsroom.fixture.producer-code",
@@ -91,7 +135,9 @@ def _fixture_policy_component(
         f"v1-{suffix}",
         {
             "profiles": [ExtractionExecutionProfile.FIXTURE_REPLAY_ONLY.value],
-            "allowed_text_digests": list(FIXTURE_ALLOWED_TEXT_DIGESTS),
+            "allowed_text_digests": list(
+                fixture_allowed_text_digests_for_case(fixture_case)
+            ),
             "fixture_case": fixture_case.value,
             "real_runtime": False,
         },
@@ -119,7 +165,7 @@ def deterministic_fixture_contract_request(
         framework=FIXTURE_FRAMEWORK_COMPONENT,
         model=FIXTURE_MODEL_COMPONENT,
         prompt=FIXTURE_PROMPT_COMPONENT,
-        output_schema=FIXTURE_OUTPUT_SCHEMA_COMPONENT,
+        output_schema=FIXTURE_OUTPUT_SCHEMA_COMPONENTS[fixture_case],
         code=FIXTURE_CODE_COMPONENT,
         normalisation=FIXTURE_NORMALISATION_COMPONENT,
         policy=FIXTURE_POLICY_COMPONENTS[fixture_case],
@@ -177,11 +223,16 @@ __all__ = [
     "EXPECTED_FIXTURE_CONTRACT_SEMANTIC_DIGEST",
     "EXPECTED_FIXTURE_CONTRACT_SEMANTIC_DIGESTS",
     "FIXTURE_ALLOWED_TEXT_DIGESTS",
+    "FIXTURE_HOMONYM_ALLOWED_TEXT_DIGESTS",
     "FIXTURE_EN_LANGUAGE",
     "FIXTURE_EN_TEXT",
+    "FIXTURE_HOMONYM_EN_TEXT",
+    "FIXTURE_HOMONYM_ZH_HK_TEXT",
     "FIXTURE_PRODUCER_KIND",
     "FIXTURE_ZH_HK_LANGUAGE",
     "FIXTURE_ZH_HK_TEXT",
     "deterministic_fixture_contract_request",
+    "fixture_allowed_text_digests_for_case",
     "fixture_case_for_contract",
+    "fixture_texts_for_case",
 ]

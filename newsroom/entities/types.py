@@ -133,6 +133,10 @@ class EntityResolutionDecisionId(UUIDv4Id):
     pass
 
 
+class EntityResolutionDependencyId(UUIDv4Id):
+    pass
+
+
 class EntityMergeDecisionId(UUIDv4Id):
     pass
 
@@ -218,10 +222,20 @@ class EntityLineageDecisionKind(StrEnum):
     REVERSAL = "REVERSAL"
 
 
-class EntityReversalTargetKind(StrEnum):
+class EntityCreationDecisionKind(StrEnum):
     RESOLUTION = "RESOLUTION"
     MERGE = "MERGE"
     SPLIT = "SPLIT"
+
+
+class EntityReversalTargetKind(StrEnum):
+    MERGE = "MERGE"
+    SPLIT = "SPLIT"
+
+
+class EntityProjectionAction(StrEnum):
+    UPSERT = "UPSERT"
+    REMOVE = "REMOVE"
 
 
 def bounded_text(

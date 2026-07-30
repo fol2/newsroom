@@ -28,6 +28,10 @@ from newsroom.extraction import (
     ExtractionRunRequest,
     ExtractionRunVersionId,
     ExtractorContractId,
+    FIXTURE_EN_TEXT,
+    FIXTURE_HOMONYM_EN_TEXT,
+    FIXTURE_HOMONYM_ZH_HK_TEXT,
+    FIXTURE_ZH_HK_TEXT,
     FixtureExtractionCase,
     deterministic_fixture_contract_request,
 )
@@ -177,7 +181,14 @@ def _seed_source(database: Path) -> None:
         system.close()
 
 
-def _build_extraction_fixture(root: Path) -> ExtractionFixtureState:
+def _build_extraction_fixture(
+    root: Path,
+    *,
+    en_text: str = FIXTURE_EN_TEXT,
+    zh_text: str = FIXTURE_ZH_HK_TEXT,
+    en_admission_key: str = "increment-4a-admit-en",
+    zh_admission_key: str = "increment-4a-admit-zh-hk",
+) -> ExtractionFixtureState:
     database = root / "authority.sqlite3"
     object_root = root / "objects"
     _seed_source(database)
@@ -191,11 +202,6 @@ def _build_extraction_fixture(root: Path) -> ExtractionFixtureState:
         payload_schemas=source_schemas,
     )
 
-    from newsroom.extraction import (
-        FIXTURE_EN_TEXT,
-        FIXTURE_ZH_HK_TEXT,
-    )
-
     object_system = open_object_system(
         database,
         object_root=object_root,
@@ -204,17 +210,17 @@ def _build_extraction_fixture(root: Path) -> ExtractionFixtureState:
         payload_schema_registry=object_schemas,
     )
     try:
-        en_data = FIXTURE_EN_TEXT.encode("utf-8")
-        zh_data = FIXTURE_ZH_HK_TEXT.encode("utf-8")
+        en_data = en_text.encode("utf-8")
+        zh_data = zh_text.encode("utf-8")
         en_admission = admit(
             object_system,
             data=en_data,
-            key="increment-4a-admit-en",
+            key=en_admission_key,
         ).admission
         zh_admission = admit(
             object_system,
             data=zh_data,
-            key="increment-4a-admit-zh-hk",
+            key=zh_admission_key,
         ).admission
         en_hydrated = object_system.objects.hydrate(
             HydrationRequest(
@@ -293,6 +299,25 @@ def _template_state() -> ExtractionFixtureState:
             _TEMPLATE_ROOT = root
             _TEMPLATE_STATE = state
         return _TEMPLATE_STATE
+
+
+def seed_homonym_extraction_fixture(root: Path) -> ExtractionFixtureState:
+    """Build the separate repository-owned same-name bilingual fixture."""
+
+    if root.is_symlink():
+        raise ValueError("extraction fixture root must be a real directory")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    selected_root = root.resolve()
+    if not selected_root.is_dir() or any(selected_root.iterdir()):
+        raise ValueError("homonym extraction fixture destination must be empty")
+    selected_root.chmod(0o700)
+    return _build_extraction_fixture(
+        selected_root,
+        en_text=FIXTURE_HOMONYM_EN_TEXT,
+        zh_text=FIXTURE_HOMONYM_ZH_HK_TEXT,
+        en_admission_key="increment-4b-homonym-admit-en",
+        zh_admission_key="increment-4b-homonym-admit-zh-hk",
+    )
 
 
 def seed_extraction_fixture(root: Path) -> ExtractionFixtureState:

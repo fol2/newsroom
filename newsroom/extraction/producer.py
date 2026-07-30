@@ -4,11 +4,10 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 
 from .fixtures import (
     FIXTURE_EN_LANGUAGE,
-    FIXTURE_EN_TEXT,
     FIXTURE_PRODUCER_KIND,
     FIXTURE_ZH_HK_LANGUAGE,
-    FIXTURE_ZH_HK_TEXT,
     fixture_case_for_contract,
+    fixture_texts_for_case,
 )
 from .models import (
     ExtractorContractRequest,
@@ -16,6 +15,7 @@ from .models import (
     ProducedExtraction,
     ProposalDraft,
 )
+from .output_schema import fixture_output_schema_name_for_case
 from .types import (
     EvidenceRange,
     ExtractionContractError,
@@ -29,12 +29,26 @@ from .types import (
 )
 
 
-def _range_for(text: str, phrase: str, passage_id) -> EvidenceRange:
+def _range_for(
+    text: str,
+    phrase: str,
+    passage_id,
+    *,
+    occurrence: int = 0,
+) -> EvidenceRange:
+    if isinstance(occurrence, bool) or not isinstance(occurrence, int) or occurrence < 0:
+        raise ExtractionContractError("fixture occurrence must be a non-negative integer")
     data = text.encode("utf-8")
     phrase_data = phrase.encode("utf-8")
-    start = data.find(phrase_data)
-    if start < 0:
-        raise ExtractionContractError("fixture phrase is absent from governed passage")
+    cursor = 0
+    start = -1
+    for _ in range(occurrence + 1):
+        start = data.find(phrase_data, cursor)
+        if start < 0:
+            raise ExtractionContractError(
+                "fixture phrase occurrence is absent from governed passage"
+            )
+        cursor = start + len(phrase_data)
     end = start + len(phrase_data)
     return EvidenceRange(
         passage_id=passage_id,
@@ -58,7 +72,10 @@ class DeterministicFixtureExtractor:
         return fixture_case_for_contract(contract)
 
     @staticmethod
-    def _validate_passages(request: ExtractionRunRequest):
+    def _validate_passages(
+        request: ExtractionRunRequest,
+        fixture_case: FixtureExtractionCase,
+    ):
         passages = request.input_binding.passages
         by_language = {passage.language: passage for passage in passages}
         if (
@@ -71,7 +88,8 @@ class DeterministicFixtureExtractor:
             )
         en = by_language[FIXTURE_EN_LANGUAGE]
         zh = by_language[FIXTURE_ZH_HK_LANGUAGE]
-        if en.require_text() != FIXTURE_EN_TEXT or zh.require_text() != FIXTURE_ZH_HK_TEXT:
+        expected_en, expected_zh = fixture_texts_for_case(fixture_case)
+        if en.require_text() != expected_en or zh.require_text() != expected_zh:
             raise ExtractionContractError(
                 "deterministic fixture output is rejected outside approved fixture bytes"
             )
@@ -104,7 +122,7 @@ class DeterministicFixtureExtractor:
         case = self._validate_contract(contract)
         if not isinstance(request, ExtractionRunRequest):
             raise TypeError("fixture extractor needs a typed run request")
-        en, zh = self._validate_passages(request)
+        en, zh = self._validate_passages(request, case)
         if case is FixtureExtractionCase.RETRYABLE_FAILURE:
             return ProducedExtraction(
                 outcome=ExtractionOutcome.RETRYABLE_FAILURE,
@@ -137,75 +155,196 @@ class DeterministicFixtureExtractor:
                 usage=self._usage(request, raw, ()),
             )
 
-        en_name = "Hong Kong Transport Department"
-        zh_name = "香港運輸署"
-        en_guidance = "revised road safety guidance"
-        earlier_notice = "earlier notice"
-        proposals = (
-            ProposalDraft(
-                local_id="entity.transport-department.en",
-                kind=ExtractionProposalKind.ENTITY_MENTION,
-                subject_placeholder=en_name,
-                object_placeholder=None,
-                predicate_hint=None,
-                confidence_basis_points=9_800,
-                uncertainty_codes=(),
-                rationale_codes=("EXACT_FIXTURE_SPAN",),
-                evidence=(_range_for(en.require_text(), en_name, en.passage_id),),
-            ),
-            ProposalDraft(
-                local_id="entity.transport-department.zh-hk",
-                kind=ExtractionProposalKind.ENTITY_MENTION,
-                subject_placeholder=zh_name,
-                object_placeholder=None,
-                predicate_hint=None,
-                confidence_basis_points=9_800,
-                uncertainty_codes=(),
-                rationale_codes=("EXACT_FIXTURE_SPAN",),
-                evidence=(_range_for(zh.require_text(), zh_name, zh.passage_id),),
-            ),
-            ProposalDraft(
-                local_id="equivalence.transport-department.bilingual",
-                kind=ExtractionProposalKind.ENTITY_EQUIVALENCE,
-                subject_placeholder=en_name,
-                object_placeholder=zh_name,
-                predicate_hint=None,
-                confidence_basis_points=8_500,
-                uncertainty_codes=("REQUIRES_EXPLICIT_RESOLUTION",),
-                rationale_codes=("BILINGUAL_FIXTURE_ALIAS",),
-                evidence=(
-                    _range_for(en.require_text(), en_name, en.passage_id),
-                    _range_for(zh.require_text(), zh_name, zh.passage_id),
-                ),
-            ),
-        )
-        if case is FixtureExtractionCase.BILINGUAL_COMPLETE:
-            proposals += (
+        if case is FixtureExtractionCase.BILINGUAL_HOMONYM:
+            en_name = "Chan Chi Ming"
+            zh_name = "陳志明"
+            en_text = en.require_text()
+            zh_text = zh.require_text()
+            proposals = (
                 ProposalDraft(
-                    local_id="relation.guidance-supersedes-notice",
-                    kind=ExtractionProposalKind.RELATION,
-                    subject_placeholder=en_guidance,
-                    object_placeholder=earlier_notice,
-                    predicate_hint=ProposalPredicateHint.SUPERSEDES,
-                    confidence_basis_points=9_500,
-                    uncertainty_codes=("REQUIRES_RELATION_ADMISSION",),
-                    rationale_codes=("EXPLICIT_SUPERSEDES_LANGUAGE",),
+                    local_id="entity.chan-chi-ming.harbour-association.en",
+                    kind=ExtractionProposalKind.ENTITY_MENTION,
+                    subject_placeholder=en_name,
+                    object_placeholder=None,
+                    predicate_hint=None,
+                    confidence_basis_points=9_600,
+                    uncertainty_codes=("SAME_NAME_DISTINCT_CONTEXT",),
+                    rationale_codes=("EXACT_FIXTURE_SPAN",),
                     evidence=(
-                        _range_for(en.require_text(), en_guidance, en.passage_id),
-                        _range_for(en.require_text(), earlier_notice, en.passage_id),
+                        _range_for(
+                            en_text, en_name, en.passage_id, occurrence=1
+                        ),
+                    ),
+                ),
+                ProposalDraft(
+                    local_id="entity.chan-chi-ming.harbour-transit.en",
+                    kind=ExtractionProposalKind.ENTITY_MENTION,
+                    subject_placeholder=en_name,
+                    object_placeholder=None,
+                    predicate_hint=None,
+                    confidence_basis_points=9_600,
+                    uncertainty_codes=("SAME_NAME_DISTINCT_CONTEXT",),
+                    rationale_codes=("EXACT_FIXTURE_SPAN",),
+                    evidence=(
+                        _range_for(
+                            en_text, en_name, en.passage_id, occurrence=0
+                        ),
+                    ),
+                ),
+                ProposalDraft(
+                    local_id="entity.chan-chi-ming.harbour-association.zh-hk",
+                    kind=ExtractionProposalKind.ENTITY_MENTION,
+                    subject_placeholder=zh_name,
+                    object_placeholder=None,
+                    predicate_hint=None,
+                    confidence_basis_points=9_600,
+                    uncertainty_codes=("SAME_NAME_DISTINCT_CONTEXT",),
+                    rationale_codes=("EXACT_FIXTURE_SPAN",),
+                    evidence=(
+                        _range_for(
+                            zh_text, zh_name, zh.passage_id, occurrence=1
+                        ),
+                    ),
+                ),
+                ProposalDraft(
+                    local_id="entity.chan-chi-ming.harbour-transit.zh-hk",
+                    kind=ExtractionProposalKind.ENTITY_MENTION,
+                    subject_placeholder=zh_name,
+                    object_placeholder=None,
+                    predicate_hint=None,
+                    confidence_basis_points=9_600,
+                    uncertainty_codes=("SAME_NAME_DISTINCT_CONTEXT",),
+                    rationale_codes=("EXACT_FIXTURE_SPAN",),
+                    evidence=(
+                        _range_for(
+                            zh_text, zh_name, zh.passage_id, occurrence=0
+                        ),
+                    ),
+                ),
+                ProposalDraft(
+                    local_id=(
+                        "equivalence.chan-chi-ming.harbour-association.bilingual"
+                    ),
+                    kind=ExtractionProposalKind.ENTITY_EQUIVALENCE,
+                    subject_placeholder=en_name,
+                    object_placeholder=zh_name,
+                    predicate_hint=None,
+                    confidence_basis_points=8_000,
+                    uncertainty_codes=(
+                        "REQUIRES_EXPLICIT_RESOLUTION",
+                        "SAME_NAME_DISTINCT_CONTEXT",
+                    ),
+                    rationale_codes=("CONTEXT_BOUND_BILINGUAL_ALIAS",),
+                    evidence=(
+                        _range_for(
+                            en_text, en_name, en.passage_id, occurrence=1
+                        ),
+                        _range_for(
+                            zh_text, zh_name, zh.passage_id, occurrence=1
+                        ),
+                    ),
+                ),
+                ProposalDraft(
+                    local_id="equivalence.chan-chi-ming.harbour-transit.bilingual",
+                    kind=ExtractionProposalKind.ENTITY_EQUIVALENCE,
+                    subject_placeholder=en_name,
+                    object_placeholder=zh_name,
+                    predicate_hint=None,
+                    confidence_basis_points=8_000,
+                    uncertainty_codes=(
+                        "REQUIRES_EXPLICIT_RESOLUTION",
+                        "SAME_NAME_DISTINCT_CONTEXT",
+                    ),
+                    rationale_codes=("CONTEXT_BOUND_BILINGUAL_ALIAS",),
+                    evidence=(
+                        _range_for(
+                            en_text, en_name, en.passage_id, occurrence=0
+                        ),
+                        _range_for(
+                            zh_text, zh_name, zh.passage_id, occurrence=0
+                        ),
                     ),
                 ),
             )
+            proposals = tuple(sorted(proposals, key=lambda item: item.local_id))
             outcome = ExtractionOutcome.SUCCESS
             failure_code = ExtractionFailureCode.NONE
-        elif case is FixtureExtractionCase.BILINGUAL_PARTIAL:
-            outcome = ExtractionOutcome.PARTIAL
-            failure_code = ExtractionFailureCode.FIXTURE_PARTIAL
-        else:  # pragma: no cover - closed enum is exhaustively handled above
-            raise ExtractionContractError("unsupported deterministic fixture case")
+        else:
+            en_name = "Hong Kong Transport Department"
+            zh_name = "香港運輸署"
+            en_guidance = "revised road safety guidance"
+            earlier_notice = "earlier notice"
+            proposals = (
+                ProposalDraft(
+                    local_id="entity.transport-department.en",
+                    kind=ExtractionProposalKind.ENTITY_MENTION,
+                    subject_placeholder=en_name,
+                    object_placeholder=None,
+                    predicate_hint=None,
+                    confidence_basis_points=9_800,
+                    uncertainty_codes=(),
+                    rationale_codes=("EXACT_FIXTURE_SPAN",),
+                    evidence=(_range_for(en.require_text(), en_name, en.passage_id),),
+                ),
+                ProposalDraft(
+                    local_id="entity.transport-department.zh-hk",
+                    kind=ExtractionProposalKind.ENTITY_MENTION,
+                    subject_placeholder=zh_name,
+                    object_placeholder=None,
+                    predicate_hint=None,
+                    confidence_basis_points=9_800,
+                    uncertainty_codes=(),
+                    rationale_codes=("EXACT_FIXTURE_SPAN",),
+                    evidence=(_range_for(zh.require_text(), zh_name, zh.passage_id),),
+                ),
+                ProposalDraft(
+                    local_id="equivalence.transport-department.bilingual",
+                    kind=ExtractionProposalKind.ENTITY_EQUIVALENCE,
+                    subject_placeholder=en_name,
+                    object_placeholder=zh_name,
+                    predicate_hint=None,
+                    confidence_basis_points=8_500,
+                    uncertainty_codes=("REQUIRES_EXPLICIT_RESOLUTION",),
+                    rationale_codes=("BILINGUAL_FIXTURE_ALIAS",),
+                    evidence=(
+                        _range_for(en.require_text(), en_name, en.passage_id),
+                        _range_for(zh.require_text(), zh_name, zh.passage_id),
+                    ),
+                ),
+            )
+            if case is FixtureExtractionCase.BILINGUAL_COMPLETE:
+                proposals += (
+                    ProposalDraft(
+                        local_id="relation.guidance-supersedes-notice",
+                        kind=ExtractionProposalKind.RELATION,
+                        subject_placeholder=en_guidance,
+                        object_placeholder=earlier_notice,
+                        predicate_hint=ProposalPredicateHint.SUPERSEDES,
+                        confidence_basis_points=9_500,
+                        uncertainty_codes=("REQUIRES_RELATION_ADMISSION",),
+                        rationale_codes=("EXPLICIT_SUPERSEDES_LANGUAGE",),
+                        evidence=(
+                            _range_for(
+                                en.require_text(), en_guidance, en.passage_id
+                            ),
+                            _range_for(
+                                en.require_text(), earlier_notice, en.passage_id
+                            ),
+                        ),
+                    ),
+                )
+                outcome = ExtractionOutcome.SUCCESS
+                failure_code = ExtractionFailureCode.NONE
+            elif case is FixtureExtractionCase.BILINGUAL_PARTIAL:
+                outcome = ExtractionOutcome.PARTIAL
+                failure_code = ExtractionFailureCode.FIXTURE_PARTIAL
+            else:  # pragma: no cover - closed enum is exhaustively handled above
+                raise ExtractionContractError(
+                    "unsupported deterministic fixture case"
+                )
 
         raw = {
-            "schema_version": "increment-4a-fixture-output-v1",
+            "schema_version": fixture_output_schema_name_for_case(case),
             "fixture_case": case.value,
             "entities": [
                 {"local_id": item.local_id, "text": item.subject_placeholder}

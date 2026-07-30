@@ -33,6 +33,10 @@ class _EntityIntegrityMixin:
             ).fetchall():
                 self._decision_from_row(conn, row, replayed=False)
             for row in conn.execute(
+                "SELECT * FROM entity_resolution_dependencies ORDER BY dependency_id"
+            ).fetchall():
+                self._dependency_from_row(conn, row, replayed=False)
+            for row in conn.execute(
                 "SELECT * FROM canonical_entities ORDER BY entity_id"
             ).fetchall():
                 self._entity_from_row(conn, row)
@@ -45,6 +49,18 @@ class _EntityIntegrityMixin:
                 "SELECT * FROM entity_aliases ORDER BY alias_id"
             ).fetchall():
                 self._alias_from_row(conn, row)
+            for row in conn.execute(
+                "SELECT * FROM entity_merge_decisions ORDER BY merge_decision_id"
+            ).fetchall():
+                self._merge_decision_from_row(conn, row, replayed=False)
+            for row in conn.execute(
+                "SELECT * FROM entity_split_decisions ORDER BY split_decision_id"
+            ).fetchall():
+                self._split_decision_from_row(conn, row, replayed=False)
+            for row in conn.execute(
+                "SELECT * FROM entity_reversal_decisions ORDER BY reversal_decision_id"
+            ).fetchall():
+                self._reversal_decision_from_row(conn, row, replayed=False)
             self._validate_entity_heads(conn)
             self._validate_entity_resolution_rows(conn)
             self._validate_entity_projection_rows(conn)
@@ -120,11 +136,10 @@ class _EntityIntegrityMixin:
                 "one mention cannot have multiple admitted resolutions before lineage reversal"
             )
 
-    @staticmethod
-    def _validate_entity_projection_rows(conn: sqlite3.Connection) -> None:
+    def _validate_entity_projection_rows(self, conn: sqlite3.Connection) -> None:
         stale = conn.execute(
-            "SELECT p.entity_id FROM entity_preferred_identities p "
-            "JOIN canonical_entity_heads h ON h.entity_id=p.entity_id "
+            "SELECT h.entity_id FROM canonical_entity_heads h "
+            "JOIN entity_preferred_identities p ON p.entity_id=h.entity_id "
             "WHERE p.current_entity_version_id!=h.current_entity_version_id "
             "OR p.lifecycle!=h.lifecycle "
             "OR p.projected_through_ledger_seq>(SELECT COALESCE(MAX(ledger_seq),0) FROM ledger_events) "
@@ -132,34 +147,52 @@ class _EntityIntegrityMixin:
         ).fetchone()
         if stale is not None:
             raise AuthoritySchemaError("preferred entity projection is inconsistent")
-        for row in conn.execute(
-            "SELECT * FROM entity_projection_events ORDER BY source_ledger_seq,projection_event_id"
-        ).fetchall():
-            value = {
-                "projection_event_id": str(row["projection_event_id"]),
-                "source_event_id": str(row["source_event_id"]),
-                "source_ledger_seq": int(row["source_ledger_seq"]),
-                "action": str(row["action"]),
-                "entity_id": str(row["entity_id"]),
-                "entity_version_id": str(row["entity_version_id"]),
-                "preferred_entity_id": (
-                    None
-                    if row["preferred_entity_id"] is None
-                    else str(row["preferred_entity_id"])
-                ),
-                "lifecycle": str(row["lifecycle"]),
-            }
-            data = canonical_json_bytes(value)
-            if data != bytes(row["canonical_bytes"]) or digest_bytes(data) != str(
-                row["canonical_digest"]
-            ):
-                raise AuthoritySchemaError("entity projection event canonical bytes differ")
-            event = conn.execute(
-                "SELECT ledger_seq FROM ledger_events WHERE event_id=?",
-                (str(row["source_event_id"]),),
+        if not self._allow_projection_rebuild:
+            missing_projection = conn.execute(
+                "SELECT h.entity_id FROM canonical_entity_heads h "
+                "LEFT JOIN entity_preferred_identities p ON p.entity_id=h.entity_id "
+                "WHERE p.entity_id IS NULL LIMIT 1"
             ).fetchone()
-            if event is None or int(event["ledger_seq"]) != int(row["source_ledger_seq"]):
-                raise AuthoritySchemaError("entity projection event source differs")
+            if missing_projection is not None:
+                raise AuthoritySchemaError("preferred entity projection is incomplete")
+        missing = conn.execute(
+            "SELECT v.entity_version_id FROM canonical_entity_versions v "
+            "LEFT JOIN entity_projection_events p "
+            "ON p.entity_id=v.entity_id AND p.entity_version_id=v.entity_version_id "
+            "WHERE p.projection_event_id IS NULL LIMIT 1"
+        ).fetchone()
+        if missing is not None:
+            raise AuthoritySchemaError(
+                "canonical entity version lacks projection-event coverage"
+            )
+        latest_mismatch = conn.execute(
+            "SELECT p.entity_id FROM entity_preferred_identities p "
+            "LEFT JOIN entity_projection_events e "
+            "ON e.projection_event_id=("
+            "SELECT projection_event_id FROM entity_projection_events "
+            "WHERE entity_id=p.entity_id "
+            "ORDER BY source_ledger_seq DESC,projection_event_id DESC LIMIT 1"
+            ") WHERE e.projection_event_id IS NULL "
+            "OR e.action!='UPSERT' "
+            "OR e.entity_version_id!=p.current_entity_version_id "
+            "OR e.preferred_entity_id!=p.preferred_entity_id "
+            "OR e.lifecycle!=p.lifecycle "
+            "OR e.source_ledger_seq!=p.projected_through_ledger_seq "
+            "LIMIT 1"
+        ).fetchone()
+        if latest_mismatch is not None:
+            raise AuthoritySchemaError(
+                "preferred entity projection differs from its latest event"
+            )
+        for row in conn.execute(
+            "SELECT * FROM entity_projection_events "
+            "ORDER BY source_ledger_seq,projection_event_id"
+        ).fetchall():
+            self._projection_event_from_row(conn, row)
+        # The latest immutable projection event for every entity must agree with
+        # the authoritative current head.  Multiple historical events for the
+        # same entity version are valid (for example, later admitted aliases).
+        self._expected_preferred_projection(conn)
 
     @staticmethod
     def _validate_entity_event_coverage(conn: sqlite3.Connection) -> None:
@@ -167,6 +200,13 @@ class _EntityIntegrityMixin:
             ("entity.mention.admitted", "entity_mentions"),
             ("entity.resolution.proposed", "entity_resolution_proposal_versions"),
             ("entity.resolution.decided", "entity_resolution_decisions"),
+            (
+                "entity.resolution.dependency.bound",
+                "entity_resolution_dependencies",
+            ),
+            ("entity.merge.decided", "entity_merge_decisions"),
+            ("entity.split.decided", "entity_split_decisions"),
+            ("entity.reversal.decided", "entity_reversal_decisions"),
         )
         for event_type, table in checks:
             missing = conn.execute(

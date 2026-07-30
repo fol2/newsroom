@@ -14,17 +14,21 @@ from newsroom.entities.models import (
     EntityMentionAdmissionRequest,
     EntityResolutionDecision,
     EntityResolutionDecisionRequest,
+    EntityResolutionDependency,
+    EntityResolutionDependencyRequest,
     EntityResolutionProposalRequest,
     EntityResolutionProposalVersion,
 )
 from newsroom.entities.policy import (
     ENTITY_MENTION_ADMIT_COMMAND,
     ENTITY_RESOLUTION_DECIDE_COMMAND,
+    ENTITY_RESOLUTION_DEPENDENCY_BIND_COMMAND,
     ENTITY_RESOLUTION_PROPOSE_COMMAND,
 )
 from newsroom.entities.types import (
     CanonicalEntityLifecycle,
     EntityDecisionConflict,
+    EntityCreationDecisionKind,
     EntityIdentifierReuse,
     EntityResolutionDecisionAction,
     EntityResolutionProposalKind,
@@ -277,6 +281,28 @@ class _EntityCommitMixin:
                     source.object_placeholder,
                 }:
                     raise EntityStateError("equivalence source text differs from mentions")
+                source_evidence = {
+                    (
+                        str(item.passage_id),
+                        item.start_byte,
+                        item.end_byte,
+                        item.evidence_text_digest,
+                    )
+                    for item in source.evidence
+                }
+                mention_evidence = {
+                    (
+                        str(item.passage_id),
+                        item.start_byte,
+                        item.end_byte,
+                        item.evidence_text_digest,
+                    )
+                    for item in (subject, other)
+                }
+                if len(source.evidence) != 2 or source_evidence != mention_evidence:
+                    raise EntityStateError(
+                        "equivalence source evidence differs from exact mentions"
+                    )
             else:
                 if (
                     source.kind is not ExtractionProposalKind.ENTITY_MENTION
@@ -480,6 +506,128 @@ class _EntityCommitMixin:
             (mention_id,),
         ).fetchone()
 
+    def commit_entity_resolution_dependency(
+        self,
+        grant: _AuthorizedCommandGrant,
+        *,
+        request: EntityResolutionDependencyRequest,
+    ) -> EntityResolutionDependency:
+        if not isinstance(request, EntityResolutionDependencyRequest):
+            raise TypeError("entity resolution dependency requires a typed request")
+        self._require_entity_grant(
+            grant,
+            command_type=ENTITY_RESOLUTION_DEPENDENCY_BIND_COMMAND,
+            aggregate_id=str(request.dependency_id),
+            expected_aggregate_version=0,
+            canonical_bytes=canonical_json_bytes(request.canonical_value()),
+        )
+        with self._lock, self._transaction() as conn:
+            now = self._clock()
+            grant.authentication.require_current(now)
+            committed = self._commit_grant_in_transaction(
+                conn, grant, recorded_at=now.to_text()
+            )
+            if grant.replay_of_command_id is not None or committed.replayed:
+                row = self._row_for_event(
+                    conn,
+                    table="entity_resolution_dependencies",
+                    event_id=committed.event_id,
+                    identity="entity resolution dependency",
+                )
+                result = self._dependency_from_row(conn, row, replayed=True)
+                self._require_dependency_current(conn, result)
+                return result
+
+            dependent = self._source_proposal(conn, request.dependent_proposal_id)
+            if dependent.kind is not ExtractionProposalKind.RELATION:
+                raise EntityStateError(
+                    "entity resolution dependency requires a RELATION proposal"
+                )
+            if (
+                dependent.canonical_digest
+                != request.expected_dependent_proposal_digest
+            ):
+                raise EntityStaleDecision("dependent proposal digest differs")
+
+            proposal = self._require_resolution_proposal_current(
+                conn, request.resolution_proposal_id
+            )
+            if (
+                proposal.proposal_version_id
+                != request.expected_resolution_proposal_version_id
+                or proposal.canonical_digest
+                != request.expected_resolution_proposal_digest
+            ):
+                raise EntityStaleDecision(
+                    "resolution dependency differs from current proposal"
+                )
+
+            self._ensure_identifier_absent(
+                conn,
+                table="entity_resolution_dependencies",
+                column="dependency_id",
+                identifier=str(request.dependency_id),
+                identity="entity resolution dependency identity",
+            )
+            existing = conn.execute(
+                "SELECT dependency_id FROM entity_resolution_dependencies "
+                "WHERE dependent_proposal_id=? AND resolution_proposal_id=?",
+                (
+                    str(request.dependent_proposal_id),
+                    str(request.resolution_proposal_id),
+                ),
+            ).fetchone()
+            if existing is not None:
+                raise EntitySemanticCollision(
+                    "equivalent resolution dependency already exists"
+                )
+
+            result = EntityResolutionDependency(
+                dependency_id=request.dependency_id,
+                dependent_proposal_id=dependent.proposal_id,
+                dependent_proposal_digest=dependent.canonical_digest,
+                resolution_proposal_id=proposal.proposal_id,
+                proposal_version_id=proposal.proposal_version_id,
+                proposal_version_digest=proposal.canonical_digest,
+                material=request.material,
+                authority_event_id=EventId.parse(committed.event_id),
+                authority_ledger_seq=committed.ledger_seq,
+                recorded_at=now,
+                replayed=False,
+            )
+            data = canonical_json_bytes(result.canonical_value())
+            conn.execute(
+                "INSERT INTO entity_resolution_dependencies("
+                "dependency_id,dependent_proposal_id,dependent_proposal_digest,"
+                "resolution_proposal_id,proposal_version_id,"
+                "proposal_version_digest,material,request_digest,"
+                "authority_event_id,authority_aggregate_version,canonical_bytes,"
+                "canonical_digest,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    str(result.dependency_id),
+                    str(result.dependent_proposal_id),
+                    result.dependent_proposal_digest,
+                    str(result.resolution_proposal_id),
+                    str(result.proposal_version_id),
+                    result.proposal_version_digest,
+                    int(result.material),
+                    request.digest,
+                    committed.event_id,
+                    committed.aggregate_version,
+                    data,
+                    digest_bytes(data),
+                    now.to_text(),
+                ),
+            )
+            row = self._row_for_event(
+                conn,
+                table="entity_resolution_dependencies",
+                event_id=committed.event_id,
+                identity="entity resolution dependency",
+            )
+            return self._dependency_from_row(conn, row, replayed=False)
+
+
     def commit_entity_resolution_decision(
         self,
         grant: _AuthorizedCommandGrant,
@@ -500,10 +648,11 @@ class _EntityCommitMixin:
         with self._lock, self._transaction() as conn:
             now = self._clock()
             grant.authentication.require_current(now)
-            if grant.replay_of_command_id is not None:
-                committed = self._commit_grant_in_transaction(
-                    conn, grant, recorded_at=now.to_text()
-                )
+            recorded_at = now.to_text()
+            committed = self._commit_grant_in_transaction(
+                conn, grant, recorded_at=recorded_at
+            )
+            if committed.replayed:
                 row = self._row_for_event(
                     conn,
                     table="entity_resolution_decisions",
@@ -633,19 +782,6 @@ class _EntityCommitMixin:
                     identity="entity alias identity",
                 )
 
-            recorded_at = now.to_text()
-            committed = self._commit_grant_in_transaction(
-                conn, grant, recorded_at=recorded_at
-            )
-            if committed.replayed:
-                row = self._row_for_event(
-                    conn,
-                    table="entity_resolution_decisions",
-                    event_id=committed.event_id,
-                    identity="entity resolution decision",
-                )
-                return self._decision_from_row(conn, row, replayed=True)
-
             result = EntityResolutionDecision(
                 decision_id=decision_id,
                 proposal_id=request.proposal_id,
@@ -718,7 +854,8 @@ class _EntityCommitMixin:
                     entity = CanonicalEntity(
                         entity_id=result.accepted_entity_id,
                         entity_kind=subject.entity_kind,
-                        created_by_decision_id=result.decision_id,
+                        created_by_kind=EntityCreationDecisionKind.RESOLUTION,
+                        created_by_decision_id=str(result.decision_id),
                         initial_version_id=result.accepted_entity_version_id,
                         authority_event_id=result.authority_event_id,
                         authority_ledger_seq=result.authority_ledger_seq,
@@ -727,13 +864,14 @@ class _EntityCommitMixin:
                     entity_data = canonical_json_bytes(entity.canonical_value())
                     conn.execute(
                         "INSERT INTO canonical_entities("
-                        "entity_id,entity_kind,created_by_decision_id,initial_version_id,"
+                        "entity_id,entity_kind,created_by_kind,created_by_decision_id,initial_version_id,"
                         "authority_event_id,authority_aggregate_version,canonical_bytes,"
-                        "canonical_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                        "canonical_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                         (
                             str(entity.entity_id),
                             entity.entity_kind.value,
-                            str(entity.created_by_decision_id),
+                            entity.created_by_kind.value,
+                            entity.created_by_decision_id,
                             str(entity.initial_version_id),
                             committed.event_id,
                             committed.aggregate_version,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
@@ -28,12 +28,15 @@ from .types import (
     EntityAliasId,
     EntityAliasKind,
     EntityContractError,
+    EntityCreationDecisionKind,
     EntityKind,
     EntityLineageDecisionKind,
     EntityMergeDecisionId,
     EntityMentionId,
+    EntityProjectionAction,
     EntityResolutionDecisionAction,
     EntityResolutionDecisionId,
+    EntityResolutionDependencyId,
     EntityResolutionProposalId,
     EntityResolutionProposalKind,
     EntityResolutionProposalVersionId,
@@ -87,7 +90,7 @@ class EntityMentionAdmissionRequest:
     entity_kind: EntityKind
     language: str
     script: EntityScript
-    normalized_text: str
+    normalized_text: str = field(repr=False)
     normalization_contract_digest: str
     idempotency_key: str
 
@@ -161,8 +164,8 @@ class EntityMention:
     start_byte: int
     end_byte: int
     evidence_text_digest: str
-    mention_text: str
-    normalized_text: str
+    mention_text: str = field(repr=False)
+    normalized_text: str = field(repr=False)
     normalization_contract_digest: str
     language: str
     script: EntityScript
@@ -343,7 +346,8 @@ class EntityMention:
 class CanonicalEntity:
     entity_id: CanonicalEntityId
     entity_kind: EntityKind
-    created_by_decision_id: EntityResolutionDecisionId
+    created_by_kind: EntityCreationDecisionKind
+    created_by_decision_id: str
     initial_version_id: CanonicalEntityVersionId
     authority_event_id: EventId
     authority_ledger_seq: int
@@ -353,9 +357,14 @@ class CanonicalEntity:
         _require_typed(self.entity_id, CanonicalEntityId, field="entity_id")
         _require_typed(self.entity_kind, EntityKind, field="entity_kind")
         _require_typed(
+            self.created_by_kind,
+            EntityCreationDecisionKind,
+            field="created_by_kind",
+        )
+        bounded_text(
             self.created_by_decision_id,
-            EntityResolutionDecisionId,
             field="created_by_decision_id",
+            maximum_bytes=36,
         )
         _require_typed(
             self.initial_version_id,
@@ -379,7 +388,8 @@ class CanonicalEntity:
         return {
             "entity_id": str(self.entity_id),
             "entity_kind": self.entity_kind.value,
-            "created_by_decision_id": str(self.created_by_decision_id),
+            "created_by_kind": self.created_by_kind.value,
+            "created_by_decision_id": self.created_by_decision_id,
             "initial_version_id": str(self.initial_version_id),
             "trust_scope": TrustScope.ADMITTED.value,
         }
@@ -514,8 +524,8 @@ class EntityAlias:
     alias_id: EntityAliasId
     entity_id: CanonicalEntityId
     entity_version_id: CanonicalEntityVersionId
-    alias_text: str
-    normalized_text: str
+    alias_text: str = field(repr=False)
+    normalized_text: str = field(repr=False)
     normalization_contract_digest: str
     language: str
     script: EntityScript
@@ -1158,10 +1168,58 @@ class EntityResolutionDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class EntityLineageVersion:
+    entity_id: CanonicalEntityId
+    entity_version_id: CanonicalEntityVersionId
+
+    def __post_init__(self) -> None:
+        _require_typed(self.entity_id, CanonicalEntityId, field="lineage_entity_id")
+        _require_typed(
+            self.entity_version_id,
+            CanonicalEntityVersionId,
+            field="lineage_entity_version_id",
+        )
+
+    def canonical_value(self) -> dict[str, str]:
+        return {
+            "entity_id": str(self.entity_id),
+            "entity_version_id": str(self.entity_version_id),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EntityMergePredecessor:
+    entity_id: CanonicalEntityId
+    expected_entity_version_id: CanonicalEntityVersionId
+    merged_entity_version_id: CanonicalEntityVersionId
+
+    def __post_init__(self) -> None:
+        _require_typed(self.entity_id, CanonicalEntityId, field="merge_entity_id")
+        _require_typed(
+            self.expected_entity_version_id,
+            CanonicalEntityVersionId,
+            field="merge_expected_entity_version_id",
+        )
+        _require_typed(
+            self.merged_entity_version_id,
+            CanonicalEntityVersionId,
+            field="merge_result_entity_version_id",
+        )
+        if self.expected_entity_version_id == self.merged_entity_version_id:
+            raise EntityContractError("merge must create a later predecessor version")
+
+    def canonical_value(self) -> dict[str, str]:
+        return {
+            "entity_id": str(self.entity_id),
+            "expected_entity_version_id": str(self.expected_entity_version_id),
+            "merged_entity_version_id": str(self.merged_entity_version_id),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class EntityMergeDecisionRequest:
     merge_decision_id: EntityMergeDecisionId
-    predecessor_entity_ids: tuple[CanonicalEntityId, ...]
-    expected_predecessor_version_ids: tuple[CanonicalEntityVersionId, ...]
+    predecessors: tuple[EntityLineageVersion, ...]
     successor_entity_id: CanonicalEntityId
     successor_entity_version_id: CanonicalEntityVersionId
     preferred_continuation_entity_id: CanonicalEntityId
@@ -1176,24 +1234,17 @@ class EntityMergeDecisionRequest:
             EntityMergeDecisionId,
             field="merge_decision_id",
         )
-        _require_sorted_ids(
-            self.predecessor_entity_ids,
-            CanonicalEntityId,
-            field="predecessor_entity_ids",
-            minimum=2,
-        )
-        _require_sorted_ids(
-            self.expected_predecessor_version_ids,
-            CanonicalEntityVersionId,
-            field="expected_predecessor_version_ids",
-            minimum=2,
-        )
-        if len(self.predecessor_entity_ids) != len(
-            self.expected_predecessor_version_ids
+        if not isinstance(self.predecessors, tuple) or len(self.predecessors) < 2:
+            raise EntityContractError("merge requires at least two predecessors")
+        if any(not isinstance(item, EntityLineageVersion) for item in self.predecessors):
+            raise EntityContractError("merge predecessors must be typed")
+        predecessor_texts = tuple(str(item.entity_id) for item in self.predecessors)
+        if predecessor_texts != tuple(sorted(set(predecessor_texts))):
+            raise EntityContractError("merge predecessors must be sorted and unique")
+        if len({item.entity_version_id for item in self.predecessors}) != len(
+            self.predecessors
         ):
-            raise EntityContractError(
-                "merge predecessors and expected versions must align"
-            )
+            raise EntityContractError("merge expected versions must be unique")
         _require_typed(
             self.successor_entity_id,
             CanonicalEntityId,
@@ -1209,7 +1260,9 @@ class EntityMergeDecisionRequest:
             CanonicalEntityId,
             field="preferred_continuation_entity_id",
         )
-        if self.preferred_continuation_entity_id not in self.predecessor_entity_ids:
+        if self.preferred_continuation_entity_id not in {
+            item.entity_id for item in self.predecessors
+        }:
             raise EntityContractError(
                 "merge preferred continuation must be one predecessor"
             )
@@ -1233,12 +1286,7 @@ class EntityMergeDecisionRequest:
     def canonical_value(self) -> dict[str, object]:
         return {
             "merge_decision_id": str(self.merge_decision_id),
-            "predecessor_entity_ids": [
-                str(value) for value in self.predecessor_entity_ids
-            ],
-            "expected_predecessor_version_ids": [
-                str(value) for value in self.expected_predecessor_version_ids
-            ],
+            "predecessors": [item.canonical_value() for item in self.predecessors],
             "successor_entity_id": str(self.successor_entity_id),
             "successor_entity_version_id": str(
                 self.successor_entity_version_id
@@ -1255,6 +1303,98 @@ class EntityMergeDecisionRequest:
 
     @property
     def digest(self) -> str:
+        return digest_canonical(self.canonical_value())
+
+
+@dataclass(frozen=True, slots=True)
+class EntityMergeDecision:
+    merge_decision_id: EntityMergeDecisionId
+    predecessors: tuple[EntityMergePredecessor, ...]
+    successor_entity_id: CanonicalEntityId
+    successor_entity_version_id: CanonicalEntityVersionId
+    preferred_continuation_entity_id: CanonicalEntityId
+    basis_resolution_proposal_ids: tuple[EntityResolutionProposalId, ...]
+    reason_code: str
+    decision_policy_version: str
+    authority_event_id: EventId
+    authority_ledger_seq: int
+    recorded_at: UtcTimestamp
+    replayed: bool = False
+
+    def __post_init__(self) -> None:
+        _require_typed(
+            self.merge_decision_id,
+            EntityMergeDecisionId,
+            field="merge_decision_id",
+        )
+        if not isinstance(self.predecessors, tuple) or len(self.predecessors) < 2:
+            raise EntityContractError("retained merge requires at least two predecessors")
+        if any(not isinstance(item, EntityMergePredecessor) for item in self.predecessors):
+            raise EntityContractError("retained merge predecessors must be typed")
+        entity_texts = tuple(str(item.entity_id) for item in self.predecessors)
+        if entity_texts != tuple(sorted(set(entity_texts))):
+            raise EntityContractError("retained merge predecessors must be sorted and unique")
+        _require_typed(
+            self.successor_entity_id,
+            CanonicalEntityId,
+            field="merge_successor_entity_id",
+        )
+        _require_typed(
+            self.successor_entity_version_id,
+            CanonicalEntityVersionId,
+            field="merge_successor_entity_version_id",
+        )
+        _require_typed(
+            self.preferred_continuation_entity_id,
+            CanonicalEntityId,
+            field="merge_preferred_continuation_entity_id",
+        )
+        if self.preferred_continuation_entity_id not in {
+            item.entity_id for item in self.predecessors
+        }:
+            raise EntityContractError(
+                "retained merge preferred continuation must be a predecessor"
+            )
+        _require_sorted_ids(
+            self.basis_resolution_proposal_ids,
+            EntityResolutionProposalId,
+            field="merge_basis_resolution_proposal_ids",
+        )
+        bounded_token(self.reason_code, field="merge_reason_code")
+        bounded_token(
+            self.decision_policy_version,
+            field="merge_decision_policy_version",
+        )
+        _require_typed(self.authority_event_id, EventId, field="merge_authority_event_id")
+        bounded_int(
+            self.authority_ledger_seq,
+            field="merge_authority_ledger_seq",
+            minimum=1,
+            maximum=2**63 - 1,
+        )
+        _require_typed(self.recorded_at, UtcTimestamp, field="merge_recorded_at")
+        if not isinstance(self.replayed, bool):
+            raise EntityContractError("merge replay flag must be boolean")
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "merge_decision_id": str(self.merge_decision_id),
+            "predecessors": [item.canonical_value() for item in self.predecessors],
+            "successor_entity_id": str(self.successor_entity_id),
+            "successor_entity_version_id": str(self.successor_entity_version_id),
+            "preferred_continuation_entity_id": str(
+                self.preferred_continuation_entity_id
+            ),
+            "basis_resolution_proposal_ids": [
+                str(value) for value in self.basis_resolution_proposal_ids
+            ],
+            "reason_code": self.reason_code,
+            "decision_policy_version": self.decision_policy_version,
+            "trust_scope": TrustScope.ADMITTED.value,
+        }
+
+    @property
+    def canonical_digest(self) -> str:
         return digest_canonical(self.canonical_value())
 
 
@@ -1283,8 +1423,7 @@ class EntitySplitDecisionRequest:
     split_decision_id: EntitySplitDecisionId
     source_entity_id: CanonicalEntityId
     expected_source_version_id: CanonicalEntityVersionId
-    successor_entity_ids: tuple[CanonicalEntityId, ...]
-    successor_entity_version_ids: tuple[CanonicalEntityVersionId, ...]
+    successors: tuple[EntityLineageVersion, ...]
     allocations: tuple[EntitySplitAllocation, ...]
     reason_code: str
     decision_policy_version: str
@@ -1297,25 +1436,18 @@ class EntitySplitDecisionRequest:
             ("expected_source_version_id", CanonicalEntityVersionId),
         ):
             _require_typed(getattr(self, field_name), expected, field=field_name)
-        _require_sorted_ids(
-            self.successor_entity_ids,
-            CanonicalEntityId,
-            field="split_successor_entity_ids",
-            minimum=2,
-        )
-        _require_sorted_ids(
-            self.successor_entity_version_ids,
-            CanonicalEntityVersionId,
-            field="split_successor_entity_version_ids",
-            minimum=2,
-        )
-        if len(self.successor_entity_ids) != len(
-            self.successor_entity_version_ids
+        if not isinstance(self.successors, tuple) or len(self.successors) < 2:
+            raise EntityContractError("split requires at least two successors")
+        if any(not isinstance(item, EntityLineageVersion) for item in self.successors):
+            raise EntityContractError("split successors must be typed")
+        successor_texts = tuple(str(item.entity_id) for item in self.successors)
+        if successor_texts != tuple(sorted(set(successor_texts))):
+            raise EntityContractError("split successors must be sorted and unique")
+        if len({item.entity_version_id for item in self.successors}) != len(
+            self.successors
         ):
-            raise EntityContractError(
-                "split successors and versions must align"
-            )
-        if self.source_entity_id in self.successor_entity_ids:
+            raise EntityContractError("split successor versions must be unique")
+        if self.source_entity_id in {item.entity_id for item in self.successors}:
             raise EntityContractError(
                 "split successor identities must be distinct from the source"
             )
@@ -1336,13 +1468,13 @@ class EntitySplitDecisionRequest:
         ):
             raise EntityContractError("split mention allocations must be unique")
         if not {item.successor_entity_id for item in self.allocations}.issubset(
-            set(self.successor_entity_ids)
+            {item.entity_id for item in self.successors}
         ):
             raise EntityContractError(
                 "split allocation names an unknown successor entity"
             )
         if {item.successor_entity_id for item in self.allocations} != set(
-            self.successor_entity_ids
+            item.entity_id for item in self.successors
         ):
             raise EntityContractError(
                 "every split successor requires an explicit mention allocation"
@@ -1363,12 +1495,7 @@ class EntitySplitDecisionRequest:
             "split_decision_id": str(self.split_decision_id),
             "source_entity_id": str(self.source_entity_id),
             "expected_source_version_id": str(self.expected_source_version_id),
-            "successor_entity_ids": [
-                str(value) for value in self.successor_entity_ids
-            ],
-            "successor_entity_version_ids": [
-                str(value) for value in self.successor_entity_version_ids
-            ],
+            "successors": [item.canonical_value() for item in self.successors],
             "allocations": [item.canonical_value() for item in self.allocations],
             "reason_code": self.reason_code,
             "decision_policy_version": self.decision_policy_version,
@@ -1380,13 +1507,93 @@ class EntitySplitDecisionRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class EntitySplitDecision:
+    split_decision_id: EntitySplitDecisionId
+    source_entity_id: CanonicalEntityId
+    expected_source_version_id: CanonicalEntityVersionId
+    source_split_version_id: CanonicalEntityVersionId
+    successors: tuple[EntityLineageVersion, ...]
+    allocations: tuple[EntitySplitAllocation, ...]
+    reason_code: str
+    decision_policy_version: str
+    authority_event_id: EventId
+    authority_ledger_seq: int
+    recorded_at: UtcTimestamp
+    replayed: bool = False
+
+    def __post_init__(self) -> None:
+        _require_typed(
+            self.split_decision_id,
+            EntitySplitDecisionId,
+            field="split_decision_id",
+        )
+        _require_typed(self.source_entity_id, CanonicalEntityId, field="split_source_id")
+        _require_typed(
+            self.expected_source_version_id,
+            CanonicalEntityVersionId,
+            field="split_expected_source_version_id",
+        )
+        _require_typed(
+            self.source_split_version_id,
+            CanonicalEntityVersionId,
+            field="split_source_result_version_id",
+        )
+        if self.source_split_version_id == self.expected_source_version_id:
+            raise EntityContractError("split must create a later source version")
+        if not isinstance(self.successors, tuple) or len(self.successors) < 2:
+            raise EntityContractError("retained split requires at least two successors")
+        if any(not isinstance(item, EntityLineageVersion) for item in self.successors):
+            raise EntityContractError("retained split successors must be typed")
+        successor_texts = tuple(str(item.entity_id) for item in self.successors)
+        if successor_texts != tuple(sorted(set(successor_texts))):
+            raise EntityContractError("retained split successors must be sorted and unique")
+        if self.source_entity_id in {item.entity_id for item in self.successors}:
+            raise EntityContractError("retained split successors differ from source")
+        if not isinstance(self.allocations, tuple) or len(self.allocations) < 2:
+            raise EntityContractError("retained split requires mention allocations")
+        if any(not isinstance(item, EntitySplitAllocation) for item in self.allocations):
+            raise EntityContractError("retained split allocations must be typed")
+        bounded_token(self.reason_code, field="split_reason_code")
+        bounded_token(
+            self.decision_policy_version,
+            field="split_decision_policy_version",
+        )
+        _require_typed(self.authority_event_id, EventId, field="split_authority_event_id")
+        bounded_int(
+            self.authority_ledger_seq,
+            field="split_authority_ledger_seq",
+            minimum=1,
+            maximum=2**63 - 1,
+        )
+        _require_typed(self.recorded_at, UtcTimestamp, field="split_recorded_at")
+        if not isinstance(self.replayed, bool):
+            raise EntityContractError("split replay flag must be boolean")
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "split_decision_id": str(self.split_decision_id),
+            "source_entity_id": str(self.source_entity_id),
+            "expected_source_version_id": str(self.expected_source_version_id),
+            "source_split_version_id": str(self.source_split_version_id),
+            "successors": [item.canonical_value() for item in self.successors],
+            "allocations": [item.canonical_value() for item in self.allocations],
+            "reason_code": self.reason_code,
+            "decision_policy_version": self.decision_policy_version,
+            "trust_scope": TrustScope.ADMITTED.value,
+        }
+
+    @property
+    def canonical_digest(self) -> str:
+        return digest_canonical(self.canonical_value())
+
+
+@dataclass(frozen=True, slots=True)
 class EntityReversalDecisionRequest:
     reversal_decision_id: EntityReversalDecisionId
     target_kind: EntityReversalTargetKind
     target_decision_id: str
     expected_current_entity_version_ids: tuple[CanonicalEntityVersionId, ...]
-    restored_entity_ids: tuple[CanonicalEntityId, ...]
-    restored_entity_version_ids: tuple[CanonicalEntityVersionId, ...]
+    restorations: tuple[EntityLineageVersion, ...]
     reason_code: str
     decision_policy_version: str
     idempotency_key: str
@@ -1408,20 +1615,17 @@ class EntityReversalDecisionRequest:
             CanonicalEntityVersionId,
             field="reversal_expected_current_versions",
         )
-        _require_sorted_ids(
-            self.restored_entity_ids,
-            CanonicalEntityId,
-            field="reversal_restored_entity_ids",
-        )
-        _require_sorted_ids(
-            self.restored_entity_version_ids,
-            CanonicalEntityVersionId,
-            field="reversal_restored_entity_version_ids",
-        )
-        if len(self.restored_entity_ids) != len(self.restored_entity_version_ids):
-            raise EntityContractError(
-                "reversal restored entities and versions must align"
-            )
+        if not isinstance(self.restorations, tuple) or not self.restorations:
+            raise EntityContractError("reversal requires restorations")
+        if any(not isinstance(item, EntityLineageVersion) for item in self.restorations):
+            raise EntityContractError("reversal restorations must be typed")
+        restoration_texts = tuple(str(item.entity_id) for item in self.restorations)
+        if restoration_texts != tuple(sorted(set(restoration_texts))):
+            raise EntityContractError("reversal restorations must be sorted and unique")
+        if len({item.entity_version_id for item in self.restorations}) != len(
+            self.restorations
+        ):
+            raise EntityContractError("reversal restoration versions must be unique")
         bounded_token(self.reason_code, field="reversal_reason_code")
         bounded_token(
             self.decision_policy_version,
@@ -1441,18 +1645,366 @@ class EntityReversalDecisionRequest:
             "expected_current_entity_version_ids": [
                 str(value) for value in self.expected_current_entity_version_ids
             ],
-            "restored_entity_ids": [
-                str(value) for value in self.restored_entity_ids
-            ],
-            "restored_entity_version_ids": [
-                str(value) for value in self.restored_entity_version_ids
-            ],
+            "restorations": [item.canonical_value() for item in self.restorations],
             "reason_code": self.reason_code,
             "decision_policy_version": self.decision_policy_version,
         }
 
     @property
     def digest(self) -> str:
+        return digest_canonical(self.canonical_value())
+
+
+@dataclass(frozen=True, slots=True)
+class EntityReversalDecision:
+    reversal_decision_id: EntityReversalDecisionId
+    target_kind: EntityReversalTargetKind
+    target_decision_id: str
+    expected_current_entity_version_ids: tuple[CanonicalEntityVersionId, ...]
+    restorations: tuple[EntityLineageVersion, ...]
+    supersessions: tuple[EntityLineageVersion, ...]
+    reason_code: str
+    decision_policy_version: str
+    authority_event_id: EventId
+    authority_ledger_seq: int
+    recorded_at: UtcTimestamp
+    replayed: bool = False
+
+    def __post_init__(self) -> None:
+        _require_typed(
+            self.reversal_decision_id,
+            EntityReversalDecisionId,
+            field="reversal_decision_id",
+        )
+        _require_typed(self.target_kind, EntityReversalTargetKind, field="target_kind")
+        bounded_text(
+            self.target_decision_id,
+            field="reversal_target_decision_id",
+            maximum_bytes=36,
+        )
+        _require_sorted_ids(
+            self.expected_current_entity_version_ids,
+            CanonicalEntityVersionId,
+            field="reversal_expected_current_versions",
+        )
+        for field_name, values in (
+            ("reversal_restorations", self.restorations),
+            ("reversal_supersessions", self.supersessions),
+        ):
+            if not isinstance(values, tuple) or not values:
+                raise EntityContractError(f"{field_name} must be non-empty")
+            if any(not isinstance(item, EntityLineageVersion) for item in values):
+                raise EntityContractError(f"{field_name} must be typed")
+            identities = tuple(str(item.entity_id) for item in values)
+            if identities != tuple(sorted(set(identities))):
+                raise EntityContractError(f"{field_name} must be sorted and unique")
+        if {item.entity_id for item in self.restorations} & {
+            item.entity_id for item in self.supersessions
+        }:
+            raise EntityContractError(
+                "reversal restorations and supersessions must be disjoint"
+            )
+        bounded_token(self.reason_code, field="reversal_reason_code")
+        bounded_token(
+            self.decision_policy_version,
+            field="reversal_decision_policy_version",
+        )
+        _require_typed(
+            self.authority_event_id,
+            EventId,
+            field="reversal_authority_event_id",
+        )
+        bounded_int(
+            self.authority_ledger_seq,
+            field="reversal_authority_ledger_seq",
+            minimum=1,
+            maximum=2**63 - 1,
+        )
+        _require_typed(self.recorded_at, UtcTimestamp, field="reversal_recorded_at")
+        if not isinstance(self.replayed, bool):
+            raise EntityContractError("reversal replay flag must be boolean")
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "reversal_decision_id": str(self.reversal_decision_id),
+            "target_kind": self.target_kind.value,
+            "target_decision_id": self.target_decision_id,
+            "expected_current_entity_version_ids": [
+                str(value) for value in self.expected_current_entity_version_ids
+            ],
+            "restorations": [item.canonical_value() for item in self.restorations],
+            "supersessions": [item.canonical_value() for item in self.supersessions],
+            "reason_code": self.reason_code,
+            "decision_policy_version": self.decision_policy_version,
+            "trust_scope": TrustScope.ADMITTED.value,
+        }
+
+    @property
+    def canonical_digest(self) -> str:
+        return digest_canonical(self.canonical_value())
+
+
+@dataclass(frozen=True, slots=True)
+class EntityResolutionDependencyRequest:
+    dependency_id: EntityResolutionDependencyId
+    dependent_proposal_id: ProposalEnvelopeId
+    expected_dependent_proposal_digest: str
+    resolution_proposal_id: EntityResolutionProposalId
+    expected_resolution_proposal_version_id: EntityResolutionProposalVersionId
+    expected_resolution_proposal_digest: str
+    material: bool
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        for field_name, expected in (
+            ("dependency_id", EntityResolutionDependencyId),
+            ("dependent_proposal_id", ProposalEnvelopeId),
+            ("resolution_proposal_id", EntityResolutionProposalId),
+            (
+                "expected_resolution_proposal_version_id",
+                EntityResolutionProposalVersionId,
+            ),
+        ):
+            _require_typed(getattr(self, field_name), expected, field=field_name)
+        canonical_digest(
+            self.expected_dependent_proposal_digest,
+            field="expected_dependent_proposal_digest",
+        )
+        canonical_digest(
+            self.expected_resolution_proposal_digest,
+            field="expected_resolution_proposal_digest",
+        )
+        if not isinstance(self.material, bool):
+            raise EntityContractError("resolution dependency material flag must be boolean")
+        bounded_text(
+            self.idempotency_key,
+            field="resolution_dependency_idempotency_key",
+            maximum_bytes=256,
+        )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "dependency_id": str(self.dependency_id),
+            "dependent_proposal_id": str(self.dependent_proposal_id),
+            "expected_dependent_proposal_digest": (
+                self.expected_dependent_proposal_digest
+            ),
+            "resolution_proposal_id": str(self.resolution_proposal_id),
+            "expected_resolution_proposal_version_id": str(
+                self.expected_resolution_proposal_version_id
+            ),
+            "expected_resolution_proposal_digest": (
+                self.expected_resolution_proposal_digest
+            ),
+            "material": self.material,
+        }
+
+    @property
+    def digest(self) -> str:
+        return digest_canonical(self.canonical_value())
+
+
+@dataclass(frozen=True, slots=True)
+class EntityResolutionDependency:
+    dependency_id: EntityResolutionDependencyId
+    dependent_proposal_id: ProposalEnvelopeId
+    dependent_proposal_digest: str
+    resolution_proposal_id: EntityResolutionProposalId
+    proposal_version_id: EntityResolutionProposalVersionId
+    proposal_version_digest: str
+    material: bool
+    authority_event_id: EventId
+    authority_ledger_seq: int
+    recorded_at: UtcTimestamp
+    replayed: bool = False
+
+    def __post_init__(self) -> None:
+        for field_name, expected in (
+            ("dependency_id", EntityResolutionDependencyId),
+            ("dependent_proposal_id", ProposalEnvelopeId),
+            ("resolution_proposal_id", EntityResolutionProposalId),
+            ("proposal_version_id", EntityResolutionProposalVersionId),
+            ("authority_event_id", EventId),
+            ("recorded_at", UtcTimestamp),
+        ):
+            _require_typed(getattr(self, field_name), expected, field=field_name)
+        canonical_digest(
+            self.dependent_proposal_digest,
+            field="dependent_proposal_digest",
+        )
+        canonical_digest(
+            self.proposal_version_digest,
+            field="dependency_resolution_proposal_digest",
+        )
+        if not isinstance(self.material, bool):
+            raise EntityContractError("resolution dependency material flag must be boolean")
+        bounded_int(
+            self.authority_ledger_seq,
+            field="resolution_dependency_authority_ledger_seq",
+            minimum=1,
+            maximum=2**63 - 1,
+        )
+        if not isinstance(self.replayed, bool):
+            raise EntityContractError("resolution dependency replay flag must be boolean")
+
+    @property
+    def trust_scope(self) -> TrustScope:
+        return TrustScope.PROPOSED
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "dependency_id": str(self.dependency_id),
+            "dependent_proposal_id": str(self.dependent_proposal_id),
+            "dependent_proposal_digest": self.dependent_proposal_digest,
+            "resolution_proposal_id": str(self.resolution_proposal_id),
+            "proposal_version_id": str(self.proposal_version_id),
+            "proposal_version_digest": self.proposal_version_digest,
+            "material": self.material,
+            "trust_scope": self.trust_scope.value,
+        }
+
+    @property
+    def canonical_digest(self) -> str:
+        return digest_canonical(self.canonical_value())
+
+
+@dataclass(frozen=True, slots=True)
+class EntityResolutionDependencyStatus:
+    dependency_id: EntityResolutionDependencyId
+    resolution_proposal_id: EntityResolutionProposalId
+    proposal_version_id: EntityResolutionProposalVersionId
+    state: EntityResolutionState
+    material: bool
+
+    def __post_init__(self) -> None:
+        for field_name, expected in (
+            ("dependency_id", EntityResolutionDependencyId),
+            ("resolution_proposal_id", EntityResolutionProposalId),
+            ("proposal_version_id", EntityResolutionProposalVersionId),
+            ("state", EntityResolutionState),
+        ):
+            _require_typed(getattr(self, field_name), expected, field=field_name)
+        if not isinstance(self.material, bool):
+            raise EntityContractError("dependency status material flag must be boolean")
+
+    @property
+    def materially_unresolved(self) -> bool:
+        return self.material and self.state is not EntityResolutionState.ACCEPTED
+
+
+@dataclass(frozen=True, slots=True)
+class EntityDependentAdmissionGuard:
+    dependent_proposal_id: ProposalEnvelopeId
+    dependent_proposal_digest: str
+    dependencies: tuple[EntityResolutionDependencyStatus, ...]
+    checked_at_ledger_seq: int
+
+    def __post_init__(self) -> None:
+        _require_typed(
+            self.dependent_proposal_id,
+            ProposalEnvelopeId,
+            field="dependent_guard_proposal_id",
+        )
+        canonical_digest(
+            self.dependent_proposal_digest,
+            field="dependent_guard_proposal_digest",
+        )
+        if not isinstance(self.dependencies, tuple) or not self.dependencies:
+            raise EntityContractError(
+                "dependent-admission guard needs retained dependencies"
+            )
+        if any(
+            not isinstance(item, EntityResolutionDependencyStatus)
+            for item in self.dependencies
+        ):
+            raise EntityContractError(
+                "dependent-admission guard entries must be typed"
+            )
+        keys = tuple(str(item.dependency_id) for item in self.dependencies)
+        if keys != tuple(sorted(set(keys))):
+            raise EntityContractError(
+                "dependent-admission guard entries must be sorted and unique"
+            )
+        bounded_int(
+            self.checked_at_ledger_seq,
+            field="dependent_guard_ledger_seq",
+            minimum=1,
+            maximum=2**63 - 1,
+        )
+
+    @property
+    def materially_unresolved(self) -> bool:
+        return any(item.materially_unresolved for item in self.dependencies)
+
+    def require_resolved(self) -> None:
+        if self.materially_unresolved:
+            raise EntityContractError(
+                "materially unresolved entity identity blocks dependent admission"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class EntityProjectionEvent:
+    projection_event_id: EventId
+    source_event_id: EventId
+    source_ledger_seq: int
+    action: EntityProjectionAction
+    entity_id: CanonicalEntityId
+    entity_version_id: CanonicalEntityVersionId
+    preferred_entity_id: CanonicalEntityId | None
+    lifecycle: CanonicalEntityLifecycle
+    recorded_at: UtcTimestamp
+
+    def __post_init__(self) -> None:
+        for field_name, expected in (
+            ("projection_event_id", EventId),
+            ("source_event_id", EventId),
+            ("action", EntityProjectionAction),
+            ("entity_id", CanonicalEntityId),
+            ("entity_version_id", CanonicalEntityVersionId),
+            ("lifecycle", CanonicalEntityLifecycle),
+            ("recorded_at", UtcTimestamp),
+        ):
+            _require_typed(getattr(self, field_name), expected, field=field_name)
+        bounded_int(
+            self.source_ledger_seq,
+            field="entity_projection_source_ledger_seq",
+            minimum=1,
+            maximum=2**63 - 1,
+        )
+        if self.action is EntityProjectionAction.UPSERT:
+            _require_typed(
+                self.preferred_entity_id,
+                CanonicalEntityId,
+                field="entity_projection_preferred_entity_id",
+            )
+        elif self.preferred_entity_id is not None:
+            raise EntityContractError(
+                "entity projection REMOVE cannot retain a preferred identity"
+            )
+
+    @property
+    def trust_scope(self) -> TrustScope:
+        return TrustScope.ADMITTED
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "projection_event_id": str(self.projection_event_id),
+            "source_event_id": str(self.source_event_id),
+            "source_ledger_seq": self.source_ledger_seq,
+            "action": self.action.value,
+            "entity_id": str(self.entity_id),
+            "entity_version_id": str(self.entity_version_id),
+            "preferred_entity_id": (
+                None
+                if self.preferred_entity_id is None
+                else str(self.preferred_entity_id)
+            ),
+            "lifecycle": self.lifecycle.value,
+        }
+
+    @property
+    def canonical_digest(self) -> str:
         return digest_canonical(self.canonical_value())
 
 

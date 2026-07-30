@@ -26,7 +26,9 @@ from newsroom.entities import (
     EntityAliasId,
     EntityAliasKind,
     EntityContractError,
+    EntityCreationDecisionKind,
     EntityKind,
+    EntityLineageVersion,
     EntityLineageDecisionKind,
     EntityMergeDecisionId,
     EntityMergeDecisionRequest,
@@ -232,7 +234,8 @@ def test_canonical_entity_and_alias_are_admitted_but_not_name_identified() -> No
     entity = CanonicalEntity(
         entity_id=entity_id,
         entity_kind=EntityKind.GOVERNMENT_BODY,
-        created_by_decision_id=decision_id,
+        created_by_kind=EntityCreationDecisionKind.RESOLUTION,
+        created_by_decision_id=str(decision_id),
         initial_version_id=version_id,
         authority_event_id=_id(EventId, 4502),
         authority_ledger_seq=101,
@@ -286,20 +289,18 @@ def test_merge_split_and_reversal_requests_preserve_explicit_lineage() -> None:
             key=str,
         )
     )
-    version_ids = tuple(
-        sorted(
-            (
-                _id(CanonicalEntityVersionId, 4611),
-                _id(CanonicalEntityVersionId, 4612),
-            ),
-            key=str,
-        )
+    version_ids = (
+        _id(CanonicalEntityVersionId, 4611),
+        _id(CanonicalEntityVersionId, 4612),
+    )
+    predecessors = tuple(
+        EntityLineageVersion(entity_id, version_id)
+        for entity_id, version_id in zip(entity_ids, version_ids, strict=True)
     )
     basis = (_id(EntityResolutionProposalId, 4301),)
     merge = EntityMergeDecisionRequest(
         merge_decision_id=_id(EntityMergeDecisionId, 4620),
-        predecessor_entity_ids=entity_ids,
-        expected_predecessor_version_ids=version_ids,
+        predecessors=predecessors,
         successor_entity_id=_id(CanonicalEntityId, 4603),
         successor_entity_version_id=_id(CanonicalEntityVersionId, 4613),
         preferred_continuation_entity_id=entity_ids[0],
@@ -316,13 +317,14 @@ def test_merge_split_and_reversal_requests_preserve_explicit_lineage() -> None:
             key=str,
         )
     )
-    successor_versions = tuple(
-        sorted(
-            (
-                _id(CanonicalEntityVersionId, 4712),
-                _id(CanonicalEntityVersionId, 4713),
-            ),
-            key=str,
+    successor_versions = (
+        _id(CanonicalEntityVersionId, 4712),
+        _id(CanonicalEntityVersionId, 4713),
+    )
+    successors = tuple(
+        EntityLineageVersion(entity_id, version_id)
+        for entity_id, version_id in zip(
+            successor_ids, successor_versions, strict=True
         )
     )
     allocations = tuple(
@@ -338,8 +340,7 @@ def test_merge_split_and_reversal_requests_preserve_explicit_lineage() -> None:
         split_decision_id=_id(EntitySplitDecisionId, 4720),
         source_entity_id=_id(CanonicalEntityId, 4701),
         expected_source_version_id=_id(CanonicalEntityVersionId, 4711),
-        successor_entity_ids=successor_ids,
-        successor_entity_version_ids=successor_versions,
+        successors=successors,
         allocations=allocations,
         reason_code="EDITORIAL_SPLIT",
         decision_policy_version="entity-resolution-policy-v1",
@@ -351,9 +352,13 @@ def test_merge_split_and_reversal_requests_preserve_explicit_lineage() -> None:
         reversal_decision_id=_id(EntityReversalDecisionId, 4730),
         target_kind=EntityReversalTargetKind.SPLIT,
         target_decision_id=str(split.split_decision_id),
-        expected_current_entity_version_ids=successor_versions,
-        restored_entity_ids=(_id(CanonicalEntityId, 4701),),
-        restored_entity_version_ids=(_id(CanonicalEntityVersionId, 4714),),
+        expected_current_entity_version_ids=tuple(sorted(successor_versions, key=str)),
+        restorations=(
+            EntityLineageVersion(
+                _id(CanonicalEntityId, 4701),
+                _id(CanonicalEntityVersionId, 4714),
+            ),
+        ),
         reason_code="EDITORIAL_REVERSAL",
         decision_policy_version="entity-resolution-policy-v1",
         idempotency_key="entity-reversal-v1",

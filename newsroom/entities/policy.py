@@ -16,9 +16,11 @@ from newsroom.extraction.policy import merge_extraction_authority_registries
 from newsroom.extraction.types import ProposalEnvelopeId
 
 from .models import (
+    EntityLineageVersion,
     EntityMentionAdmissionRequest,
     EntityMergeDecisionRequest,
     EntityResolutionDecisionRequest,
+    EntityResolutionDependencyRequest,
     EntityResolutionProposalRequest,
     EntityReversalDecisionRequest,
     EntitySplitAllocation,
@@ -35,6 +37,7 @@ from .types import (
     EntityMentionId,
     EntityResolutionDecisionAction,
     EntityResolutionDecisionId,
+    EntityResolutionDependencyId,
     EntityResolutionProposalId,
     EntityResolutionProposalKind,
     EntityResolutionProposalVersionId,
@@ -47,6 +50,7 @@ from .types import (
 ENTITY_MENTION_ADMIT_COMMAND = "entity.mention.admit"
 ENTITY_RESOLUTION_PROPOSE_COMMAND = "entity.resolution.propose"
 ENTITY_RESOLUTION_DECIDE_COMMAND = "entity.resolution.decide"
+ENTITY_RESOLUTION_DEPENDENCY_BIND_COMMAND = "entity.resolution.dependency.bind"
 ENTITY_MERGE_DECIDE_COMMAND = "entity.merge.decide"
 ENTITY_SPLIT_DECIDE_COMMAND = "entity.split.decide"
 ENTITY_REVERSAL_DECIDE_COMMAND = "entity.reversal.decide"
@@ -55,6 +59,7 @@ ENTITY_COMMAND_TYPES = frozenset(
         ENTITY_MENTION_ADMIT_COMMAND,
         ENTITY_RESOLUTION_PROPOSE_COMMAND,
         ENTITY_RESOLUTION_DECIDE_COMMAND,
+        ENTITY_RESOLUTION_DEPENDENCY_BIND_COMMAND,
         ENTITY_MERGE_DECIDE_COMMAND,
         ENTITY_SPLIT_DECIDE_COMMAND,
         ENTITY_REVERSAL_DECIDE_COMMAND,
@@ -64,6 +69,7 @@ ENTITY_COMMAND_TYPES = frozenset(
 _MENTION_SCHEMA = "entity_mention_admission_v1"
 _PROPOSAL_SCHEMA = "entity_resolution_proposal_v1"
 _DECISION_SCHEMA = "entity_resolution_decision_v1"
+_DEPENDENCY_SCHEMA = "entity_resolution_dependency_v1"
 _MERGE_SCHEMA = "entity_merge_decision_v1"
 _SPLIT_SCHEMA = "entity_split_decision_v1"
 _REVERSAL_SCHEMA = "entity_reversal_decision_v1"
@@ -137,6 +143,37 @@ def _ids(
     if not isinstance(value, list):
         raise PayloadSchemaValidationError(f"{field} must be an identifier array")
     return tuple(_required_id(item, parser, field=field) for item in value)
+
+
+def _lineage_versions_payload(
+    value: Any, *, field: str
+) -> tuple[EntityLineageVersion, ...]:
+    if not isinstance(value, list):
+        raise PayloadSchemaValidationError(
+            f"{field} must be a lineage-version array"
+        )
+    results: list[EntityLineageVersion] = []
+    for raw in value:
+        item = _object(
+            raw,
+            field=f"{field}.item",
+            keys=frozenset({"entity_id", "entity_version_id"}),
+        )
+        results.append(
+            EntityLineageVersion(
+                entity_id=_required_id(
+                    item["entity_id"],
+                    CanonicalEntityId.parse,
+                    field=f"{field}.entity_id",
+                ),
+                entity_version_id=_required_id(
+                    item["entity_version_id"],
+                    CanonicalEntityVersionId.parse,
+                    field=f"{field}.entity_version_id",
+                ),
+            )
+        )
+    return tuple(results)
 
 
 def _canonicalize_request(
@@ -371,12 +408,69 @@ def _decision_payload(value: Any) -> bytes:
     )
 
 
+def _dependency_payload(value: Any) -> bytes:
+    keys = frozenset(
+        {
+            "dependency_id",
+            "dependent_proposal_id",
+            "expected_dependent_proposal_digest",
+            "resolution_proposal_id",
+            "expected_resolution_proposal_version_id",
+            "expected_resolution_proposal_digest",
+            "material",
+        }
+    )
+
+    def build(item: dict[str, Any]) -> EntityResolutionDependencyRequest:
+        material = item["material"]
+        if not isinstance(material, bool):
+            raise PayloadSchemaValidationError("material must be boolean")
+        return EntityResolutionDependencyRequest(
+            dependency_id=_required_id(
+                item["dependency_id"],
+                EntityResolutionDependencyId.parse,
+                field="dependency_id",
+            ),
+            dependent_proposal_id=_required_id(
+                item["dependent_proposal_id"],
+                ProposalEnvelopeId.parse,
+                field="dependent_proposal_id",
+            ),
+            expected_dependent_proposal_digest=_string(
+                item["expected_dependent_proposal_digest"],
+                field="expected_dependent_proposal_digest",
+            ),
+            resolution_proposal_id=_required_id(
+                item["resolution_proposal_id"],
+                EntityResolutionProposalId.parse,
+                field="resolution_proposal_id",
+            ),
+            expected_resolution_proposal_version_id=_required_id(
+                item["expected_resolution_proposal_version_id"],
+                EntityResolutionProposalVersionId.parse,
+                field="expected_resolution_proposal_version_id",
+            ),
+            expected_resolution_proposal_digest=_string(
+                item["expected_resolution_proposal_digest"],
+                field="expected_resolution_proposal_digest",
+            ),
+            material=material,
+            idempotency_key="payload-validation-only",
+        )
+
+    return _canonicalize_request(
+        value,
+        field="entity_resolution_dependency",
+        keys=keys,
+        build=build,
+    )
+
+
 def _merge_payload(value: Any) -> bytes:
     keys = frozenset(
         {
             "merge_decision_id",
-            "predecessor_entity_ids",
-            "expected_predecessor_version_ids",
+            "predecessors",
             "successor_entity_id",
             "successor_entity_version_id",
             "preferred_continuation_entity_id",
@@ -393,15 +487,8 @@ def _merge_payload(value: Any) -> bytes:
                 EntityMergeDecisionId.parse,
                 field="merge_decision_id",
             ),
-            predecessor_entity_ids=_ids(
-                item["predecessor_entity_ids"],
-                CanonicalEntityId.parse,
-                field="predecessor_entity_ids",
-            ),
-            expected_predecessor_version_ids=_ids(
-                item["expected_predecessor_version_ids"],
-                CanonicalEntityVersionId.parse,
-                field="expected_predecessor_version_ids",
+            predecessors=_lineage_versions_payload(
+                item["predecessors"], field="predecessors"
             ),
             successor_entity_id=_required_id(
                 item["successor_entity_id"],
@@ -439,8 +526,7 @@ def _split_payload(value: Any) -> bytes:
             "split_decision_id",
             "source_entity_id",
             "expected_source_version_id",
-            "successor_entity_ids",
-            "successor_entity_version_ids",
+            "successors",
             "allocations",
             "reason_code",
             "decision_policy_version",
@@ -486,15 +572,8 @@ def _split_payload(value: Any) -> bytes:
                 CanonicalEntityVersionId.parse,
                 field="expected_source_version_id",
             ),
-            successor_entity_ids=_ids(
-                item["successor_entity_ids"],
-                CanonicalEntityId.parse,
-                field="successor_entity_ids",
-            ),
-            successor_entity_version_ids=_ids(
-                item["successor_entity_version_ids"],
-                CanonicalEntityVersionId.parse,
-                field="successor_entity_version_ids",
+            successors=_lineage_versions_payload(
+                item["successors"], field="successors"
             ),
             allocations=allocations,
             reason_code=_string(item["reason_code"], field="reason_code"),
@@ -514,8 +593,7 @@ def _reversal_payload(value: Any) -> bytes:
             "target_kind",
             "target_decision_id",
             "expected_current_entity_version_ids",
-            "restored_entity_ids",
-            "restored_entity_version_ids",
+            "restorations",
             "reason_code",
             "decision_policy_version",
         }
@@ -539,15 +617,8 @@ def _reversal_payload(value: Any) -> bytes:
                 CanonicalEntityVersionId.parse,
                 field="expected_current_entity_version_ids",
             ),
-            restored_entity_ids=_ids(
-                item["restored_entity_ids"],
-                CanonicalEntityId.parse,
-                field="restored_entity_ids",
-            ),
-            restored_entity_version_ids=_ids(
-                item["restored_entity_version_ids"],
-                CanonicalEntityVersionId.parse,
-                field="restored_entity_version_ids",
+            restorations=_lineage_versions_payload(
+                item["restorations"], field="restorations"
             ),
             reason_code=_string(item["reason_code"], field="reason_code"),
             decision_policy_version=_string(
@@ -597,6 +668,16 @@ def _golden_requests() -> tuple[Any, ...]:
         basis_codes=("EXACT_PASSAGE",),
         idempotency_key="golden-proposal",
     )
+    dependency = EntityResolutionDependencyRequest(
+        dependency_id=_id(EntityResolutionDependencyId, 5350),
+        dependent_proposal_id=_id(ProposalEnvelopeId, 5102),
+        expected_dependent_proposal_digest="sha256:" + "2" * 64,
+        resolution_proposal_id=proposal.proposal_id,
+        expected_resolution_proposal_version_id=proposal.proposal_version_id,
+        expected_resolution_proposal_digest=proposal.digest,
+        material=True,
+        idempotency_key="golden-dependency",
+    )
     entity_id = _id(CanonicalEntityId, 5401)
     version_id = _id(CanonicalEntityVersionId, 5402)
     decision = EntityResolutionDecisionRequest(
@@ -615,46 +696,53 @@ def _golden_requests() -> tuple[Any, ...]:
         idempotency_key="golden-decision",
     )
     predecessors = tuple(
-        sorted((_id(CanonicalEntityId, 5501), _id(CanonicalEntityId, 5502)), key=str)
-    )
-    predecessor_versions = tuple(
         sorted(
             (
-                _id(CanonicalEntityVersionId, 5511),
-                _id(CanonicalEntityVersionId, 5512),
+                EntityLineageVersion(
+                    _id(CanonicalEntityId, 5501),
+                    _id(CanonicalEntityVersionId, 5511),
+                ),
+                EntityLineageVersion(
+                    _id(CanonicalEntityId, 5502),
+                    _id(CanonicalEntityVersionId, 5512),
+                ),
             ),
-            key=str,
+            key=lambda item: str(item.entity_id),
         )
     )
     merge = EntityMergeDecisionRequest(
         merge_decision_id=_id(EntityMergeDecisionId, 5520),
-        predecessor_entity_ids=predecessors,
-        expected_predecessor_version_ids=predecessor_versions,
+        predecessors=predecessors,
         successor_entity_id=_id(CanonicalEntityId, 5503),
         successor_entity_version_id=_id(CanonicalEntityVersionId, 5513),
-        preferred_continuation_entity_id=predecessors[0],
+        preferred_continuation_entity_id=predecessors[0].entity_id,
         basis_resolution_proposal_ids=(proposal.proposal_id,),
         reason_code="EDITORIAL_MERGE",
         decision_policy_version="entity-resolution-policy-v1",
         idempotency_key="golden-merge",
     )
     successors = tuple(
-        sorted((_id(CanonicalEntityId, 5602), _id(CanonicalEntityId, 5603)), key=str)
-    )
-    successor_versions = tuple(
         sorted(
             (
-                _id(CanonicalEntityVersionId, 5612),
-                _id(CanonicalEntityVersionId, 5613),
+                EntityLineageVersion(
+                    _id(CanonicalEntityId, 5602),
+                    _id(CanonicalEntityVersionId, 5612),
+                ),
+                EntityLineageVersion(
+                    _id(CanonicalEntityId, 5603),
+                    _id(CanonicalEntityVersionId, 5613),
+                ),
             ),
-            key=str,
+            key=lambda item: str(item.entity_id),
         )
     )
     allocations = tuple(
         sorted(
             (
-                EntitySplitAllocation(mention.mention_id, successors[0]),
-                EntitySplitAllocation(_id(EntityMentionId, 5202), successors[1]),
+                EntitySplitAllocation(mention.mention_id, successors[0].entity_id),
+                EntitySplitAllocation(
+                    _id(EntityMentionId, 5202), successors[1].entity_id
+                ),
             ),
             key=lambda item: (str(item.mention_id), str(item.successor_entity_id)),
         )
@@ -663,8 +751,7 @@ def _golden_requests() -> tuple[Any, ...]:
         split_decision_id=_id(EntitySplitDecisionId, 5620),
         source_entity_id=_id(CanonicalEntityId, 5601),
         expected_source_version_id=_id(CanonicalEntityVersionId, 5611),
-        successor_entity_ids=successors,
-        successor_entity_version_ids=successor_versions,
+        successors=successors,
         allocations=allocations,
         reason_code="EDITORIAL_SPLIT",
         decision_policy_version="entity-resolution-policy-v1",
@@ -674,14 +761,26 @@ def _golden_requests() -> tuple[Any, ...]:
         reversal_decision_id=_id(EntityReversalDecisionId, 5630),
         target_kind=EntityReversalTargetKind.SPLIT,
         target_decision_id=str(split.split_decision_id),
-        expected_current_entity_version_ids=successor_versions,
-        restored_entity_ids=(split.source_entity_id,),
-        restored_entity_version_ids=(_id(CanonicalEntityVersionId, 5614),),
+        expected_current_entity_version_ids=tuple(
+            sorted(
+                (
+                    split.expected_source_version_id,
+                    *(item.entity_version_id for item in successors),
+                ),
+                key=str,
+            )
+        ),
+        restorations=(
+            EntityLineageVersion(
+                split.source_entity_id,
+                _id(CanonicalEntityVersionId, 5614),
+            ),
+        ),
         reason_code="EDITORIAL_REVERSAL",
         decision_policy_version="entity-resolution-policy-v1",
         idempotency_key="golden-reversal",
     )
-    return mention, proposal, decision, merge, split, reversal
+    return mention, proposal, decision, dependency, merge, split, reversal
 
 
 def entity_payload_contracts() -> tuple[PayloadSchemaContract, ...]:
@@ -690,9 +789,10 @@ def entity_payload_contracts() -> tuple[PayloadSchemaContract, ...]:
         (_MENTION_SCHEMA, "mention", _mention_payload, requests[0]),
         (_PROPOSAL_SCHEMA, "proposal", _proposal_payload, requests[1]),
         (_DECISION_SCHEMA, "decision", _decision_payload, requests[2]),
-        (_MERGE_SCHEMA, "merge", _merge_payload, requests[3]),
-        (_SPLIT_SCHEMA, "split", _split_payload, requests[4]),
-        (_REVERSAL_SCHEMA, "reversal", _reversal_payload, requests[5]),
+        (_DEPENDENCY_SCHEMA, "dependency", _dependency_payload, requests[3]),
+        (_MERGE_SCHEMA, "merge", _merge_payload, requests[4]),
+        (_SPLIT_SCHEMA, "split", _split_payload, requests[5]),
+        (_REVERSAL_SCHEMA, "reversal", _reversal_payload, requests[6]),
     )
     return tuple(
         PayloadSchemaContract(
@@ -742,6 +842,14 @@ def entity_command_definitions() -> tuple[CommandDefinition, ...]:
             _DECISION_SCHEMA,
             TrustScope.ADMITTED,
             "authority.entity.decide",
+        ),
+        (
+            ENTITY_RESOLUTION_DEPENDENCY_BIND_COMMAND,
+            "entity_resolution_dependency",
+            "entity.resolution.dependency.bound",
+            _DEPENDENCY_SCHEMA,
+            TrustScope.PROPOSED,
+            "authority.entity.dependency",
         ),
         (
             ENTITY_MERGE_DECIDE_COMMAND,
@@ -863,6 +971,7 @@ __all__ = [
     "ENTITY_MENTION_ADMIT_COMMAND",
     "ENTITY_MERGE_DECIDE_COMMAND",
     "ENTITY_RESOLUTION_DECIDE_COMMAND",
+    "ENTITY_RESOLUTION_DEPENDENCY_BIND_COMMAND",
     "ENTITY_RESOLUTION_PROPOSE_COMMAND",
     "ENTITY_REVERSAL_DECIDE_COMMAND",
     "ENTITY_SPLIT_DECIDE_COMMAND",

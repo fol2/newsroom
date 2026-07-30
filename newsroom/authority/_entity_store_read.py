@@ -10,15 +10,28 @@ from newsroom.entities.models import (
     CanonicalEntityVersion,
     EntityAdmissionGuard,
     EntityAlias,
+    EntityDependentAdmissionGuard,
+    EntityLineageVersion,
+    EntityMergeDecision,
+    EntityMergePredecessor,
     EntityMention,
     EntityPreferredIdentity,
+    EntityReversalDecision,
     EntityResolutionDecision,
+    EntityResolutionDependency,
+    EntityResolutionDependencyStatus,
     EntityResolutionProposalVersion,
+    EntitySplitAllocation,
+    EntitySplitDecision,
 )
 from newsroom.entities.policy import (
     ENTITY_MENTION_ADMIT_COMMAND,
+    ENTITY_MERGE_DECIDE_COMMAND,
     ENTITY_RESOLUTION_DECIDE_COMMAND,
+    ENTITY_RESOLUTION_DEPENDENCY_BIND_COMMAND,
     ENTITY_RESOLUTION_PROPOSE_COMMAND,
+    ENTITY_REVERSAL_DECIDE_COMMAND,
+    ENTITY_SPLIT_DECIDE_COMMAND,
 )
 from newsroom.entities.types import (
     CanonicalEntityId,
@@ -26,16 +39,22 @@ from newsroom.entities.types import (
     CanonicalEntityVersionId,
     EntityAliasId,
     EntityAliasKind,
+    EntityCreationDecisionKind,
     EntityKind,
     EntityLineageDecisionKind,
     EntityMentionId,
+    EntityMergeDecisionId,
+    EntityReversalDecisionId,
+    EntityReversalTargetKind,
     EntityResolutionDecisionAction,
     EntityResolutionDecisionId,
+    EntityResolutionDependencyId,
     EntityResolutionProposalId,
     EntityResolutionProposalKind,
     EntityResolutionProposalVersionId,
     EntityResolutionState,
     EntityScript,
+    EntitySplitDecisionId,
 )
 from newsroom.extraction.types import (
     ExtractionOutputId,
@@ -55,8 +74,12 @@ from newsroom.sources.types import (
 
 from ._entity_decoding import (
     decode_entity_decision_request,
+    decode_entity_dependency_request,
+    decode_entity_merge_request,
     decode_entity_mention_request,
     decode_entity_proposal_request,
+    decode_entity_reversal_request,
+    decode_entity_split_request,
 )
 from ._entity_store_common import deterministic_decision_id
 
@@ -305,6 +328,72 @@ class _EntityReadMixin:
             )
         return result
 
+    def _dependency_from_row(
+        self, conn: sqlite3.Connection, row: sqlite3.Row, *, replayed: bool
+    ) -> EntityResolutionDependency:
+        event = self._record_context(conn, event_id=str(row["authority_event_id"]))
+        payload = bytes(event["payload_bytes"])
+        request_value = self._decode_json_blob(
+            payload, identity="entity resolution dependency request"
+        )
+        request = decode_entity_dependency_request(
+            request_value, idempotency_key=str(event["idempotency_key"])
+        )
+        self._validate_entity_record_envelope(
+            conn,
+            row,
+            command_type=ENTITY_RESOLUTION_DEPENDENCY_BIND_COMMAND,
+            aggregate_id=str(request.dependency_id),
+            payload_bytes=payload,
+            payload_digest=request.digest,
+        )
+        result = EntityResolutionDependency(
+            dependency_id=EntityResolutionDependencyId.parse(
+                str(row["dependency_id"])
+            ),
+            dependent_proposal_id=ProposalEnvelopeId.parse(
+                str(row["dependent_proposal_id"])
+            ),
+            dependent_proposal_digest=str(row["dependent_proposal_digest"]),
+            resolution_proposal_id=EntityResolutionProposalId.parse(
+                str(row["resolution_proposal_id"])
+            ),
+            proposal_version_id=EntityResolutionProposalVersionId.parse(
+                str(row["proposal_version_id"])
+            ),
+            proposal_version_digest=str(row["proposal_version_digest"]),
+            material=bool(int(row["material"])),
+            authority_event_id=EventId.parse(str(row["authority_event_id"])),
+            authority_ledger_seq=int(event["ledger_seq"]),
+            recorded_at=UtcTimestamp.parse(str(row["recorded_at"])),
+            replayed=replayed,
+        )
+        if (
+            request.dependency_id != result.dependency_id
+            or request.dependent_proposal_id != result.dependent_proposal_id
+            or request.expected_dependent_proposal_digest
+            != result.dependent_proposal_digest
+            or request.resolution_proposal_id != result.resolution_proposal_id
+            or request.expected_resolution_proposal_version_id
+            != result.proposal_version_id
+            or request.expected_resolution_proposal_digest
+            != result.proposal_version_digest
+            or request.material != result.material
+            or request.digest != str(row["request_digest"])
+        ):
+            raise AuthorityPersistenceError(
+                "entity resolution dependency differs from its request"
+            )
+        data = canonical_json_bytes(result.canonical_value())
+        if data != bytes(row["canonical_bytes"]) or digest_bytes(data) != str(
+            row["canonical_digest"]
+        ):
+            raise AuthorityPersistenceError(
+                "entity resolution dependency canonical bytes differ"
+            )
+        return result
+
+
     def _decision_from_row(
         self, conn: sqlite3.Connection, row: sqlite3.Row, *, replayed: bool
     ) -> EntityResolutionDecision:
@@ -386,14 +475,297 @@ class _EntityReadMixin:
             raise AuthorityPersistenceError("resolution decision normalized columns differ")
         return result
 
+    def _merge_decision_from_row(
+        self, conn: sqlite3.Connection, row: sqlite3.Row, *, replayed: bool
+    ) -> EntityMergeDecision:
+        event = self._record_context(conn, event_id=str(row["authority_event_id"]))
+        request_bytes = bytes(event["payload_bytes"])
+        request = decode_entity_merge_request(
+            self._decode_json_blob(request_bytes, identity="entity merge request"),
+            idempotency_key=str(event["idempotency_key"]),
+        )
+        self._validate_entity_record_envelope(
+            conn,
+            row,
+            command_type=ENTITY_MERGE_DECIDE_COMMAND,
+            aggregate_id=str(request.merge_decision_id),
+            payload_bytes=request_bytes,
+            payload_digest=request.digest,
+        )
+        predecessor_rows = conn.execute(
+            "SELECT * FROM entity_merge_predecessors WHERE merge_decision_id=? "
+            "ORDER BY predecessor_ordinal",
+            (str(request.merge_decision_id),),
+        ).fetchall()
+        predecessors = tuple(
+            EntityMergePredecessor(
+                entity_id=CanonicalEntityId.parse(str(item["entity_id"])),
+                expected_entity_version_id=CanonicalEntityVersionId.parse(
+                    str(item["expected_entity_version_id"])
+                ),
+                merged_entity_version_id=CanonicalEntityVersionId.parse(
+                    str(item["merged_entity_version_id"])
+                ),
+            )
+            for item in predecessor_rows
+        )
+        basis = self._decode_json_blob(
+            bytes(row["basis_resolution_proposal_ids_bytes"]),
+            identity="merge basis proposal ids",
+        )
+        if not isinstance(basis, list):
+            raise AuthorityPersistenceError("merge basis proposal ids are invalid")
+        result = EntityMergeDecision(
+            merge_decision_id=EntityMergeDecisionId.parse(
+                str(row["merge_decision_id"])
+            ),
+            predecessors=predecessors,
+            successor_entity_id=CanonicalEntityId.parse(
+                str(row["successor_entity_id"])
+            ),
+            successor_entity_version_id=CanonicalEntityVersionId.parse(
+                str(row["successor_entity_version_id"])
+            ),
+            preferred_continuation_entity_id=CanonicalEntityId.parse(
+                str(row["preferred_continuation_entity_id"])
+            ),
+            basis_resolution_proposal_ids=tuple(
+                EntityResolutionProposalId.parse(str(value)) for value in basis
+            ),
+            reason_code=str(row["reason_code"]),
+            decision_policy_version=str(row["decision_policy_version"]),
+            authority_event_id=EventId.parse(str(row["authority_event_id"])),
+            authority_ledger_seq=int(event["ledger_seq"]),
+            recorded_at=UtcTimestamp.parse(str(row["recorded_at"])),
+            replayed=replayed,
+        )
+        data = canonical_json_bytes(result.canonical_value())
+        request_pairs = tuple(
+            (item.entity_id, item.entity_version_id) for item in request.predecessors
+        )
+        result_pairs = tuple(
+            (item.entity_id, item.expected_entity_version_id)
+            for item in result.predecessors
+        )
+        if (
+            len(predecessor_rows) != int(row["predecessor_count"])
+            or request_pairs != result_pairs
+            or request.successor_entity_id != result.successor_entity_id
+            or request.successor_entity_version_id
+            != result.successor_entity_version_id
+            or request.preferred_continuation_entity_id
+            != result.preferred_continuation_entity_id
+            or request.basis_resolution_proposal_ids
+            != result.basis_resolution_proposal_ids
+            or request.reason_code != result.reason_code
+            or request.decision_policy_version != result.decision_policy_version
+            or request.digest != str(row["request_digest"])
+            or data != bytes(row["canonical_bytes"])
+            or digest_bytes(data) != str(row["canonical_digest"])
+        ):
+            raise AuthorityPersistenceError("entity merge normalized columns differ")
+        for item, predecessor_row in zip(result.predecessors, predecessor_rows, strict=True):
+            child = canonical_json_bytes(item.canonical_value())
+            if child != bytes(predecessor_row["canonical_bytes"]) or digest_bytes(
+                child
+            ) != str(predecessor_row["canonical_digest"]):
+                raise AuthorityPersistenceError(
+                    "entity merge predecessor normalized columns differ"
+                )
+        return result
+
+    def _split_decision_from_row(
+        self, conn: sqlite3.Connection, row: sqlite3.Row, *, replayed: bool
+    ) -> EntitySplitDecision:
+        event = self._record_context(conn, event_id=str(row["authority_event_id"]))
+        request_bytes = bytes(event["payload_bytes"])
+        request = decode_entity_split_request(
+            self._decode_json_blob(request_bytes, identity="entity split request"),
+            idempotency_key=str(event["idempotency_key"]),
+        )
+        self._validate_entity_record_envelope(
+            conn,
+            row,
+            command_type=ENTITY_SPLIT_DECIDE_COMMAND,
+            aggregate_id=str(request.split_decision_id),
+            payload_bytes=request_bytes,
+            payload_digest=request.digest,
+        )
+        successor_rows = conn.execute(
+            "SELECT * FROM entity_split_successors WHERE split_decision_id=? "
+            "ORDER BY successor_ordinal",
+            (str(request.split_decision_id),),
+        ).fetchall()
+        allocation_rows = conn.execute(
+            "SELECT * FROM entity_split_allocations WHERE split_decision_id=? "
+            "ORDER BY mention_id,successor_entity_id",
+            (str(request.split_decision_id),),
+        ).fetchall()
+        successors = tuple(
+            EntityLineageVersion(
+                CanonicalEntityId.parse(str(item["entity_id"])),
+                CanonicalEntityVersionId.parse(str(item["entity_version_id"])),
+            )
+            for item in successor_rows
+        )
+        allocations = tuple(
+            EntitySplitAllocation(
+                EntityMentionId.parse(str(item["mention_id"])),
+                CanonicalEntityId.parse(str(item["successor_entity_id"])),
+            )
+            for item in allocation_rows
+        )
+        result = EntitySplitDecision(
+            split_decision_id=EntitySplitDecisionId.parse(
+                str(row["split_decision_id"])
+            ),
+            source_entity_id=CanonicalEntityId.parse(str(row["source_entity_id"])),
+            expected_source_version_id=CanonicalEntityVersionId.parse(
+                str(row["expected_source_version_id"])
+            ),
+            source_split_version_id=CanonicalEntityVersionId.parse(
+                str(row["source_split_version_id"])
+            ),
+            successors=successors,
+            allocations=allocations,
+            reason_code=str(row["reason_code"]),
+            decision_policy_version=str(row["decision_policy_version"]),
+            authority_event_id=EventId.parse(str(row["authority_event_id"])),
+            authority_ledger_seq=int(event["ledger_seq"]),
+            recorded_at=UtcTimestamp.parse(str(row["recorded_at"])),
+            replayed=replayed,
+        )
+        data = canonical_json_bytes(result.canonical_value())
+        if (
+            len(successor_rows) != int(row["successor_count"])
+            or request.source_entity_id != result.source_entity_id
+            or request.expected_source_version_id
+            != result.expected_source_version_id
+            or request.successors != result.successors
+            or request.allocations != result.allocations
+            or request.reason_code != result.reason_code
+            or request.decision_policy_version != result.decision_policy_version
+            or request.digest != str(row["request_digest"])
+            or data != bytes(row["canonical_bytes"])
+            or digest_bytes(data) != str(row["canonical_digest"])
+        ):
+            raise AuthorityPersistenceError("entity split normalized columns differ")
+        for item, child_row in zip(result.successors, successor_rows, strict=True):
+            child = canonical_json_bytes(item.canonical_value())
+            if child != bytes(child_row["canonical_bytes"]) or digest_bytes(child) != str(
+                child_row["canonical_digest"]
+            ):
+                raise AuthorityPersistenceError(
+                    "entity split successor normalized columns differ"
+                )
+        for item, child_row in zip(result.allocations, allocation_rows, strict=True):
+            child = canonical_json_bytes(item.canonical_value())
+            if child != bytes(child_row["canonical_bytes"]) or digest_bytes(child) != str(
+                child_row["canonical_digest"]
+            ):
+                raise AuthorityPersistenceError(
+                    "entity split allocation normalized columns differ"
+                )
+        return result
+
+    def _reversal_decision_from_row(
+        self, conn: sqlite3.Connection, row: sqlite3.Row, *, replayed: bool
+    ) -> EntityReversalDecision:
+        event = self._record_context(conn, event_id=str(row["authority_event_id"]))
+        request_bytes = bytes(event["payload_bytes"])
+        request = decode_entity_reversal_request(
+            self._decode_json_blob(request_bytes, identity="entity reversal request"),
+            idempotency_key=str(event["idempotency_key"]),
+        )
+        self._validate_entity_record_envelope(
+            conn,
+            row,
+            command_type=ENTITY_REVERSAL_DECIDE_COMMAND,
+            aggregate_id=str(request.reversal_decision_id),
+            payload_bytes=request_bytes,
+            payload_digest=request.digest,
+        )
+        expected_rows = conn.execute(
+            "SELECT entity_version_id FROM entity_reversal_expected_versions "
+            "WHERE reversal_decision_id=? ORDER BY version_ordinal",
+            (str(request.reversal_decision_id),),
+        ).fetchall()
+        restoration_rows = conn.execute(
+            "SELECT * FROM entity_reversal_restorations WHERE reversal_decision_id=? "
+            "ORDER BY restoration_ordinal",
+            (str(request.reversal_decision_id),),
+        ).fetchall()
+        supersession_rows = conn.execute(
+            "SELECT * FROM entity_reversal_supersessions WHERE reversal_decision_id=? "
+            "ORDER BY supersession_ordinal",
+            (str(request.reversal_decision_id),),
+        ).fetchall()
+        result = EntityReversalDecision(
+            reversal_decision_id=EntityReversalDecisionId.parse(
+                str(row["reversal_decision_id"])
+            ),
+            target_kind=EntityReversalTargetKind(str(row["target_kind"])),
+            target_decision_id=str(row["target_decision_id"]),
+            expected_current_entity_version_ids=tuple(
+                CanonicalEntityVersionId.parse(str(item["entity_version_id"]))
+                for item in expected_rows
+            ),
+            restorations=tuple(
+                EntityLineageVersion(
+                    CanonicalEntityId.parse(str(item["entity_id"])),
+                    CanonicalEntityVersionId.parse(str(item["entity_version_id"])),
+                )
+                for item in restoration_rows
+            ),
+            supersessions=tuple(
+                EntityLineageVersion(
+                    CanonicalEntityId.parse(str(item["entity_id"])),
+                    CanonicalEntityVersionId.parse(str(item["entity_version_id"])),
+                )
+                for item in supersession_rows
+            ),
+            reason_code=str(row["reason_code"]),
+            decision_policy_version=str(row["decision_policy_version"]),
+            authority_event_id=EventId.parse(str(row["authority_event_id"])),
+            authority_ledger_seq=int(event["ledger_seq"]),
+            recorded_at=UtcTimestamp.parse(str(row["recorded_at"])),
+            replayed=replayed,
+        )
+        data = canonical_json_bytes(result.canonical_value())
+        if (
+            request.target_kind is not result.target_kind
+            or request.target_decision_id != result.target_decision_id
+            or request.expected_current_entity_version_ids
+            != result.expected_current_entity_version_ids
+            or request.restorations != result.restorations
+            or request.reason_code != result.reason_code
+            or request.decision_policy_version != result.decision_policy_version
+            or request.digest != str(row["request_digest"])
+            or data != bytes(row["canonical_bytes"])
+            or digest_bytes(data) != str(row["canonical_digest"])
+        ):
+            raise AuthorityPersistenceError("entity reversal normalized columns differ")
+        for values, rows, identity in (
+            (result.restorations, restoration_rows, "restoration"),
+            (result.supersessions, supersession_rows, "supersession"),
+        ):
+            for item, child_row in zip(values, rows, strict=True):
+                child = canonical_json_bytes(item.canonical_value())
+                if child != bytes(child_row["canonical_bytes"]) or digest_bytes(
+                    child
+                ) != str(child_row["canonical_digest"]):
+                    raise AuthorityPersistenceError(
+                        f"entity reversal {identity} normalized columns differ"
+                    )
+        return result
+
     def _entity_from_row(self, conn: sqlite3.Connection, row: sqlite3.Row) -> CanonicalEntity:
         event = self._record_context(conn, event_id=str(row["authority_event_id"]))
         result = CanonicalEntity(
             entity_id=CanonicalEntityId.parse(str(row["entity_id"])),
             entity_kind=EntityKind(str(row["entity_kind"])),
-            created_by_decision_id=EntityResolutionDecisionId.parse(
-                str(row["created_by_decision_id"])
-            ),
+            created_by_kind=EntityCreationDecisionKind(str(row["created_by_kind"])),
+            created_by_decision_id=str(row["created_by_decision_id"]),
             initial_version_id=CanonicalEntityVersionId.parse(
                 str(row["initial_version_id"])
             ),
@@ -612,20 +984,7 @@ class _EntityReadMixin:
                 identity="canonical entity",
             )
             result = self._entity_from_row(self._connection, row)
-            aliases = self._connection.execute(
-                "SELECT provenance_mention_id FROM entity_aliases WHERE entity_id=?",
-                (str(entity_id),),
-            ).fetchall()
-            for alias in aliases:
-                mention = self._mention_from_row(
-                    self._connection,
-                    self._mention_row(
-                        self._connection,
-                        EntityMentionId.parse(str(alias["provenance_mention_id"])),
-                    ),
-                    replayed=False,
-                )
-                self._require_mention_current(self._connection, mention)
+            self._require_entity_current(self._connection, result.entity_id)
             return result
 
     def entity_version(
@@ -698,6 +1057,150 @@ class _EntityReadMixin:
             )
             self.entity(result.entity_id)
             return result
+
+    def merge_decision(
+        self, decision_id: EntityMergeDecisionId
+    ) -> EntityMergeDecision:
+        if not isinstance(decision_id, EntityMergeDecisionId):
+            raise TypeError("entity merge decision identity must be typed")
+        with self._lock:
+            row = self._required_entity_row(
+                self._connection,
+                table="entity_merge_decisions",
+                column="merge_decision_id",
+                identifier=str(decision_id),
+                identity="entity merge decision",
+            )
+            result = self._merge_decision_from_row(
+                self._connection, row, replayed=False
+            )
+            for proposal_id in result.basis_resolution_proposal_ids:
+                self.proposal_current(proposal_id)
+            for predecessor in result.predecessors:
+                self.entity(predecessor.entity_id)
+            self.entity(result.successor_entity_id)
+            return result
+
+    def split_decision(
+        self, decision_id: EntitySplitDecisionId
+    ) -> EntitySplitDecision:
+        if not isinstance(decision_id, EntitySplitDecisionId):
+            raise TypeError("entity split decision identity must be typed")
+        with self._lock:
+            row = self._required_entity_row(
+                self._connection,
+                table="entity_split_decisions",
+                column="split_decision_id",
+                identifier=str(decision_id),
+                identity="entity split decision",
+            )
+            result = self._split_decision_from_row(
+                self._connection, row, replayed=False
+            )
+            self.entity(result.source_entity_id)
+            for successor in result.successors:
+                self.entity(successor.entity_id)
+            return result
+
+    def reversal_decision(
+        self, decision_id: EntityReversalDecisionId
+    ) -> EntityReversalDecision:
+        if not isinstance(decision_id, EntityReversalDecisionId):
+            raise TypeError("entity reversal decision identity must be typed")
+        with self._lock:
+            row = self._required_entity_row(
+                self._connection,
+                table="entity_reversal_decisions",
+                column="reversal_decision_id",
+                identifier=str(decision_id),
+                identity="entity reversal decision",
+            )
+            result = self._reversal_decision_from_row(
+                self._connection, row, replayed=False
+            )
+            if result.target_kind is EntityReversalTargetKind.MERGE:
+                self.merge_decision(EntityMergeDecisionId.parse(result.target_decision_id))
+            else:
+                self.split_decision(EntitySplitDecisionId.parse(result.target_decision_id))
+            for item in (*result.restorations, *result.supersessions):
+                self.entity(item.entity_id)
+            return result
+
+    def dependency(
+        self, dependency_id: EntityResolutionDependencyId
+    ) -> EntityResolutionDependency:
+        if not isinstance(dependency_id, EntityResolutionDependencyId):
+            raise TypeError("entity resolution dependency identity must be typed")
+        with self._lock:
+            row = self._required_entity_row(
+                self._connection,
+                table="entity_resolution_dependencies",
+                column="dependency_id",
+                identifier=str(dependency_id),
+                identity="entity resolution dependency",
+            )
+            result = self._dependency_from_row(
+                self._connection, row, replayed=False
+            )
+            self._require_dependency_current(self._connection, result)
+            return result
+
+    def dependent_admission_guard(
+        self, dependent_proposal_id: ProposalEnvelopeId
+    ) -> EntityDependentAdmissionGuard:
+        if not isinstance(dependent_proposal_id, ProposalEnvelopeId):
+            raise TypeError("dependent proposal identity must be typed")
+        with self._lock:
+            dependent = self._source_proposal(
+                self._connection, dependent_proposal_id
+            )
+            rows = self._connection.execute(
+                "SELECT g.*,d.dependent_proposal_digest "
+                "FROM entity_dependent_admission_guard g "
+                "JOIN entity_resolution_dependencies d "
+                "ON d.dependency_id=g.dependency_id "
+                "WHERE g.dependent_proposal_id=? ORDER BY g.dependency_id",
+                (str(dependent_proposal_id),),
+            ).fetchall()
+            if not rows:
+                raise KeyError(
+                    "dependent proposal has no retained entity-resolution dependencies"
+                )
+            statuses: list[EntityResolutionDependencyStatus] = []
+            for row in rows:
+                dependency_row = self._required_entity_row(
+                    self._connection,
+                    table="entity_resolution_dependencies",
+                    column="dependency_id",
+                    identifier=str(row["dependency_id"]),
+                    identity="entity resolution dependency",
+                )
+                dependency = self._dependency_from_row(
+                    self._connection, dependency_row, replayed=False
+                )
+                self._require_dependency_current(self._connection, dependency)
+                if dependency.dependent_proposal_id != dependent.proposal_id:
+                    raise AuthorityPersistenceError(
+                        "dependent-admission guard proposal differs"
+                    )
+                statuses.append(
+                    EntityResolutionDependencyStatus(
+                        dependency_id=dependency.dependency_id,
+                        resolution_proposal_id=dependency.resolution_proposal_id,
+                        proposal_version_id=dependency.proposal_version_id,
+                        state=EntityResolutionState(str(row["current_state"])),
+                        material=bool(int(row["material"])),
+                    )
+                )
+            checked = self._connection.execute(
+                "SELECT COALESCE(MAX(ledger_seq),1) FROM ledger_events"
+            ).fetchone()
+            return EntityDependentAdmissionGuard(
+                dependent_proposal_id=dependent.proposal_id,
+                dependent_proposal_digest=dependent.canonical_digest,
+                dependencies=tuple(statuses),
+                checked_at_ledger_seq=int(checked[0]),
+            )
 
     def admission_guard(
         self, proposal_id: EntityResolutionProposalId

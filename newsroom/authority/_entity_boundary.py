@@ -13,27 +13,46 @@ from newsroom.entities.models import (
     CanonicalEntityVersion,
     EntityAdmissionGuard,
     EntityAlias,
+    EntityDependentAdmissionGuard,
     EntityMention,
     EntityMentionAdmissionRequest,
+    EntityMergeDecision,
+    EntityMergeDecisionRequest,
     EntityPreferredIdentity,
+    EntityProjectionEvent,
     EntityResolutionDecision,
     EntityResolutionDecisionRequest,
+    EntityResolutionDependency,
+    EntityResolutionDependencyRequest,
     EntityResolutionProposalRequest,
     EntityResolutionProposalVersion,
+    EntityReversalDecision,
+    EntityReversalDecisionRequest,
+    EntitySplitDecision,
+    EntitySplitDecisionRequest,
 )
 from newsroom.entities.policy import (
     ENTITY_MENTION_ADMIT_COMMAND,
+    ENTITY_MERGE_DECIDE_COMMAND,
     ENTITY_RESOLUTION_DECIDE_COMMAND,
+    ENTITY_RESOLUTION_DEPENDENCY_BIND_COMMAND,
     ENTITY_RESOLUTION_PROPOSE_COMMAND,
+    ENTITY_REVERSAL_DECIDE_COMMAND,
+    ENTITY_SPLIT_DECIDE_COMMAND,
 )
 from newsroom.entities.types import (
     CanonicalEntityId,
     CanonicalEntityVersionId,
     EntityMentionId,
+    EntityMergeDecisionId,
     EntityReadPolicy,
+    EntityResolutionDependencyId,
     EntityResolutionProposalId,
     EntityResolutionProposalVersionId,
+    EntityReversalDecisionId,
+    EntitySplitDecisionId,
 )
+from newsroom.extraction.types import ProposalEnvelopeId
 
 from ._entity_store import _EntityAuthorityStore
 from ._entity_store_common import deterministic_decision_id
@@ -100,6 +119,25 @@ class _EntityBoundary:
         grant = self._command_service._authorize_for_commit(command, proof=proof)
         return self._store.commit_entity_resolution_proposal(grant, request=request)
 
+    def bind_resolution_dependency(
+        self,
+        request: EntityResolutionDependencyRequest,
+        proof: AuthenticationProof,
+    ) -> EntityResolutionDependency:
+        if not isinstance(request, EntityResolutionDependencyRequest):
+            raise TypeError("entity resolution dependency must be typed")
+        command = SemanticCommand(
+            command_type=ENTITY_RESOLUTION_DEPENDENCY_BIND_COMMAND,
+            aggregate_id=AggregateId(request.dependency_id.value),
+            expected_aggregate_version=0,
+            payload=InlinePayload(request.canonical_value()),
+            idempotency_key=request.idempotency_key,
+        )
+        grant = self._command_service._authorize_for_commit(command, proof=proof)
+        return self._store.commit_entity_resolution_dependency(
+            grant, request=request
+        )
+
     def decide_resolution(
         self,
         request: EntityResolutionDecisionRequest,
@@ -117,6 +155,57 @@ class _EntityBoundary:
         )
         grant = self._command_service._authorize_for_commit(command, proof=proof)
         return self._store.commit_entity_resolution_decision(grant, request=request)
+
+    def merge_entities(
+        self,
+        request: EntityMergeDecisionRequest,
+        proof: AuthenticationProof,
+    ) -> EntityMergeDecision:
+        if not isinstance(request, EntityMergeDecisionRequest):
+            raise TypeError("entity merge decision must be typed")
+        command = SemanticCommand(
+            command_type=ENTITY_MERGE_DECIDE_COMMAND,
+            aggregate_id=AggregateId(request.merge_decision_id.value),
+            expected_aggregate_version=0,
+            payload=InlinePayload(request.canonical_value()),
+            idempotency_key=request.idempotency_key,
+        )
+        grant = self._command_service._authorize_for_commit(command, proof=proof)
+        return self._store.commit_entity_merge(grant, request=request)
+
+    def split_entity(
+        self,
+        request: EntitySplitDecisionRequest,
+        proof: AuthenticationProof,
+    ) -> EntitySplitDecision:
+        if not isinstance(request, EntitySplitDecisionRequest):
+            raise TypeError("entity split decision must be typed")
+        command = SemanticCommand(
+            command_type=ENTITY_SPLIT_DECIDE_COMMAND,
+            aggregate_id=AggregateId(request.split_decision_id.value),
+            expected_aggregate_version=0,
+            payload=InlinePayload(request.canonical_value()),
+            idempotency_key=request.idempotency_key,
+        )
+        grant = self._command_service._authorize_for_commit(command, proof=proof)
+        return self._store.commit_entity_split(grant, request=request)
+
+    def reverse_lineage(
+        self,
+        request: EntityReversalDecisionRequest,
+        proof: AuthenticationProof,
+    ) -> EntityReversalDecision:
+        if not isinstance(request, EntityReversalDecisionRequest):
+            raise TypeError("entity reversal decision must be typed")
+        command = SemanticCommand(
+            command_type=ENTITY_REVERSAL_DECIDE_COMMAND,
+            aggregate_id=AggregateId(request.reversal_decision_id.value),
+            expected_aggregate_version=0,
+            payload=InlinePayload(request.canonical_value()),
+            idempotency_key=request.idempotency_key,
+        )
+        grant = self._command_service._authorize_for_commit(command, proof=proof)
+        return self._store.commit_entity_reversal(grant, request=request)
 
     def _authorize_read(
         self,
@@ -316,6 +405,107 @@ class _EntityBoundary:
             trust_scope=TrustScope.ADMITTED,
         )
         return self._store.preferred_identity(entity_id)
+
+    def projection_events_after(
+        self,
+        after_ledger_seq: int,
+        limit: int,
+        proof: AuthenticationProof,
+    ) -> tuple[EntityProjectionEvent, ...]:
+        self._read_policy.require_limit(limit)
+        if (
+            isinstance(after_ledger_seq, bool)
+            or not isinstance(after_ledger_seq, int)
+            or after_ledger_seq < 0
+        ):
+            raise ValueError("entity projection event cutoff must be non-negative")
+        self._authorize_read(
+            proof,
+            operation="read:entity:projection_events",
+            aggregate_type="entity_projection_event_stream",
+            aggregate_id=self._read_policy.policy_id,
+            required_scope=self._read_policy.projection_required_scope,
+            trust_scope=TrustScope.ADMITTED,
+            limit=limit,
+        )
+        return self._store.projection_events_after(
+            after_ledger_seq=after_ledger_seq, limit=limit
+        )
+
+    def merge_decision(
+        self,
+        decision_id: EntityMergeDecisionId,
+        proof: AuthenticationProof,
+    ) -> EntityMergeDecision:
+        self._authorize_read(
+            proof,
+            operation="read:entity:merge_decision",
+            aggregate_type="entity_merge_decision",
+            aggregate_id=str(decision_id),
+            required_scope=self._read_policy.admitted_required_scope,
+            trust_scope=TrustScope.ADMITTED,
+        )
+        return self._store.merge_decision(decision_id)
+
+    def split_decision(
+        self,
+        decision_id: EntitySplitDecisionId,
+        proof: AuthenticationProof,
+    ) -> EntitySplitDecision:
+        self._authorize_read(
+            proof,
+            operation="read:entity:split_decision",
+            aggregate_type="entity_split_decision",
+            aggregate_id=str(decision_id),
+            required_scope=self._read_policy.admitted_required_scope,
+            trust_scope=TrustScope.ADMITTED,
+        )
+        return self._store.split_decision(decision_id)
+
+    def reversal_decision(
+        self,
+        decision_id: EntityReversalDecisionId,
+        proof: AuthenticationProof,
+    ) -> EntityReversalDecision:
+        self._authorize_read(
+            proof,
+            operation="read:entity:reversal_decision",
+            aggregate_type="entity_reversal_decision",
+            aggregate_id=str(decision_id),
+            required_scope=self._read_policy.admitted_required_scope,
+            trust_scope=TrustScope.ADMITTED,
+        )
+        return self._store.reversal_decision(decision_id)
+
+    def dependency(
+        self,
+        dependency_id: EntityResolutionDependencyId,
+        proof: AuthenticationProof,
+    ) -> EntityResolutionDependency:
+        self._authorize_read(
+            proof,
+            operation="read:entity:resolution_dependency",
+            aggregate_type="entity_resolution_dependency",
+            aggregate_id=str(dependency_id),
+            required_scope=self._read_policy.proposal_required_scope,
+            trust_scope=TrustScope.PROPOSED,
+        )
+        return self._store.dependency(dependency_id)
+
+    def dependent_admission_guard(
+        self,
+        dependent_proposal_id: ProposalEnvelopeId,
+        proof: AuthenticationProof,
+    ) -> EntityDependentAdmissionGuard:
+        self._authorize_read(
+            proof,
+            operation="read:entity:dependent_admission_guard",
+            aggregate_type="extraction_proposal",
+            aggregate_id=str(dependent_proposal_id),
+            required_scope=self._read_policy.admitted_required_scope,
+            trust_scope=TrustScope.ADMITTED,
+        )
+        return self._store.dependent_admission_guard(dependent_proposal_id)
 
     def admission_guard(
         self,

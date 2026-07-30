@@ -22,7 +22,7 @@ from newsroom.tests.source_3a_helpers import base_registries
 def test_entity_command_and_payload_contracts_are_exact_and_closed() -> None:
     contracts = entity_payload_contracts()
     definitions = entity_command_definitions()
-    assert len(contracts) == len(definitions) == 6
+    assert len(contracts) == len(definitions) == 7
     assert {item.command_type for item in definitions} == ENTITY_COMMAND_TYPES
     assert {item.payload_mode for item in definitions} == {PayloadMode.INLINE}
     assert {item.security_scope for item in definitions} == {"authority.entity"}
