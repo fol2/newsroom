@@ -377,7 +377,8 @@ def _pairs(*pairs: tuple[EditorialRelationEndpointKind, EditorialRelationEndpoin
 
 
 _PREDICATE_CONTRACT_VERSION = "editorial-predicate-contract-v1"
-_PREDICATE_POLICY_VERSION = "editorial-relation-admission-policy-v1"
+EDITORIAL_RELATION_ADMISSION_POLICY_VERSION = "editorial-relation-admission-policy-v1"
+_PREDICATE_POLICY_VERSION = EDITORIAL_RELATION_ADMISSION_POLICY_VERSION
 
 
 def _contract(
@@ -1176,6 +1177,10 @@ class EditorialRelationDecisionRequest:
             self.decision_policy_version,
             field="decision_policy_version",
         )
+        if self.decision_policy_version != EDITORIAL_RELATION_ADMISSION_POLICY_VERSION:
+            raise EditorialRelationContractError(
+                "decision policy version differs from the approved admission policy"
+            )
         bounded_token(self.idempotency_key, field="idempotency_key")
 
     def canonical_value(self) -> dict[str, object]:

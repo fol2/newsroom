@@ -68,6 +68,7 @@ _AUTHORITY_FACADE_NAMES = {
 _EDITORIAL_MODEL_NAMES = {
     "CanonicalEntityRelationEndpoint",
     "EDITORIAL_PREDICATE_REGISTRY_V1",
+    "EDITORIAL_RELATION_ADMISSION_POLICY_VERSION",
     "EditorialPredicateContract",
     "EditorialPredicateEndpointPair",
     "EditorialPredicateRegistry",
@@ -149,6 +150,7 @@ def __getattr__(name: str):
 __all__ = [
     "CanonicalEntityRelationEndpoint",
     "EDITORIAL_PREDICATE_REGISTRY_V1",
+    "EDITORIAL_RELATION_ADMISSION_POLICY_VERSION",
     "EDITORIAL_RELATION_COMMAND_TYPES",
     "EDITORIAL_RELATION_DECISION_COMMAND",
     "EDITORIAL_RELATION_PROPOSAL_COMMAND",

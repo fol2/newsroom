@@ -34,6 +34,7 @@ from newsroom.sources.types import SourceItemId, SourceRevisionId
 
 from .editorial_models import (
     EDITORIAL_PREDICATE_REGISTRY_V1,
+    EDITORIAL_RELATION_ADMISSION_POLICY_VERSION,
     CanonicalEntityRelationEndpoint,
     EditorialRelationDecisionRequest,
     EditorialRelationProducer,
@@ -600,7 +601,7 @@ def _golden_decision(proposal: EditorialRelationProposalRequest) -> EditorialRel
         successor_assertion_id=None,
         supersession_id=None,
         reason_code="EXPLICIT_EDITORIAL_ACCEPT",
-        decision_policy_version="editorial-relation-admission-policy-v1",
+        decision_policy_version=EDITORIAL_RELATION_ADMISSION_POLICY_VERSION,
         idempotency_key="editorial-relation-decision-golden",
     )
 
