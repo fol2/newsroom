@@ -42,7 +42,7 @@ class _Metadata:
 
 @dataclass(frozen=True)
 class _Route:
-    contract_version: str = "sdlc-v2.2"
+    contract_version: str = "sdlc-v2.3"
     risk_classifier_version: str = "sdlc-risk-v1"
     risk_tier: str = "R1_LOCAL_CODE"
     service_required: bool = False

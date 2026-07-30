@@ -238,7 +238,7 @@ def test_bounded_route_uses_accepted_route_gate_and_secret_free_child(
 ) -> None:
     context = _context("route")
     contract = _contract(tmp_path)
-    deadline = LaneDeadline(100, 55_000)
+    deadline = LaneDeadline(100, 110_000)
     observed = {}
     monkeypatch.setattr(budget, "context_from_environment", lambda _root: context)
     monkeypatch.setattr(budget, "load_contract", lambda _root: contract)
@@ -285,7 +285,7 @@ def test_route_budget_failure_removes_partial_output(
     monkeypatch.setattr(budget, "context_from_environment", lambda _root: context)
     monkeypatch.setattr(budget, "load_contract", lambda _root: contract)
     monkeypatch.setattr(
-        budget, "start_lane_deadline", lambda *_args: LaneDeadline(100, 55_000)
+        budget, "start_lane_deadline", lambda *_args: LaneDeadline(100, 110_000)
     )
     monkeypatch.setattr(
         budget,
@@ -309,12 +309,12 @@ def test_route_budget_failure_removes_partial_output(
     assert not (tmp_path / "route-output").exists()
 
 
-def test_lane_finalization_uses_accepted_five_second_gate_and_exact_child(
+def test_lane_finalization_uses_accepted_ten_second_gate_and_exact_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     context = _context("core")
     contract = _contract(tmp_path)
-    deadline = LaneDeadline(100, 5_000)
+    deadline = LaneDeadline(100, 10_000)
     _write(tmp_path / "route.json", {"route": True})
     (tmp_path / "artifact").mkdir()
     observed = {}
@@ -364,7 +364,7 @@ def test_invalid_lane_output_converts_pass_to_evidence_mismatch(
     monkeypatch.setattr(budget, "context_from_environment", lambda _root: context)
     monkeypatch.setattr(budget, "load_contract", lambda _root: contract)
     monkeypatch.setattr(
-        budget, "start_lane_deadline", lambda *_args: LaneDeadline(100, 5_000)
+        budget, "start_lane_deadline", lambda *_args: LaneDeadline(100, 10_000)
     )
     monkeypatch.setattr(
         budget,

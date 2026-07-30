@@ -30,6 +30,7 @@ _REQUIRED_RISKS = (
     "R4_RELEASE_OPERATIONAL",
 )
 _INTERACTIVE_LANES = frozenset({"core", "service", "merge_group"})
+_MAX_HARD_TIMEOUT_SECONDS = 120
 
 
 def _mapping(value: object, name: str) -> Mapping[str, Any]:
@@ -143,17 +144,17 @@ def validate_contract_data(
     command_limit = _positive_int(
         global_config.get("gate_command_timeout_seconds"),
         "global.gate_command_timeout_seconds",
-        below=60,
+        below=_MAX_HARD_TIMEOUT_SECONDS,
     )
     lane_limit = _positive_int(
         global_config.get("lane_execution_timeout_seconds"),
         "global.lane_execution_timeout_seconds",
-        below=60,
+        below=_MAX_HARD_TIMEOUT_SECONDS,
     )
     finalization_limit = _positive_int(
         global_config.get("finalization_timeout_seconds"),
         "global.finalization_timeout_seconds",
-        below=60,
+        below=_MAX_HARD_TIMEOUT_SECONDS,
     )
     if global_config.get("required_decision_always_reports") is not True:
         raise ContractError("the required decision must always report")
@@ -183,7 +184,7 @@ def validate_contract_data(
         timeout = _positive_int(
             gate.get("hard_timeout_seconds"),
             f"gate.{gate_name}.hard_timeout_seconds",
-            below=60,
+            below=_MAX_HARD_TIMEOUT_SECONDS,
         )
         if timeout > command_limit:
             raise ContractError(f"gate.{gate_name} exceeds the global command timeout")
@@ -193,7 +194,7 @@ def validate_contract_data(
         timeout = _positive_int(
             lane.get("hard_timeout_seconds"),
             f"lanes.{lane_name}.hard_timeout_seconds",
-            below=60,
+            below=_MAX_HARD_TIMEOUT_SECONDS,
         )
         if timeout > lane_limit:
             raise ContractError(f"lanes.{lane_name} exceeds the aggregate lane timeout")
@@ -201,13 +202,13 @@ def validate_contract_data(
     _positive_int(
         science.get("per_shard_hard_timeout_seconds"),
         "lanes.science.per_shard_hard_timeout_seconds",
-        below=60,
+        below=_MAX_HARD_TIMEOUT_SECONDS,
     )
     decision = _mapping(lanes.get("decision"), "lanes.decision")
     decision_timeout = _positive_int(
         decision.get("hard_timeout_seconds"),
         "lanes.decision.hard_timeout_seconds",
-        below=60,
+        below=_MAX_HARD_TIMEOUT_SECONDS,
     )
     if decision.get("always_reports") is not True:
         raise ContractError("lanes.decision must always report")
@@ -281,6 +282,12 @@ def validate_contract_data(
         owner.get("selector_mutation_recall_minimum"),
         "owner mutation recall",
     )
+    if owner.get("predecessor_contract_version") != "sdlc-v2.2":
+        raise ContractError("accepted predecessor contract version is missing")
+    if owner.get("budget_amended_at") != "2026-07-30":
+        raise ContractError("accepted budget amendment date is missing")
+    if owner.get("hard_budget_multiplier") != 2:
+        raise ContractError("accepted hard-budget multiplier must be two")
     if owner.get("prewarmed_runner_evaluation_permitted_after_measured_slo_failure") is not True:
         raise ContractError("accepted runner evaluation policy is missing")
     if owner.get("critical_main_failure_pauses_merges") is not True:

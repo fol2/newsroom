@@ -324,8 +324,8 @@ def test_service_boundary_is_exact_authenticated_loopback_and_bounded() -> None:
         'chmod 600 "${admin_file}" "${projector_file}"',
         "--publish 127.0.0.1:7687:7687",
         "--pull=never",
-        "timeout --signal=TERM --kill-after=5s 55s",
-        "timeout --signal=TERM --kill-after=2s 10s",
+        "timeout --signal=TERM --kill-after=5s 110s",
+        "timeout --signal=TERM --kill-after=2s 20s",
     ):
         assert required in start
 
@@ -340,7 +340,7 @@ def test_service_boundary_is_exact_authenticated_loopback_and_bounded() -> None:
     assert "NEO4J_ADMIN_PASSWORD" not in _step("service", "Upload service lane evidence").get("env", {})
     assert "NEWSROOM_NEO4J_PROJECTOR_PASSWORD" not in _step("service", "Upload service lane evidence").get("env", {})
     for required in (
-        "time.monotonic() + 25.0",
+        "time.monotonic() + 50.0",
         "connection_timeout=1.0",
         "CREATE USER newsroom_projector IF NOT EXISTS",
         "verify_connectivity()",
@@ -352,7 +352,7 @@ def test_service_boundary_is_exact_authenticated_loopback_and_bounded() -> None:
     assert '${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env' in cleanup["run"]
     assert '${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env' in cleanup["run"]
     assert "docker rm --force newsroom-sdlc-neo4j" in cleanup["run"]
-    assert "kill-after=2s 10s" in cleanup["run"]
+    assert "kill-after=2s 20s" in cleanup["run"]
     service_names = [step["name"] for step in _steps("service")]
     assert service_names.index("Execute evidence lane") < service_names.index("Remove disposable Neo4j state")
     assert service_names.index("Remove disposable Neo4j state") < service_names.index("Finalize evidence")
@@ -377,7 +377,7 @@ def test_repository_owned_gate_budgets_drive_route_lane_and_decision() -> None:
 
     collect = _step("decision", "Collect exact lane evidence")
     assert collect["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
-    assert "timeout --signal=TERM --kill-after=2s 55s" in collect["run"]
+    assert "timeout --signal=TERM --kill-after=2s 110s" in collect["run"]
     assert "scripts.sdlc.workflow_orchestrator collect" in collect["run"]
     finalize = _step("decision", "Finalize decision")
     assert finalize["if"] == "always()"

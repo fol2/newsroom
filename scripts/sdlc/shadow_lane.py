@@ -31,7 +31,7 @@ from .workflow_event import (
 
 SCHEMA_VERSION = "newsroom.sdlc.shadow-lane.v1"
 POLICY_VERSION = "sdlc-shadow-lane-v1"
-CONTRACT_VERSION = "sdlc-v2.2"
+CONTRACT_VERSION = "sdlc-v2.3"
 CLASSIFIER_VERSION = "sdlc-risk-v1"
 _SERVICE_RISKS = frozenset({"R3_EXTERNAL_SERVICE_SECURITY", "R4_RELEASE_OPERATIONAL"})
 _OWNER_RISKS = frozenset({"R4_RELEASE_OPERATIONAL"})
