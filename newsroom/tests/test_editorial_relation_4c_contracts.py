@@ -16,6 +16,7 @@ from newsroom.extraction.types import (
 from newsroom.integrated.models import IntegratedHypothesisVersionId
 from newsroom.relations.editorial_models import (
     EDITORIAL_PREDICATE_REGISTRY_V1,
+    EDITORIAL_RELATION_ADMISSION_POLICY_VERSION,
     CanonicalEntityRelationEndpoint,
     EditorialPredicateEndpointPair,
     EditorialRelationDecisionRequest,
@@ -242,7 +243,7 @@ def test_relation_decision_shapes_separate_admission_and_lifecycle() -> None:
         successor_assertion_id=None,
         supersession_id=None,
         reason_code="EXPLICIT_EDITORIAL_ACCEPT",
-        decision_policy_version="editorial-relation-admission-policy-v1",
+        decision_policy_version=EDITORIAL_RELATION_ADMISSION_POLICY_VERSION,
         idempotency_key="accept-relation",
     )
     assert accepted.action.terminal_for_proposal
@@ -252,6 +253,55 @@ def test_relation_decision_shapes_separate_admission_and_lifecycle() -> None:
             decision_id=EditorialRelationDecisionId.parse(_uuid(52)),
             target_assertion_id=EditorialRelationAssertionId.parse(_uuid(53)),
             idempotency_key="invalid-accept-shape",
+        )
+
+
+
+def test_relation_requests_reject_changed_registry_contract_and_policy() -> None:
+    proposal = _proposal()
+    wrong_registry = "sha256:" + "00" * 32
+    wrong_contract = EDITORIAL_PREDICATE_REGISTRY_V1.contract(
+        EditorialPredicateCode.SAME_PROCESS_AS
+    ).digest
+    with pytest.raises(EditorialRelationContractError, match="registry digest"):
+        replace(
+            proposal,
+            proposal_id=EditorialRelationProposalId.parse(_uuid(54)),
+            proposal_version_id=EditorialRelationProposalVersionId.parse(_uuid(55)),
+            predicate_registry_digest=wrong_registry,
+            idempotency_key="wrong-registry",
+        )
+    with pytest.raises(EditorialRelationContractError, match="predicate digest"):
+        replace(
+            proposal,
+            proposal_id=EditorialRelationProposalId.parse(_uuid(56)),
+            proposal_version_id=EditorialRelationProposalVersionId.parse(_uuid(57)),
+            predicate_contract_digest=wrong_contract,
+            idempotency_key="wrong-predicate-contract",
+        )
+
+    accepted = EditorialRelationDecisionRequest(
+        decision_id=EditorialRelationDecisionId.parse(_uuid(58)),
+        action=EditorialRelationDecisionAction.ACCEPT,
+        proposal_id=proposal.proposal_id,
+        proposal_version_id=proposal.proposal_version_id,
+        expected_proposal_version_digest=proposal.canonical_digest,
+        expected_previous_decision_id=None,
+        expected_previous_decision_version=0,
+        assertion_id=EditorialRelationAssertionId.parse(_uuid(59)),
+        target_assertion_id=None,
+        successor_assertion_id=None,
+        supersession_id=None,
+        reason_code="EXPLICIT_EDITORIAL_ACCEPT",
+        decision_policy_version=EDITORIAL_RELATION_ADMISSION_POLICY_VERSION,
+        idempotency_key="accepted-policy-contract",
+    )
+    with pytest.raises(EditorialRelationContractError, match="policy version"):
+        replace(
+            accepted,
+            decision_id=EditorialRelationDecisionId.parse(_uuid(60)),
+            decision_policy_version="editorial-relation-admission-policy-v2",
+            idempotency_key="wrong-decision-policy",
         )
 
 

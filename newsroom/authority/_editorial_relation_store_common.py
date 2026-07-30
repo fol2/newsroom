@@ -20,6 +20,8 @@ from newsroom.entities.types import (
     CanonicalEntityVersionId,
     EntityResolutionDependencyId,
     EntityRightsDenied,
+    EntityStaleDecision,
+    EntityStateError,
 )
 from newsroom.extraction.types import ExtractionRightsDenied
 from newsroom.relations.editorial_models import (
@@ -438,6 +440,10 @@ class _EditorialRelationStoreSupport:
                     version_id=endpoint.entity_version_id,
                 )
                 self._require_entity_current(conn, endpoint.entity_id)
+            except EntityStaleDecision as exc:
+                raise EditorialRelationStaleDecision(str(exc)) from exc
+            except EntityStateError as exc:
+                raise EditorialRelationStateError(str(exc)) from exc
             except EntityRightsDenied as exc:
                 raise EditorialRelationRightsDenied(str(exc)) from exc
             return

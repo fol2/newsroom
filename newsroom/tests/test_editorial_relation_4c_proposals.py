@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from newsroom.integrated.models import IntegratedHypothesisVersionId
+from newsroom.relations.editorial_models import CanonicalEntityRelationEndpoint
 from newsroom.relations import (
     EDITORIAL_PREDICATE_REGISTRY_V1,
     EventHypothesisRelationEndpoint,
@@ -21,7 +22,9 @@ from newsroom.relations import (
 )
 
 from .editorial_relation_4c_helpers import (
+    ENTITY_ID,
     RELATION_HOLD_DECISION_ID,
+    ZH_ENTITY_VERSION_ID,
     open_relation_system,
     relation_decision_request,
     relation_proposal_request,
@@ -185,5 +188,25 @@ def test_unretained_event_hypothesis_endpoint_fails_closed(
         with pytest.raises(
             EditorialRelationStateError,
             match="no retained workflow authority",
+        ):
+            system.relations.propose(request, proof=extraction_proof())
+
+
+def test_stale_canonical_entity_version_blocks_relation_proposal(
+    tmp_path: Path,
+) -> None:
+    state = seed_relation_fixture(tmp_path)
+    request = replace(
+        relation_proposal_request(state),
+        subject=CanonicalEntityRelationEndpoint(
+            entity_id=ENTITY_ID,
+            entity_version_id=ZH_ENTITY_VERSION_ID,
+        ),
+        idempotency_key="relation-stale-entity-version-v1",
+    )
+    with open_relation_system(state) as system:
+        with pytest.raises(
+            EditorialRelationStaleDecision,
+            match="candidate entity version is no longer current",
         ):
             system.relations.propose(request, proof=extraction_proof())

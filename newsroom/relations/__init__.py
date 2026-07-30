@@ -101,6 +101,14 @@ _EDITORIAL_POLICY_NAMES = {
     "merge_editorial_relation_authority_registries",
 }
 
+_EDITORIAL_TRACEABILITY_NAMES = {
+    "EditorialRelationTraceabilityRow",
+    "INCREMENT_4C_ADR_ANCHORS",
+    "INCREMENT_4C_DEFERRED",
+    "INCREMENT_4C_EXCLUSIONS",
+    "INCREMENT_4C_TRACEABILITY",
+}
+
 _EDITORIAL_TYPE_NAMES = {
     "EditorialPredicateCode",
     "EditorialPredicateDirectionality",
@@ -144,6 +152,10 @@ def __getattr__(name: str):
         from . import editorial_types as _editorial_types
 
         return getattr(_editorial_types, name)
+    if name in _EDITORIAL_TRACEABILITY_NAMES:
+        from . import editorial_traceability as _editorial_traceability
+
+        return getattr(_editorial_traceability, name)
     raise AttributeError(name)
 
 
@@ -193,6 +205,11 @@ __all__ = [
     "EditorialRelationReadPolicy",
     "EditorialRelationStateError",
     "EditorialRelationTemporalScope",
+    "EditorialRelationTraceabilityRow",
+    "INCREMENT_4C_ADR_ANCHORS",
+    "INCREMENT_4C_DEFERRED",
+    "INCREMENT_4C_EXCLUSIONS",
+    "INCREMENT_4C_TRACEABILITY",
     "RelationAssertionRelationEndpoint",
     "SourceRevisionRelationEndpoint",
     "StoryCandidateRelationEndpoint",
