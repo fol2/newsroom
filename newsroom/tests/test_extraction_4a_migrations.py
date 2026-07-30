@@ -19,6 +19,9 @@ from newsroom.authority.migrations import (
 )
 from newsroom.authority.persistence import AuthoritySchemaError
 
+from .editorial_relation_4c_migration_helpers import (
+    downgrade_empty_editorial_relation_schema_to_v14,
+)
 from .extraction_4a_helpers import open_extraction_system, seed_extraction_fixture
 
 
@@ -36,6 +39,7 @@ _EXTRACTION_TABLES_IN_DROP_ORDER = (
 
 
 def _downgrade_empty_extraction_schema_to_v12(database: Path) -> None:
+    downgrade_empty_editorial_relation_schema_to_v14(database)
     conn = sqlite3.connect(database, isolation_level=None)
     try:
         conn.execute("PRAGMA foreign_keys=OFF")

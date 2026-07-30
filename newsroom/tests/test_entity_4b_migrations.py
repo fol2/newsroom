@@ -22,6 +22,9 @@ from newsroom.authority.extraction_system import (
     open_governed_extraction_authority_system,
 )
 
+from .editorial_relation_4c_migration_helpers import (
+    downgrade_empty_editorial_relation_schema_to_v14,
+)
 from .extraction_4a_helpers import open_extraction_system, seed_extraction_fixture
 
 
@@ -72,6 +75,7 @@ REQUIRED_ENTITY_TRIGGERS = {
 
 
 def _drop_empty_entity_schema_to_v13(database: Path) -> None:
+    downgrade_empty_editorial_relation_schema_to_v14(database)
     conn = sqlite3.connect(database, isolation_level=None)
     try:
         conn.execute("PRAGMA foreign_keys=OFF")
@@ -98,7 +102,7 @@ def _drop_empty_entity_schema_to_v13(database: Path) -> None:
         ).fetchall():
             conn.execute(f'DROP TABLE "{row[0]}"')
         conn.execute(
-            "DELETE FROM authority_migrations WHERE version=?",
+            "DELETE FROM authority_migrations WHERE version>=?",
             (ENTITY_AUTHORITY_SCHEMA_VERSION,),
         )
         conn.execute(str(delete_trigger[0]))
@@ -107,14 +111,15 @@ def _drop_empty_entity_schema_to_v13(database: Path) -> None:
         conn.close()
 
 
-def test_fresh_schema_v14_history_fingerprint_tables_and_view_are_exact(
+def test_current_schema_retains_exact_v14_history_tables_and_view(
     tmp_path: Path,
 ) -> None:
     state = seed_extraction_fixture(tmp_path)
     conn = sqlite3.connect(state.database)
     try:
-        assert SCHEMA_VERSION == ENTITY_AUTHORITY_SCHEMA_VERSION == 14
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert ENTITY_AUTHORITY_SCHEMA_VERSION == 14
+        assert SCHEMA_VERSION == 15
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(conn) == EXPECTED_SCHEMA_FINGERPRINT
         assert conn.execute(
             "SELECT name,checksum FROM authority_migrations WHERE version=?",
@@ -192,7 +197,7 @@ def test_checked_v13_to_v14_upgrade_preserves_extraction_authority(
 
     after = sqlite3.connect(state.database)
     try:
-        assert after.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert after.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(after) == EXPECTED_SCHEMA_FINGERPRINT
         assert {
             table: after.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
