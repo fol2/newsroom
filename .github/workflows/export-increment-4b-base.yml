@@ -1,0 +1,48 @@
+name: Export exact Increment 4B base source
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  export-base:
+    if: github.event.pull_request.head.ref == 'agent/increment-4b-source-export'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact merged Increment 4A base
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: da65dbef7b8d6707555f820e7835aada64ed061f
+          fetch-depth: 0
+          show-progress: false
+          persist-credentials: false
+
+      - name: Build content-addressed source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 'da65dbef7b8d6707555f820e7835aada64ed061f'
+          mkdir -p "$RUNNER_TEMP/increment-4b-base"
+          git archive \
+            --format=tar.gz \
+            --output="$RUNNER_TEMP/increment-4b-base/newsroom-da65dbef.tar.gz" \
+            HEAD
+          sha256sum "$RUNNER_TEMP/increment-4b-base/newsroom-da65dbef.tar.gz" \
+            > "$RUNNER_TEMP/increment-4b-base/SHA256SUMS"
+          printf '%s\n' \
+            'commit=da65dbef7b8d6707555f820e7835aada64ed061f' \
+            "tree=$(git rev-parse HEAD^{tree})" \
+            > "$RUNNER_TEMP/increment-4b-base/source.env"
+
+      - name: Upload exact source archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        with:
+          name: increment-4b-base-da65dbef
+          path: ${{ runner.temp }}/increment-4b-base
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
