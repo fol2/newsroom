@@ -1,14 +1,15 @@
 # High-performance evidence SDLC
 
 - Role: Normative target specification
-- Status: Proposed — owner review required before implementation replaces existing gates
+- Status: Accepted — amended by the owner on 2026-07-30
 - Owner: fol2
 - Canonical language: English
 - Date: 2026-07-21
 - Specification ID: `SDLC-V2`
-- Contract version: `sdlc-v2.2`
+- Contract version: `sdlc-v2.3`
 - Related issue: #98
 - Related active product work: #96 / PR #97
+- Current owner amendment: `docs/specs/sdlc/2026-07-30-sdlc-v2.3-owner-budget-amendment.md`
 
 ## 1. Decision
 
@@ -23,14 +24,14 @@ The normal pull-request path has one always-reporting decision workflow with two
 
 The measured exact-head test selections are currently small: the recorded JUnit suites range from 1.134 to 7.401 seconds. The exact full-repository pytest p95 has not yet been recorded. Full deterministic tests remain the blocking default until measurement proves that their p95 no longer fits the core-lane budget. Test-impact analysis begins in observe mode and cannot replace full evidence until repository-specific shadow controls demonstrate that it preserves defect detection.
 
-Deep mutation, fuzz, compatibility, flake, performance and recovery work runs as independent scientific shards outside the interactive path. Each shard has its own sub-60-second budget; a large experiment is many content-addressed shards, not one unbounded job.
+Deep mutation, fuzz, compatibility, flake, performance and recovery work runs as independent scientific shards outside the interactive path. Each shard has its own sub-120-second budget; a large experiment is many content-addressed shards, not one unbounded job.
 
 ## 2. Goals
 
 `SDLC-V2` must:
 
 - preserve or improve regression, authority, security, deletion and production-profile confidence;
-- give developers a correct blocking machine decision within a 55-second repository-owned execution envelope;
+- give developers a correct blocking machine decision within a 110-second repository-owned execution envelope;
 - target less than 60 seconds p95 from GitHub event to decision once queue and provisioning are measured and controlled;
 - prevent obsolete commits from consuming runner capacity;
 - remove repeated checkout, Python setup, uv installation, dependency sync and overlapping tests;
@@ -134,24 +135,26 @@ A deterministic classification of changed paths and semantic surfaces that contr
 
 All gate and lane durations below start after runner allocation.
 
+The 2026-07-30 owner amendment doubles every hard command, lane, shard and finalisation ceiling for all risk tiers. It does not double the p50/p95 performance targets, relax required evidence, reduce test coverage or alter risk routing. The unchanged targets continue to expose performance regression; the doubled values control only typed `BUDGET_EXCEEDED` enforcement.
+
 | Gate | p50 | p95 | hard command timeout | Lane |
 |---|---:|---:|---:|---|
-| `route` | 1 s | 2 s | 5 s | core |
-| `source-integrity` | 3 s | 8 s | 15 s | core |
-| `core-deterministic` | 15 s | 35 s | 55 s | core |
-| `service-neo4j` | 25 s | 50 s | 55 s | service |
-| `merge-exact` | 20 s | 50 s | 55 s | merge group |
-| each `science-*` shard | 20 s | 50 s | 55 s | science |
-| `evidence-finalize` | 1 s | 3 s | 5 s | decision |
+| `route` | 1 s | 2 s | 10 s | core |
+| `source-integrity` | 3 s | 8 s | 30 s | core |
+| `core-deterministic` | 15 s | 35 s | 110 s | core |
+| `service-neo4j` | 25 s | 50 s | 110 s | service |
+| `merge-exact` | 20 s | 50 s | 110 s | merge group |
+| each `science-*` shard | 20 s | 50 s | 110 s | science |
+| `evidence-finalize` | 1 s | 3 s | 10 s | decision |
 
 Aggregate execution rules:
 
-- core-lane repository-owned execution hard deadline: 55 seconds;
-- service-lane repository-owned execution hard deadline: 55 seconds;
-- merge-lane repository-owned execution hard deadline: 55 seconds;
-- finalisation hard deadline: 5 seconds;
+- core-lane repository-owned execution hard deadline: 110 seconds;
+- service-lane repository-owned execution hard deadline: 110 seconds;
+- merge-lane repository-owned execution hard deadline: 110 seconds;
+- finalisation hard deadline: 10 seconds;
 - an internal command's timeout is capped by the lane's remaining deadline;
-- a GitHub job may use a one-minute timeout where supported, but the repository-owned lane watchdog is authoritative and reserves finalisation time.
+- a GitHub job may use a two-minute timeout where supported, but the repository-owned lane watchdog is authoritative and reserves finalisation time.
 
 Global objectives:
 
@@ -333,13 +336,13 @@ It:
 
 Purpose: catch repository interactions without delaying every edit.
 
-It runs bounded shards for clean full deterministic evidence, package smoke, migration matrices, actual-service recovery, dependency/workflow integrity and clustering. If a full category exceeds 55 seconds, it is partitioned into deterministic content-addressed shards; no shard exceeds the budget.
+It runs bounded shards for clean full deterministic evidence, package smoke, migration matrices, actual-service recovery, dependency/workflow integrity and clustering. If a full category exceeds 110 seconds, it is partitioned into deterministic content-addressed shards; no shard exceeds the budget.
 
 A critical failure creates a revert/fix-forward incident and follows the owner-selected merge-pause policy. It never rewrites PR evidence.
 
 ### 8.7 `G6` scientific verification
 
-Independent sub-55-second shards include:
+Independent sub-110-second shards include:
 
 - mutation testing by target slice;
 - deterministic fault injection;
@@ -376,7 +379,7 @@ Canonical output shape:
 ```json
 {
   "schema_version": "newsroom.sdlc.route.v1",
-  "contract_version": "sdlc-v2.2",
+  "contract_version": "sdlc-v2.3",
   "base_sha": "0000000000000000000000000000000000000000",
   "head_sha": "1111111111111111111111111111111111111111",
   "base_tree_sha": "2222222222222222222222222222222222222222",
@@ -404,7 +407,7 @@ The complete deterministic suite remains blocking while all are true:
 
 - measured p95 test execution is at most 35 seconds;
 - measured warm bootstrap p95 is at most 10 seconds;
-- lane execution remains below 55 seconds;
+- lane execution remains below 110 seconds;
 - flake rate is below 0.1%;
 - no test requires an unauthorised external effect.
 
@@ -415,7 +418,7 @@ Current component selections are well below the test threshold, but the exact fu
 - `micro`: individual p95 below 100 ms;
 - `small`: hermetic test/file p95 below 1 second;
 - `service`: disposable actual-service individual p95 below 5 seconds;
-- `science`: shard below 55 seconds.
+- `science`: shard below 110 seconds.
 
 A target above its size budget is split, redesigned, moved to the correct lane or granted a documented temporary exception.
 
@@ -491,7 +494,7 @@ If execution conforms but feedback p95 remains above 60 seconds because queue/pr
 
 ### 11.4 Build-system graduation
 
-Do not adopt Bazel/Pants for appearance. Evaluate a hermetic action graph/remote cache only when simpler optimisation cannot keep the deterministic lane below 55 seconds, the repository becomes multi-package/multi-language, generated dependency inference is unreliable, remote-cache modelling predicts material improvement, or environment drift becomes recurring.
+Do not adopt Bazel/Pants for appearance. Evaluate a hermetic action graph/remote cache only when simpler optimisation cannot keep the deterministic lane below 110 seconds, the repository becomes multi-package/multi-language, generated dependency inference is unreliable, remote-cache modelling predicts material improvement, or environment drift becomes recurring.
 
 Any adoption must prove lower p95 and no reproducibility loss in shadow.
 
@@ -618,7 +621,7 @@ Method:
 - stop/rollback on quality regression;
 - review monthly and after every escaped defect.
 
-A lane is non-conformant over seven days when p95 execution exceeds 55 seconds, more than 1% hit `BUDGET_EXCEEDED`, flake exceeds 0.5%, evidence mismatch exceeds 0.1%, or routing/selection misses a known regression. It accepts no additional scope until fixed or split.
+A lane is non-conformant over seven days when p95 execution exceeds 110 seconds, more than 1% hit `BUDGET_EXCEEDED`, flake exceeds 0.5%, evidence mismatch exceeds 0.1%, or routing/selection misses a known regression. It accepts no additional scope until fixed or split.
 
 ## 15. Security and supply chain
 

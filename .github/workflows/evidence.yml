@@ -275,9 +275,9 @@ jobs:
           printf 'NEO4J_ADMIN_PASSWORD=%s\n' "${NEO4J_ADMIN_PASSWORD}" > "${admin_file}"
           printf 'NEWSROOM_NEO4J_PROJECTOR_PASSWORD=%s\n' "${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}" > "${projector_file}"
           chmod 600 "${admin_file}" "${projector_file}"
-          timeout --signal=TERM --kill-after=5s 55s \
+          timeout --signal=TERM --kill-after=5s 110s \
             docker pull "${NEO4J_B2_IMAGE}"
-          timeout --signal=TERM --kill-after=2s 10s \
+          timeout --signal=TERM --kill-after=2s 20s \
             docker run --detach --pull=never \
               --name newsroom-sdlc-neo4j \
               --publish 127.0.0.1:7687:7687 \
@@ -307,7 +307,7 @@ jobs:
               os.environ['NEO4J_ADMIN_USERNAME'],
               os.environ['NEO4J_ADMIN_PASSWORD'],
           )
-          deadline = time.monotonic() + 25.0
+          deadline = time.monotonic() + 50.0
           last_error = None
           driver = None
           while time.monotonic() < deadline:
@@ -380,7 +380,7 @@ jobs:
           rm -f \
             "${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env" \
             "${RUNNER_TEMP}/newsroom-sdlc-neo4j-projector.env"
-          timeout --signal=TERM --kill-after=2s 10s docker rm --force newsroom-sdlc-neo4j || true
+          timeout --signal=TERM --kill-after=2s 20s docker rm --force newsroom-sdlc-neo4j || true
 
       - name: Finalize evidence
         if: always()
@@ -448,7 +448,7 @@ jobs:
         run: |
           set -uo pipefail
           set +e
-          timeout --signal=TERM --kill-after=2s 55s \
+          timeout --signal=TERM --kill-after=2s 110s \
             python -m scripts.sdlc.workflow_orchestrator collect \
               --output-directory .sdlc-run/decision-input \
               > "${RUNNER_TEMP}/collection-result.json"

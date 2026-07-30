@@ -62,7 +62,7 @@ def _route(*, service: bool = False, clustering: bool = False) -> dict[str, obje
         "sentinels": ["workflow_gate_contract_integrity"],
         "selected_test_manifest_digest": "sha256:" + "1" * 64,
         "schema_version": "newsroom.sdlc.route.v1",
-        "contract_version": "sdlc-v2.2",
+        "contract_version": "sdlc-v2.3",
     }
 
 
@@ -115,7 +115,7 @@ def test_execute_uses_the_caller_shared_deadline(
     contract = _contract(tmp_path)
     first = _spec(contract, "source-integrity", "source")
     second = _spec(contract, "core-deterministic", "tests")
-    deadline = LaneDeadline(100, 55_000)
+    deadline = LaneDeadline(100, 110_000)
     observed: list[LaneDeadline] = []
 
     def run_configured_gate(**kwargs):
@@ -148,7 +148,7 @@ def test_core_lane_passes_one_deadline_to_both_gates(
     contract = _contract(tmp_path)
     artifact = tmp_path / "artifact"
     artifact.mkdir()
-    deadline = LaneDeadline(200, 55_000)
+    deadline = LaneDeadline(200, 110_000)
     observed: list[LaneDeadline] = []
     specifications: list[dict[str, object]] = []
 
@@ -198,7 +198,7 @@ def test_core_lane_starts_independent_gates_concurrently(
     contract = _contract(tmp_path)
     artifact = tmp_path / "artifact-concurrent"
     artifact.mkdir()
-    deadline = LaneDeadline(300, 55_000)
+    deadline = LaneDeadline(300, 110_000)
     rendezvous = threading.Barrier(2, timeout=2)
     started: list[tuple[str, str]] = []
     observed_deadlines: list[LaneDeadline] = []
@@ -246,7 +246,7 @@ def test_core_lane_waits_for_peer_cleanup_before_propagating_defect(
     contract = _contract(tmp_path)
     artifact = tmp_path / "artifact-concurrent-defect"
     artifact.mkdir()
-    deadline = LaneDeadline(400, 55_000)
+    deadline = LaneDeadline(400, 110_000)
     rendezvous = threading.Barrier(2, timeout=2)
     peer_finished = threading.Event()
 
@@ -325,7 +325,7 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
         lambda **kwargs: captured.setdefault("spec", kwargs) or SimpleNamespace(),
     )
     monkeypatch.setattr(
-        lane_module, "start_lane_deadline", lambda *_args: LaneDeadline(1, 55_000)
+        lane_module, "start_lane_deadline", lambda *_args: LaneDeadline(1, 110_000)
     )
     monkeypatch.setattr(
         lane_module,
@@ -868,7 +868,7 @@ def test_execute_phase_does_not_parse_junit(
     artifact = tmp_path / "artifact-no-finalize"
     artifact.mkdir()
     monkeypatch.setattr(
-        lane_module, "start_lane_deadline", lambda *_args: LaneDeadline(1, 55_000)
+        lane_module, "start_lane_deadline", lambda *_args: LaneDeadline(1, 110_000)
     )
     monkeypatch.setattr(
         lane_module,

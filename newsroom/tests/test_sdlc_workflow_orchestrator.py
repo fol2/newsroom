@@ -465,7 +465,7 @@ def test_bounded_decision_timeout_publishes_failure_without_ambient_token(
     monkeypatch.setattr(
         orchestrator,
         "start_lane_deadline",
-        lambda *_args: LaneDeadline(1, 5_000),
+        lambda *_args: LaneDeadline(1, 10_000),
     )
     captured = {}
 
@@ -606,7 +606,7 @@ def test_watchdog_environment_failure_is_typed_after_context(
     monkeypatch.setattr(
         orchestrator,
         "start_lane_deadline",
-        lambda *_args: LaneDeadline(1, 5_000),
+        lambda *_args: LaneDeadline(1, 10_000),
     )
     monkeypatch.setattr(
         orchestrator,
@@ -759,7 +759,7 @@ def test_parent_rejects_child_decision_for_another_context(
     monkeypatch.setattr(
         orchestrator,
         "start_lane_deadline",
-        lambda *_args: LaneDeadline(1, 5_000),
+        lambda *_args: LaneDeadline(1, 10_000),
     )
 
     def run(**kwargs):
