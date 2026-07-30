@@ -1,0 +1,48 @@
+name: Export exact Increment 4D base source
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  export-source:
+    if: github.event.pull_request.head.ref == 'agent/increment-4d-source-export-2'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact merged Increment 4C base
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: b2f12922e5ec853991f95ac41bf46a977a70dc1a
+          fetch-depth: 0
+          show-progress: false
+          persist-credentials: false
+
+      - name: Build content-addressed source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 'b2f12922e5ec853991f95ac41bf46a977a70dc1a'
+          test "$(git rev-parse HEAD^{tree})" = '395b76dcb8539b3593b73bdfff45b25f2371d8be'
+          mkdir -p "$RUNNER_TEMP/export"
+          git archive --format=tar --prefix=newsroom/ HEAD \
+            | gzip -n -9 > "$RUNNER_TEMP/export/newsroom-b2f12922.tar.gz"
+          sha256sum "$RUNNER_TEMP/export/newsroom-b2f12922.tar.gz" \
+            > "$RUNNER_TEMP/export/newsroom-b2f12922.tar.gz.sha256"
+          cat > "$RUNNER_TEMP/export/manifest.txt" <<'EOF'
+          commit=b2f12922e5ec853991f95ac41bf46a977a70dc1a
+          tree=395b76dcb8539b3593b73bdfff45b25f2371d8be
+          purpose=Increment 4D exact base recovery
+          EOF
+
+      - name: Upload exact source archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        with:
+          name: increment-4d-base-b2f12922
+          path: ${{ runner.temp }}/export
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
