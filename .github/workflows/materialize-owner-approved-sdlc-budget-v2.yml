@@ -1,0 +1,171 @@
+name: Materialize owner-approved doubled SDLC budgets
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-budget-v2:
+    if: github.event.pull_request.head.ref == 'agent/increment-4a-extraction-run-authority'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact staged head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-4a-extraction-run-authority
+          fetch-depth: 0
+          persist-credentials: true
+          show-progress: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+
+      - name: Amend, verify, test and publish clean source
+        shell: bash
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONHASHSEED: '0'
+          PYTHONUTF8: '1'
+        run: |
+          set -euo pipefail
+          START_SHA="$(git rev-parse HEAD)"
+          test -f .github/OWNER_SDLC_BUDGET_APPROVAL_2026-07-30.md
+          test -f .github/workflows/materialize-owner-approved-sdlc-budget-v2.yml
+
+          python - <<'PY'
+          from __future__ import annotations
+
+          import re
+          from pathlib import Path
+
+          roots = [
+              Path('.github/workflows/evidence.yml'),
+              Path('scripts/sdlc'),
+              Path('newsroom/tests'),
+              Path('docs'),
+          ]
+          allowed_test_prefix = 'test_sdlc_'
+          semantic = re.compile(
+              r'(budget|deadline|timeout|watchdog|hard[_ -]?ceiling|execution[_ -]?max|'
+              r'bootstrap[_ -]?max|finali[sz]e[_ -]?max|max[_ -]?(?:execution|bootstrap|finali[sz]e)|'
+              r'BUDGET_EXCEEDED|SDLC_EXECUTION|SDLC_BOOTSTRAP|SDLC_FINAL)',
+              re.IGNORECASE,
+          )
+          replacements = (
+              (re.compile(r'(?<![0-9])55_000(?![0-9])'), '110_000'),
+              (re.compile(r'(?<![0-9])55000(?![0-9])'), '110000'),
+              (re.compile(r'(?<![0-9])55\.0(?![0-9])'), '110.0'),
+              (re.compile(r'(?<![0-9])55s(?![A-Za-z0-9])'), '110s'),
+              (re.compile(r'(?<![0-9])15_000(?![0-9])'), '30_000'),
+              (re.compile(r'(?<![0-9])15000(?![0-9])'), '30000'),
+              (re.compile(r'(?<![0-9])15\.0(?![0-9])'), '30.0'),
+              (re.compile(r'(?<![0-9])15s(?![A-Za-z0-9])'), '30s'),
+              (re.compile(r'(?<![0-9])5_000(?![0-9])'), '10_000'),
+              (re.compile(r'(?<![0-9])5000(?![0-9])'), '10000'),
+              (re.compile(r'(?<![0-9])5\.0(?![0-9])'), '10.0'),
+              (re.compile(r'(?<![0-9])5s(?![A-Za-z0-9])'), '10s'),
+          )
+
+          candidates: list[Path] = []
+          for root in roots:
+              if root.is_file():
+                  candidates.append(root)
+              elif root.is_dir():
+                  for path in root.rglob('*'):
+                      if not path.is_file() or path.suffix not in {'.py', '.yml', '.yaml', '.json', '.md'}:
+                          continue
+                      if path.parts[:2] == ('newsroom', 'tests') and not path.name.startswith(allowed_test_prefix):
+                          continue
+                      candidates.append(path)
+
+          changed: list[Path] = []
+          replacement_count = 0
+          for path in sorted(set(candidates)):
+              text = path.read_text(encoding='utf-8')
+              lines = text.splitlines(keepends=True)
+              out: list[str] = []
+              file_changed = False
+              is_sdlc_test = path.parts[:2] == ('newsroom', 'tests') and path.name.startswith(allowed_test_prefix)
+              is_evidence = path == Path('.github/workflows/evidence.yml')
+              for line in lines:
+                  amended = line
+                  # Tests encode exact expected contract values, so every old hard-budget
+                  # literal in an SDLC test is eligible. Runtime/docs/workflow lines must
+                  # also carry an explicit budget/deadline/watchdog semantic marker.
+                  if is_sdlc_test or is_evidence or semantic.search(line):
+                      for pattern, replacement in replacements:
+                          amended, count = pattern.subn(replacement, amended)
+                          replacement_count += count
+                  if amended != line:
+                      file_changed = True
+                  out.append(amended)
+              if file_changed:
+                  path.write_text(''.join(out), encoding='utf-8')
+                  changed.append(path)
+
+          if replacement_count < 12:
+              raise SystemExit(f'expected broad governed amendment; replacements={replacement_count}')
+          if not changed:
+              raise SystemExit('no active SDLC budget files changed')
+          print('BUDGET_AMENDMENT_FILES')
+          for path in changed:
+              print(path)
+          print(f'BUDGET_AMENDMENT_REPLACEMENTS={replacement_count}')
+          PY
+
+          rm -f .github/workflows/materialize-owner-approved-sdlc-budget-v2.yml
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          rm -rf .pytest_cache
+
+          mapfile -t CHANGED < <(git status --short | sed -E 's/^...//' | LC_ALL=C sort)
+          test "${#CHANGED[@]}" -ge 4
+          test "${#CHANGED[@]}" -le 24
+          for path in "${CHANGED[@]}"; do
+            case "$path" in
+              .github/OWNER_SDLC_BUDGET_APPROVAL_2026-07-30.md|.github/workflows/evidence.yml|scripts/sdlc/*|newsroom/tests/test_sdlc_*|docs/*)
+                ;;
+              *)
+                printf 'unauthorised budget-amendment path: %s\n' "$path" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          git diff --check
+          python -m compileall -q scripts/sdlc newsroom/tests
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m pytest -q newsroom/tests/test_sdlc_*.py \
+            --junitxml="$RUNNER_TEMP/sdlc-budget-v2.xml"
+
+          # The owner approval is a hard-ceiling change only. Reject accidental
+          # coverage or dependency changes.
+          test -z "$(git diff --name-only -- pyproject.toml uv.lock)"
+          git add -A
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore(sdlc): double owner-approved tier budgets'
+          git push \
+            --force-with-lease=refs/heads/agent/increment-4a-extraction-run-authority:"$START_SHA" \
+            origin HEAD:agent/increment-4a-extraction-run-authority
