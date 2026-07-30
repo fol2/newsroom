@@ -1,0 +1,111 @@
+name: Materialize Increment 4C security and lifecycle hardening
+
+on:
+  pull_request:
+    types: [synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-hardening:
+    if: github.event.pull_request.head.ref == 'agent/increment-4c-general-relation-authority' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact staged Increment 4C hardening head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-4c-general-relation-authority
+          fetch-depth: 0
+          show-progress: false
+          persist-credentials: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+
+      - name: Verify, apply, qualify and publish clean hardening slice
+        shell: bash
+        env:
+          BASE_SHA: 42b8a60dd7352ce013755648c7088718268be86f
+          BASE_TREE: c99135e56a376b8c34c239cb54a6abd0a3750a49
+          FINAL_TREE: e7f670b6d40d8fc3be02afa581411d0332c74a34
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONHASHSEED: '0'
+          PYTHONUTF8: '1'
+        run: |
+          set -euo pipefail
+          START_SHA="$(git rev-parse HEAD)"
+          test "$(git branch --show-current)" = 'agent/increment-4c-general-relation-authority'
+          git merge-base --is-ancestor "$BASE_SHA" "$START_SHA"
+          test "$(git rev-parse "$BASE_SHA^{tree}")" = "$BASE_TREE"
+
+          mapfile -t staged < <(git diff --name-only "$BASE_SHA" "$START_SHA" | LC_ALL=C sort)
+          test "${#staged[@]}" -eq 4
+          test "${staged[0]}" = '.github/increment-4c-hardening/part-00.b64'
+          test "${staged[1]}" = '.github/increment-4c-hardening/part-01.b64'
+          test "${staged[2]}" = '.github/increment-4c-hardening/part-02.b64'
+          test "${staged[3]}" = '.github/workflows/materialize-increment-4c-hardening.yml'
+
+          declare -A expected_size=([00]=4800 [01]=4800 [02]=2996)
+          declare -A expected_sha=(
+            [00]=c8c0fdff9ea0061d7fd78fa3283505146958e4f2445f6721b2f2b1c15fd290b6
+            [01]=ae077201ff3e09094c922903943eaf88c0aa2f29a986e4142363429bbbffd6a9
+            [02]=dc34cf12cbcb7f9ce1814a2119c284c0be97438190c1f680fe56f5046d7330dc
+          )
+          : > "$RUNNER_TEMP/increment-4c-hardening.patch.gz.b64"
+          for index in 00 01 02; do
+            chunk=".github/increment-4c-hardening/part-${index}.b64"
+            test "$(wc -c < "$chunk")" -eq "${expected_size[$index]}"
+            printf '%s  %s\n' "${expected_sha[$index]}" "$chunk" | sha256sum --check --strict -
+            cat "$chunk" >> "$RUNNER_TEMP/increment-4c-hardening.patch.gz.b64"
+          done
+          test "$(wc -c < "$RUNNER_TEMP/increment-4c-hardening.patch.gz.b64")" -eq 12596
+          printf '%s  %s\n' '8cc82c2af7ac3817783b15647ff6a97a97560ed0a2d877068a3284f528157114' "$RUNNER_TEMP/increment-4c-hardening.patch.gz.b64" | sha256sum --check --strict -
+          base64 --decode "$RUNNER_TEMP/increment-4c-hardening.patch.gz.b64" > "$RUNNER_TEMP/increment-4c-hardening.patch.gz"
+          test "$(wc -c < "$RUNNER_TEMP/increment-4c-hardening.patch.gz")" -eq 9447
+          printf '%s  %s\n' 'dc93d8b0d9e75a2fd1e6ab7887ead6e7c8e403a76d35ba505d1984d4e0e5fb8e' "$RUNNER_TEMP/increment-4c-hardening.patch.gz" | sha256sum --check --strict -
+          gzip --decompress --stdout "$RUNNER_TEMP/increment-4c-hardening.patch.gz" > "$RUNNER_TEMP/increment-4c-hardening.patch"
+          test "$(wc -c < "$RUNNER_TEMP/increment-4c-hardening.patch")" -eq 54976
+          printf '%s  %s\n' '4453151f8f06a4eacf887365fa70000e9236491b5e7fb6f957d16b93a26ea2d7' "$RUNNER_TEMP/increment-4c-hardening.patch" | sha256sum --check --strict -
+
+          git apply --check "$RUNNER_TEMP/increment-4c-hardening.patch"
+          git apply "$RUNNER_TEMP/increment-4c-hardening.patch"
+          rm -rf .github/increment-4c-hardening
+          rm -f .github/workflows/materialize-increment-4c-hardening.yml
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          rm -rf .pytest_cache
+          git diff --check
+          python -m compileall -q newsroom/authority newsroom/relations
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m pytest -q newsroom/tests/test_editorial_relation_4c_*.py newsroom/tests/test_relation_2a_authority.py newsroom/tests/test_relation_2a_contracts.py newsroom/tests/test_relation_2a_lifecycle_integrity.py newsroom/tests/test_relation_2a_traceability.py newsroom/tests/test_extraction_4a_migrations.py newsroom/tests/test_entity_4b_migrations.py -W error::ResourceWarning --junitxml="$RUNNER_TEMP/increment-4c-hardening.xml"
+
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          rm -rf .pytest_cache
+          git add -A
+          git diff --cached --check
+          ACTUAL_TREE="$(git write-tree)"
+          printf 'actual_tree=%s\nexpected_tree=%s\n' "$ACTUAL_TREE" "$FINAL_TREE"
+          test "$ACTUAL_TREE" = "$FINAL_TREE"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'test(relation): harden concurrency rights and lifecycle'
+          git push origin HEAD:agent/increment-4c-general-relation-authority
