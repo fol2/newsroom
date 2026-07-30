@@ -13,6 +13,7 @@ from newsroom.authority.extraction_migrations import (
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
     EXPECTED_SCHEMA_FINGERPRINT,
+    SCHEMA_VERSION,
     apply_pending_migrations,
     schema_fingerprint,
 )
@@ -44,10 +45,38 @@ def _downgrade_empty_extraction_schema_to_v12(database: Path) -> None:
         ).fetchone()
         assert delete_trigger is not None and delete_trigger[0]
         conn.execute("DROP TRIGGER immutable_authority_migrations_delete")
+        entity_views = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='view' "
+                "AND name LIKE 'entity_%'"
+            ).fetchall()
+        ]
+        for view in entity_views:
+            conn.execute(f'DROP VIEW "{view}"')
+        entity_triggers = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND (name LIKE '%entity%' OR tbl_name LIKE 'entity_%' "
+                "OR tbl_name LIKE 'canonical_entit%')"
+            ).fetchall()
+        ]
+        for trigger in entity_triggers:
+            conn.execute(f'DROP TRIGGER "{trigger}"')
+        entity_tables = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND (name LIKE 'entity_%' OR name LIKE 'canonical_entit%')"
+            ).fetchall()
+        ]
+        for table in entity_tables:
+            conn.execute(f'DROP TABLE "{table}"')
         for table in _EXTRACTION_TABLES_IN_DROP_ORDER:
             conn.execute(f'DROP TABLE "{table}"')
         conn.execute(
-            "DELETE FROM authority_migrations WHERE version=?",
+            "DELETE FROM authority_migrations WHERE version>=?",
             (EXTRACTION_AUTHORITY_SCHEMA_VERSION,),
         )
         conn.execute(str(delete_trigger[0]))
@@ -56,13 +85,13 @@ def _downgrade_empty_extraction_schema_to_v12(database: Path) -> None:
         conn.close()
 
 
-def test_fresh_schema_v13_history_fingerprint_and_tables_are_exact(
+def test_current_schema_retains_exact_v13_history_and_extraction_tables(
     tmp_path: Path,
 ) -> None:
     state = seed_extraction_fixture(tmp_path)
     conn = sqlite3.connect(state.database)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(conn) == EXPECTED_SCHEMA_FINGERPRINT
         assert conn.execute(
             "SELECT name,checksum FROM authority_migrations WHERE version=13"
@@ -114,7 +143,7 @@ def test_checked_v12_to_v13_upgrade_preserves_prior_authority(
 
     after = sqlite3.connect(state.database)
     try:
-        assert after.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert after.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(after) == EXPECTED_SCHEMA_FINGERPRINT
         assert after.execute(
             "SELECT COUNT(*) FROM source_revisions"
@@ -166,7 +195,7 @@ def test_newer_or_tampered_migration_state_fails_closed(tmp_path: Path) -> None:
     state = seed_extraction_fixture(tmp_path)
     conn = sqlite3.connect(state.database)
     try:
-        conn.execute("PRAGMA user_version=14")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
         conn.commit()
     finally:
         conn.close()
