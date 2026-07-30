@@ -66,6 +66,17 @@ class _EditorialRelationIntegrityMixin:
             ).fetchall():
                 self._editorial_projection_event_from_row(conn, row)
             self._validate_editorial_relation_heads(conn)
+            if not self._allow_editorial_relation_projection_rebuild:
+                missing_head = conn.execute(
+                    "SELECT a.assertion_id FROM editorial_relation_assertions a "
+                    "LEFT JOIN editorial_relation_assertion_heads h "
+                    "ON h.assertion_id=a.assertion_id "
+                    "WHERE h.assertion_id IS NULL LIMIT 1"
+                ).fetchone()
+                if missing_head is not None:
+                    raise AuthoritySchemaError(
+                        "editorial relation current projection is incomplete"
+                    )
             self._validate_editorial_supersessions(conn)
             self._validate_editorial_projection_coverage(conn)
             self._validate_editorial_assertion_endpoint_graph(conn)
