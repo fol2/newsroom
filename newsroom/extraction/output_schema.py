@@ -31,92 +31,201 @@ if TYPE_CHECKING:
 FIXTURE_OUTPUT_SCHEMA_ID = "newsroom.fixture.output-schema"
 FIXTURE_OUTPUT_SCHEMA_VERSION = "v1"
 FIXTURE_OUTPUT_SCHEMA_NAME = "increment-4a-fixture-output-v1"
+HOMONYM_FIXTURE_OUTPUT_SCHEMA_VERSION = "v2-homonym"
+HOMONYM_FIXTURE_OUTPUT_SCHEMA_NAME = "increment-4b-homonym-fixture-output-v1"
 
-FIXTURE_OUTPUT_SCHEMA: dict[str, object] = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "urn:newsroom:increment-4a:fixture-output:v1",
-    "type": "object",
-    "required": [
-        "entities",
-        "equivalences",
-        "fixture_case",
-        "relations",
-        "schema_version",
-    ],
-    "additionalProperties": False,
-    "properties": {
-        "schema_version": {"const": FIXTURE_OUTPUT_SCHEMA_NAME},
-        "fixture_case": {
-            "enum": [
-                FixtureExtractionCase.BILINGUAL_COMPLETE.value,
-                FixtureExtractionCase.BILINGUAL_PARTIAL.value,
-            ]
-        },
-        "entities": {
-            "type": "array",
-            "minItems": 2,
-            "maxItems": 2,
-            "uniqueItems": True,
-            "items": {
-                "type": "object",
-                "required": ["local_id", "text"],
-                "additionalProperties": False,
-                "properties": {
-                    "local_id": {"type": "string", "minLength": 1, "maxLength": 256},
-                    "text": {"type": "string", "minLength": 1, "maxLength": 4096},
+
+def _fixture_output_schema(
+    *,
+    schema_name: str,
+    schema_urn: str,
+    cases: tuple[FixtureExtractionCase, ...],
+    entity_count: int,
+    equivalence_count: int,
+    relation_minimum: int,
+    relation_maximum: int,
+) -> dict[str, object]:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": schema_urn,
+        "type": "object",
+        "required": [
+            "entities",
+            "equivalences",
+            "fixture_case",
+            "relations",
+            "schema_version",
+        ],
+        "additionalProperties": False,
+        "properties": {
+            "schema_version": {"const": schema_name},
+            "fixture_case": {"enum": [case.value for case in cases]},
+            "entities": {
+                "type": "array",
+                "minItems": entity_count,
+                "maxItems": entity_count,
+                "uniqueItems": True,
+                "items": {
+                    "type": "object",
+                    "required": ["local_id", "text"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "local_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                        },
+                        "text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096,
+                        },
+                    },
                 },
             },
-        },
-        "equivalences": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 1,
-            "uniqueItems": True,
-            "items": {
-                "type": "object",
-                "required": ["local_id", "object", "subject"],
-                "additionalProperties": False,
-                "properties": {
-                    "local_id": {"type": "string", "minLength": 1, "maxLength": 256},
-                    "subject": {"type": "string", "minLength": 1, "maxLength": 4096},
-                    "object": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "equivalences": {
+                "type": "array",
+                "minItems": equivalence_count,
+                "maxItems": equivalence_count,
+                "uniqueItems": True,
+                "items": {
+                    "type": "object",
+                    "required": ["local_id", "object", "subject"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "local_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                        },
+                        "subject": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096,
+                        },
+                        "object": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096,
+                        },
+                    },
                 },
             },
-        },
-        "relations": {
-            "type": "array",
-            "minItems": 0,
-            "maxItems": 1,
-            "uniqueItems": True,
-            "items": {
-                "type": "object",
-                "required": ["local_id", "object", "predicate", "subject"],
-                "additionalProperties": False,
-                "properties": {
-                    "local_id": {"type": "string", "minLength": 1, "maxLength": 256},
-                    "subject": {"type": "string", "minLength": 1, "maxLength": 4096},
-                    "object": {"type": "string", "minLength": 1, "maxLength": 4096},
-                    "predicate": {
-                        "enum": [
-                            "ABOUT_EVENT",
-                            "CORRECTS",
-                            "DEVELOPMENT_OF",
-                            "DISPUTES",
-                            "SAME_EVENT_AS",
-                            "SAME_PROCESS_AS",
-                            "SUPERSEDES",
-                            "SUPPORTS",
-                        ]
+            "relations": {
+                "type": "array",
+                "minItems": relation_minimum,
+                "maxItems": relation_maximum,
+                "uniqueItems": True,
+                "items": {
+                    "type": "object",
+                    "required": ["local_id", "object", "predicate", "subject"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "local_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                        },
+                        "subject": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096,
+                        },
+                        "object": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096,
+                        },
+                        "predicate": {
+                            "enum": [
+                                "ABOUT_EVENT",
+                                "CORRECTS",
+                                "DEVELOPMENT_OF",
+                                "DISPUTES",
+                                "SAME_EVENT_AS",
+                                "SAME_PROCESS_AS",
+                                "SUPERSEDES",
+                                "SUPPORTS",
+                            ]
+                        },
                     },
                 },
             },
         },
-    },
-}
+    }
+
+
+FIXTURE_OUTPUT_SCHEMA = _fixture_output_schema(
+    schema_name=FIXTURE_OUTPUT_SCHEMA_NAME,
+    schema_urn="urn:newsroom:increment-4a:fixture-output:v1",
+    cases=(
+        FixtureExtractionCase.BILINGUAL_COMPLETE,
+        FixtureExtractionCase.BILINGUAL_PARTIAL,
+    ),
+    entity_count=2,
+    equivalence_count=1,
+    relation_minimum=0,
+    relation_maximum=1,
+)
+HOMONYM_FIXTURE_OUTPUT_SCHEMA = _fixture_output_schema(
+    schema_name=HOMONYM_FIXTURE_OUTPUT_SCHEMA_NAME,
+    schema_urn="urn:newsroom:increment-4b:homonym-fixture-output:v1",
+    cases=(FixtureExtractionCase.BILINGUAL_HOMONYM,),
+    entity_count=4,
+    equivalence_count=2,
+    relation_minimum=0,
+    relation_maximum=0,
+)
 
 Draft202012Validator.check_schema(FIXTURE_OUTPUT_SCHEMA)
+Draft202012Validator.check_schema(HOMONYM_FIXTURE_OUTPUT_SCHEMA)
 _FIXTURE_OUTPUT_VALIDATOR = Draft202012Validator(FIXTURE_OUTPUT_SCHEMA)
+_HOMONYM_FIXTURE_OUTPUT_VALIDATOR = Draft202012Validator(
+    HOMONYM_FIXTURE_OUTPUT_SCHEMA
+)
 FIXTURE_OUTPUT_SCHEMA_DIGEST = digest_canonical(FIXTURE_OUTPUT_SCHEMA)
+HOMONYM_FIXTURE_OUTPUT_SCHEMA_DIGEST = digest_canonical(
+    HOMONYM_FIXTURE_OUTPUT_SCHEMA
+)
+
+
+def fixture_output_schema_contract(
+    fixture_case: FixtureExtractionCase,
+) -> tuple[str, str, str]:
+    if not isinstance(fixture_case, FixtureExtractionCase):
+        raise ExtractionContractError("fixture case must be typed")
+    if fixture_case is FixtureExtractionCase.BILINGUAL_HOMONYM:
+        return (
+            FIXTURE_OUTPUT_SCHEMA_ID,
+            HOMONYM_FIXTURE_OUTPUT_SCHEMA_VERSION,
+            HOMONYM_FIXTURE_OUTPUT_SCHEMA_DIGEST,
+        )
+    return (
+        FIXTURE_OUTPUT_SCHEMA_ID,
+        FIXTURE_OUTPUT_SCHEMA_VERSION,
+        FIXTURE_OUTPUT_SCHEMA_DIGEST,
+    )
+
+
+def _fixture_output_schema_for_case(
+    fixture_case: FixtureExtractionCase,
+) -> tuple[str, Draft202012Validator]:
+    if not isinstance(fixture_case, FixtureExtractionCase):
+        raise ExtractionContractError("fixture case must be typed")
+    if fixture_case is FixtureExtractionCase.BILINGUAL_HOMONYM:
+        return (
+            HOMONYM_FIXTURE_OUTPUT_SCHEMA_NAME,
+            _HOMONYM_FIXTURE_OUTPUT_VALIDATOR,
+        )
+    return FIXTURE_OUTPUT_SCHEMA_NAME, _FIXTURE_OUTPUT_VALIDATOR
+
+
+def fixture_output_schema_name_for_case(
+    fixture_case: FixtureExtractionCase,
+) -> str:
+    """Return the exact retained schema name for one closed fixture case."""
+
+    return _fixture_output_schema_for_case(fixture_case)[0]
 
 
 def _expected_output(
@@ -133,8 +242,9 @@ def _expected_output(
         raise ExtractionContractError(
             "the fixed Increment 4A output schema does not admit claim proposals"
         )
+    schema_name, _ = _fixture_output_schema_for_case(fixture_case)
     return {
-        "schema_version": FIXTURE_OUTPUT_SCHEMA_NAME,
+        "schema_version": schema_name,
         "fixture_case": fixture_case.value,
         "entities": [
             {"local_id": item.local_id, "text": item.subject_placeholder}
@@ -191,18 +301,31 @@ def _validate_proposal_evidence(
 
 def require_fixture_output_contract(
     contract: "ExtractorContractRequest",
+    *,
+    fixture_case: FixtureExtractionCase | None = None,
 ) -> None:
+    from .fixtures import fixture_case_for_contract
     from .models import ExtractorContractRequest
 
     if not isinstance(contract, ExtractorContractRequest):
         raise TypeError("fixture output validation needs a typed extractor contract")
+    selected_case = (
+        fixture_case_for_contract(contract)
+        if fixture_case is None
+        else fixture_case
+    )
+    if not isinstance(selected_case, FixtureExtractionCase):
+        raise ExtractionContractError("fixture case must be typed")
+    component_id, component_version, component_digest = (
+        fixture_output_schema_contract(selected_case)
+    )
     if (
-        contract.output_schema.component_id != FIXTURE_OUTPUT_SCHEMA_ID
-        or contract.output_schema.component_version != FIXTURE_OUTPUT_SCHEMA_VERSION
-        or contract.output_schema.contract_digest != FIXTURE_OUTPUT_SCHEMA_DIGEST
+        contract.output_schema.component_id != component_id
+        or contract.output_schema.component_version != component_version
+        or contract.output_schema.contract_digest != component_digest
     ):
         raise ExtractionContractError(
-            "extractor output-schema contract is incompatible with Increment 4A"
+            "extractor output-schema contract is incompatible with its fixture case"
         )
 
 
@@ -230,9 +353,10 @@ def validate_fixture_production(
         # The exact contract was checked before producer invocation and is
         # checked again by the normalisation boundary for defence in depth.
         return
-    require_fixture_output_contract(contract)
     fixture_case = fixture_case_for_contract(contract)
-    errors = tuple(_FIXTURE_OUTPUT_VALIDATOR.iter_errors(raw))
+    require_fixture_output_contract(contract, fixture_case=fixture_case)
+    schema_name, validator = _fixture_output_schema_for_case(fixture_case)
+    errors = tuple(validator.iter_errors(raw))
     expected = _expected_output(
         fixture_case=fixture_case, proposals=production.proposals
     )
@@ -275,8 +399,8 @@ def normalize_fixture_production(
     # Every outcome, including no-output failures, remains bound to the exact
     # repository-owned fixture contract. A producer bug cannot make an
     # incompatible framework/prompt/policy contract look like a valid retry.
-    require_fixture_output_contract(contract)
-    fixture_case_for_contract(contract)
+    fixture_case = fixture_case_for_contract(contract)
+    require_fixture_output_contract(contract, fixture_case=fixture_case)
     if production.raw_output_value is None:
         validate_fixture_production(
             contract=contract, request=request, production=production
@@ -323,6 +447,12 @@ __all__ = [
     "FIXTURE_OUTPUT_SCHEMA_ID",
     "FIXTURE_OUTPUT_SCHEMA_NAME",
     "FIXTURE_OUTPUT_SCHEMA_VERSION",
+    "HOMONYM_FIXTURE_OUTPUT_SCHEMA",
+    "HOMONYM_FIXTURE_OUTPUT_SCHEMA_DIGEST",
+    "HOMONYM_FIXTURE_OUTPUT_SCHEMA_NAME",
+    "HOMONYM_FIXTURE_OUTPUT_SCHEMA_VERSION",
+    "fixture_output_schema_contract",
+    "fixture_output_schema_name_for_case",
     "normalize_fixture_production",
     "require_fixture_output_contract",
     "validate_fixture_production",

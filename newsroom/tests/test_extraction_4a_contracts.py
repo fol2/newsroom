@@ -26,6 +26,9 @@ from newsroom.extraction import (
     EXPECTED_FIXTURE_CONTRACT_SEMANTIC_DIGESTS,
     FIXTURE_ALLOWED_TEXT_DIGESTS,
     FIXTURE_EN_TEXT,
+    FIXTURE_HOMONYM_ALLOWED_TEXT_DIGESTS,
+    FIXTURE_HOMONYM_EN_TEXT,
+    FIXTURE_HOMONYM_ZH_HK_TEXT,
     FIXTURE_ZH_HK_TEXT,
     FixtureExtractionCase,
     ProducedExtraction,
@@ -39,6 +42,7 @@ from .extraction_4a_helpers import (
     contract_request,
     run_request,
     seed_extraction_fixture,
+    seed_homonym_extraction_fixture,
 )
 from .source_3a_helpers import SOURCE_NOW
 
@@ -467,10 +471,84 @@ def test_deterministic_fixture_producer_is_exact_bilingual_and_side_effect_free(
         )
 
 
+def test_homonym_fixture_is_separately_versioned_and_occurrence_bound(
+    tmp_path: Path,
+) -> None:
+    state = seed_homonym_extraction_fixture(tmp_path)
+    producer = DeterministicFixtureExtractor()
+    contract = contract_request(
+        fixture_case=FixtureExtractionCase.BILINGUAL_HOMONYM,
+        key="homonym-contract",
+    )
+    request = run_request(
+        state, contract_id=contract.contract_id, key="homonym-run"
+    )
+
+    produced = producer.produce(contract=contract, request=request)
+
+    assert produced.outcome is ExtractionOutcome.SUCCESS
+    assert produced.validation is ExtractionOutputValidation.VALID
+    assert produced.raw_output_value is not None
+    assert produced.raw_output_value["schema_version"] == (
+        "increment-4b-homonym-fixture-output-v1"
+    )
+    assert len(produced.proposals) == 6
+    mentions = tuple(
+        item
+        for item in produced.proposals
+        if item.kind is ExtractionProposalKind.ENTITY_MENTION
+    )
+    equivalences = tuple(
+        item
+        for item in produced.proposals
+        if item.kind is ExtractionProposalKind.ENTITY_EQUIVALENCE
+    )
+    assert len(mentions) == 4
+    assert len(equivalences) == 2
+    assert {item.subject_placeholder for item in mentions} == {
+        "Chan Chi Ming",
+        "陳志明",
+    }
+    assert len(
+        {
+            (
+                str(item.evidence[0].passage_id),
+                item.evidence[0].start_byte,
+                item.evidence[0].end_byte,
+            )
+            for item in mentions
+        }
+    ) == 4
+    assert len(
+        {
+            tuple(
+                (str(evidence.passage_id), evidence.start_byte, evidence.end_byte)
+                for evidence in item.evidence
+            )
+            for item in equivalences
+        }
+    ) == 2
+
+    ordinary_state = seed_extraction_fixture(tmp_path / "ordinary")
+    with pytest.raises(ExtractionContractError, match="approved fixture bytes"):
+        producer.produce(
+            contract=contract,
+            request=run_request(
+                ordinary_state,
+                contract_id=contract.contract_id,
+                key="wrong-homonym-bytes",
+            ),
+        )
+
+
 def test_fixture_policy_binds_exact_admitted_utf8_bytes() -> None:
     assert FIXTURE_ALLOWED_TEXT_DIGESTS == (
         digest_bytes(FIXTURE_EN_TEXT.encode("utf-8")),
         digest_bytes(FIXTURE_ZH_HK_TEXT.encode("utf-8")),
+    )
+    assert FIXTURE_HOMONYM_ALLOWED_TEXT_DIGESTS == (
+        digest_bytes(FIXTURE_HOMONYM_EN_TEXT.encode("utf-8")),
+        digest_bytes(FIXTURE_HOMONYM_ZH_HK_TEXT.encode("utf-8")),
     )
 
 
@@ -481,6 +559,7 @@ def test_execution_profile_is_closed_to_fixture_replay_only() -> None:
     assert tuple(FixtureExtractionCase) == (
         FixtureExtractionCase.BILINGUAL_COMPLETE,
         FixtureExtractionCase.BILINGUAL_PARTIAL,
+        FixtureExtractionCase.BILINGUAL_HOMONYM,
         FixtureExtractionCase.RETRYABLE_FAILURE,
         FixtureExtractionCase.BLOCKING_FAILURE,
         FixtureExtractionCase.INVALID_OUTPUT,

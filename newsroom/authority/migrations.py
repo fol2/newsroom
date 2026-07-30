@@ -26,6 +26,13 @@ from .discovery_migrations import (
     DISCOVERY_AUTHORITY_MIGRATION_STATEMENTS,
     DISCOVERY_AUTHORITY_SCHEMA_VERSION,
 )
+from .entity_migrations import (
+    ENTITY_AUTHORITY_MIGRATION,
+    ENTITY_AUTHORITY_MIGRATION_CHECKSUM,
+    ENTITY_AUTHORITY_MIGRATION_NAME,
+    ENTITY_AUTHORITY_MIGRATION_STATEMENTS,
+    ENTITY_AUTHORITY_SCHEMA_VERSION,
+)
 from .extraction_migrations import (
     EXTRACTION_AUTHORITY_MIGRATION,
     EXTRACTION_AUTHORITY_MIGRATION_CHECKSUM,
@@ -92,7 +99,7 @@ from .source_registry_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = EXTRACTION_AUTHORITY_SCHEMA_VERSION
+SCHEMA_VERSION = ENTITY_AUTHORITY_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -561,7 +568,7 @@ def apply_pending_migrations(
     """Apply every pending checked migration in one exclusive transaction.
 
     Fresh schema creation is all-or-nothing across every retained authority
-    migration. Existing v10 source registries upgrade through checked v11 and v12.
+    migration. Existing databases upgrade through checked extraction v13 and entity-resolution v14.
     """
 
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
@@ -754,6 +761,21 @@ def apply_pending_migrations(
                 ),
             )
             current = EXTRACTION_AUTHORITY_SCHEMA_VERSION
+        if current == EXTRACTION_AUTHORITY_SCHEMA_VERSION:
+            for statement in ENTITY_AUTHORITY_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations("
+                "version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    ENTITY_AUTHORITY_SCHEMA_VERSION,
+                    ENTITY_AUTHORITY_MIGRATION_NAME,
+                    ENTITY_AUTHORITY_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = ENTITY_AUTHORITY_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -776,6 +798,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     CHECK_AUTHORITY_MIGRATION,
     DISCOVERY_AUTHORITY_MIGRATION,
     EXTRACTION_AUTHORITY_MIGRATION,
+    ENTITY_AUTHORITY_MIGRATION,
 )
 
 def _expected_fingerprint() -> str:
@@ -848,5 +871,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         EXTRACTION_AUTHORITY_SCHEMA_VERSION,
         EXTRACTION_AUTHORITY_MIGRATION_NAME,
         EXTRACTION_AUTHORITY_MIGRATION_CHECKSUM,
+    ),
+    (
+        ENTITY_AUTHORITY_SCHEMA_VERSION,
+        ENTITY_AUTHORITY_MIGRATION_NAME,
+        ENTITY_AUTHORITY_MIGRATION_CHECKSUM,
     ),
 )
