@@ -14,7 +14,10 @@ from newsroom.increment4.models import (
     sorted_snapshot,
 )
 from newsroom.projection.models import ProjectionStateError
-from newsroom.relations.editorial_types import EditorialRelationAssertionId
+from newsroom.relations.editorial_types import (
+    EditorialRelationAssertionId,
+    EditorialRelationStaleDecision,
+)
 
 from ._editorial_relation_store import _EditorialRelationAuthorityStore
 from ._projection_store import _ProjectionAuthorityStore
@@ -133,7 +136,9 @@ class _Increment4ProjectionAuthorityStore(
                 )
                 try:
                     current = self.editorial_current(assertion_id)
-                except PermissionError:
+                except (PermissionError, EditorialRelationStaleDecision):
+                    # Rights-invalid or endpoint-stale assertions remain immutable
+                    # history but cannot participate in the current graph snapshot.
                     continue
                 projection_row = conn.execute(
                     "SELECT * FROM editorial_relation_projection_events "
