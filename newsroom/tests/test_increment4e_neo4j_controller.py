@@ -221,6 +221,7 @@ def test_increment4_exact_active_replay_is_non_mutating_and_graph_loss_fails_clo
         assert adapter.reconcile_count == before_reconcile + 1
 
         serving_deliveries = dict(adapter.deliveries)
+        serving_markers = dict(adapter._delivery_markers)
         adapter.deliveries.clear()
         failed_apply = adapter.apply_count
         failed_cleanup = adapter.cleanup_count
@@ -233,6 +234,7 @@ def test_increment4_exact_active_replay_is_non_mutating_and_graph_loss_fails_clo
         assert adapter.deliveries == {}
 
         adapter.deliveries.update(serving_deliveries)
+        adapter._delivery_markers.update(serving_markers)
         source_apply = adapter.apply_count
         source_cleanup = adapter.cleanup_count
         source_reconcile = adapter.reconcile_count
