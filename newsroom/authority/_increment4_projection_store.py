@@ -3,6 +3,8 @@ from __future__ import annotations
 from newsroom.authority.persistence import AuthorityPersistenceError
 from newsroom.entities.types import (
     CanonicalEntityId,
+    CanonicalEntityLifecycle,
+    EntityCreationDecisionKind,
     EntityProjectionAction,
 )
 from newsroom.increment4.models import (
@@ -41,18 +43,26 @@ class _Increment4ProjectionAuthorityStore(
                 )
 
             entity_states: list[Increment4EntityProjectionState] = []
-            # The latest retained projection action defines current graph
-            # membership. MERGED lineage can remain an UPSERT state, while
-            # split/reversal/tombstone removals must not be resurrected.
+            # Every lineage transition retains an UPSERT projection event. Split-
+            # created successors stop belonging to current graph state when that
+            # split is reversed, while a reversed merge successor remains required
+            # to preserve the admitted merge/reversal lineage. Creation authority
+            # therefore participates in current graph membership.
             entity_rows = conn.execute(
                 "SELECT p.entity_id "
                 "FROM entity_preferred_identities AS p "
+                "JOIN canonical_entities AS c ON c.entity_id=p.entity_id "
                 "JOIN entity_projection_events AS e "
                 "ON e.entity_id=p.entity_id "
                 "AND e.source_ledger_seq=p.projected_through_ledger_seq "
                 "WHERE e.action=? "
+                "AND NOT (p.lifecycle=? AND c.created_by_kind=?) "
                 "ORDER BY p.entity_id",
-                (EntityProjectionAction.UPSERT.value,),
+                (
+                    EntityProjectionAction.UPSERT.value,
+                    CanonicalEntityLifecycle.REVERSED.value,
+                    EntityCreationDecisionKind.SPLIT.value,
+                ),
             ).fetchall()
             for row in entity_rows:
                 entity_id = CanonicalEntityId.parse(str(row["entity_id"]))
