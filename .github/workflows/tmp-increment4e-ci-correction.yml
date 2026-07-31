@@ -1,0 +1,164 @@
+name: Temporary Increment 4E CI correction
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: write
+
+jobs:
+  correct-and-verify:
+    if: >-
+      github.head_ref == 'agent/increment-4e-corrective-hardening' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Align retained snapshot selection with serving entity authority
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          store_path = Path('newsroom/authority/_increment4_projection_store.py')
+          store = store_path.read_text(encoding='utf-8')
+          old_import = 'from newsroom.entities.types import CanonicalEntityId\n'
+          new_import = (
+              'from newsroom.entities.types import (\n'
+              '    CanonicalEntityId,\n'
+              '    CanonicalEntityLifecycle,\n'
+              ')\n'
+          )
+          if store.count(old_import) != 1:
+              raise SystemExit('Increment 4 store entity import anchor changed')
+          store = store.replace(old_import, new_import, 1)
+
+          old_query = (
+              '            entity_rows = conn.execute(\n'
+              '                "SELECT entity_id FROM entity_preferred_identities ORDER BY entity_id"\n'
+              '            ).fetchall()\n'
+          )
+          new_query = (
+              '            # Only current serving roots project as canonical entities.\n'
+              '            # Redirected MERGED/REVERSED identities and non-serving\n'
+              '            # SPLIT/RETIRED heads remain retained lineage authority.\n'
+              '            entity_rows = conn.execute(\n'
+              '                "SELECT entity_id FROM entity_preferred_identities "\n'
+              '                "WHERE lifecycle=? AND preferred_entity_id=entity_id "\n'
+              '                "ORDER BY entity_id",\n'
+              '                (CanonicalEntityLifecycle.ACTIVE.value,),\n'
+              '            ).fetchall()\n'
+          )
+          if store.count(old_query) != 1:
+              raise SystemExit('Increment 4 store entity selection anchor changed')
+          store = store.replace(old_query, new_query, 1)
+          store_path.write_text(store, encoding='utf-8')
+
+          boundary_path = Path('newsroom/authority/_increment4_neo4j_boundary.py')
+          boundary = boundary_path.read_text(encoding='utf-8')
+          old_comment = (
+              '            # Authentication precedes authority reads, while all mutation waits\n'
+              '            # until the caller snapshot has been exactly matched to retained state.\n'
+          )
+          new_comment = (
+              '            # Register the immutable family and authorize this operation before\n'
+              '            # authority reads. Generation and graph mutation wait until the caller\n'
+              '            # snapshot exactly matches current retained serving authority.\n'
+          )
+          if boundary.count(old_comment) != 1:
+              raise SystemExit('Increment 4 build comment anchor changed')
+          boundary = boundary.replace(old_comment, new_comment, 1)
+          duplicate = (
+              '            source_watermark, authoritative_snapshot = (\n'
+              '                self._require_source_snapshot(request)\n'
+              '            )\n'
+              '            self._register_family(proof)\n'
+          )
+          corrected = (
+              '            source_watermark, authoritative_snapshot = (\n'
+              '                self._require_source_snapshot(request)\n'
+              '            )\n'
+          )
+          if boundary.count(duplicate) != 1:
+              raise SystemExit('Increment 4 duplicate registration anchor changed')
+          boundary = boundary.replace(duplicate, corrected, 1)
+          boundary_path.write_text(boundary, encoding='utf-8')
+          PY
+
+      - name: Install locked development environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Run corrective, lineage, and workflow regressions
+        run: |
+          uv run python -m compileall -q newsroom
+          uv run python -m pytest -q \
+            newsroom/tests/test_increment4e_projection_contracts.py \
+            newsroom/tests/test_increment4e_neo4j_controller.py \
+            newsroom/tests/test_increment4e_corrective_hardening.py \
+            newsroom/tests/test_increment4e_workflow_contract.py \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            newsroom/tests/test_increment4e_governed_path.py::test_graphiti_bilingual_entity_split_and_reversal_preserve_partition_history
+
+      - name: Commit tested non-workflow correction
+        run: |
+          git checkout HEAD -- .github/workflows
+          git diff --check
+          git status --short
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(increment4): select only serving entity roots"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+
+      - name: Diagnose current Neo4j image startup
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          password="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          echo "::add-mask::${password}"
+          docker rm --force newsroom-i4-diagnostic 2>/dev/null || true
+          docker run --detach \
+            --name newsroom-i4-diagnostic \
+            --publish 127.0.0.1:7687:7687 \
+            --env "NEO4J_AUTH=neo4j/${password}" \
+            neo4j:2026.06.0-community-trixie
+          ready=0
+          for _ in $(seq 1 60); do
+            if python - <<'PY'
+          import socket
+          with socket.create_connection(('127.0.0.1', 7687), timeout=1):
+              pass
+          PY
+            then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          docker ps --all --filter name=newsroom-i4-diagnostic
+          docker logs newsroom-i4-diagnostic || true
+          docker rm --force newsroom-i4-diagnostic || true
+          test "${ready}" -eq 1
