@@ -40,6 +40,13 @@ from .editorial_relation_migrations import (
     EDITORIAL_RELATION_MIGRATION_STATEMENTS,
     EDITORIAL_RELATION_SCHEMA_VERSION,
 )
+from .graphiti_adapter_migrations import (
+    GRAPHITI_ADAPTER_MIGRATION,
+    GRAPHITI_ADAPTER_MIGRATION_CHECKSUM,
+    GRAPHITI_ADAPTER_MIGRATION_NAME,
+    GRAPHITI_ADAPTER_MIGRATION_STATEMENTS,
+    GRAPHITI_ADAPTER_SCHEMA_VERSION,
+)
 from .extraction_migrations import (
     EXTRACTION_AUTHORITY_MIGRATION,
     EXTRACTION_AUTHORITY_MIGRATION_CHECKSUM,
@@ -106,7 +113,7 @@ from .source_registry_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = EDITORIAL_RELATION_SCHEMA_VERSION
+SCHEMA_VERSION = GRAPHITI_ADAPTER_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -576,7 +583,8 @@ def apply_pending_migrations(
 
     Fresh schema creation is all-or-nothing across every retained authority
     migration. Existing databases upgrade through checked extraction v13,
-    entity-resolution v14 and editorial-relation v15.
+    entity-resolution v14, editorial-relation v15 and isolated Graphiti
+    proposal-adapter v16.
     """
 
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
@@ -799,6 +807,21 @@ def apply_pending_migrations(
                 ),
             )
             current = EDITORIAL_RELATION_SCHEMA_VERSION
+        if current == EDITORIAL_RELATION_SCHEMA_VERSION:
+            for statement in GRAPHITI_ADAPTER_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations("
+                "version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    GRAPHITI_ADAPTER_SCHEMA_VERSION,
+                    GRAPHITI_ADAPTER_MIGRATION_NAME,
+                    GRAPHITI_ADAPTER_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = GRAPHITI_ADAPTER_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -823,6 +846,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     EXTRACTION_AUTHORITY_MIGRATION,
     ENTITY_AUTHORITY_MIGRATION,
     EDITORIAL_RELATION_MIGRATION,
+    GRAPHITI_ADAPTER_MIGRATION,
 )
 
 def _expected_fingerprint() -> str:
@@ -905,5 +929,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         EDITORIAL_RELATION_SCHEMA_VERSION,
         EDITORIAL_RELATION_MIGRATION_NAME,
         EDITORIAL_RELATION_MIGRATION_CHECKSUM,
+    ),
+    (
+        GRAPHITI_ADAPTER_SCHEMA_VERSION,
+        GRAPHITI_ADAPTER_MIGRATION_NAME,
+        GRAPHITI_ADAPTER_MIGRATION_CHECKSUM,
     ),
 )

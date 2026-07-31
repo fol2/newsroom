@@ -7,6 +7,10 @@ from newsroom.authority.editorial_relation_migrations import (
     EDITORIAL_RELATION_SCHEMA_VERSION,
 )
 
+from .graphiti_adapter_4d_migration_helpers import (
+    downgrade_empty_graphiti_adapter_schema_to_v15,
+)
+
 
 def downgrade_empty_editorial_relation_schema_to_v14(database: Path) -> None:
     """Remove only the v15 editorial-relation schema from a checked test DB.
@@ -16,6 +20,7 @@ def downgrade_empty_editorial_relation_schema_to_v14(database: Path) -> None:
     v15 history record.
     """
 
+    downgrade_empty_graphiti_adapter_schema_to_v15(database)
     conn = sqlite3.connect(database, isolation_level=None)
     try:
         conn.execute("PRAGMA foreign_keys=OFF")

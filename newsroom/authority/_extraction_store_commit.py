@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 
 from newsroom.authority._capability import _AuthorizedCommandGrant
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
@@ -174,6 +175,10 @@ class _ExtractionCommitMixin:
         production: ProducedExtraction | None,
         started_at: UtcTimestamp | None,
         ended_at: UtcTimestamp | None,
+        _after_persist: Callable[
+            [sqlite3.Connection, ExtractionRunVersion, UtcTimestamp], None
+        ]
+        | None = None,
     ) -> ExtractionRunVersion:
         if not isinstance(request, ExtractionRunRequest):
             raise TypeError("extraction run commit requires a typed request")
@@ -185,6 +190,10 @@ class _ExtractionCommitMixin:
         )
         replay = grant.replay_of_command_id is not None
         if replay:
+            if _after_persist is not None:
+                raise AuthorityPersistenceError(
+                    "exact extraction replay cannot append coupled authority"
+                )
             if production is not None or started_at is not None or ended_at is not None:
                 raise AuthorityPersistenceError(
                     "exact extraction replay must not rerun the producer"
@@ -550,9 +559,12 @@ class _ExtractionCommitMixin:
                                 ),
                             )
 
-            return self._run_version_for_event(
+            result = self._run_version_for_event(
                 conn, committed.event_id, replayed=False
             )
+            if _after_persist is not None:
+                _after_persist(conn, result, now)
+            return result
 
 
 __all__ = ["_ExtractionCommitMixin"]
