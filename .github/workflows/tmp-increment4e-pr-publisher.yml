@@ -1,4 +1,4 @@
-name: Temporary Increment 4E PR publisher
+name: Temporary Increment 4E workflow export
 
 on:
   pull_request:
@@ -10,10 +10,10 @@ on:
       - synchronize
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  publish:
+  export:
     if: >-
       github.head_ref == 'agent/increment-4e-corrective-hardening' &&
       github.event.pull_request.head.repo.full_name == github.repository
@@ -21,75 +21,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           ref: ${{ github.event.pull_request.head.ref }}
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Recover and apply the staged corrective patch
-        run: |
-          python - <<'PY'
-          import base64
-          import gzip
-          import re
-          from pathlib import Path
-
-          workflow = Path('.github/workflows/tmp-increment4e-corrective-publisher.yml')
-          match = re.search(
-              r'PATCH_GZIP_BASE64: "([A-Za-z0-9+/=]+)"',
-              workflow.read_text(encoding='utf-8'),
-          )
-          if match is None:
-              raise SystemExit('staged corrective payload is absent')
-          Path('/tmp/increment4_patch.py').write_bytes(
-              gzip.decompress(base64.b64decode(match.group(1)))
-          )
-          PY
-          python /tmp/increment4_patch.py
-
-      - name: Correct first-use family authorization ordering
+      - name: Prepare exact permanent workflow update
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          path = Path('newsroom/authority/_increment4_neo4j_boundary.py')
+          path = Path('.github/workflows/projection-b2-neo4j.yml')
+          old = 'test_actual_service_increment4_graph_loss_replays_retained_authority_exactly'
+          new = 'test_actual_service_increment4_graph_loss_requires_isolated_replacement'
           text = path.read_text(encoding='utf-8')
-          build_index = text.rfind('    def build_and_promote(')
-          call = '            self._authenticate_management(\n'
-          call_index = text.rfind(call)
-          if build_index < 0 or call_index < build_index:
-              raise SystemExit('private Increment 4 build authorization call was not found')
-          registration = '            self._register_family(proof)\n'
-          if text[call_index - len(registration):call_index] != registration:
-              text = text[:call_index] + registration + text[call_index:]
-          path.write_text(text, encoding='utf-8')
+          if text.count(old) != 1 or new in text:
+              raise SystemExit('Increment 4E workflow assertion anchor changed')
+          path.write_text(text.replace(old, new), encoding='utf-8')
           PY
 
-      - name: Install locked development environment
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install uv
-          uv lock --check
-          uv sync --dev --locked
-
-      - name: Compile and run focused corrective regressions
-        run: |
-          uv run python -m compileall -q newsroom
-          uv run python -m pytest -q \
-            newsroom/tests/test_increment4e_neo4j_controller.py \
-            newsroom/tests/test_increment4e_corrective_hardening.py \
-            newsroom/tests/test_increment4e_workflow_contract.py \
-            newsroom/tests/test_sdlc_workflow_lane.py
-
-      - name: Commit and push the tested non-workflow correction
-        run: |
-          git checkout HEAD -- .github/workflows
-          git diff --check
-          git status --short
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "fix(increment4): harden authoritative Neo4j rebuild"
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+      - name: Export exact permanent workflow file
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment4e-permanent-workflow
+          path: .github/workflows/projection-b2-neo4j.yml
+          if-no-files-found: error
