@@ -19,17 +19,17 @@ from .editorial_relation_4c_helpers import (
     RELATION_ASSERTION_ID,
     ZH_ENTITY_ID,
     ZH_ENTITY_VERSION_ID,
+    open_entity_system_after_relation,
+    open_relation_system,
 )
 from .entity_4b_helpers import ENTITY_ID, ENTITY_VERSION_ID
 from .extraction_4a_helpers import extraction_proof
-from .increment4e_governed_path_helpers import (
-    admit_increment4_graphiti_path,
-    open_graphiti_path_entity_system,
-    open_graphiti_path_increment4_neo4j_system,
-    open_graphiti_path_relation_system,
-    seed_increment4_graphiti_path,
+from .increment4e_helpers import (
+    _entity_state,
+    _ledger_events,
+    admitted_increment4_fixture,
+    open_increment4_neo4j_system,
 )
-from .increment4e_helpers import _entity_state, _ledger_events
 from .projection_b2_helpers import MemoryNeo4jAdapter
 
 
@@ -47,10 +47,7 @@ def _id(identifier_type: type, suffix: int):
 def test_increment4_rebuild_omits_relation_stale_after_entity_merge(
     tmp_path: Path,
 ) -> None:
-    admitted = admit_increment4_graphiti_path(
-        seed_increment4_graphiti_path(tmp_path)
-    )
-    state = admitted.path
+    state, _initial_snapshot = admitted_increment4_fixture(tmp_path)
     merge_decision_id = _id(EntityMergeDecisionId, 5102)
     successor_entity_id = _id(CanonicalEntityId, 5103)
     successor_version_id = _id(CanonicalEntityVersionId, 5104)
@@ -71,8 +68,8 @@ def test_increment4_rebuild_omits_relation_stale_after_entity_merge(
         basis_resolution_proposal_ids=tuple(
             sorted(
                 (
-                    state.relation.en_resolution_proposal.proposal_id,
-                    state.relation.zh_resolution_proposal.proposal_id,
+                    state.en_resolution_proposal.proposal_id,
+                    state.zh_resolution_proposal.proposal_id,
                 ),
                 key=str,
             )
@@ -82,7 +79,7 @@ def test_increment4_rebuild_omits_relation_stale_after_entity_merge(
         idempotency_key="increment4-stale-relation-endpoint-merge-v1",
     )
 
-    with open_graphiti_path_entity_system(state.relation.entity) as entities:
+    with open_entity_system_after_relation(state) as entities:
         merged = entities.entities.merge_entities(
             merge_request,
             proof=extraction_proof(),
@@ -105,14 +102,14 @@ def test_increment4_rebuild_omits_relation_stale_after_entity_merge(
             ),
         )
 
-    with open_graphiti_path_relation_system(state.relation) as relations:
+    with open_relation_system(state) as relations:
         with pytest.raises(EditorialRelationStaleDecision):
             relations.relations.current(
                 RELATION_ASSERTION_ID,
                 proof=extraction_proof(),
             )
 
-    events = _ledger_events(state.extraction.database)
+    events = _ledger_events(state.entity.extraction.database)
     snapshot = sorted_snapshot(
         entities=current_entities,
         relations=(),
@@ -120,10 +117,7 @@ def test_increment4_rebuild_omits_relation_stale_after_entity_merge(
         through_ledger_seq=events[-1].ledger_seq,
     )
     adapter = MemoryNeo4jAdapter()
-    with open_graphiti_path_increment4_neo4j_system(
-        state.relation,
-        adapter,
-    ) as projection:
+    with open_increment4_neo4j_system(state, adapter) as projection:
         rebuilt = projection.increment4.build_and_promote(
             Increment4Neo4jBuildRequest(
                 generation_id=GENERATION_ID,
