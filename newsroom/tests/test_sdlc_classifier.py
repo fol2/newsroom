@@ -92,6 +92,7 @@ def test_classifier_source_tests_policy_and_workflows_require_service() -> None:
         assert route["service_required"] is True
         assert route["service_tests"] == [
             "newsroom/tests/test_complete_projection_2b_neo4j_service.py",
+            "newsroom/tests/test_increment4e_neo4j_service.py",
             "newsroom/tests/test_increment_2d_neo4j_service.py",
             "newsroom/tests/test_integrated_c1_neo4j_service.py",
             "newsroom/tests/test_projection_b2_neo4j_service.py",

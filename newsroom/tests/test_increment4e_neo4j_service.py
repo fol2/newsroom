@@ -81,21 +81,14 @@ def _expected(snapshot, generation_id):
         generation_id=generation_id,
         family=family,
     )
-    canonical_ids = tuple(
-        sorted(
-            {
-                node.canonical_id
-                for batch in batches
-                for node in batch.nodes
-                if node.identity_source == "CANONICAL_ENTITY_ID"
-            }
-        )
-    )
     node_ids = {
         node.canonical_id
         for batch in batches
         for node in batch.nodes
     }
+    # Structural reads are explicit-ID bounded and expand only one relationship hop.
+    # Bind the exact admitted generation inventory when asserting complete state.
+    canonical_ids = tuple(sorted(node_ids))
     relation_keys = {
         relation.relation_key
         for batch in batches
