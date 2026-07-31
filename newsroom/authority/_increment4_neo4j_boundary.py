@@ -588,12 +588,10 @@ class _Increment4Neo4jBoundary:
         validation: Any,
         promotion: Any,
         state_digest: str,
-        purge_prior: bool = True,
     ) -> Increment4Neo4jBuildResult:
         purged_prior = 0
         if (
-            purge_prior
-            and request.purge_retired_generation
+            request.purge_retired_generation
             and promotion.prior_generation is not None
         ):
             purged_prior = self._adapter.cleanup_generation(
@@ -717,6 +715,10 @@ class _Increment4Neo4jBoundary:
                         "Increment 4 active graph differs from retained validation"
                     )
                 promotion = self._promotion_for_generation(request.generation_id)
+                # The serving generation remains reconciliation-only. A retained
+                # promotion may still name a retired predecessor whose requested
+                # cleanup failed after the atomic SQLite promotion, so result
+                # assembly must retry only that retired namespace.
                 return self._result(
                     request=request,
                     source_watermark=source_watermark,
@@ -726,7 +728,6 @@ class _Increment4Neo4jBoundary:
                     validation=validation,
                     promotion=promotion,
                     state_digest=state_digest,
-                    purge_prior=False,
                 )
 
             deleted_target, _projected, ignored = self._materialize_generation(
