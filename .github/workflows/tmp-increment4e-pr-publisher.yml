@@ -83,10 +83,9 @@ jobs:
             newsroom/tests/test_increment4e_workflow_contract.py \
             newsroom/tests/test_sdlc_workflow_lane.py
 
-      - name: Commit tested permanent correction and remove publishers
+      - name: Commit and push the tested non-workflow correction
         run: |
-          rm .github/workflows/tmp-increment4e-corrective-publisher.yml
-          rm .github/workflows/tmp-increment4e-pr-publisher.yml
+          git checkout HEAD -- .github/workflows
           git diff --check
           git status --short
           git config user.name "github-actions[bot]"
