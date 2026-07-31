@@ -630,8 +630,9 @@ class _Increment4Neo4jBoundary:
         if not isinstance(request, Increment4Neo4jBuildRequest):
             raise TypeError("Increment 4 build requires a typed request")
         with self._operation_lock:
-            # Authentication precedes authority reads, while all mutation waits
-            # until the caller snapshot has been exactly matched to retained state.
+            # Register the immutable family and authorize this operation before
+            # authority reads. Generation and graph mutation wait until the caller
+            # snapshot exactly matches current retained serving authority.
             self._register_family(proof)
             self._authenticate_management(
                 generation_id=request.generation_id,
@@ -647,7 +648,6 @@ class _Increment4Neo4jBoundary:
             source_watermark, authoritative_snapshot = (
                 self._require_source_snapshot(request)
             )
-            self._register_family(proof)
             family = self._store.projection_family_definition(
                 INCREMENT4_ADMITTED_FAMILY_ID
             )

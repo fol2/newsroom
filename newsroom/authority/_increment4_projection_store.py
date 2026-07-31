@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from newsroom.authority.persistence import AuthorityPersistenceError
-from newsroom.entities.types import CanonicalEntityId
+from newsroom.entities.types import (
+    CanonicalEntityId,
+    CanonicalEntityLifecycle,
+)
 from newsroom.increment4.models import (
     Increment4AdmittedProjectionSnapshot,
     Increment4EntityProjectionState,
@@ -38,8 +41,14 @@ class _Increment4ProjectionAuthorityStore(
                 )
 
             entity_states: list[Increment4EntityProjectionState] = []
+            # Only current serving roots project as canonical entities.
+            # Redirected MERGED/REVERSED identities and non-serving
+            # SPLIT/RETIRED heads remain retained lineage authority.
             entity_rows = conn.execute(
-                "SELECT entity_id FROM entity_preferred_identities ORDER BY entity_id"
+                "SELECT entity_id FROM entity_preferred_identities "
+                "WHERE lifecycle=? AND preferred_entity_id=entity_id "
+                "ORDER BY entity_id",
+                (CanonicalEntityLifecycle.ACTIVE.value,),
             ).fetchall()
             for row in entity_rows:
                 entity_id = CanonicalEntityId.parse(str(row["entity_id"]))
