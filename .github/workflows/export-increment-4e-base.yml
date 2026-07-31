@@ -1,0 +1,59 @@
+name: Export exact Increment 4E base source
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  export-source:
+    if: github.event.pull_request.head.ref == 'agent/increment-4e-source-export'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact merged Increment 4D base
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: bf7b955d57f5e583fcfc9bade109eec79564a200
+          fetch-depth: 0
+          show-progress: false
+          persist-credentials: false
+
+      - name: Build content-addressed source archive
+        shell: bash
+        env:
+          BASE_SHA: bf7b955d57f5e583fcfc9bade109eec79564a200
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          TREE_SHA="$(git rev-parse HEAD^{tree})"
+          git archive --format=tar.gz --prefix=newsroom/ -o "$RUNNER_TEMP/newsroom-increment-4e-base.tar.gz" "$BASE_SHA"
+          ARCHIVE_SHA="$(sha256sum "$RUNNER_TEMP/newsroom-increment-4e-base.tar.gz" | awk '{print $1}')"
+          ARCHIVE_BYTES="$(wc -c < "$RUNNER_TEMP/newsroom-increment-4e-base.tar.gz")"
+          python - "$RUNNER_TEMP/increment-4e-base-metadata.json" "$BASE_SHA" "$TREE_SHA" "$ARCHIVE_SHA" "$ARCHIVE_BYTES" <<'PY'
+          import json
+          import pathlib
+          import sys
+          path, commit, tree, archive_sha, archive_bytes = sys.argv[1:]
+          pathlib.Path(path).write_text(json.dumps({
+              "schema_version": "newsroom.increment-4e.source-export.v1",
+              "commit_sha": commit,
+              "tree_sha": tree,
+              "archive_sha256": f"sha256:{archive_sha}",
+              "archive_bytes": int(archive_bytes),
+          }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+          PY
+          cat "$RUNNER_TEMP/increment-4e-base-metadata.json"
+
+      - name: Upload exact source archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        with:
+          name: increment-4e-base-bf7b955d
+          path: |
+            ${{ runner.temp }}/newsroom-increment-4e-base.tar.gz
+            ${{ runner.temp }}/increment-4e-base-metadata.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
