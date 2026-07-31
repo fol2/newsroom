@@ -13,6 +13,7 @@ from newsroom.increment4 import (
     Increment4Neo4jBuildRequest,
     build_increment4_admitted_batches,
     increment4_admitted_contract_registry,
+    sorted_snapshot,
 )
 from newsroom.projection import ProjectionGenerationId, ProjectionGenerationState
 from newsroom.projection.neo4j import Neo4jProjectorConfig
@@ -22,8 +23,16 @@ from .editorial_relation_4c_helpers import (
     RELATION_PROPOSAL_ID,
     RELATION_PROPOSAL_V1_ID,
 )
+from .authority_a2b_helpers import open_object_system
+from .authority_helpers import proof as object_proof
 from .extraction_4a_helpers import extraction_proof
-from .increment4e_helpers import admitted_increment4_fixture, open_increment4_neo4j_system
+from .increment4e_governed_path_helpers import (
+    admit_increment4_graphiti_path,
+    graphiti_path_registries,
+    open_graphiti_path_increment4_neo4j_system,
+    seed_increment4_graphiti_path,
+)
+from .increment4e_helpers import _ledger_events
 from .source_3a_helpers import SOURCE_NOW
 
 
@@ -130,7 +139,9 @@ def test_actual_service_increment4_admitted_state_projects_exactly_and_replays(
     tmp_path: Path,
 ) -> None:
     config = _service_config()
-    state, snapshot = admitted_increment4_fixture(tmp_path / "authority")
+    state = seed_increment4_graphiti_path(tmp_path / "authority")
+    admitted = admit_increment4_graphiti_path(state)
+    snapshot = admitted.snapshot
     generation_id = ProjectionGenerationId.new()
     batches, canonical_ids, node_ids, relation_keys = _expected(
         snapshot, generation_id
@@ -140,9 +151,12 @@ def test_actual_service_increment4_admitted_state_projects_exactly_and_replays(
         snapshot,
         key="increment4e-actual-service-build-v1",
     )
-    before_events = _event_count(state.entity.extraction.database)
+    before_events = _event_count(state.extraction.database)
     adapter = _open_neo4j_adapter(config)
-    system = open_increment4_neo4j_system(state, adapter)
+    system = open_graphiti_path_increment4_neo4j_system(
+        state.relation,
+        adapter,
+    )
     try:
         built = system.increment4.build_and_promote(
             request,
@@ -156,12 +170,12 @@ def test_actual_service_increment4_admitted_state_projects_exactly_and_replays(
             ),
             proof=extraction_proof(),
         )
-        after_first = _event_count(state.entity.extraction.database)
+        after_first = _event_count(state.extraction.database)
         replay = system.increment4.build_and_promote(
             request,
             proof=extraction_proof(),
         )
-        after_replay = _event_count(state.entity.extraction.database)
+        after_replay = _event_count(state.extraction.database)
     finally:
         system.close()
 
@@ -209,6 +223,22 @@ def test_actual_service_increment4_admitted_state_projects_exactly_and_replays(
             "OR label CONTAINS 'Graphiti' RETURN label ORDER BY label",
             generation_id=str(generation_id),
         )
+        assert not state.workspace_root.exists() or not any(
+            state.workspace_root.iterdir()
+        )
+        with sqlite3.connect(state.extraction.database) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM graphiti_adapter_attempts"
+            ).fetchone()[0] == 2
+            assert conn.execute(
+                "SELECT COUNT(*) FROM extraction_proposals"
+            ).fetchone()[0] >= 4
+            assert conn.execute(
+                "SELECT COUNT(*) FROM canonical_entities"
+            ).fetchone()[0] == 2
+            assert conn.execute(
+                "SELECT COUNT(*) FROM editorial_relation_assertions"
+            ).fetchone()[0] == 1
     finally:
         _cleanup(config, generation_id)
 
@@ -217,7 +247,9 @@ def test_actual_service_increment4_graph_loss_replays_retained_authority_exactly
     tmp_path: Path,
 ) -> None:
     config = _service_config()
-    state, snapshot = admitted_increment4_fixture(tmp_path / "authority")
+    state = seed_increment4_graphiti_path(tmp_path / "authority")
+    admitted = admit_increment4_graphiti_path(state)
+    snapshot = admitted.snapshot
     generation_id = ProjectionGenerationId.new()
     _batches, canonical_ids, _node_ids, _relation_keys = _expected(
         snapshot, generation_id
@@ -227,10 +259,10 @@ def test_actual_service_increment4_graph_loss_replays_retained_authority_exactly
         snapshot,
         key="increment4e-actual-service-loss-v1",
     )
-    database = state.entity.extraction.database
+    database = state.extraction.database
 
-    system = open_increment4_neo4j_system(
-        state,
+    system = open_graphiti_path_increment4_neo4j_system(
+        state.relation,
         _open_neo4j_adapter(config),
     )
     try:
@@ -252,8 +284,8 @@ def test_actual_service_increment4_graph_loss_replays_retained_authority_exactly
 
     try:
         _cleanup(config, generation_id)
-        restarted = open_increment4_neo4j_system(
-            state,
+        restarted = open_graphiti_path_increment4_neo4j_system(
+            state.relation,
             _open_neo4j_adapter(config),
         )
         try:
@@ -295,7 +327,9 @@ def test_actual_service_increment4_replacement_generation_is_only_serving_state(
     tmp_path: Path,
 ) -> None:
     config = _service_config()
-    state, snapshot = admitted_increment4_fixture(tmp_path / "authority")
+    state = seed_increment4_graphiti_path(tmp_path / "authority")
+    admitted = admit_increment4_graphiti_path(state)
+    snapshot = admitted.snapshot
     first_id = ProjectionGenerationId.new()
     second_id = ProjectionGenerationId.new()
     _first_batches, first_canonical_ids, _nodes, _relations = _expected(
@@ -305,8 +339,8 @@ def test_actual_service_increment4_replacement_generation_is_only_serving_state(
         snapshot, second_id
     )
 
-    system = open_increment4_neo4j_system(
-        state,
+    system = open_graphiti_path_increment4_neo4j_system(
+        state.relation,
         _open_neo4j_adapter(config),
     )
     try:
@@ -352,3 +386,127 @@ def test_actual_service_increment4_replacement_generation_is_only_serving_state(
         assert first_canonical_ids == second_canonical_ids
     finally:
         _cleanup(config, first_id, second_id)
+
+
+def test_actual_service_increment4_tombstone_purges_and_never_resurrects(
+    tmp_path: Path,
+) -> None:
+    config = _service_config()
+    state = seed_increment4_graphiti_path(tmp_path / "authority")
+    admitted = admit_increment4_graphiti_path(state)
+    first_id = ProjectionGenerationId.new()
+    purge_id = ProjectionGenerationId.new()
+    _batches, canonical_ids, _node_ids, _relation_keys = _expected(
+        admitted.snapshot, first_id
+    )
+
+    system = open_graphiti_path_increment4_neo4j_system(
+        state.relation,
+        _open_neo4j_adapter(config),
+    )
+    try:
+        first = system.increment4.build_and_promote(
+            _request(
+                first_id,
+                admitted.snapshot,
+                key="increment4e-service-tombstone-base-v1",
+            ),
+            proof=extraction_proof(),
+        )
+    finally:
+        system.close()
+
+    commands, schemas = graphiti_path_registries(state.extraction)
+    passage = state.extraction.input_binding.passages[0]
+    with open_object_system(
+        state.extraction.database,
+        object_root=state.extraction.object_root,
+        clock=lambda: SOURCE_NOW,
+        command_registry=commands,
+        payload_schema_registry=schemas,
+    ) as objects:
+        deletion = objects.objects.request_deletion(
+            passage.blob_digest,
+            reason_code="INCREMENT4E_ACTUAL_SOURCE_DELETE",
+            idempotency_key="increment4e-actual-source-delete-v1",
+            proof=object_proof(),
+        )
+        objects.objects.tombstone(
+            deletion.deletion_id,
+            reason_code="INCREMENT4E_ACTUAL_SOURCE_TOMBSTONE",
+            idempotency_key="increment4e-actual-source-tombstone-v1",
+            proof=object_proof(),
+        )
+
+    events = _ledger_events(state.extraction.database)
+    empty = sorted_snapshot(
+        entities=(),
+        relations=(),
+        events=events,
+        through_ledger_seq=events[-1].ledger_seq,
+    )
+    purge_request = _request(
+        purge_id,
+        empty,
+        key="increment4e-actual-source-purge-v1",
+    )
+    restarted = open_graphiti_path_increment4_neo4j_system(
+        state.relation,
+        _open_neo4j_adapter(config),
+    )
+    try:
+        purged = restarted.increment4.build_and_promote(
+            purge_request,
+            proof=extraction_proof(),
+        )
+        read = restarted.increment4.read_active(
+            Increment4Neo4jActiveReadRequest(
+                canonical_ids=canonical_ids,
+                query_valid_time=SOURCE_NOW,
+                limit=100,
+            ),
+            proof=extraction_proof(),
+        )
+        replay = restarted.increment4.build_and_promote(
+            purge_request,
+            proof=extraction_proof(),
+        )
+    finally:
+        restarted.close()
+
+    try:
+        assert first.generation.state is ProjectionGenerationState.ACTIVE
+        assert purged.generation.state is ProjectionGenerationState.ACTIVE
+        assert purged.prior_generation is not None
+        assert purged.prior_generation.generation_id == first_id
+        assert purged.projected_batch_count == 0
+        assert purged.purged_retired_graph_record_count > 0
+        assert read.nodes == ()
+        assert read.relations == ()
+        assert replay.validation.validation_digest == purged.validation.validation_digest
+        assert replay.promotion.promotion_digest == purged.promotion.promotion_digest
+        assert _scalar(
+            "MATCH (n {generation_id:$generation_id}) RETURN count(n)",
+            generation_id=str(first_id),
+        ) == 0
+        assert _scalar(
+            "MATCH (n {generation_id:$generation_id}) RETURN count(n)",
+            generation_id=str(purge_id),
+        ) == 0
+        with sqlite3.connect(state.extraction.database) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM graphiti_adapter_attempts"
+            ).fetchone()[0] == 2
+            assert conn.execute(
+                "SELECT COUNT(*) FROM editorial_relation_assertions"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM object_deletion_heads h "
+                "JOIN object_deletion_versions v "
+                "ON v.deletion_id=h.deletion_id "
+                "AND v.lifecycle_version=h.current_version "
+                "WHERE h.deletion_id=? AND v.state='TOMBSTONED'",
+                (str(deletion.deletion_id),),
+            ).fetchone()[0] == 1
+    finally:
+        _cleanup(config, first_id, purge_id)

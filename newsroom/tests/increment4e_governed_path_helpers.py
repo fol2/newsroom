@@ -29,6 +29,7 @@ from newsroom.increment4 import (
     increment4_admitted_contract_registry,
     sorted_snapshot,
 )
+from newsroom.projection import merge_projection_authority_registries
 from newsroom.relations import (
     EditorialRelationCurrentView,
     EditorialRelationDecision,
@@ -133,9 +134,13 @@ class Increment4GraphitiAdmittedPath:
 
 
 def graphiti_path_registries(state: ExtractionFixtureState):
-    return merge_graphiti_adapter_authority_registries(
+    commands, schemas = merge_graphiti_adapter_authority_registries(
         command_registry=state.commands,
         payload_schemas=state.schemas,
+    )
+    return merge_projection_authority_registries(
+        command_registry=commands,
+        payload_schemas=schemas,
     )
 
 
@@ -218,6 +223,45 @@ def open_graphiti_path_increment4_neo4j_system(
         projection_read_policy=increment4_projection_read_policy(),
         adapter=adapter,
         clock=lambda: SOURCE_NOW,
+    )
+
+
+def graphiti_path_current_snapshot(
+    state: EditorialRelationFixtureState,
+) -> Increment4AdmittedProjectionSnapshot:
+    with open_graphiti_path_relation_system(state) as relations:
+        current = relations.relations.current_relations(
+            limit=100,
+            proof=extraction_proof(),
+        )
+        projection_events = relations.relations.projection_events_after(
+            after_ledger_seq=0,
+            limit=100,
+            proof=extraction_proof(),
+        )
+    latest_upsert_by_assertion = {
+        event.assertion_id: event
+        for event in projection_events
+        if event.assertion is not None
+    }
+    relation_states = tuple(
+        Increment4RelationProjectionState(
+            item,
+            latest_upsert_by_assertion[item.assertion.assertion_id],
+        )
+        for item in current
+    )
+    with open_graphiti_path_entity_system(state.entity) as entities:
+        admitted_entities = (
+            _entity_state(entities, ENTITY_ID, ENTITY_VERSION_ID),
+            _entity_state(entities, ZH_ENTITY_ID, ZH_ENTITY_VERSION_ID),
+        )
+    events = _ledger_events(state.entity.extraction.database)
+    return sorted_snapshot(
+        entities=admitted_entities,
+        relations=relation_states,
+        events=events,
+        through_ledger_seq=events[-1].ledger_seq,
     )
 
 
@@ -578,6 +622,7 @@ __all__ = [
     "Increment4GraphitiPathState",
     "admit_increment4_graphiti_path",
     "Increment4HomonymGraphitiPathState",
+    "graphiti_path_current_snapshot",
     "graphiti_path_registries",
     "graphiti_path_snapshot",
     "open_graphiti_path_entity_system",

@@ -14,7 +14,10 @@ from newsroom.projection.mapping import (
 from newsroom.projection.models import ProjectionFamilyDefinition, ProjectionGenerationId
 from newsroom.projection.neo4j.models import StructuralBatch, StructuralNode, StructuralRelation
 from newsroom.projection.ontology import ProjectionNodeType, ProjectionRelationType
-from newsroom.relations.editorial_models import CanonicalEntityRelationEndpoint
+from newsroom.relations.editorial_models import (
+    CanonicalEntityRelationEndpoint,
+    RelationAssertionRelationEndpoint,
+)
 
 from .contracts import INCREMENT4_ADMITTED_FAMILY_ID
 from .models import (
@@ -114,7 +117,11 @@ def _event_node(event: LedgerEventRecord) -> StructuralNode:
 def _entity_nodes(
     state: Increment4EntityProjectionState,
     events: dict[str, LedgerEventRecord],
-) -> tuple[StructuralNode, StructuralNode, tuple[tuple[EntityAlias, StructuralNode], ...]]:
+) -> tuple[
+    StructuralNode,
+    StructuralNode,
+    tuple[tuple[EntityAlias, StructuralNode, StructuralNode], ...],
+]:
     entity_event = events[str(state.entity.authority_event_id)]
     version_event = events[str(state.version.authority_event_id)]
     entity = _node(
@@ -129,6 +136,18 @@ def _entity_nodes(
         value=str(state.version.entity_version_id),
         event=version_event,
     )
+    historical_version_events: dict[str, LedgerEventRecord] = {}
+    for alias in state.aliases:
+        if alias.entity_version_id == state.version.entity_version_id:
+            continue
+        event = events[str(alias.authority_event_id)]
+        key = str(alias.entity_version_id)
+        existing = historical_version_events.get(key)
+        if existing is None or (event.ledger_seq, event.event_id) < (
+            existing.ledger_seq,
+            existing.event_id,
+        ):
+            historical_version_events[key] = event
     aliases = tuple(
         (
             alias,
@@ -137,6 +156,16 @@ def _entity_nodes(
                 namespace=_ALIAS_NAMESPACE,
                 value=str(alias.alias_id),
                 event=events[str(alias.authority_event_id)],
+            ),
+            (
+                version
+                if alias.entity_version_id == state.version.entity_version_id
+                else _node(
+                    node_type=ProjectionNodeType.AUTHORITY_VERSION,
+                    namespace=_ENTITY_VERSION_NAMESPACE,
+                    value=str(alias.entity_version_id),
+                    event=historical_version_events[str(alias.entity_version_id)],
+                )
             ),
         )
         for alias in state.aliases
@@ -155,10 +184,18 @@ def _entity_batch_parts(
     source_event = events[str(state.projection_event.source_event_id)]
     event_node = _event_node(source_event)
     entity_node, version_node, alias_nodes = _entity_nodes(state, events)
-    for node in (event_node, entity_node, version_node, *(item[1] for item in alias_nodes)):
+    for node in (
+        event_node,
+        entity_node,
+        version_node,
+        *(item[1] for item in alias_nodes),
+        *(item[2] for item in alias_nodes),
+    ):
         existing = nodes.get(node.canonical_id)
         if existing is not None and existing != node:
-            raise Increment4ProofContractError("canonical graph node has conflicting provenance")
+            raise Increment4ProofContractError(
+                "canonical graph node has conflicting provenance"
+            )
         nodes[node.canonical_id] = node
     relations.extend(
         (
@@ -182,12 +219,27 @@ def _entity_batch_parts(
             ),
         )
     )
-    for alias, alias_node in alias_nodes:
+    historical_versions: set[str] = set()
+    for alias, alias_node, alias_version_node in alias_nodes:
+        if alias_version_node.canonical_id != version_node.canonical_id:
+            if alias_version_node.canonical_id not in historical_versions:
+                relations.append(
+                    _relation(
+                        generation_id=generation_id,
+                        relation_type=ProjectionRelationType.HAS_VERSION,
+                        source=entity_node,
+                        target=alias_version_node,
+                        event=source_event,
+                        semantic_digest=alias.canonical_digest,
+                        semantic_id=f"{alias.entity_version_id}:historical",
+                    )
+                )
+                historical_versions.add(alias_version_node.canonical_id)
         relations.append(
             _relation(
                 generation_id=generation_id,
                 relation_type=ProjectionRelationType.CONTAINS_PAYLOAD,
-                source=version_node,
+                source=alias_version_node,
                 target=alias_node,
                 event=source_event,
                 semantic_digest=alias.canonical_digest,
@@ -239,24 +291,46 @@ def _relation_batch_parts(
     )
     subject = assertion.subject
     object_ = assertion.object
-    if not isinstance(subject, CanonicalEntityRelationEndpoint) or not isinstance(
+    if isinstance(subject, CanonicalEntityRelationEndpoint) and isinstance(
         object_, CanonicalEntityRelationEndpoint
     ):
-        raise Increment4ProofContractError("relation endpoints are not canonical entities")
-    subject_state = entity_by_version[str(subject.entity_version_id)]
-    object_state = entity_by_version[str(object_.entity_version_id)]
-    subject_node = _node(
-        node_type=ProjectionNodeType.AUTHORITY_VERSION,
-        namespace=_ENTITY_VERSION_NAMESPACE,
-        value=str(subject.entity_version_id),
-        event=events[str(subject_state.version.authority_event_id)],
-    )
-    object_node = _node(
-        node_type=ProjectionNodeType.AUTHORITY_VERSION,
-        namespace=_ENTITY_VERSION_NAMESPACE,
-        value=str(object_.entity_version_id),
-        event=events[str(object_state.version.authority_event_id)],
-    )
+        subject_state = entity_by_version[str(subject.entity_version_id)]
+        object_state = entity_by_version[str(object_.entity_version_id)]
+        subject_node = _node(
+            node_type=ProjectionNodeType.AUTHORITY_VERSION,
+            namespace=_ENTITY_VERSION_NAMESPACE,
+            value=str(subject.entity_version_id),
+            event=events[str(subject_state.version.authority_event_id)],
+        )
+        object_node = _node(
+            node_type=ProjectionNodeType.AUTHORITY_VERSION,
+            namespace=_ENTITY_VERSION_NAMESPACE,
+            value=str(object_.entity_version_id),
+            event=events[str(object_state.version.authority_event_id)],
+        )
+    elif isinstance(subject, RelationAssertionRelationEndpoint) and isinstance(
+        object_, RelationAssertionRelationEndpoint
+    ):
+        # A current correction/supersession assertion may reference a retained
+        # predecessor that is no longer current. The endpoint node is an
+        # identity-stable lineage reference; the current assertion and edge
+        # retain the exact source event and admitted trust.
+        subject_node = _node(
+            node_type=ProjectionNodeType.AUTHORITY_VERSION,
+            namespace=_ASSERTION_NAMESPACE,
+            value=str(subject.assertion_id),
+            event=source_event,
+        )
+        object_node = _node(
+            node_type=ProjectionNodeType.AUTHORITY_VERSION,
+            namespace=_ASSERTION_NAMESPACE,
+            value=str(object_.assertion_id),
+            event=source_event,
+        )
+    else:
+        raise Increment4ProofContractError(
+            "relation endpoint pair is outside the admitted projection contract"
+        )
     for node in (event_node, assertion_node, subject_node, object_node):
         existing = nodes.get(node.canonical_id)
         if existing is not None and existing != node:

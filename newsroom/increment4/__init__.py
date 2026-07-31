@@ -24,6 +24,13 @@ from .models import (
     sorted_snapshot,
 )
 from .projection import build_increment4_admitted_batches
+from .traceability import (
+    INCREMENT_4E_ADR_ANCHORS,
+    INCREMENT_4E_DEFERRED,
+    INCREMENT_4E_EXCLUSIONS,
+    INCREMENT_4E_TRACEABILITY,
+    Increment4ProofTraceabilityRow,
+)
 
 
 _NEO4J_EXPORTS = frozenset(
@@ -56,6 +63,11 @@ __all__ = [
     "INCREMENT4_ADMITTED_ONTOLOGY_ID",
     "INCREMENT4_ADMITTED_ONTOLOGY_VERSION",
     "INCREMENT4_ADMITTED_PROJECTOR_VERSION",
+    "INCREMENT_4E_ADR_ANCHORS",
+    "INCREMENT_4E_DEFERRED",
+    "INCREMENT_4E_EXCLUSIONS",
+    "INCREMENT_4E_TRACEABILITY",
+    "Increment4ProofTraceabilityRow",
     "Increment4AdmittedProjectionSnapshot",
     "Increment4Neo4jActiveReadRequest",
     "Increment4Neo4jBuildRequest",

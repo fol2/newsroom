@@ -18,6 +18,7 @@ from newsroom.relations.editorial_models import (
     CanonicalEntityRelationEndpoint,
     EditorialRelationCurrentView,
     EditorialRelationProjectionEvent,
+    RelationAssertionRelationEndpoint,
 )
 from newsroom.relations.editorial_types import (
     EditorialRelationAssertionLifecycle,
@@ -74,11 +75,10 @@ class Increment4EntityProjectionState:
         for alias in self.aliases:
             if not isinstance(alias, EntityAlias):
                 raise Increment4ProofContractError("entity alias must be typed")
-            if (
-                alias.entity_id != self.entity.entity_id
-                or alias.entity_version_id != self.version.entity_version_id
-            ):
-                raise Increment4ProofContractError("entity alias targets another entity version")
+            if alias.entity_id != self.entity.entity_id:
+                raise Increment4ProofContractError(
+                    "entity alias targets another canonical entity"
+                )
 
     @property
     def canonical_digest(self) -> str:
@@ -142,11 +142,16 @@ class Increment4RelationProjectionState:
         if not isinstance(self.projection_event, EditorialRelationProjectionEvent):
             raise Increment4ProofContractError("relation state requires a projection event")
         assertion = self.current.assertion
-        if not isinstance(assertion.subject, CanonicalEntityRelationEndpoint) or not isinstance(
-            assertion.object, CanonicalEntityRelationEndpoint
-        ):
+        canonical_entity_pair = isinstance(
+            assertion.subject, CanonicalEntityRelationEndpoint
+        ) and isinstance(assertion.object, CanonicalEntityRelationEndpoint)
+        assertion_lineage_pair = isinstance(
+            assertion.subject, RelationAssertionRelationEndpoint
+        ) and isinstance(assertion.object, RelationAssertionRelationEndpoint)
+        if not (canonical_entity_pair or assertion_lineage_pair):
             raise Increment4ProofContractError(
-                "Increment 4 admitted proof supports canonical entity relation endpoints"
+                "Increment 4 admitted proof supports canonical-entity or "
+                "relation-assertion endpoint pairs"
             )
         if (
             self.current.lifecycle is not EditorialRelationAssertionLifecycle.ACTIVE
@@ -186,8 +191,10 @@ class Increment4AdmittedProjectionSnapshot:
     through_ledger_seq: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.entities, tuple) or not self.entities:
-            raise Increment4ProofContractError("proof snapshot requires admitted entities")
+        if not isinstance(self.entities, tuple):
+            raise Increment4ProofContractError(
+                "proof entities must be an immutable tuple"
+            )
         if not isinstance(self.relations, tuple):
             raise Increment4ProofContractError("proof relations must be an immutable tuple")
         if not isinstance(self.events, tuple) or not self.events:
@@ -241,11 +248,23 @@ class Increment4AdmittedProjectionSnapshot:
                 )
         for state in self.relations:
             assertion = state.current.assertion
-            subject = str(assertion.subject.entity_version_id)
-            object_ = str(assertion.object.entity_version_id)
-            if subject not in current_versions or object_ not in current_versions:
+            if isinstance(assertion.subject, CanonicalEntityRelationEndpoint):
+                if not isinstance(assertion.object, CanonicalEntityRelationEndpoint):
+                    raise Increment4ProofContractError(
+                        "admitted relation endpoint kinds differ"
+                    )
+                subject = str(assertion.subject.entity_version_id)
+                object_ = str(assertion.object.entity_version_id)
+                if subject not in current_versions or object_ not in current_versions:
+                    raise Increment4ProofContractError(
+                        "admitted relation endpoint is absent from current entity authority"
+                    )
+            elif not (
+                isinstance(assertion.subject, RelationAssertionRelationEndpoint)
+                and isinstance(assertion.object, RelationAssertionRelationEndpoint)
+            ):
                 raise Increment4ProofContractError(
-                    "admitted relation endpoint is absent from current entity authority"
+                    "admitted relation endpoint kinds are outside the proof contract"
                 )
 
     @property
