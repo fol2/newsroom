@@ -46,6 +46,7 @@ from .extraction_4a_helpers import (
     open_extraction_system,
     run_request,
     seed_extraction_fixture,
+    seed_homonym_extraction_fixture,
 )
 from .graphiti_adapter_4d_helpers import fake_attempt, replay_payload_digest
 from .source_3a_helpers import SOURCE_NOW
@@ -100,7 +101,11 @@ def seed_graphiti_authority_fixture(
         if fixture_case is None
         else fixture_case
     )
-    state = seed_extraction_fixture(root)
+    state = (
+        seed_homonym_extraction_fixture(root)
+        if selected is FixtureExtractionCase.BILINGUAL_HOMONYM
+        else seed_extraction_fixture(root)
+    )
     with open_extraction_system(state) as extraction:
         extraction.extraction.register_contract(
             contract_request(fixture_case=selected), proof=extraction_proof()

@@ -2214,7 +2214,21 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
             )
 
     @staticmethod
+    def _latest_projection_source_ledger_seq(conn: sqlite3.Connection) -> int:
+        return int(
+            conn.execute(
+                "SELECT COALESCE(MAX(ledger_seq),0) FROM ledger_events "
+                "WHERE security_scope NOT IN ('authority.projection','authority.candidate')"
+            ).fetchone()[0]
+        )
+
+    def latest_projection_source_ledger_seq(self) -> int:
+        with self._lock:
+            return self._latest_projection_source_ledger_seq(self._connection)
+
+    @classmethod
     def _require_source_watermark(
+        cls,
         conn: sqlite3.Connection,
         *,
         checkpoint_ledger_seq: int,
@@ -2228,14 +2242,14 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
             or required_source_ledger_seq < 0
         ):
             raise ValueError("required source ledger sequence is invalid")
-        latest = int(
-            conn.execute(
-                "SELECT COALESCE(MAX(ledger_seq),0) FROM ledger_events "
-                "WHERE security_scope NOT IN ('authority.projection','authority.candidate')"
-            ).fetchone()[0]
-        )
+        latest = cls._latest_projection_source_ledger_seq(conn)
+        # Structural generations may have finalized later projection-control
+        # events after consuming the exact source watermark.  They may never
+        # lag that source watermark, and no newer non-projection authority may
+        # appear between reconciliation and the SQLite validation/promotion
+        # commit.  Complete projections continue to pass an equal checkpoint.
         if (
-            checkpoint_ledger_seq != required_source_ledger_seq
+            checkpoint_ledger_seq < required_source_ledger_seq
             or latest != required_source_ledger_seq
         ):
             raise ProjectionStateError(

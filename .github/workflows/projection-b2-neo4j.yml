@@ -136,6 +136,7 @@ jobs:
             newsroom/tests/test_complete_projection_2b_neo4j_service.py \
             newsroom/tests/test_retrieval_2c_neo4j_service.py \
             newsroom/tests/test_increment_2d_neo4j_service.py \
+            newsroom/tests/test_increment4e_neo4j_service.py \
             --junitxml=projection-b2-b3-c1-complete-retrieval-neo4j-results.xml
 
       - name: Prove actual-service tests executed
@@ -311,6 +312,34 @@ jobs:
               for case in increment_2d
           ):
               raise SystemExit("Increment 2D actual-service cases failed")
+
+          increment_4e = [
+              case
+              for case in cases
+              if "test_increment4e_neo4j_service"
+              in case.attrib.get("classname", "")
+          ]
+          required_increment_4e = {
+              "test_actual_service_increment4_admitted_state_projects_exactly_and_replays",
+              "test_actual_service_increment4_graph_loss_replays_retained_authority_exactly",
+              "test_actual_service_increment4_replacement_generation_is_only_serving_state",
+              "test_actual_service_increment4_tombstone_purges_and_never_resurrects",
+          }
+          increment_4e_names = {
+              case.attrib.get("name", "") for case in increment_4e
+          }
+          if increment_4e_names != required_increment_4e:
+              raise SystemExit(
+                  "required Increment 4E actual-service cases differ: "
+                  + repr(sorted(increment_4e_names))
+              )
+          if any(case.find("skipped") is not None for case in increment_4e):
+              raise SystemExit("Increment 4E actual-service cases were skipped")
+          if any(
+              case.find("failure") is not None or case.find("error") is not None
+              for case in increment_4e
+          ):
+              raise SystemExit("Increment 4E actual-service cases failed")
           PY
 
       - name: Upload B2/B3/C1, complete 2B and retrieval 2C actual-service evidence

@@ -520,7 +520,12 @@ class _EditorialRelationStoreSupport:
                     "editorial relation assertion endpoint cycle is retained"
                 )
             visited.add(key)
-            self._require_editorial_assertion_current(
+            # Relation-assertion endpoints are immutable lineage references.
+            # A current correction/supersession may legitimately point at a
+            # predecessor whose lifecycle is no longer ACTIVE, but the
+            # retained assertion and all of its source/entity rights must
+            # still revalidate.
+            self._require_editorial_assertion_rights_current(
                 conn, endpoint.assertion_id, visited_assertions=visited
             )
             visited.remove(key)

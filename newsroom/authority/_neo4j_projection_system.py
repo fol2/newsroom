@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from ._capability import _CapabilityIssuer
 from ._event_system import _ReadBoundary
+from ._increment4_neo4j_boundary import _Increment4Neo4jBoundary
 from ._projection_store import (
     _ProjectionAuthorityStore,
     _ProjectionDeliverySource,
@@ -26,6 +27,7 @@ from .persistence import (
 from .policy import CommandRegistry, PayloadSchemaRegistry
 from .service import CommandService
 from .types import TrustScope, UtcTimestamp
+from newsroom.increment4.neo4j import Increment4Neo4jController
 from newsroom.projection.mapping import (
     ProjectionIdentitySource,
     StructuralIdentityContext,
@@ -232,6 +234,7 @@ class Neo4jProjectionAuthoritySystem:
         "events",
         "projections",
         "structural",
+        "increment4",
         "health",
         "compatibility",
         "__close",
@@ -244,6 +247,7 @@ class Neo4jProjectionAuthoritySystem:
         events: AuthorityEvents,
         projections: NativeProjections,
         structural: Neo4jStructuralProjector,
+        increment4: Increment4Neo4jController,
         health: DiscoveryHealthAuthorityFacade,
         compatibility: Neo4jCompatibility,
         close: Callable[[], None],
@@ -252,6 +256,7 @@ class Neo4jProjectionAuthoritySystem:
         self.events = events
         self.projections = projections
         self.structural = structural
+        self.increment4 = increment4
         self.health = health
         self.compatibility = compatibility
         self.__close = close
@@ -274,12 +279,22 @@ class _Neo4jProjectionBoundary:
         projection_boundary: _ProjectionBoundary,
         adapter: _StructuralGraphAdapter,
         clock: Callable[[], UtcTimestamp],
+        operation_lock: RLock | None = None,
     ) -> None:
         self._store = store
         self._projection_boundary = projection_boundary
         self._adapter = adapter
         self._clock = clock
-        self._operation_lock = RLock()
+        self._operation_lock = operation_lock or RLock()
+
+    @staticmethod
+    def _require_generic_structural_family(family_id: str) -> None:
+        from newsroom.increment4.contracts import INCREMENT4_ADMITTED_FAMILY_ID
+
+        if family_id == INCREMENT4_ADMITTED_FAMILY_ID:
+            raise ProjectionStateError(
+                "Increment 4 admitted projection requires its bounded controller"
+            )
 
     def deliver(
         self,
@@ -314,6 +329,7 @@ class _Neo4jProjectionBoundary:
             request.generation_id,
             request.ledger_seq,
         )
+        self._require_generic_structural_family(source.family.family_id)
         if (
             applied_grant.replay_of_command_id is None
             and source.generation.authority_aggregate_version
@@ -407,6 +423,11 @@ class _Neo4jProjectionBoundary:
     ) -> StructuralRebuildResult:
         if not isinstance(request, StructuralRebuildRequest):
             raise TypeError("structural rebuild requires a typed request")
+        self._projection_boundary._authenticate(proof)
+        metadata = self._store.projection_generation_metadata(
+            request.generation_id
+        )
+        self._require_generic_structural_family(metadata.family.family_id)
         receipt = self._projection_boundary._begin_rebuild(request, proof)
         if receipt.generation.state is not ProjectionGenerationState.BUILDING:
             raise ProjectionStateError(
@@ -547,6 +568,7 @@ class _Neo4jProjectionBoundary:
         metadata = self._store.projection_generation_metadata(
             request.generation_id
         )
+        self._require_generic_structural_family(metadata.family.family_id)
         replaying = target_grant.replay_of_command_id is not None
         if replaying:
             if metadata.generation.state not in {
@@ -652,6 +674,7 @@ class _Neo4jProjectionBoundary:
         metadata = self._store.projection_generation_metadata(
             request.generation_id
         )
+        self._require_generic_structural_family(metadata.family.family_id)
         self._projection_boundary._authorize_management_operation(
             family_id=metadata.family.family_id,
             aggregate_id=str(request.generation_id),
@@ -795,6 +818,7 @@ class _Neo4jProjectionBoundary:
             metadata = self._store.projection_active_generation_metadata(
                 request.family_id
             )
+            self._require_generic_structural_family(metadata.family.family_id)
             expected = self._expected_validation_batches(
                 metadata.generation.generation_id,
                 metadata.contiguous_ledger_seq,
@@ -1236,11 +1260,21 @@ def _open_with_adapter(
             read_policy=projection_read_policy,
             clock=clock,
         )
+        operation_lock = RLock()
         graph_boundary = _Neo4jProjectionBoundary(
             store=store,
             projection_boundary=projection_boundary,
             adapter=adapter,
             clock=clock,
+            operation_lock=operation_lock,
+        )
+        increment4_boundary = _Increment4Neo4jBoundary(
+            store=store,
+            projection_boundary=projection_boundary,
+            structural_reader=graph_boundary,
+            adapter=adapter,
+            clock=clock,
+            operation_lock=operation_lock,
         )
 
         def execute(
@@ -1301,6 +1335,11 @@ def _open_with_adapter(
                 reconcile_active=graph_boundary.reconcile_active,
                 rebuild=graph_boundary.rebuild,
                 validate_generation=graph_boundary.validate_generation,
+            ),
+            increment4=Increment4Neo4jController(
+                build=increment4_boundary.build_and_promote,
+                status=increment4_boundary.generation_status,
+                read_active=increment4_boundary.read_active,
             ),
             health=DiscoveryHealthAuthorityFacade(
                 source=graph_boundary.source_health,
