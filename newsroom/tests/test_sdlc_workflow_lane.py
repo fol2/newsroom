@@ -665,7 +665,7 @@ def test_optional_core_skips_are_exact_actual_service_cases() -> None:
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_revocation_and_tombstone_remove_current_derivatives',
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_wrong_watermark_generation_and_vector_dimension_fail_closed',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_admitted_state_projects_exactly_and_replays',
-        'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_graph_loss_replays_retained_authority_exactly',
+        'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_graph_loss_requires_isolated_replacement',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_replacement_generation_is_only_serving_state',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_tombstone_purges_and_never_resurrects',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_increment_2_proof_admits_replays_and_restarts',

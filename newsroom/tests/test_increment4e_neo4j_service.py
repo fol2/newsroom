@@ -16,7 +16,7 @@ from newsroom.increment4 import (
     sorted_snapshot,
 )
 from newsroom.projection import ProjectionGenerationId, ProjectionGenerationState
-from newsroom.projection.neo4j import Neo4jProjectorConfig
+from newsroom.projection.neo4j import Neo4jIdentityConflict, Neo4jProjectorConfig
 from newsroom.projection.neo4j._adapter import _open_neo4j_adapter
 
 from .editorial_relation_4c_helpers import (
@@ -243,19 +243,23 @@ def test_actual_service_increment4_admitted_state_projects_exactly_and_replays(
         _cleanup(config, generation_id)
 
 
-def test_actual_service_increment4_graph_loss_replays_retained_authority_exactly(
+def test_actual_service_increment4_graph_loss_requires_isolated_replacement(
     tmp_path: Path,
 ) -> None:
     config = _service_config()
     state = seed_increment4_graphiti_path(tmp_path / "authority")
     admitted = admit_increment4_graphiti_path(state)
     snapshot = admitted.snapshot
-    generation_id = ProjectionGenerationId.new()
-    _batches, canonical_ids, _node_ids, _relation_keys = _expected(
-        snapshot, generation_id
+    first_id = ProjectionGenerationId.new()
+    replacement_id = ProjectionGenerationId.new()
+    _first_batches, first_canonical_ids, _node_ids, _relation_keys = _expected(
+        snapshot, first_id
     )
-    request = _request(
-        generation_id,
+    _replacement_batches, replacement_canonical_ids, _node_ids2, _relation_keys2 = (
+        _expected(snapshot, replacement_id)
+    )
+    first_request = _request(
+        first_id,
         snapshot,
         key="increment4e-actual-service-loss-v1",
     )
@@ -267,12 +271,12 @@ def test_actual_service_increment4_graph_loss_replays_retained_authority_exactly
     )
     try:
         first = system.increment4.build_and_promote(
-            request,
+            first_request,
             proof=extraction_proof(),
         )
         initial = system.increment4.read_active(
             Increment4Neo4jActiveReadRequest(
-                canonical_ids=canonical_ids,
+                canonical_ids=first_canonical_ids,
                 query_valid_time=SOURCE_NOW,
                 limit=100,
             ),
@@ -283,7 +287,7 @@ def test_actual_service_increment4_graph_loss_replays_retained_authority_exactly
         system.close()
 
     try:
-        _cleanup(config, generation_id)
+        _cleanup(config, first_id)
         restarted = open_graphiti_path_increment4_neo4j_system(
             state.relation,
             _open_neo4j_adapter(config),
@@ -291,7 +295,7 @@ def test_actual_service_increment4_graph_loss_replays_retained_authority_exactly
         try:
             missing = restarted.increment4.read_active(
                 Increment4Neo4jActiveReadRequest(
-                    canonical_ids=canonical_ids,
+                    canonical_ids=first_canonical_ids,
                     query_valid_time=SOURCE_NOW,
                     limit=100,
                 ),
@@ -299,14 +303,30 @@ def test_actual_service_increment4_graph_loss_replays_retained_authority_exactly
             )
             assert missing.nodes == ()
             assert missing.relations == ()
-
-            restored = restarted.increment4.build_and_promote(
-                request,
+            with pytest.raises(Neo4jIdentityConflict):
+                restarted.increment4.build_and_promote(
+                    first_request,
+                    proof=extraction_proof(),
+                )
+            still_active = restarted.increment4.generation_status(
+                first_id,
+                proof=extraction_proof(),
+            )
+            replacement = restarted.increment4.build_and_promote(
+                _request(
+                    replacement_id,
+                    snapshot,
+                    key="increment4e-actual-service-loss-replacement-v1",
+                ),
+                proof=extraction_proof(),
+            )
+            retired = restarted.increment4.generation_status(
+                first_id,
                 proof=extraction_proof(),
             )
             after = restarted.increment4.read_active(
                 Increment4Neo4jActiveReadRequest(
-                    canonical_ids=canonical_ids,
+                    canonical_ids=replacement_canonical_ids,
                     query_valid_time=SOURCE_NOW,
                     limit=100,
                 ),
@@ -315,12 +335,27 @@ def test_actual_service_increment4_graph_loss_replays_retained_authority_exactly
         finally:
             restarted.close()
 
-        assert restored.promotion.promotion_digest == first.promotion.promotion_digest
-        assert restored.validation.validation_digest == first.validation.validation_digest
-        assert after == initial
-        assert _event_count(database) == before_events
+        assert first.generation.state is ProjectionGenerationState.ACTIVE
+        assert still_active.generation.state is ProjectionGenerationState.ACTIVE
+        assert replacement.generation.state is ProjectionGenerationState.ACTIVE
+        assert replacement.prior_generation is not None
+        assert replacement.prior_generation.generation_id == first_id
+        assert retired.generation.state is ProjectionGenerationState.RETIRED
+        assert after.metadata.generation_id == replacement_id
+        assert {item.canonical_id for item in after.nodes} == {
+            item.canonical_id for item in initial.nodes
+        }
+        assert {
+            (item.relation_type, item.source_canonical_id, item.target_canonical_id)
+            for item in after.relations
+        } == {
+            (item.relation_type, item.source_canonical_id, item.target_canonical_id)
+            for item in initial.relations
+        }
+        assert _event_count(database) > before_events
     finally:
-        _cleanup(config, generation_id)
+        _cleanup(config, first_id, replacement_id)
+
 
 
 def test_actual_service_increment4_replacement_generation_is_only_serving_state(

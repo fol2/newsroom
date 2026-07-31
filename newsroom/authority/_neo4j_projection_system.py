@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from ._capability import _CapabilityIssuer
 from ._event_system import _ReadBoundary
 from ._increment4_neo4j_boundary import _Increment4Neo4jBoundary
+from ._increment4_projection_store import _Increment4ProjectionAuthorityStore
 from ._projection_store import (
     _ProjectionAuthorityStore,
     _ProjectionDeliverySource,
@@ -41,10 +42,17 @@ from newsroom.projection.models import (
     ProjectionContractError,
     ProjectionDeliveryOutcome,
     ProjectionDeliveryRequest,
+    ProjectionFamilyRegistrationRequest,
+    ProjectionFamilyView,
+    ProjectionGapResolutionRequest,
+    ProjectionGapView,
+    ProjectionGenerationCreateRequest,
     ProjectionGenerationId,
     ProjectionGenerationPromotionRequest,
     ProjectionGenerationPromotionView,
     ProjectionGenerationState,
+    ProjectionGenerationTransitionRequest,
+    ProjectionGenerationView,
     ProjectionGenerationValidationRequest,
     ProjectionGenerationValidationView,
     ProjectionReadPolicy,
@@ -295,6 +303,67 @@ class _Neo4jProjectionBoundary:
             raise ProjectionStateError(
                 "Increment 4 admitted projection requires its bounded controller"
             )
+
+    def _require_generic_mutation_generation(
+        self,
+        generation_id: ProjectionGenerationId,
+        proof: AuthenticationProof,
+    ) -> None:
+        self._projection_boundary._authenticate(proof)
+        metadata = self._store.projection_generation_metadata(generation_id)
+        self._require_generic_structural_family(metadata.family.family_id)
+
+    def register_family(
+        self,
+        request: ProjectionFamilyRegistrationRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionFamilyView:
+        if not isinstance(request, ProjectionFamilyRegistrationRequest):
+            raise TypeError("projection family registration requires a typed request")
+        self._projection_boundary._authenticate(proof)
+        self._require_generic_structural_family(request.family_id)
+        return self._projection_boundary.register_family(request, proof)
+
+    def create_generation(
+        self,
+        request: ProjectionGenerationCreateRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationView:
+        if not isinstance(request, ProjectionGenerationCreateRequest):
+            raise TypeError("projection generation creation requires a typed request")
+        self._projection_boundary._authenticate(proof)
+        self._require_generic_structural_family(request.family_id)
+        return self._projection_boundary.create_generation(request, proof)
+
+    def transition_generation(
+        self,
+        request: ProjectionGenerationTransitionRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationView:
+        if not isinstance(request, ProjectionGenerationTransitionRequest):
+            raise TypeError("projection generation transition requires a typed request")
+        self._require_generic_mutation_generation(request.generation_id, proof)
+        return self._projection_boundary.transition_generation(request, proof)
+
+    def record_delivery(
+        self,
+        request: ProjectionDeliveryRequest,
+        proof: AuthenticationProof,
+    ) -> DeliveryRecordView:
+        if not isinstance(request, ProjectionDeliveryRequest):
+            raise TypeError("projection delivery requires a typed request")
+        self._require_generic_mutation_generation(request.generation_id, proof)
+        return self._projection_boundary.record_delivery(request, proof)
+
+    def resolve_gap(
+        self,
+        request: ProjectionGapResolutionRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGapView:
+        if not isinstance(request, ProjectionGapResolutionRequest):
+            raise TypeError("projection gap resolution requires a typed request")
+        self._require_generic_mutation_generation(request.generation_id, proof)
+        return self._projection_boundary.resolve_gap(request, proof)
 
     def deliver(
         self,
@@ -562,6 +631,12 @@ class _Neo4jProjectionBoundary:
     ) -> ProjectionGenerationPromotionView:
         if not isinstance(request, ProjectionGenerationPromotionRequest):
             raise TypeError("projection promotion requires a typed request")
+        self._require_generic_mutation_generation(request.generation_id, proof)
+        if request.prior_generation_id is not None:
+            self._require_generic_mutation_generation(
+                request.prior_generation_id,
+                proof,
+            )
         target_grant, prior_grant = (
             self._projection_boundary._authorize_promotion(request, proof)
         )
@@ -650,7 +725,7 @@ class _Neo4jProjectionBoundary:
     ) -> ProjectionGenerationValidationView:
         if not isinstance(request, ProjectionGenerationValidationRequest):
             raise TypeError("projection validation requires a typed request")
-        self._projection_boundary._authenticate(proof)
+        self._require_generic_mutation_generation(request.generation_id, proof)
         raise ProjectionStateError(
             "Neo4j generation validation requires structural reconciliation"
         )
@@ -1221,11 +1296,11 @@ def _open_with_adapter(
         command_registry=merged_registry,
         payload_schemas=merged_schemas,
     )
-    store: _ProjectionAuthorityStore | None = None
+    store: _Increment4ProjectionAuthorityStore | None = None
     try:
         compatibility = adapter.verify_compatibility()
         adapter.bootstrap_schema()
-        store = _ProjectionAuthorityStore(
+        store = _Increment4ProjectionAuthorityStore(
             path,
             issuer=issuer,
             command_registry=merged_registry,
@@ -1312,15 +1387,13 @@ def _open_with_adapter(
                 result=event_read_boundary.command_result,
             ),
             projections=NativeProjections(
-                register_family=projection_boundary.register_family,
-                create_generation=projection_boundary.create_generation,
-                transition_generation=(
-                    projection_boundary.transition_generation
-                ),
+                register_family=graph_boundary.register_family,
+                create_generation=graph_boundary.create_generation,
+                transition_generation=graph_boundary.transition_generation,
                 validate_generation=graph_boundary.reject_direct_validation,
                 promote_generation=graph_boundary.promote_generation,
-                record_delivery=projection_boundary.record_delivery,
-                resolve_gap=projection_boundary.resolve_gap,
+                record_delivery=graph_boundary.record_delivery,
+                resolve_gap=graph_boundary.resolve_gap,
                 status=projection_boundary.status,
                 generations=projection_boundary.generations,
                 validation=projection_boundary.validation,

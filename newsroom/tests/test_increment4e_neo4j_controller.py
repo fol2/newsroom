@@ -143,7 +143,7 @@ def test_increment4_replacement_retires_and_purges_prior_generation(
     assert any(key[0] == str(GENERATION_2) for key in adapter.deliveries)
 
 
-def test_increment4_exact_replay_restores_lost_graph_without_new_authority(
+def test_increment4_exact_active_replay_is_non_mutating_and_graph_loss_fails_closed(
     tmp_path: Path,
 ) -> None:
     state, snapshot = admitted_increment4_fixture(tmp_path)
@@ -154,16 +154,60 @@ def test_increment4_exact_replay_restores_lost_graph_without_new_authority(
         first = system.increment4.build_and_promote(
             request, proof=extraction_proof()
         )
-        first_apply_count = adapter.apply_count
-        adapter.deliveries.clear()
+        before_apply = adapter.apply_count
+        before_cleanup = adapter.cleanup_count
+        before_reconcile = adapter.reconcile_count
         replay = system.increment4.build_and_promote(
             request, proof=extraction_proof()
         )
+        assert replay.promotion.promotion_digest == first.promotion.promotion_digest
+        assert replay.validation.validation_digest == first.validation.validation_digest
+        assert replay.deleted_target_graph_record_count == 0
+        assert replay.purged_retired_graph_record_count == 0
+        assert adapter.apply_count == before_apply
+        assert adapter.cleanup_count == before_cleanup
+        assert adapter.reconcile_count == before_reconcile + 1
 
-    assert replay.promotion.promotion_digest == first.promotion.promotion_digest
-    assert replay.validation.validation_digest == first.validation.validation_digest
-    assert adapter.apply_count == first_apply_count + first.projected_batch_count
-    assert len(adapter.deliveries) == first.projected_batch_count
+        adapter.deliveries.clear()
+        failed_apply = adapter.apply_count
+        failed_cleanup = adapter.cleanup_count
+        with pytest.raises(Neo4jIdentityConflict):
+            system.increment4.build_and_promote(
+                request, proof=extraction_proof()
+            )
+        assert adapter.apply_count == failed_apply
+        assert adapter.cleanup_count == failed_cleanup
+        assert adapter.deliveries == {}
+
+
+def test_increment4_graph_loss_recovers_only_through_isolated_replacement(
+    tmp_path: Path,
+) -> None:
+    state, snapshot = admitted_increment4_fixture(tmp_path)
+    adapter = MemoryNeo4jAdapter()
+
+    with open_increment4_neo4j_system(state, adapter) as system:
+        first = system.increment4.build_and_promote(
+            _request(GENERATION_1, snapshot, key="increment4-loss-first-v1"),
+            proof=extraction_proof(),
+        )
+        adapter.deliveries.clear()
+        replacement = system.increment4.build_and_promote(
+            _request(GENERATION_2, snapshot, key="increment4-loss-replacement-v1"),
+            proof=extraction_proof(),
+        )
+        first_status = system.increment4.generation_status(
+            GENERATION_1, proof=extraction_proof()
+        )
+
+    assert first.generation.state is ProjectionGenerationState.ACTIVE
+    assert replacement.generation.state is ProjectionGenerationState.ACTIVE
+    assert replacement.prior_generation is not None
+    assert replacement.prior_generation.generation_id == GENERATION_1
+    assert first_status.generation.state is ProjectionGenerationState.RETIRED
+    assert any(key[0] == str(GENERATION_2) for key in adapter.deliveries)
+    assert not any(key[0] == str(GENERATION_1) for key in adapter.deliveries)
+
 
 
 def test_increment4_reconciliation_mismatch_never_promotes(tmp_path: Path) -> None:

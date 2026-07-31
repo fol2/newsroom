@@ -12,7 +12,7 @@ def test_permanent_neo4j_gate_executes_exact_increment4e_actual_service_proof() 
     required = (
         "newsroom/tests/test_increment4e_neo4j_service.py",
         "test_actual_service_increment4_admitted_state_projects_exactly_and_replays",
-        "test_actual_service_increment4_graph_loss_replays_retained_authority_exactly",
+        "test_actual_service_increment4_graph_loss_requires_isolated_replacement",
         "test_actual_service_increment4_replacement_generation_is_only_serving_state",
         "test_actual_service_increment4_tombstone_purges_and_never_resurrects",
         "required Increment 4E actual-service cases differ",

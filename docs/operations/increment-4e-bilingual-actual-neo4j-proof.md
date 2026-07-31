@@ -199,7 +199,7 @@ To recover complete Neo4j loss:
 6. validate and promote it; and
 7. retire or purge any damaged predecessor generation.
 
-Exact replay is idempotent and creates no duplicate Runs, attempts, mentions, entities, aliases, proposals, decisions, assertions, batches or graph state.
+Exact replay of a healthy ACTIVE generation is read-only: it revalidates current SQLite authority, service compatibility and exact graph reconciliation, then returns retained validation and promotion records. It never cleans, reapplies or purges serving graph state. Graph loss or replacement always requires a fresh isolated BUILDING generation identity.
 
 ## Rights revocation, deletion and purge
 
@@ -230,7 +230,7 @@ The permanent authenticated Neo4j workflow explicitly invokes `test_increment4e_
 
 ```text
 test_actual_service_increment4_admitted_state_projects_exactly_and_replays
-test_actual_service_increment4_graph_loss_replays_retained_authority_exactly
+test_actual_service_increment4_graph_loss_requires_isolated_replacement
 test_actual_service_increment4_replacement_generation_is_only_serving_state
 test_actual_service_increment4_tombstone_purges_and_never_resurrects
 ```
