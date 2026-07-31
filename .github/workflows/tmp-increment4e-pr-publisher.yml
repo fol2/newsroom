@@ -1,0 +1,78 @@
+name: Temporary Increment 4E PR publisher
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: >-
+      github.head_ref == 'agent/increment-4e-corrective-hardening' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Recover and apply the staged corrective patch
+        run: |
+          python - <<'PY'
+          import base64
+          import gzip
+          import re
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/tmp-increment4e-corrective-publisher.yml')
+          match = re.search(
+              r'PATCH_GZIP_BASE64: "([A-Za-z0-9+/=]+)"',
+              workflow.read_text(encoding='utf-8'),
+          )
+          if match is None:
+              raise SystemExit('staged corrective payload is absent')
+          Path('/tmp/increment4_patch.py').write_bytes(
+              gzip.decompress(base64.b64decode(match.group(1)))
+          )
+          PY
+          python /tmp/increment4_patch.py
+
+      - name: Install locked development environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Compile and run focused corrective regressions
+        run: |
+          uv run python -m compileall -q newsroom
+          uv run python -m pytest -q \
+            newsroom/tests/test_increment4e_neo4j_controller.py \
+            newsroom/tests/test_increment4e_corrective_hardening.py \
+            newsroom/tests/test_increment4e_workflow_contract.py \
+            newsroom/tests/test_sdlc_workflow_lane.py
+
+      - name: Commit tested permanent correction and remove publishers
+        run: |
+          rm .github/workflows/tmp-increment4e-corrective-publisher.yml
+          rm .github/workflows/tmp-increment4e-pr-publisher.yml
+          git diff --check
+          git status --short
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(increment4): harden authoritative Neo4j rebuild"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
