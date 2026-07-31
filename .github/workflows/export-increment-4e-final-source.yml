@@ -1,0 +1,59 @@
+name: Export Increment 4E final source checkpoint
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  export-source:
+    if: github.head_ref == 'agent/increment-4e-final-source-recover'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SOURCE_SHA: f0e7d01810ee8d7c123be37d9141f54ff8ffaa3d
+      SOURCE_TREE: 9a478e991895853b033180a149923884963eb90f
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: agent/increment-4e-final-source-recover
+          fetch-depth: 0
+          show-progress: false
+          persist-credentials: false
+
+      - name: Verify and archive exact clean source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "$SOURCE_SHA^{tree}")" = "$SOURCE_TREE"
+          git archive --format=tar.gz --output=increment-4e-final-source.tar.gz "$SOURCE_SHA"
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          archive = Path('increment-4e-final-source.tar.gz')
+          manifest = {
+              'source_sha': os.environ['SOURCE_SHA'],
+              'source_tree': os.environ['SOURCE_TREE'],
+              'archive_bytes': archive.stat().st_size,
+              'archive_sha256': 'sha256:' + hashlib.sha256(archive.read_bytes()).hexdigest(),
+          }
+          Path('increment-4e-final-source-manifest.json').write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          print(json.dumps(manifest, sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: increment-4e-final-source-f0e7d018
+          path: |
+            increment-4e-final-source.tar.gz
+            increment-4e-final-source-manifest.json
+          if-no-files-found: error
+          retention-days: 7
