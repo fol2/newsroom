@@ -692,17 +692,15 @@ class _GraphitiAdapterCommitMixin:
                 )
                 self._require_graphiti_attempt_current(conn, result)
                 return result
-        if extraction_grant is None or not isinstance(
-            execution, GraphitiAdapterExecution
-        ):
-            raise TypeError(
-                "new adapter execution requires extraction grant and typed result"
-            )
+        if extraction_grant is None:
+            raise TypeError("new adapter execution requires an extraction grant")
         if extraction_grant.replay_of_command_id is not None:
             raise GraphitiAdapterAmbiguousEffect(
                 "Extraction Run already exists without adapter attempt authority; "
                 "explicit reconciliation is required"
             )
+        if not isinstance(execution, GraphitiAdapterExecution):
+            raise TypeError("new adapter execution requires a typed result")
         holder: dict[str, GraphitiAttemptRecord] = {}
 
         def after_persist(

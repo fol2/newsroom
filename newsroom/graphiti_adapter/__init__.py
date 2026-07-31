@@ -34,6 +34,13 @@ from .models import (
 )
 from .producer import GraphitiProposalProducerBridge
 from .replay import ApprovedReplayGraphitiAdapter
+from .traceability import (
+    GraphitiAdapterTraceabilityRow,
+    INCREMENT_4D_ADR_ANCHORS,
+    INCREMENT_4D_DEFERRED,
+    INCREMENT_4D_EXCLUSIONS,
+    INCREMENT_4D_TRACEABILITY,
+)
 from .types import (
     GraphitiAdapterConfigurationId,
     GraphitiAdapterContractError,
@@ -83,6 +90,11 @@ __all__ = [
     "GraphitiAdapterSemanticCollision",
     "GraphitiAdapterReadPolicy",
     "GraphitiAdapterStateError",
+    "INCREMENT_4D_TRACEABILITY",
+    "INCREMENT_4D_EXCLUSIONS",
+    "INCREMENT_4D_DEFERRED",
+    "INCREMENT_4D_ADR_ANCHORS",
+    "GraphitiAdapterTraceabilityRow",
     "GraphitiAdapterVersionConflict",
     "GraphitiAttemptId",
     "GraphitiCleanupReason",
