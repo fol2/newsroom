@@ -36,6 +36,7 @@ def _route(*paths: str) -> dict[str, object]:
 def test_increment_1c_native_graph_paths_require_actual_service_evidence() -> None:
     expected_tests = [
         "newsroom/tests/test_complete_projection_2b_neo4j_service.py",
+        "newsroom/tests/test_increment4e_neo4j_service.py",
         "newsroom/tests/test_increment_2d_neo4j_service.py",
         _INTEGRATED_SERVICE_TEST,
         "newsroom/tests/test_projection_b2_neo4j_service.py",
@@ -114,7 +115,7 @@ def test_complete_actual_service_cases_are_optional_only_in_core() -> None:
     } <= set(optional)
     assert complete <= set(optional)
     assert optional == tuple(sorted(optional))
-    assert len(optional) == 34
+    assert len(optional) == 37
 
     route = _route("newsroom/projection/neo4j/_complete_adapter.py")
     assert route["service_required"] is True
