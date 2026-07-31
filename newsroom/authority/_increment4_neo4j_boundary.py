@@ -719,7 +719,7 @@ class _Increment4Neo4jBoundary:
                 # promotion may still name a retired predecessor whose requested
                 # cleanup failed after the atomic SQLite promotion, so result
                 # assembly must retry only that retired namespace.
-                return self._result(
+                result = self._result(
                     request=request,
                     source_watermark=source_watermark,
                     batches=batches,
@@ -729,6 +729,11 @@ class _Increment4Neo4jBoundary:
                     promotion=promotion,
                     state_digest=state_digest,
                 )
+                # Authority commands do not share the graph operation lock. Re-read
+                # after reconciliation and retired cleanup so a concurrent rights,
+                # tombstone or lineage change cannot be reported as current.
+                self._require_source_snapshot(request)
+                return result
 
             deleted_target, _projected, ignored = self._materialize_generation(
                 request=request,
