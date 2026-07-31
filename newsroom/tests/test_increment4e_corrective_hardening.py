@@ -193,6 +193,89 @@ def test_increment4_failed_replacement_keeps_prior_active_and_serving(
     } == prior_batches
 
 
+class _FailRetiredCleanupOnceAdapter(MemoryNeo4jAdapter):
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.fail_cleanup_generation: str | None = None
+        self.failed_cleanup = False
+
+    def cleanup_generation(self, generation_id: str) -> int:
+        if (
+            generation_id == self.fail_cleanup_generation
+            and not self.failed_cleanup
+        ):
+            self.cleanup_count += 1
+            self.failed_cleanup = True
+            raise Neo4jWriteError("fixed retired-generation cleanup failure")
+        return super().cleanup_generation(generation_id)
+
+
+def test_increment4_active_retry_completes_failed_retired_predecessor_purge(
+    tmp_path: Path,
+) -> None:
+    state, snapshot = admitted_increment4_fixture(tmp_path)
+    adapter = _FailRetiredCleanupOnceAdapter()
+    replacement_request = _request(
+        GENERATION_2,
+        snapshot,
+        key="increment4-retry-retired-cleanup-v1",
+    )
+
+    with open_increment4_neo4j_system(state, adapter) as system:
+        first = system.increment4.build_and_promote(
+            _request(
+                GENERATION_1,
+                snapshot,
+                key="increment4-retry-retired-cleanup-prior-v1",
+            ),
+            proof=extraction_proof(),
+        )
+        adapter.fail_cleanup_generation = str(GENERATION_1)
+        with pytest.raises(
+            Neo4jWriteError,
+            match="retired-generation cleanup failure",
+        ):
+            system.increment4.build_and_promote(
+                replacement_request,
+                proof=extraction_proof(),
+            )
+        first_status = system.increment4.generation_status(
+            GENERATION_1, proof=extraction_proof()
+        )
+        second_status = system.increment4.generation_status(
+            GENERATION_2, proof=extraction_proof()
+        )
+        assert first_status.generation.state is ProjectionGenerationState.RETIRED
+        assert second_status.generation.state is ProjectionGenerationState.ACTIVE
+        assert any(key[0] == str(GENERATION_1) for key in adapter.deliveries)
+        serving_before_retry = {
+            key: value
+            for key, value in adapter.deliveries.items()
+            if key[0] == str(GENERATION_2)
+        }
+        apply_before_retry = adapter.apply_count
+        reconcile_before_retry = adapter.reconcile_count
+
+        replay = system.increment4.build_and_promote(
+            replacement_request,
+            proof=extraction_proof(),
+        )
+
+    assert replay.generation.state is ProjectionGenerationState.ACTIVE
+    assert replay.prior_generation is not None
+    assert replay.prior_generation.generation_id == GENERATION_1
+    assert replay.deleted_target_graph_record_count == 0
+    assert replay.purged_retired_graph_record_count == first.projected_batch_count
+    assert adapter.apply_count == apply_before_retry
+    assert adapter.reconcile_count == reconcile_before_retry + 1
+    assert not any(key[0] == str(GENERATION_1) for key in adapter.deliveries)
+    assert {
+        key: value
+        for key, value in adapter.deliveries.items()
+        if key[0] == str(GENERATION_2)
+    } == serving_before_retry
+
+
 def test_increment4_family_rejects_every_generic_projection_mutation(
     tmp_path: Path,
 ) -> None:
