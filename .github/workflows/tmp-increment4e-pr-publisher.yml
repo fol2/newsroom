@@ -56,22 +56,15 @@ jobs:
 
           path = Path('newsroom/authority/_increment4_neo4j_boundary.py')
           text = path.read_text(encoding='utf-8')
-          prefix, marker, tail = text.partition('    def build_and_promote(\n')
-          if not marker:
-              raise SystemExit('Increment 4 build boundary was not found')
-          needle = (
-              '        with self._operation_lock:\n'
-              '            self._authenticate_management(\n'
-          )
-          replacement = (
-              '        with self._operation_lock:\n'
-              '            self._register_family(proof)\n'
-              '            self._authenticate_management(\n'
-          )
-          if needle not in tail:
-              raise SystemExit('first-use authorization ordering anchor changed')
-          tail = tail.replace(needle, replacement, 1)
-          path.write_text(prefix + marker + tail, encoding='utf-8')
+          build_index = text.rfind('    def build_and_promote(')
+          call = '            self._authenticate_management(\n'
+          call_index = text.rfind(call)
+          if build_index < 0 or call_index < build_index:
+              raise SystemExit('private Increment 4 build authorization call was not found')
+          registration = '            self._register_family(proof)\n'
+          if text[call_index - len(registration):call_index] != registration:
+              text = text[:call_index] + registration + text[call_index:]
+          path.write_text(text, encoding='utf-8')
           PY
 
       - name: Install locked development environment
