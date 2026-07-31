@@ -1,6 +1,8 @@
 name: Export exact Increment 4E current source
 
 on:
+  pull_request:
+    types: [opened, reopened, synchronize]
   push:
     branches:
       - agent/increment-4e-current-source-export
@@ -10,6 +12,7 @@ permissions:
 
 jobs:
   export-source:
+    if: github.event_name == 'push' || github.event.pull_request.head.ref == 'agent/increment-4e-current-source-export'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
