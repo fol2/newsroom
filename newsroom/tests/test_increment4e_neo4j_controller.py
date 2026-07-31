@@ -147,7 +147,7 @@ def test_increment4_exact_active_replay_is_non_mutating_and_graph_loss_fails_clo
     tmp_path: Path,
 ) -> None:
     state, snapshot = admitted_increment4_fixture(tmp_path)
-    adapter = MemoryNeo4jAdapter()
+    adapter = _SourceRaceAdapter()
     request = _request(GENERATION_1, snapshot, key="increment4-replay-v1")
 
     with open_increment4_neo4j_system(state, adapter) as system:
@@ -168,6 +168,7 @@ def test_increment4_exact_active_replay_is_non_mutating_and_graph_loss_fails_clo
         assert adapter.cleanup_count == before_cleanup
         assert adapter.reconcile_count == before_reconcile + 1
 
+        serving_deliveries = dict(adapter.deliveries)
         adapter.deliveries.clear()
         failed_apply = adapter.apply_count
         failed_cleanup = adapter.cleanup_count
@@ -178,6 +179,36 @@ def test_increment4_exact_active_replay_is_non_mutating_and_graph_loss_fails_clo
         assert adapter.apply_count == failed_apply
         assert adapter.cleanup_count == failed_cleanup
         assert adapter.deliveries == {}
+
+        adapter.deliveries.update(serving_deliveries)
+        source_apply = adapter.apply_count
+        source_cleanup = adapter.cleanup_count
+        source_reconcile = adapter.reconcile_count
+        adapter.before_first_reconcile = lambda: system.commands.execute(
+            authority_command(
+                key="increment4-active-source-race-authority-v1",
+                aggregate_id=AggregateId.parse(
+                    "00000000-0000-4000-8000-000000005099"
+                ),
+            ),
+            proof=extraction_proof(),
+        )
+        with pytest.raises(
+            ProjectionStateError,
+            match="differs from exact retained admitted authority",
+        ):
+            system.increment4.build_and_promote(
+                request, proof=extraction_proof()
+            )
+        status = system.increment4.generation_status(
+            GENERATION_1, proof=extraction_proof()
+        )
+
+    assert status.generation.state is ProjectionGenerationState.ACTIVE
+    assert status.source_watermark_ledger_seq > snapshot.through_ledger_seq
+    assert adapter.apply_count == source_apply
+    assert adapter.cleanup_count == source_cleanup
+    assert adapter.reconcile_count == source_reconcile + 1
 
 
 def test_increment4_graph_loss_recovers_only_through_isolated_replacement(
@@ -207,7 +238,6 @@ def test_increment4_graph_loss_recovers_only_through_isolated_replacement(
     assert first_status.generation.state is ProjectionGenerationState.RETIRED
     assert any(key[0] == str(GENERATION_2) for key in adapter.deliveries)
     assert not any(key[0] == str(GENERATION_1) for key in adapter.deliveries)
-
 
 
 def test_increment4_reconciliation_mismatch_never_promotes(tmp_path: Path) -> None:
