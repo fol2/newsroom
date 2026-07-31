@@ -1,0 +1,62 @@
+name: Export exact Increment 4E current source
+
+on:
+  push:
+    branches:
+      - agent/increment-4e-current-source-export
+
+permissions:
+  contents: read
+
+jobs:
+  export-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exporter branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          show-progress: false
+          persist-credentials: false
+
+      - name: Build exact content-addressed source archive
+        shell: bash
+        env:
+          SOURCE_SHA: cbbdab785bfa7bb8b1b2c6342b7a058f35522d84
+          SOURCE_TREE: a6c069a61ca6c1adfff7ba0e7587111bc16a1015
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "$SOURCE_SHA^{tree}")" = "$SOURCE_TREE"
+          git archive --format=tar --prefix=newsroom/ "$SOURCE_SHA" \
+            | gzip -n -9 > newsroom-increment-4e-current.tar.gz
+          archive_sha="$(sha256sum newsroom-increment-4e-current.tar.gz | awk '{print $1}')"
+          archive_bytes="$(wc -c < newsroom-increment-4e-current.tar.gz)"
+          python - <<PY
+          import json
+          from pathlib import Path
+          metadata = {
+              "schema_version": "newsroom.increment-4e.current-source-export.v1",
+              "commit_sha": "${SOURCE_SHA}",
+              "tree_sha": "${SOURCE_TREE}",
+              "archive_sha256": "sha256:${archive_sha}",
+              "archive_bytes": int("${archive_bytes}"),
+          }
+          Path("increment-4e-current-metadata.json").write_text(
+              json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          cat increment-4e-current-metadata.json
+
+      - name: Upload exact source archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        with:
+          name: increment-4e-current-cbbdab7
+          path: |
+            newsroom-increment-4e-current.tar.gz
+            increment-4e-current-metadata.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
