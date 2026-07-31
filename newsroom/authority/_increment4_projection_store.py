@@ -3,7 +3,7 @@ from __future__ import annotations
 from newsroom.authority.persistence import AuthorityPersistenceError
 from newsroom.entities.types import (
     CanonicalEntityId,
-    CanonicalEntityLifecycle,
+    EntityProjectionAction,
 )
 from newsroom.increment4.models import (
     Increment4AdmittedProjectionSnapshot,
@@ -41,14 +41,18 @@ class _Increment4ProjectionAuthorityStore(
                 )
 
             entity_states: list[Increment4EntityProjectionState] = []
-            # Only current serving roots project as canonical entities.
-            # Redirected MERGED/REVERSED identities and non-serving
-            # SPLIT/RETIRED heads remain retained lineage authority.
+            # The latest retained projection action defines current graph
+            # membership. MERGED lineage can remain an UPSERT state, while
+            # split/reversal/tombstone removals must not be resurrected.
             entity_rows = conn.execute(
-                "SELECT entity_id FROM entity_preferred_identities "
-                "WHERE lifecycle=? AND preferred_entity_id=entity_id "
-                "ORDER BY entity_id",
-                (CanonicalEntityLifecycle.ACTIVE.value,),
+                "SELECT p.entity_id "
+                "FROM entity_preferred_identities AS p "
+                "JOIN entity_projection_events AS e "
+                "ON e.entity_id=p.entity_id "
+                "AND e.source_ledger_seq=p.projected_through_ledger_seq "
+                "WHERE e.action=? "
+                "ORDER BY p.entity_id",
+                (EntityProjectionAction.UPSERT.value,),
             ).fetchall()
             for row in entity_rows:
                 entity_id = CanonicalEntityId.parse(str(row["entity_id"]))
