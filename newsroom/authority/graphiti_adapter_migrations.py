@@ -292,7 +292,7 @@ GRAPHITI_ADAPTER_MIGRATION_STATEMENTS: tuple[str, ...] = (
         text_digest TEXT NOT NULL,
         language TEXT NOT NULL,
         canonical_bytes BLOB NOT NULL,
-        canonical_digest TEXT NOT NULL UNIQUE,
+        canonical_digest TEXT NOT NULL,
         PRIMARY KEY(manifest_id,passage_ordinal),
         UNIQUE(manifest_id,passage_id),
         FOREIGN KEY(run_id,passage_id)

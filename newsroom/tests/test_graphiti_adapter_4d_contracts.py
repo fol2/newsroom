@@ -227,6 +227,7 @@ def test_attempt_chain_and_read_policy_are_closed(tmp_path) -> None:
             purpose="graphiti.adapter.audit",
             attempt_required_scope="authority.graphiti.read",
             configuration_required_scope="authority.graphiti.read",
+            replay_required_scope="authority.graphiti.read",
             allowed_principal_ids=frozenset({"principal.alpha"}),
         )
 

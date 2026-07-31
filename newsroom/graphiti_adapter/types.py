@@ -32,6 +32,26 @@ class GraphitiReplayError(GraphitiAdapterStateError):
     """Approved replay material is incomplete, changed, or ineligible."""
 
 
+class GraphitiAdapterIdentifierReuse(GraphitiAdapterStateError):
+    """A stable adapter identity was reused under different authority."""
+
+
+class GraphitiAdapterSemanticCollision(GraphitiAdapterStateError):
+    """Equivalent adapter semantics were assigned a second stable identity."""
+
+
+class GraphitiAdapterVersionConflict(GraphitiAdapterStateError):
+    """An adapter attempt does not extend the exact retained head."""
+
+
+class GraphitiAdapterAmbiguousEffect(GraphitiAdapterStateError):
+    """Extraction authority committed but adapter attempt authority is missing."""
+
+
+class GraphitiAdapterRightsDenied(PermissionError, GraphitiAdapterError):
+    """Current source/object rights do not permit adapter use."""
+
+
 class GraphitiAdapterConfigurationId(UUIDv4Id):
     pass
 
@@ -150,6 +170,7 @@ class GraphitiAdapterReadPolicy:
     purpose: str
     attempt_required_scope: str
     configuration_required_scope: str
+    replay_required_scope: str
     allowed_principal_ids: frozenset[str]
     max_results: int = 1000
 
@@ -159,14 +180,19 @@ class GraphitiAdapterReadPolicy:
         for name, value in (
             ("graphiti_attempt_read_scope", self.attempt_required_scope),
             ("graphiti_configuration_read_scope", self.configuration_required_scope),
+            ("graphiti_replay_read_scope", self.replay_required_scope),
         ):
             try:
                 require_scope(value, field=name)
             except ValueError as exc:
                 raise GraphitiAdapterContractError(str(exc)) from exc
-        if self.attempt_required_scope == self.configuration_required_scope:
+        if len({
+            self.attempt_required_scope,
+            self.configuration_required_scope,
+            self.replay_required_scope,
+        }) != 3:
             raise GraphitiAdapterContractError(
-                "adapter attempt and configuration reads require distinct scopes"
+                "adapter configuration, attempt, and replay reads require distinct scopes"
             )
         if (
             not isinstance(self.allowed_principal_ids, frozenset)
@@ -183,6 +209,38 @@ class GraphitiAdapterReadPolicy:
             minimum=1,
             maximum=10_000,
         )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "policy_id": self.policy_id,
+            "purpose": self.purpose,
+            "attempt_required_scope": self.attempt_required_scope,
+            "configuration_required_scope": self.configuration_required_scope,
+            "replay_required_scope": self.replay_required_scope,
+            "allowed_principal_ids": sorted(self.allowed_principal_ids),
+            "max_results": self.max_results,
+        }
+
+    @property
+    def digest(self) -> str:
+        from newsroom.authority.canonical import digest_canonical
+
+        return digest_canonical(self.canonical_value())
+
+    def require_principal(self, principal_id: str) -> None:
+        if principal_id not in self.allowed_principal_ids:
+            raise PermissionError(
+                "adapter reader principal is outside the read policy"
+            )
+
+    def require_limit(self, limit: int) -> None:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit <= 0
+            or limit > self.max_results
+        ):
+            raise PermissionError("adapter read limit exceeds the read policy")
 
 
 def token(value: str, *, field: str) -> str:
@@ -290,9 +348,14 @@ __all__ = [
     "GraphitiAdapterConfigurationId",
     "GraphitiAdapterContractError",
     "GraphitiAdapterError",
+    "GraphitiAdapterAmbiguousEffect",
+    "GraphitiAdapterIdentifierReuse",
     "GraphitiAdapterOutcome",
+    "GraphitiAdapterRightsDenied",
+    "GraphitiAdapterSemanticCollision",
     "GraphitiAdapterReadPolicy",
     "GraphitiAdapterStateError",
+    "GraphitiAdapterVersionConflict",
     "GraphitiAttemptId",
     "GraphitiCleanupReason",
     "GraphitiCleanupReceiptId",

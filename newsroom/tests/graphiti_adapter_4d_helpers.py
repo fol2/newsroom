@@ -84,9 +84,12 @@ def fake_attempt(
     attempt_id: GraphitiAttemptId = FAKE_ATTEMPT_ID,
     workspace_id: GraphitiWorkspaceId = FAKE_WORKSPACE_ID,
     cleanup_receipt_id: GraphitiCleanupReceiptId = FAKE_CLEANUP_ID,
+    timeout_ms: int = 10_000,
 ) -> GraphitiAttemptRequest:
     contract = contract_request(fixture_case=fixture_case)
-    request = run_request(state, contract_id=contract.contract_id)
+    request = run_request(
+        state, contract_id=contract.contract_id, timeout_ms=timeout_ms
+    )
     configuration = qualification_configuration(
         configuration_id=FAKE_CONFIGURATION_ID,
         contract=contract,

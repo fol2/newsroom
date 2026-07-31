@@ -9,9 +9,10 @@ from newsroom.authority.canonical import (
     digest_canonical,
 )
 from newsroom.authority.objects import ObjectAccessDecisionId
-from newsroom.authority.types import ObjectAdmissionId, UtcTimestamp
+from newsroom.authority.types import EventId, ObjectAdmissionId, UtcTimestamp
 from newsroom.extraction.models import (
     ExtractionPassageInput,
+    ExtractionUsage,
     ExtractionRunRequest,
     ExtractorContractRequest,
     ProducedExtraction,
@@ -830,6 +831,272 @@ class GraphitiReplaySource:
 
 
 @dataclass(frozen=True, slots=True)
+class GraphitiReplayApprovalRequest:
+    replay_source_id: GraphitiReplaySourceId
+    source_attempt_id: GraphitiAttemptId
+    source_run_version_id: ExtractionRunVersionId
+    source_output_id: ExtractionOutputId
+    source_proposal_set_id: ProposalSetId | None
+    eligibility: GraphitiReplayEligibility
+    expected_output_canonical_digest: str
+    expected_proposal_set_canonical_digest: str | None
+    expected_replay_payload_digest: str
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.replay_source_id, GraphitiReplaySourceId):
+            raise GraphitiAdapterContractError("replay approval identity must be typed")
+        if not isinstance(self.source_attempt_id, GraphitiAttemptId):
+            raise GraphitiAdapterContractError("replay approval attempt must be typed")
+        if not isinstance(self.source_run_version_id, ExtractionRunVersionId):
+            raise GraphitiAdapterContractError("replay approval run version must be typed")
+        if not isinstance(self.source_output_id, ExtractionOutputId):
+            raise GraphitiAdapterContractError("replay approval output must be typed")
+        if self.source_proposal_set_id is not None and not isinstance(
+            self.source_proposal_set_id, ProposalSetId
+        ):
+            raise GraphitiAdapterContractError(
+                "replay approval proposal set must be typed"
+            )
+        if not isinstance(self.eligibility, GraphitiReplayEligibility):
+            raise GraphitiAdapterContractError(
+                "replay approval eligibility must be typed"
+            )
+        digest(
+            self.expected_output_canonical_digest,
+            field="replay_approval_output_canonical_digest",
+        )
+        if self.expected_proposal_set_canonical_digest is not None:
+            digest(
+                self.expected_proposal_set_canonical_digest,
+                field="replay_approval_proposal_set_canonical_digest",
+            )
+        digest(
+            self.expected_replay_payload_digest,
+            field="replay_approval_payload_digest",
+        )
+        text(self.idempotency_key, field="idempotency_key", maximum_bytes=256)
+        if self.eligibility is GraphitiReplayEligibility.MALFORMED_OUTPUT:
+            if (
+                self.source_proposal_set_id is not None
+                or self.expected_proposal_set_canonical_digest is not None
+            ):
+                raise GraphitiAdapterContractError(
+                    "malformed replay approval cannot name a proposal set"
+                )
+        elif (
+            self.source_proposal_set_id is None
+            or self.expected_proposal_set_canonical_digest is None
+        ):
+            raise GraphitiAdapterContractError(
+                "complete and partial replay approval require a proposal set"
+            )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "replay_source_id": str(self.replay_source_id),
+            "source_attempt_id": str(self.source_attempt_id),
+            "source_run_version_id": str(self.source_run_version_id),
+            "source_output_id": str(self.source_output_id),
+            "source_proposal_set_id": (
+                None
+                if self.source_proposal_set_id is None
+                else str(self.source_proposal_set_id)
+            ),
+            "eligibility": self.eligibility.value,
+            "expected_output_canonical_digest": (
+                self.expected_output_canonical_digest
+            ),
+            "expected_proposal_set_canonical_digest": (
+                self.expected_proposal_set_canonical_digest
+            ),
+            "expected_replay_payload_digest": self.expected_replay_payload_digest,
+        }
+
+    @property
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(self.canonical_value())
+
+    @property
+    def canonical_digest(self) -> str:
+        return digest_bytes(self.canonical_bytes)
+
+
+@dataclass(frozen=True, slots=True)
+class GraphitiAdapterConfigurationRecord:
+    configuration: GraphitiAdapterConfiguration
+    authority_event_id: EventId
+    aggregate_version: int
+    recorded_at: UtcTimestamp
+    replayed: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.configuration, GraphitiAdapterConfiguration):
+            raise GraphitiAdapterContractError(
+                "retained adapter configuration must be typed"
+            )
+        if not isinstance(self.authority_event_id, EventId):
+            raise GraphitiAdapterContractError(
+                "configuration authority event must be typed"
+            )
+        if self.aggregate_version != 1:
+            raise GraphitiAdapterContractError(
+                "adapter configuration authority is immutable"
+            )
+        if not isinstance(self.recorded_at, UtcTimestamp):
+            raise GraphitiAdapterContractError(
+                "configuration recording time must be typed"
+            )
+        if not isinstance(self.replayed, bool):
+            raise GraphitiAdapterContractError(
+                "configuration replay flag must be boolean"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class GraphitiAttemptRecord:
+    attempt_id: GraphitiAttemptId
+    run_id: ExtractionRunId
+    run_version_id: ExtractionRunVersionId
+    attempt_number: int
+    previous_attempt_id: GraphitiAttemptId | None
+    configuration_id: GraphitiAdapterConfigurationId
+    configuration_digest: str
+    workspace_id: GraphitiWorkspaceId
+    manifest_id: GraphitiInputManifestId
+    outcome: GraphitiAdapterOutcome
+    failure_code: str
+    started_at: UtcTimestamp
+    ended_at: UtcTimestamp
+    usage: ExtractionUsage
+    output_id: ExtractionOutputId | None
+    proposal_set_id: ProposalSetId | None
+    cleanup_receipt: GraphitiCleanupReceipt
+    authority_event_id: EventId
+    recorded_at: UtcTimestamp
+    replayed: bool = False
+
+    def __post_init__(self) -> None:
+        typed = (
+            (self.attempt_id, GraphitiAttemptId, "attempt identity"),
+            (self.run_id, ExtractionRunId, "attempt run"),
+            (self.run_version_id, ExtractionRunVersionId, "attempt run version"),
+            (
+                self.configuration_id,
+                GraphitiAdapterConfigurationId,
+                "attempt configuration",
+            ),
+            (self.workspace_id, GraphitiWorkspaceId, "attempt workspace"),
+            (self.manifest_id, GraphitiInputManifestId, "attempt manifest"),
+            (self.authority_event_id, EventId, "attempt authority event"),
+        )
+        for value, expected, label in typed:
+            if not isinstance(value, expected):
+                raise GraphitiAdapterContractError(f"{label} must be typed")
+        integer(
+            self.attempt_number,
+            field="retained_graphiti_attempt_number",
+            minimum=1,
+            maximum=1_000_000,
+        )
+        if self.previous_attempt_id is not None and not isinstance(
+            self.previous_attempt_id, GraphitiAttemptId
+        ):
+            raise GraphitiAdapterContractError(
+                "retained previous attempt identity must be typed"
+            )
+        digest(self.configuration_digest, field="retained_configuration_digest")
+        if not isinstance(self.outcome, GraphitiAdapterOutcome):
+            raise GraphitiAdapterContractError("retained adapter outcome must be typed")
+        token(self.failure_code, field="retained_adapter_failure_code")
+        if not isinstance(self.started_at, UtcTimestamp) or not isinstance(
+            self.ended_at, UtcTimestamp
+        ):
+            raise GraphitiAdapterContractError("retained attempt times must be typed")
+        if self.started_at.value > self.ended_at.value:
+            raise GraphitiAdapterContractError(
+                "retained adapter attempt cannot end before it starts"
+            )
+        if not isinstance(self.usage, ExtractionUsage):
+            raise GraphitiAdapterContractError("retained adapter usage must be typed")
+        if self.output_id is not None and not isinstance(
+            self.output_id, ExtractionOutputId
+        ):
+            raise GraphitiAdapterContractError("retained output identity must be typed")
+        if self.proposal_set_id is not None and not isinstance(
+            self.proposal_set_id, ProposalSetId
+        ):
+            raise GraphitiAdapterContractError(
+                "retained proposal set identity must be typed"
+            )
+        if not isinstance(self.cleanup_receipt, GraphitiCleanupReceipt):
+            raise GraphitiAdapterContractError(
+                "retained cleanup receipt must be typed"
+            )
+        if self.cleanup_receipt.workspace_id != self.workspace_id:
+            raise GraphitiAdapterContractError(
+                "retained cleanup receipt names a different workspace"
+            )
+        if not isinstance(self.recorded_at, UtcTimestamp):
+            raise GraphitiAdapterContractError(
+                "retained attempt recording time must be typed"
+            )
+        if self.recorded_at.value < self.ended_at.value:
+            raise GraphitiAdapterContractError(
+                "adapter attempt must be recorded after execution"
+            )
+        if self.outcome.may_reference_output != (self.output_id is not None):
+            raise GraphitiAdapterContractError(
+                "retained adapter output authority differs from outcome"
+            )
+        if self.outcome.may_reference_proposals != (
+            self.proposal_set_id is not None
+        ):
+            if not (
+                self.outcome is GraphitiAdapterOutcome.PARTIAL
+                and self.proposal_set_id is None
+            ):
+                raise GraphitiAdapterContractError(
+                    "retained adapter proposal authority differs from outcome"
+                )
+        if not isinstance(self.replayed, bool):
+            raise GraphitiAdapterContractError(
+                "retained attempt replay flag must be boolean"
+            )
+
+    @property
+    def terminal(self) -> bool:
+        return self.outcome.terminal
+
+
+@dataclass(frozen=True, slots=True)
+class GraphitiReplaySourceRecord:
+    source: GraphitiReplaySource
+    authority_event_id: EventId
+    aggregate_version: int
+    approved_at: UtcTimestamp
+    replayed: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, GraphitiReplaySource):
+            raise GraphitiAdapterContractError(
+                "retained replay source must be typed"
+            )
+        if not isinstance(self.authority_event_id, EventId):
+            raise GraphitiAdapterContractError(
+                "replay approval event must be typed"
+            )
+        if self.aggregate_version != 1:
+            raise GraphitiAdapterContractError("replay approval authority is immutable")
+        if not isinstance(self.approved_at, UtcTimestamp):
+            raise GraphitiAdapterContractError("replay approval time must be typed")
+        if not isinstance(self.replayed, bool):
+            raise GraphitiAdapterContractError(
+                "replay approval replay flag must be boolean"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovedReplayBundle:
     source: GraphitiReplaySource
     produced: ProducedExtraction = field(repr=False)
@@ -1107,12 +1374,16 @@ class ProposalOnlyGraphitiAdapter(Protocol):
 __all__ = [
     "ApprovedReplayBundle",
     "GraphitiAdapterConfiguration",
+    "GraphitiAdapterConfigurationRecord",
     "GraphitiAdapterExecution",
+    "GraphitiAttemptRecord",
     "GraphitiAttemptRequest",
     "GraphitiCleanupReceipt",
     "GraphitiInputManifest",
     "GraphitiManifestPassage",
+    "GraphitiReplayApprovalRequest",
     "GraphitiReplaySource",
+    "GraphitiReplaySourceRecord",
     "GraphitiWorkspaceDescriptor",
     "GraphitiWorkspacePolicy",
     "ProposalOnlyGraphitiAdapter",
