@@ -42,15 +42,23 @@ missing, changed or noncanonical record fails closed.
 ## Production gate
 
 Production qualification does not trust class identity, mutable slots,
-subclass methods, injected sessions or supplied verifier objects. Both the
-manifest builder and validator read the one source-pinned repository record
-internally. The builder accepts no authority argument. The validator accepts
-only the canonical module authority façade and independently reloads the
-source-pinned record.
+subclass methods, injected sessions or supplied verifier objects. At import,
+the reviewed path, expected digest and parser are captured in one repository
+loader. The authority façade closes over that loader. The public production
+builder and validator are created by a factory that closes over a one-time
+binding to the same loader and effective-contract calculator; the internal
+implementations and binding getter are then removed from the module namespace.
+
+The builder accepts no authority argument. The validator accepts only the
+canonical source-bound authority object. Later reassignment of public path,
+digest, loader, parser, authority or helper-function attributes does not alter
+the closed-over production gates. The direct authority gate is independently
+closed over the same reviewed loader.
 
 A separately parsed record from another path is evidence only. It cannot be
-passed into a production gate. Reassigning the public record path or digest at
-runtime does not alter the loader values captured from reviewed source.
+passed into a production gate. This boundary assumes the running repository
+code itself is trusted; arbitrary replacement of the public API function is
+code replacement, not approval evidence.
 
 ## Exact owner statement
 
@@ -101,6 +109,8 @@ owner decision, schema and qualification epoch.
   binding fails;
 - caller-created authority, subclass or parsed external record: production
   gates reject or ignore it;
+- public loader, parser, authority and helper-function reassignment after import
+  cannot change the source-closed gates;
 - fixture replay remains non-qualifying and cannot substitute for production;
 - `DEVAL-073`, `DOPS-064` and `DOPS-072` remain deferred to 5E/#254.
 
