@@ -34,15 +34,21 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
+      - name: Sync locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+
       - name: Materialise zero-call and zero-spend schema
-        run: python scripts/temp_increment5a_zero_budget_migrate.py
+        run: uv run --no-sync python scripts/temp_increment5a_zero_budget_migrate.py
 
       - name: Verify exact migration
         shell: bash
         run: |
           set -euo pipefail
           uv lock --check
-          uv sync --dev --locked
           uv run --no-sync python -m compileall -q \
             newsroom/increment5 \
             newsroom/tests/test_increment5a_zero_budget_schema.py
