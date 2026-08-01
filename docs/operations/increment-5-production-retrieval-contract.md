@@ -1,9 +1,9 @@
 # Increment 5 production retrieval operational contract
 
-**Status:** Contract proposal; no executable runtime authority  
-**Bound decision payload:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`  
-**Production schema:** `sha256:2cdaa92a487ff48dd6095e1cc82af6f67362c168c557d9e6c3ecfe83e83cb647`  
-**Fixture schema:** `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e`  
+**Status:** Contract proposal; no executable runtime authority
+**Bound decision payload:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`
+**Production schema:** `sha256:2cdaa92a487ff48dd6095e1cc82af6f67362c168c557d9e6c3ecfe83e83cb647`
+**Fixture schema:** `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e`
 **Applies to:** issues #251–#254 after explicit 5A owner approval
 
 ## Fail-closed profile loading
