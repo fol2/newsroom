@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   materialise-worksteal:
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'agent/sdlc-core-worksteal-scheduler' && github.actor != 'github-actions[bot]'
+    if: github.ref == 'refs/heads/agent/sdlc-core-worksteal-scheduler' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout exact support branch
