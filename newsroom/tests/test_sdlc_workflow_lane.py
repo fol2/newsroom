@@ -469,8 +469,8 @@ def test_core_worker_command_is_pinned_persistent_and_file_scoped(
         basetemp=basetemp,
     )
 
-    assert lane_module._CORE_WORKER_COUNT == 6
-    assert lane_module._CORE_DISTRIBUTION == "loadfile"
+    assert lane_module._CORE_WORKER_COUNT == 4
+    assert lane_module._CORE_DISTRIBUTION == "worksteal"
     assert command[:13] == (
         sys.executable,
         "-m",
@@ -482,8 +482,8 @@ def test_core_worker_command_is_pinned_persistent_and_file_scoped(
         "-p",
         "xdist.plugin",
         "-n",
-        "6",
-        "--dist=loadfile",
+        "4",
+        "--dist=worksteal",
         "--max-worker-restart=0",
     )
     assert command[13:14] == lane_module._CORE_TESTS == (
@@ -609,7 +609,7 @@ def test_persistent_core_runner_invokes_one_session_and_propagates_failure(
     assert cwd == tmp_path
     assert check is False
     assert command.count("xdist.plugin") == 1
-    assert "--dist=loadfile" in command
+    assert "--dist=worksteal" in command
     assert "--max-worker-restart=0" in command
 
 
