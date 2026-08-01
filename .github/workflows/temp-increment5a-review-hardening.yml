@@ -40,6 +40,13 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
+      - name: Sync locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+
       - name: Make staging script matching current-head aware
         shell: bash
         run: |
