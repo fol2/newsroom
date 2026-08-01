@@ -14,6 +14,17 @@ def replace_once(path: str, old: str, new: str) -> None:
 
 replace_once(
     "newsroom/authority/_increment4_neo4j_boundary.py",
+    '''from newsroom.authority.persistence import AuthorityPersistenceError
+''',
+    '''from newsroom.authority.persistence import (
+    AuthorityPersistenceError,
+    ExpectedVersionConflict,
+)
+''',
+)
+
+replace_once(
+    "newsroom/authority/_increment4_neo4j_boundary.py",
     '''                    {
                         "generation_id": str(request.generation_id),
                         "snapshot_digest": snapshot_digest,
@@ -26,6 +37,29 @@ replace_once(
                             request.purge_retired_generation
                         ),
                     },
+''',
+)
+
+replace_once(
+    "newsroom/authority/_increment4_neo4j_boundary.py",
+    '''        self._create_generation(
+            request=request,
+            snapshot_digest=request.snapshot.canonical_digest,
+            proof=proof,
+        )
+        promotion = self._promotion_for_generation(request.generation_id)
+''',
+    '''        try:
+            self._create_generation(
+                request=request,
+                snapshot_digest=request.snapshot.canonical_digest,
+                proof=proof,
+            )
+        except ExpectedVersionConflict:
+            raise ProjectionStateError(
+                "Increment 4 ACTIVE retry differs from immutable build intent"
+            ) from None
+        promotion = self._promotion_for_generation(request.generation_id)
 ''',
 )
 
@@ -56,7 +90,10 @@ replace_once(
         # Cleanup intent is part of the immutable creation-command identity.
         # A retry cannot attach to this ACTIVE generation while changing the
         # original request from purge=True to purge=False.
-        with pytest.raises(ProjectionStateError):
+        with pytest.raises(
+            ProjectionStateError,
+            match="immutable build intent",
+        ):
             system.increment4.build_and_promote(
                 replace(
                     replacement_request,
