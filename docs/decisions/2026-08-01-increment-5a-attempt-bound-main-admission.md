@@ -23,13 +23,13 @@ commit/tree.
 
 The signed SDLC evidence is embedded as its exact canonical decision document.
 The loader first validates it through
-`scripts.sdlc.shadow_decision.validate_shadow_decision` under the
-repository SDLC contract, then recomputes its document digest and requires
-`result=PASS`,
+`scripts.sdlc.shadow_decision.validate_shadow_decision` under the repository
+SDLC contract and accepts only that validator's normalized result. It then
+recomputes the document digest and requires `result=PASS`,
 `result_reason=PASS:decision`, no first failure, matching exact-main context and
 event, the same SDLC run/attempt, zero failures/errors/required skips, matching
-test/skip totals and only PASS gate decisions. The record summary cannot differ
-from the embedded canonical artifact.
+test/skip totals, exact source-integrity evidence and only PASS gate decisions.
+The record summary cannot differ from the embedded canonical artifact.
 
 A failed, unrelated, pull-request, wrong-tree, reused-attempt, noncanonical,
 summary-tampered or non-PASS record therefore cannot grant downstream
