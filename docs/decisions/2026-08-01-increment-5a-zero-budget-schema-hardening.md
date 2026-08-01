@@ -1,8 +1,8 @@
 # Increment 5A zero-call and zero-spend schema hardening
 
-**Issue:** #250  
-**Pull request:** #255  
-**Qualification base:** `main@8f53b1ef2200442b459d5d84087df1905efec4bd`  
+**Issue:** #250
+**Pull request:** #255
+**Qualification base:** `main@8f53b1ef2200442b459d5d84087df1905efec4bd`
 **Hardening commit:** `b313b30b712773198844dd680d9b5dd78e690984`
 
 The effective production-qualification v2 JSON Schema now makes both external-call and provider-spend boundaries independently enforceable by any standards-compliant schema consumer:
