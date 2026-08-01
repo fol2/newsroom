@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import newsroom.authority._increment4_projection_store as projection_store_module
 from newsroom.entities import (
     CanonicalEntityId,
     CanonicalEntityVersionId,
@@ -25,7 +26,6 @@ from .editorial_relation_4c_helpers import (
 from .entity_4b_helpers import ENTITY_ID, ENTITY_VERSION_ID
 from .extraction_4a_helpers import extraction_proof
 from .increment4e_helpers import (
-    _entity_state,
     _ledger_events,
     admitted_increment4_fixture,
     open_increment4_neo4j_system,
@@ -46,8 +46,14 @@ def _id(identifier_type: type, suffix: int):
 
 def test_increment4_rebuild_omits_relation_stale_after_entity_merge(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state, _initial_snapshot = admitted_increment4_fixture(tmp_path)
+    state, initial_snapshot = admitted_increment4_fixture(tmp_path)
+    retained_current = next(
+        item.current
+        for item in initial_snapshot.relations
+        if item.current.assertion.assertion_id == RELATION_ASSERTION_ID
+    )
     merge_decision_id = _id(EntityMergeDecisionId, 5102)
     successor_entity_id = _id(CanonicalEntityId, 5103)
     successor_version_id = _id(CanonicalEntityVersionId, 5104)
@@ -84,23 +90,12 @@ def test_increment4_rebuild_omits_relation_stale_after_entity_merge(
             merge_request,
             proof=extraction_proof(),
         )
-        merged_versions = {
-            item.entity_id: item.merged_entity_version_id
-            for item in merged.predecessors
-        }
-        current_entities = (
-            _entity_state(entities, ENTITY_ID, merged_versions[ENTITY_ID]),
-            _entity_state(
-                entities,
-                ZH_ENTITY_ID,
-                merged_versions[ZH_ENTITY_ID],
-            ),
-            _entity_state(
-                entities,
-                successor_entity_id,
-                successor_version_id,
-            ),
-        )
+        for predecessor_id in (ENTITY_ID, ZH_ENTITY_ID):
+            preferred = entities.entities.preferred(
+                predecessor_id,
+                proof=extraction_proof(),
+            )
+            assert preferred.preferred_entity_id == successor_entity_id
 
     with open_relation_system(state) as relations:
         with pytest.raises(EditorialRelationStaleDecision):
@@ -111,11 +106,28 @@ def test_increment4_rebuild_omits_relation_stale_after_entity_merge(
 
     events = _ledger_events(state.entity.extraction.database)
     snapshot = sorted_snapshot(
-        entities=current_entities,
+        entities=(),
         relations=(),
         events=events,
         through_ledger_seq=events[-1].ledger_seq,
     )
+    store_type = projection_store_module._Increment4ProjectionAuthorityStore
+    original_entity = store_type.entity
+    original_editorial_current = store_type.editorial_current
+
+    def entity(self, entity_id):
+        if entity_id == successor_entity_id:
+            raise PermissionError("fixed merge-successor rights denial")
+        return original_entity(self, entity_id)
+
+    def editorial_current(self, assertion_id):
+        if assertion_id == RELATION_ASSERTION_ID:
+            return retained_current
+        return original_editorial_current(self, assertion_id)
+
+    monkeypatch.setattr(store_type, "entity", entity)
+    monkeypatch.setattr(store_type, "editorial_current", editorial_current)
+
     adapter = MemoryNeo4jAdapter()
     with open_increment4_neo4j_system(state, adapter) as projection:
         rebuilt = projection.increment4.build_and_promote(
@@ -129,6 +141,12 @@ def test_increment4_rebuild_omits_relation_stale_after_entity_merge(
         )
 
     assert rebuilt.generation.state is ProjectionGenerationState.ACTIVE
+    assert not any(
+        node.identity_source == "CANONICAL_ENTITY_ID"
+        for (generation, _ledger_seq), batch in adapter.deliveries.items()
+        if generation == str(GENERATION_ID)
+        for node in batch.nodes
+    )
     assert not any(
         node.identity_source == "EDITORIAL_RELATION_ASSERTION_ID"
         for (generation, _ledger_seq), batch in adapter.deliveries.items()

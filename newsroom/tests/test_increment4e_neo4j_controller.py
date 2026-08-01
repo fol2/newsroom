@@ -171,22 +171,40 @@ def test_increment4_replacement_retires_and_purges_prior_generation(
             if key[0] == str(GENERATION_2)
         }
         apply_before_retry = adapter.apply_count
+        cleanup_before_retry = adapter.cleanup_count
         reconcile_before_retry = adapter.reconcile_count
-
-        second = system.increment4.build_and_promote(
-            replacement_request,
+        system.commands.execute(
+            authority_command(
+                key="increment4-retired-cleanup-source-advance-v1",
+                aggregate_id=AggregateId.parse(
+                    "00000000-0000-4000-8000-000000005100"
+                ),
+            ),
             proof=extraction_proof(),
         )
 
+        with pytest.raises(
+            ProjectionStateError,
+            match="differs from exact retained admitted authority",
+        ):
+            system.increment4.build_and_promote(
+                replacement_request,
+                proof=extraction_proof(),
+            )
+        first_after = system.increment4.generation_status(
+            GENERATION_1, proof=extraction_proof()
+        )
+        second_after = system.increment4.generation_status(
+            GENERATION_2, proof=extraction_proof()
+        )
+
     assert first.generation.state is ProjectionGenerationState.ACTIVE
-    assert second.generation.state is ProjectionGenerationState.ACTIVE
-    assert second.prior_generation is not None
-    assert second.prior_generation.generation_id == GENERATION_1
-    assert second.prior_generation.state is ProjectionGenerationState.RETIRED
-    assert second.deleted_target_graph_record_count == 0
-    assert second.purged_retired_graph_record_count == first.projected_batch_count
+    assert first_after.generation.state is ProjectionGenerationState.RETIRED
+    assert second_after.generation.state is ProjectionGenerationState.ACTIVE
+    assert second_after.source_watermark_ledger_seq > snapshot.through_ledger_seq
     assert adapter.apply_count == apply_before_retry
-    assert adapter.reconcile_count == reconcile_before_retry + 1
+    assert adapter.cleanup_count == cleanup_before_retry + 1
+    assert adapter.reconcile_count == reconcile_before_retry
     assert not any(key[0] == str(GENERATION_1) for key in adapter.deliveries)
     assert {
         key: value

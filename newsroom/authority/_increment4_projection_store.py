@@ -14,6 +14,9 @@ from newsroom.increment4.models import (
     sorted_snapshot,
 )
 from newsroom.projection.models import ProjectionStateError
+from newsroom.relations.editorial_models import (
+    CanonicalEntityRelationEndpoint,
+)
 from newsroom.relations.editorial_types import (
     EditorialRelationAssertionId,
     EditorialRelationStaleDecision,
@@ -136,6 +139,35 @@ class _Increment4ProjectionAuthorityStore(
                     )
                 )
 
+            # Current derivative authority must be dependency-closed. A merge or
+            # split predecessor cannot remain when its preferred target was
+            # excluded by current rights. Remove dangling states to a fixed point
+            # so longer preferred-identity chains fail closed as one unit.
+            entity_state_by_id = {
+                str(item.entity.entity_id): item for item in entity_states
+            }
+            while True:
+                retained_entity_ids = set(entity_state_by_id)
+                dangling_entity_ids = tuple(
+                    sorted(
+                        entity_id
+                        for entity_id, item in entity_state_by_id.items()
+                        if str(item.preferred.preferred_entity_id)
+                        not in retained_entity_ids
+                    )
+                )
+                if not dangling_entity_ids:
+                    break
+                for entity_id in dangling_entity_ids:
+                    del entity_state_by_id[entity_id]
+            entity_states = [
+                entity_state_by_id[entity_id]
+                for entity_id in sorted(entity_state_by_id)
+            ]
+            current_entity_version_ids = {
+                str(item.version.entity_version_id) for item in entity_states
+            }
+
             relation_states: list[Increment4RelationProjectionState] = []
             relation_rows = conn.execute(
                 "SELECT assertion_id FROM editorial_current_admitted_relations "
@@ -151,6 +183,28 @@ class _Increment4ProjectionAuthorityStore(
                     # Rights-invalid or endpoint-stale assertions remain immutable
                     # history but cannot participate in the current graph snapshot.
                     continue
+                assertion = current.assertion
+                if isinstance(
+                    assertion.subject,
+                    CanonicalEntityRelationEndpoint,
+                ):
+                    if not isinstance(
+                        assertion.object,
+                        CanonicalEntityRelationEndpoint,
+                    ):
+                        raise AuthorityPersistenceError(
+                            "Increment 4 relation endpoint kinds differ"
+                        )
+                    if (
+                        str(assertion.subject.entity_version_id)
+                        not in current_entity_version_ids
+                        or str(assertion.object.entity_version_id)
+                        not in current_entity_version_ids
+                    ):
+                        # A relation can remain individually current while an
+                        # endpoint was removed by preferred-identity closure.
+                        # Preserve its immutable history but omit the derivative.
+                        continue
                 projection_row = conn.execute(
                     "SELECT * FROM editorial_relation_projection_events "
                     "WHERE assertion_id=? AND source_ledger_seq<=? "

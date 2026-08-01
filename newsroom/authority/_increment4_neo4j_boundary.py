@@ -173,6 +173,67 @@ class _Increment4Neo4jBoundary:
             )
         return authoritative.through_ledger_seq, authoritative
 
+    def _create_generation(
+        self,
+        *,
+        request: Increment4Neo4jBuildRequest,
+        snapshot_digest: str,
+        proof: AuthenticationProof,
+    ) -> None:
+        self._projection_boundary.create_generation(
+            ProjectionGenerationCreateRequest(
+                generation_id=request.generation_id,
+                family_id=INCREMENT4_ADMITTED_FAMILY_ID,
+                reason_code=request.reason_code,
+                idempotency_key=self._operation_key(
+                    request.idempotency_key,
+                    "create",
+                    {
+                        "generation_id": str(request.generation_id),
+                        "snapshot_digest": snapshot_digest,
+                    },
+                ),
+            ),
+            proof,
+        )
+
+    def _retry_active_predecessor_cleanup(
+        self,
+        *,
+        request: Increment4Neo4jBuildRequest,
+        proof: AuthenticationProof,
+    ) -> tuple[Any | None, int | None]:
+        metadata = self._metadata_or_none(request.generation_id)
+        if (
+            metadata is None
+            or metadata.generation.state is not ProjectionGenerationState.ACTIVE
+        ):
+            return None, None
+        self._require_family(metadata)
+
+        # Prove this is the exact immutable creation-command replay before any
+        # graph cleanup. A changed request key or snapshot digest cannot attach to
+        # an existing ACTIVE identity and trigger predecessor deletion.
+        self._create_generation(
+            request=request,
+            snapshot_digest=request.snapshot.canonical_digest,
+            proof=proof,
+        )
+        promotion = self._promotion_for_generation(request.generation_id)
+        purged_prior = 0
+        if (
+            request.purge_retired_generation
+            and promotion.prior_generation is not None
+        ):
+            # The target is already ACTIVE and the predecessor already RETIRED in
+            # SQLite. Retry only that immutable retired namespace before the
+            # current-source gate, because newer source authority must not strand
+            # a failed post-promotion purge forever.
+            purged_prior = self._adapter.cleanup_generation(
+                str(promotion.prior_generation.generation_id)
+            )
+        return promotion, purged_prior
+
     @staticmethod
     def _batch_by_sequence(
         batches: tuple[StructuralBatch, ...],
@@ -588,15 +649,17 @@ class _Increment4Neo4jBoundary:
         validation: Any,
         promotion: Any,
         state_digest: str,
+        purged_prior: int | None = None,
     ) -> Increment4Neo4jBuildResult:
-        purged_prior = 0
-        if (
-            request.purge_retired_generation
-            and promotion.prior_generation is not None
-        ):
-            purged_prior = self._adapter.cleanup_generation(
-                str(promotion.prior_generation.generation_id)
-            )
+        if purged_prior is None:
+            purged_prior = 0
+            if (
+                request.purge_retired_generation
+                and promotion.prior_generation is not None
+            ):
+                purged_prior = self._adapter.cleanup_generation(
+                    str(promotion.prior_generation.generation_id)
+                )
         metadata = self._store.projection_generation_metadata(
             request.generation_id
         )
@@ -629,8 +692,10 @@ class _Increment4Neo4jBoundary:
             raise TypeError("Increment 4 build requires a typed request")
         with self._operation_lock:
             # Register the immutable family and authorize this operation before
-            # authority reads. Generation and graph mutation wait until the caller
-            # snapshot exactly matches current retained serving authority.
+            # authority reads. New generation and serving-graph mutation wait for
+            # the exact current snapshot. The sole pre-gate graph effect is an
+            # exact-command retry of a retained ACTIVE promotion's failed cleanup
+            # against its immutable RETIRED predecessor namespace.
             self._register_family(proof)
             self._authenticate_management(
                 generation_id=request.generation_id,
@@ -643,6 +708,12 @@ class _Increment4Neo4jBoundary:
                 },
                 proof=proof,
             )
+            active_promotion, pre_purged_prior = (
+                self._retry_active_predecessor_cleanup(
+                    request=request,
+                    proof=proof,
+                )
+            )
             source_watermark, authoritative_snapshot = (
                 self._require_source_snapshot(request)
             )
@@ -650,25 +721,15 @@ class _Increment4Neo4jBoundary:
                 INCREMENT4_ADMITTED_FAMILY_ID
             )
 
-            # Always replay the exact immutable creation command. A different
-            # request key or semantic payload cannot attach to an existing
-            # generation identity and masquerade as a completed-command retry.
-            self._projection_boundary.create_generation(
-                ProjectionGenerationCreateRequest(
-                    generation_id=request.generation_id,
-                    family_id=INCREMENT4_ADMITTED_FAMILY_ID,
-                    reason_code=request.reason_code,
-                    idempotency_key=self._operation_key(
-                        request.idempotency_key,
-                        "create",
-                        {
-                            "generation_id": str(request.generation_id),
-                            "snapshot_digest": authoritative_snapshot.canonical_digest,
-                        },
-                    ),
-                ),
-                proof,
-            )
+            # New and unfinished generations replay the exact immutable
+            # creation command only after the source gate. ACTIVE generations
+            # already replayed it before their bounded predecessor cleanup.
+            if active_promotion is None:
+                self._create_generation(
+                    request=request,
+                    snapshot_digest=authoritative_snapshot.canonical_digest,
+                    proof=proof,
+                )
             metadata = self._store.projection_generation_metadata(
                 request.generation_id
             )
@@ -714,7 +775,11 @@ class _Increment4Neo4jBoundary:
                     raise Neo4jIdentityConflict(
                         "Increment 4 active graph differs from retained validation"
                     )
-                promotion = self._promotion_for_generation(request.generation_id)
+                promotion = (
+                    active_promotion
+                    if active_promotion is not None
+                    else self._promotion_for_generation(request.generation_id)
+                )
                 # The serving generation remains reconciliation-only. A retained
                 # promotion may still name a retired predecessor whose requested
                 # cleanup failed after the atomic SQLite promotion, so result
@@ -728,6 +793,7 @@ class _Increment4Neo4jBoundary:
                     validation=validation,
                     promotion=promotion,
                     state_digest=state_digest,
+                    purged_prior=pre_purged_prior,
                 )
                 # Authority commands do not share the graph operation lock. Re-read
                 # after reconciliation and retired cleanup so a concurrent rights,
