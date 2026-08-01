@@ -1,9 +1,10 @@
 # Increment 5A owner approval record and production-qualification authority
 
-**Status:** Repository-record contract implemented; no owner approval record admitted
+**Status:** Repository-record contract implemented and restacked; no owner approval record admitted
 **Issue:** #250
 **Pull request:** #255
-**Proposal base:** `main@c9e31879421083e82e2538d57087d04e9b454d34`
+**Immutable proposal base:** `main@c9e31879421083e82e2538d57087d04e9b454d34`
+**Current qualification base:** `main@8f53b1ef2200442b459d5d84087df1905efec4bd` (PR #256)
 **Proposal payload:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`
 **Proposal record:** `sha256:77fe5544b33a85519b8c1fba57f41fe1a68aa411eb63c64be5429dbbd28ea913`
 **Proposal bundle:** `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`
@@ -17,6 +18,7 @@
 The proposal packet remains immutable proposal evidence and continues to parse
 as `PENDING_OWNER_REVIEW` after approval. Approval never changes its bytes,
 status, component dispositions, profile lists, runtime authority or digests.
+The qualification-base restack changes none of those proposal identities.
 
 ## Authentication boundary
 
