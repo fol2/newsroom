@@ -31,7 +31,7 @@ from .decision_validation import (
 )
 from .profiles import (
     FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,
-    PRODUCTION_PROFILE_SCHEMA_DIGEST,
+    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,
 )
 
 
@@ -104,9 +104,12 @@ def load_increment5a_decision_packet(
         required=frozenset({"fixture_replay", "production"}),
         field="profile_schema_digests",
     )
-    if schemas.get("production") != PRODUCTION_PROFILE_SCHEMA_DIGEST:
+    if (
+        schemas.get("production")
+        != PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST
+    ):
         raise Increment5ContractError(
-            "production profile schema digest differs from repository code"
+            "proposal production-profile schema digest differs from repository code"
         )
     if schemas.get("fixture_replay") != FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST:
         raise Increment5ContractError(
@@ -141,7 +144,9 @@ def load_increment5a_decision_packet(
             payload.get("implementation_base"),
             field="implementation_base",
         ),
-        production_profile_schema_digest=PRODUCTION_PROFILE_SCHEMA_DIGEST,
+        production_profile_schema_digest=(
+            PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST
+        ),
         fixture_replay_profile_schema_digest=(
             FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
         ),
