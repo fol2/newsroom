@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from ._capability import _CapabilityIssuer
 from ._event_system import _ReadBoundary
 from ._increment4_neo4j_boundary import _Increment4Neo4jBoundary
+from ._increment4_projection_store import _Increment4ProjectionAuthorityStore
 from ._projection_store import (
     _ProjectionAuthorityStore,
     _ProjectionDeliverySource,
@@ -41,10 +42,17 @@ from newsroom.projection.models import (
     ProjectionContractError,
     ProjectionDeliveryOutcome,
     ProjectionDeliveryRequest,
+    ProjectionFamilyRegistrationRequest,
+    ProjectionFamilyView,
+    ProjectionGapResolutionRequest,
+    ProjectionGapView,
+    ProjectionGenerationCreateRequest,
     ProjectionGenerationId,
     ProjectionGenerationPromotionRequest,
     ProjectionGenerationPromotionView,
     ProjectionGenerationState,
+    ProjectionGenerationTransitionRequest,
+    ProjectionGenerationView,
     ProjectionGenerationValidationRequest,
     ProjectionGenerationValidationView,
     ProjectionReadPolicy,
@@ -296,6 +304,161 @@ class _Neo4jProjectionBoundary:
                 "Increment 4 admitted projection requires its bounded controller"
             )
 
+    def _require_generic_mutation_generation(
+        self,
+        generation_id: ProjectionGenerationId,
+    ) -> None:
+        metadata = self._store.projection_generation_metadata(generation_id)
+        self._require_generic_structural_family(metadata.family.family_id)
+
+    def _authorize_transition(
+        self,
+        request: ProjectionGenerationTransitionRequest,
+        proof: AuthenticationProof,
+    ):
+        return self._projection_boundary._grant(
+            command_type="projection.generation.transition",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "target_state": request.target_state.value,
+                "validated_through_ledger_seq": (
+                    request.validated_through_ledger_seq
+                ),
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
+
+    def _authorize_validation(
+        self,
+        request: ProjectionGenerationValidationRequest,
+        proof: AuthenticationProof,
+    ):
+        return self._projection_boundary._grant(
+            command_type="projection.generation.validate",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "checkpoint_ledger_seq": request.checkpoint_ledger_seq,
+                "service_compatibility_digest": (
+                    request.service_compatibility_digest
+                ),
+                "projection_state_digest": request.projection_state_digest,
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
+
+    def _authorize_rebuild(
+        self,
+        request: StructuralRebuildRequest,
+        proof: AuthenticationProof,
+    ):
+        return self._projection_boundary._grant(
+            command_type="projection.generation.rebuild",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "through_ledger_seq": request.through_ledger_seq,
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
+
+    def _authorize_gap_resolution(
+        self,
+        request: ProjectionGapResolutionRequest,
+        proof: AuthenticationProof,
+    ):
+        return self._projection_boundary._grant(
+            command_type="projection.gap.resolve",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "gap_id": str(request.gap_id),
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
+
+    def register_family(
+        self,
+        request: ProjectionFamilyRegistrationRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionFamilyView:
+        if not isinstance(request, ProjectionFamilyRegistrationRequest):
+            raise TypeError("projection family registration requires a typed request")
+        self._projection_boundary._authenticate(proof)
+        self._require_generic_structural_family(request.family_id)
+        return self._projection_boundary.register_family(request, proof)
+
+    def create_generation(
+        self,
+        request: ProjectionGenerationCreateRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationView:
+        if not isinstance(request, ProjectionGenerationCreateRequest):
+            raise TypeError("projection generation creation requires a typed request")
+        self._projection_boundary._authenticate(proof)
+        self._require_generic_structural_family(request.family_id)
+        return self._projection_boundary.create_generation(request, proof)
+
+    def transition_generation(
+        self,
+        request: ProjectionGenerationTransitionRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGenerationView:
+        if not isinstance(request, ProjectionGenerationTransitionRequest):
+            raise TypeError("projection generation transition requires a typed request")
+        grant = self._authorize_transition(request, proof)
+        self._require_generic_mutation_generation(request.generation_id)
+        return self._store.transition_generation(
+            grant,
+            generation_id=request.generation_id,
+            target_state=request.target_state,
+            validated_through_ledger_seq=request.validated_through_ledger_seq,
+            reason_code=request.reason_code,
+        )
+
+    def record_delivery(
+        self,
+        request: ProjectionDeliveryRequest,
+        proof: AuthenticationProof,
+    ) -> DeliveryRecordView:
+        if not isinstance(request, ProjectionDeliveryRequest):
+            raise TypeError("projection delivery requires a typed request")
+        grant = self._projection_boundary._authorize_delivery(
+            request,
+            proof,
+        )
+        self._require_generic_mutation_generation(request.generation_id)
+        return self._projection_boundary._commit_delivery(grant, request)
+
+    def resolve_gap(
+        self,
+        request: ProjectionGapResolutionRequest,
+        proof: AuthenticationProof,
+    ) -> ProjectionGapView:
+        if not isinstance(request, ProjectionGapResolutionRequest):
+            raise TypeError("projection gap resolution requires a typed request")
+        grant = self._authorize_gap_resolution(request, proof)
+        self._require_generic_mutation_generation(request.generation_id)
+        return self._store.resolve_gap(
+            grant,
+            generation_id=request.generation_id,
+            gap_id=request.gap_id,
+            reason_code=request.reason_code,
+        )
+
     def deliver(
         self,
         request: StructuralDeliveryRequest,
@@ -423,12 +586,13 @@ class _Neo4jProjectionBoundary:
     ) -> StructuralRebuildResult:
         if not isinstance(request, StructuralRebuildRequest):
             raise TypeError("structural rebuild requires a typed request")
-        self._projection_boundary._authenticate(proof)
-        metadata = self._store.projection_generation_metadata(
-            request.generation_id
+        grant = self._authorize_rebuild(request, proof)
+        self._require_generic_mutation_generation(request.generation_id)
+        receipt = self._store.begin_projection_rebuild(
+            grant,
+            generation_id=request.generation_id,
+            through_ledger_seq=request.through_ledger_seq,
         )
-        self._require_generic_structural_family(metadata.family.family_id)
-        receipt = self._projection_boundary._begin_rebuild(request, proof)
         if receipt.generation.state is not ProjectionGenerationState.BUILDING:
             raise ProjectionStateError(
                 "only a building generation can be destructively rebuilt"
@@ -565,6 +729,11 @@ class _Neo4jProjectionBoundary:
         target_grant, prior_grant = (
             self._projection_boundary._authorize_promotion(request, proof)
         )
+        self._require_generic_mutation_generation(request.generation_id)
+        if request.prior_generation_id is not None:
+            self._require_generic_mutation_generation(
+                request.prior_generation_id
+            )
         metadata = self._store.projection_generation_metadata(
             request.generation_id
         )
@@ -650,7 +819,8 @@ class _Neo4jProjectionBoundary:
     ) -> ProjectionGenerationValidationView:
         if not isinstance(request, ProjectionGenerationValidationRequest):
             raise TypeError("projection validation requires a typed request")
-        self._projection_boundary._authenticate(proof)
+        self._authorize_validation(request, proof)
+        self._require_generic_mutation_generation(request.generation_id)
         raise ProjectionStateError(
             "Neo4j generation validation requires structural reconciliation"
         )
@@ -1221,11 +1391,11 @@ def _open_with_adapter(
         command_registry=merged_registry,
         payload_schemas=merged_schemas,
     )
-    store: _ProjectionAuthorityStore | None = None
+    store: _Increment4ProjectionAuthorityStore | None = None
     try:
         compatibility = adapter.verify_compatibility()
         adapter.bootstrap_schema()
-        store = _ProjectionAuthorityStore(
+        store = _Increment4ProjectionAuthorityStore(
             path,
             issuer=issuer,
             command_registry=merged_registry,
@@ -1312,15 +1482,13 @@ def _open_with_adapter(
                 result=event_read_boundary.command_result,
             ),
             projections=NativeProjections(
-                register_family=projection_boundary.register_family,
-                create_generation=projection_boundary.create_generation,
-                transition_generation=(
-                    projection_boundary.transition_generation
-                ),
+                register_family=graph_boundary.register_family,
+                create_generation=graph_boundary.create_generation,
+                transition_generation=graph_boundary.transition_generation,
                 validate_generation=graph_boundary.reject_direct_validation,
                 promote_generation=graph_boundary.promote_generation,
-                record_delivery=projection_boundary.record_delivery,
-                resolve_gap=projection_boundary.resolve_gap,
+                record_delivery=graph_boundary.record_delivery,
+                resolve_gap=graph_boundary.resolve_gap,
                 status=projection_boundary.status,
                 generations=projection_boundary.generations,
                 validation=projection_boundary.validation,

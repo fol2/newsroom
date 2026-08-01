@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+import newsroom.authority._increment4_neo4j_boundary as increment4_boundary_module
 from newsroom.authority import AggregateId
 from newsroom.increment4 import (
     Increment4Neo4jActiveReadRequest,
@@ -18,6 +20,7 @@ from newsroom.projection import (
 )
 from newsroom.projection.neo4j import (
     Neo4jIdentityConflict,
+    Neo4jWriteError,
     StructuralActiveReconciliationRequest,
 )
 
@@ -63,15 +66,33 @@ def _entity_canonical_ids(adapter: MemoryNeo4jAdapter, generation_id):
     )
 
 
+class _FailRetiredCleanupOnceAdapter(MemoryNeo4jAdapter):
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.fail_cleanup_generation: str | None = None
+        self.failed_cleanup = False
+
+    def cleanup_generation(self, generation_id: str) -> int:
+        if (
+            generation_id == self.fail_cleanup_generation
+            and not self.failed_cleanup
+        ):
+            self.cleanup_count += 1
+            self.failed_cleanup = True
+            raise Neo4jWriteError("fixed retired-generation cleanup failure")
+        return super().cleanup_generation(generation_id)
+
+
 def test_increment4_controller_builds_validates_promotes_and_reads_active(
     tmp_path: Path,
 ) -> None:
     state, snapshot = admitted_increment4_fixture(tmp_path)
     adapter = MemoryNeo4jAdapter()
+    request = _request(GENERATION_1, snapshot, key="increment4-build-v1")
 
     with open_increment4_neo4j_system(state, adapter) as system:
         result = system.increment4.build_and_promote(
-            _request(GENERATION_1, snapshot, key="increment4-build-v1"),
+            request,
             proof=extraction_proof(),
         )
         status = system.increment4.generation_status(
@@ -86,6 +107,20 @@ def test_increment4_controller_builds_validates_promotes_and_reads_active(
             ),
             proof=extraction_proof(),
         )
+        apply_before_changed_retry = adapter.apply_count
+        cleanup_before_changed_retry = adapter.cleanup_count
+        reconcile_before_changed_retry = adapter.reconcile_count
+        with pytest.raises(
+            ProjectionStateError,
+            match="immutable build intent",
+        ):
+            system.increment4.build_and_promote(
+                replace(request, purge_retired_generation=False),
+                proof=extraction_proof(),
+            )
+        assert adapter.apply_count == apply_before_changed_retry
+        assert adapter.cleanup_count == cleanup_before_changed_retry
+        assert adapter.reconcile_count == reconcile_before_changed_retry
 
     assert result.generation.state is ProjectionGenerationState.ACTIVE
     assert result.generation.generation_id == GENERATION_1
@@ -111,18 +146,64 @@ def test_increment4_controller_builds_validates_promotes_and_reads_active(
 
 def test_increment4_replacement_retires_and_purges_prior_generation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, snapshot = admitted_increment4_fixture(tmp_path)
-    adapter = MemoryNeo4jAdapter()
+    adapter = _FailRetiredCleanupOnceAdapter()
+    boundary_type = increment4_boundary_module._Increment4Neo4jBoundary
+    current_create_generation = boundary_type._create_generation
+
+    def create_legacy_generation(
+        self,
+        *,
+        request,
+        snapshot_digest,
+        proof,
+        legacy_identity=False,
+    ):
+        return current_create_generation(
+            self,
+            request=request,
+            snapshot_digest=snapshot_digest,
+            proof=proof,
+            legacy_identity=True,
+        )
+
+    # Seed the exact parent-release identity before exercising post-upgrade
+    # ACTIVE replay and pending predecessor cleanup.
+    monkeypatch.setattr(
+        boundary_type,
+        "_create_generation",
+        create_legacy_generation,
+    )
+    replacement_request = _request(
+        GENERATION_2,
+        snapshot,
+        key="increment4-retry-retired-cleanup-v1",
+    )
 
     with open_increment4_neo4j_system(state, adapter) as system:
         first = system.increment4.build_and_promote(
-            _request(GENERATION_1, snapshot, key="increment4-first-v1"),
+            _request(
+                GENERATION_1,
+                snapshot,
+                key="increment4-retry-retired-cleanup-prior-v1",
+            ),
             proof=extraction_proof(),
         )
-        second = system.increment4.build_and_promote(
-            _request(GENERATION_2, snapshot, key="increment4-second-v1"),
-            proof=extraction_proof(),
+        adapter.fail_cleanup_generation = str(GENERATION_1)
+        with pytest.raises(
+            Neo4jWriteError,
+            match="retired-generation cleanup failure",
+        ):
+            system.increment4.build_and_promote(
+                replacement_request,
+                proof=extraction_proof(),
+            )
+        monkeypatch.setattr(
+            boundary_type,
+            "_create_generation",
+            current_create_generation,
         )
         first_status = system.increment4.generation_status(
             GENERATION_1, proof=extraction_proof()
@@ -130,40 +211,179 @@ def test_increment4_replacement_retires_and_purges_prior_generation(
         second_status = system.increment4.generation_status(
             GENERATION_2, proof=extraction_proof()
         )
+        assert first_status.generation.state is ProjectionGenerationState.RETIRED
+        assert second_status.generation.state is ProjectionGenerationState.ACTIVE
+        assert any(key[0] == str(GENERATION_1) for key in adapter.deliveries)
+        serving_before_retry = {
+            key: value
+            for key, value in adapter.deliveries.items()
+            if key[0] == str(GENERATION_2)
+        }
+        apply_before_retry = adapter.apply_count
+        cleanup_before_retry = adapter.cleanup_count
+        reconcile_before_retry = adapter.reconcile_count
+
+        # Cleanup intent is part of the immutable creation-command identity.
+        # A retry cannot attach to this ACTIVE generation while changing the
+        # original request from purge=True to purge=False.
+        with pytest.raises(
+            ProjectionStateError,
+            match="immutable build intent",
+        ):
+            system.increment4.build_and_promote(
+                replace(
+                    replacement_request,
+                    purge_retired_generation=False,
+                ),
+                proof=extraction_proof(),
+            )
+        assert adapter.apply_count == apply_before_retry
+        assert adapter.cleanup_count == cleanup_before_retry
+        assert adapter.reconcile_count == reconcile_before_retry
+        assert any(key[0] == str(GENERATION_1) for key in adapter.deliveries)
+        assert {
+            key: value
+            for key, value in adapter.deliveries.items()
+            if key[0] == str(GENERATION_2)
+        } == serving_before_retry
+
+        system.commands.execute(
+            authority_command(
+                key="increment4-retired-cleanup-source-advance-v1",
+                aggregate_id=AggregateId.parse(
+                    "00000000-0000-4000-8000-000000005100"
+                ),
+            ),
+            proof=extraction_proof(),
+        )
+
+        with pytest.raises(
+            ProjectionStateError,
+            match="differs from exact retained admitted authority",
+        ):
+            system.increment4.build_and_promote(
+                replacement_request,
+                proof=extraction_proof(),
+            )
+        first_after = system.increment4.generation_status(
+            GENERATION_1, proof=extraction_proof()
+        )
+        second_after = system.increment4.generation_status(
+            GENERATION_2, proof=extraction_proof()
+        )
 
     assert first.generation.state is ProjectionGenerationState.ACTIVE
-    assert second.generation.state is ProjectionGenerationState.ACTIVE
-    assert second.prior_generation is not None
-    assert second.prior_generation.generation_id == GENERATION_1
-    assert second.prior_generation.state is ProjectionGenerationState.RETIRED
-    assert first_status.generation.state is ProjectionGenerationState.RETIRED
-    assert second_status.generation.state is ProjectionGenerationState.ACTIVE
-    assert second.purged_retired_graph_record_count == first.projected_batch_count
+    assert first_after.generation.state is ProjectionGenerationState.RETIRED
+    assert second_after.generation.state is ProjectionGenerationState.ACTIVE
+    assert second_after.source_watermark_ledger_seq > snapshot.through_ledger_seq
+    assert adapter.apply_count == apply_before_retry
+    assert adapter.cleanup_count == cleanup_before_retry + 1
+    assert adapter.reconcile_count == reconcile_before_retry
     assert not any(key[0] == str(GENERATION_1) for key in adapter.deliveries)
-    assert any(key[0] == str(GENERATION_2) for key in adapter.deliveries)
+    assert {
+        key: value
+        for key, value in adapter.deliveries.items()
+        if key[0] == str(GENERATION_2)
+    } == serving_before_retry
 
 
-def test_increment4_exact_replay_restores_lost_graph_without_new_authority(
+def test_increment4_exact_active_replay_is_non_mutating_and_graph_loss_fails_closed(
     tmp_path: Path,
 ) -> None:
     state, snapshot = admitted_increment4_fixture(tmp_path)
-    adapter = MemoryNeo4jAdapter()
+    adapter = _SourceRaceAdapter()
     request = _request(GENERATION_1, snapshot, key="increment4-replay-v1")
 
     with open_increment4_neo4j_system(state, adapter) as system:
         first = system.increment4.build_and_promote(
             request, proof=extraction_proof()
         )
-        first_apply_count = adapter.apply_count
-        adapter.deliveries.clear()
+        before_apply = adapter.apply_count
+        before_cleanup = adapter.cleanup_count
+        before_reconcile = adapter.reconcile_count
         replay = system.increment4.build_and_promote(
             request, proof=extraction_proof()
         )
+        assert replay.promotion.promotion_digest == first.promotion.promotion_digest
+        assert replay.validation.validation_digest == first.validation.validation_digest
+        assert replay.deleted_target_graph_record_count == 0
+        assert replay.purged_retired_graph_record_count == 0
+        assert adapter.apply_count == before_apply
+        assert adapter.cleanup_count == before_cleanup
+        assert adapter.reconcile_count == before_reconcile + 1
 
-    assert replay.promotion.promotion_digest == first.promotion.promotion_digest
-    assert replay.validation.validation_digest == first.validation.validation_digest
-    assert adapter.apply_count == first_apply_count + first.projected_batch_count
-    assert len(adapter.deliveries) == first.projected_batch_count
+        serving_deliveries = dict(adapter.deliveries)
+        serving_markers = dict(adapter._delivery_markers)
+        adapter.deliveries.clear()
+        failed_apply = adapter.apply_count
+        failed_cleanup = adapter.cleanup_count
+        with pytest.raises(Neo4jIdentityConflict):
+            system.increment4.build_and_promote(
+                request, proof=extraction_proof()
+            )
+        assert adapter.apply_count == failed_apply
+        assert adapter.cleanup_count == failed_cleanup
+        assert adapter.deliveries == {}
+
+        adapter.deliveries.update(serving_deliveries)
+        adapter._delivery_markers.update(serving_markers)
+        source_apply = adapter.apply_count
+        source_cleanup = adapter.cleanup_count
+        source_reconcile = adapter.reconcile_count
+        adapter.before_first_reconcile = lambda: system.commands.execute(
+            authority_command(
+                key="increment4-active-source-race-authority-v1",
+                aggregate_id=AggregateId.parse(
+                    "00000000-0000-4000-8000-000000005099"
+                ),
+            ),
+            proof=extraction_proof(),
+        )
+        with pytest.raises(
+            ProjectionStateError,
+            match="differs from exact retained admitted authority",
+        ):
+            system.increment4.build_and_promote(
+                request, proof=extraction_proof()
+            )
+        status = system.increment4.generation_status(
+            GENERATION_1, proof=extraction_proof()
+        )
+
+    assert status.generation.state is ProjectionGenerationState.ACTIVE
+    assert status.source_watermark_ledger_seq > snapshot.through_ledger_seq
+    assert adapter.apply_count == source_apply
+    assert adapter.cleanup_count == source_cleanup
+    assert adapter.reconcile_count == source_reconcile + 1
+
+
+def test_increment4_graph_loss_recovers_only_through_isolated_replacement(
+    tmp_path: Path,
+) -> None:
+    state, snapshot = admitted_increment4_fixture(tmp_path)
+    adapter = MemoryNeo4jAdapter()
+
+    with open_increment4_neo4j_system(state, adapter) as system:
+        first = system.increment4.build_and_promote(
+            _request(GENERATION_1, snapshot, key="increment4-loss-first-v1"),
+            proof=extraction_proof(),
+        )
+        adapter.deliveries.clear()
+        replacement = system.increment4.build_and_promote(
+            _request(GENERATION_2, snapshot, key="increment4-loss-replacement-v1"),
+            proof=extraction_proof(),
+        )
+        first_status = system.increment4.generation_status(
+            GENERATION_1, proof=extraction_proof()
+        )
+
+    assert first.generation.state is ProjectionGenerationState.ACTIVE
+    assert replacement.generation.state is ProjectionGenerationState.ACTIVE
+    assert replacement.prior_generation is not None
+    assert replacement.prior_generation.generation_id == GENERATION_1
+    assert first_status.generation.state is ProjectionGenerationState.RETIRED
+    assert any(key[0] == str(GENERATION_2) for key in adapter.deliveries)
+    assert not any(key[0] == str(GENERATION_1) for key in adapter.deliveries)
 
 
 def test_increment4_reconciliation_mismatch_never_promotes(tmp_path: Path) -> None:
