@@ -1,0 +1,104 @@
+name: Temporary Increment 5A hardening finalizer
+
+on:
+  push:
+    branches:
+      - agent/increment-5a-retrieval-contract
+    paths:
+      - scripts/temp_increment5a_finalize.py
+      - .github/workflows/temp-increment5a-finalize.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: temporary-increment5a-hardening-finalizer
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact Increment 5A branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/increment-5a-retrieval-contract
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+          check-latest: false
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: "0.8.0"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Generate the permanent authenticated contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python scripts/temp_increment5a_finalize.py
+
+      - name: Verify focused adversarial coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m compileall -q \
+            newsroom/increment5 \
+            scripts/sdlc/github_transport.py \
+            newsroom/tests/test_increment5a_github_attempts.py \
+            newsroom/tests/test_increment5a_main_qualification.py \
+            newsroom/tests/test_increment5a_traceability.py \
+            newsroom/tests/test_increment5a_zero_budget_schema.py
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_increment5a_github_attempts.py \
+            newsroom/tests/test_increment5a_main_qualification.py \
+            newsroom/tests/test_increment5a_approval.py \
+            newsroom/tests/test_increment5a_contracts.py \
+            newsroom/tests/test_increment5a_traceability.py \
+            newsroom/tests/test_increment5a_zero_budget_schema.py \
+            newsroom/tests/test_sdlc_github_transport.py \
+            newsroom/tests/test_sdlc_shadow_decision.py
+          test ! -e newsroom/increment5/data/increment5a_owner_approval_record_v1.json
+          test ! -e newsroom/increment5/data/increment5a_main_qualification_record_v2.json
+          git diff --check
+
+      - name: Verify complete deterministic suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m pytest -q -n 4 --dist=worksteal
+
+      - name: Remove temporary machinery and push permanent result
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/temp-increment5a-review-hardening.yml
+          rm scripts/temp_increment5a_review_hardening.py
+          rm .github/workflows/temp-increment5a-finalize.yml
+          rm scripts/temp_increment5a_finalize.py
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git add -f \
+            newsroom/increment5/data/increment5_fixture_replay_profile_v2.schema.json
+          git commit -m "fix(increment5): authenticate admission evidence"
+          if git diff --name-only origin/main...HEAD | grep -E '(^|/)(temp|diagnostic|publisher|installer|patch-transport|evidence-reader)' ; then
+            echo "temporary or diagnostic material remains in the PR tree" >&2
+            exit 1
+          fi
+          git push origin HEAD:agent/increment-5a-retrieval-contract
