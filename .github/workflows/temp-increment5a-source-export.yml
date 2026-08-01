@@ -1,4 +1,4 @@
-name: Temporary Increment 5A source export
+name: Temporary Increment 5A profile-gate hardening
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  export:
+  harden:
     runs-on: ubuntu-latest
     steps:
       - name: Check out exact branch
@@ -20,29 +20,147 @@ jobs:
           ref: agent/increment-5a-retrieval-contract
           fetch-depth: 0
 
-      - name: Prepare exact source export
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .source-export
-          git archive --format=tar HEAD | tar -xf - -C .source-export
-
-      - name: Upload exact source export
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
-          name: increment5a-source-${{ github.sha }}
-          path: .source-export
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
+          python-version: "3.12"
+          check-latest: false
 
-      - name: Remove temporary workflow and push
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: "0.8.0"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Materialise source-bound production gates
         shell: bash
         run: |
           set -euo pipefail
-          rm .github/workflows/temp-increment5a-source-export.yml
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(source: str, old: str, new: str, *, label: str) -> str:
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, found {count}")
+              return source.replace(old, new, 1)
+
+          profiles_path = Path("newsroom/increment5/profiles.py")
+          profiles = profiles_path.read_text(encoding="utf-8")
+          profiles = replace_once(
+              profiles,
+              "from typing import Any, Mapping\n",
+              "from typing import Any, Callable, Mapping\n",
+              label="profiles typing import",
+          )
+          profiles = replace_once(
+              profiles,
+              "_REQUIRED_MODES = tuple(item.value for item in RetrievalMode)\n\n\n",
+              '''_REQUIRED_MODES = tuple(item.value for item in RetrievalMode)\n\nRepositoryApprovalBinding = tuple[\n    object,\n    Callable[[], object | None],\n    Callable[[object | None], str],\n]\n\n\ndef _repository_authority_binding_factory() -> tuple[\n    Callable[..., None],\n    Callable[[], RepositoryApprovalBinding],\n]:\n    binding: RepositoryApprovalBinding | None = None\n\n    def bind_once(\n        *,\n        authority: object,\n        load_approval: Callable[[], object | None],\n        effective_contract_digest_for: Callable[[object | None], str],\n    ) -> None:\n        nonlocal binding\n        candidate = (\n            authority,\n            load_approval,\n            effective_contract_digest_for,\n        )\n        if binding is None:\n            binding = candidate\n            return\n        if (\n            binding[0] is not authority\n            or binding[1] is not load_approval\n            or binding[2] is not effective_contract_digest_for\n        ):\n            raise Increment5ContractError(\n                "repository approval authority is already bound"\n            )\n\n    def get_binding() -> RepositoryApprovalBinding:\n        if binding is None:\n            raise Increment5ProfileError(\n                "repository approval authority is not initialized"\n            )\n        return binding\n\n    return bind_once, get_binding\n\n\n(\n    _bind_repository_authority_once,\n    _get_repository_authority_binding,\n) = _repository_authority_binding_factory()\n\n\n''',
+              label="profiles binding insertion",
+          )
+          profiles = replace_once(
+              profiles,
+              '''def validate_profile_manifest(\n    document: Mapping[str, Any],\n    *,\n    packet: object,\n) -> ValidatedRetrievalProfile:\n''',
+              '''def _validate_profile_manifest_impl(\n    document: Mapping[str, Any],\n    *,\n    packet: object,\n    _repository_binding: RepositoryApprovalBinding,\n) -> ValidatedRetrievalProfile:\n''',
+              label="validate signature",
+          )
+          profiles = replace_once(
+              profiles,
+              '''    from .approval import INCREMENT_5A_DECISION_AUTHORITY, require_repository_approval_record\n\n    if packet is not INCREMENT_5A_DECISION_AUTHORITY:\n        raise Increment5ProfileError("PRODUCTION requires canonical repository authority")\n    proposal = _proposal_packet()\n    approval = require_repository_approval_record()\n''',
+              '''    (\n        authority,\n        load_approval,\n        effective_contract_digest_for,\n    ) = _repository_binding\n    if packet is not authority:\n        raise Increment5ProfileError(\n            "PRODUCTION requires canonical repository authority"\n        )\n    proposal = _proposal_packet()\n    approval = load_approval()\n    if approval is None:\n        raise Increment5ProfileError(\n            "PRODUCTION is not authorized without the admitted repository "\n            "owner approval record"\n        )\n    effective_contract_digest = effective_contract_digest_for(approval)\n''',
+              label="validate authority block",
+          )
+          profiles = profiles.replace(
+              "INCREMENT_5A_DECISION_AUTHORITY.effective_contract_digest",
+              "effective_contract_digest",
+          )
+          if profiles.count("effective_contract_digest") < 4:
+              raise SystemExit("effective digest replacement did not materialise")
+          profiles = replace_once(
+              profiles,
+              '''def build_production_qualification_manifest() -> dict[str, object]:\n    from .approval import INCREMENT_5A_DECISION_AUTHORITY, require_repository_approval_record\n\n    proposal = _proposal_packet()\n    approval = require_repository_approval_record()\n''',
+              '''def _build_production_qualification_manifest_impl(\n    *,\n    _repository_binding: RepositoryApprovalBinding,\n) -> dict[str, object]:\n    (\n        _authority,\n        load_approval,\n        effective_contract_digest_for,\n    ) = _repository_binding\n    proposal = _proposal_packet()\n    approval = load_approval()\n    if approval is None:\n        raise Increment5ProfileError(\n            "PRODUCTION is not authorized without the admitted repository "\n            "owner approval record"\n        )\n    effective_contract_digest = effective_contract_digest_for(approval)\n''',
+              label="builder authority block",
+          )
+          profiles = replace_once(
+              profiles,
+              '''        "effective_contract_digest": effective_contract_digest,\n        "runtime_authority": RuntimeAuthority.PRODUCTION_QUALIFICATION.value,\n''',
+              '''        "effective_contract_digest": effective_contract_digest,\n        "runtime_authority": RuntimeAuthority.PRODUCTION_QUALIFICATION.value,\n''',
+              label="builder effective digest check",
+          )
+          profiles += '''\n\ndef _public_profile_gate_factory(\n    *,\n    validate_impl: Callable[..., ValidatedRetrievalProfile],\n    build_impl: Callable[..., dict[str, object]],\n    get_binding: Callable[[], RepositoryApprovalBinding],\n) -> tuple[Callable[..., ValidatedRetrievalProfile], Callable[[], dict[str, object]]]:\n    def validate_profile_manifest(\n        document: Mapping[str, Any],\n        *,\n        packet: object,\n    ) -> ValidatedRetrievalProfile:\n        return validate_impl(\n            document,\n            packet=packet,\n            _repository_binding=get_binding(),\n        )\n\n    def build_production_qualification_manifest() -> dict[str, object]:\n        return build_impl(_repository_binding=get_binding())\n\n    return validate_profile_manifest, build_production_qualification_manifest\n\n\n(\n    validate_profile_manifest,\n    build_production_qualification_manifest,\n) = _public_profile_gate_factory(\n    validate_impl=_validate_profile_manifest_impl,\n    build_impl=_build_production_qualification_manifest_impl,\n    get_binding=_get_repository_authority_binding,\n)\n\ndel _validate_profile_manifest_impl\ndel _build_production_qualification_manifest_impl\ndel _public_profile_gate_factory\ndel _get_repository_authority_binding\n'''
+          profiles_path.write_text(profiles, encoding="utf-8")
+
+          approval_path = Path("newsroom/increment5/approval.py")
+          approval = approval_path.read_text(encoding="utf-8")
+          approval = replace_once(
+              approval,
+              '''def _repository_loader_factory(\n    *,\n    path: Path,\n    expected_digest: str | None,\n) -> Callable[[], Increment5AApprovalAttestation | None]:\n''',
+              '''def _repository_loader_factory(\n    *,\n    path: Path,\n    expected_digest: str | None,\n    parser: Callable[[Path], Increment5AApprovalAttestation] = (\n        load_increment5a_approval_attestation\n    ),\n) -> Callable[[], Increment5AApprovalAttestation | None]:\n''',
+              label="loader signature",
+          )
+          approval = replace_once(
+              approval,
+              '''    captured_path = path\n    captured_digest = expected_digest\n\n    def load() -> Increment5AApprovalAttestation | None:\n''',
+              '''    captured_path = path\n    captured_digest = expected_digest\n    captured_parser = parser\n\n    def load() -> Increment5AApprovalAttestation | None:\n''',
+              label="loader parser capture",
+          )
+          approval = replace_once(
+              approval,
+              "        approval = load_increment5a_approval_attestation(captured_path)\n",
+              "        approval = captured_parser(captured_path)\n",
+              label="loader parser use",
+          )
+
+          class_start = approval.index("class Increment5ADecisionAuthority:")
+          class_end = approval.index("\n\ndef decision_authority()", class_start)
+          replacement = '''def _effective_contract_digest_factory(\n    *,\n    proposal: Increment5ADecisionPacket,\n    qualification_schema_digest: str,\n    approval_effect: str,\n) -> Callable[[Increment5AApprovalAttestation | None], str]:\n    captured_proposal = proposal\n    captured_schema_digest = qualification_schema_digest\n    captured_effect = approval_effect\n\n    def effective_contract_digest_for(\n        approval: Increment5AApprovalAttestation | None,\n    ) -> str:\n        return digest_bytes(\n            canonical_json_bytes(\n                {\n                    "contract": "increment5a-effective-decision-authority-v4",\n                    "proposal_payload_digest": captured_proposal.payload_digest,\n                    "proposal_record_digest": captured_proposal.record_digest,\n                    "proposal_contract_bundle_digest": (\n                        captured_proposal.bundle.contract_digest\n                    ),\n                    "approval_record_digest": (\n                        None\n                        if approval is None\n                        else approval.attestation_digest\n                    ),\n                    "qualification_production_profile_schema_digest": (\n                        captured_schema_digest\n                    ),\n                    "protected_content_allowed": False,\n                    "approval_effect": (\n                        captured_effect if approval is not None else None\n                    ),\n                }\n            )\n        )\n\n    return effective_contract_digest_for\n\n\n_EFFECTIVE_CONTRACT_DIGEST_FOR = _effective_contract_digest_factory(\n    proposal=INCREMENT_5A_DECISION_PACKET,\n    qualification_schema_digest=_qualification_schema_digest(),\n    approval_effect=APPROVAL_EFFECT,\n)\n\n\ndef _decision_authority_class_factory(\n    *,\n    proposal: Increment5ADecisionPacket,\n    load_approval: Callable[[], Increment5AApprovalAttestation | None],\n    effective_contract_digest_for: Callable[\n        [Increment5AApprovalAttestation | None], str\n    ],\n) -> type:\n    captured_proposal = proposal\n    captured_loader = load_approval\n    captured_effective_digest = effective_contract_digest_for\n\n    class Increment5ADecisionAuthority:\n        """Read-only facade closed over the reviewed repository record."""\n\n        __slots__ = ()\n\n        @property\n        def proposal(self) -> Increment5ADecisionPacket:\n            return captured_proposal\n\n        @property\n        def production_authorized(self) -> bool:\n            return captured_loader() is not None\n\n        @property\n        def approval_attestation_digest(self) -> str | None:\n            approval = captured_loader()\n            return None if approval is None else approval.attestation_digest\n\n        @property\n        def approval_claim_digest(self) -> str | None:\n            return self.approval_attestation_digest\n\n        @property\n        def effective_contract_digest(self) -> str:\n            return captured_effective_digest(captured_loader())\n\n        def component_authorized(\n            self,\n            kind: RetrievalComponentKind,\n        ) -> bool:\n            if not isinstance(kind, RetrievalComponentKind):\n                raise Increment5ProfileError(\n                    "retrieval component kind must be typed"\n                )\n            approval = captured_loader()\n            if approval is None:\n                return False\n            expected = captured_proposal.bundle.component_by_kind[\n                kind\n            ].identity_digest\n            return approval.component_digest_by_kind.get(kind) == expected\n\n        def require_profile(self, profile: RetrievalProfileKind) -> None:\n            if not isinstance(profile, RetrievalProfileKind):\n                raise Increment5ProfileError(\n                    "retrieval profile must be typed"\n                )\n            if profile is RetrievalProfileKind.FIXTURE_REPLAY:\n                captured_proposal.require_profile(profile)\n                return\n            approval = captured_loader()\n            if approval is None:\n                raise Increment5ProfileError(\n                    "PRODUCTION is not authorized without the admitted "\n                    "repository owner approval record"\n                )\n            for kind in RetrievalComponentKind:\n                expected = captured_proposal.bundle.component_by_kind[\n                    kind\n                ].identity_digest\n                if approval.component_digest_by_kind.get(kind) != expected:\n                    raise Increment5ProfileError(\n                        "production qualification component approval is "\n                        "incomplete"\n                    )\n\n    return Increment5ADecisionAuthority\n\n\nIncrement5ADecisionAuthority = _decision_authority_class_factory(\n    proposal=INCREMENT_5A_DECISION_PACKET,\n    load_approval=_LOAD_REPOSITORY_APPROVAL,\n    effective_contract_digest_for=_EFFECTIVE_CONTRACT_DIGEST_FOR,\n)\nINCREMENT_5A_DECISION_AUTHORITY = Increment5ADecisionAuthority()\n\n\nfrom . import profiles as _profiles_module\n\n_profiles_module._bind_repository_authority_once(\n    authority=INCREMENT_5A_DECISION_AUTHORITY,\n    load_approval=_LOAD_REPOSITORY_APPROVAL,\n    effective_contract_digest_for=_EFFECTIVE_CONTRACT_DIGEST_FOR,\n)\ndel _profiles_module\n'''
+          approval = approval[:class_start] + replacement + approval[class_end:]
+          approval_path.write_text(approval, encoding="utf-8")
+
+          tests_path = Path("newsroom/tests/test_increment5a_approval.py")
+          tests = tests_path.read_text(encoding="utf-8")
+          tests = replace_once(
+              tests,
+              "import newsroom.increment5.approval as approval_module\n",
+              "import newsroom.increment5.approval as approval_module\nimport newsroom.increment5.profiles as profiles_module\n",
+              label="test profiles import",
+          )
+          marker = '''    monkeypatch.setattr(\n        approval_module,\n        "_LOAD_REPOSITORY_APPROVAL",\n        lambda: record,\n    )\n\n    # The public functions captured the source-defined loader in their defaults.\n'''
+          replacement_test = '''    monkeypatch.setattr(\n        approval_module,\n        "_LOAD_REPOSITORY_APPROVAL",\n        lambda: record,\n    )\n    monkeypatch.setattr(\n        approval_module,\n        "repository_approval_record",\n        lambda: record,\n    )\n    monkeypatch.setattr(\n        approval_module,\n        "require_repository_approval_record",\n        lambda: record,\n    )\n    monkeypatch.setattr(\n        approval_module,\n        "load_increment5a_approval_attestation",\n        lambda _path: record,\n    )\n    monkeypatch.setattr(\n        approval_module,\n        "INCREMENT_5A_DECISION_AUTHORITY",\n        Increment5ADecisionAuthority(),\n    )\n    monkeypatch.setattr(\n        profiles_module,\n        "_bind_repository_authority_once",\n        lambda **_kwargs: None,\n    )\n\n    # Production gates retain their one-time source binding; replacing public\n    # module attributes after import cannot substitute caller evidence.\n'''
+          tests = replace_once(
+              tests,
+              marker,
+              replacement_test,
+              label="test monkeypatch expansion",
+          )
+          tests = replace_once(
+              tests,
+              '''    with pytest.raises(\n        Increment5ProfileError,\n        match="admitted repository owner approval record",\n    ):\n        build_production_qualification_manifest()\n\n\ndef test_caller_created_authority_objects_cannot_cross_profile_gate() -> None:\n''',
+              '''    with pytest.raises(\n        Increment5ProfileError,\n        match="admitted repository owner approval record",\n    ):\n        build_production_qualification_manifest()\n    with pytest.raises(\n        Increment5ProfileError,\n        match="admitted repository owner approval record",\n    ):\n        INCREMENT_5A_DECISION_AUTHORITY.require_profile(\n            RetrievalProfileKind.PRODUCTION\n        )\n\n\ndef test_caller_created_authority_objects_cannot_cross_profile_gate() -> None:\n''',
+              label="test direct authority gate",
+          )
+          tests_path.write_text(tests, encoding="utf-8")
+          PY
+
+          uv lock --check
+          uv sync --dev --locked
+          uv run --no-sync python -m compileall -q newsroom/increment5 newsroom/tests/test_increment5a_approval.py
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_increment5a_approval.py \
+            newsroom/tests/test_increment5a_contracts.py \
+            newsroom/tests/test_increment5a_traceability.py
+          git diff --check
+
+      - name: Commit hardening and remove temporary workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/temp-increment5a-source-export.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/workflows/temp-increment5a-source-export.yml
-          git commit -m "chore(increment5): remove temporary source export"
+          git add -A
+          git commit -m "fix(increment5): close production gates over source authority"
           git push origin HEAD:agent/increment-5a-retrieval-contract
