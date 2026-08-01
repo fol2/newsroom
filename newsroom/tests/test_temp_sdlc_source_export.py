@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-import sys
 
 
 _FOCUSED_TEST = '''from __future__ import annotations
@@ -71,21 +70,21 @@ jobs:
 '''
 
 
-def _report_directory() -> Path:
-    for argument in sys.argv:
-        if argument.startswith("--junitxml="):
-            path = Path(argument.split("=", 1)[1]).resolve()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            return path.parent
-    raise AssertionError("signed core command did not expose its JUnit path")
-
-
 def _digest(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 def test_temporary_export_exact_sdlc_sources() -> None:
-    output = _report_directory()
+    output = (
+        Path.cwd()
+        / ".sdlc-run"
+        / "core"
+        / "gates"
+        / "core-deterministic"
+        / "tests"
+        / "reports"
+    )
+    output.mkdir(parents=True, exist_ok=True)
 
     lane = Path("scripts/sdlc/workflow_lane.py").read_text(encoding="utf-8")
     old = '_CORE_WORKER_COUNT = 8\n_CORE_DISTRIBUTION = "loadfile"\n'
