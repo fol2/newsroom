@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
-import scripts.sdlc._workflow_lane_impl as implementation_module
 import scripts.sdlc.workflow_lane as lane_module
 
 
@@ -26,14 +25,10 @@ def test_core_lane_uses_four_persistent_worksteal_workers(
     assert command.count("newsroom/tests") == 1
 
 
-def test_private_implementation_and_reload_keep_scheduler_contract() -> None:
-    assert lane_module is implementation_module
-    assert implementation_module._CORE_WORKER_COUNT == 4
-    assert implementation_module._CORE_DISTRIBUTION == "worksteal"
+def test_reload_keeps_canonical_scheduler_contract() -> None:
+    reloaded = importlib.reload(lane_module)
 
-    reloaded = importlib.reload(implementation_module)
-
-    assert reloaded is implementation_module
-    assert lane_module is implementation_module
+    assert reloaded is lane_module
     assert reloaded._CORE_WORKER_COUNT == 4
     assert reloaded._CORE_DISTRIBUTION == "worksteal"
+    assert reloaded._CORE_TESTS == ("newsroom/tests",)
