@@ -1,0 +1,78 @@
+name: Temporary SDLC core worker capacity patch
+
+on:
+  push:
+    branches:
+      - agent/sdlc-core-worksteal-scheduler
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact support branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/sdlc-core-worksteal-scheduler
+          fetch-depth: 0
+
+      - name: Apply exact capacity correction and regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          runner = Path("scripts/sdlc/workflow_lane.py")
+          source = runner.read_text(encoding="utf-8")
+          old = "_CORE_WORKER_COUNT = 6\n"
+          new = "_CORE_WORKER_COUNT = 8\n"
+          if source.count(old) != 1:
+              raise SystemExit("expected one exact six-worker contract")
+          runner.write_text(source.replace(old, new, 1), encoding="utf-8")
+
+          test = Path("newsroom/tests/test_sdlc_core_worker_capacity.py")
+          if test.exists():
+              raise SystemExit("capacity regression already exists")
+          test.write_text(
+              '''from __future__ import annotations
+
+from pathlib import Path
+
+import scripts.sdlc.workflow_lane as lane_module
+
+
+def test_core_lane_uses_eight_persistent_loadfile_workers(
+    tmp_path: Path,
+) -> None:
+    assert lane_module._CORE_WORKER_COUNT == 8
+    assert lane_module._CORE_DISTRIBUTION == "loadfile"
+
+    command = lane_module._core_worker_command(
+        report=tmp_path / "pytest.xml",
+        basetemp=tmp_path / "pytest",
+    )
+
+    worker_flag = command.index("-n")
+    assert command[worker_flag + 1] == "8"
+    assert "--dist=loadfile" in command
+    assert "--max-worker-restart=0" in command
+    assert command.count("xdist.plugin") == 1
+''',
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Commit durable support change
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scripts/sdlc/workflow_lane.py newsroom/tests/test_sdlc_core_worker_capacity.py
+          git diff --cached --check
+          git commit -m "perf(sdlc): restore core lane budget margin"
+          git push origin HEAD:agent/sdlc-core-worksteal-scheduler
