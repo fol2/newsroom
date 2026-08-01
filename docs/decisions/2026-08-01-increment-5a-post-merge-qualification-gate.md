@@ -16,7 +16,9 @@ require a second source-pinned post-merge record.
 That later record can be created only after PR #255 is merged and the exact
 merged `main` commit has passed all six permanent workflows. Before it can
 return authority, its source-pinned loader authenticates every claimed run
-attempt and the qualified commit tree against GitHub REST. It binds:
+attempt and the qualified commit tree against GitHub REST. Canonical record
+fields are evidence inputs only; they cannot self-assert successful execution,
+and unavailable authenticated GitHub evidence fails closed. The record binds:
 
 - the exact merged main commit and tree;
 - the exact owner-approval record digest;
