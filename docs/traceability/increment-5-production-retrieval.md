@@ -1,9 +1,9 @@
 # Increment 5 production retrieval traceability
 
-**Status:** Exact 5A decision and delivery map  
-**Machine-readable source:** `newsroom/increment5/traceability.py`  
-**Verification:** `newsroom/tests/test_increment5a_traceability.py`  
-**Bound decision packet:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`  
+**Status:** Exact 5A decision and delivery map
+**Machine-readable source:** `newsroom/increment5/traceability.py`
+**Verification:** `newsroom/tests/test_increment5a_traceability.py`
+**Bound decision packet:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`
 **Rows:** 114 unique requirements
 
 ## Reading the map
