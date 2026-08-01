@@ -10,58 +10,57 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: increment4-final-review-corrections
+  cancel-in-progress: false
+
 jobs:
-  correct-and-verify:
-    runs-on: ubuntu-24.04
+  apply:
+    if: github.repository == 'fol2/newsroom'
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout exact branch head
+        uses: actions/checkout@v4
         with:
           ref: agent/increment-4e-corrective-hardening
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Apply exact review corrections
-        shell: bash
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Apply exact review corrections and regressions
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          def replace_once(text: str, old: str, new: str, *, label: str) -> str:
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f"{label}: expected one anchor, found {count}")
-              return text.replace(old, new, 1)
+                  raise SystemExit(
+                      f"{path}: expected one exact patch anchor, found {count}"
+                  )
+              target.write_text(text.replace(old, new), encoding="utf-8")
 
-          store_path = Path("newsroom/authority/_increment4_projection_store.py")
-          store = store_path.read_text(encoding="utf-8")
-          store = replace_once(
-              store,
-              '''    """Projection authority with exact governed Increment 4 snapshot reads."""
 
-    def increment4_admitted_snapshot(self) -> Increment4AdmittedProjectionSnapshot:
-''',
-              '''    """Projection authority with exact governed Increment 4 snapshot reads."""
-
-    def _increment4_alias_if_current(self, conn, row):
-        alias = self._alias_from_row(conn, row)
-        mention = self._mention_from_row(
-            conn,
-            self._mention_row(conn, alias.provenance_mention_id),
-            replayed=False,
-        )
-        self._require_mention_current(conn, mention)
-        return alias
-
-    def increment4_admitted_snapshot(self) -> Increment4AdmittedProjectionSnapshot:
-''',
-              label="alias-current helper",
-          )
-          store = replace_once(
-              store,
-              '''                    alias_count = int(
+          replace_once(
+              "newsroom/authority/_increment4_projection_store.py",
+              '''                try:
+                    entity = self.entity(entity_id)
+                    preferred = self.preferred_identity(entity_id)
+                    version = self.entity_version(
+                        preferred.current_entity_version_id
+                    )
+                    alias_count = int(
                         conn.execute(
                             "SELECT COUNT(*) FROM entity_aliases WHERE entity_id=?",
                             (str(entity_id),),
@@ -82,36 +81,48 @@ jobs:
                         "Increment 4 entity alias authority is incomplete"
                     )
 ''',
-              '''                    alias_rows = conn.execute(
-                        "SELECT * FROM entity_aliases WHERE entity_id=? "
-                        "ORDER BY alias_id",
-                        (str(entity_id),),
-                    ).fetchall()
-                    current_aliases = []
-                    for alias_row in alias_rows:
-                        try:
-                            current_aliases.append(
-                                self._increment4_alias_if_current(conn, alias_row)
-                            )
-                        except PermissionError:
-                            # An independently sourced alias can lose current rights
-                            # without invalidating the canonical entity or relations
-                            # whose own retained authority remains current.
-                            continue
-                    aliases = tuple(current_aliases)
+              '''                try:
+                    entity = self.entity(entity_id)
+                    preferred = self.preferred_identity(entity_id)
+                    version = self.entity_version(
+                        preferred.current_entity_version_id
+                    )
                 except PermissionError:
                     # Rights-invalid current state must disappear from derivative
                     # authority rather than being copied from stale caller memory.
                     continue
-''',
-              label="per-alias rights filtering",
-          )
-          store_path.write_text(store, encoding="utf-8")
 
-          boundary_path = Path("newsroom/authority/_neo4j_projection_system.py")
-          boundary = boundary_path.read_text(encoding="utf-8")
-          boundary = replace_once(
-              boundary,
+                # Alias evidence can have independent rights from the retained
+                # entity creation decision. Decode every immutable alias row, but
+                # retain only aliases whose own provenance remains currently
+                # usable. One revoked alias must not remove an otherwise-current
+                # entity or make relation endpoint membership inconsistent.
+                alias_rows = conn.execute(
+                    "SELECT * FROM entity_aliases WHERE entity_id=? "
+                    "ORDER BY language,normalized_text,alias_id",
+                    (str(entity_id),),
+                ).fetchall()
+                admitted_aliases = []
+                for alias_row in alias_rows:
+                    alias = self._alias_from_row(conn, alias_row)
+                    mention = self._mention_from_row(
+                        conn,
+                        self._mention_row(conn, alias.provenance_mention_id),
+                        replayed=False,
+                    )
+                    try:
+                        self._require_mention_current(conn, mention)
+                    except PermissionError:
+                        continue
+                    admitted_aliases.append(alias)
+                aliases = tuple(
+                    sorted(admitted_aliases, key=lambda item: str(item.alias_id))
+                )
+''',
+          )
+
+          replace_once(
+              "newsroom/authority/_neo4j_projection_system.py",
               '''    def _require_generic_mutation_generation(
         self,
         generation_id: ProjectionGenerationId,
@@ -127,132 +138,56 @@ jobs:
     ) -> None:
         metadata = self._store.projection_generation_metadata(generation_id)
         self._require_generic_structural_family(metadata.family.family_id)
-''',
-              label="generation guard",
-          )
-          boundary = replace_once(
-              boundary,
-              '''    def transition_generation(
+
+    def _authorize_transition(
         self,
         request: ProjectionGenerationTransitionRequest,
         proof: AuthenticationProof,
-    ) -> ProjectionGenerationView:
-        if not isinstance(request, ProjectionGenerationTransitionRequest):
-            raise TypeError("projection generation transition requires a typed request")
-        self._require_generic_mutation_generation(request.generation_id, proof)
-        return self._projection_boundary.transition_generation(request, proof)
-''',
-              '''    def transition_generation(
-        self,
-        request: ProjectionGenerationTransitionRequest,
-        proof: AuthenticationProof,
-    ) -> ProjectionGenerationView:
-        if not isinstance(request, ProjectionGenerationTransitionRequest):
-            raise TypeError("projection generation transition requires a typed request")
-        grant = self._projection_boundary._grant(
+    ):
+        return self._projection_boundary._grant(
             command_type="projection.generation.transition",
             aggregate_id=request.generation_id.as_aggregate_id(),
             expected_version=request.expected_authority_version,
             payload={
                 "generation_id": str(request.generation_id),
                 "target_state": request.target_state.value,
-                "validated_through_ledger_seq": request.validated_through_ledger_seq,
+                "validated_through_ledger_seq": (
+                    request.validated_through_ledger_seq
+                ),
                 "reason_code": request.reason_code,
             },
             idempotency_key=request.idempotency_key,
             proof=proof,
         )
-        self._require_generic_mutation_generation(request.generation_id)
-        return self._store.transition_generation(
-            grant,
-            generation_id=request.generation_id,
-            target_state=request.target_state,
-            validated_through_ledger_seq=request.validated_through_ledger_seq,
-            reason_code=request.reason_code,
-        )
-''',
-              label="transition authorization order",
-          )
-          boundary = replace_once(
-              boundary,
-              '''    def record_delivery(
+
+    def _authorize_validation(
         self,
-        request: ProjectionDeliveryRequest,
+        request: ProjectionGenerationValidationRequest,
         proof: AuthenticationProof,
-    ) -> DeliveryRecordView:
-        if not isinstance(request, ProjectionDeliveryRequest):
-            raise TypeError("projection delivery requires a typed request")
-        self._require_generic_mutation_generation(request.generation_id, proof)
-        return self._projection_boundary.record_delivery(request, proof)
-''',
-              '''    def record_delivery(
-        self,
-        request: ProjectionDeliveryRequest,
-        proof: AuthenticationProof,
-    ) -> DeliveryRecordView:
-        if not isinstance(request, ProjectionDeliveryRequest):
-            raise TypeError("projection delivery requires a typed request")
-        grant = self._projection_boundary._authorize_delivery(request, proof)
-        self._require_generic_mutation_generation(request.generation_id)
-        return self._projection_boundary._commit_delivery(grant, request)
-''',
-              label="delivery authorization order",
-          )
-          boundary = replace_once(
-              boundary,
-              '''    def resolve_gap(
-        self,
-        request: ProjectionGapResolutionRequest,
-        proof: AuthenticationProof,
-    ) -> ProjectionGapView:
-        if not isinstance(request, ProjectionGapResolutionRequest):
-            raise TypeError("projection gap resolution requires a typed request")
-        self._require_generic_mutation_generation(request.generation_id, proof)
-        return self._projection_boundary.resolve_gap(request, proof)
-''',
-              '''    def resolve_gap(
-        self,
-        request: ProjectionGapResolutionRequest,
-        proof: AuthenticationProof,
-    ) -> ProjectionGapView:
-        if not isinstance(request, ProjectionGapResolutionRequest):
-            raise TypeError("projection gap resolution requires a typed request")
-        grant = self._projection_boundary._grant(
-            command_type="projection.gap.resolve",
+    ):
+        return self._projection_boundary._grant(
+            command_type="projection.generation.validate",
             aggregate_id=request.generation_id.as_aggregate_id(),
             expected_version=request.expected_authority_version,
             payload={
                 "generation_id": str(request.generation_id),
-                "gap_id": str(request.gap_id),
+                "checkpoint_ledger_seq": request.checkpoint_ledger_seq,
+                "service_compatibility_digest": (
+                    request.service_compatibility_digest
+                ),
+                "projection_state_digest": request.projection_state_digest,
                 "reason_code": request.reason_code,
             },
             idempotency_key=request.idempotency_key,
             proof=proof,
         )
-        self._require_generic_mutation_generation(request.generation_id)
-        return self._store.resolve_gap(
-            grant,
-            generation_id=request.generation_id,
-            gap_id=request.gap_id,
-            reason_code=request.reason_code,
-        )
-''',
-              label="gap authorization order",
-          )
-          boundary = replace_once(
-              boundary,
-              '''        if not isinstance(request, StructuralRebuildRequest):
-            raise TypeError("structural rebuild requires a typed request")
-        self._projection_boundary._authenticate(proof)
-        metadata = self._store.projection_generation_metadata(
-            request.generation_id
-        )
-        self._require_generic_structural_family(metadata.family.family_id)
-        receipt = self._projection_boundary._begin_rebuild(request, proof)
-''',
-              '''        if not isinstance(request, StructuralRebuildRequest):
-            raise TypeError("structural rebuild requires a typed request")
-        grant = self._projection_boundary._grant(
+
+    def _authorize_rebuild(
+        self,
+        request: StructuralRebuildRequest,
+        proof: AuthenticationProof,
+    ):
+        return self._projection_boundary._grant(
             command_type="projection.generation.rebuild",
             aggregate_id=request.generation_id.as_aggregate_id(),
             expected_version=request.expected_authority_version,
@@ -264,23 +199,96 @@ jobs:
             idempotency_key=request.idempotency_key,
             proof=proof,
         )
+
+    def _authorize_gap_resolution(
+        self,
+        request: ProjectionGapResolutionRequest,
+        proof: AuthenticationProof,
+    ):
+        return self._projection_boundary._grant(
+            command_type="projection.gap.resolve",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "gap_id": str(request.gap_id),
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
+''',
+          )
+
+          replace_once(
+              "newsroom/authority/_neo4j_projection_system.py",
+              '''        self._require_generic_mutation_generation(request.generation_id, proof)
+        return self._projection_boundary.transition_generation(request, proof)
+''',
+              '''        grant = self._authorize_transition(request, proof)
+        self._require_generic_mutation_generation(request.generation_id)
+        return self._store.transition_generation(
+            grant,
+            generation_id=request.generation_id,
+            target_state=request.target_state,
+            validated_through_ledger_seq=request.validated_through_ledger_seq,
+            reason_code=request.reason_code,
+        )
+''',
+          )
+
+          replace_once(
+              "newsroom/authority/_neo4j_projection_system.py",
+              '''        self._require_generic_mutation_generation(request.generation_id, proof)
+        return self._projection_boundary.record_delivery(request, proof)
+''',
+              '''        grant = self._projection_boundary._authorize_delivery(
+            request,
+            proof,
+        )
+        self._require_generic_mutation_generation(request.generation_id)
+        return self._projection_boundary._commit_delivery(grant, request)
+''',
+          )
+
+          replace_once(
+              "newsroom/authority/_neo4j_projection_system.py",
+              '''        self._require_generic_mutation_generation(request.generation_id, proof)
+        return self._projection_boundary.resolve_gap(request, proof)
+''',
+              '''        grant = self._authorize_gap_resolution(request, proof)
+        self._require_generic_mutation_generation(request.generation_id)
+        return self._store.resolve_gap(
+            grant,
+            generation_id=request.generation_id,
+            gap_id=request.gap_id,
+            reason_code=request.reason_code,
+        )
+''',
+          )
+
+          replace_once(
+              "newsroom/authority/_neo4j_projection_system.py",
+              '''        self._projection_boundary._authenticate(proof)
         metadata = self._store.projection_generation_metadata(
             request.generation_id
         )
         self._require_generic_structural_family(metadata.family.family_id)
+        receipt = self._projection_boundary._begin_rebuild(request, proof)
+''',
+              '''        grant = self._authorize_rebuild(request, proof)
+        self._require_generic_mutation_generation(request.generation_id)
         receipt = self._store.begin_projection_rebuild(
             grant,
             generation_id=request.generation_id,
             through_ledger_seq=request.through_ledger_seq,
         )
 ''',
-              label="rebuild authorization order",
           )
-          boundary = replace_once(
-              boundary,
-              '''        if not isinstance(request, ProjectionGenerationPromotionRequest):
-            raise TypeError("projection promotion requires a typed request")
-        self._require_generic_mutation_generation(request.generation_id, proof)
+
+          replace_once(
+              "newsroom/authority/_neo4j_projection_system.py",
+              '''        self._require_generic_mutation_generation(request.generation_id, proof)
         if request.prior_generation_id is not None:
             self._require_generic_mutation_generation(
                 request.prior_generation_id,
@@ -290,380 +298,319 @@ jobs:
             self._projection_boundary._authorize_promotion(request, proof)
         )
 ''',
-              '''        if not isinstance(request, ProjectionGenerationPromotionRequest):
-            raise TypeError("projection promotion requires a typed request")
-        target_grant, prior_grant = (
+              '''        target_grant, prior_grant = (
             self._projection_boundary._authorize_promotion(request, proof)
         )
         self._require_generic_mutation_generation(request.generation_id)
         if request.prior_generation_id is not None:
             self._require_generic_mutation_generation(
-                request.prior_generation_id,
+                request.prior_generation_id
             )
 ''',
-              label="promotion authorization order",
           )
-          boundary = replace_once(
-              boundary,
-              '''    def reject_direct_validation(
-        self,
-        request: ProjectionGenerationValidationRequest,
-        proof: AuthenticationProof,
-    ) -> ProjectionGenerationValidationView:
-        if not isinstance(request, ProjectionGenerationValidationRequest):
-            raise TypeError("projection validation requires a typed request")
-        self._require_generic_mutation_generation(request.generation_id, proof)
+
+          replace_once(
+              "newsroom/authority/_neo4j_projection_system.py",
+              '''        self._require_generic_mutation_generation(request.generation_id, proof)
         raise ProjectionStateError(
             "Neo4j generation validation requires structural reconciliation"
         )
 ''',
-              '''    def reject_direct_validation(
-        self,
-        request: ProjectionGenerationValidationRequest,
-        proof: AuthenticationProof,
-    ) -> ProjectionGenerationValidationView:
-        if not isinstance(request, ProjectionGenerationValidationRequest):
-            raise TypeError("projection validation requires a typed request")
-        self._projection_boundary._grant(
-            command_type="projection.generation.validate",
-            aggregate_id=request.generation_id.as_aggregate_id(),
-            expected_version=request.expected_authority_version,
-            payload={
-                "generation_id": str(request.generation_id),
-                "checkpoint_ledger_seq": request.checkpoint_ledger_seq,
-                "service_compatibility_digest": request.service_compatibility_digest,
-                "projection_state_digest": request.projection_state_digest,
-                "reason_code": request.reason_code,
-            },
-            idempotency_key=request.idempotency_key,
-            proof=proof,
-        )
+              '''        self._authorize_validation(request, proof)
         self._require_generic_mutation_generation(request.generation_id)
         raise ProjectionStateError(
             "Neo4j generation validation requires structural reconciliation"
         )
 ''',
-              label="direct validation authorization order",
           )
-          boundary = replace_once(
-              boundary,
-              '''        if not isinstance(request, StructuralGenerationValidationRequest):
-            raise TypeError("structural validation requires a typed request")
-        authenticated = self._projection_boundary._authenticate(proof)
-        metadata = self._store.projection_generation_metadata(
-            request.generation_id
-        )
-''',
-              '''        if not isinstance(request, StructuralGenerationValidationRequest):
-            raise TypeError("structural validation requires a typed request")
-        grant = self._projection_boundary._grant(
-            command_type="projection.generation.validate",
-            aggregate_id=request.generation_id.as_aggregate_id(),
-            expected_version=request.expected_authority_version,
-            payload={
-                "generation_id": str(request.generation_id),
-                "checkpoint_ledger_seq": request.checkpoint_ledger_seq,
-                "service_compatibility_digest": request.service_compatibility_digest,
-                "projection_state_digest": request.projection_state_digest,
-                "reason_code": request.reason_code,
-            },
-            idempotency_key=request.idempotency_key,
-            proof=proof,
-        )
-        authenticated = self._projection_boundary._authenticate(proof)
-        metadata = self._store.projection_generation_metadata(
-            request.generation_id
-        )
-''',
-              label="structural validation preauthorization",
-          )
-          boundary = replace_once(
-              boundary,
-              '''        authoritative_request = ProjectionGenerationValidationRequest(
-            generation_id=request.generation_id,
-            expected_authority_version=request.expected_authority_version,
-            checkpoint_ledger_seq=request.checkpoint_ledger_seq,
-            service_compatibility_digest=compatibility_digest,
-            projection_state_digest=state_digest,
-            reason_code=request.reason_code,
-            idempotency_key=request.idempotency_key,
-        )
-        return self._projection_boundary.validate_generation(
-            authoritative_request,
-            proof,
-        )
-''',
-              '''        return self._store.validate_generation(
-            grant,
-            generation_id=request.generation_id,
-            checkpoint_ledger_seq=request.checkpoint_ledger_seq,
-            service_compatibility_digest=compatibility_digest,
-            projection_state_digest=state_digest,
-            reason_code=request.reason_code,
-        )
-''',
-              label="structural validation commit",
-          )
-          boundary_path.write_text(boundary, encoding="utf-8")
 
-          test_path = Path("newsroom/tests/test_increment4e_corrective_hardening.py")
-          test = test_path.read_text(encoding="utf-8")
-          test = replace_once(
-              test,
-              '''import newsroom.authority._increment4_neo4j_boundary as increment4_boundary_module
-from newsroom.authority import digest_canonical
-from newsroom.entities.types import EntityKind
-''',
-              '''import newsroom.authority._increment4_neo4j_boundary as increment4_boundary_module
-import newsroom.authority._increment4_projection_store as increment4_store_module
-from newsroom.authority import digest_canonical
-from newsroom.entities.types import EntityKind, EntityRightsDenied
-''',
-              label="test authority imports",
-          )
-          test = replace_once(
-              test,
-              '''from .increment4e_helpers import (
+          Path("newsroom/tests/test_increment4e_alias_rights_snapshot.py").write_text(
+              '''from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+import newsroom.authority._increment4_projection_store as projection_store_module
+from newsroom.increment4 import Increment4Neo4jBuildRequest, sorted_snapshot
+from newsroom.projection import ProjectionGenerationId, ProjectionGenerationState
+
+from .extraction_4a_helpers import extraction_proof
+from .increment4e_helpers import (
     admitted_increment4_fixture,
     open_increment4_neo4j_system,
 )
-''',
-              '''from .increment4e_helpers import (
-    INCREMENT4_PROJECTION_SCOPES,
-    admitted_increment4_fixture,
-    open_increment4_neo4j_system,
+from .projection_b2_helpers import MemoryNeo4jAdapter
+
+
+GENERATION_ID = ProjectionGenerationId.parse(
+    "00000000-0000-4000-8000-000000005097"
 )
-''',
-              label="test scope import",
-          )
-          test = replace_once(
-              test,
-              '''    state, snapshot = admitted_increment4_fixture(tmp_path)
-    adapter = MemoryNeo4jAdapter()
-    captured = []
-    build = increment4_boundary_module.build_increment4_admitted_batches
 
-    def capture(authoritative_snapshot, **kwargs):
-        captured.append(authoritative_snapshot)
-        return build(authoritative_snapshot, **kwargs)
 
-    monkeypatch.setattr(
-        increment4_boundary_module,
-        "build_increment4_admitted_batches",
-        capture,
-    )
-    with open_increment4_neo4j_system(state, adapter) as system:
-        system.increment4.build_and_promote(
-            _request(GENERATION_1, snapshot, key="increment4-authority-owned-v1"),
-            proof=extraction_proof(),
-        )
-
-    assert captured == [snapshot]
-    assert captured[0] is not snapshot
-''',
-              '''    state, snapshot = admitted_increment4_fixture(tmp_path)
-    adapter = MemoryNeo4jAdapter()
-    captured = []
-    build = increment4_boundary_module.build_increment4_admitted_batches
-    revoked_alias = snapshot.entities[0].aliases[0]
-    filtered_entity = replace(
-        snapshot.entities[0],
-        aliases=tuple(
-            item
-            for item in snapshot.entities[0].aliases
-            if item.alias_id != revoked_alias.alias_id
+def test_increment4_filters_one_rights_invalid_alias_without_dropping_entity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, snapshot = admitted_increment4_fixture(tmp_path)
+    target = snapshot.entities[0]
+    revoked_alias_id = target.aliases[0].alias_id
+    expected = sorted_snapshot(
+        entities=tuple(
+            replace(item, aliases=())
+            if item.entity.entity_id == target.entity.entity_id
+            else item
+            for item in snapshot.entities
         ),
-    )
-    filtered_snapshot = replace(
-        snapshot,
-        entities=(filtered_entity, *snapshot.entities[1:]),
-    )
-    require_alias = (
-        increment4_store_module._Increment4ProjectionAuthorityStore
-        ._increment4_alias_if_current
+        relations=snapshot.relations,
+        events=snapshot.events,
+        through_ledger_seq=snapshot.through_ledger_seq,
     )
 
-    def reject_revoked_alias(self, conn, row):
-        alias = self._alias_from_row(conn, row)
-        if alias.alias_id == revoked_alias.alias_id:
-            raise EntityRightsDenied("alias rights are no longer current")
-        return require_alias(self, conn, row)
+    store_type = projection_store_module._Increment4ProjectionAuthorityStore
+    original_alias_from_row = store_type._alias_from_row
+    original_require_mention_current = store_type._require_mention_current
+    deny_next_alias_use = {"value": False}
 
-    def capture(authoritative_snapshot, **kwargs):
-        captured.append(authoritative_snapshot)
-        return build(authoritative_snapshot, **kwargs)
+    def alias_from_row(self, conn, row):
+        alias = original_alias_from_row(self, conn, row)
+        deny_next_alias_use["value"] = alias.alias_id == revoked_alias_id
+        return alias
 
+    def require_mention_current(self, conn, mention):
+        if deny_next_alias_use["value"]:
+            deny_next_alias_use["value"] = False
+            raise PermissionError("fixed independently revoked alias evidence")
+        return original_require_mention_current(self, conn, mention)
+
+    monkeypatch.setattr(store_type, "_alias_from_row", alias_from_row)
     monkeypatch.setattr(
-        increment4_store_module._Increment4ProjectionAuthorityStore,
-        "_increment4_alias_if_current",
-        reject_revoked_alias,
+        store_type,
+        "_require_mention_current",
+        require_mention_current,
     )
-    monkeypatch.setattr(
-        increment4_boundary_module,
-        "build_increment4_admitted_batches",
-        capture,
-    )
+
+    adapter = MemoryNeo4jAdapter()
     with open_increment4_neo4j_system(state, adapter) as system:
-        system.increment4.build_and_promote(
-            _request(
-                GENERATION_1,
-                filtered_snapshot,
-                key="increment4-authority-owned-v1",
+        result = system.increment4.build_and_promote(
+            Increment4Neo4jBuildRequest(
+                generation_id=GENERATION_ID,
+                snapshot=expected,
+                reason_code="INCREMENT4_ALIAS_RIGHTS_FILTER_PROOF",
+                idempotency_key="increment4-alias-rights-filter-v1",
             ),
             proof=extraction_proof(),
         )
 
-    assert captured == [filtered_snapshot]
-    assert captured[0] is not filtered_snapshot
-    assert captured[0].entities[0].entity == snapshot.entities[0].entity
-    assert captured[0].relations == snapshot.relations
-    assert revoked_alias not in captured[0].entities[0].aliases
+    assert result.generation.state is ProjectionGenerationState.ACTIVE
+    entity_nodes = {
+        node.canonical_id
+        for batch in adapter.deliveries.values()
+        for node in batch.nodes
+        if node.identity_source == "CANONICAL_ENTITY_ID"
+    }
+    alias_nodes = {
+        node.canonical_id
+        for batch in adapter.deliveries.values()
+        for node in batch.nodes
+        if node.identity_source == "ENTITY_ALIAS_ID"
+    }
+    relation_nodes = {
+        node.canonical_id
+        for batch in adapter.deliveries.values()
+        for node in batch.nodes
+        if node.identity_source == "EDITORIAL_RELATION_ASSERTION_ID"
+    }
+    assert len(entity_nodes) == len(snapshot.entities)
+    assert len(alias_nodes) == sum(
+        len(item.aliases) for item in snapshot.entities
+    ) - 1
+    assert relation_nodes
 ''',
-              label="alias rights regression",
+              encoding="utf-8",
           )
-          test = replace_once(
-              test,
-              '''    assert after.generation == built.generation
-    assert adapter.apply_count == before_apply
-    assert adapter.cleanup_count == before_cleanup
-''',
-              '''    assert after.generation == built.generation
-    assert adapter.apply_count == before_apply
-    assert adapter.cleanup_count == before_cleanup
+
+          Path("newsroom/tests/test_increment4e_mutation_authorization.py").write_text(
+              '''from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from newsroom.projection import (
+    ProjectionDeliveryOutcome,
+    ProjectionDeliveryRequest,
+    ProjectionGapId,
+    ProjectionGapResolutionRequest,
+    ProjectionGenerationId,
+    ProjectionGenerationPromotionRequest,
+    ProjectionGenerationState,
+    ProjectionGenerationTransitionRequest,
+    ProjectionGenerationValidationRequest,
+)
+
+from .extraction_4a_helpers import extraction_proof
+from .increment4e_helpers import (
+    INCREMENT4_PROJECTION_SCOPES,
+    admitted_increment4_fixture,
+    open_increment4_neo4j_system,
+)
+from .projection_b2_helpers import MemoryNeo4jAdapter
+from .test_increment4e_neo4j_controller import GENERATION_1, _request
+
+
+MISSING_GENERATION = ProjectionGenerationId.parse(
+    "00000000-0000-4000-8000-000000005098"
+)
+GAP_ID = ProjectionGapId.parse(
+    "00000000-0000-4000-8000-000000005099"
+)
+
+
+def _mutation_operations(system, generation_id, built):
+    version = built.generation.authority_aggregate_version
+    return (
+        (
+            "transition",
+            lambda: system.projections.transition_generation(
+                ProjectionGenerationTransitionRequest(
+                    generation_id=generation_id,
+                    expected_authority_version=version,
+                    target_state=ProjectionGenerationState.FAILED,
+                    reason_code="DENIED_TRANSITION",
+                    idempotency_key=f"denied-transition-{generation_id}",
+                ),
+                proof=extraction_proof(),
+            ),
+        ),
+        (
+            "delivery",
+            lambda: system.projections.record_delivery(
+                ProjectionDeliveryRequest(
+                    generation_id=generation_id,
+                    expected_authority_version=version,
+                    ledger_seq=1,
+                    outcome=ProjectionDeliveryOutcome.IGNORED_OPTIONAL,
+                    idempotency_key=f"denied-delivery-{generation_id}",
+                ),
+                proof=extraction_proof(),
+            ),
+        ),
+        (
+            "gap",
+            lambda: system.projections.resolve_gap(
+                ProjectionGapResolutionRequest(
+                    generation_id=generation_id,
+                    expected_authority_version=version,
+                    gap_id=GAP_ID,
+                    reason_code="DENIED_GAP",
+                    idempotency_key=f"denied-gap-{generation_id}",
+                ),
+                proof=extraction_proof(),
+            ),
+        ),
+        (
+            "promotion",
+            lambda: system.projections.promote_generation(
+                ProjectionGenerationPromotionRequest(
+                    generation_id=generation_id,
+                    expected_authority_version=version,
+                    checkpoint_ledger_seq=built.checkpoint_ledger_seq,
+                    validation_digest=built.validation.validation_digest,
+                    reason_code="DENIED_PROMOTION",
+                    idempotency_key=f"denied-promotion-{generation_id}",
+                ),
+                proof=extraction_proof(),
+            ),
+        ),
+        (
+            "validation",
+            lambda: system.projections.validate_generation(
+                ProjectionGenerationValidationRequest(
+                    generation_id=generation_id,
+                    expected_authority_version=version,
+                    checkpoint_ledger_seq=built.checkpoint_ledger_seq,
+                    service_compatibility_digest=(
+                        built.validation.service_compatibility_digest
+                    ),
+                    projection_state_digest=(
+                        built.validation.projection_state_digest
+                    ),
+                    reason_code="DENIED_VALIDATION",
+                    idempotency_key=f"denied-validation-{generation_id}",
+                ),
+                proof=extraction_proof(),
+            ),
+        ),
+    )
+
+
+def test_generic_mutation_authorization_precedes_generation_lookup(
+    tmp_path: Path,
+) -> None:
+    state, snapshot = admitted_increment4_fixture(tmp_path)
+    with open_increment4_neo4j_system(
+        state,
+        MemoryNeo4jAdapter(),
+    ) as system:
+        built = system.increment4.build_and_promote(
+            _request(
+                GENERATION_1,
+                snapshot,
+                key="increment4-mutation-oracle-base-v1",
+            ),
+            proof=extraction_proof(),
+        )
 
     restricted_scopes = INCREMENT4_PROJECTION_SCOPES - {
         "authority.projection.manage",
         "authority.projection.write",
     }
-    missing_generation = ProjectionGenerationId.parse(
-        "00000000-0000-4000-8000-000000005199"
-    )
+    adapter = MemoryNeo4jAdapter()
     with open_increment4_neo4j_system(
         state,
         adapter,
         scopes=restricted_scopes,
-    ) as restricted:
-        for label, generation_id in (
-            ("existing", GENERATION_1),
-            ("missing", missing_generation),
-        ):
-            restricted_operations = (
-                lambda generation_id=generation_id, label=label: (
-                    restricted.projections.transition_generation(
-                        ProjectionGenerationTransitionRequest(
-                            generation_id=generation_id,
-                            expected_authority_version=version,
-                            target_state=ProjectionGenerationState.FAILED,
-                            reason_code="GENERIC_TRANSITION_UNAUTHORIZED",
-                            idempotency_key=f"unauthorized-transition-{label}-v1",
-                        ),
-                        proof=extraction_proof(),
-                    )
-                ),
-                lambda generation_id=generation_id, label=label: (
-                    restricted.projections.validate_generation(
-                        ProjectionGenerationValidationRequest(
-                            generation_id=generation_id,
-                            expected_authority_version=version,
-                            checkpoint_ledger_seq=built.checkpoint_ledger_seq,
-                            service_compatibility_digest=digest,
-                            projection_state_digest=digest,
-                            reason_code="GENERIC_VALIDATE_UNAUTHORIZED",
-                            idempotency_key=f"unauthorized-validate-{label}-v1",
-                        ),
-                        proof=extraction_proof(),
-                    )
-                ),
-                lambda generation_id=generation_id, label=label: (
-                    restricted.projections.promote_generation(
-                        ProjectionGenerationPromotionRequest(
-                            generation_id=generation_id,
-                            expected_authority_version=version,
-                            checkpoint_ledger_seq=built.checkpoint_ledger_seq,
-                            validation_digest=built.validation.validation_digest,
-                            reason_code="GENERIC_PROMOTE_UNAUTHORIZED",
-                            idempotency_key=f"unauthorized-promote-{label}-v1",
-                        ),
-                        proof=extraction_proof(),
-                    )
-                ),
-                lambda generation_id=generation_id, label=label: (
-                    restricted.projections.record_delivery(
-                        ProjectionDeliveryRequest(
-                            generation_id=generation_id,
-                            expected_authority_version=version,
-                            ledger_seq=1,
-                            outcome=ProjectionDeliveryOutcome.IGNORED_OPTIONAL,
-                            idempotency_key=f"unauthorized-delivery-{label}-v1",
-                        ),
-                        proof=extraction_proof(),
-                    )
-                ),
-                lambda generation_id=generation_id, label=label: (
-                    restricted.projections.resolve_gap(
-                        ProjectionGapResolutionRequest(
-                            generation_id=generation_id,
-                            expected_authority_version=version,
-                            gap_id=ProjectionGapId.parse(
-                                "00000000-0000-4000-8000-000000005198"
-                            ),
-                            reason_code="GENERIC_GAP_UNAUTHORIZED",
-                            idempotency_key=f"unauthorized-gap-{label}-v1",
-                        ),
-                        proof=extraction_proof(),
-                    )
-                ),
-            )
-            for operation in restricted_operations:
-                with pytest.raises(PermissionError):
+    ) as system:
+        messages: dict[str, list[str]] = {}
+        for generation_id in (GENERATION_1, MISSING_GENERATION):
+            for operation_name, operation in _mutation_operations(
+                system,
+                generation_id,
+                built,
+            ):
+                with pytest.raises(PermissionError) as error:
                     operation()
+                messages.setdefault(operation_name, []).append(str(error.value))
 
-    assert adapter.apply_count == before_apply
-    assert adapter.cleanup_count == before_cleanup
+    assert all(len(values) == 2 for values in messages.values())
+    assert all(values[0] == values[1] for values in messages.values())
+    assert adapter.apply_count == 0
+    assert adapter.cleanup_count == 0
+    assert adapter.reconcile_count == 0
 ''',
-              label="authorization oracle regression",
+              encoding="utf-8",
           )
-          test = replace_once(
-              test,
-              '''    ProjectionGenerationCreateRequest,
-    ProjectionGenerationPromotionRequest,
-''',
-              '''    ProjectionGenerationCreateRequest,
-    ProjectionGenerationId,
-    ProjectionGenerationPromotionRequest,
-''',
-              label="generation id test import",
-          )
-          test_path.write_text(test, encoding="utf-8")
           PY
 
-      - name: Install locked environment
-        shell: bash
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install uv
-          uv lock --check
-          uv sync --dev --locked
+      - name: Sync locked development environment
+        run: uv sync --dev --locked
 
-      - name: Run focused authority and controller regressions
-        shell: bash
+      - name: Run focused authority regressions
         run: |
-          uv run python -m compileall -q newsroom
           uv run python -m pytest -q \
+            newsroom/tests/test_increment4e_alias_rights_snapshot.py \
+            newsroom/tests/test_increment4e_mutation_authorization.py \
             newsroom/tests/test_increment4e_corrective_hardening.py \
-            newsroom/tests/test_increment4e_neo4j_controller.py \
-            newsroom/tests/test_increment4e_stale_relation_rebuild.py \
-            newsroom/tests/test_increment4e_workflow_contract.py \
-            newsroom/tests/test_sdlc_workflow_lane.py
+            newsroom/tests/test_increment4e_neo4j_controller.py
 
-      - name: Commit tested permanent correction and remove this workflow
-        shell: bash
+      - name: Remove temporary workflow and publish permanent correction
         run: |
           rm .github/workflows/tmp-increment4-final-review-fixes.yml
           git diff --check
-          git status --short
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
-          git commit -m "fix(increment4): close final authority review gaps"
+          git commit -m 'fix(increment4): close final authority review gaps'
           git push origin HEAD:agent/increment-4e-corrective-hardening
