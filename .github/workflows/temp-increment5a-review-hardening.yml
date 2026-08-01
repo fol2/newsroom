@@ -68,10 +68,16 @@ jobs:
               "    PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,\n"
           )
           if proposal_import not in text:
-              anchor = "    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,\n"
-              if text.count(anchor) != 1:
-                  raise SystemExit("proposal fixture test import anchor differs")
-              text = text.replace(anchor, proposal_import + anchor, 1)
+              start_marker = "from newsroom.increment5 import (\n"
+              end_marker = ")\nfrom newsroom.increment5.decision import "
+              start = text.find(start_marker)
+              end = text.find(end_marker, start)
+              if start < 0 or end < 0:
+                  raise SystemExit("proposal fixture test import block differs")
+              block = text[start:end]
+              if proposal_import in block:
+                  raise SystemExit("proposal fixture import state is ambiguous")
+              text = text[:end] + proposal_import + text[end:]
 
           old_assert = (
               "    assert packet.bundle.fixture_replay_profile_schema_digest == (\n"
