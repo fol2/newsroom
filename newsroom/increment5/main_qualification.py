@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from jsonschema import Draft202012Validator
 
@@ -15,6 +15,12 @@ from newsroom.authority.canonical import (
     validate_sha256_digest,
 )
 from newsroom.authority.types import UtcTimestamp
+from scripts.sdlc.contracts import SdlcContract, load_contract
+from scripts.sdlc.shadow_decision import (
+    ShadowDecision,
+    ShadowDecisionError,
+    validate_shadow_decision,
+)
 
 from .contracts import (
     Increment5ADecisionPacket,
@@ -62,6 +68,14 @@ MAIN_QUALIFICATION_WORKFLOW_SPECS: dict[str, tuple[int, str]] = {
     ),
     "SDLC_EVIDENCE_SHADOW": (318982302, "SDLC Evidence Shadow"),
 }
+MAIN_QUALIFICATION_WORKFLOW_EVENTS: dict[str, str] = {
+    "CI": "push",
+    "AUTHORITY_A2A": "push",
+    "AUTHORITY_A2B": "push",
+    "PROJECTION_B1": "push",
+    "PROJECTION_B2_B3_C1_NEO4J": "push",
+    "SDLC_EVIDENCE_SHADOW": "workflow_dispatch",
+}
 MAIN_QUALIFICATION_WORKFLOW_NAMES = tuple(MAIN_QUALIFICATION_WORKFLOW_SPECS)
 MAIN_QUALIFICATION_RECORD_SCHEMA_PATH = (
     Path(__file__).resolve().parent
@@ -78,12 +92,32 @@ MAIN_QUALIFICATION_RECORD_PATH = (
 MAIN_QUALIFICATION_RECORD_DIGEST: str | None = None
 _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
 _COMMIT_PATTERN = r"^[0-9a-f]{40}$"
+_SDLC_CONTRACT: SdlcContract = load_contract(
+    Path(__file__).resolve().parents[2]
+)
 
+
+def _canonical_decision_validator_factory(
+    *,
+    validator: Callable[..., ShadowDecision] = validate_shadow_decision,
+    contract: object = _SDLC_CONTRACT,
+) -> Callable[[object], ShadowDecision]:
+    captured_validator = validator
+    captured_contract = contract
+
+    def validate(value: object) -> ShadowDecision:
+        return captured_validator(value, contract=captured_contract)
+
+    return validate
+
+
+_CANONICAL_DECISION_VALIDATOR = _canonical_decision_validator_factory()
 
 def _workflow_attempt_schema(
     *,
     workflow_id: int,
     workflow_name: str,
+    event_name: str,
 ) -> dict[str, object]:
     return {
         "type": "object",
@@ -119,7 +153,7 @@ def _workflow_attempt_schema(
             "run_number": {"type": "integer", "minimum": 1},
             "repository": {"const": MAIN_QUALIFICATION_REPOSITORY},
             "repository_id": {"const": MAIN_QUALIFICATION_REPOSITORY_ID},
-            "event": {"const": "push"},
+            "event": {"const": event_name},
             "ref": {"const": MAIN_QUALIFICATION_REF},
             "head_branch": {"const": MAIN_QUALIFICATION_BRANCH},
             "head_sha": {"type": "string", "pattern": _COMMIT_PATTERN},
@@ -269,6 +303,9 @@ MAIN_QUALIFICATION_RECORD_SCHEMA: dict[str, object] = {
                 name: _workflow_attempt_schema(
                     workflow_id=workflow_id,
                     workflow_name=workflow_name,
+                    event_name=(
+                        MAIN_QUALIFICATION_WORKFLOW_EVENTS[name]
+                    ),
                 )
                 for name, (
                     workflow_id,
@@ -447,6 +484,7 @@ class WorkflowAttemptEvidence:
     key: str
     workflow_id: int
     workflow_name: str
+    event: str
     run_id: int
     run_attempt: int
     run_number: int
@@ -465,6 +503,11 @@ class WorkflowAttemptEvidence:
         if expected != (self.workflow_id, self.workflow_name):
             raise Increment5ContractError(
                 "workflow attempt identity differs from permanent workflow"
+            )
+        expected_event = MAIN_QUALIFICATION_WORKFLOW_EVENTS.get(self.key)
+        if self.event != expected_event:
+            raise Increment5ContractError(
+                "workflow attempt event differs from permanent workflow"
             )
         for field_name in ("run_id", "run_attempt", "run_number"):
             _require_positive_integer(
@@ -615,9 +658,10 @@ def _parse_workflow_attempt(
         raise Increment5ContractError(
             "workflow attempt repository identity differs"
         )
-    if value.get("event") != "push":
+    expected_event = MAIN_QUALIFICATION_WORKFLOW_EVENTS[key]
+    if value.get("event") != expected_event:
         raise Increment5ContractError(
-            "workflow attempt is not a main push"
+            f"workflow attempt event differs for {key}"
         )
     if value.get("ref") != MAIN_QUALIFICATION_REF:
         raise Increment5ContractError(
@@ -638,6 +682,7 @@ def _parse_workflow_attempt(
             field=f"workflow_attempts.{key}.workflow_id",
         ),
         workflow_name=str(value.get("workflow_name")),
+        event=str(value.get("event")),
         run_id=_require_positive_integer(
             value.get("run_id"),
             field=f"workflow_attempts.{key}.run_id",
@@ -730,53 +775,64 @@ def _require_mapping(value: object, *, field: str) -> Mapping[str, Any]:
 
 def _validate_decision_document(
     *,
-    summary: Mapping[str, Any],
+    summary: Mapping[str, Any] | None,
     document: Mapping[str, Any],
     qualified_main_commit_sha: str,
     qualified_main_tree_sha: str,
     sdlc_attempt: WorkflowAttemptEvidence,
-) -> tuple[str, str, int, int]:
-    document_digest = digest_bytes(canonical_json_bytes(document))
-    if summary.get("decision_document_digest") != document_digest:
+    _validate: Callable[[object], ShadowDecision] = (
+        _CANONICAL_DECISION_VALIDATOR
+    ),
+) -> tuple[dict[str, object], str, str, int, int]:
+    document_copy = deepcopy(dict(document))
+    document_digest = digest_bytes(canonical_json_bytes(document_copy))
+    if (
+        summary is not None
+        and summary.get("decision_document_digest") != document_digest
+    ):
         raise Increment5ContractError(
             "signed decision document digest differs"
         )
-    if document.get("schema_version") != "newsroom.sdlc.shadow-decision.v1":
+
+    try:
+        validated = _validate(document_copy)
+    except ShadowDecisionError as exc:
         raise Increment5ContractError(
-            "signed decision schema version differs"
+            "signed decision is not canonical SDLC evidence"
+        ) from exc
+
+    canonical_document = validated.as_dict()
+    if canonical_document != document_copy:
+        raise Increment5ContractError(
+            "signed decision differs from canonical SDLC output"
         )
-    if document.get("result") != "PASS":
+    if validated.result != "PASS":
         raise Increment5ContractError(
             "signed decision result is not PASS"
         )
-    if document.get("result_reason") != "PASS:decision":
+    if validated.result_reason != "PASS:decision":
         raise Increment5ContractError(
             "signed decision reason is not PASS"
         )
-    if document.get("first_failure") is not None:
+    if validated.first_failure is not None:
         raise Increment5ContractError(
             "PASS decision cannot retain a first failure"
         )
+
     decision_identity = _require_digest(
-        document.get("decision_identity"),
+        validated.decision_identity,
         field="signed_decision.decision_identity",
     )
-    if summary.get("decision_identity") != decision_identity:
+    context = validated.context.as_dict()
+    if validated.event is None:
         raise Increment5ContractError(
-            "signed decision identity differs"
+            "signed PASS decision has no workflow event"
         )
-
-    context = _require_mapping(
-        document.get("context"),
-        field="signed_decision.document.context",
-    )
-    event = _require_mapping(
-        document.get("event"),
-        field="signed_decision.document.event",
-    )
+    event = validated.event.as_dict()
+    expected_event = sdlc_attempt.event
     for field_name, expected in (
         ("repository", MAIN_QUALIFICATION_REPOSITORY),
-        ("event_name", "push"),
+        ("event_name", expected_event),
         ("ref", MAIN_QUALIFICATION_REF),
         ("evaluated_sha", qualified_main_commit_sha),
         ("evaluated_tree_sha", qualified_main_tree_sha),
@@ -806,27 +862,40 @@ def _validate_decision_document(
             "signed decision workflow ref differs"
         )
 
-    totals = _require_mapping(
-        document.get("totals"),
-        field="signed_decision.document.totals",
-    )
     test_count = _require_positive_integer(
-        totals.get("test_count"),
+        validated.totals.test_count,
         field="signed_decision.test_count",
     )
     skip_count = _require_nonnegative_integer(
-        totals.get("skip_count"),
+        validated.totals.skip_count,
         field="signed_decision.skip_count",
     )
-    for field_name in (
-        "required_skip_count",
-        "failure_count",
-        "error_count",
+    if (
+        validated.totals.required_skip_count != 0
+        or validated.totals.failure_count != 0
+        or validated.totals.error_count != 0
     ):
-        if totals.get(field_name) != 0:
-            raise Increment5ContractError(
-                f"signed decision {field_name} must be zero"
-            )
+        raise Increment5ContractError(
+            "signed PASS decision has nonzero failure totals"
+        )
+
+    gates = tuple(
+        gate
+        for lane in validated.lanes
+        for gate in lane.receipt.gate_decisions
+    )
+    if not gates or any(gate.result != "PASS" for gate in gates):
+        raise Increment5ContractError(
+            "signed PASS decision contains a non-PASS gate"
+        )
+    source_integrity = tuple(
+        gate for gate in gates if gate.gate_id == "source-integrity"
+    )
+    if len(source_integrity) != 1:
+        raise Increment5ContractError(
+            "signed PASS decision lacks exact source-integrity evidence"
+        )
+
     expected_summary = {
         "workflow_run_id": sdlc_attempt.run_id,
         "workflow_run_attempt": sdlc_attempt.run_attempt,
@@ -842,50 +911,25 @@ def _validate_decision_document(
         "failure_count": 0,
         "error_count": 0,
     }
-    if {
-        key: summary.get(key)
-        for key in expected_summary
-    } != expected_summary:
-        raise Increment5ContractError(
-            "signed decision summary differs from canonical artifact"
-        )
-
-    lanes = document.get("lanes")
-    if not isinstance(lanes, list) or not lanes:
-        raise Increment5ContractError(
-            "signed PASS decision has no retained lanes"
-        )
-    gate_count = 0
-    for lane in lanes:
-        lane_value = _require_mapping(
-            lane,
-            field="signed_decision.document.lane",
-        )
-        receipt = _require_mapping(
-            lane_value.get("receipt"),
-            field="signed_decision.document.lane.receipt",
-        )
-        gate_decisions = receipt.get("gate_decisions")
-        if not isinstance(gate_decisions, list):
+    if summary is not None:
+        if {
+            key: summary.get(key)
+            for key in expected_summary
+        } != expected_summary:
             raise Increment5ContractError(
-                "signed decision lane has no gate decisions"
+                "signed decision summary differs from canonical artifact"
             )
-        for gate in gate_decisions:
-            gate_value = _require_mapping(
-                gate,
-                field="signed_decision.document.gate",
+        if summary.get("decision_document") != canonical_document:
+            raise Increment5ContractError(
+                "signed decision document differs from canonical artifact"
             )
-            gate_count += 1
-            if gate_value.get("result") != "PASS":
-                raise Increment5ContractError(
-                    "signed PASS decision contains a non-PASS gate"
-                )
-    if gate_count == 0:
-        raise Increment5ContractError(
-            "signed PASS decision contains no gate evidence"
-        )
-    return document_digest, decision_identity, test_count, skip_count
-
+    return (
+        canonical_document,
+        document_digest,
+        decision_identity,
+        test_count,
+        skip_count,
+    )
 
 def _signed_decision_value(
     *,
@@ -894,42 +938,35 @@ def _signed_decision_value(
     qualified_main_tree_sha: str,
     sdlc_attempt: WorkflowAttemptEvidence,
 ) -> dict[str, object]:
-    document_copy = deepcopy(dict(document))
-    context = _require_mapping(
-        document_copy.get("context"),
-        field="signed_decision.document.context",
-    )
-    totals = _require_mapping(
-        document_copy.get("totals"),
-        field="signed_decision.document.totals",
-    )
-    summary: dict[str, object] = {
-        "workflow_run_id": sdlc_attempt.run_id,
-        "workflow_run_attempt": sdlc_attempt.run_attempt,
-        "decision_document_digest": digest_bytes(
-            canonical_json_bytes(document_copy)
-        ),
-        "decision_identity": document_copy.get("decision_identity"),
-        "result": document_copy.get("result"),
-        "result_reason": document_copy.get("result_reason"),
-        "evaluated_sha": context.get("evaluated_sha"),
-        "evaluated_tree_sha": context.get("evaluated_tree_sha"),
-        "test_count": totals.get("test_count"),
-        "skip_count": totals.get("skip_count"),
-        "required_skip_count": totals.get("required_skip_count"),
-        "failure_count": totals.get("failure_count"),
-        "error_count": totals.get("error_count"),
-        "decision_document": document_copy,
-    }
-    _validate_decision_document(
-        summary=summary,
-        document=document_copy,
+    (
+        canonical_document,
+        document_digest,
+        decision_identity,
+        test_count,
+        skip_count,
+    ) = _validate_decision_document(
+        summary=None,
+        document=document,
         qualified_main_commit_sha=qualified_main_commit_sha,
         qualified_main_tree_sha=qualified_main_tree_sha,
         sdlc_attempt=sdlc_attempt,
     )
-    return summary
-
+    return {
+        "workflow_run_id": sdlc_attempt.run_id,
+        "workflow_run_attempt": sdlc_attempt.run_attempt,
+        "decision_document_digest": document_digest,
+        "decision_identity": decision_identity,
+        "result": "PASS",
+        "result_reason": "PASS:decision",
+        "evaluated_sha": qualified_main_commit_sha,
+        "evaluated_tree_sha": qualified_main_tree_sha,
+        "test_count": test_count,
+        "skip_count": skip_count,
+        "required_skip_count": 0,
+        "failure_count": 0,
+        "error_count": 0,
+        "decision_document": canonical_document,
+    }
 
 def main_qualification_record_value(
     *,
@@ -1111,6 +1148,7 @@ def load_increment5a_main_qualification_record(
         field="main_qualification.signed_decision.decision_document",
     )
     (
+        _canonical_document,
         decision_document_digest,
         decision_identity,
         test_count,

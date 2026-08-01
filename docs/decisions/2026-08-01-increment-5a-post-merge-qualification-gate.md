@@ -19,10 +19,13 @@ merged `main` commit has passed all six permanent workflows. It binds:
 - the exact merged main commit and tree;
 - the exact owner-approval record digest;
 - the immutable proposal and hardened qualification-profile schema;
-- distinct CI, Authority A2a, Authority A2b, Projection B1, authenticated
-  Projection B2/B3/C1 Neo4j and signed SDLC workflow run IDs;
-- the signed SDLC decision digest and zero-failure, zero-error,
-  zero-required-skip totals; and
+- distinct successful CI, Authority A2a, Authority A2b, Projection B1 and
+  authenticated Projection B2/B3/C1 Neo4j `push` attempts on exact main;
+- one distinct successful SDLC Evidence Shadow `workflow_dispatch` attempt
+  on the same exact main commit and tree;
+- the complete signed SDLC decision validated through the canonical
+  repository parser, with zero-failure, zero-error and zero-required-skip
+  totals; and
 - one canonical UTC qualification time.
 
 Before that record is admitted, its digest is `None`, its path must be absent,

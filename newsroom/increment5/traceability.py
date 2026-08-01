@@ -341,19 +341,65 @@ def _decision_for(requirement_id: str) -> Increment5DecisionTrace:
     return Increment5DecisionTrace.BOUND_BY_5A
 
 
+_DOPS_ANCHOR_BY_REQUIREMENT: dict[str, str] = {
+    "DOPS-001": _DECISION_PACKET + "#/payload/components",
+    "DOPS-002": _DECISION_PACKET + "#/payload/budgets",
+    "DOPS-007": _DECISION_PACKET + "#/payload/authority_boundaries",
+    "DOPS-010": _DECISION_PACKET + "#/payload/components",
+    "DOPS-011": _DECISION_PACKET + "#/payload/components",
+    "DOPS-012": _DECISION_PACKET + "#/payload/components",
+    "DOPS-013": _DECISION_PACKET + "#/payload/components",
+    "DOPS-014": _DECISION_PACKET + "#/payload/components",
+    "DOPS-015": _DECISION_PACKET + "#/payload/components",
+    "DOPS-016": _DECISION_PACKET + "#/payload/components",
+    "DOPS-026": _DECISION_PACKET + "#/payload/pr_boundaries/5C",
+    "DOPS-030": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-031": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-032": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-033": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-034": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-035": _DECISION_PACKET + "#/payload/pr_boundaries/5E",
+    "DOPS-036": _DECISION_PACKET + "#/payload/pr_boundaries/5E",
+    "DOPS-037": _DECISION_PACKET + "#/payload/components",
+    "DOPS-040": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-043": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-044": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-045": "issue:#254:deferred:capacity-qualification-evidence",
+    "DOPS-046": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-047": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-048": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-050": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-052": _DECISION_PACKET + "#/payload/rollback",
+    "DOPS-054": "issue:#254:deferred:backup-restore-rebuild-evidence",
+    "DOPS-060": _DECISION_PACKET + "#/payload/pr_boundaries/5C",
+    "DOPS-064": "issue:#254:deferred:owner-escalation-runbook-evidence",
+    "DOPS-067": _DECISION_PACKET + "#/payload/components",
+    "DOPS-070": _DECISION_PACKET + "#/payload/components",
+    "DOPS-072": _DECISION_PACKET + "#/payload/rollback",
+    "DOPS-073": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
+    "DOPS-074": _DECISION_PACKET + "#/payload/rights_matrix",
+    "DOPS-075": "issue:#254:deferred:operational-admission-evidence",
+    "DOPS-076": _DECISION_PACKET + "#/payload/runtime_authority",
+}
+_DOPS_REQUIREMENTS = frozenset(
+    item for item in _ALL_REQUIREMENTS if item.startswith("DOPS-")
+)
+if frozenset(_DOPS_ANCHOR_BY_REQUIREMENT) != _DOPS_REQUIREMENTS:
+    raise RuntimeError("Increment 5 DOPS anchors are incomplete")
+
+
 def _anchor_for(requirement_id: str) -> str:
+    if requirement_id.startswith("DOPS-"):
+        return _DOPS_ANCHOR_BY_REQUIREMENT[requirement_id]
     if requirement_id.startswith("DEVAL-"):
         suffix = "evaluation_plan"
     elif requirement_id.startswith("TRI-"):
         suffix = "components"
-    elif requirement_id.startswith("DOPS-"):
-        suffix = "budgets"
     elif requirement_id.startswith("GRPROD-"):
         suffix = "pr_boundaries"
     else:
         suffix = "required_modes"
     return f"{_DECISION_PACKET}#/payload/{suffix}"
-
 
 def _row(requirement_id: str) -> Increment5TraceabilityRow:
     delivery = _delivery_for(requirement_id)

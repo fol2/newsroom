@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -37,16 +38,41 @@ from newsroom.increment5 import (
     main_qualification_record_value,
     repository_main_qualification_record,
 )
+from newsroom.increment5.main_qualification import (
+    MAIN_QUALIFICATION_WORKFLOW_EVENTS,
+)
+from newsroom.tests.test_sdlc_shadow_decision import (
+    _Route,
+    _lane as _sdlc_lane,
+    _patch_lane_validator,
+)
+from scripts.sdlc.artifact_envelope import GithubRunContext
+from scripts.sdlc.contracts import load_contract
+from scripts.sdlc.shadow_decision import aggregate_shadow_decision
+from scripts.sdlc.workflow_event import WorkflowEvent
 
 
 _APPROVAL_DIGEST = "sha256:" + "a" * 64
 _COMMIT_SHA = "1" * 40
 _TREE_SHA = "2" * 40
+_BASE_SHA = "3" * 40
+_BASE_TREE_SHA = "4" * 40
 _QUALIFIED_AT = UtcTimestamp.parse("2042-03-12T12:30:00.000000Z")
 _CREATED_AT = "2042-03-12T12:00:00.000000Z"
 _STARTED_AT = "2042-03-12T12:00:01.000000Z"
 _UPDATED_AT = "2042-03-12T12:20:00.000000Z"
-_DECISION_IDENTITY = "sha256:" + "b" * 64
+_WORKFLOW_FILE_BY_KEY = {
+    "CI": "ci.yml",
+    "AUTHORITY_A2A": "authority-a2a.yml",
+    "AUTHORITY_A2B": "authority-a2b.yml",
+    "PROJECTION_B1": "projection-b1.yml",
+    "PROJECTION_B2_B3_C1_NEO4J": "projection-b2-neo4j.yml",
+    "SDLC_EVIDENCE_SHADOW": "evidence.yml",
+}
+
+
+def _contract():
+    return load_contract(Path(__file__).resolve().parents[2])
 
 
 def _workflow_attempts() -> dict[str, dict[str, object]]:
@@ -62,7 +88,7 @@ def _workflow_attempts() -> dict[str, dict[str, object]]:
             "run_number": 2000 + index,
             "repository": MAIN_QUALIFICATION_REPOSITORY,
             "repository_id": MAIN_QUALIFICATION_REPOSITORY_ID,
-            "event": "push",
+            "event": MAIN_QUALIFICATION_WORKFLOW_EVENTS[key],
             "ref": MAIN_QUALIFICATION_REF,
             "head_branch": "main",
             "head_sha": _COMMIT_SHA,
@@ -70,7 +96,7 @@ def _workflow_attempts() -> dict[str, dict[str, object]]:
             "workflow_sha": _COMMIT_SHA,
             "workflow_ref": (
                 f"{MAIN_QUALIFICATION_REPOSITORY}/.github/workflows/"
-                f"{key.lower()}.yml@{MAIN_QUALIFICATION_REF}"
+                f"{_WORKFLOW_FILE_BY_KEY[key]}@{MAIN_QUALIFICATION_REF}"
             ),
             "status": "completed",
             "conclusion": "success",
@@ -90,7 +116,88 @@ def _workflow_attempts() -> dict[str, dict[str, object]]:
     return attempts
 
 
-def _decision_document(
+def _canonical_decision_document(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    attempts: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
+    selected = _workflow_attempts() if attempts is None else attempts
+    sdlc = selected["SDLC_EVIDENCE_SHADOW"]
+    route = _Route(
+        risk_tier="R1_LOCAL_CODE",
+        service_required=False,
+        owner_authority_required=False,
+        base_sha=_BASE_SHA,
+        base_tree_sha=_BASE_TREE_SHA,
+    )
+    core = _sdlc_lane("core", route)
+    core = replace(
+        core,
+        receipt=replace(
+            core.receipt,
+            metadata=replace(
+                core.receipt.metadata,
+                run_id=int(sdlc["run_id"]),
+            ),
+            run_attempt=int(sdlc["run_attempt"]),
+            workflow_ref=str(sdlc["workflow_ref"]),
+            workflow_sha=_COMMIT_SHA,
+            event_name="workflow_dispatch",
+            event_sha=_COMMIT_SHA,
+            evaluated_sha=_COMMIT_SHA,
+            evaluated_tree_sha=_TREE_SHA,
+            ref=MAIN_QUALIFICATION_REF,
+        ),
+        replay=replace(
+            core.replay,
+            run_id=int(sdlc["run_id"]),
+            run_attempt=int(sdlc["run_attempt"]),
+            head_sha=_COMMIT_SHA,
+        ),
+        run_event="workflow_dispatch",
+    )
+    _patch_lane_validator(monkeypatch, core)
+
+    context = GithubRunContext(
+        repository=MAIN_QUALIFICATION_REPOSITORY,
+        repository_id=MAIN_QUALIFICATION_REPOSITORY_ID,
+        head_repository=MAIN_QUALIFICATION_REPOSITORY,
+        head_repository_id=MAIN_QUALIFICATION_REPOSITORY_ID,
+        run_id=int(sdlc["run_id"]),
+        run_attempt=int(sdlc["run_attempt"]),
+        job_id="decision",
+        workflow_ref=str(sdlc["workflow_ref"]),
+        workflow_sha=_COMMIT_SHA,
+        event_name="workflow_dispatch",
+        event_sha=_COMMIT_SHA,
+        evaluated_sha=_COMMIT_SHA,
+        evaluated_tree_sha=_TREE_SHA,
+        ref=MAIN_QUALIFICATION_REF,
+        runner_environment="github-hosted",
+    )
+    event = WorkflowEvent(
+        repository=MAIN_QUALIFICATION_REPOSITORY,
+        repository_id=MAIN_QUALIFICATION_REPOSITORY_ID,
+        head_repository=MAIN_QUALIFICATION_REPOSITORY,
+        head_repository_id=MAIN_QUALIFICATION_REPOSITORY_ID,
+        event_name="workflow_dispatch",
+        event_sha=_COMMIT_SHA,
+        base_sha=_BASE_SHA,
+        base_tree_sha=_BASE_TREE_SHA,
+        evaluated_sha=_COMMIT_SHA,
+        evaluated_tree_sha=_TREE_SHA,
+        ref=MAIN_QUALIFICATION_REF,
+    )
+    return aggregate_shadow_decision(
+        context=context,
+        event=event,
+        core=core,  # type: ignore[arg-type]
+        service=None,
+        contract=_contract(),
+    ).as_dict()
+
+
+def _fabricated_minimal_pass(
     *,
     attempts: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
@@ -98,13 +205,13 @@ def _decision_document(
     sdlc = selected["SDLC_EVIDENCE_SHADOW"]
     return {
         "schema_version": "newsroom.sdlc.shadow-decision.v1",
-        "decision_identity": _DECISION_IDENTITY,
+        "decision_identity": "sha256:" + "b" * 64,
         "result": "PASS",
         "result_reason": "PASS:decision",
         "first_failure": None,
         "context": {
             "repository": MAIN_QUALIFICATION_REPOSITORY,
-            "event_name": "push",
+            "event_name": "workflow_dispatch",
             "ref": MAIN_QUALIFICATION_REF,
             "evaluated_sha": _COMMIT_SHA,
             "evaluated_tree_sha": _TREE_SHA,
@@ -115,7 +222,7 @@ def _decision_document(
         },
         "event": {
             "repository": MAIN_QUALIFICATION_REPOSITORY,
-            "event_name": "push",
+            "event_name": "workflow_dispatch",
             "ref": MAIN_QUALIFICATION_REF,
             "evaluated_sha": _COMMIT_SHA,
             "evaluated_tree_sha": _TREE_SHA,
@@ -125,14 +232,8 @@ def _decision_document(
                 "lane_id": "core",
                 "receipt": {
                     "gate_decisions": [
-                        {
-                            "gate_id": "core-deterministic",
-                            "result": "PASS",
-                        },
-                        {
-                            "gate_id": "source-integrity",
-                            "result": "PASS",
-                        },
+                        {"gate_id": "core-deterministic", "result": "PASS"},
+                        {"gate_id": "source-integrity", "result": "PASS"},
                     ]
                 },
             }
@@ -147,7 +248,7 @@ def _decision_document(
     }
 
 
-def _value() -> dict[str, object]:
+def _value(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     attempts = _workflow_attempts()
     return main_qualification_record_value(
         proposal=INCREMENT_5A_DECISION_PACKET,
@@ -156,7 +257,10 @@ def _value() -> dict[str, object]:
         qualified_main_tree_sha=_TREE_SHA,
         qualified_at=_QUALIFIED_AT,
         workflow_attempts=attempts,
-        decision_document=_decision_document(attempts=attempts),
+        decision_document=_canonical_decision_document(
+            monkeypatch,
+            attempts=attempts,
+        ),
     )
 
 
@@ -173,6 +277,13 @@ def test_main_qualification_schema_artifact_is_canonical() -> None:
     assert MAIN_QUALIFICATION_RECORD_SCHEMA["properties"]["branch"] == {
         "const": "main"
     }
+    workflow_properties = MAIN_QUALIFICATION_RECORD_SCHEMA["properties"][
+        "workflow_attempts"
+    ]["properties"]
+    for key in MAIN_QUALIFICATION_WORKFLOW_NAMES:
+        assert workflow_properties[key]["properties"]["event"] == {
+            "const": MAIN_QUALIFICATION_WORKFLOW_EVENTS[key]
+        }
 
 
 def test_current_branch_has_no_post_merge_implementation_admission() -> None:
@@ -187,13 +298,17 @@ def test_current_branch_has_no_post_merge_implementation_admission() -> None:
     assert INCREMENT_5A_DECISION_AUTHORITY.qualified_main_commit_sha is None
 
 
-def test_main_qualification_record_binds_attempts_and_signed_pass(
+def test_main_qualification_record_binds_attempts_and_canonical_signed_pass(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    value = _value(monkeypatch)
     record = load_increment5a_main_qualification_record(
-        _write(tmp_path, _value()),
+        _write(tmp_path, value),
         approval_record_digest=_APPROVAL_DIGEST,
     )
+    signed = value["signed_decision"]
+    assert isinstance(signed, dict)
     assert record.qualified_main_commit_sha == _COMMIT_SHA
     assert record.qualified_main_tree_sha == _TREE_SHA
     assert record.qualified_at == _QUALIFIED_AT
@@ -201,28 +316,30 @@ def test_main_qualification_record_binds_attempts_and_signed_pass(
     assert tuple(record.workflow_attempt_by_name) == (
         MAIN_QUALIFICATION_WORKFLOW_NAMES
     )
-    assert record.decision_identity == _DECISION_IDENTITY
-    assert record.test_count == 1920
-    assert record.skip_count == 38
+    assert record.decision_identity == signed["decision_identity"]
+    assert record.test_count == signed["test_count"]
+    assert record.skip_count == signed["skip_count"]
 
 
 def test_main_qualification_record_rejects_wrong_approval(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with pytest.raises(
         Increment5ContractError,
         match="approval digest differs",
     ):
         load_increment5a_main_qualification_record(
-            _write(tmp_path, _value()),
+            _write(tmp_path, _value(monkeypatch)),
             approval_record_digest="sha256:" + "c" * 64,
         )
 
 
 def test_main_qualification_record_rejects_wrong_proposal(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    value = _value()
+    value = _value(monkeypatch)
     proposal = value["proposal"]
     assert isinstance(proposal, dict)
     proposal["payload_digest"] = "sha256:" + "c" * 64
@@ -238,8 +355,9 @@ def test_main_qualification_record_rejects_wrong_proposal(
 
 def test_main_qualification_record_rejects_incomplete_or_reused_attempts(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    missing = _value()
+    missing = _value(monkeypatch)
     attempts = missing["workflow_attempts"]
     assert isinstance(attempts, dict)
     attempts.pop("CI")
@@ -267,7 +385,10 @@ def test_main_qualification_record_rejects_incomplete_or_reused_attempts(
             qualified_main_tree_sha=_TREE_SHA,
             qualified_at=_QUALIFIED_AT,
             workflow_attempts=reused,
-            decision_document=_decision_document(attempts=reused),
+            decision_document=_canonical_decision_document(
+                monkeypatch,
+                attempts=reused,
+            ),
         )
 
 
@@ -277,34 +398,74 @@ def test_main_qualification_record_rejects_incomplete_or_reused_attempts(
         ("head_sha", "3" * 40, "not bound to qualified main"),
         ("head_tree_sha", "3" * 40, "not bound to qualified main"),
         ("workflow_sha", "3" * 40, "not bound to qualified main"),
-        ("conclusion", "failure", "schema validation failed"),
-        ("event", "pull_request", "schema validation failed"),
-        ("ref", "refs/pull/255/merge", "schema validation failed"),
+        ("conclusion", "failure", "event|schema|successfully"),
+        ("ref", "refs/pull/255/merge", "ref differs"),
     ),
 )
 def test_workflow_attempts_must_be_successful_exact_main(
-    tmp_path: Path,
     field: str,
     replacement: str,
     message: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    value = _value()
-    attempts = value["workflow_attempts"]
-    assert isinstance(attempts, dict)
-    ci = attempts["CI"]
-    assert isinstance(ci, dict)
-    ci[field] = replacement
+    attempts = _workflow_attempts()
+    attempts["CI"][field] = replacement
     with pytest.raises(Increment5ContractError, match=message):
-        load_increment5a_main_qualification_record(
-            _write(tmp_path, value),
+        main_qualification_record_value(
+            proposal=INCREMENT_5A_DECISION_PACKET,
             approval_record_digest=_APPROVAL_DIGEST,
+            qualified_main_commit_sha=_COMMIT_SHA,
+            qualified_main_tree_sha=_TREE_SHA,
+            qualified_at=_QUALIFIED_AT,
+            workflow_attempts=attempts,
+            decision_document=_canonical_decision_document(monkeypatch),
+        )
+
+
+def test_workflow_events_are_specialised_and_truthful(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert MAIN_QUALIFICATION_WORKFLOW_EVENTS == {
+        "CI": "push",
+        "AUTHORITY_A2A": "push",
+        "AUTHORITY_A2B": "push",
+        "PROJECTION_B1": "push",
+        "PROJECTION_B2_B3_C1_NEO4J": "push",
+        "SDLC_EVIDENCE_SHADOW": "workflow_dispatch",
+    }
+
+    bad_sdlc = _workflow_attempts()
+    bad_sdlc["SDLC_EVIDENCE_SHADOW"]["event"] = "push"
+    with pytest.raises(Increment5ContractError, match="event differs"):
+        main_qualification_record_value(
+            proposal=INCREMENT_5A_DECISION_PACKET,
+            approval_record_digest=_APPROVAL_DIGEST,
+            qualified_main_commit_sha=_COMMIT_SHA,
+            qualified_main_tree_sha=_TREE_SHA,
+            qualified_at=_QUALIFIED_AT,
+            workflow_attempts=bad_sdlc,
+            decision_document=_canonical_decision_document(monkeypatch),
+        )
+
+    bad_ci = _workflow_attempts()
+    bad_ci["CI"]["event"] = "workflow_dispatch"
+    with pytest.raises(Increment5ContractError, match="event differs"):
+        main_qualification_record_value(
+            proposal=INCREMENT_5A_DECISION_PACKET,
+            approval_record_digest=_APPROVAL_DIGEST,
+            qualified_main_commit_sha=_COMMIT_SHA,
+            qualified_main_tree_sha=_TREE_SHA,
+            qualified_at=_QUALIFIED_AT,
+            workflow_attempts=bad_ci,
+            decision_document=_canonical_decision_document(monkeypatch),
         )
 
 
 def test_main_qualification_record_rejects_noncanonical_time(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    value = _value()
+    value = _value(monkeypatch)
     value["qualified_at"] = "2042-03-12T12:30:00Z"
     with pytest.raises(
         Increment5ContractError,
@@ -316,43 +477,92 @@ def test_main_qualification_record_rejects_noncanonical_time(
         )
 
 
+def test_fabricated_minimal_pass_document_is_rejected() -> None:
+    attempts = _workflow_attempts()
+    with pytest.raises(
+        Increment5ContractError,
+        match="canonical SDLC evidence",
+    ):
+        main_qualification_record_value(
+            proposal=INCREMENT_5A_DECISION_PACKET,
+            approval_record_digest=_APPROVAL_DIGEST,
+            qualified_main_commit_sha=_COMMIT_SHA,
+            qualified_main_tree_sha=_TREE_SHA,
+            qualified_at=_QUALIFIED_AT,
+            workflow_attempts=attempts,
+            decision_document=_fabricated_minimal_pass(attempts=attempts),
+        )
+
+
 @pytest.mark.parametrize(
-    ("field", "replacement", "message"),
+    "mutation",
     (
-        ("result", "BUDGET_EXCEEDED", "result is not PASS"),
-        ("result_reason", "BUDGET_EXCEEDED:decision", "reason is not PASS"),
-        ("first_failure", {"gate_id": "core"}, "first failure"),
+        "fake_totals",
+        "missing_context",
+        "arbitrary_identity",
     ),
 )
-def test_signed_decision_must_be_pass(
-    tmp_path: Path,
-    field: str,
-    replacement: object,
-    message: str,
+def test_canonical_sdlc_document_rejects_fabricated_claims(
+    mutation: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    value = _value()
-    signed = value["signed_decision"]
-    assert isinstance(signed, dict)
-    document = signed["decision_document"]
-    assert isinstance(document, dict)
-    document[field] = replacement
-    signed["decision_document_digest"] = digest_bytes(
-        canonical_json_bytes(document)
-    )
-    with pytest.raises(Increment5ContractError, match=message):
-        load_increment5a_main_qualification_record(
-            _write(tmp_path, value),
+    attempts = _workflow_attempts()
+    document = _canonical_decision_document(monkeypatch, attempts=attempts)
+    if mutation == "fake_totals":
+        totals = document["totals"]
+        assert isinstance(totals, dict)
+        totals["test_count"] = int(totals["test_count"]) + 1
+    elif mutation == "missing_context":
+        document.pop("context")
+    else:
+        document["decision_identity"] = "sha256:" + "c" * 64
+
+    with pytest.raises(
+        Increment5ContractError,
+        match="canonical SDLC evidence",
+    ):
+        main_qualification_record_value(
+            proposal=INCREMENT_5A_DECISION_PACKET,
             approval_record_digest=_APPROVAL_DIGEST,
+            qualified_main_commit_sha=_COMMIT_SHA,
+            qualified_main_tree_sha=_TREE_SHA,
+            qualified_at=_QUALIFIED_AT,
+            workflow_attempts=attempts,
+            decision_document=document,
+        )
+
+
+def test_invalid_lane_receipt_is_rejected() -> None:
+    attempts = _workflow_attempts()
+    document = _fabricated_minimal_pass(attempts=attempts)
+    lanes = document["lanes"]
+    assert isinstance(lanes, list)
+    lane = lanes[0]
+    assert isinstance(lane, dict)
+    lane["receipt"] = {"gate_decisions": []}
+    with pytest.raises(
+        Increment5ContractError,
+        match="canonical SDLC evidence",
+    ):
+        main_qualification_record_value(
+            proposal=INCREMENT_5A_DECISION_PACKET,
+            approval_record_digest=_APPROVAL_DIGEST,
+            qualified_main_commit_sha=_COMMIT_SHA,
+            qualified_main_tree_sha=_TREE_SHA,
+            qualified_at=_QUALIFIED_AT,
+            workflow_attempts=attempts,
+            decision_document=document,
         )
 
 
 def test_signed_decision_summary_must_match_canonical_document(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    value = _value()
+    value = _value(monkeypatch)
     signed = value["signed_decision"]
     assert isinstance(signed, dict)
-    signed["test_count"] = 1919
+    signed["test_count"] = int(signed["test_count"]) + 1
     with pytest.raises(
         Increment5ContractError,
         match="summary differs",
@@ -365,8 +575,9 @@ def test_signed_decision_summary_must_match_canonical_document(
 
 def test_signed_decision_document_digest_is_exact(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    value = _value()
+    value = _value(monkeypatch)
     signed = value["signed_decision"]
     assert isinstance(signed, dict)
     signed["decision_document_digest"] = "sha256:" + "c" * 64

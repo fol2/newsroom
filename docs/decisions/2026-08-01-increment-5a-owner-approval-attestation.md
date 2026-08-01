@@ -76,11 +76,10 @@ author or using another issue is not accepted.
 
 ## Approval effect
 
-An admitted record authorizes only:
-
-- implementation of issues #251–#254 under the exact bound contracts; and
-- production-equivalent qualification under the pre-registered Evaluation
-  Plan.
+An admitted owner record authorizes only production-equivalent
+qualification under the pre-registered Evaluation Plan. It does not
+authorize implementation of #251–#254. That authority can exist only in
+the separately pinned post-merge main-admission record.
 
 It does not authorize shadow, canary, production activation, publication,
 public effect, live-source execution, external embedding API calls, provider

@@ -99,7 +99,10 @@ def test_traceability_is_unique_typed_and_uses_admitted_issue_boundaries() -> No
         assert isinstance(row.decision_trace, Increment5DecisionTrace)
         assert isinstance(row.delivery_trace, Increment5DeliveryTrace)
         assert row.delivery_issue in {144, 250, 251, 252, 253, 254}
-        assert row.decision_anchor.startswith("newsroom/increment5/data/")
+        assert (
+            row.decision_anchor.startswith("newsroom/increment5/data/")
+            or row.decision_anchor.startswith("issue:#254:deferred:")
+        )
         assert row.verification_node.startswith("newsroom/tests/")
 
 
@@ -175,6 +178,75 @@ def test_traceability_delivery_distribution_remains_truthful() -> None:
     assert counts[Increment5DeliveryTrace.DEFERRED_TO_5E] == 41
     assert counts[Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT] == 4
     assert counts[Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION] == 1
+
+
+def test_dops_decision_anchors_are_individual_and_truthful() -> None:
+    anchors = {
+        requirement_id: INCREMENT5_TRACEABILITY_BY_REQUIREMENT[
+            requirement_id
+        ].decision_anchor
+        for requirement_id in _EXPECTED_DOPS
+    }
+    packet = (
+        "newsroom/increment5/data/"
+        "increment5a_production_retrieval_decision_v1.json"
+    )
+    expected = {
+        "DOPS-001": packet + "#/payload/components",
+        "DOPS-002": packet + "#/payload/budgets",
+        "DOPS-007": packet + "#/payload/authority_boundaries",
+        "DOPS-010": packet + "#/payload/components",
+        "DOPS-011": packet + "#/payload/components",
+        "DOPS-012": packet + "#/payload/components",
+        "DOPS-013": packet + "#/payload/components",
+        "DOPS-014": packet + "#/payload/components",
+        "DOPS-015": packet + "#/payload/components",
+        "DOPS-016": packet + "#/payload/components",
+        "DOPS-026": packet + "#/payload/pr_boundaries/5C",
+        "DOPS-030": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-031": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-032": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-033": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-034": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-035": packet + "#/payload/pr_boundaries/5E",
+        "DOPS-036": packet + "#/payload/pr_boundaries/5E",
+        "DOPS-037": packet + "#/payload/components",
+        "DOPS-040": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-043": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-044": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-045": (
+            "issue:#254:deferred:capacity-qualification-evidence"
+        ),
+        "DOPS-046": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-047": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-048": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-050": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-052": packet + "#/payload/rollback",
+        "DOPS-054": (
+            "issue:#254:deferred:backup-restore-rebuild-evidence"
+        ),
+        "DOPS-060": packet + "#/payload/pr_boundaries/5C",
+        "DOPS-064": (
+            "issue:#254:deferred:owner-escalation-runbook-evidence"
+        ),
+        "DOPS-067": packet + "#/payload/components",
+        "DOPS-070": packet + "#/payload/components",
+        "DOPS-072": packet + "#/payload/rollback",
+        "DOPS-073": packet + "#/payload/pr_boundaries/5D",
+        "DOPS-074": packet + "#/payload/rights_matrix",
+        "DOPS-075": (
+            "issue:#254:deferred:operational-admission-evidence"
+        ),
+        "DOPS-076": packet + "#/payload/runtime_authority",
+    }
+    assert anchors == expected
+    assert {
+        requirement_id
+        for requirement_id, anchor in anchors.items()
+        if anchor.endswith("#/payload/budgets")
+    } == {"DOPS-002"}
+    assert anchors["DOPS-052"].endswith("#/payload/rollback")
+    assert anchors["DOPS-072"].endswith("#/payload/rollback")
 
 
 def test_increment5a_documents_are_present() -> None:

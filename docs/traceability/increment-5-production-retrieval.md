@@ -13,7 +13,7 @@ The table separates two independent facts:
 - **Decision trace** says whether 5A binds the requirement, inherits an already accepted authority, or remains blocked until owner approval.
 - **Delivery trace** says where executable implementation or evidence is actually delivered. A requirement bound in 5A is not falsely reported as a working retriever, tool, hydration path, runbook, completed qualification decision or actual-service result.
 
-Every row names the canonical decision JSON pointer, implementation symbol, verification node and exact issue boundary. Tests reject duplicate requirements, unknown issue boundaries, missing families, false graph-free or fake-production language, and changes to the expected delivery distribution.
+Every row names either a real canonical decision JSON pointer or an explicit #254 deferred-evidence anchor, plus its implementation symbol, verification node and exact issue boundary. Tests reject duplicate requirements, unknown issue boundaries, missing families, invented budget pointers, false graph-free or fake-production language, and changes to the expected delivery distribution.
 
 ## Coverage
 
