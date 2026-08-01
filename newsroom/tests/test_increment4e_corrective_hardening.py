@@ -7,8 +7,10 @@ import sqlite3
 import pytest
 
 import newsroom.authority._increment4_neo4j_boundary as increment4_boundary_module
+import newsroom.authority._increment4_projection_store as projection_store_module
 from newsroom.authority import digest_canonical
 from newsroom.entities.types import EntityKind
+from newsroom.increment4 import sorted_snapshot
 from newsroom.projection import (
     ProjectionDeliveryOutcome,
     ProjectionDeliveryRequest,
@@ -16,6 +18,7 @@ from newsroom.projection import (
     ProjectionGapId,
     ProjectionGapResolutionRequest,
     ProjectionGenerationCreateRequest,
+    ProjectionGenerationId,
     ProjectionGenerationPromotionRequest,
     ProjectionGenerationState,
     ProjectionGenerationTransitionRequest,
@@ -26,6 +29,7 @@ from newsroom.projection.neo4j import Neo4jWriteError
 
 from .extraction_4a_helpers import extraction_proof
 from .increment4e_helpers import (
+    INCREMENT4_PROJECTION_SCOPES,
     admitted_increment4_fixture,
     open_increment4_neo4j_system,
 )
@@ -34,6 +38,9 @@ from .test_increment4e_neo4j_controller import GENERATION_1, GENERATION_2, _requ
 
 
 _FAMILY_ID = "graph.increment4.admitted"
+_MISSING_GENERATION = ProjectionGenerationId.parse(
+    "00000000-0000-4000-8000-000000005098"
+)
 
 
 def _fabricated_snapshot(snapshot, kind: str):
@@ -127,6 +134,50 @@ def test_increment4_mapper_receives_fresh_authority_owned_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, snapshot = admitted_increment4_fixture(tmp_path)
+    target = snapshot.entities[0]
+    revoked_alias_id = target.aliases[0].alias_id
+    expected = sorted_snapshot(
+        entities=tuple(
+            replace(
+                item,
+                aliases=tuple(
+                    alias
+                    for alias in item.aliases
+                    if alias.alias_id != revoked_alias_id
+                ),
+            )
+            if item.entity.entity_id == target.entity.entity_id
+            else item
+            for item in snapshot.entities
+        ),
+        relations=snapshot.relations,
+        events=snapshot.events,
+        through_ledger_seq=snapshot.through_ledger_seq,
+    )
+
+    store_type = projection_store_module._Increment4ProjectionAuthorityStore
+    original_alias_from_row = store_type._alias_from_row
+    original_require_mention_current = store_type._require_mention_current
+    deny_next_alias_use = {"value": False}
+
+    def alias_from_row(self, conn, row):
+        alias = original_alias_from_row(self, conn, row)
+        deny_next_alias_use["value"] = alias.alias_id == revoked_alias_id
+        return alias
+
+    def require_mention_current(self, conn, mention):
+        if deny_next_alias_use["value"]:
+            deny_next_alias_use["value"] = False
+            raise PermissionError("fixed independently revoked alias evidence")
+        return original_require_mention_current(self, conn, mention)
+
+    monkeypatch.setattr(store_type, "_alias_from_row", alias_from_row)
+    monkeypatch.setattr(
+        store_type,
+        "_require_mention_current",
+        require_mention_current,
+    )
+
     adapter = MemoryNeo4jAdapter()
     captured = []
     build = increment4_boundary_module.build_increment4_admitted_batches
@@ -141,13 +192,41 @@ def test_increment4_mapper_receives_fresh_authority_owned_snapshot(
         capture,
     )
     with open_increment4_neo4j_system(state, adapter) as system:
-        system.increment4.build_and_promote(
-            _request(GENERATION_1, snapshot, key="increment4-authority-owned-v1"),
+        result = system.increment4.build_and_promote(
+            _request(
+                GENERATION_1,
+                expected,
+                key="increment4-authority-owned-alias-rights-v1",
+            ),
             proof=extraction_proof(),
         )
 
-    assert captured == [snapshot]
-    assert captured[0] is not snapshot
+    assert result.generation.state is ProjectionGenerationState.ACTIVE
+    assert captured == [expected]
+    assert captured[0] is not expected
+    entity_nodes = {
+        node.canonical_id
+        for batch in adapter.deliveries.values()
+        for node in batch.nodes
+        if node.identity_source == "CANONICAL_ENTITY_ID"
+    }
+    alias_nodes = {
+        node.canonical_id
+        for batch in adapter.deliveries.values()
+        for node in batch.nodes
+        if node.identity_source == "ENTITY_ALIAS_ID"
+    }
+    relation_nodes = {
+        node.canonical_id
+        for batch in adapter.deliveries.values()
+        for node in batch.nodes
+        if node.identity_source == "EDITORIAL_RELATION_ASSERTION_ID"
+    }
+    assert len(entity_nodes) == len(snapshot.entities)
+    assert len(alias_nodes) == sum(
+        len(item.aliases) for item in snapshot.entities
+    ) - 1
+    assert relation_nodes
 
 
 def test_increment4_failed_replacement_keeps_prior_active_and_serving(
@@ -294,3 +373,124 @@ def test_increment4_family_rejects_every_generic_projection_mutation(
     assert after.generation == built.generation
     assert adapter.apply_count == before_apply
     assert adapter.cleanup_count == before_cleanup
+
+    restricted_scopes = INCREMENT4_PROJECTION_SCOPES - {
+        "authority.projection.manage",
+        "authority.projection.write",
+    }
+    restricted_adapter = MemoryNeo4jAdapter()
+    with open_increment4_neo4j_system(
+        state,
+        restricted_adapter,
+        scopes=restricted_scopes,
+    ) as system:
+        messages: dict[str, list[str]] = {}
+        for generation_id in (GENERATION_1, _MISSING_GENERATION):
+            denied_operations = (
+                (
+                    "transition",
+                    lambda generation_id=generation_id: (
+                        system.projections.transition_generation(
+                            ProjectionGenerationTransitionRequest(
+                                generation_id=generation_id,
+                                expected_authority_version=version,
+                                target_state=ProjectionGenerationState.FAILED,
+                                reason_code="DENIED_TRANSITION",
+                                idempotency_key=(
+                                    f"denied-transition-{generation_id}"
+                                ),
+                            ),
+                            proof=extraction_proof(),
+                        )
+                    ),
+                ),
+                (
+                    "delivery",
+                    lambda generation_id=generation_id: (
+                        system.projections.record_delivery(
+                            ProjectionDeliveryRequest(
+                                generation_id=generation_id,
+                                expected_authority_version=version,
+                                ledger_seq=1,
+                                outcome=(
+                                    ProjectionDeliveryOutcome.IGNORED_OPTIONAL
+                                ),
+                                idempotency_key=(
+                                    f"denied-delivery-{generation_id}"
+                                ),
+                            ),
+                            proof=extraction_proof(),
+                        )
+                    ),
+                ),
+                (
+                    "gap",
+                    lambda generation_id=generation_id: (
+                        system.projections.resolve_gap(
+                            ProjectionGapResolutionRequest(
+                                generation_id=generation_id,
+                                expected_authority_version=version,
+                                gap_id=ProjectionGapId.parse(
+                                    "00000000-0000-4000-8000-000000005099"
+                                ),
+                                reason_code="DENIED_GAP",
+                                idempotency_key=f"denied-gap-{generation_id}",
+                            ),
+                            proof=extraction_proof(),
+                        )
+                    ),
+                ),
+                (
+                    "promotion",
+                    lambda generation_id=generation_id: (
+                        system.projections.promote_generation(
+                            ProjectionGenerationPromotionRequest(
+                                generation_id=generation_id,
+                                expected_authority_version=version,
+                                checkpoint_ledger_seq=built.checkpoint_ledger_seq,
+                                validation_digest=(
+                                    built.validation.validation_digest
+                                ),
+                                reason_code="DENIED_PROMOTION",
+                                idempotency_key=(
+                                    f"denied-promotion-{generation_id}"
+                                ),
+                            ),
+                            proof=extraction_proof(),
+                        )
+                    ),
+                ),
+                (
+                    "validation",
+                    lambda generation_id=generation_id: (
+                        system.projections.validate_generation(
+                            ProjectionGenerationValidationRequest(
+                                generation_id=generation_id,
+                                expected_authority_version=version,
+                                checkpoint_ledger_seq=built.checkpoint_ledger_seq,
+                                service_compatibility_digest=(
+                                    built.validation.service_compatibility_digest
+                                ),
+                                projection_state_digest=(
+                                    built.validation.projection_state_digest
+                                ),
+                                reason_code="DENIED_VALIDATION",
+                                idempotency_key=(
+                                    f"denied-validation-{generation_id}"
+                                ),
+                            ),
+                            proof=extraction_proof(),
+                        )
+                    ),
+                ),
+            )
+            for operation_name, operation in denied_operations:
+                with pytest.raises(PermissionError) as error:
+                    operation()
+                messages.setdefault(operation_name, []).append(str(error.value))
+
+    assert all(len(values) == 2 for values in messages.values())
+    assert all(values[0] == values[1] for values in messages.values())
+    assert restricted_adapter.apply_count == 0
+    assert restricted_adapter.cleanup_count == 0
+    assert restricted_adapter.reconcile_count == 0
