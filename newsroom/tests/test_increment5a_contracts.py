@@ -18,6 +18,10 @@ from newsroom.increment5 import (
     Increment5ProfileError,
     PRODUCTION_PROFILE_SCHEMA_DIGEST,
     PRODUCTION_PROFILE_SCHEMA_PATH,
+    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,
+    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_PATH,
+    QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST,
+    QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_PATH,
     RetrievalComponentKind,
     RetrievalProfileKind,
     RuntimeAuthority,
@@ -85,22 +89,42 @@ def test_pending_packet_is_exact_zero_spend_and_fixture_only() -> None:
         "sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c"
     )
     assert packet.bundle.production_profile_schema_digest == (
-        PRODUCTION_PROFILE_SCHEMA_DIGEST
+        PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST
     )
     assert packet.bundle.fixture_replay_profile_schema_digest == (
         FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
     )
 
 
-def test_schema_artifacts_are_canonical_and_digest_bound() -> None:
+def test_schema_artifacts_are_canonical_digest_bound_and_unambiguous() -> None:
     for path, expected_digest in (
-        (PRODUCTION_PROFILE_SCHEMA_PATH, PRODUCTION_PROFILE_SCHEMA_DIGEST),
+        (
+            PROPOSAL_PRODUCTION_PROFILE_SCHEMA_PATH,
+            PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,
+        ),
+        (
+            QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_PATH,
+            QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST,
+        ),
         (FIXTURE_REPLAY_PROFILE_SCHEMA_PATH, FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST),
     ):
         data = path.read_bytes()
         value = json.loads(data.decode("utf-8"))
         assert data == canonical_json_bytes(value)
         assert digest_bytes(data) == expected_digest
+
+    assert PRODUCTION_PROFILE_SCHEMA_PATH == (
+        QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_PATH
+    )
+    assert PRODUCTION_PROFILE_SCHEMA_DIGEST == (
+        QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST
+    )
+    assert PRODUCTION_PROFILE_SCHEMA_PATH != (
+        PROPOSAL_PRODUCTION_PROFILE_SCHEMA_PATH
+    )
+    assert PRODUCTION_PROFILE_SCHEMA_DIGEST != (
+        PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST
+    )
 
 
 def test_exact_self_hosted_embedding_proposal_is_local_and_still_disabled() -> None:
