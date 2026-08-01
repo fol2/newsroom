@@ -18,6 +18,6 @@ The hardened effective schema digest is:
 
 The corresponding exact owner-statement body digest is:
 
-`sha256:600c6b43c645d8c26d234c7a29d325650ab164791cdde457ac96b55b1b99cacd`
+`sha256:665e146d420088a1a88e4946741bae187cd950e6e0eb733e103f2fcfda1fe37b`
 
 The immutable proposal payload, proposal record, proposal bundle, historical proposal schema and fixture-replay schema are unchanged. No owner approval record is admitted by this change, no model or vector is loaded, no external request is made, no provider credential is used, and no live-source, shadow, canary, publication or production activation occurs.

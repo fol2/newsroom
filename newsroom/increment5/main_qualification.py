@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -24,41 +25,143 @@ from .decision_validation import object_without_duplicate_names
 
 
 MAIN_QUALIFICATION_RECORD_SCHEMA_ID = (
-    "urn:newsroom:increment5a:main-qualification-record:v1"
+    "urn:newsroom:increment5a:main-qualification-record:v2"
 )
 MAIN_QUALIFICATION_RECORD_SCHEMA_VERSION = (
-    "increment5a-main-qualification-record-v1"
+    "increment5a-main-qualification-record-v2"
 )
 MAIN_QUALIFICATION_RECORD_ID = "increment5a-post-merge-main-qualification"
-MAIN_QUALIFICATION_RECORD_VERSION = "increment5a-main-qualification-v1"
+MAIN_QUALIFICATION_RECORD_VERSION = "increment5a-main-qualification-v2"
 MAIN_QUALIFICATION_SCOPE = "POST_MERGE_INCREMENT5_IMPLEMENTATION_ADMISSION"
+MAIN_QUALIFICATION_EFFECT = "IMPLEMENTATION_OF_ISSUES_251_254_ONLY"
+MAIN_QUALIFICATION_NON_EFFECTS = (
+    "CANARY",
+    "EXTERNAL_EMBEDDING_API_CALLS",
+    "LIVE_SOURCE_EXECUTION",
+    "PROTECTED_CONTENT_VECTORS",
+    "PROVIDER_SPENDING",
+    "PUBLICATION",
+    "PUBLIC_EFFECT",
+    "PRODUCTION_ACTIVATION",
+    "SHADOW",
+)
 MAIN_QUALIFICATION_REPOSITORY = "fol2/newsroom"
+MAIN_QUALIFICATION_REPOSITORY_ID = 1153895518
 MAIN_QUALIFICATION_BRANCH = "main"
+MAIN_QUALIFICATION_REF = "refs/heads/main"
 MAIN_QUALIFICATION_ISSUE_NUMBER = 250
 MAIN_QUALIFICATION_PULL_REQUEST_NUMBER = 255
-MAIN_QUALIFICATION_WORKFLOW_NAMES = (
-    "CI",
-    "AUTHORITY_A2A",
-    "AUTHORITY_A2B",
-    "PROJECTION_B1",
-    "PROJECTION_B2_B3_C1_NEO4J",
-    "SDLC_EVIDENCE_SHADOW",
-)
+MAIN_QUALIFICATION_WORKFLOW_SPECS: dict[str, tuple[int, str]] = {
+    "CI": (232327316, "CI"),
+    "AUTHORITY_A2A": (315268483, "Authority A2a"),
+    "AUTHORITY_A2B": (315287552, "Authority A2b"),
+    "PROJECTION_B1": (317445524, "Projection B1"),
+    "PROJECTION_B2_B3_C1_NEO4J": (
+        317681630,
+        "Projection B2/B3/C1 Neo4j",
+    ),
+    "SDLC_EVIDENCE_SHADOW": (318982302, "SDLC Evidence Shadow"),
+}
+MAIN_QUALIFICATION_WORKFLOW_NAMES = tuple(MAIN_QUALIFICATION_WORKFLOW_SPECS)
 MAIN_QUALIFICATION_RECORD_SCHEMA_PATH = (
     Path(__file__).resolve().parent
     / "data"
-    / "increment5a_main_qualification_record_v1.schema.json"
+    / "increment5a_main_qualification_record_v2.schema.json"
 )
 MAIN_QUALIFICATION_RECORD_PATH = (
     Path(__file__).resolve().parent
     / "data"
-    / "increment5a_main_qualification_record_v1.json"
+    / "increment5a_main_qualification_record_v2.json"
 )
 # A later post-merge admission commit replaces None with the exact canonical
 # record digest after the merged 5A commit has passed exact-main qualification.
 MAIN_QUALIFICATION_RECORD_DIGEST: str | None = None
 _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
 _COMMIT_PATTERN = r"^[0-9a-f]{40}$"
+
+
+def _workflow_attempt_schema(
+    *,
+    workflow_id: int,
+    workflow_name: str,
+) -> dict[str, object]:
+    return {
+        "type": "object",
+        "required": [
+            "workflow_id",
+            "workflow_name",
+            "run_id",
+            "run_attempt",
+            "run_number",
+            "repository",
+            "repository_id",
+            "event",
+            "ref",
+            "head_branch",
+            "head_sha",
+            "head_tree_sha",
+            "workflow_sha",
+            "workflow_ref",
+            "status",
+            "conclusion",
+            "api_url",
+            "html_url",
+            "created_at",
+            "run_started_at",
+            "updated_at",
+        ],
+        "additionalProperties": False,
+        "properties": {
+            "workflow_id": {"const": workflow_id},
+            "workflow_name": {"const": workflow_name},
+            "run_id": {"type": "integer", "minimum": 1},
+            "run_attempt": {"type": "integer", "minimum": 1},
+            "run_number": {"type": "integer", "minimum": 1},
+            "repository": {"const": MAIN_QUALIFICATION_REPOSITORY},
+            "repository_id": {"const": MAIN_QUALIFICATION_REPOSITORY_ID},
+            "event": {"const": "push"},
+            "ref": {"const": MAIN_QUALIFICATION_REF},
+            "head_branch": {"const": MAIN_QUALIFICATION_BRANCH},
+            "head_sha": {"type": "string", "pattern": _COMMIT_PATTERN},
+            "head_tree_sha": {
+                "type": "string",
+                "pattern": _COMMIT_PATTERN,
+            },
+            "workflow_sha": {"type": "string", "pattern": _COMMIT_PATTERN},
+            "workflow_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+            },
+            "status": {"const": "completed"},
+            "conclusion": {"const": "success"},
+            "api_url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+            },
+            "html_url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+            },
+            "created_at": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+            },
+            "run_started_at": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+            },
+            "updated_at": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+            },
+        },
+    }
 
 
 MAIN_QUALIFICATION_RECORD_SCHEMA: dict[str, object] = {
@@ -70,6 +173,8 @@ MAIN_QUALIFICATION_RECORD_SCHEMA: dict[str, object] = {
         "qualification_id",
         "qualification_version",
         "qualification_scope",
+        "qualification_effect",
+        "non_effects",
         "repository",
         "branch",
         "issue_number",
@@ -80,14 +185,21 @@ MAIN_QUALIFICATION_RECORD_SCHEMA: dict[str, object] = {
         "qualified_at",
         "approval_record_digest",
         "proposal",
-        "evidence",
+        "workflow_attempts",
+        "signed_decision",
     ],
     "additionalProperties": False,
     "properties": {
-        "schema_version": {"const": MAIN_QUALIFICATION_RECORD_SCHEMA_VERSION},
+        "schema_version": {
+            "const": MAIN_QUALIFICATION_RECORD_SCHEMA_VERSION
+        },
         "qualification_id": {"const": MAIN_QUALIFICATION_RECORD_ID},
-        "qualification_version": {"const": MAIN_QUALIFICATION_RECORD_VERSION},
+        "qualification_version": {
+            "const": MAIN_QUALIFICATION_RECORD_VERSION
+        },
         "qualification_scope": {"const": MAIN_QUALIFICATION_SCOPE},
+        "qualification_effect": {"const": MAIN_QUALIFICATION_EFFECT},
+        "non_effects": {"const": list(MAIN_QUALIFICATION_NON_EFFECTS)},
         "repository": {"const": MAIN_QUALIFICATION_REPOSITORY},
         "branch": {"const": MAIN_QUALIFICATION_BRANCH},
         "issue_number": {"const": MAIN_QUALIFICATION_ISSUE_NUMBER},
@@ -123,6 +235,7 @@ MAIN_QUALIFICATION_RECORD_SCHEMA: dict[str, object] = {
                 "record_digest",
                 "contract_bundle_digest",
                 "qualification_profile_schema_digest",
+                "main_qualification_record_schema_digest",
             ],
             "additionalProperties": False,
             "properties": {
@@ -142,47 +255,85 @@ MAIN_QUALIFICATION_RECORD_SCHEMA: dict[str, object] = {
                     "type": "string",
                     "pattern": _SHA256_PATTERN,
                 },
+                "main_qualification_record_schema_digest": {
+                    "type": "string",
+                    "pattern": _SHA256_PATTERN,
+                },
             },
         },
-        "evidence": {
+        "workflow_attempts": {
             "type": "object",
-            "required": ["workflow_runs", "signed_decision"],
+            "required": list(MAIN_QUALIFICATION_WORKFLOW_NAMES),
             "additionalProperties": False,
             "properties": {
-                "workflow_runs": {
-                    "type": "object",
-                    "required": list(MAIN_QUALIFICATION_WORKFLOW_NAMES),
-                    "additionalProperties": False,
-                    "properties": {
-                        name: {"type": "integer", "minimum": 1}
-                        for name in MAIN_QUALIFICATION_WORKFLOW_NAMES
-                    },
+                name: _workflow_attempt_schema(
+                    workflow_id=workflow_id,
+                    workflow_name=workflow_name,
+                )
+                for name, (
+                    workflow_id,
+                    workflow_name,
+                ) in MAIN_QUALIFICATION_WORKFLOW_SPECS.items()
+            },
+        },
+        "signed_decision": {
+            "type": "object",
+            "required": [
+                "workflow_run_id",
+                "workflow_run_attempt",
+                "decision_document_digest",
+                "decision_identity",
+                "result",
+                "result_reason",
+                "evaluated_sha",
+                "evaluated_tree_sha",
+                "test_count",
+                "skip_count",
+                "required_skip_count",
+                "failure_count",
+                "error_count",
+                "decision_document",
+            ],
+            "additionalProperties": False,
+            "properties": {
+                "workflow_run_id": {
+                    "type": "integer",
+                    "minimum": 1,
                 },
-                "signed_decision": {
-                    "type": "object",
-                    "required": [
-                        "run_id",
-                        "decision_digest",
-                        "test_count",
-                        "skip_count",
-                        "required_skip_count",
-                        "failure_count",
-                        "error_count",
-                    ],
-                    "additionalProperties": False,
-                    "properties": {
-                        "run_id": {"type": "integer", "minimum": 1},
-                        "decision_digest": {
-                            "type": "string",
-                            "pattern": _SHA256_PATTERN,
-                        },
-                        "test_count": {"type": "integer", "minimum": 1},
-                        "skip_count": {"type": "integer", "minimum": 0},
-                        "required_skip_count": {"const": 0},
-                        "failure_count": {"const": 0},
-                        "error_count": {"const": 0},
-                    },
+                "workflow_run_attempt": {
+                    "type": "integer",
+                    "minimum": 1,
                 },
+                "decision_document_digest": {
+                    "type": "string",
+                    "pattern": _SHA256_PATTERN,
+                },
+                "decision_identity": {
+                    "type": "string",
+                    "pattern": _SHA256_PATTERN,
+                },
+                "result": {"const": "PASS"},
+                "result_reason": {"const": "PASS:decision"},
+                "evaluated_sha": {
+                    "type": "string",
+                    "pattern": _COMMIT_PATTERN,
+                },
+                "evaluated_tree_sha": {
+                    "type": "string",
+                    "pattern": _COMMIT_PATTERN,
+                },
+                "test_count": {
+                    "type": "integer",
+                    "minimum": 1,
+                },
+                "skip_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                },
+                "required_skip_count": {"const": 0},
+                "failure_count": {"const": 0},
+                "error_count": {"const": 0},
+                "decision_document": {"type": "object"},
             },
         },
     },
@@ -230,7 +381,9 @@ def _qualification_schema_digest() -> str:
     return QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST
 
 
-def _parse_canonical_utc(value: str, *, field: str) -> UtcTimestamp:
+def _parse_canonical_utc(value: object, *, field: str) -> UtcTimestamp:
+    if not isinstance(value, str):
+        raise Increment5ContractError(f"{field} is not valid UTC text")
     try:
         parsed = UtcTimestamp.parse(value)
     except (TypeError, ValueError) as exc:
@@ -242,7 +395,9 @@ def _parse_canonical_utc(value: str, *, field: str) -> UtcTimestamp:
 
 def _require_commit_sha(value: object, *, field: str) -> str:
     if not isinstance(value, str) or re.fullmatch(_COMMIT_PATTERN, value) is None:
-        raise Increment5ContractError(f"{field} must be lowercase 40-hex text")
+        raise Increment5ContractError(
+            f"{field} must be lowercase 40-hex text"
+        )
     if value == "0" * 40:
         raise Increment5ContractError(f"{field} cannot be the null commit")
     return value
@@ -255,6 +410,20 @@ def _require_digest(value: object, *, field: str) -> str:
         return validate_sha256_digest(value, field=field)
     except ValueError as exc:
         raise Increment5ContractError(f"{field} is not canonical") from exc
+
+
+def _require_positive_integer(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise Increment5ContractError(f"{field} must be a positive integer")
+    return value
+
+
+def _require_nonnegative_integer(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise Increment5ContractError(
+            f"{field} must be a nonnegative integer"
+        )
+    return value
 
 
 def _schema_errors(value: Mapping[str, Any]) -> tuple[str, ...]:
@@ -274,6 +443,79 @@ def _schema_errors(value: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowAttemptEvidence:
+    key: str
+    workflow_id: int
+    workflow_name: str
+    run_id: int
+    run_attempt: int
+    run_number: int
+    head_sha: str
+    head_tree_sha: str
+    workflow_sha: str
+    workflow_ref: str
+    api_url: str
+    html_url: str
+    created_at: UtcTimestamp
+    run_started_at: UtcTimestamp
+    updated_at: UtcTimestamp
+
+    def __post_init__(self) -> None:
+        expected = MAIN_QUALIFICATION_WORKFLOW_SPECS.get(self.key)
+        if expected != (self.workflow_id, self.workflow_name):
+            raise Increment5ContractError(
+                "workflow attempt identity differs from permanent workflow"
+            )
+        for field_name in ("run_id", "run_attempt", "run_number"):
+            _require_positive_integer(
+                getattr(self, field_name),
+                field=f"workflow_attempt.{field_name}",
+            )
+        for field_name in ("head_sha", "head_tree_sha", "workflow_sha"):
+            _require_commit_sha(
+                getattr(self, field_name),
+                field=f"workflow_attempt.{field_name}",
+            )
+        expected_api_url = (
+            f"https://api.github.com/repos/{MAIN_QUALIFICATION_REPOSITORY}/"
+            f"actions/runs/{self.run_id}/attempts/{self.run_attempt}"
+        )
+        expected_html_url = (
+            f"https://github.com/{MAIN_QUALIFICATION_REPOSITORY}/"
+            f"actions/runs/{self.run_id}"
+        )
+        if self.api_url != expected_api_url:
+            raise Increment5ContractError(
+                "workflow attempt API URL differs"
+            )
+        if self.html_url != expected_html_url:
+            raise Increment5ContractError(
+                "workflow attempt HTML URL differs"
+            )
+        if not (
+            self.workflow_ref.startswith(
+                f"{MAIN_QUALIFICATION_REPOSITORY}/"
+            )
+            and self.workflow_ref.endswith(f"@{MAIN_QUALIFICATION_REF}")
+        ):
+            raise Increment5ContractError(
+                "workflow ref is not exact main"
+            )
+        if self.created_at.value > self.run_started_at.value:
+            raise Increment5ContractError(
+                "workflow attempt starts before creation"
+            )
+        if self.run_started_at.value > self.updated_at.value:
+            raise Increment5ContractError(
+                "workflow attempt completes before start"
+            )
+
+    @property
+    def identity(self) -> tuple[int, int]:
+        return self.run_id, self.run_attempt
+
+
+@dataclass(frozen=True, slots=True)
 class Increment5AMainQualificationRecord:
     qualified_main_commit_sha: str
     qualified_main_tree_sha: str
@@ -283,8 +525,10 @@ class Increment5AMainQualificationRecord:
     proposal_record_digest: str
     proposal_contract_bundle_digest: str
     qualification_profile_schema_digest: str
-    workflow_run_ids: tuple[tuple[str, int], ...]
-    signed_sdlc_decision_digest: str
+    main_qualification_record_schema_digest: str
+    workflow_attempts: tuple[WorkflowAttemptEvidence, ...]
+    decision_document_digest: str
+    decision_identity: str
     test_count: int
     skip_count: int
     record_digest: str
@@ -308,46 +552,44 @@ class Increment5AMainQualificationRecord:
             "proposal_record_digest",
             "proposal_contract_bundle_digest",
             "qualification_profile_schema_digest",
-            "signed_sdlc_decision_digest",
+            "main_qualification_record_schema_digest",
+            "decision_document_digest",
+            "decision_identity",
             "record_digest",
         ):
             _require_digest(getattr(self, field_name), field=field_name)
-        actual_names = tuple(name for name, _run_id in self.workflow_run_ids)
+        if (
+            self.main_qualification_record_schema_digest
+            != MAIN_QUALIFICATION_RECORD_SCHEMA_DIGEST
+        ):
+            raise Increment5ContractError(
+                "main qualification schema digest differs"
+            )
+        actual_names = tuple(item.key for item in self.workflow_attempts)
         if actual_names != MAIN_QUALIFICATION_WORKFLOW_NAMES:
             raise Increment5ContractError(
                 "main qualification workflow inventory differs"
             )
-        run_ids: list[int] = []
-        for name, run_id in self.workflow_run_ids:
+        identities = [item.identity for item in self.workflow_attempts]
+        if len(set(identities)) != len(identities):
+            raise Increment5ContractError(
+                "workflow attempt identities must be distinct"
+            )
+        for attempt in self.workflow_attempts:
             if (
-                name not in MAIN_QUALIFICATION_WORKFLOW_NAMES
-                or isinstance(run_id, bool)
-                or not isinstance(run_id, int)
-                or run_id <= 0
+                attempt.head_sha != self.qualified_main_commit_sha
+                or attempt.workflow_sha != self.qualified_main_commit_sha
+                or attempt.head_tree_sha != self.qualified_main_tree_sha
             ):
                 raise Increment5ContractError(
-                    "main qualification workflow evidence is invalid"
+                    "workflow attempt is not bound to qualified main"
                 )
-            run_ids.append(run_id)
-        if len(set(run_ids)) != len(run_ids):
-            raise Increment5ContractError(
-                "main qualification workflow run identities must be distinct"
-            )
-        if (
-            isinstance(self.test_count, bool)
-            or not isinstance(self.test_count, int)
-            or self.test_count <= 0
-            or isinstance(self.skip_count, bool)
-            or not isinstance(self.skip_count, int)
-            or self.skip_count < 0
-        ):
-            raise Increment5ContractError(
-                "main qualification signed test totals are invalid"
-            )
+        _require_positive_integer(self.test_count, field="test_count")
+        _require_nonnegative_integer(self.skip_count, field="skip_count")
 
     @property
-    def workflow_run_id_by_name(self) -> dict[str, int]:
-        return dict(self.workflow_run_ids)
+    def workflow_attempt_by_name(self) -> dict[str, WorkflowAttemptEvidence]:
+        return {item.key: item for item in self.workflow_attempts}
 
     @property
     def qualified_main_commit_url(self) -> str:
@@ -357,6 +599,338 @@ class Increment5AMainQualificationRecord:
         )
 
 
+def _parse_workflow_attempt(
+    *,
+    key: str,
+    value: Mapping[str, Any],
+    qualified_main_commit_sha: str,
+    qualified_main_tree_sha: str,
+) -> WorkflowAttemptEvidence:
+    workflow_id, workflow_name = MAIN_QUALIFICATION_WORKFLOW_SPECS[key]
+    if value.get("repository") != MAIN_QUALIFICATION_REPOSITORY:
+        raise Increment5ContractError(
+            "workflow attempt repository differs"
+        )
+    if value.get("repository_id") != MAIN_QUALIFICATION_REPOSITORY_ID:
+        raise Increment5ContractError(
+            "workflow attempt repository identity differs"
+        )
+    if value.get("event") != "push":
+        raise Increment5ContractError(
+            "workflow attempt is not a main push"
+        )
+    if value.get("ref") != MAIN_QUALIFICATION_REF:
+        raise Increment5ContractError(
+            "workflow attempt ref differs from main"
+        )
+    if value.get("head_branch") != MAIN_QUALIFICATION_BRANCH:
+        raise Increment5ContractError(
+            "workflow attempt branch differs from main"
+        )
+    if value.get("status") != "completed" or value.get("conclusion") != "success":
+        raise Increment5ContractError(
+            "workflow attempt did not complete successfully"
+        )
+    attempt = WorkflowAttemptEvidence(
+        key=key,
+        workflow_id=_require_positive_integer(
+            value.get("workflow_id"),
+            field=f"workflow_attempts.{key}.workflow_id",
+        ),
+        workflow_name=str(value.get("workflow_name")),
+        run_id=_require_positive_integer(
+            value.get("run_id"),
+            field=f"workflow_attempts.{key}.run_id",
+        ),
+        run_attempt=_require_positive_integer(
+            value.get("run_attempt"),
+            field=f"workflow_attempts.{key}.run_attempt",
+        ),
+        run_number=_require_positive_integer(
+            value.get("run_number"),
+            field=f"workflow_attempts.{key}.run_number",
+        ),
+        head_sha=_require_commit_sha(
+            value.get("head_sha"),
+            field=f"workflow_attempts.{key}.head_sha",
+        ),
+        head_tree_sha=_require_commit_sha(
+            value.get("head_tree_sha"),
+            field=f"workflow_attempts.{key}.head_tree_sha",
+        ),
+        workflow_sha=_require_commit_sha(
+            value.get("workflow_sha"),
+            field=f"workflow_attempts.{key}.workflow_sha",
+        ),
+        workflow_ref=str(value.get("workflow_ref")),
+        api_url=str(value.get("api_url")),
+        html_url=str(value.get("html_url")),
+        created_at=_parse_canonical_utc(
+            value.get("created_at"),
+            field=f"workflow_attempts.{key}.created_at",
+        ),
+        run_started_at=_parse_canonical_utc(
+            value.get("run_started_at"),
+            field=f"workflow_attempts.{key}.run_started_at",
+        ),
+        updated_at=_parse_canonical_utc(
+            value.get("updated_at"),
+            field=f"workflow_attempts.{key}.updated_at",
+        ),
+    )
+    if (attempt.workflow_id, attempt.workflow_name) != (
+        workflow_id,
+        workflow_name,
+    ):
+        raise Increment5ContractError(
+            "workflow attempt differs from permanent workflow"
+        )
+    if (
+        attempt.head_sha != qualified_main_commit_sha
+        or attempt.workflow_sha != qualified_main_commit_sha
+        or attempt.head_tree_sha != qualified_main_tree_sha
+    ):
+        raise Increment5ContractError(
+            "workflow attempt is not bound to qualified main"
+        )
+    return attempt
+
+
+def _parse_workflow_attempts(
+    *,
+    value: Mapping[str, Any],
+    qualified_main_commit_sha: str,
+    qualified_main_tree_sha: str,
+) -> tuple[WorkflowAttemptEvidence, ...]:
+    attempts = tuple(
+        _parse_workflow_attempt(
+            key=key,
+            value=_require_mapping(
+                value[key],
+                field=f"workflow_attempts.{key}",
+            ),
+            qualified_main_commit_sha=qualified_main_commit_sha,
+            qualified_main_tree_sha=qualified_main_tree_sha,
+        )
+        for key in MAIN_QUALIFICATION_WORKFLOW_NAMES
+    )
+    identities = [item.identity for item in attempts]
+    if len(set(identities)) != len(identities):
+        raise Increment5ContractError(
+            "workflow attempt identities must be distinct"
+        )
+    return attempts
+
+
+def _require_mapping(value: object, *, field: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise Increment5ContractError(f"{field} must be an object")
+    return value
+
+
+def _validate_decision_document(
+    *,
+    summary: Mapping[str, Any],
+    document: Mapping[str, Any],
+    qualified_main_commit_sha: str,
+    qualified_main_tree_sha: str,
+    sdlc_attempt: WorkflowAttemptEvidence,
+) -> tuple[str, str, int, int]:
+    document_digest = digest_bytes(canonical_json_bytes(document))
+    if summary.get("decision_document_digest") != document_digest:
+        raise Increment5ContractError(
+            "signed decision document digest differs"
+        )
+    if document.get("schema_version") != "newsroom.sdlc.shadow-decision.v1":
+        raise Increment5ContractError(
+            "signed decision schema version differs"
+        )
+    if document.get("result") != "PASS":
+        raise Increment5ContractError(
+            "signed decision result is not PASS"
+        )
+    if document.get("result_reason") != "PASS:decision":
+        raise Increment5ContractError(
+            "signed decision reason is not PASS"
+        )
+    if document.get("first_failure") is not None:
+        raise Increment5ContractError(
+            "PASS decision cannot retain a first failure"
+        )
+    decision_identity = _require_digest(
+        document.get("decision_identity"),
+        field="signed_decision.decision_identity",
+    )
+    if summary.get("decision_identity") != decision_identity:
+        raise Increment5ContractError(
+            "signed decision identity differs"
+        )
+
+    context = _require_mapping(
+        document.get("context"),
+        field="signed_decision.document.context",
+    )
+    event = _require_mapping(
+        document.get("event"),
+        field="signed_decision.document.event",
+    )
+    for field_name, expected in (
+        ("repository", MAIN_QUALIFICATION_REPOSITORY),
+        ("event_name", "push"),
+        ("ref", MAIN_QUALIFICATION_REF),
+        ("evaluated_sha", qualified_main_commit_sha),
+        ("evaluated_tree_sha", qualified_main_tree_sha),
+    ):
+        if context.get(field_name) != expected:
+            raise Increment5ContractError(
+                f"signed decision context {field_name} differs"
+            )
+        if event.get(field_name) != expected:
+            raise Increment5ContractError(
+                f"signed decision event {field_name} differs"
+            )
+    if context.get("workflow_sha") != qualified_main_commit_sha:
+        raise Increment5ContractError(
+            "signed decision workflow SHA differs from qualified main"
+        )
+    if context.get("run_id") != sdlc_attempt.run_id:
+        raise Increment5ContractError(
+            "signed decision run differs from SDLC attempt"
+        )
+    if context.get("run_attempt") != sdlc_attempt.run_attempt:
+        raise Increment5ContractError(
+            "signed decision attempt differs from SDLC attempt"
+        )
+    if context.get("workflow_ref") != sdlc_attempt.workflow_ref:
+        raise Increment5ContractError(
+            "signed decision workflow ref differs"
+        )
+
+    totals = _require_mapping(
+        document.get("totals"),
+        field="signed_decision.document.totals",
+    )
+    test_count = _require_positive_integer(
+        totals.get("test_count"),
+        field="signed_decision.test_count",
+    )
+    skip_count = _require_nonnegative_integer(
+        totals.get("skip_count"),
+        field="signed_decision.skip_count",
+    )
+    for field_name in (
+        "required_skip_count",
+        "failure_count",
+        "error_count",
+    ):
+        if totals.get(field_name) != 0:
+            raise Increment5ContractError(
+                f"signed decision {field_name} must be zero"
+            )
+    expected_summary = {
+        "workflow_run_id": sdlc_attempt.run_id,
+        "workflow_run_attempt": sdlc_attempt.run_attempt,
+        "decision_document_digest": document_digest,
+        "decision_identity": decision_identity,
+        "result": "PASS",
+        "result_reason": "PASS:decision",
+        "evaluated_sha": qualified_main_commit_sha,
+        "evaluated_tree_sha": qualified_main_tree_sha,
+        "test_count": test_count,
+        "skip_count": skip_count,
+        "required_skip_count": 0,
+        "failure_count": 0,
+        "error_count": 0,
+    }
+    if {
+        key: summary.get(key)
+        for key in expected_summary
+    } != expected_summary:
+        raise Increment5ContractError(
+            "signed decision summary differs from canonical artifact"
+        )
+
+    lanes = document.get("lanes")
+    if not isinstance(lanes, list) or not lanes:
+        raise Increment5ContractError(
+            "signed PASS decision has no retained lanes"
+        )
+    gate_count = 0
+    for lane in lanes:
+        lane_value = _require_mapping(
+            lane,
+            field="signed_decision.document.lane",
+        )
+        receipt = _require_mapping(
+            lane_value.get("receipt"),
+            field="signed_decision.document.lane.receipt",
+        )
+        gate_decisions = receipt.get("gate_decisions")
+        if not isinstance(gate_decisions, list):
+            raise Increment5ContractError(
+                "signed decision lane has no gate decisions"
+            )
+        for gate in gate_decisions:
+            gate_value = _require_mapping(
+                gate,
+                field="signed_decision.document.gate",
+            )
+            gate_count += 1
+            if gate_value.get("result") != "PASS":
+                raise Increment5ContractError(
+                    "signed PASS decision contains a non-PASS gate"
+                )
+    if gate_count == 0:
+        raise Increment5ContractError(
+            "signed PASS decision contains no gate evidence"
+        )
+    return document_digest, decision_identity, test_count, skip_count
+
+
+def _signed_decision_value(
+    *,
+    document: Mapping[str, Any],
+    qualified_main_commit_sha: str,
+    qualified_main_tree_sha: str,
+    sdlc_attempt: WorkflowAttemptEvidence,
+) -> dict[str, object]:
+    document_copy = deepcopy(dict(document))
+    context = _require_mapping(
+        document_copy.get("context"),
+        field="signed_decision.document.context",
+    )
+    totals = _require_mapping(
+        document_copy.get("totals"),
+        field="signed_decision.document.totals",
+    )
+    summary: dict[str, object] = {
+        "workflow_run_id": sdlc_attempt.run_id,
+        "workflow_run_attempt": sdlc_attempt.run_attempt,
+        "decision_document_digest": digest_bytes(
+            canonical_json_bytes(document_copy)
+        ),
+        "decision_identity": document_copy.get("decision_identity"),
+        "result": document_copy.get("result"),
+        "result_reason": document_copy.get("result_reason"),
+        "evaluated_sha": context.get("evaluated_sha"),
+        "evaluated_tree_sha": context.get("evaluated_tree_sha"),
+        "test_count": totals.get("test_count"),
+        "skip_count": totals.get("skip_count"),
+        "required_skip_count": totals.get("required_skip_count"),
+        "failure_count": totals.get("failure_count"),
+        "error_count": totals.get("error_count"),
+        "decision_document": document_copy,
+    }
+    _validate_decision_document(
+        summary=summary,
+        document=document_copy,
+        qualified_main_commit_sha=qualified_main_commit_sha,
+        qualified_main_tree_sha=qualified_main_tree_sha,
+        sdlc_attempt=sdlc_attempt,
+    )
+    return summary
+
+
 def main_qualification_record_value(
     *,
     proposal: Increment5ADecisionPacket,
@@ -364,10 +938,8 @@ def main_qualification_record_value(
     qualified_main_commit_sha: str,
     qualified_main_tree_sha: str,
     qualified_at: UtcTimestamp,
-    workflow_run_ids: Mapping[str, int],
-    signed_sdlc_decision_digest: str,
-    test_count: int,
-    skip_count: int,
+    workflow_attempts: Mapping[str, Mapping[str, Any]],
+    decision_document: Mapping[str, Any],
 ) -> dict[str, object]:
     if not isinstance(proposal, Increment5ADecisionPacket):
         raise Increment5ContractError(
@@ -389,42 +961,35 @@ def main_qualification_record_value(
         approval_record_digest,
         field="approval_record_digest",
     )
-    decision_digest = _require_digest(
-        signed_sdlc_decision_digest,
-        field="signed_sdlc_decision_digest",
-    )
-    if set(workflow_run_ids) != set(MAIN_QUALIFICATION_WORKFLOW_NAMES):
+    if set(workflow_attempts) != set(MAIN_QUALIFICATION_WORKFLOW_NAMES):
         raise Increment5ContractError(
             "main qualification workflow inventory differs"
         )
-    ordered_runs: dict[str, int] = {}
-    for name in MAIN_QUALIFICATION_WORKFLOW_NAMES:
-        run_id = workflow_run_ids[name]
-        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
-            raise Increment5ContractError(
-                "main qualification workflow run identity is invalid"
-            )
-        ordered_runs[name] = run_id
-    if len(set(ordered_runs.values())) != len(ordered_runs):
-        raise Increment5ContractError(
-            "main qualification workflow run identities must be distinct"
-        )
-    if (
-        isinstance(test_count, bool)
-        or not isinstance(test_count, int)
-        or test_count <= 0
-        or isinstance(skip_count, bool)
-        or not isinstance(skip_count, int)
-        or skip_count < 0
-    ):
-        raise Increment5ContractError(
-            "main qualification signed test totals are invalid"
-        )
+    ordered_attempt_values = {
+        name: deepcopy(dict(workflow_attempts[name]))
+        for name in MAIN_QUALIFICATION_WORKFLOW_NAMES
+    }
+    parsed_attempts = _parse_workflow_attempts(
+        value=ordered_attempt_values,
+        qualified_main_commit_sha=commit_sha,
+        qualified_main_tree_sha=tree_sha,
+    )
+    sdlc_attempt = {
+        item.key: item for item in parsed_attempts
+    }["SDLC_EVIDENCE_SHADOW"]
+    signed_decision = _signed_decision_value(
+        document=decision_document,
+        qualified_main_commit_sha=commit_sha,
+        qualified_main_tree_sha=tree_sha,
+        sdlc_attempt=sdlc_attempt,
+    )
     return {
         "schema_version": MAIN_QUALIFICATION_RECORD_SCHEMA_VERSION,
         "qualification_id": MAIN_QUALIFICATION_RECORD_ID,
         "qualification_version": MAIN_QUALIFICATION_RECORD_VERSION,
         "qualification_scope": MAIN_QUALIFICATION_SCOPE,
+        "qualification_effect": MAIN_QUALIFICATION_EFFECT,
+        "non_effects": list(MAIN_QUALIFICATION_NON_EFFECTS),
         "repository": MAIN_QUALIFICATION_REPOSITORY,
         "branch": MAIN_QUALIFICATION_BRANCH,
         "issue_number": MAIN_QUALIFICATION_ISSUE_NUMBER,
@@ -444,19 +1009,12 @@ def main_qualification_record_value(
             "qualification_profile_schema_digest": (
                 _qualification_schema_digest()
             ),
+            "main_qualification_record_schema_digest": (
+                MAIN_QUALIFICATION_RECORD_SCHEMA_DIGEST
+            ),
         },
-        "evidence": {
-            "workflow_runs": ordered_runs,
-            "signed_decision": {
-                "run_id": ordered_runs["SDLC_EVIDENCE_SHADOW"],
-                "decision_digest": decision_digest,
-                "test_count": test_count,
-                "skip_count": skip_count,
-                "required_skip_count": 0,
-                "failure_count": 0,
-                "error_count": 0,
-            },
-        },
+        "workflow_attempts": ordered_attempt_values,
+        "signed_decision": signed_decision,
     }
 
 
@@ -494,10 +1052,6 @@ def load_increment5a_main_qualification_record(
             "main qualification record schema validation failed: " + errors[0]
         )
 
-    proposal_value = value["proposal"]
-    evidence = value["evidence"]
-    workflow_runs = evidence["workflow_runs"]
-    signed_decision = evidence["signed_decision"]
     commit_sha = _require_commit_sha(
         value["qualified_main_commit_sha"],
         field="qualified_main_commit_sha",
@@ -518,6 +1072,10 @@ def load_increment5a_main_qualification_record(
         raise Increment5ContractError(
             "main qualification approval digest differs"
         )
+    proposal_value = _require_mapping(
+        value["proposal"],
+        field="main_qualification.proposal",
+    )
     expected_proposal = {
         "payload_digest": proposal.payload_digest,
         "record_digest": proposal.record_digest,
@@ -525,21 +1083,45 @@ def load_increment5a_main_qualification_record(
         "qualification_profile_schema_digest": (
             _qualification_schema_digest()
         ),
+        "main_qualification_record_schema_digest": (
+            MAIN_QUALIFICATION_RECORD_SCHEMA_DIGEST
+        ),
     }
-    if proposal_value != expected_proposal:
+    if dict(proposal_value) != expected_proposal:
         raise Increment5ContractError(
             "main qualification record does not bind the exact proposal"
         )
-    ordered_runs = tuple(
-        (name, workflow_runs[name])
-        for name in MAIN_QUALIFICATION_WORKFLOW_NAMES
+    attempts = _parse_workflow_attempts(
+        value=_require_mapping(
+            value["workflow_attempts"],
+            field="main_qualification.workflow_attempts",
+        ),
+        qualified_main_commit_sha=commit_sha,
+        qualified_main_tree_sha=tree_sha,
     )
-    if signed_decision["run_id"] != dict(ordered_runs)[
-        "SDLC_EVIDENCE_SHADOW"
-    ]:
-        raise Increment5ContractError(
-            "signed decision run differs from workflow evidence"
-        )
+    sdlc_attempt = {
+        item.key: item for item in attempts
+    }["SDLC_EVIDENCE_SHADOW"]
+    signed_decision = _require_mapping(
+        value["signed_decision"],
+        field="main_qualification.signed_decision",
+    )
+    decision_document = _require_mapping(
+        signed_decision["decision_document"],
+        field="main_qualification.signed_decision.decision_document",
+    )
+    (
+        decision_document_digest,
+        decision_identity,
+        test_count,
+        skip_count,
+    ) = _validate_decision_document(
+        summary=signed_decision,
+        document=decision_document,
+        qualified_main_commit_sha=commit_sha,
+        qualified_main_tree_sha=tree_sha,
+        sdlc_attempt=sdlc_attempt,
+    )
     return Increment5AMainQualificationRecord(
         qualified_main_commit_sha=commit_sha,
         qualified_main_tree_sha=tree_sha,
@@ -556,9 +1138,13 @@ def load_increment5a_main_qualification_record(
         qualification_profile_schema_digest=proposal_value[
             "qualification_profile_schema_digest"
         ],
-        workflow_run_ids=ordered_runs,
-        signed_sdlc_decision_digest=signed_decision["decision_digest"],
-        test_count=signed_decision["test_count"],
-        skip_count=signed_decision["skip_count"],
+        main_qualification_record_schema_digest=proposal_value[
+            "main_qualification_record_schema_digest"
+        ],
+        workflow_attempts=attempts,
+        decision_document_digest=decision_document_digest,
+        decision_identity=decision_identity,
+        test_count=test_count,
+        skip_count=skip_count,
         record_digest=digest_bytes(data),
     )

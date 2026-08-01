@@ -12,7 +12,7 @@ This checklist is executed only after the proposal/code head has permanent-gate 
 8. Obtain a final substantive review with zero unresolved P1/P2 findings and resolve every thread.
 9. Merge 5A, qualify exact `main`, close #250 and only then begin #251.
 
-Materialisation authorises implementation and production-equivalent qualification only. It does not authorise shadow, canary, production activation, publication, public effect, live-source execution, external embedding API calls, provider spending or protected-content vectors.
+Materialisation authorises production-equivalent qualification only; downstream implementation remains blocked until post-merge admission. It does not authorise shadow, canary, production activation, publication, public effect, live-source execution, external embedding API calls, provider spending or protected-content vectors.
 
 
 ## Post-merge downstream admission

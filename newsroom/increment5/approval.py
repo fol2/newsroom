@@ -48,13 +48,14 @@ APPROVAL_ATTESTATION_SCHEMA_VERSION = (
 )
 APPROVAL_ATTESTATION_ID = "increment5a-production-retrieval-owner-approval"
 APPROVAL_ATTESTATION_VERSION = "increment5a-owner-approval-v1"
-APPROVAL_EFFECT = "IMPLEMENTATION_AND_PRODUCTION_QUALIFICATION_ONLY"
+APPROVAL_EFFECT = "PRODUCTION_EQUIVALENT_QUALIFICATION_ONLY"
 APPROVAL_REPOSITORY = "fol2/newsroom"
 APPROVAL_OWNER_GITHUB_LOGIN = "fol2"
 APPROVAL_ISSUE_NUMBER = 250
 APPROVAL_PULL_REQUEST_NUMBER = 255
 APPROVAL_NON_EFFECTS = (
     "CANARY",
+    "DOWNSTREAM_IMPLEMENTATION",
     "EXTERNAL_EMBEDDING_API_CALLS",
     "LIVE_SOURCE_EXECUTION",
     "PROTECTED_CONTENT_VECTORS",
@@ -273,8 +274,9 @@ def expected_increment5a_owner_approval_body(
         f"`{_qualification_schema_digest()}`, approval-attestation schema "
         f"`{APPROVAL_ATTESTATION_SCHEMA_DIGEST}`, and fixture-replay schema "
         f"`{proposal.bundle.fixture_replay_profile_schema_digest}` as the exact "
-        "implementation and production-equivalent qualification contract for "
-        "issues #251–#254. This approval authorizes no shadow, canary, "
+        "production-equivalent qualification contract for issues #251–#254. "
+        "This approval authorizes production-equivalent qualification only; "
+        "it authorizes no downstream implementation, shadow, canary, "
         "production activation, publication, public effect, live-source "
         "execution, external embedding API call, provider spending, or "
         "protected-content vector."

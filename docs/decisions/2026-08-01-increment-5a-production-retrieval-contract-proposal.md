@@ -87,7 +87,7 @@ Effective production-equivalent qualification requires:
 - qualification profile schema
   `sha256:3e2ac38b2c17d11b8ea29afe58bd0cdf6924146969600cad2b89fc82ec8607b9`;
 - approval-record schema
-  `sha256:8e69e5a66949e103ec4a960af34a509f3ba8b86a9f32b08ed77930f0898b8577`;
+  `sha256:cc87d78551d3e2f2ae61c0bd5e247288c291feced7b63165d55e2e8b05dcc56e`;
 - the exact proposal record, bundle, components and owner comment evidence;
 - a canonical approval record whose digest is pinned in reviewed source; and
 - `protected_content_allowed=false` as a schema constant.
