@@ -173,6 +173,50 @@ jobs:
           if text.count(old_trace_patch) != 1:
               raise SystemExit("DOPS-074 documentation patch source differs")
           text = text.replace(old_trace_patch, new_trace_patch, 1)
+
+          old_owner_patch = '''owner_doc = replace_once(
+              owner_doc,
+              "- the fixture-replay profile schema digest;\\n",
+              "- the hardened effective fixture-replay profile schema digest;\\n",
+              label="effective fixture owner binding documentation",
+          )
+          '''
+          new_owner_patch = '''owner_doc = replace_once(
+              owner_doc,
+              "**Fixture-replay schema:**",
+              "**Historical proposal fixture-replay schema:**",
+              label="historical fixture owner binding documentation",
+          )
+          '''
+          if text.count(old_owner_patch) != 1:
+              raise SystemExit("owner fixture documentation patch source differs")
+          text = text.replace(old_owner_patch, new_owner_patch, 1)
+
+          old_metadata_marker = '''# The approval test must pin the newly generated exact statement digest.
+          approval_test = approval_test_path.read_text(encoding="utf-8")
+          '''
+          new_metadata_marker = '''owner_value = owner_doc_path.read_text(encoding="utf-8")
+          owner_marker = (
+              f"**Historical proposal fixture-replay schema:** "
+              f"`{proposal_fixture_digest}`"
+          )
+          owner_value = replace_once(
+              owner_value,
+              owner_marker,
+              (
+                  owner_marker
+                  + f"\\n**Effective fixture-replay schema:** `{new_fixture_digest}`"
+              ),
+              label="effective fixture owner metadata",
+          )
+          write_text(owner_doc_path, owner_value)
+
+          # The approval test must pin the newly generated exact statement digest.
+          approval_test = approval_test_path.read_text(encoding="utf-8")
+          '''
+          if text.count(old_metadata_marker) != 1:
+              raise SystemExit("owner fixture metadata marker differs")
+          text = text.replace(old_metadata_marker, new_metadata_marker, 1)
           path.write_text(text, encoding="utf-8", newline="\n")
           PY
 
