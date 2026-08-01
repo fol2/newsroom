@@ -133,6 +133,14 @@ Revoked, invalidated, superseded, rejected, held and unresolved relations are ab
 - bounded idempotency key and operational reason; and
 - whether a retired predecessor generation may be physically purged.
 
+Creation identity is versioned. Current builds bind the purge bit into the
+immutable generation-creation key. A parent-release ACTIVE generation may carry
+the earlier key that omitted this bit. That legacy identity is accepted only for
+`purge_retired_generation=True`: retired Neo4j state is derivative, the historical
+default is purge, and the compatibility rule therefore migrates ambiguous legacy
+intent one-way to the rights-safe default. A false request never receives the
+legacy fallback and cannot suppress a pending cleanup.
+
 The controller performs:
 
 1. family registration or exact replay;

@@ -182,7 +182,16 @@ class _Increment4Neo4jBoundary:
         request: Increment4Neo4jBuildRequest,
         snapshot_digest: str,
         proof: AuthenticationProof,
+        legacy_identity: bool = False,
     ) -> None:
+        creation_value: dict[str, object] = {
+            "generation_id": str(request.generation_id),
+            "snapshot_digest": snapshot_digest,
+        }
+        if not legacy_identity:
+            creation_value["purge_retired_generation"] = (
+                request.purge_retired_generation
+            )
         self._projection_boundary.create_generation(
             ProjectionGenerationCreateRequest(
                 generation_id=request.generation_id,
@@ -191,13 +200,7 @@ class _Increment4Neo4jBoundary:
                 idempotency_key=self._operation_key(
                     request.idempotency_key,
                     "create",
-                    {
-                        "generation_id": str(request.generation_id),
-                        "snapshot_digest": snapshot_digest,
-                        "purge_retired_generation": (
-                            request.purge_retired_generation
-                        ),
-                    },
+                    creation_value,
                 ),
             ),
             proof,
@@ -227,9 +230,25 @@ class _Increment4Neo4jBoundary:
                 proof=proof,
             )
         except ExpectedVersionConflict:
-            raise ProjectionStateError(
-                "Increment 4 ACTIVE retry differs from immutable build intent"
-            ) from None
+            if not request.purge_retired_generation:
+                raise ProjectionStateError(
+                    "Increment 4 ACTIVE retry differs from immutable build intent"
+                ) from None
+            try:
+                # Parent-release creation identities predate the explicit purge
+                # bit. Retired graph state is derivative and that release's
+                # rights-safe/default contract is therefore migrated one-way to
+                # purge=True. A false request never receives this fallback.
+                self._create_generation(
+                    request=request,
+                    snapshot_digest=request.snapshot.canonical_digest,
+                    proof=proof,
+                    legacy_identity=True,
+                )
+            except ExpectedVersionConflict:
+                raise ProjectionStateError(
+                    "Increment 4 ACTIVE retry differs from immutable build intent"
+                ) from None
         promotion = self._promotion_for_generation(request.generation_id)
         purged_prior = 0
         if (

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import newsroom.authority._increment4_neo4j_boundary as increment4_boundary_module
 from newsroom.authority import AggregateId
 from newsroom.increment4 import (
     Increment4Neo4jActiveReadRequest,
@@ -87,10 +88,11 @@ def test_increment4_controller_builds_validates_promotes_and_reads_active(
 ) -> None:
     state, snapshot = admitted_increment4_fixture(tmp_path)
     adapter = MemoryNeo4jAdapter()
+    request = _request(GENERATION_1, snapshot, key="increment4-build-v1")
 
     with open_increment4_neo4j_system(state, adapter) as system:
         result = system.increment4.build_and_promote(
-            _request(GENERATION_1, snapshot, key="increment4-build-v1"),
+            request,
             proof=extraction_proof(),
         )
         status = system.increment4.generation_status(
@@ -105,6 +107,20 @@ def test_increment4_controller_builds_validates_promotes_and_reads_active(
             ),
             proof=extraction_proof(),
         )
+        apply_before_changed_retry = adapter.apply_count
+        cleanup_before_changed_retry = adapter.cleanup_count
+        reconcile_before_changed_retry = adapter.reconcile_count
+        with pytest.raises(
+            ProjectionStateError,
+            match="immutable build intent",
+        ):
+            system.increment4.build_and_promote(
+                replace(request, purge_retired_generation=False),
+                proof=extraction_proof(),
+            )
+        assert adapter.apply_count == apply_before_changed_retry
+        assert adapter.cleanup_count == cleanup_before_changed_retry
+        assert adapter.reconcile_count == reconcile_before_changed_retry
 
     assert result.generation.state is ProjectionGenerationState.ACTIVE
     assert result.generation.generation_id == GENERATION_1
@@ -130,9 +146,36 @@ def test_increment4_controller_builds_validates_promotes_and_reads_active(
 
 def test_increment4_replacement_retires_and_purges_prior_generation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, snapshot = admitted_increment4_fixture(tmp_path)
     adapter = _FailRetiredCleanupOnceAdapter()
+    boundary_type = increment4_boundary_module._Increment4Neo4jBoundary
+    current_create_generation = boundary_type._create_generation
+
+    def create_legacy_generation(
+        self,
+        *,
+        request,
+        snapshot_digest,
+        proof,
+        legacy_identity=False,
+    ):
+        return current_create_generation(
+            self,
+            request=request,
+            snapshot_digest=snapshot_digest,
+            proof=proof,
+            legacy_identity=True,
+        )
+
+    # Seed the exact parent-release identity before exercising post-upgrade
+    # ACTIVE replay and pending predecessor cleanup.
+    monkeypatch.setattr(
+        boundary_type,
+        "_create_generation",
+        create_legacy_generation,
+    )
     replacement_request = _request(
         GENERATION_2,
         snapshot,
@@ -157,6 +200,11 @@ def test_increment4_replacement_retires_and_purges_prior_generation(
                 replacement_request,
                 proof=extraction_proof(),
             )
+        monkeypatch.setattr(
+            boundary_type,
+            "_create_generation",
+            current_create_generation,
+        )
         first_status = system.increment4.generation_status(
             GENERATION_1, proof=extraction_proof()
         )
