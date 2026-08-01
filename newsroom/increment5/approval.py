@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
@@ -64,159 +63,18 @@ APPROVAL_ATTESTATION_SCHEMA_PATH = (
     / "data"
     / "increment5a_owner_approval_attestation_v1.schema.json"
 )
+EXPECTED_APPROVAL_ATTESTATION_SCHEMA_DIGEST = (
+    "sha256:8e69e5a66949e103ec4a960af34a509f3ba8b86a9f32b08ed77930f0898b8577"
+)
 GITHUB_APPROVAL_VERIFIER_CONTRACT = "github-issue-comment-approval-verifier-v1"
 GITHUB_API_VERSION = "2022-11-28"
 GITHUB_API_BASE = "https://api.github.com"
 GITHUB_APPROVAL_TIMEOUT_SECONDS = 10.0
 GITHUB_APPROVAL_MAX_RESPONSE_BYTES = 128 * 1024
-_SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
 _BEARER_TOKEN = re.compile(r"^[^\s\x00-\x1f\x7f]{1,4096}$")
 
 
-APPROVAL_ATTESTATION_SCHEMA: dict[str, object] = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": APPROVAL_ATTESTATION_SCHEMA_ID,
-    "type": "object",
-    "required": [
-        "schema_version",
-        "attestation_id",
-        "attestation_version",
-        "approval_effect",
-        "non_effects",
-        "proposal",
-        "owner",
-        "approved_at",
-        "repository",
-        "issue_number",
-        "pull_request_number",
-        "evidence",
-    ],
-    "additionalProperties": False,
-    "properties": {
-        "schema_version": {"const": APPROVAL_ATTESTATION_SCHEMA_VERSION},
-        "attestation_id": {"const": APPROVAL_ATTESTATION_ID},
-        "attestation_version": {"const": APPROVAL_ATTESTATION_VERSION},
-        "approval_effect": {"const": APPROVAL_EFFECT},
-        "non_effects": {"const": list(APPROVAL_NON_EFFECTS)},
-        "proposal": {
-            "type": "object",
-            "required": [
-                "decision_id",
-                "payload_digest",
-                "record_digest",
-                "contract_bundle_digest",
-                "proposal_production_profile_schema_digest",
-                "qualification_production_profile_schema_digest",
-                "fixture_replay_profile_schema_digest",
-                "component_identity_digests",
-            ],
-            "additionalProperties": False,
-            "properties": {
-                "decision_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128,
-                },
-                "payload_digest": {
-                    "type": "string",
-                    "pattern": _SHA256_PATTERN,
-                },
-                "record_digest": {
-                    "type": "string",
-                    "pattern": _SHA256_PATTERN,
-                },
-                "contract_bundle_digest": {
-                    "type": "string",
-                    "pattern": _SHA256_PATTERN,
-                },
-                "proposal_production_profile_schema_digest": {
-                    "type": "string",
-                    "pattern": _SHA256_PATTERN,
-                },
-                "qualification_production_profile_schema_digest": {
-                    "type": "string",
-                    "pattern": _SHA256_PATTERN,
-                },
-                "fixture_replay_profile_schema_digest": {
-                    "type": "string",
-                    "pattern": _SHA256_PATTERN,
-                },
-                "component_identity_digests": {
-                    "type": "object",
-                    "required": [
-                        item.value for item in RetrievalComponentKind
-                    ],
-                    "additionalProperties": False,
-                    "properties": {
-                        item.value: {
-                            "type": "string",
-                            "pattern": _SHA256_PATTERN,
-                        }
-                        for item in RetrievalComponentKind
-                    },
-                },
-            },
-        },
-        "owner": {
-            "type": "object",
-            "required": ["display_name", "github_login"],
-            "additionalProperties": False,
-            "properties": {
-                "display_name": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 256,
-                },
-                "github_login": {"const": APPROVAL_OWNER_GITHUB_LOGIN},
-            },
-        },
-        "approved_at": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64,
-        },
-        "repository": {"const": APPROVAL_REPOSITORY},
-        "issue_number": {"const": APPROVAL_ISSUE_NUMBER},
-        "pull_request_number": {"const": APPROVAL_PULL_REQUEST_NUMBER},
-        "evidence": {
-            "type": "object",
-            "required": [
-                "kind",
-                "repository",
-                "issue_number",
-                "comment_id",
-                "author_login",
-                "body_digest",
-                "url",
-            ],
-            "additionalProperties": False,
-            "properties": {
-                "kind": {"const": "GITHUB_ISSUE_COMMENT"},
-                "repository": {"const": APPROVAL_REPOSITORY},
-                "issue_number": {"const": APPROVAL_ISSUE_NUMBER},
-                "comment_id": {"type": "integer", "minimum": 1},
-                "author_login": {"const": APPROVAL_OWNER_GITHUB_LOGIN},
-                "body_digest": {
-                    "type": "string",
-                    "pattern": _SHA256_PATTERN,
-                },
-                "url": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                },
-            },
-        },
-    },
-}
-Draft202012Validator.check_schema(APPROVAL_ATTESTATION_SCHEMA)
-_APPROVAL_VALIDATOR = Draft202012Validator(APPROVAL_ATTESTATION_SCHEMA)
-APPROVAL_ATTESTATION_SCHEMA_DIGEST = digest_bytes(
-    canonical_json_bytes(APPROVAL_ATTESTATION_SCHEMA)
-)
-
-
-def _require_schema_artifact() -> None:
+def _load_approval_schema() -> tuple[dict[str, object], str]:
     try:
         data = APPROVAL_ATTESTATION_SCHEMA_PATH.read_bytes()
         value = json.loads(
@@ -231,17 +89,27 @@ def _require_schema_artifact() -> None:
         raise Increment5ContractError(
             "approval-attestation schema artifact must be an object"
         )
-    if (
-        data != canonical_json_bytes(value)
-        or value != APPROVAL_ATTESTATION_SCHEMA
-        or digest_bytes(data) != APPROVAL_ATTESTATION_SCHEMA_DIGEST
-    ):
+    if data != canonical_json_bytes(value):
         raise Increment5ContractError(
-            "approval-attestation schema artifact differs from repository code"
+            "approval-attestation schema artifact is not canonical JSON"
         )
+    if value.get("$id") != APPROVAL_ATTESTATION_SCHEMA_ID:
+        raise Increment5ContractError(
+            "approval-attestation schema identity differs"
+        )
+    Draft202012Validator.check_schema(value)
+    schema_digest = digest_bytes(data)
+    if schema_digest != EXPECTED_APPROVAL_ATTESTATION_SCHEMA_DIGEST:
+        raise Increment5ContractError(
+            "approval-attestation schema digest differs from the reviewed contract"
+        )
+    return value, schema_digest
 
 
-_require_schema_artifact()
+APPROVAL_ATTESTATION_SCHEMA, APPROVAL_ATTESTATION_SCHEMA_DIGEST = (
+    _load_approval_schema()
+)
+_APPROVAL_VALIDATOR = Draft202012Validator(APPROVAL_ATTESTATION_SCHEMA)
 
 
 def _qualification_schema_digest() -> str:
@@ -293,24 +161,21 @@ def _parse_github_utc(value: object, *, field: str) -> UtcTimestamp:
         raise Increment5ContractError(f"{field} is not valid UTC text") from exc
 
 
-@dataclass(frozen=True, slots=True)
 class Increment5AApprovalEvidence:
-    comment_id: int
-    body_digest: str
-    url: str
+    __slots__ = ("comment_id", "body_digest", "url")
 
-    def __post_init__(self) -> None:
+    def __init__(self, *, comment_id: int, body_digest: str, url: str) -> None:
         if (
-            isinstance(self.comment_id, bool)
-            or not isinstance(self.comment_id, int)
-            or self.comment_id <= 0
+            isinstance(comment_id, bool)
+            or not isinstance(comment_id, int)
+            or comment_id <= 0
         ):
             raise Increment5ContractError(
                 "approval evidence comment identity must be positive"
             )
         try:
             validate_sha256_digest(
-                self.body_digest,
+                body_digest,
                 field="approval_evidence_body_digest",
             )
         except ValueError as exc:
@@ -319,12 +184,15 @@ class Increment5AApprovalEvidence:
             ) from exc
         expected = (
             f"https://github.com/{APPROVAL_REPOSITORY}/issues/"
-            f"{APPROVAL_ISSUE_NUMBER}#issuecomment-{self.comment_id}"
+            f"{APPROVAL_ISSUE_NUMBER}#issuecomment-{comment_id}"
         )
-        if self.url != expected:
+        if url != expected:
             raise Increment5ContractError(
                 "approval evidence URL differs from the exact issue comment"
             )
+        self.comment_id = comment_id
+        self.body_digest = body_digest
+        self.url = url
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -338,65 +206,84 @@ class Increment5AApprovalEvidence:
         }
 
 
-@dataclass(frozen=True, slots=True)
 class Increment5AApprovalAttestation:
     """Canonical but untrusted approval claim pending GitHub verification."""
 
-    approved_at: UtcTimestamp
-    evidence: Increment5AApprovalEvidence
-    proposal_payload_digest: str
-    proposal_record_digest: str
-    proposal_contract_bundle_digest: str
-    proposal_production_profile_schema_digest: str
-    qualification_production_profile_schema_digest: str
-    fixture_replay_profile_schema_digest: str
-    component_identity_digests: tuple[tuple[str, str], ...]
-    owner_display_name: str
-    attestation_digest: str
+    __slots__ = (
+        "approved_at",
+        "evidence",
+        "proposal_payload_digest",
+        "proposal_record_digest",
+        "proposal_contract_bundle_digest",
+        "proposal_production_profile_schema_digest",
+        "qualification_production_profile_schema_digest",
+        "fixture_replay_profile_schema_digest",
+        "component_identity_digests",
+        "owner_display_name",
+        "attestation_digest",
+    )
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.approved_at, UtcTimestamp):
+    def __init__(
+        self,
+        *,
+        approved_at: UtcTimestamp,
+        evidence: Increment5AApprovalEvidence,
+        proposal_payload_digest: str,
+        proposal_record_digest: str,
+        proposal_contract_bundle_digest: str,
+        proposal_production_profile_schema_digest: str,
+        qualification_production_profile_schema_digest: str,
+        fixture_replay_profile_schema_digest: str,
+        component_identity_digests: tuple[tuple[str, str], ...],
+        owner_display_name: str,
+        attestation_digest: str,
+    ) -> None:
+        if not isinstance(approved_at, UtcTimestamp):
             raise Increment5ContractError("approval time must be typed UTC")
-        if not isinstance(self.evidence, Increment5AApprovalEvidence):
+        if not isinstance(evidence, Increment5AApprovalEvidence):
             raise Increment5ContractError("approval evidence must be typed")
         if (
-            not isinstance(self.owner_display_name, str)
-            or not self.owner_display_name
-            or self.owner_display_name != self.owner_display_name.strip()
-            or len(self.owner_display_name.encode("utf-8")) > 256
+            not isinstance(owner_display_name, str)
+            or not owner_display_name
+            or owner_display_name != owner_display_name.strip()
+            or len(owner_display_name.encode("utf-8")) > 256
             or any(
                 ord(character) < 32 or ord(character) == 127
-                for character in self.owner_display_name
+                for character in owner_display_name
             )
         ):
             raise Increment5ContractError(
                 "approval owner display name is invalid"
             )
-        for field_name in (
-            "proposal_payload_digest",
-            "proposal_record_digest",
-            "proposal_contract_bundle_digest",
-            "proposal_production_profile_schema_digest",
-            "qualification_production_profile_schema_digest",
-            "fixture_replay_profile_schema_digest",
-            "attestation_digest",
-        ):
+        digests = {
+            "proposal_payload_digest": proposal_payload_digest,
+            "proposal_record_digest": proposal_record_digest,
+            "proposal_contract_bundle_digest": proposal_contract_bundle_digest,
+            "proposal_production_profile_schema_digest": (
+                proposal_production_profile_schema_digest
+            ),
+            "qualification_production_profile_schema_digest": (
+                qualification_production_profile_schema_digest
+            ),
+            "fixture_replay_profile_schema_digest": (
+                fixture_replay_profile_schema_digest
+            ),
+            "attestation_digest": attestation_digest,
+        }
+        for field_name, value in digests.items():
             try:
-                validate_sha256_digest(
-                    getattr(self, field_name),
-                    field=field_name,
-                )
+                validate_sha256_digest(value, field=field_name)
             except ValueError as exc:
                 raise Increment5ContractError(
                     f"{field_name} is not a canonical digest"
                 ) from exc
         expected_kinds = tuple(item.value for item in RetrievalComponentKind)
-        actual_kinds = tuple(item[0] for item in self.component_identity_digests)
+        actual_kinds = tuple(item[0] for item in component_identity_digests)
         if actual_kinds != expected_kinds:
             raise Increment5ContractError(
                 "approval component digest inventory differs"
             )
-        for kind, value in self.component_identity_digests:
+        for kind, value in component_identity_digests:
             if not isinstance(kind, str) or not kind:
                 raise Increment5ContractError(
                     "approval component kind is invalid"
@@ -410,6 +297,23 @@ class Increment5AApprovalAttestation:
                 raise Increment5ContractError(
                     "approval component identity digest is invalid"
                 ) from exc
+        self.approved_at = approved_at
+        self.evidence = evidence
+        self.proposal_payload_digest = proposal_payload_digest
+        self.proposal_record_digest = proposal_record_digest
+        self.proposal_contract_bundle_digest = proposal_contract_bundle_digest
+        self.proposal_production_profile_schema_digest = (
+            proposal_production_profile_schema_digest
+        )
+        self.qualification_production_profile_schema_digest = (
+            qualification_production_profile_schema_digest
+        )
+        self.fixture_replay_profile_schema_digest = (
+            fixture_replay_profile_schema_digest
+        )
+        self.component_identity_digests = component_identity_digests
+        self.owner_display_name = owner_display_name
+        self.attestation_digest = attestation_digest
 
     @property
     def component_digest_by_kind(self) -> dict[RetrievalComponentKind, str]:
@@ -456,69 +360,93 @@ class Increment5AApprovalAttestation:
         }
 
 
-@dataclass(frozen=True, slots=True)
 class GitHubApprovalComment:
-    comment_id: int
-    api_url: str
-    html_url: str
-    issue_url: str
-    author_login: str
-    author_id: int
-    author_association: str
-    body: str
-    created_at: UtcTimestamp
-    updated_at: UtcTimestamp
+    __slots__ = (
+        "comment_id",
+        "api_url",
+        "html_url",
+        "issue_url",
+        "author_login",
+        "author_id",
+        "author_association",
+        "body",
+        "created_at",
+        "updated_at",
+    )
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        comment_id: int,
+        api_url: str,
+        html_url: str,
+        issue_url: str,
+        author_login: str,
+        author_id: int,
+        author_association: str,
+        body: str,
+        created_at: UtcTimestamp,
+        updated_at: UtcTimestamp,
+    ) -> None:
         if (
-            isinstance(self.comment_id, bool)
-            or not isinstance(self.comment_id, int)
-            or self.comment_id <= 0
+            isinstance(comment_id, bool)
+            or not isinstance(comment_id, int)
+            or comment_id <= 0
         ):
             raise Increment5ContractError("GitHub approval comment ID is invalid")
         expected_api = (
             f"{GITHUB_API_BASE}/repos/{APPROVAL_REPOSITORY}/issues/comments/"
-            f"{self.comment_id}"
+            f"{comment_id}"
         )
         expected_html = (
             f"https://github.com/{APPROVAL_REPOSITORY}/issues/"
-            f"{APPROVAL_ISSUE_NUMBER}#issuecomment-{self.comment_id}"
+            f"{APPROVAL_ISSUE_NUMBER}#issuecomment-{comment_id}"
         )
         expected_issue = (
             f"{GITHUB_API_BASE}/repos/{APPROVAL_REPOSITORY}/issues/"
             f"{APPROVAL_ISSUE_NUMBER}"
         )
-        if self.api_url != expected_api:
+        if api_url != expected_api:
             raise Increment5ContractError("GitHub approval API URL differs")
-        if self.html_url != expected_html:
+        if html_url != expected_html:
             raise Increment5ContractError("GitHub approval HTML URL differs")
-        if self.issue_url != expected_issue:
+        if issue_url != expected_issue:
             raise Increment5ContractError("GitHub approval issue URL differs")
-        if self.author_login != APPROVAL_OWNER_GITHUB_LOGIN:
+        if author_login != APPROVAL_OWNER_GITHUB_LOGIN:
             raise Increment5ContractError("GitHub approval author login differs")
-        if self.author_id != APPROVAL_OWNER_GITHUB_USER_ID:
+        if author_id != APPROVAL_OWNER_GITHUB_USER_ID:
             raise Increment5ContractError("GitHub approval author identity differs")
-        if self.author_association != "OWNER":
+        if author_association != "OWNER":
             raise Increment5ContractError(
                 "GitHub approval author is not the repository owner"
             )
         if (
-            not isinstance(self.body, str)
-            or not self.body
-            or len(self.body.encode("utf-8")) > 16 * 1024
-            or "\x00" in self.body
+            not isinstance(body, str)
+            or not body
+            or len(body.encode("utf-8")) > 16 * 1024
+            or "\x00" in body
         ):
             raise Increment5ContractError("GitHub approval body is invalid")
-        if not isinstance(self.created_at, UtcTimestamp) or not isinstance(
-            self.updated_at, UtcTimestamp
+        if not isinstance(created_at, UtcTimestamp) or not isinstance(
+            updated_at, UtcTimestamp
         ):
             raise Increment5ContractError(
                 "GitHub approval timestamps must be typed UTC"
             )
-        if self.updated_at != self.created_at:
+        if updated_at != created_at:
             raise Increment5ContractError(
                 "edited GitHub approval comments are not admissible"
             )
+        self.comment_id = comment_id
+        self.api_url = api_url
+        self.html_url = html_url
+        self.issue_url = issue_url
+        self.author_login = author_login
+        self.author_id = author_id
+        self.author_association = author_association
+        self.body = body
+        self.created_at = created_at
+        self.updated_at = updated_at
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -565,6 +493,7 @@ class GitHubIssueCommentApprovalVerifier:
 
     def close(self) -> None:
         self._session.close()
+        self._token = ""
 
     def __enter__(self) -> GitHubIssueCommentApprovalVerifier:
         return self
@@ -573,6 +502,8 @@ class GitHubIssueCommentApprovalVerifier:
         self.close()
 
     def fetch_issue_comment(self, comment_id: int) -> GitHubApprovalComment:
+        if not self._token:
+            raise Increment5ContractError("GitHub approval verifier is closed")
         if (
             isinstance(comment_id, bool)
             or not isinstance(comment_id, int)
@@ -633,7 +564,10 @@ class GitHubIssueCommentApprovalVerifier:
                 "GitHub approval response is not strict JSON"
             ) from exc
         root = require_mapping(value, field="github_approval_comment")
-        user = require_mapping(root.get("user"), field="github_approval_comment.user")
+        user = require_mapping(
+            root.get("user"),
+            field="github_approval_comment.user",
+        )
         return GitHubApprovalComment(
             comment_id=require_integer(
                 root.get("id"),
@@ -679,60 +613,6 @@ class GitHubIssueCommentApprovalVerifier:
         )
 
 
-def _verified_approval_factory():
-    capability = object()
-
-    @dataclass(frozen=True, slots=True)
-    class _VerifiedIncrement5AApproval:
-        claim: Increment5AApprovalAttestation
-        comment: GitHubApprovalComment
-        verification_digest: str
-        _capability: object
-
-        def __post_init__(self) -> None:
-            if self._capability is not capability:
-                raise Increment5ContractError(
-                    "verified approval cannot be constructed directly"
-                )
-            if not isinstance(self.claim, Increment5AApprovalAttestation):
-                raise Increment5ContractError(
-                    "verified approval claim must be typed"
-                )
-            if not isinstance(self.comment, GitHubApprovalComment):
-                raise Increment5ContractError(
-                    "verified approval comment must be typed"
-                )
-            try:
-                validate_sha256_digest(
-                    self.verification_digest,
-                    field="approval_verification_digest",
-                )
-            except ValueError as exc:
-                raise Increment5ContractError(
-                    "approval verification digest is invalid"
-                ) from exc
-
-    def make(
-        *,
-        claim: Increment5AApprovalAttestation,
-        comment: GitHubApprovalComment,
-        verification_digest: str,
-    ) -> _VerifiedIncrement5AApproval:
-        return _VerifiedIncrement5AApproval(
-            claim=claim,
-            comment=comment,
-            verification_digest=verification_digest,
-            _capability=capability,
-        )
-
-    return _VerifiedIncrement5AApproval, make
-
-
-_VerifiedIncrement5AApproval, _make_verified_approval = (
-    _verified_approval_factory()
-)
-
-
 def _require_approval_binds_proposal(
     *,
     approval: Increment5AApprovalAttestation,
@@ -769,12 +649,120 @@ def _require_approval_binds_proposal(
         )
 
 
+class Increment5ADecisionAuthority:
+    """Immutable pending or GitHub-verified Increment 5A decision authority."""
+
+    __slots__ = (
+        "proposal",
+        "_approval_claim",
+        "_approval_comment",
+        "_approval_verification_digest",
+        "_sealed",
+    )
+
+    def __init__(
+        self,
+        *,
+        proposal: Increment5ADecisionPacket = INCREMENT_5A_DECISION_PACKET,
+    ) -> None:
+        if not isinstance(proposal, Increment5ADecisionPacket):
+            raise Increment5ContractError(
+                "effective Increment 5A authority requires a typed proposal"
+            )
+        object.__setattr__(self, "proposal", proposal)
+        object.__setattr__(self, "_approval_claim", None)
+        object.__setattr__(self, "_approval_comment", None)
+        object.__setattr__(self, "_approval_verification_digest", None)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("Increment 5A decision authority is immutable")
+        object.__setattr__(self, _name, _value)
+
+    @property
+    def production_authorized(self) -> bool:
+        return self._approval_verification_digest is not None
+
+    @property
+    def approval_attestation_digest(self) -> str | None:
+        return self._approval_verification_digest
+
+    @property
+    def approval_claim_digest(self) -> str | None:
+        return (
+            None
+            if self._approval_claim is None
+            else self._approval_claim.attestation_digest
+        )
+
+    @property
+    def effective_contract_digest(self) -> str:
+        return digest_bytes(
+            canonical_json_bytes(
+                {
+                    "contract": "increment5a-effective-decision-authority-v3",
+                    "proposal_payload_digest": self.proposal.payload_digest,
+                    "proposal_record_digest": self.proposal.record_digest,
+                    "proposal_contract_bundle_digest": (
+                        self.proposal.bundle.contract_digest
+                    ),
+                    "approval_claim_digest": self.approval_claim_digest,
+                    "approval_verification_digest": (
+                        self.approval_attestation_digest
+                    ),
+                    "qualification_production_profile_schema_digest": (
+                        _qualification_schema_digest()
+                    ),
+                    "protected_content_allowed": False,
+                    "approval_effect": (
+                        APPROVAL_EFFECT if self.production_authorized else None
+                    ),
+                }
+            )
+        )
+
+    def component_authorized(self, kind: RetrievalComponentKind) -> bool:
+        if not isinstance(kind, RetrievalComponentKind):
+            raise Increment5ProfileError(
+                "retrieval component kind must be typed"
+            )
+        if not self.production_authorized or self._approval_claim is None:
+            return False
+        expected = self.proposal.bundle.component_by_kind[kind].identity_digest
+        return (
+            self._approval_claim.component_digest_by_kind.get(kind) == expected
+        )
+
+    def require_profile(self, profile: RetrievalProfileKind) -> None:
+        if not isinstance(profile, RetrievalProfileKind):
+            raise Increment5ProfileError(
+                "retrieval profile must be typed"
+            )
+        if profile is RetrievalProfileKind.FIXTURE_REPLAY:
+            self.proposal.require_profile(profile)
+            return
+        if not self.production_authorized:
+            raise Increment5ProfileError(
+                "PRODUCTION is not authorized without GitHub-verified owner approval"
+            )
+        if not all(
+            self.component_authorized(kind)
+            for kind in RetrievalComponentKind
+        ):
+            raise Increment5ProfileError(
+                "production qualification component approval is incomplete"
+            )
+
+
 def verify_increment5a_approval(
     approval: Increment5AApprovalAttestation,
     *,
     verifier: GitHubIssueCommentApprovalVerifier,
     proposal: Increment5ADecisionPacket = INCREMENT_5A_DECISION_PACKET,
-):
+) -> Increment5ADecisionAuthority:
+    """Perform the live GitHub read and return the approved authority directly."""
+
     if not isinstance(approval, Increment5AApprovalAttestation):
         raise Increment5ContractError(
             "approval verification requires a typed attestation claim"
@@ -820,110 +808,17 @@ def verify_increment5a_approval(
             }
         )
     )
-    return _make_verified_approval(
-        claim=approval,
-        comment=comment,
-        verification_digest=verification_digest,
+    authority = object.__new__(Increment5ADecisionAuthority)
+    object.__setattr__(authority, "proposal", proposal)
+    object.__setattr__(authority, "_approval_claim", approval)
+    object.__setattr__(authority, "_approval_comment", comment)
+    object.__setattr__(
+        authority,
+        "_approval_verification_digest",
+        verification_digest,
     )
-
-
-@dataclass(frozen=True, slots=True)
-class Increment5ADecisionAuthority:
-    proposal: Increment5ADecisionPacket
-    approval: object | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.proposal, Increment5ADecisionPacket):
-            raise Increment5ContractError(
-                "effective Increment 5A authority requires a typed proposal"
-            )
-        if self.approval is not None:
-            if not isinstance(self.approval, _VerifiedIncrement5AApproval):
-                raise Increment5ContractError(
-                    "effective authority requires GitHub-verified owner approval"
-                )
-            _require_approval_binds_proposal(
-                approval=self.approval.claim,
-                proposal=self.proposal,
-            )
-
-    @property
-    def production_authorized(self) -> bool:
-        return self.approval is not None
-
-    @property
-    def approval_attestation_digest(self) -> str | None:
-        return (
-            None
-            if self.approval is None
-            else self.approval.verification_digest
-        )
-
-    @property
-    def approval_claim_digest(self) -> str | None:
-        return (
-            None
-            if self.approval is None
-            else self.approval.claim.attestation_digest
-        )
-
-    @property
-    def effective_contract_digest(self) -> str:
-        return digest_bytes(
-            canonical_json_bytes(
-                {
-                    "contract": "increment5a-effective-decision-authority-v2",
-                    "proposal_payload_digest": self.proposal.payload_digest,
-                    "proposal_record_digest": self.proposal.record_digest,
-                    "proposal_contract_bundle_digest": (
-                        self.proposal.bundle.contract_digest
-                    ),
-                    "approval_claim_digest": self.approval_claim_digest,
-                    "approval_verification_digest": (
-                        self.approval_attestation_digest
-                    ),
-                    "qualification_production_profile_schema_digest": (
-                        _qualification_schema_digest()
-                    ),
-                    "protected_content_allowed": False,
-                    "approval_effect": (
-                        None if self.approval is None else APPROVAL_EFFECT
-                    ),
-                }
-            )
-        )
-
-    def component_authorized(self, kind: RetrievalComponentKind) -> bool:
-        if not isinstance(kind, RetrievalComponentKind):
-            raise Increment5ProfileError(
-                "retrieval component kind must be typed"
-            )
-        if self.approval is None:
-            return False
-        expected = self.proposal.bundle.component_by_kind[kind].identity_digest
-        return (
-            self.approval.claim.component_digest_by_kind.get(kind) == expected
-        )
-
-    def require_profile(self, profile: RetrievalProfileKind) -> None:
-        if not isinstance(profile, RetrievalProfileKind):
-            raise Increment5ProfileError(
-                "retrieval profile must be typed"
-            )
-        if profile is RetrievalProfileKind.FIXTURE_REPLAY:
-            self.proposal.require_profile(profile)
-            return
-        if not self.production_authorized:
-            raise Increment5ProfileError(
-                "PRODUCTION is not authorized without GitHub-verified owner approval"
-            )
-        if not all(
-            self.component_authorized(kind)
-            for kind in RetrievalComponentKind
-        ):
-            raise Increment5ProfileError(
-                "production qualification component approval is incomplete"
-            )
+    object.__setattr__(authority, "_sealed", True)
+    return authority
 
 
 def _schema_errors(value: Mapping[str, Any]) -> tuple[str, ...]:
@@ -1060,7 +955,6 @@ def load_increment5a_approval_attestation(
             "owner approval attestation schema validation failed: "
             + errors[0]
         )
-
     proposal_value = require_mapping(
         value.get("proposal"),
         field="approval.proposal",
@@ -1180,12 +1074,10 @@ def load_increment5a_approval_attestation(
 def decision_authority(
     *,
     proposal: Increment5ADecisionPacket = INCREMENT_5A_DECISION_PACKET,
-    approval: object | None = None,
 ) -> Increment5ADecisionAuthority:
-    return Increment5ADecisionAuthority(
-        proposal=proposal,
-        approval=approval,
-    )
+    """Create pending authority only; verified authority comes from the live verifier."""
+
+    return Increment5ADecisionAuthority(proposal=proposal)
 
 
 INCREMENT_5A_DECISION_AUTHORITY = decision_authority()
