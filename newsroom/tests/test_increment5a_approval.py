@@ -93,6 +93,24 @@ def test_pending_proposal_remains_immutable_and_non_authorizing() -> None:
         )
 
 
+def test_historical_proposal_schema_has_no_generic_public_validator() -> None:
+    import newsroom.increment5 as increment5
+    import newsroom.increment5.profiles as profiles
+
+    assert not hasattr(increment5, "PRODUCTION_PROFILE_SCHEMA")
+    assert not hasattr(increment5, "PRODUCTION_PROFILE_SCHEMA_ID")
+    assert not hasattr(increment5, "PRODUCTION_PROFILE_SCHEMA_VERSION")
+    assert not hasattr(profiles, "PRODUCTION_PROFILE_SCHEMA")
+    assert not hasattr(profiles, "PRODUCTION_PROFILE_SCHEMA_ID")
+    assert not hasattr(profiles, "PRODUCTION_PROFILE_SCHEMA_VERSION")
+    assert increment5.PRODUCTION_PROFILE_SCHEMA_DIGEST == (
+        increment5.PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST
+    )
+    assert increment5.PRODUCTION_PROFILE_SCHEMA_PATH == (
+        increment5.PROPOSAL_PRODUCTION_PROFILE_SCHEMA_PATH
+    )
+
+
 def test_separate_attestation_authorizes_exact_proposal_without_mutation(
     tmp_path: Path,
 ) -> None:
