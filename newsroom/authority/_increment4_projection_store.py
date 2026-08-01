@@ -75,26 +75,37 @@ class _Increment4ProjectionAuthorityStore(
                     version = self.entity_version(
                         preferred.current_entity_version_id
                     )
-                    alias_count = int(
-                        conn.execute(
-                            "SELECT COUNT(*) FROM entity_aliases WHERE entity_id=?",
-                            (str(entity_id),),
-                        ).fetchone()[0]
-                    )
-                    aliases = tuple(
-                        sorted(
-                            self.aliases(entity_id, limit=max(1, alias_count)),
-                            key=lambda item: str(item.alias_id),
-                        )
-                    )
                 except PermissionError:
                     # Rights-invalid current state must disappear from derivative
                     # authority rather than being copied from stale caller memory.
                     continue
-                if len(aliases) != alias_count:
-                    raise AuthorityPersistenceError(
-                        "Increment 4 entity alias authority is incomplete"
+
+                # Alias evidence can have independent rights from the retained
+                # entity creation decision. Decode every immutable alias row, but
+                # retain only aliases whose own provenance remains currently
+                # usable. One revoked alias must not remove an otherwise-current
+                # entity or make relation endpoint membership inconsistent.
+                alias_rows = conn.execute(
+                    "SELECT * FROM entity_aliases WHERE entity_id=? "
+                    "ORDER BY language,normalized_text,alias_id",
+                    (str(entity_id),),
+                ).fetchall()
+                admitted_aliases = []
+                for alias_row in alias_rows:
+                    alias = self._alias_from_row(conn, alias_row)
+                    mention = self._mention_from_row(
+                        conn,
+                        self._mention_row(conn, alias.provenance_mention_id),
+                        replayed=False,
                     )
+                    try:
+                        self._require_mention_current(conn, mention)
+                    except PermissionError:
+                        continue
+                    admitted_aliases.append(alias)
+                aliases = tuple(
+                    sorted(admitted_aliases, key=lambda item: str(item.alias_id))
+                )
                 projection_rows = conn.execute(
                     "SELECT * FROM entity_projection_events "
                     "WHERE entity_id=? AND source_ledger_seq=? "

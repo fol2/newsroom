@@ -307,11 +307,88 @@ class _Neo4jProjectionBoundary:
     def _require_generic_mutation_generation(
         self,
         generation_id: ProjectionGenerationId,
-        proof: AuthenticationProof,
     ) -> None:
-        self._projection_boundary._authenticate(proof)
         metadata = self._store.projection_generation_metadata(generation_id)
         self._require_generic_structural_family(metadata.family.family_id)
+
+    def _authorize_transition(
+        self,
+        request: ProjectionGenerationTransitionRequest,
+        proof: AuthenticationProof,
+    ):
+        return self._projection_boundary._grant(
+            command_type="projection.generation.transition",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "target_state": request.target_state.value,
+                "validated_through_ledger_seq": (
+                    request.validated_through_ledger_seq
+                ),
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
+
+    def _authorize_validation(
+        self,
+        request: ProjectionGenerationValidationRequest,
+        proof: AuthenticationProof,
+    ):
+        return self._projection_boundary._grant(
+            command_type="projection.generation.validate",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "checkpoint_ledger_seq": request.checkpoint_ledger_seq,
+                "service_compatibility_digest": (
+                    request.service_compatibility_digest
+                ),
+                "projection_state_digest": request.projection_state_digest,
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
+
+    def _authorize_rebuild(
+        self,
+        request: StructuralRebuildRequest,
+        proof: AuthenticationProof,
+    ):
+        return self._projection_boundary._grant(
+            command_type="projection.generation.rebuild",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "through_ledger_seq": request.through_ledger_seq,
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
+
+    def _authorize_gap_resolution(
+        self,
+        request: ProjectionGapResolutionRequest,
+        proof: AuthenticationProof,
+    ):
+        return self._projection_boundary._grant(
+            command_type="projection.gap.resolve",
+            aggregate_id=request.generation_id.as_aggregate_id(),
+            expected_version=request.expected_authority_version,
+            payload={
+                "generation_id": str(request.generation_id),
+                "gap_id": str(request.gap_id),
+                "reason_code": request.reason_code,
+            },
+            idempotency_key=request.idempotency_key,
+            proof=proof,
+        )
 
     def register_family(
         self,
@@ -342,8 +419,15 @@ class _Neo4jProjectionBoundary:
     ) -> ProjectionGenerationView:
         if not isinstance(request, ProjectionGenerationTransitionRequest):
             raise TypeError("projection generation transition requires a typed request")
-        self._require_generic_mutation_generation(request.generation_id, proof)
-        return self._projection_boundary.transition_generation(request, proof)
+        grant = self._authorize_transition(request, proof)
+        self._require_generic_mutation_generation(request.generation_id)
+        return self._store.transition_generation(
+            grant,
+            generation_id=request.generation_id,
+            target_state=request.target_state,
+            validated_through_ledger_seq=request.validated_through_ledger_seq,
+            reason_code=request.reason_code,
+        )
 
     def record_delivery(
         self,
@@ -352,8 +436,12 @@ class _Neo4jProjectionBoundary:
     ) -> DeliveryRecordView:
         if not isinstance(request, ProjectionDeliveryRequest):
             raise TypeError("projection delivery requires a typed request")
-        self._require_generic_mutation_generation(request.generation_id, proof)
-        return self._projection_boundary.record_delivery(request, proof)
+        grant = self._projection_boundary._authorize_delivery(
+            request,
+            proof,
+        )
+        self._require_generic_mutation_generation(request.generation_id)
+        return self._projection_boundary._commit_delivery(grant, request)
 
     def resolve_gap(
         self,
@@ -362,8 +450,14 @@ class _Neo4jProjectionBoundary:
     ) -> ProjectionGapView:
         if not isinstance(request, ProjectionGapResolutionRequest):
             raise TypeError("projection gap resolution requires a typed request")
-        self._require_generic_mutation_generation(request.generation_id, proof)
-        return self._projection_boundary.resolve_gap(request, proof)
+        grant = self._authorize_gap_resolution(request, proof)
+        self._require_generic_mutation_generation(request.generation_id)
+        return self._store.resolve_gap(
+            grant,
+            generation_id=request.generation_id,
+            gap_id=request.gap_id,
+            reason_code=request.reason_code,
+        )
 
     def deliver(
         self,
@@ -492,12 +586,13 @@ class _Neo4jProjectionBoundary:
     ) -> StructuralRebuildResult:
         if not isinstance(request, StructuralRebuildRequest):
             raise TypeError("structural rebuild requires a typed request")
-        self._projection_boundary._authenticate(proof)
-        metadata = self._store.projection_generation_metadata(
-            request.generation_id
+        grant = self._authorize_rebuild(request, proof)
+        self._require_generic_mutation_generation(request.generation_id)
+        receipt = self._store.begin_projection_rebuild(
+            grant,
+            generation_id=request.generation_id,
+            through_ledger_seq=request.through_ledger_seq,
         )
-        self._require_generic_structural_family(metadata.family.family_id)
-        receipt = self._projection_boundary._begin_rebuild(request, proof)
         if receipt.generation.state is not ProjectionGenerationState.BUILDING:
             raise ProjectionStateError(
                 "only a building generation can be destructively rebuilt"
@@ -631,15 +726,14 @@ class _Neo4jProjectionBoundary:
     ) -> ProjectionGenerationPromotionView:
         if not isinstance(request, ProjectionGenerationPromotionRequest):
             raise TypeError("projection promotion requires a typed request")
-        self._require_generic_mutation_generation(request.generation_id, proof)
-        if request.prior_generation_id is not None:
-            self._require_generic_mutation_generation(
-                request.prior_generation_id,
-                proof,
-            )
         target_grant, prior_grant = (
             self._projection_boundary._authorize_promotion(request, proof)
         )
+        self._require_generic_mutation_generation(request.generation_id)
+        if request.prior_generation_id is not None:
+            self._require_generic_mutation_generation(
+                request.prior_generation_id
+            )
         metadata = self._store.projection_generation_metadata(
             request.generation_id
         )
@@ -725,7 +819,8 @@ class _Neo4jProjectionBoundary:
     ) -> ProjectionGenerationValidationView:
         if not isinstance(request, ProjectionGenerationValidationRequest):
             raise TypeError("projection validation requires a typed request")
-        self._require_generic_mutation_generation(request.generation_id, proof)
+        self._authorize_validation(request, proof)
+        self._require_generic_mutation_generation(request.generation_id)
         raise ProjectionStateError(
             "Neo4j generation validation requires structural reconciliation"
         )
