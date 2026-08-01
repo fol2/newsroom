@@ -5,19 +5,24 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
-  actions: read
+  actions: write
   contents: read
+
+concurrency:
+  group: increment4-exact-main-reader-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   inspect-main-runs:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
-      - name: Read exact-main push workflow evidence
+      - name: Dispatch and read exact-main workflow evidence
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           MAIN_SHA: ${{ github.event.pull_request.base.sha }}
+          MAIN_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           python - <<'PY'
           import json
@@ -27,47 +32,59 @@ jobs:
           import urllib.parse
           import urllib.request
 
-          expected = {
+          push_expected = {
               "CI",
               "Authority A2a",
               "Authority A2b",
               "Projection B1",
               "Projection B2/B3/C1 Neo4j",
-              "SDLC Evidence Shadow",
           }
+          sdlc_name = "SDLC Evidence Shadow"
           repository = os.environ["REPOSITORY"]
           main_sha = os.environ["MAIN_SHA"]
+          main_ref = os.environ["MAIN_REF"]
           token = os.environ["GH_TOKEN"]
-          endpoint = f"https://api.github.com/repos/{repository}/actions/runs"
+          api_root = f"https://api.github.com/repos/{repository}"
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "newsroom-exact-main-evidence-reader",
+          }
 
           def request_json(url: str) -> dict:
-              request = urllib.request.Request(
-                  url,
-                  headers={
-                      "Accept": "application/vnd.github+json",
-                      "Authorization": f"Bearer {token}",
-                      "X-GitHub-Api-Version": "2022-11-28",
-                      "User-Agent": "newsroom-exact-main-evidence-reader",
-                  },
-              )
+              request = urllib.request.Request(url, headers=headers)
               with urllib.request.urlopen(request, timeout=30) as response:
                   return json.load(response)
 
-          latest = {}
-          for attempt in range(40):
-              query = urllib.parse.urlencode(
-                  {
-                      "head_sha": main_sha,
-                      "event": "push",
-                      "per_page": 100,
-                  }
+          def post_json(url: str, payload: dict) -> None:
+              request = urllib.request.Request(
+                  url,
+                  data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                  method="POST",
+                  headers={**headers, "Content-Type": "application/json"},
               )
-              payload = request_json(f"{endpoint}?{query}")
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  if response.status != 204:
+                      raise RuntimeError(
+                          f"unexpected workflow dispatch status {response.status}"
+                      )
+
+          commit = request_json(f"{api_root}/commits/{main_sha}")
+          parents = commit.get("parents")
+          if not isinstance(parents, list) or len(parents) != 1:
+              raise SystemExit("exact-main qualification requires one parent")
+          base_sha = parents[0].get("sha")
+          if not isinstance(base_sha, str) or len(base_sha) != 40:
+              raise SystemExit("exact-main parent identity is invalid")
+
+          def latest_runs(url: str, expected: set[str], event: str) -> dict:
+              payload = request_json(url)
               matching = [
                   run
                   for run in payload.get("workflow_runs", [])
                   if run.get("head_sha") == main_sha
-                  and run.get("event") == "push"
+                  and run.get("event") == event
                   and run.get("name") in expected
               ]
               latest = {}
@@ -76,17 +93,71 @@ jobs:
                   key=lambda item: (item.get("created_at") or "", item.get("id") or 0),
               ):
                   latest[run["name"]] = run
+              return latest
 
+          dispatch_query = urllib.parse.urlencode(
+              {
+                  "head_sha": main_sha,
+                  "event": "workflow_dispatch",
+                  "per_page": 100,
+              }
+          )
+          dispatch_runs_url = (
+              f"{api_root}/actions/workflows/evidence.yml/runs?{dispatch_query}"
+          )
+          existing_sdlc = latest_runs(
+              dispatch_runs_url,
+              {sdlc_name},
+              "workflow_dispatch",
+          )
+          if not existing_sdlc:
+              post_json(
+                  f"{api_root}/actions/workflows/evidence.yml/dispatches",
+                  {
+                      "ref": main_ref,
+                      "inputs": {"base_sha": base_sha},
+                  },
+              )
+              print(
+                  f"dispatched {sdlc_name} on {main_ref}@{main_sha} "
+                  f"against base {base_sha}",
+                  flush=True,
+              )
+          else:
+              print(
+                  f"reusing existing exact-main {sdlc_name} run "
+                  f"{existing_sdlc[sdlc_name]['id']}",
+                  flush=True,
+              )
+
+          push_query = urllib.parse.urlencode(
+              {
+                  "head_sha": main_sha,
+                  "event": "push",
+                  "per_page": 100,
+              }
+          )
+          push_runs_url = f"{api_root}/actions/runs?{push_query}"
+
+          for attempt in range(55):
+              push_runs = latest_runs(push_runs_url, push_expected, "push")
+              sdlc_runs = latest_runs(
+                  dispatch_runs_url,
+                  {sdlc_name},
+                  "workflow_dispatch",
+              )
+              combined = {**push_runs, **sdlc_runs}
+              expected = push_expected | {sdlc_name}
               summary = {
                   name: {
-                      "id": latest[name]["id"],
-                      "status": latest[name]["status"],
-                      "conclusion": latest[name]["conclusion"],
-                      "event": latest[name]["event"],
-                      "head_sha": latest[name]["head_sha"],
-                      "html_url": latest[name]["html_url"],
+                      "id": combined[name]["id"],
+                      "status": combined[name]["status"],
+                      "conclusion": combined[name]["conclusion"],
+                      "event": combined[name]["event"],
+                      "head_sha": combined[name]["head_sha"],
+                      "html_url": combined[name]["html_url"],
                   }
-                  for name in sorted(latest)
+                  for name in sorted(combined)
               }
               print(
                   f"attempt={attempt + 1} main_sha={main_sha} "
@@ -94,21 +165,23 @@ jobs:
                   flush=True,
               )
 
-              if expected.issubset(latest) and all(
-                  latest[name]["status"] == "completed" for name in expected
+              if expected.issubset(combined) and all(
+                  combined[name]["status"] == "completed" for name in expected
               ):
                   failures = {
-                      name: latest[name]["conclusion"]
+                      name: combined[name]["conclusion"]
                       for name in sorted(expected)
-                      if latest[name]["conclusion"] != "success"
+                      if combined[name]["conclusion"] != "success"
                   }
                   evidence = {
+                      "base_sha": base_sha,
                       "main_sha": main_sha,
                       "runs": {
                           name: {
-                              "id": latest[name]["id"],
-                              "conclusion": latest[name]["conclusion"],
-                              "html_url": latest[name]["html_url"],
+                              "id": combined[name]["id"],
+                              "event": combined[name]["event"],
+                              "conclusion": combined[name]["conclusion"],
+                              "html_url": combined[name]["html_url"],
                           }
                           for name in sorted(expected)
                       },
@@ -129,11 +202,11 @@ jobs:
 
               time.sleep(15)
 
-          missing = sorted(expected - set(latest))
+          missing = sorted(expected - set(combined))
           incomplete = {
-              name: latest[name]["status"]
-              for name in sorted(expected & set(latest))
-              if latest[name]["status"] != "completed"
+              name: combined[name]["status"]
+              for name in sorted(expected & set(combined))
+              if combined[name]["status"] != "completed"
           }
           print(
               "Exact-main workflow evidence did not complete within the bounded poll; "
