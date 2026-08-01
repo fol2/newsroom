@@ -40,14 +40,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
-      - name: Sync locked environment
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv lock --check
-          uv sync --dev --locked
-
-      - name: Make staging-script matching indentation-aware
+      - name: Make staging script matching current-head aware
         shell: bash
         run: |
           set -euo pipefail
@@ -91,11 +84,42 @@ jobs:
           '''
           if text.count(old) != 1:
               raise SystemExit("replace_once helper source differs")
-          path.write_text(
-              text.replace(old, new, 1),
-              encoding="utf-8",
-              newline="\n",
+          text = text.replace(old, new, 1)
+
+          old_doc_patch = '''postmerge_doc = replace_once(
+              postmerge_doc,
+              "The post-merge record is a separate admission artifact. ",
+              (
+                  "The post-merge record is a separate admission artifact. Its "
+                  "source-pinned loader authenticates every claimed run attempt and the "
+                  "qualified commit tree against GitHub REST before returning authority. "
+              ),
+              label="post-merge live authentication documentation",
           )
+          '''
+          new_doc_patch = '''postmerge_doc = replace_once(
+              postmerge_doc,
+              dedent(
+                  \'''\
+                  That later record can be created only after PR #255 is merged and the exact
+                  merged `main` commit has passed all six permanent workflows. It binds:
+                  \'''\
+              ).strip("\\n"),
+              dedent(
+                  \'''\
+                  That later record can be created only after PR #255 is merged and the exact
+                  merged `main` commit has passed all six permanent workflows. Before it can
+                  return authority, its source-pinned loader authenticates every claimed run
+                  attempt and the qualified commit tree against GitHub REST. It binds:
+                  \'''\
+              ).strip("\\n"),
+              label="post-merge live authentication documentation",
+          )
+          '''
+          if text.count(old_doc_patch) != 1:
+              raise SystemExit("post-merge documentation patch source differs")
+          text = text.replace(old_doc_patch, new_doc_patch, 1)
+          path.write_text(text, encoding="utf-8", newline="\n")
           PY
 
       - name: Apply authenticated admission and fixture hardening
