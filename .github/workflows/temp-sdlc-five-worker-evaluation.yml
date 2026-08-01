@@ -1,4 +1,4 @@
-name: Temporary SDLC direct-pytest evaluation
+name: Temporary SDLC minimal-plugin evaluation
 
 on:
   pull_request:
@@ -44,34 +44,44 @@ jobs:
           uv lock --check
           uv sync --dev --locked
 
-      - name: Execute direct canonical pytest command under immutable budget
+      - name: Execute complete suite with unused built-ins disabled
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .sdlc-direct-evaluation/pytest
+          mkdir -p .sdlc-minimal-plugin/pytest
           started="$(date +%s%3N)"
           set +e
           timeout --signal=TERM --kill-after=2s 110s \
             uv run --no-sync python -m pytest \
-              -q \
+              -qq \
+              --tb=no \
+              --no-header \
               --assert=plain \
               -p no:cacheprovider \
+              -p no:warnings \
+              -p no:logging \
+              -p no:doctest \
+              -p no:faulthandler \
+              -p no:unraisableexception \
+              -p no:threadexception \
+              -p no:pastebin \
+              -p no:stepwise \
               -p xdist.plugin \
               -n 4 \
               --dist=worksteal \
               --max-worker-restart=0 \
               newsroom/tests \
-              --basetemp=.sdlc-direct-evaluation/pytest \
-              --junitxml=.sdlc-direct-evaluation/pytest.xml \
-            > .sdlc-direct-evaluation/output.log 2>&1
+              --basetemp=.sdlc-minimal-plugin/pytest \
+              --junitxml=.sdlc-minimal-plugin/pytest.xml \
+            > .sdlc-minimal-plugin/output.log 2>&1
           status="$?"
           set -e
           finished="$(date +%s%3N)"
-          cat .sdlc-direct-evaluation/output.log
-          echo "direct_pytest_elapsed_ms=$((finished - started))"
-          echo "direct_pytest_status=${status}"
+          cat .sdlc-minimal-plugin/output.log
+          echo "minimal_plugin_elapsed_ms=$((finished - started))"
+          echo "minimal_plugin_status=${status}"
           test "${status}" -eq 0
-          test -s .sdlc-direct-evaluation/pytest.xml
+          test -s .sdlc-minimal-plugin/pytest.xml
 
       - name: Prove repository source was not modified
         shell: bash
