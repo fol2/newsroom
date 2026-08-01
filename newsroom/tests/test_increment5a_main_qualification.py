@@ -6,18 +6,27 @@ from pathlib import Path
 
 import pytest
 
+import newsroom.increment5.approval as approval_module
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.types import UtcTimestamp
 from newsroom.increment5 import (
+    APPROVAL_EFFECT,
     INCREMENT_5A_DECISION_AUTHORITY,
     INCREMENT_5A_DECISION_PACKET,
     Increment5ContractError,
+    Increment5ProfileError,
     MAIN_QUALIFICATION_RECORD_DIGEST,
     MAIN_QUALIFICATION_RECORD_PATH,
     MAIN_QUALIFICATION_RECORD_SCHEMA,
     MAIN_QUALIFICATION_RECORD_SCHEMA_DIGEST,
     MAIN_QUALIFICATION_RECORD_SCHEMA_PATH,
     MAIN_QUALIFICATION_WORKFLOW_NAMES,
+    QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST,
+    RetrievalComponentKind,
+    RetrievalProfileKind,
+    approval_attestation_value,
+    expected_increment5a_owner_approval_body,
+    load_increment5a_approval_attestation,
     load_increment5a_main_qualification_record,
     main_qualification_record_value,
     repository_main_qualification_record,
@@ -177,6 +186,53 @@ def test_main_qualification_record_requires_canonical_utc(
             _write(tmp_path, value),
             approval_record_digest=_APPROVAL_DIGEST,
         )
+
+
+def test_owner_approval_alone_cannot_open_increment5b(
+    tmp_path: Path,
+) -> None:
+    body_digest = digest_bytes(
+        expected_increment5a_owner_approval_body().encode("utf-8")
+    )
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_bytes(
+        canonical_json_bytes(
+            approval_attestation_value(
+                proposal=INCREMENT_5A_DECISION_PACKET,
+                approved_at=_QUALIFIED_AT,
+                comment_id=123456789,
+                approval_comment_body_digest=body_digest,
+            )
+        )
+    )
+    approval = load_increment5a_approval_attestation(approval_path)
+    effective_digest_for = approval_module._effective_contract_digest_factory(
+        proposal=INCREMENT_5A_DECISION_PACKET,
+        qualification_schema_digest=(
+            QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST
+        ),
+        approval_effect=APPROVAL_EFFECT,
+    )
+    authority_type = approval_module._decision_authority_class_factory(
+        proposal=INCREMENT_5A_DECISION_PACKET,
+        load_approval=lambda: approval,
+        load_main_qualification=lambda: None,
+        effective_contract_digest_for=effective_digest_for,
+    )
+    authority = authority_type()
+
+    assert authority.production_qualification_authorized
+    assert not authority.production_authorized
+    assert not authority.downstream_implementation_authorized
+    assert authority.main_qualification_record_digest is None
+    assert authority.downstream_contract_digest is None
+    for kind in RetrievalComponentKind:
+        assert not authority.component_authorized(kind)
+    with pytest.raises(
+        Increment5ProfileError,
+        match="post-merge exact-main qualification record",
+    ):
+        authority.require_profile(RetrievalProfileKind.PRODUCTION)
 
 
 def test_workflow_inventory_is_exact() -> None:
