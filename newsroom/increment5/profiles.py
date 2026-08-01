@@ -20,7 +20,6 @@ from .contracts import (
     RetrievalProfileKind,
     RuntimeAuthority,
 )
-from .decision import INCREMENT_5A_DECISION_PACKET
 
 
 # v1 remains immutable proposal evidence only; the public production surface is v2.
@@ -43,6 +42,14 @@ QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_PATH = (
 )
 _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
 _REQUIRED_MODES = tuple(item.value for item in RetrievalMode)
+
+
+def _proposal_packet() -> Increment5ADecisionPacket:
+    # decision.py imports this schema module, so load the packet only after both
+    # modules have completed initialization.
+    from .decision import INCREMENT_5A_DECISION_PACKET
+
+    return INCREMENT_5A_DECISION_PACKET
 
 
 def _qualification_component_reference_schema() -> dict[str, object]:
@@ -190,8 +197,9 @@ def _schema_errors(
 def _proposal_for_fixture(packet: object) -> Increment5ADecisionPacket:
     from .approval import INCREMENT_5A_DECISION_AUTHORITY
 
-    if packet is INCREMENT_5A_DECISION_PACKET or packet is INCREMENT_5A_DECISION_AUTHORITY:
-        return INCREMENT_5A_DECISION_PACKET
+    proposal = _proposal_packet()
+    if packet is proposal or packet is INCREMENT_5A_DECISION_AUTHORITY:
+        return proposal
     raise Increment5ProfileError("retrieval profile validation requires canonical 5A authority")
 
 
@@ -261,7 +269,7 @@ def validate_profile_manifest(
 
     if packet is not INCREMENT_5A_DECISION_AUTHORITY:
         raise Increment5ProfileError("PRODUCTION requires canonical repository authority")
-    proposal = INCREMENT_5A_DECISION_PACKET
+    proposal = _proposal_packet()
     approval = require_repository_approval_record()
     errors = _schema_errors(_QUALIFICATION_PRODUCTION_VALIDATOR, document)
     if errors:
@@ -315,7 +323,7 @@ def build_fixture_replay_manifest(
 def build_production_qualification_manifest() -> dict[str, object]:
     from .approval import INCREMENT_5A_DECISION_AUTHORITY, require_repository_approval_record
 
-    proposal = INCREMENT_5A_DECISION_PACKET
+    proposal = _proposal_packet()
     approval = require_repository_approval_record()
     components: dict[str, object] = {}
     for kind, identity in proposal.bundle.component_by_kind.items():
