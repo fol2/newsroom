@@ -1,0 +1,48 @@
+name: Temporary Increment 5A source export
+
+on:
+  push:
+    branches:
+      - agent/increment-5a-retrieval-contract
+    paths:
+      - .github/workflows/temp-increment5a-source-export.yml
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/increment-5a-retrieval-contract
+          fetch-depth: 0
+
+      - name: Prepare exact source export
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .source-export
+          git archive --format=tar HEAD | tar -xf - -C .source-export
+
+      - name: Upload exact source export
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: increment5a-source-${{ github.sha }}
+          path: .source-export
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Remove temporary workflow and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/temp-increment5a-source-export.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/temp-increment5a-source-export.yml
+          git commit -m "chore(increment5): remove temporary source export"
+          git push origin HEAD:agent/increment-5a-retrieval-contract
