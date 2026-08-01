@@ -1,16 +1,16 @@
 # Increment 5A production retrieval contract proposal
 
-**Status:** Proposed — explicit owner approval required  
-**Owner:** Product owner  
-**Prepared:** 2026-08-01  
-**Issue:** #250  
-**Parent:** #145  
-**Implementation base:** `main@c9e31879421083e82e2538d57087d04e9b454d34`  
-**Decision packet:** `newsroom/increment5/data/increment5a_production_retrieval_decision_v1.json`  
-**Decision payload digest:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`  
-**Decision record digest:** `sha256:77fe5544b33a85519b8c1fba57f41fe1a68aa411eb63c64be5429dbbd28ea913`  
-**Contract bundle digest:** `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`  
-**Production profile schema digest:** `sha256:2cdaa92a487ff48dd6095e1cc82af6f67362c168c557d9e6c3ecfe83e83cb647`  
+**Status:** Proposed — explicit owner approval required
+**Owner:** Product owner
+**Prepared:** 2026-08-01
+**Issue:** #250
+**Parent:** #145
+**Implementation base:** `main@c9e31879421083e82e2538d57087d04e9b454d34`
+**Decision packet:** `newsroom/increment5/data/increment5a_production_retrieval_decision_v1.json`
+**Decision payload digest:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`
+**Decision record digest:** `sha256:77fe5544b33a85519b8c1fba57f41fe1a68aa411eb63c64be5429dbbd28ea913`
+**Contract bundle digest:** `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`
+**Production profile schema digest:** `sha256:2cdaa92a487ff48dd6095e1cc82af6f67362c168c557d9e6c3ecfe83e83cb647`
 **Fixture replay profile schema digest:** `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e`
 
 ## Decision requested
