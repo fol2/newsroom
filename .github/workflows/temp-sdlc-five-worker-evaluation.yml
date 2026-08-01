@@ -1,4 +1,4 @@
-name: Temporary SDLC minimal-plugin evaluation
+name: Temporary SDLC deterministic shard evaluation
 
 on:
   pull_request:
@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - .github/workflows/temp-sdlc-five-worker-evaluation.yml
+      - scripts/temp_sdlc_core_duration_weights.json
 
 permissions:
   contents: read
@@ -44,44 +45,195 @@ jobs:
           uv lock --check
           uv sync --dev --locked
 
-      - name: Execute complete suite with unused built-ins disabled
+      - name: Run four exact file shards under immutable lane budget
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .sdlc-minimal-plugin/pytest
+          rm -rf .sdlc-core-shard-evaluation
+          mkdir -p .sdlc-core-shard-evaluation
           started="$(date +%s%3N)"
           set +e
           timeout --signal=TERM --kill-after=2s 110s \
-            uv run --no-sync python -m pytest \
-              -qq \
-              --tb=no \
-              --no-header \
-              --assert=plain \
-              -p no:cacheprovider \
-              -p no:warnings \
-              -p no:logging \
-              -p no:doctest \
-              -p no:faulthandler \
-              -p no:unraisableexception \
-              -p no:threadexception \
-              -p no:pastebin \
-              -p no:stepwise \
-              -p xdist.plugin \
-              -n 4 \
-              --dist=worksteal \
-              --max-worker-restart=0 \
-              newsroom/tests \
-              --basetemp=.sdlc-minimal-plugin/pytest \
-              --junitxml=.sdlc-minimal-plugin/pytest.xml \
-            > .sdlc-minimal-plugin/output.log 2>&1
+            uv run --no-sync python - <<'PY'
+          from __future__ import annotations
+
+          from concurrent.futures import ThreadPoolExecutor
+          import json
+          from pathlib import Path
+          import subprocess
+          import sys
+          import time
+          import xml.etree.ElementTree as ET
+
+
+          ROOT = Path.cwd()
+          OUTPUT = ROOT / ".sdlc-core-shard-evaluation"
+          WEIGHTS_PATH = ROOT / "scripts" / "temp_sdlc_core_duration_weights.json"
+          SHARD_COUNT = 4
+          EXPECTED_TESTS = 1954
+          EXPECTED_SKIPS = 38
+
+          test_root = ROOT / "newsroom" / "tests"
+          files = tuple(
+              path.relative_to(ROOT).as_posix()
+              for path in sorted(test_root.rglob("test_*.py"))
+              if path.is_file() and not path.is_symlink()
+          )
+          weights_raw = json.loads(WEIGHTS_PATH.read_text(encoding="utf-8"))
+          if not isinstance(weights_raw, dict):
+              raise SystemExit("duration weights must be an object")
+          weights = {
+              str(path): float(value)
+              for path, value in weights_raw.items()
+          }
+          if set(files) != set(weights):
+              missing = sorted(set(files) - set(weights))
+              extra = sorted(set(weights) - set(files))
+              raise SystemExit(
+                  f"duration inventory differs missing={missing} extra={extra}"
+              )
+
+          shards: list[list[str]] = [[] for _ in range(SHARD_COUNT)]
+          totals = [0.0] * SHARD_COUNT
+          for relative, weight in sorted(
+              weights.items(),
+              key=lambda item: (-item[1], item[0]),
+          ):
+              index = min(range(SHARD_COUNT), key=lambda item: (totals[item], item))
+              shards[index].append(relative)
+              totals[index] += weight
+
+          print(
+              "planned_shards="
+              + json.dumps(
+                  [
+                      {
+                          "index": index,
+                          "files": len(shards[index]),
+                          "historical_seconds": round(totals[index], 3),
+                      }
+                      for index in range(SHARD_COUNT)
+                  ],
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ),
+              flush=True,
+          )
+
+          def run_shard(index: int) -> tuple[int, float]:
+              report = OUTPUT / f"shard-{index}.xml"
+              log = OUTPUT / f"shard-{index}.log"
+              basetemp = OUTPUT / f"pytest-{index}"
+              command = (
+                  sys.executable,
+                  "-m",
+                  "pytest",
+                  "-qq",
+                  "--tb=no",
+                  "--no-header",
+                  "--assert=plain",
+                  "-p",
+                  "no:cacheprovider",
+                  *tuple(shards[index]),
+                  f"--basetemp={basetemp}",
+                  f"--junitxml={report}",
+              )
+              start = time.monotonic()
+              with log.open("wb") as stream:
+                  completed = subprocess.run(
+                      command,
+                      cwd=ROOT,
+                      stdout=stream,
+                      stderr=subprocess.STDOUT,
+                      check=False,
+                  )
+              return completed.returncode, time.monotonic() - start
+
+          with ThreadPoolExecutor(max_workers=SHARD_COUNT) as executor:
+              results = tuple(executor.map(run_shard, range(SHARD_COUNT)))
+
+          print(
+              "actual_shards="
+              + json.dumps(
+                  [
+                      {
+                          "index": index,
+                          "returncode": results[index][0],
+                          "elapsed_seconds": round(results[index][1], 3),
+                      }
+                      for index in range(SHARD_COUNT)
+                  ],
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ),
+              flush=True,
+          )
+          if any(code != 0 for code, _elapsed in results):
+              for index in range(SHARD_COUNT):
+                  print(f"--- shard {index} ---", flush=True)
+                  print(
+                      (OUTPUT / f"shard-{index}.log").read_text(
+                          encoding="utf-8",
+                          errors="replace",
+                      ),
+                      flush=True,
+                  )
+              raise SystemExit("one or more core shards failed")
+
+          identities: set[tuple[str, str]] = set()
+          test_count = 0
+          skip_count = 0
+          failure_count = 0
+          error_count = 0
+          for index in range(SHARD_COUNT):
+              report_root = ET.parse(OUTPUT / f"shard-{index}.xml").getroot()
+              for testcase in report_root.iter("testcase"):
+                  identity = (
+                      testcase.attrib.get("classname", ""),
+                      testcase.attrib.get("name", ""),
+                  )
+                  if identity in identities:
+                      raise SystemExit(f"duplicate test identity: {identity}")
+                  identities.add(identity)
+                  test_count += 1
+                  skip_count += sum(1 for _ in testcase.findall("skipped"))
+                  failure_count += sum(1 for _ in testcase.findall("failure"))
+                  error_count += sum(1 for _ in testcase.findall("error"))
+
+          summary = {
+              "tests": test_count,
+              "skips": skip_count,
+              "failures": failure_count,
+              "errors": error_count,
+              "unique": len(identities),
+          }
+          print(
+              "shard_summary="
+              + json.dumps(summary, sort_keys=True, separators=(",", ":")),
+              flush=True,
+          )
+          if summary != {
+              "tests": EXPECTED_TESTS,
+              "skips": EXPECTED_SKIPS,
+              "failures": 0,
+              "errors": 0,
+              "unique": EXPECTED_TESTS,
+          }:
+              raise SystemExit(f"unexpected shard summary: {summary}")
+          PY
           status="$?"
           set -e
           finished="$(date +%s%3N)"
-          cat .sdlc-minimal-plugin/output.log
-          echo "minimal_plugin_elapsed_ms=$((finished - started))"
-          echo "minimal_plugin_status=${status}"
+          echo "deterministic_shard_elapsed_ms=$((finished - started))"
+          echo "deterministic_shard_status=${status}"
+          if test "${status}" -ne 0; then
+            for log in .sdlc-core-shard-evaluation/shard-*.log; do
+              test -e "${log}" || continue
+              echo "--- ${log} ---"
+              cat "${log}"
+            done
+          fi
           test "${status}" -eq 0
-          test -s .sdlc-minimal-plugin/pytest.xml
 
       - name: Prove repository source was not modified
         shell: bash
