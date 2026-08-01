@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from newsroom.increment5 import (
     INCREMENT5_TRACEABILITY_BY_REQUIREMENT,
     INCREMENT_5A_DECISION_AUTHORITY,
     INCREMENT_5A_DECISION_PACKET,
+    Increment5ADecisionAuthority,
     Increment5ContractError,
     Increment5DeliveryTrace,
     Increment5ProfileError,
@@ -148,22 +150,22 @@ def _verified_approval(
         lambda: session,
     )
     with GitHubIssueCommentApprovalVerifier(token="test-token") as verifier:
-        verified = verify_increment5a_approval(
+        authority = verify_increment5a_approval(
             claim,
             verifier=verifier,
         )
-    return claim, verified, session
+    return claim, authority, session
 
 
 def _approved_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    _claim, verified, _session = _verified_approval(
+    _claim, authority, _session = _verified_approval(
         tmp_path,
         monkeypatch,
     )
-    return decision_authority(approval=verified)
+    return authority
 
 
 def test_approval_and_qualification_schema_artifacts_are_canonical() -> None:
@@ -207,28 +209,38 @@ def test_unverified_canonical_claim_cannot_create_authority(
     )
 
     with pytest.raises(
-        Increment5ContractError,
-        match="GitHub-verified owner approval",
+        TypeError,
+        match="unexpected keyword argument 'approval'",
     ):
-        decision_authority(approval=claim)
+        decision_authority(approval=claim)  # type: ignore[call-arg]
+
+
+def test_approval_module_exposes_no_raw_capability_minting_path() -> None:
+    source = Path(approval_module.__file__).read_text(encoding="utf-8")
+
+    assert "_make_verified_approval" not in source
+    assert "_verified_approval_factory" not in source
+    assert "decision_authority(approval=" not in source
+    assert tuple(inspect.signature(decision_authority).parameters) == (
+        "proposal",
+    )
 
 
 def test_authenticated_github_comment_authorizes_exact_proposal_without_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    claim, verified, session = _verified_approval(
+    claim, authority, session = _verified_approval(
         tmp_path,
         monkeypatch,
     )
-    authority = decision_authority(approval=verified)
 
+    assert type(authority) is Increment5ADecisionAuthority
     assert authority.production_authorized
     assert authority.proposal is INCREMENT_5A_DECISION_PACKET
     assert authority.proposal.status.value == "PENDING_OWNER_REVIEW"
-    assert authority.approval is verified
     assert authority.approval_claim_digest == claim.attestation_digest
-    assert authority.approval_attestation_digest == verified.verification_digest
+    assert authority.approval_attestation_digest is not None
     assert tuple(APPROVAL_NON_EFFECTS) == (
         "CANARY",
         "EXTERNAL_EMBEDDING_API_CALLS",
@@ -254,6 +266,44 @@ def test_authenticated_github_comment_authorizes_exact_proposal_without_mutation
         "User-Agent": "fol2-newsroom-increment5a-approval-verifier",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+
+
+def test_decision_authority_subclasses_cannot_cross_production_gates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ForgedAuthority(Increment5ADecisionAuthority):
+        @property
+        def approval_attestation_digest(self) -> str:
+            return "sha256:" + "a" * 64
+
+        @property
+        def effective_contract_digest(self) -> str:
+            return "sha256:" + "b" * 64
+
+        def require_profile(self, profile: RetrievalProfileKind) -> None:
+            assert profile is RetrievalProfileKind.PRODUCTION
+
+        def component_authorized(self, _kind: object) -> bool:
+            return True
+
+    forged = _ForgedAuthority()
+    assert isinstance(forged, Increment5ADecisionAuthority)
+    assert type(forged) is not Increment5ADecisionAuthority
+
+    with pytest.raises(
+        Increment5ProfileError,
+        match="exact sealed owner approval authority",
+    ):
+        build_production_qualification_manifest(authority=forged)
+
+    genuine = _approved_authority(tmp_path, monkeypatch)
+    manifest = build_production_qualification_manifest(authority=genuine)
+    with pytest.raises(
+        Increment5ProfileError,
+        match="exact sealed owner approval authority",
+    ):
+        validate_profile_manifest(manifest, packet=forged)
 
 
 def test_production_manifest_requires_verified_attestation_and_denies_protected_content(

@@ -388,9 +388,9 @@ def validate_profile_manifest(
 
     from .approval import Increment5ADecisionAuthority
 
-    if not isinstance(packet, Increment5ADecisionAuthority):
+    if type(packet) is not Increment5ADecisionAuthority:
         raise Increment5ProfileError(
-            "PRODUCTION requires exact owner approval authority"
+            "PRODUCTION requires exact sealed owner approval authority"
         )
     packet.require_profile(RetrievalProfileKind.PRODUCTION)
     errors = _schema_errors(
@@ -494,9 +494,9 @@ def build_production_qualification_manifest(
 ) -> dict[str, object]:
     from .approval import Increment5ADecisionAuthority
 
-    if not isinstance(authority, Increment5ADecisionAuthority):
+    if type(authority) is not Increment5ADecisionAuthority:
         raise Increment5ProfileError(
-            "production manifest requires typed owner approval authority"
+            "production manifest requires exact sealed owner approval authority"
         )
     authority.require_profile(RetrievalProfileKind.PRODUCTION)
     proposal = authority.proposal
