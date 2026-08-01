@@ -1,11 +1,11 @@
 # Increment 5 retrieval Evaluation Plan v1
 
-**Status:** Pre-registered proposal — owner approval required before qualification  
-**Plan ID:** `increment5-retrieval-evaluation-plan-v1`  
-**Plan version:** `increment5-retrieval-evaluation-v1`  
-**Bound decision payload:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`  
-**Bound contract bundle:** `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`  
-**Issue boundaries:** #250 defines; #254 executes  
+**Status:** Pre-registered proposal — owner approval required before qualification
+**Plan ID:** `increment5-retrieval-evaluation-plan-v1`
+**Plan version:** `increment5-retrieval-evaluation-v1`
+**Bound decision payload:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`
+**Bound contract bundle:** `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`
+**Issue boundaries:** #250 defines; #254 executes
 **Runtime authority:** none
 
 ## Purpose
