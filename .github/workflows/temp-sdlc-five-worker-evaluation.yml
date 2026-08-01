@@ -1,4 +1,4 @@
-name: Temporary SDLC load-scheduler evaluation
+name: Temporary SDLC direct-pytest evaluation
 
 on:
   pull_request:
@@ -44,68 +44,37 @@ jobs:
           uv lock --check
           uv sync --dev --locked
 
-      - name: Substitute four-worker load scheduling in workspace only
+      - name: Execute direct canonical pytest command under immutable budget
         shell: bash
         run: |
           set -euo pipefail
-          uv run --no-sync python - <<'PY'
-          from pathlib import Path
-
-          source = Path("scripts/sdlc/workflow_lane.py")
-          text = source.read_text(encoding="utf-8")
-          old = '_CORE_DISTRIBUTION = "worksteal"\n'
-          if text.count(old) != 1:
-              raise SystemExit("canonical distribution source differs")
-          source.write_text(
-              text.replace(old, '_CORE_DISTRIBUTION = "load"\n', 1),
-              encoding="utf-8",
-              newline="\n",
-          )
-
-          for relative in (
-              "newsroom/tests/test_sdlc_core_worker_capacity.py",
-              "newsroom/tests/test_sdlc_workflow_lane.py",
-          ):
-              path = Path(relative)
-              value = path.read_text(encoding="utf-8")
-              if "worksteal" not in value:
-                  raise SystemExit(f"scheduler expectation missing: {relative}")
-              path.write_text(
-                  value.replace("worksteal", "load"),
-                  encoding="utf-8",
-                  newline="\n",
-              )
-          PY
-
-      - name: Execute exact core command under immutable budget
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .sdlc-load-evaluation
+          mkdir -p .sdlc-direct-evaluation/pytest
           started="$(date +%s%3N)"
           set +e
           timeout --signal=TERM --kill-after=2s 110s \
-            uv run --no-sync python -m scripts.sdlc.workflow_lane \
-              core-tests \
-              --repo-root . \
-              --report .sdlc-load-evaluation/pytest.xml \
-            > .sdlc-load-evaluation/output.log 2>&1
+            uv run --no-sync python -m pytest \
+              -q \
+              --assert=plain \
+              -p no:cacheprovider \
+              -p xdist.plugin \
+              -n 4 \
+              --dist=worksteal \
+              --max-worker-restart=0 \
+              newsroom/tests \
+              --basetemp=.sdlc-direct-evaluation/pytest \
+              --junitxml=.sdlc-direct-evaluation/pytest.xml \
+            > .sdlc-direct-evaluation/output.log 2>&1
           status="$?"
           set -e
           finished="$(date +%s%3N)"
-          cat .sdlc-load-evaluation/output.log
-          echo "load_scheduler_elapsed_ms=$((finished - started))"
-          echo "load_scheduler_status=${status}"
+          cat .sdlc-direct-evaluation/output.log
+          echo "direct_pytest_elapsed_ms=$((finished - started))"
+          echo "direct_pytest_status=${status}"
           test "${status}" -eq 0
-          test -s .sdlc-load-evaluation/pytest.xml
+          test -s .sdlc-direct-evaluation/pytest.xml
 
-      - name: Prove workspace-only substitution
+      - name: Prove repository source was not modified
         shell: bash
         run: |
           set -euo pipefail
-          git diff --check
-          git diff -- \
-            scripts/sdlc/workflow_lane.py \
-            newsroom/tests/test_sdlc_core_worker_capacity.py \
-            newsroom/tests/test_sdlc_workflow_lane.py
-          test "$(git diff --name-only | wc -l)" -eq 3
+          git diff --exit-code
