@@ -220,6 +220,52 @@ jobs:
           path.write_text(text, encoding="utf-8", newline="\n")
           PY
 
+      - name: Preserve immutable proposal fixture identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/temp_increment5a_review_hardening.py")
+          text = path.read_text(encoding="utf-8")
+          marker = '''# ---------------------------------------------------------------------------
+          # Source-pinned loader must authenticate claims against live GitHub
+          # ---------------------------------------------------------------------------
+          '''
+          insertion = '''# ---------------------------------------------------------------------------
+          # Immutable proposal continues to bind the historical fixture schema
+          # ---------------------------------------------------------------------------
+
+          decision_path = ROOT / "newsroom" / "increment5" / "decision.py"
+          decision = decision_path.read_text(encoding="utf-8")
+          decision = replace_once(
+              decision,
+              "    FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,\\n"
+              "    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,\\n",
+              "    PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,\\n"
+              "    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,\\n",
+              label="proposal fixture schema import",
+          )
+          decision = replace_once(
+              decision,
+              "schemas.get(\"fixture_replay\") != FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST",
+              (
+                  "schemas.get(\"fixture_replay\") "
+                  "!= PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST"
+              ),
+              label="proposal fixture schema verification",
+          )
+          write_text(decision_path, decision)
+
+
+          '''
+          if text.count(marker) != 1:
+              raise SystemExit("source-pinned loader marker differs")
+          text = text.replace(marker, insertion + marker, 1)
+          path.write_text(text, encoding="utf-8", newline="\n")
+          PY
+
       - name: Apply authenticated admission and fixture hardening
         shell: bash
         run: uv run --no-sync python scripts/temp_increment5a_review_hardening.py
