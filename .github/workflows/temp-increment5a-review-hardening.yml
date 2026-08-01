@@ -126,6 +126,53 @@ jobs:
           if text.count(old_doc_patch) != 1:
               raise SystemExit("post-merge documentation patch source differs")
           text = text.replace(old_doc_patch, new_doc_patch, 1)
+
+          old_trace_patch = '''trace_doc = replace_once(
+              trace_doc,
+              "`DEVAL-073`, `DOPS-064` and `DOPS-072` are deliberately assigned to 5E,",
+              "`DEVAL-073`, `DOPS-064`, `DOPS-072` and `DOPS-074` are deliberately assigned to 5E,",
+              label="DOPS-074 documentation deferral",
+          )
+          '''
+          new_trace_patch = '''trace_doc = replace_once(
+              trace_doc,
+              "| Delivered in 5A / #250 | 24 |",
+              "| Delivered in 5A / #250 | 23 |",
+              label="DOPS-074 delivered count",
+          )
+          trace_doc = replace_once(
+              trace_doc,
+              "`DOPS-070`, `DOPS-074`, `DOPS-076`",
+              "`DOPS-070`, `DOPS-076`",
+              label="remove DOPS-074 from 5A table",
+          )
+          trace_doc = replace_once(
+              trace_doc,
+              "| Deferred to 5E / #254 | 41 |",
+              "| Deferred to 5E / #254 | 42 |",
+              label="DOPS-074 deferred count",
+          )
+          trace_doc = replace_once(
+              trace_doc,
+              "`DOPS-064`, `DOPS-072`, `DOPS-075`",
+              "`DOPS-064`, `DOPS-072`, `DOPS-074`, `DOPS-075`",
+              label="add DOPS-074 to 5E table",
+          )
+          trace_doc = replace_once(
+              trace_doc,
+              "`DOPS-072` remains in 5E, where rollback is actually exercised.",
+              (
+                  "`DOPS-072` remains in 5E, where rollback is actually exercised. "
+                  "`DOPS-074` is deferred to 5E/#254, where material rights, terms, "
+                  "pricing, access and credential changes receive accountable review "
+                  "and blocking evidence."
+              ),
+              label="DOPS-074 documentation deferral",
+          )
+          '''
+          if text.count(old_trace_patch) != 1:
+              raise SystemExit("DOPS-074 documentation patch source differs")
+          text = text.replace(old_trace_patch, new_trace_patch, 1)
           path.write_text(text, encoding="utf-8", newline="\n")
           PY
 
