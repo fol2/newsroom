@@ -5,13 +5,9 @@ import sys
 from . import _workflow_lane_impl as _implementation
 
 
-# Keep one reviewed implementation module while selecting the permanent hosted-
-# runner scheduler at the stable public entrypoint. Importers receive the
-# implementation module itself, so existing monkeypatching and identity checks
-# continue to exercise the real lane code rather than a proxy surface.
-_implementation._CORE_WORKER_COUNT = 4
-_implementation._CORE_DISTRIBUTION = "worksteal"
-
+# Importers receive the reviewed implementation module itself, so normal
+# imports, direct implementation execution, reloads, monkeypatches and the
+# stable public CLI all use the same permanent scheduler defaults.
 if __name__ == "__main__":
     raise SystemExit(_implementation.main())
 
