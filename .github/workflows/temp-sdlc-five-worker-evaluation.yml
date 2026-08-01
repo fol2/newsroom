@@ -14,6 +14,8 @@ jobs:
   evaluate:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
     steps:
       - name: Check out exact branch head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
