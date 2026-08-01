@@ -1,0 +1,540 @@
+name: Temporary Increment 5A fresh review corrections
+
+on:
+  push:
+    branches:
+      - agent/increment-5a-retrieval-contract
+    paths:
+      - .github/workflows/temp-increment5a-fresh-findings.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: temporary-increment5a-fresh-findings
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact Increment 5A branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/increment-5a-retrieval-contract
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+          check-latest: false
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: "0.8.0"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Apply exact four-finding correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+
+          from newsroom.authority.canonical import canonical_json_bytes
+
+
+          OLD_SCHEMA_DIGEST = (
+              "sha256:7e03c7d5bfa8576ab13b31a6a441e2c763143958f92f041c62a0300403373b68"
+          )
+          TEST_CONTENT = "from __future__ import annotations\n\nfrom copy import deepcopy\nfrom dataclasses import replace\nimport json\nfrom pathlib import Path\n\nimport pytest\n\nimport newsroom.increment5.approval as approval_module\nfrom newsroom.authority.canonical import canonical_json_bytes, digest_bytes\nfrom newsroom.authority.types import UtcTimestamp\nfrom newsroom.increment5 import (\n    APPROVAL_EFFECT,\n    INCREMENT_5A_DECISION_AUTHORITY,\n    INCREMENT_5A_DECISION_PACKET,\n    Increment5ContractError,\n    Increment5ProfileError,\n    MAIN_QUALIFICATION_EFFECT,\n    MAIN_QUALIFICATION_NON_EFFECTS,\n    MAIN_QUALIFICATION_RECORD_DIGEST,\n    MAIN_QUALIFICATION_RECORD_PATH,\n    MAIN_QUALIFICATION_RECORD_SCHEMA,\n    MAIN_QUALIFICATION_RECORD_SCHEMA_DIGEST,\n    MAIN_QUALIFICATION_RECORD_SCHEMA_PATH,\n    MAIN_QUALIFICATION_REF,\n    MAIN_QUALIFICATION_REPOSITORY,\n    MAIN_QUALIFICATION_REPOSITORY_ID,\n    MAIN_QUALIFICATION_WORKFLOW_NAMES,\n    MAIN_QUALIFICATION_WORKFLOW_SPECS,\n    QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST,\n    RetrievalComponentKind,\n    RetrievalProfileKind,\n    approval_attestation_value,\n    expected_increment5a_owner_approval_body,\n    load_increment5a_approval_attestation,\n    load_increment5a_main_qualification_record,\n    main_qualification_record_value,\n    repository_main_qualification_record,\n)\nfrom newsroom.increment5.main_qualification import (\n    MAIN_QUALIFICATION_WORKFLOW_EVENTS,\n)\nfrom newsroom.tests.test_sdlc_shadow_decision import (\n    _Route,\n    _lane as _sdlc_lane,\n    _patch_lane_validator,\n)\nfrom scripts.sdlc.artifact_envelope import GithubRunContext\nfrom scripts.sdlc.contracts import load_contract\nfrom scripts.sdlc.shadow_decision import aggregate_shadow_decision\nfrom scripts.sdlc.workflow_event import WorkflowEvent\n\n\n_APPROVAL_DIGEST = \"sha256:\" + \"a\" * 64\n_COMMIT_SHA = \"1\" * 40\n_TREE_SHA = \"2\" * 40\n_BASE_SHA = \"3\" * 40\n_BASE_TREE_SHA = \"4\" * 40\n_QUALIFIED_AT = UtcTimestamp.parse(\"2042-03-12T12:30:00.000000Z\")\n_CREATED_AT = \"2042-03-12T12:00:00.000000Z\"\n_STARTED_AT = \"2042-03-12T12:00:01.000000Z\"\n_UPDATED_AT = \"2042-03-12T12:20:00.000000Z\"\n_WORKFLOW_FILE_BY_KEY = {\n    \"CI\": \"ci.yml\",\n    \"AUTHORITY_A2A\": \"authority-a2a.yml\",\n    \"AUTHORITY_A2B\": \"authority-a2b.yml\",\n    \"PROJECTION_B1\": \"projection-b1.yml\",\n    \"PROJECTION_B2_B3_C1_NEO4J\": \"projection-b2-neo4j.yml\",\n    \"SDLC_EVIDENCE_SHADOW\": \"evidence.yml\",\n}\n\n\ndef _contract():\n    return load_contract(Path(__file__).resolve().parents[2])\n\n\ndef _workflow_attempts() -> dict[str, dict[str, object]]:\n    attempts: dict[str, dict[str, object]] = {}\n    for index, key in enumerate(MAIN_QUALIFICATION_WORKFLOW_NAMES, start=1):\n        workflow_id, workflow_name = MAIN_QUALIFICATION_WORKFLOW_SPECS[key]\n        run_id = 1000 + index\n        attempts[key] = {\n            \"workflow_id\": workflow_id,\n            \"workflow_name\": workflow_name,\n            \"run_id\": run_id,\n            \"run_attempt\": 1,\n            \"run_number\": 2000 + index,\n            \"repository\": MAIN_QUALIFICATION_REPOSITORY,\n            \"repository_id\": MAIN_QUALIFICATION_REPOSITORY_ID,\n            \"event\": MAIN_QUALIFICATION_WORKFLOW_EVENTS[key],\n            \"ref\": MAIN_QUALIFICATION_REF,\n            \"head_branch\": \"main\",\n            \"head_sha\": _COMMIT_SHA,\n            \"head_tree_sha\": _TREE_SHA,\n            \"workflow_sha\": _COMMIT_SHA,\n            \"workflow_ref\": (\n                f\"{MAIN_QUALIFICATION_REPOSITORY}/.github/workflows/\"\n                f\"{_WORKFLOW_FILE_BY_KEY[key]}@{MAIN_QUALIFICATION_REF}\"\n            ),\n            \"status\": \"completed\",\n            \"conclusion\": \"success\",\n            \"api_url\": (\n                f\"https://api.github.com/repos/\"\n                f\"{MAIN_QUALIFICATION_REPOSITORY}/actions/runs/{run_id}/\"\n                \"attempts/1\"\n            ),\n            \"html_url\": (\n                f\"https://github.com/{MAIN_QUALIFICATION_REPOSITORY}/\"\n                f\"actions/runs/{run_id}\"\n            ),\n            \"created_at\": _CREATED_AT,\n            \"run_started_at\": _STARTED_AT,\n            \"updated_at\": _UPDATED_AT,\n        }\n    return attempts\n\n\ndef _canonical_decision_document(\n    monkeypatch: pytest.MonkeyPatch,\n    *,\n    attempts: dict[str, dict[str, object]] | None = None,\n) -> dict[str, object]:\n    selected = _workflow_attempts() if attempts is None else attempts\n    sdlc = selected[\"SDLC_EVIDENCE_SHADOW\"]\n    route = _Route(\n        risk_tier=\"R1_LOCAL_CODE\",\n        service_required=False,\n        owner_authority_required=False,\n        base_sha=_BASE_SHA,\n        base_tree_sha=_BASE_TREE_SHA,\n    )\n    core = _sdlc_lane(\"core\", route)\n    core = replace(\n        core,\n        receipt=replace(\n            core.receipt,\n            metadata=replace(\n                core.receipt.metadata,\n                run_id=int(sdlc[\"run_id\"]),\n            ),\n            run_attempt=int(sdlc[\"run_attempt\"]),\n            workflow_ref=str(sdlc[\"workflow_ref\"]),\n            workflow_sha=_COMMIT_SHA,\n            event_name=\"workflow_dispatch\",\n            event_sha=_COMMIT_SHA,\n            evaluated_sha=_COMMIT_SHA,\n            evaluated_tree_sha=_TREE_SHA,\n            ref=MAIN_QUALIFICATION_REF,\n        ),\n        replay=replace(\n            core.replay,\n            run_id=int(sdlc[\"run_id\"]),\n            run_attempt=int(sdlc[\"run_attempt\"]),\n            head_sha=_COMMIT_SHA,\n        ),\n        run_event=\"workflow_dispatch\",\n    )\n    _patch_lane_validator(monkeypatch, core)\n\n    context = GithubRunContext(\n        repository=MAIN_QUALIFICATION_REPOSITORY,\n        repository_id=MAIN_QUALIFICATION_REPOSITORY_ID,\n        head_repository=MAIN_QUALIFICATION_REPOSITORY,\n        head_repository_id=MAIN_QUALIFICATION_REPOSITORY_ID,\n        run_id=int(sdlc[\"run_id\"]),\n        run_attempt=int(sdlc[\"run_attempt\"]),\n        job_id=\"decision\",\n        workflow_ref=str(sdlc[\"workflow_ref\"]),\n        workflow_sha=_COMMIT_SHA,\n        event_name=\"workflow_dispatch\",\n        event_sha=_COMMIT_SHA,\n        evaluated_sha=_COMMIT_SHA,\n        evaluated_tree_sha=_TREE_SHA,\n        ref=MAIN_QUALIFICATION_REF,\n        runner_environment=\"github-hosted\",\n    )\n    event = WorkflowEvent(\n        repository=MAIN_QUALIFICATION_REPOSITORY,\n        repository_id=MAIN_QUALIFICATION_REPOSITORY_ID,\n        head_repository=MAIN_QUALIFICATION_REPOSITORY,\n        head_repository_id=MAIN_QUALIFICATION_REPOSITORY_ID,\n        event_name=\"workflow_dispatch\",\n        event_sha=_COMMIT_SHA,\n        base_sha=_BASE_SHA,\n        base_tree_sha=_BASE_TREE_SHA,\n        evaluated_sha=_COMMIT_SHA,\n        evaluated_tree_sha=_TREE_SHA,\n        ref=MAIN_QUALIFICATION_REF,\n    )\n    return aggregate_shadow_decision(\n        context=context,\n        event=event,\n        core=core,  # type: ignore[arg-type]\n        service=None,\n        contract=_contract(),\n    ).as_dict()\n\n\ndef _fabricated_minimal_pass(\n    *,\n    attempts: dict[str, dict[str, object]] | None = None,\n) -> dict[str, object]:\n    selected = _workflow_attempts() if attempts is None else attempts\n    sdlc = selected[\"SDLC_EVIDENCE_SHADOW\"]\n    return {\n        \"schema_version\": \"newsroom.sdlc.shadow-decision.v1\",\n        \"decision_identity\": \"sha256:\" + \"b\" * 64,\n        \"result\": \"PASS\",\n        \"result_reason\": \"PASS:decision\",\n        \"first_failure\": None,\n        \"context\": {\n            \"repository\": MAIN_QUALIFICATION_REPOSITORY,\n            \"event_name\": \"workflow_dispatch\",\n            \"ref\": MAIN_QUALIFICATION_REF,\n            \"evaluated_sha\": _COMMIT_SHA,\n            \"evaluated_tree_sha\": _TREE_SHA,\n            \"run_id\": sdlc[\"run_id\"],\n            \"run_attempt\": sdlc[\"run_attempt\"],\n            \"workflow_ref\": sdlc[\"workflow_ref\"],\n            \"workflow_sha\": _COMMIT_SHA,\n        },\n        \"event\": {\n            \"repository\": MAIN_QUALIFICATION_REPOSITORY,\n            \"event_name\": \"workflow_dispatch\",\n            \"ref\": MAIN_QUALIFICATION_REF,\n            \"evaluated_sha\": _COMMIT_SHA,\n            \"evaluated_tree_sha\": _TREE_SHA,\n        },\n        \"lanes\": [\n            {\n                \"lane_id\": \"core\",\n                \"receipt\": {\n                    \"gate_decisions\": [\n                        {\"gate_id\": \"core-deterministic\", \"result\": \"PASS\"},\n                        {\"gate_id\": \"source-integrity\", \"result\": \"PASS\"},\n                    ]\n                },\n            }\n        ],\n        \"totals\": {\n            \"test_count\": 1920,\n            \"skip_count\": 38,\n            \"required_skip_count\": 0,\n            \"failure_count\": 0,\n            \"error_count\": 0,\n        },\n    }\n\n\ndef _value(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:\n    attempts = _workflow_attempts()\n    return main_qualification_record_value(\n        proposal=INCREMENT_5A_DECISION_PACKET,\n        approval_record_digest=_APPROVAL_DIGEST,\n        qualified_main_commit_sha=_COMMIT_SHA,\n        qualified_main_tree_sha=_TREE_SHA,\n        qualified_at=_QUALIFIED_AT,\n        workflow_attempts=attempts,\n        decision_document=_canonical_decision_document(\n            monkeypatch,\n            attempts=attempts,\n        ),\n    )\n\n\ndef _write(tmp_path: Path, value: dict[str, object]) -> Path:\n    path = tmp_path / \"main-qualification.json\"\n    path.write_bytes(canonical_json_bytes(value))\n    return path\n\n\ndef test_main_qualification_schema_artifact_is_canonical() -> None:\n    data = MAIN_QUALIFICATION_RECORD_SCHEMA_PATH.read_bytes()\n    assert data == canonical_json_bytes(json.loads(data.decode(\"utf-8\")))\n    assert digest_bytes(data) == MAIN_QUALIFICATION_RECORD_SCHEMA_DIGEST\n    assert MAIN_QUALIFICATION_RECORD_SCHEMA[\"properties\"][\"branch\"] == {\n        \"const\": \"main\"\n    }\n    workflow_properties = MAIN_QUALIFICATION_RECORD_SCHEMA[\"properties\"][\n        \"workflow_attempts\"\n    ][\"properties\"]\n    for key in MAIN_QUALIFICATION_WORKFLOW_NAMES:\n        assert workflow_properties[key][\"properties\"][\"event\"] == {\n            \"const\": MAIN_QUALIFICATION_WORKFLOW_EVENTS[key]\n        }\n\n\ndef test_current_branch_has_no_post_merge_implementation_admission() -> None:\n    assert MAIN_QUALIFICATION_RECORD_DIGEST is None\n    assert not MAIN_QUALIFICATION_RECORD_PATH.exists()\n    assert repository_main_qualification_record() is None\n    assert not INCREMENT_5A_DECISION_AUTHORITY.production_authorized\n    assert not (\n        INCREMENT_5A_DECISION_AUTHORITY.downstream_implementation_authorized\n    )\n    assert INCREMENT_5A_DECISION_AUTHORITY.main_qualification_record_digest is None\n    assert INCREMENT_5A_DECISION_AUTHORITY.qualified_main_commit_sha is None\n\n\ndef test_main_qualification_record_binds_attempts_and_canonical_signed_pass(\n    tmp_path: Path,\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    value = _value(monkeypatch)\n    record = load_increment5a_main_qualification_record(\n        _write(tmp_path, value),\n        approval_record_digest=_APPROVAL_DIGEST,\n    )\n    signed = value[\"signed_decision\"]\n    assert isinstance(signed, dict)\n    assert record.qualified_main_commit_sha == _COMMIT_SHA\n    assert record.qualified_main_tree_sha == _TREE_SHA\n    assert record.qualified_at == _QUALIFIED_AT\n    assert record.approval_record_digest == _APPROVAL_DIGEST\n    assert tuple(record.workflow_attempt_by_name) == (\n        MAIN_QUALIFICATION_WORKFLOW_NAMES\n    )\n    assert record.decision_identity == signed[\"decision_identity\"]\n    assert record.test_count == signed[\"test_count\"]\n    assert record.skip_count == signed[\"skip_count\"]\n\n\ndef test_main_qualification_record_rejects_wrong_approval(\n    tmp_path: Path,\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    with pytest.raises(\n        Increment5ContractError,\n        match=\"approval digest differs\",\n    ):\n        load_increment5a_main_qualification_record(\n            _write(tmp_path, _value(monkeypatch)),\n            approval_record_digest=\"sha256:\" + \"c\" * 64,\n        )\n\n\ndef test_main_qualification_record_rejects_wrong_proposal(\n    tmp_path: Path,\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    value = _value(monkeypatch)\n    proposal = value[\"proposal\"]\n    assert isinstance(proposal, dict)\n    proposal[\"payload_digest\"] = \"sha256:\" + \"c\" * 64\n    with pytest.raises(\n        Increment5ContractError,\n        match=\"does not bind the exact proposal\",\n    ):\n        load_increment5a_main_qualification_record(\n            _write(tmp_path, value),\n            approval_record_digest=_APPROVAL_DIGEST,\n        )\n\n\ndef test_main_qualification_record_rejects_incomplete_or_reused_attempts(\n    tmp_path: Path,\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    missing = _value(monkeypatch)\n    attempts = missing[\"workflow_attempts\"]\n    assert isinstance(attempts, dict)\n    attempts.pop(\"CI\")\n    with pytest.raises(\n        Increment5ContractError,\n        match=\"schema validation failed\",\n    ):\n        load_increment5a_main_qualification_record(\n            _write(tmp_path, missing),\n            approval_record_digest=_APPROVAL_DIGEST,\n        )\n\n    reused = _workflow_attempts()\n    reused[\"CI\"][\"run_id\"] = reused[\"AUTHORITY_A2A\"][\"run_id\"]\n    reused[\"CI\"][\"api_url\"] = reused[\"AUTHORITY_A2A\"][\"api_url\"]\n    reused[\"CI\"][\"html_url\"] = reused[\"AUTHORITY_A2A\"][\"html_url\"]\n    with pytest.raises(\n        Increment5ContractError,\n        match=\"identities must be distinct\",\n    ):\n        main_qualification_record_value(\n            proposal=INCREMENT_5A_DECISION_PACKET,\n            approval_record_digest=_APPROVAL_DIGEST,\n            qualified_main_commit_sha=_COMMIT_SHA,\n            qualified_main_tree_sha=_TREE_SHA,\n            qualified_at=_QUALIFIED_AT,\n            workflow_attempts=reused,\n            decision_document=_canonical_decision_document(\n                monkeypatch,\n                attempts=reused,\n            ),\n        )\n\n\n@pytest.mark.parametrize(\n    (\"field\", \"replacement\", \"message\"),\n    (\n        (\"head_sha\", \"3\" * 40, \"not bound to qualified main\"),\n        (\"head_tree_sha\", \"3\" * 40, \"not bound to qualified main\"),\n        (\"workflow_sha\", \"3\" * 40, \"not bound to qualified main\"),\n        (\"conclusion\", \"failure\", \"event|schema|successfully\"),\n        (\"ref\", \"refs/pull/255/merge\", \"ref differs\"),\n    ),\n)\ndef test_workflow_attempts_must_be_successful_exact_main(\n    field: str,\n    replacement: str,\n    message: str,\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    attempts = _workflow_attempts()\n    attempts[\"CI\"][field] = replacement\n    with pytest.raises(Increment5ContractError, match=message):\n        main_qualification_record_value(\n            proposal=INCREMENT_5A_DECISION_PACKET,\n            approval_record_digest=_APPROVAL_DIGEST,\n            qualified_main_commit_sha=_COMMIT_SHA,\n            qualified_main_tree_sha=_TREE_SHA,\n            qualified_at=_QUALIFIED_AT,\n            workflow_attempts=attempts,\n            decision_document=_canonical_decision_document(monkeypatch),\n        )\n\n\ndef test_workflow_events_are_specialised_and_truthful(\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    assert MAIN_QUALIFICATION_WORKFLOW_EVENTS == {\n        \"CI\": \"push\",\n        \"AUTHORITY_A2A\": \"push\",\n        \"AUTHORITY_A2B\": \"push\",\n        \"PROJECTION_B1\": \"push\",\n        \"PROJECTION_B2_B3_C1_NEO4J\": \"push\",\n        \"SDLC_EVIDENCE_SHADOW\": \"workflow_dispatch\",\n    }\n\n    bad_sdlc = _workflow_attempts()\n    bad_sdlc[\"SDLC_EVIDENCE_SHADOW\"][\"event\"] = \"push\"\n    with pytest.raises(Increment5ContractError, match=\"event differs\"):\n        main_qualification_record_value(\n            proposal=INCREMENT_5A_DECISION_PACKET,\n            approval_record_digest=_APPROVAL_DIGEST,\n            qualified_main_commit_sha=_COMMIT_SHA,\n            qualified_main_tree_sha=_TREE_SHA,\n            qualified_at=_QUALIFIED_AT,\n            workflow_attempts=bad_sdlc,\n            decision_document=_canonical_decision_document(monkeypatch),\n        )\n\n    bad_ci = _workflow_attempts()\n    bad_ci[\"CI\"][\"event\"] = \"workflow_dispatch\"\n    with pytest.raises(Increment5ContractError, match=\"event differs\"):\n        main_qualification_record_value(\n            proposal=INCREMENT_5A_DECISION_PACKET,\n            approval_record_digest=_APPROVAL_DIGEST,\n            qualified_main_commit_sha=_COMMIT_SHA,\n            qualified_main_tree_sha=_TREE_SHA,\n            qualified_at=_QUALIFIED_AT,\n            workflow_attempts=bad_ci,\n            decision_document=_canonical_decision_document(monkeypatch),\n        )\n\n\ndef test_main_qualification_record_rejects_noncanonical_time(\n    tmp_path: Path,\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    value = _value(monkeypatch)\n    value[\"qualified_at\"] = \"2042-03-12T12:30:00Z\"\n    with pytest.raises(\n        Increment5ContractError,\n        match=\"canonical UTC text\",\n    ):\n        load_increment5a_main_qualification_record(\n            _write(tmp_path, value),\n            approval_record_digest=_APPROVAL_DIGEST,\n        )\n\n\ndef test_fabricated_minimal_pass_document_is_rejected() -> None:\n    attempts = _workflow_attempts()\n    with pytest.raises(\n        Increment5ContractError,\n        match=\"canonical SDLC evidence\",\n    ):\n        main_qualification_record_value(\n            proposal=INCREMENT_5A_DECISION_PACKET,\n            approval_record_digest=_APPROVAL_DIGEST,\n            qualified_main_commit_sha=_COMMIT_SHA,\n            qualified_main_tree_sha=_TREE_SHA,\n            qualified_at=_QUALIFIED_AT,\n            workflow_attempts=attempts,\n            decision_document=_fabricated_minimal_pass(attempts=attempts),\n        )\n\n\n@pytest.mark.parametrize(\n    \"mutation\",\n    (\n        \"fake_totals\",\n        \"missing_context\",\n        \"arbitrary_identity\",\n    ),\n)\ndef test_canonical_sdlc_document_rejects_fabricated_claims(\n    mutation: str,\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    attempts = _workflow_attempts()\n    document = _canonical_decision_document(monkeypatch, attempts=attempts)\n    if mutation == \"fake_totals\":\n        totals = document[\"totals\"]\n        assert isinstance(totals, dict)\n        totals[\"test_count\"] = int(totals[\"test_count\"]) + 1\n    elif mutation == \"missing_context\":\n        document.pop(\"context\")\n    else:\n        document[\"decision_identity\"] = \"sha256:\" + \"c\" * 64\n\n    with pytest.raises(\n        Increment5ContractError,\n        match=\"canonical SDLC evidence\",\n    ):\n        main_qualification_record_value(\n            proposal=INCREMENT_5A_DECISION_PACKET,\n            approval_record_digest=_APPROVAL_DIGEST,\n            qualified_main_commit_sha=_COMMIT_SHA,\n            qualified_main_tree_sha=_TREE_SHA,\n            qualified_at=_QUALIFIED_AT,\n            workflow_attempts=attempts,\n            decision_document=document,\n        )\n\n\ndef test_invalid_lane_receipt_is_rejected() -> None:\n    attempts = _workflow_attempts()\n    document = _fabricated_minimal_pass(attempts=attempts)\n    lanes = document[\"lanes\"]\n    assert isinstance(lanes, list)\n    lane = lanes[0]\n    assert isinstance(lane, dict)\n    lane[\"receipt\"] = {\"gate_decisions\": []}\n    with pytest.raises(\n        Increment5ContractError,\n        match=\"canonical SDLC evidence\",\n    ):\n        main_qualification_record_value(\n            proposal=INCREMENT_5A_DECISION_PACKET,\n            approval_record_digest=_APPROVAL_DIGEST,\n            qualified_main_commit_sha=_COMMIT_SHA,\n            qualified_main_tree_sha=_TREE_SHA,\n            qualified_at=_QUALIFIED_AT,\n            workflow_attempts=attempts,\n            decision_document=document,\n        )\n\n\ndef test_signed_decision_summary_must_match_canonical_document(\n    tmp_path: Path,\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    value = _value(monkeypatch)\n    signed = value[\"signed_decision\"]\n    assert isinstance(signed, dict)\n    signed[\"test_count\"] = int(signed[\"test_count\"]) + 1\n    with pytest.raises(\n        Increment5ContractError,\n        match=\"summary differs\",\n    ):\n        load_increment5a_main_qualification_record(\n            _write(tmp_path, value),\n            approval_record_digest=_APPROVAL_DIGEST,\n        )\n\n\ndef test_signed_decision_document_digest_is_exact(\n    tmp_path: Path,\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    value = _value(monkeypatch)\n    signed = value[\"signed_decision\"]\n    assert isinstance(signed, dict)\n    signed[\"decision_document_digest\"] = \"sha256:\" + \"c\" * 64\n    with pytest.raises(\n        Increment5ContractError,\n        match=\"document digest differs\",\n    ):\n        load_increment5a_main_qualification_record(\n            _write(tmp_path, value),\n            approval_record_digest=_APPROVAL_DIGEST,\n        )\n\n\ndef test_owner_approval_alone_cannot_open_increment5b(\n    tmp_path: Path,\n) -> None:\n    body_digest = digest_bytes(\n        expected_increment5a_owner_approval_body().encode(\"utf-8\")\n    )\n    approval_path = tmp_path / \"approval.json\"\n    approval_path.write_bytes(\n        canonical_json_bytes(\n            approval_attestation_value(\n                proposal=INCREMENT_5A_DECISION_PACKET,\n                approved_at=_QUALIFIED_AT,\n                comment_id=123456789,\n                approval_comment_body_digest=body_digest,\n            )\n        )\n    )\n    approval = load_increment5a_approval_attestation(approval_path)\n    effective_digest_for = approval_module._effective_contract_digest_factory(\n        proposal=INCREMENT_5A_DECISION_PACKET,\n        qualification_schema_digest=(\n            QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST\n        ),\n        approval_effect=APPROVAL_EFFECT,\n    )\n    authority_type = approval_module._decision_authority_class_factory(\n        proposal=INCREMENT_5A_DECISION_PACKET,\n        load_approval=lambda: approval,\n        load_main_qualification=lambda: None,\n        effective_contract_digest_for=effective_digest_for,\n    )\n    authority = authority_type()\n\n    assert authority.production_qualification_authorized\n    assert not authority.production_authorized\n    assert not authority.downstream_implementation_authorized\n    assert authority.main_qualification_record_digest is None\n    assert authority.downstream_contract_digest is None\n    for kind in RetrievalComponentKind:\n        assert not authority.component_authorized(kind)\n    with pytest.raises(\n        Increment5ProfileError,\n        match=\"post-merge exact-main qualification record\",\n    ):\n        authority.require_profile(RetrievalProfileKind.PRODUCTION)\n\n\ndef test_authority_effects_are_separate_and_exact() -> None:\n    assert APPROVAL_EFFECT == \"PRODUCTION_EQUIVALENT_QUALIFICATION_ONLY\"\n    assert MAIN_QUALIFICATION_EFFECT == (\n        \"IMPLEMENTATION_OF_ISSUES_251_254_ONLY\"\n    )\n    assert \"DOWNSTREAM_IMPLEMENTATION\" not in MAIN_QUALIFICATION_NON_EFFECTS\n\n\ndef test_workflow_inventory_is_exact() -> None:\n    assert MAIN_QUALIFICATION_WORKFLOW_NAMES == (\n        \"CI\",\n        \"AUTHORITY_A2A\",\n        \"AUTHORITY_A2B\",\n        \"PROJECTION_B1\",\n        \"PROJECTION_B2_B3_C1_NEO4J\",\n        \"SDLC_EVIDENCE_SHADOW\",\n    )\n"
+          VALIDATOR_FACTORY = "def _canonical_decision_validator_factory(\n    *,\n    validator: Callable[..., ShadowDecision] = validate_shadow_decision,\n    contract: object = _SDLC_CONTRACT,\n) -> Callable[[object], ShadowDecision]:\n    captured_validator = validator\n    captured_contract = contract\n\n    def validate(value: object) -> ShadowDecision:\n        return captured_validator(value, contract=captured_contract)\n\n    return validate\n\n\n_CANONICAL_DECISION_VALIDATOR = _canonical_decision_validator_factory()\n"
+          VALIDATE_FUNCTION = "def _validate_decision_document(\n    *,\n    summary: Mapping[str, Any] | None,\n    document: Mapping[str, Any],\n    qualified_main_commit_sha: str,\n    qualified_main_tree_sha: str,\n    sdlc_attempt: WorkflowAttemptEvidence,\n    _validate: Callable[[object], ShadowDecision] = (\n        _CANONICAL_DECISION_VALIDATOR\n    ),\n) -> tuple[dict[str, object], str, str, int, int]:\n    document_copy = deepcopy(dict(document))\n    document_digest = digest_bytes(canonical_json_bytes(document_copy))\n    if (\n        summary is not None\n        and summary.get(\"decision_document_digest\") != document_digest\n    ):\n        raise Increment5ContractError(\n            \"signed decision document digest differs\"\n        )\n\n    try:\n        validated = _validate(document_copy)\n    except ShadowDecisionError as exc:\n        raise Increment5ContractError(\n            \"signed decision is not canonical SDLC evidence\"\n        ) from exc\n\n    canonical_document = validated.as_dict()\n    if canonical_document != document_copy:\n        raise Increment5ContractError(\n            \"signed decision differs from canonical SDLC output\"\n        )\n    if validated.result != \"PASS\":\n        raise Increment5ContractError(\n            \"signed decision result is not PASS\"\n        )\n    if validated.result_reason != \"PASS:decision\":\n        raise Increment5ContractError(\n            \"signed decision reason is not PASS\"\n        )\n    if validated.first_failure is not None:\n        raise Increment5ContractError(\n            \"PASS decision cannot retain a first failure\"\n        )\n\n    decision_identity = _require_digest(\n        validated.decision_identity,\n        field=\"signed_decision.decision_identity\",\n    )\n    context = validated.context.as_dict()\n    if validated.event is None:\n        raise Increment5ContractError(\n            \"signed PASS decision has no workflow event\"\n        )\n    event = validated.event.as_dict()\n    expected_event = sdlc_attempt.event\n    for field_name, expected in (\n        (\"repository\", MAIN_QUALIFICATION_REPOSITORY),\n        (\"event_name\", expected_event),\n        (\"ref\", MAIN_QUALIFICATION_REF),\n        (\"evaluated_sha\", qualified_main_commit_sha),\n        (\"evaluated_tree_sha\", qualified_main_tree_sha),\n    ):\n        if context.get(field_name) != expected:\n            raise Increment5ContractError(\n                f\"signed decision context {field_name} differs\"\n            )\n        if event.get(field_name) != expected:\n            raise Increment5ContractError(\n                f\"signed decision event {field_name} differs\"\n            )\n    if context.get(\"workflow_sha\") != qualified_main_commit_sha:\n        raise Increment5ContractError(\n            \"signed decision workflow SHA differs from qualified main\"\n        )\n    if context.get(\"run_id\") != sdlc_attempt.run_id:\n        raise Increment5ContractError(\n            \"signed decision run differs from SDLC attempt\"\n        )\n    if context.get(\"run_attempt\") != sdlc_attempt.run_attempt:\n        raise Increment5ContractError(\n            \"signed decision attempt differs from SDLC attempt\"\n        )\n    if context.get(\"workflow_ref\") != sdlc_attempt.workflow_ref:\n        raise Increment5ContractError(\n            \"signed decision workflow ref differs\"\n        )\n\n    test_count = _require_positive_integer(\n        validated.totals.test_count,\n        field=\"signed_decision.test_count\",\n    )\n    skip_count = _require_nonnegative_integer(\n        validated.totals.skip_count,\n        field=\"signed_decision.skip_count\",\n    )\n    if (\n        validated.totals.required_skip_count != 0\n        or validated.totals.failure_count != 0\n        or validated.totals.error_count != 0\n    ):\n        raise Increment5ContractError(\n            \"signed PASS decision has nonzero failure totals\"\n        )\n\n    gates = tuple(\n        gate\n        for lane in validated.lanes\n        for gate in lane.receipt.gate_decisions\n    )\n    if not gates or any(gate.result != \"PASS\" for gate in gates):\n        raise Increment5ContractError(\n            \"signed PASS decision contains a non-PASS gate\"\n        )\n    source_integrity = tuple(\n        gate for gate in gates if gate.gate_id == \"source-integrity\"\n    )\n    if len(source_integrity) != 1:\n        raise Increment5ContractError(\n            \"signed PASS decision lacks exact source-integrity evidence\"\n        )\n\n    expected_summary = {\n        \"workflow_run_id\": sdlc_attempt.run_id,\n        \"workflow_run_attempt\": sdlc_attempt.run_attempt,\n        \"decision_document_digest\": document_digest,\n        \"decision_identity\": decision_identity,\n        \"result\": \"PASS\",\n        \"result_reason\": \"PASS:decision\",\n        \"evaluated_sha\": qualified_main_commit_sha,\n        \"evaluated_tree_sha\": qualified_main_tree_sha,\n        \"test_count\": test_count,\n        \"skip_count\": skip_count,\n        \"required_skip_count\": 0,\n        \"failure_count\": 0,\n        \"error_count\": 0,\n    }\n    if summary is not None:\n        if {\n            key: summary.get(key)\n            for key in expected_summary\n        } != expected_summary:\n            raise Increment5ContractError(\n                \"signed decision summary differs from canonical artifact\"\n            )\n        if summary.get(\"decision_document\") != canonical_document:\n            raise Increment5ContractError(\n                \"signed decision document differs from canonical artifact\"\n            )\n    return (\n        canonical_document,\n        document_digest,\n        decision_identity,\n        test_count,\n        skip_count,\n    )\n"
+          SIGNED_FUNCTION = "def _signed_decision_value(\n    *,\n    document: Mapping[str, Any],\n    qualified_main_commit_sha: str,\n    qualified_main_tree_sha: str,\n    sdlc_attempt: WorkflowAttemptEvidence,\n) -> dict[str, object]:\n    (\n        canonical_document,\n        document_digest,\n        decision_identity,\n        test_count,\n        skip_count,\n    ) = _validate_decision_document(\n        summary=None,\n        document=document,\n        qualified_main_commit_sha=qualified_main_commit_sha,\n        qualified_main_tree_sha=qualified_main_tree_sha,\n        sdlc_attempt=sdlc_attempt,\n    )\n    return {\n        \"workflow_run_id\": sdlc_attempt.run_id,\n        \"workflow_run_attempt\": sdlc_attempt.run_attempt,\n        \"decision_document_digest\": document_digest,\n        \"decision_identity\": decision_identity,\n        \"result\": \"PASS\",\n        \"result_reason\": \"PASS:decision\",\n        \"evaluated_sha\": qualified_main_commit_sha,\n        \"evaluated_tree_sha\": qualified_main_tree_sha,\n        \"test_count\": test_count,\n        \"skip_count\": skip_count,\n        \"required_skip_count\": 0,\n        \"failure_count\": 0,\n        \"error_count\": 0,\n        \"decision_document\": canonical_document,\n    }\n"
+          TRACE_BLOCK = "_DOPS_ANCHOR_BY_REQUIREMENT: dict[str, str] = {\n    \"DOPS-001\": _DECISION_PACKET + \"#/payload/components\",\n    \"DOPS-002\": _DECISION_PACKET + \"#/payload/budgets\",\n    \"DOPS-007\": _DECISION_PACKET + \"#/payload/authority_boundaries\",\n    \"DOPS-010\": _DECISION_PACKET + \"#/payload/components\",\n    \"DOPS-011\": _DECISION_PACKET + \"#/payload/components\",\n    \"DOPS-012\": _DECISION_PACKET + \"#/payload/components\",\n    \"DOPS-013\": _DECISION_PACKET + \"#/payload/components\",\n    \"DOPS-014\": _DECISION_PACKET + \"#/payload/components\",\n    \"DOPS-015\": _DECISION_PACKET + \"#/payload/components\",\n    \"DOPS-016\": _DECISION_PACKET + \"#/payload/components\",\n    \"DOPS-026\": _DECISION_PACKET + \"#/payload/pr_boundaries/5C\",\n    \"DOPS-030\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-031\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-032\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-033\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-034\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-035\": _DECISION_PACKET + \"#/payload/pr_boundaries/5E\",\n    \"DOPS-036\": _DECISION_PACKET + \"#/payload/pr_boundaries/5E\",\n    \"DOPS-037\": _DECISION_PACKET + \"#/payload/components\",\n    \"DOPS-040\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-043\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-044\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-045\": \"issue:#254:deferred:capacity-qualification-evidence\",\n    \"DOPS-046\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-047\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-048\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-050\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-052\": _DECISION_PACKET + \"#/payload/rollback\",\n    \"DOPS-054\": \"issue:#254:deferred:backup-restore-rebuild-evidence\",\n    \"DOPS-060\": _DECISION_PACKET + \"#/payload/pr_boundaries/5C\",\n    \"DOPS-064\": \"issue:#254:deferred:owner-escalation-runbook-evidence\",\n    \"DOPS-067\": _DECISION_PACKET + \"#/payload/components\",\n    \"DOPS-070\": _DECISION_PACKET + \"#/payload/components\",\n    \"DOPS-072\": _DECISION_PACKET + \"#/payload/rollback\",\n    \"DOPS-073\": _DECISION_PACKET + \"#/payload/pr_boundaries/5D\",\n    \"DOPS-074\": _DECISION_PACKET + \"#/payload/rights_matrix\",\n    \"DOPS-075\": \"issue:#254:deferred:operational-admission-evidence\",\n    \"DOPS-076\": _DECISION_PACKET + \"#/payload/runtime_authority\",\n}\n_DOPS_REQUIREMENTS = frozenset(\n    item for item in _ALL_REQUIREMENTS if item.startswith(\"DOPS-\")\n)\nif frozenset(_DOPS_ANCHOR_BY_REQUIREMENT) != _DOPS_REQUIREMENTS:\n    raise RuntimeError(\"Increment 5 DOPS anchors are incomplete\")\n\n\ndef _anchor_for(requirement_id: str) -> str:\n    if requirement_id.startswith(\"DOPS-\"):\n        return _DOPS_ANCHOR_BY_REQUIREMENT[requirement_id]\n    if requirement_id.startswith(\"DEVAL-\"):\n        suffix = \"evaluation_plan\"\n    elif requirement_id.startswith(\"TRI-\"):\n        suffix = \"components\"\n    elif requirement_id.startswith(\"GRPROD-\"):\n        suffix = \"pr_boundaries\"\n    else:\n        suffix = \"required_modes\"\n    return f\"{_DECISION_PACKET}#/payload/{suffix}\"\n"
+          TRACE_TEST_ADD = "def test_dops_decision_anchors_are_individual_and_truthful() -> None:\n    anchors = {\n        requirement_id: INCREMENT5_TRACEABILITY_BY_REQUIREMENT[\n            requirement_id\n        ].decision_anchor\n        for requirement_id in _EXPECTED_DOPS\n    }\n    packet = (\n        \"newsroom/increment5/data/\"\n        \"increment5a_production_retrieval_decision_v1.json\"\n    )\n    expected = {\n        \"DOPS-001\": packet + \"#/payload/components\",\n        \"DOPS-002\": packet + \"#/payload/budgets\",\n        \"DOPS-007\": packet + \"#/payload/authority_boundaries\",\n        \"DOPS-010\": packet + \"#/payload/components\",\n        \"DOPS-011\": packet + \"#/payload/components\",\n        \"DOPS-012\": packet + \"#/payload/components\",\n        \"DOPS-013\": packet + \"#/payload/components\",\n        \"DOPS-014\": packet + \"#/payload/components\",\n        \"DOPS-015\": packet + \"#/payload/components\",\n        \"DOPS-016\": packet + \"#/payload/components\",\n        \"DOPS-026\": packet + \"#/payload/pr_boundaries/5C\",\n        \"DOPS-030\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-031\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-032\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-033\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-034\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-035\": packet + \"#/payload/pr_boundaries/5E\",\n        \"DOPS-036\": packet + \"#/payload/pr_boundaries/5E\",\n        \"DOPS-037\": packet + \"#/payload/components\",\n        \"DOPS-040\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-043\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-044\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-045\": (\n            \"issue:#254:deferred:capacity-qualification-evidence\"\n        ),\n        \"DOPS-046\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-047\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-048\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-050\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-052\": packet + \"#/payload/rollback\",\n        \"DOPS-054\": (\n            \"issue:#254:deferred:backup-restore-rebuild-evidence\"\n        ),\n        \"DOPS-060\": packet + \"#/payload/pr_boundaries/5C\",\n        \"DOPS-064\": (\n            \"issue:#254:deferred:owner-escalation-runbook-evidence\"\n        ),\n        \"DOPS-067\": packet + \"#/payload/components\",\n        \"DOPS-070\": packet + \"#/payload/components\",\n        \"DOPS-072\": packet + \"#/payload/rollback\",\n        \"DOPS-073\": packet + \"#/payload/pr_boundaries/5D\",\n        \"DOPS-074\": packet + \"#/payload/rights_matrix\",\n        \"DOPS-075\": (\n            \"issue:#254:deferred:operational-admission-evidence\"\n        ),\n        \"DOPS-076\": packet + \"#/payload/runtime_authority\",\n    }\n    assert anchors == expected\n    assert {\n        requirement_id\n        for requirement_id, anchor in anchors.items()\n        if anchor.endswith(\"#/payload/budgets\")\n    } == {\"DOPS-002\"}\n    assert anchors[\"DOPS-052\"].endswith(\"#/payload/rollback\")\n    assert anchors[\"DOPS-072\"].endswith(\"#/payload/rollback\")\n"
+          EVENT_MAPPING_CODE = "MAIN_QUALIFICATION_WORKFLOW_EVENTS: dict[str, str] = {\n    \"CI\": \"push\",\n    \"AUTHORITY_A2A\": \"push\",\n    \"AUTHORITY_A2B\": \"push\",\n    \"PROJECTION_B1\": \"push\",\n    \"PROJECTION_B2_B3_C1_NEO4J\": \"push\",\n    \"SDLC_EVIDENCE_SHADOW\": \"workflow_dispatch\",\n}\n"
+
+
+          def replace_once(text: str, old: str, new: str, *, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label} expected one match, found {count}")
+              return text.replace(old, new, 1)
+
+
+          def replace_between(
+              text: str,
+              start_marker: str,
+              end_marker: str,
+              replacement: str,
+              *,
+              label: str,
+          ) -> str:
+              start = text.find(start_marker)
+              if start < 0:
+                  raise RuntimeError(f"{label} start marker absent")
+              end = text.find(end_marker, start)
+              if end < 0:
+                  raise RuntimeError(f"{label} end marker absent")
+              return text[:start] + replacement.rstrip() + "\n\n" + text[end:]
+
+
+          def write_text(path: Path, text: str) -> None:
+              path.write_text(text, encoding="utf-8", newline="\n")
+
+
+          main_path = Path("newsroom/increment5/main_qualification.py")
+          main = main_path.read_text(encoding="utf-8")
+          main = replace_once(
+              main,
+              "from typing import Any, Mapping\n",
+              "from typing import Any, Callable, Mapping\n",
+              label="typing import",
+          )
+          main = replace_once(
+              main,
+              "from newsroom.authority.types import UtcTimestamp\n\n",
+              (
+                  "from newsroom.authority.types import UtcTimestamp\n"
+                  "from scripts.sdlc.contracts import SdlcContract, load_contract\n"
+                  "from scripts.sdlc.shadow_decision import (\n"
+                  "    ShadowDecision,\n"
+                  "    ShadowDecisionError,\n"
+                  "    validate_shadow_decision,\n"
+                  ")\n\n"
+              ),
+              label="canonical SDLC imports",
+          )
+          main = replace_once(
+              main,
+              (
+                  '    "SDLC_EVIDENCE_SHADOW": (318982302, "SDLC Evidence Shadow"),\n'
+                  "}\n"
+                  "MAIN_QUALIFICATION_WORKFLOW_NAMES = tuple("
+                  "MAIN_QUALIFICATION_WORKFLOW_SPECS)\n"
+              ),
+              (
+                  '    "SDLC_EVIDENCE_SHADOW": (318982302, "SDLC Evidence Shadow"),\n'
+                  "}\n"
+                  + EVENT_MAPPING_CODE
+                  + "MAIN_QUALIFICATION_WORKFLOW_NAMES = tuple("
+                  "MAIN_QUALIFICATION_WORKFLOW_SPECS)\n"
+              ),
+              label="workflow event inventory",
+          )
+          main = replace_once(
+              main,
+              (
+                  '_COMMIT_PATTERN = r"^[0-9a-f]{40}$"\n\n\n'
+                  "def _workflow_attempt_schema(\n"
+              ),
+              (
+                  '_COMMIT_PATTERN = r"^[0-9a-f]{40}$"\n'
+                  "_SDLC_CONTRACT: SdlcContract = load_contract(\n"
+                  "    Path(__file__).resolve().parents[2]\n"
+                  ")\n\n\n"
+                  + VALIDATOR_FACTORY
+                  + "\n"
+                  "def _workflow_attempt_schema(\n"
+              ),
+              label="source-pinned SDLC validator",
+          )
+          main = replace_once(
+              main,
+              (
+                  "def _workflow_attempt_schema(\n"
+                  "    *,\n"
+                  "    workflow_id: int,\n"
+                  "    workflow_name: str,\n"
+                  ") -> dict[str, object]:\n"
+              ),
+              (
+                  "def _workflow_attempt_schema(\n"
+                  "    *,\n"
+                  "    workflow_id: int,\n"
+                  "    workflow_name: str,\n"
+                  "    event_name: str,\n"
+                  ") -> dict[str, object]:\n"
+              ),
+              label="workflow schema signature",
+          )
+          main = replace_once(
+              main,
+              '            "event": {"const": "push"},\n',
+              '            "event": {"const": event_name},\n',
+              label="workflow schema event",
+          )
+          main = replace_once(
+              main,
+              (
+                  "                    workflow_id=workflow_id,\n"
+                  "                    workflow_name=workflow_name,\n"
+                  "                )\n"
+              ),
+              (
+                  "                    workflow_id=workflow_id,\n"
+                  "                    workflow_name=workflow_name,\n"
+                  "                    event_name=(\n"
+                  "                        MAIN_QUALIFICATION_WORKFLOW_EVENTS[name]\n"
+                  "                    ),\n"
+                  "                )\n"
+              ),
+              label="workflow schema event binding",
+          )
+          main = replace_once(
+              main,
+              (
+                  "class WorkflowAttemptEvidence:\n"
+                  "    key: str\n"
+                  "    workflow_id: int\n"
+                  "    workflow_name: str\n"
+                  "    run_id: int\n"
+              ),
+              (
+                  "class WorkflowAttemptEvidence:\n"
+                  "    key: str\n"
+                  "    workflow_id: int\n"
+                  "    workflow_name: str\n"
+                  "    event: str\n"
+                  "    run_id: int\n"
+              ),
+              label="workflow evidence event field",
+          )
+          main = replace_once(
+              main,
+              (
+                  "        if expected != (self.workflow_id, self.workflow_name):\n"
+                  "            raise Increment5ContractError(\n"
+                  '                "workflow attempt identity differs from permanent workflow"\n'
+                  "            )\n"
+                  '        for field_name in ("run_id", "run_attempt", "run_number"):\n'
+              ),
+              (
+                  "        if expected != (self.workflow_id, self.workflow_name):\n"
+                  "            raise Increment5ContractError(\n"
+                  '                "workflow attempt identity differs from permanent workflow"\n'
+                  "            )\n"
+                  "        expected_event = MAIN_QUALIFICATION_WORKFLOW_EVENTS.get(self.key)\n"
+                  "        if self.event != expected_event:\n"
+                  "            raise Increment5ContractError(\n"
+                  '                "workflow attempt event differs from permanent workflow"\n'
+                  "            )\n"
+                  '        for field_name in ("run_id", "run_attempt", "run_number"):\n'
+              ),
+              label="workflow evidence event validation",
+          )
+          main = replace_once(
+              main,
+              (
+                  '    if value.get("event") != "push":\n'
+                  "        raise Increment5ContractError(\n"
+                  '            "workflow attempt is not a main push"\n'
+                  "        )\n"
+              ),
+              (
+                  "    expected_event = MAIN_QUALIFICATION_WORKFLOW_EVENTS[key]\n"
+                  '    if value.get("event") != expected_event:\n'
+                  "        raise Increment5ContractError(\n"
+                  '            f"workflow attempt event differs for {key}"\n'
+                  "        )\n"
+              ),
+              label="workflow parser event validation",
+          )
+          main = replace_once(
+              main,
+              (
+                  '        workflow_name=str(value.get("workflow_name")),\n'
+                  "        run_id=_require_positive_integer(\n"
+              ),
+              (
+                  '        workflow_name=str(value.get("workflow_name")),\n'
+                  '        event=str(value.get("event")),\n'
+                  "        run_id=_require_positive_integer(\n"
+              ),
+              label="workflow evidence construction",
+          )
+          main = replace_between(
+              main,
+              "def _validate_decision_document(\n",
+              "def _signed_decision_value(\n",
+              VALIDATE_FUNCTION,
+              label="canonical decision validation",
+          )
+          main = replace_between(
+              main,
+              "def _signed_decision_value(\n",
+              "def main_qualification_record_value(\n",
+              SIGNED_FUNCTION,
+              label="canonical decision builder",
+          )
+          main = replace_once(
+              main,
+              (
+                  "    (\n"
+                  "        decision_document_digest,\n"
+                  "        decision_identity,\n"
+                  "        test_count,\n"
+                  "        skip_count,\n"
+                  "    ) = _validate_decision_document(\n"
+              ),
+              (
+                  "    (\n"
+                  "        _canonical_document,\n"
+                  "        decision_document_digest,\n"
+                  "        decision_identity,\n"
+                  "        test_count,\n"
+                  "        skip_count,\n"
+                  "    ) = _validate_decision_document(\n"
+              ),
+              label="canonical loader result",
+          )
+          write_text(main_path, main)
+
+          schema_path = Path(
+              "newsroom/increment5/data/"
+              "increment5a_main_qualification_record_v2.schema.json"
+          )
+          schema = json.loads(schema_path.read_text(encoding="utf-8"))
+          workflow_properties = schema["properties"]["workflow_attempts"]["properties"]
+          for key in workflow_properties:
+              workflow_properties[key]["properties"]["event"] = {
+                  "const": (
+                      "workflow_dispatch"
+                      if key == "SDLC_EVIDENCE_SHADOW"
+                      else "push"
+                  )
+              }
+          schema_path.write_bytes(canonical_json_bytes(schema))
+
+          write_text(
+              Path("newsroom/tests/test_increment5a_main_qualification.py"),
+              TEST_CONTENT,
+          )
+
+          approval_doc_path = Path(
+              "docs/decisions/"
+              "2026-08-01-increment-5a-owner-approval-attestation.md"
+          )
+          approval_doc = approval_doc_path.read_text(encoding="utf-8")
+          approval_doc = replace_once(
+              approval_doc,
+              (
+                  "An admitted record authorizes only:\n\n"
+                  "- implementation of issues #251–#254 under the exact bound contracts; and\n"
+                  "- production-equivalent qualification under the pre-registered Evaluation\n"
+                  "  Plan.\n"
+              ),
+              (
+                  "An admitted owner record authorizes only production-equivalent\n"
+                  "qualification under the pre-registered Evaluation Plan. It does not\n"
+                  "authorize implementation of #251–#254. That authority can exist only in\n"
+                  "the separately pinned post-merge main-admission record.\n"
+              ),
+              label="qualification-only approval documentation",
+          )
+          write_text(approval_doc_path, approval_doc)
+
+          trace_path = Path("newsroom/increment5/traceability.py")
+          trace = trace_path.read_text(encoding="utf-8")
+          trace = replace_between(
+              trace,
+              "def _anchor_for(requirement_id: str) -> str:\n",
+              "def _row(requirement_id: str) -> Increment5TraceabilityRow:\n",
+              TRACE_BLOCK,
+              label="DOPS traceability anchors",
+          )
+          write_text(trace_path, trace)
+
+          trace_test_path = Path("newsroom/tests/test_increment5a_traceability.py")
+          trace_test = trace_test_path.read_text(encoding="utf-8")
+          trace_test = replace_once(
+              trace_test,
+              '        assert row.decision_anchor.startswith("newsroom/increment5/data/")\n',
+              (
+                  "        assert (\n"
+                  '            row.decision_anchor.startswith("newsroom/increment5/data/")\n'
+                  '            or row.decision_anchor.startswith("issue:#254:deferred:")\n'
+                  "        )\n"
+              ),
+              label="deferred trace anchor acceptance",
+          )
+          insert_marker = "def test_increment5a_documents_are_present() -> None:\n"
+          trace_test = replace_once(
+              trace_test,
+              insert_marker,
+              TRACE_TEST_ADD + "\n\n" + insert_marker,
+              label="DOPS anchor regression",
+          )
+          write_text(trace_test_path, trace_test)
+
+          trace_doc_path = Path(
+              "docs/traceability/increment-5-production-retrieval.md"
+          )
+          trace_doc = trace_doc_path.read_text(encoding="utf-8")
+          trace_doc = replace_once(
+              trace_doc,
+              (
+                  "Every row names the canonical decision JSON pointer, implementation symbol, "
+                  "verification node and exact issue boundary. Tests reject duplicate "
+                  "requirements, unknown issue boundaries, missing families, false graph-free "
+                  "or fake-production language, and changes to the expected delivery "
+                  "distribution.\n"
+              ),
+              (
+                  "Every row names either a real canonical decision JSON pointer or an explicit "
+                  "#254 deferred-evidence anchor, plus its implementation symbol, verification "
+                  "node and exact issue boundary. Tests reject duplicate requirements, unknown "
+                  "issue boundaries, missing families, invented budget pointers, false "
+                  "graph-free or fake-production language, and changes to the expected delivery "
+                  "distribution.\n"
+              ),
+              label="traceability reading guidance",
+          )
+          write_text(trace_doc_path, trace_doc)
+
+          attempt_doc_path = Path(
+              "docs/decisions/"
+              "2026-08-01-increment-5a-attempt-bound-main-admission.md"
+          )
+          attempt_doc = attempt_doc_path.read_text(encoding="utf-8")
+          attempt_doc = replace_once(
+              attempt_doc,
+              (
+                  "main-qualification record. Each of the six permanent workflows is represented\n"
+                  "by one exact attempt with immutable workflow ID/name, run ID and attempt,\n"
+                  "repository ID, push event, `refs/heads/main`, head commit/tree, workflow SHA/ref,\n"
+                  "successful conclusion, exact API/HTML URLs and canonical timestamps. All\n"
+                  "attempts must be distinct and must bind the declared merged-main commit/tree.\n"
+              ),
+              (
+                  "main-qualification record. CI, Authority A2a, Authority A2b, Projection B1\n"
+                  "and Projection B2/B3/C1 Neo4j each require one truthful `push` attempt on\n"
+                  "`refs/heads/main`; SDLC Evidence Shadow requires one truthful\n"
+                  "`workflow_dispatch` attempt. Every attempt retains immutable workflow\n"
+                  "ID/name, run ID and attempt, repository ID, head commit/tree, workflow\n"
+                  "SHA/ref, successful conclusion, exact API/HTML URLs and canonical timestamps.\n"
+                  "All attempts must be distinct and bind the same declared merged-main\n"
+                  "commit/tree.\n"
+              ),
+              label="truthful workflow attempt documentation",
+          )
+          attempt_doc = replace_once(
+              attempt_doc,
+              (
+                  "The signed SDLC evidence is embedded as its exact canonical decision document.\n"
+                  "The loader recomputes its document digest and requires `result=PASS`,\n"
+              ),
+              (
+                  "The signed SDLC evidence is embedded as its exact canonical decision document.\n"
+                  "The loader first validates it through\n"
+                  "`scripts.sdlc.shadow_decision.validate_shadow_decision` under the\n"
+                  "repository SDLC contract, then recomputes its document digest and requires\n"
+                  "`result=PASS`,\n"
+              ),
+              label="canonical validator documentation",
+          )
+          write_text(attempt_doc_path, attempt_doc)
+
+          postmerge_doc_path = Path(
+              "docs/decisions/"
+              "2026-08-01-increment-5a-post-merge-qualification-gate.md"
+          )
+          postmerge_doc = postmerge_doc_path.read_text(encoding="utf-8")
+          postmerge_doc = replace_once(
+              postmerge_doc,
+              (
+                  "- distinct CI, Authority A2a, Authority A2b, Projection B1, authenticated\n"
+                  "  Projection B2/B3/C1 Neo4j and signed SDLC workflow run IDs;\n"
+                  "- the signed SDLC decision digest and zero-failure, zero-error,\n"
+                  "  zero-required-skip totals; and\n"
+              ),
+              (
+                  "- distinct successful CI, Authority A2a, Authority A2b, Projection B1 and\n"
+                  "  authenticated Projection B2/B3/C1 Neo4j `push` attempts on exact main;\n"
+                  "- one distinct successful SDLC Evidence Shadow `workflow_dispatch` attempt\n"
+                  "  on the same exact main commit and tree;\n"
+                  "- the complete signed SDLC decision validated through the canonical\n"
+                  "  repository parser, with zero-failure, zero-error and zero-required-skip\n"
+                  "  totals; and\n"
+              ),
+              label="post-merge attempt documentation",
+          )
+          write_text(postmerge_doc_path, postmerge_doc)
+
+          from newsroom.increment5 import main_qualification as qualification
+
+          if schema_path.read_bytes() != canonical_json_bytes(
+              qualification.MAIN_QUALIFICATION_RECORD_SCHEMA
+          ):
+              raise RuntimeError("main qualification schema artifact is not canonical")
+          new_schema_digest = qualification.MAIN_QUALIFICATION_RECORD_SCHEMA_DIGEST
+          if new_schema_digest == OLD_SCHEMA_DIGEST:
+              raise RuntimeError("main qualification schema digest did not change")
+
+          for path in Path("docs").rglob("*.md"):
+              value = path.read_text(encoding="utf-8")
+              if OLD_SCHEMA_DIGEST in value:
+                  write_text(path, value.replace(OLD_SCHEMA_DIGEST, new_schema_digest))
+
+          for path in Path(".").rglob("*"):
+              if (
+                  path.is_file()
+                  and ".git" not in path.parts
+                  and path.suffix in {".py", ".md", ".json", ".yml", ".yaml"}
+                  and path.as_posix()
+                  != ".github/workflows/temp-increment5a-fresh-findings.yml"
+              ):
+                  value = path.read_text(encoding="utf-8")
+                  if OLD_SCHEMA_DIGEST in value:
+                      raise RuntimeError(f"stale main schema digest remains in {path}")
+
+          print(new_schema_digest)
+          PY
+
+      - name: Verify focused contract and adversarial regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m compileall -q \
+            newsroom/increment5 \
+            newsroom/tests/test_increment5a_main_qualification.py \
+            newsroom/tests/test_increment5a_traceability.py
+          uv run --no-sync python -m pytest -q \
+            newsroom/tests/test_increment5a_main_qualification.py \
+            newsroom/tests/test_increment5a_traceability.py \
+            newsroom/tests/test_increment5a_approval.py \
+            newsroom/tests/test_increment5a_contracts.py \
+            newsroom/tests/test_increment5a_zero_budget_schema.py \
+            newsroom/tests/test_sdlc_shadow_decision.py
+          test ! -e newsroom/increment5/data/increment5a_owner_approval_record_v1.json
+          test ! -e newsroom/increment5/data/increment5a_main_qualification_record_v2.json
+          git diff --check
+
+      - name: Commit tested correction and remove temporary machinery
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/temp-increment5a-fresh-findings.yml
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git add -f \
+            newsroom/increment5/data/increment5a_main_qualification_record_v2.schema.json
+          git commit -m "fix(increment5): close exact-main admission review gaps"
+          git push origin HEAD:agent/increment-5a-retrieval-contract
