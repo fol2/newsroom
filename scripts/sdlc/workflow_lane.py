@@ -9,7 +9,7 @@ from . import _workflow_lane_impl as _implementation
 # runner scheduler at the stable public entrypoint. Importers receive the
 # implementation module itself, so existing monkeypatching and identity checks
 # continue to exercise the real lane code rather than a proxy surface.
-_implementation._CORE_WORKER_COUNT = 3
+_implementation._CORE_WORKER_COUNT = 4
 _implementation._CORE_DISTRIBUTION = "worksteal"
 
 if __name__ == "__main__":
