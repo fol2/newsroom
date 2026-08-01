@@ -1,0 +1,144 @@
+name: Increment 4 Exact Main Evidence Reader
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  inspect-main-runs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Read exact-main push workflow evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          MAIN_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import time
+          import urllib.parse
+          import urllib.request
+
+          expected = {
+              "CI",
+              "Authority A2a",
+              "Authority A2b",
+              "Projection B1",
+              "Projection B2/B3/C1 Neo4j",
+              "SDLC Evidence Shadow",
+          }
+          repository = os.environ["REPOSITORY"]
+          main_sha = os.environ["MAIN_SHA"]
+          token = os.environ["GH_TOKEN"]
+          endpoint = f"https://api.github.com/repos/{repository}/actions/runs"
+
+          def request_json(url: str) -> dict:
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "newsroom-exact-main-evidence-reader",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          latest = {}
+          for attempt in range(40):
+              query = urllib.parse.urlencode(
+                  {
+                      "head_sha": main_sha,
+                      "event": "push",
+                      "per_page": 100,
+                  }
+              )
+              payload = request_json(f"{endpoint}?{query}")
+              matching = [
+                  run
+                  for run in payload.get("workflow_runs", [])
+                  if run.get("head_sha") == main_sha
+                  and run.get("event") == "push"
+                  and run.get("name") in expected
+              ]
+              latest = {}
+              for run in sorted(
+                  matching,
+                  key=lambda item: (item.get("created_at") or "", item.get("id") or 0),
+              ):
+                  latest[run["name"]] = run
+
+              summary = {
+                  name: {
+                      "id": latest[name]["id"],
+                      "status": latest[name]["status"],
+                      "conclusion": latest[name]["conclusion"],
+                      "event": latest[name]["event"],
+                      "head_sha": latest[name]["head_sha"],
+                      "html_url": latest[name]["html_url"],
+                  }
+                  for name in sorted(latest)
+              }
+              print(
+                  f"attempt={attempt + 1} main_sha={main_sha} "
+                  + json.dumps(summary, sort_keys=True),
+                  flush=True,
+              )
+
+              if expected.issubset(latest) and all(
+                  latest[name]["status"] == "completed" for name in expected
+              ):
+                  failures = {
+                      name: latest[name]["conclusion"]
+                      for name in sorted(expected)
+                      if latest[name]["conclusion"] != "success"
+                  }
+                  evidence = {
+                      "main_sha": main_sha,
+                      "runs": {
+                          name: {
+                              "id": latest[name]["id"],
+                              "conclusion": latest[name]["conclusion"],
+                              "html_url": latest[name]["html_url"],
+                          }
+                          for name in sorted(expected)
+                      },
+                  }
+                  print(
+                      "EXACT_MAIN_EVIDENCE="
+                      + json.dumps(evidence, sort_keys=True),
+                      flush=True,
+                  )
+                  if failures:
+                      print(
+                          "Exact-main workflow failures: "
+                          + json.dumps(failures, sort_keys=True),
+                          file=sys.stderr,
+                      )
+                      raise SystemExit(1)
+                  raise SystemExit(0)
+
+              time.sleep(15)
+
+          missing = sorted(expected - set(latest))
+          incomplete = {
+              name: latest[name]["status"]
+              for name in sorted(expected & set(latest))
+              if latest[name]["status"] != "completed"
+          }
+          print(
+              "Exact-main workflow evidence did not complete within the bounded poll; "
+              f"missing={missing}, incomplete={incomplete}",
+              file=sys.stderr,
+          )
+          raise SystemExit(1)
+          PY
