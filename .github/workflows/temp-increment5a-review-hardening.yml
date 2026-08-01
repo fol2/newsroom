@@ -64,37 +64,38 @@ jobs:
           path = Path("newsroom/tests/test_increment5a_contracts.py")
           text = path.read_text(encoding="utf-8")
 
-          old = "    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,\n"
-          new = (
+          proposal_import = (
               "    PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,\n"
-              "    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,\n"
           )
-          if text.count(old) != 1:
-              raise SystemExit("proposal fixture test import differs")
-          text = text.replace(old, new, 1)
+          if proposal_import not in text:
+              anchor = "    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,\n"
+              if text.count(anchor) != 1:
+                  raise SystemExit("proposal fixture test import anchor differs")
+              text = text.replace(anchor, proposal_import + anchor, 1)
 
-          old = (
+          old_assert = (
               "    assert packet.bundle.fixture_replay_profile_schema_digest == (\n"
               "        FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST\n"
               "    )\n"
           )
-          new = (
+          new_assert = (
               "    assert packet.bundle.fixture_replay_profile_schema_digest == (\n"
               "        PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST\n"
               "    )\n"
           )
-          if text.count(old) != 1:
+          if old_assert in text:
+              text = text.replace(old_assert, new_assert, 1)
+          elif new_assert not in text:
               raise SystemExit("proposal fixture test assertion differs")
-          text = text.replace(old, new, 1)
 
-          old = (
+          old_error = (
               "    with pytest.raises(Increment5ProfileError, match=\"local, zero-spend\"):\n"
               "        validate_profile_manifest(\n"
               "            tampered,\n"
               "            packet=INCREMENT_5A_DECISION_PACKET,\n"
               "        )\n"
           )
-          new = (
+          new_error = (
               "    with pytest.raises(\n"
               "        Increment5ProfileError,\n"
               "        match=\"schema validation failed\",\n"
@@ -104,9 +105,11 @@ jobs:
               "            packet=INCREMENT_5A_DECISION_PACKET,\n"
               "        )\n"
           )
-          if text.count(old) != 1:
+          if old_error in text:
+              text = text.replace(old_error, new_error, 1)
+          elif new_error not in text:
               raise SystemExit("fixture schema rejection expectation differs")
-          text = text.replace(old, new, 1)
+
           path.write_text(text, encoding="utf-8", newline="\n")
           PY
 
