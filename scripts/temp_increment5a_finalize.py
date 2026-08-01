@@ -52,7 +52,7 @@ def main() -> None:
             "    postmerge_doc,\n"
             "    \"The post-merge record is a separate admission artifact. \""
         ),
-        end="write_text(postmerge_path, postmerge_doc)",
+        end="write_text(postmerge_doc_path, postmerge_doc)",
         replacement="""postmerge_doc = replace_once(\n    postmerge_doc,\n    (\n        \"That later record can be created only after PR #255 is merged and the exact\\n\"\n        \"merged `main` commit has passed all six permanent workflows. It binds:\"\n    ),\n    (\n        \"That later record can be created only after PR #255 is merged and the exact\\n\"\n        \"merged `main` commit has passed all six permanent workflows. Before it can\\n\"\n        \"return authority, its source-pinned loader authenticates every claimed run\\n\"\n        \"attempt and the qualified commit tree against GitHub REST. It binds:\"\n    ),\n    label=\"post-merge live authentication documentation\",\n)\n""",
         label="post-merge authentication documentation",
     )
