@@ -13,3 +13,13 @@ This checklist is executed only after the proposal/code head has permanent-gate 
 9. Merge 5A, qualify exact `main`, close #250 and only then begin #251.
 
 Materialisation authorises implementation and production-equivalent qualification only. It does not authorise shadow, canary, production activation, publication, public effect, live-source execution, external embedding API calls, provider spending or protected-content vectors.
+
+
+## Post-merge downstream admission
+
+The owner record alone permits production-equivalent qualification but does not
+open #251. After PR #255 merges, qualify the exact merged `main` commit with all
+six permanent workflows, build the canonical post-merge main-qualification
+record from those immutable run identities and the signed decision, pin its
+digest in source in the same reviewed commit, qualify that admission change,
+merge it, requalify exact `main`, close #250, and only then begin #251.

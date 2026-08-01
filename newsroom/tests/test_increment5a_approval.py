@@ -17,6 +17,8 @@ from newsroom.increment5 import (
     APPROVAL_NON_EFFECTS,
     APPROVAL_RECORD_DIGEST,
     APPROVAL_RECORD_PATH,
+    MAIN_QUALIFICATION_RECORD_DIGEST,
+    MAIN_QUALIFICATION_RECORD_PATH,
     INCREMENT5_TRACEABILITY_BY_REQUIREMENT,
     INCREMENT_5A_DECISION_AUTHORITY,
     INCREMENT_5A_DECISION_PACKET,
@@ -110,7 +112,11 @@ def test_pending_repository_record_is_fail_closed() -> None:
     assert APPROVAL_RECORD_DIGEST is None
     assert not APPROVAL_RECORD_PATH.exists()
     assert repository_approval_record() is None
+    assert MAIN_QUALIFICATION_RECORD_DIGEST is None
+    assert not MAIN_QUALIFICATION_RECORD_PATH.exists()
+    assert not INCREMENT_5A_DECISION_AUTHORITY.production_qualification_authorized
     assert not INCREMENT_5A_DECISION_AUTHORITY.production_authorized
+    assert not INCREMENT_5A_DECISION_AUTHORITY.downstream_implementation_authorized
     assert decision_authority() is INCREMENT_5A_DECISION_AUTHORITY
     assert INCREMENT_5A_DECISION_AUTHORITY.proposal is INCREMENT_5A_DECISION_PACKET
 

@@ -32,6 +32,14 @@ from .decision_validation import (
 )
 
 
+from .main_qualification import (
+    MAIN_QUALIFICATION_RECORD_DIGEST,
+    MAIN_QUALIFICATION_RECORD_PATH,
+    Increment5AMainQualificationRecord,
+    load_increment5a_main_qualification_record,
+)
+
+
 APPROVAL_ATTESTATION_SCHEMA_ID = (
     "urn:newsroom:increment5a:owner-approval-attestation:v1"
 )
@@ -806,6 +814,88 @@ def require_repository_approval_record(
     return approval
 
 
+def _main_qualification_loader_factory(
+    *,
+    path: Path,
+    expected_digest: str | None,
+    approval_record_digest: str | None,
+    parser: Callable[..., Increment5AMainQualificationRecord] = (
+        load_increment5a_main_qualification_record
+    ),
+) -> Callable[[], Increment5AMainQualificationRecord | None]:
+    captured_path = path
+    captured_digest = expected_digest
+    captured_approval_digest = approval_record_digest
+    captured_parser = parser
+
+    def load() -> Increment5AMainQualificationRecord | None:
+        if captured_digest is None:
+            if captured_path.exists():
+                raise Increment5ContractError(
+                    "unadmitted post-merge main qualification record is present"
+                )
+            return None
+        if captured_approval_digest is None:
+            raise Increment5ContractError(
+                "post-merge qualification cannot exist without owner approval"
+            )
+        try:
+            validate_sha256_digest(
+                captured_digest,
+                field="main_qualification_record_digest",
+            )
+        except ValueError as exc:
+            raise Increment5ContractError(
+                "main qualification record digest is invalid"
+            ) from exc
+        if not captured_path.is_file():
+            raise Increment5ContractError(
+                "admitted post-merge main qualification record is missing"
+            )
+        qualification = captured_parser(
+            captured_path,
+            approval_record_digest=captured_approval_digest,
+        )
+        if qualification.record_digest != captured_digest:
+            raise Increment5ContractError(
+                "post-merge main qualification record digest differs"
+            )
+        return qualification
+
+    return load
+
+
+_LOAD_MAIN_QUALIFICATION = _main_qualification_loader_factory(
+    path=MAIN_QUALIFICATION_RECORD_PATH,
+    expected_digest=MAIN_QUALIFICATION_RECORD_DIGEST,
+    approval_record_digest=APPROVAL_RECORD_DIGEST,
+)
+
+
+def repository_main_qualification_record(
+    _load: Callable[
+        [], Increment5AMainQualificationRecord | None
+    ] = _LOAD_MAIN_QUALIFICATION,
+) -> Increment5AMainQualificationRecord | None:
+    'Return only the source-pinned post-merge exact-main admission.'
+
+    return _load()
+
+
+def require_repository_main_qualification_record(
+    _load: Callable[
+        [], Increment5AMainQualificationRecord | None
+    ] = _LOAD_MAIN_QUALIFICATION,
+) -> Increment5AMainQualificationRecord:
+    qualification = _load()
+    if qualification is None:
+        raise Increment5ProfileError(
+            "Increment 5 implementation remains blocked until the admitted "
+            "post-merge exact-main qualification record exists"
+        )
+    return qualification
+
+
 def _effective_contract_digest_factory(
     *,
     proposal: Increment5ADecisionPacket,
@@ -858,12 +948,16 @@ def _decision_authority_class_factory(
     *,
     proposal: Increment5ADecisionPacket,
     load_approval: Callable[[], Increment5AApprovalAttestation | None],
+    load_main_qualification: Callable[
+        [], Increment5AMainQualificationRecord | None
+    ],
     effective_contract_digest_for: Callable[
         [Increment5AApprovalAttestation | None], str
     ],
 ) -> type:
     captured_proposal = proposal
     captured_loader = load_approval
+    captured_main_loader = load_main_qualification
     captured_effective_digest = effective_contract_digest_for
 
     class Increment5ADecisionAuthority:
@@ -876,8 +970,24 @@ def _decision_authority_class_factory(
             return captured_proposal
 
         @property
-        def production_authorized(self) -> bool:
+        def production_qualification_authorized(self) -> bool:
             return captured_loader() is not None
+
+        @property
+        def production_authorized(self) -> bool:
+            approval = captured_loader()
+            if approval is None:
+                return False
+            qualification = captured_main_loader()
+            return (
+                qualification is not None
+                and qualification.approval_record_digest
+                == approval.attestation_digest
+            )
+
+        @property
+        def downstream_implementation_authorized(self) -> bool:
+            return self.production_authorized
 
         @property
         def approval_attestation_digest(self) -> str | None:
@@ -889,8 +999,53 @@ def _decision_authority_class_factory(
             return self.approval_attestation_digest
 
         @property
+        def main_qualification_record_digest(self) -> str | None:
+            qualification = captured_main_loader()
+            return None if qualification is None else qualification.record_digest
+
+        @property
+        def qualified_main_commit_sha(self) -> str | None:
+            qualification = captured_main_loader()
+            return (
+                None
+                if qualification is None
+                else qualification.qualified_main_commit_sha
+            )
+
+        @property
         def effective_contract_digest(self) -> str:
             return captured_effective_digest(captured_loader())
+
+        @property
+        def downstream_contract_digest(self) -> str | None:
+            approval = captured_loader()
+            qualification = captured_main_loader()
+            if approval is None or qualification is None:
+                return None
+            return digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "contract": (
+                            "increment5a-post-merge-implementation-authority-v1"
+                        ),
+                        "proposal_payload_digest": captured_proposal.payload_digest,
+                        "proposal_record_digest": captured_proposal.record_digest,
+                        "proposal_contract_bundle_digest": (
+                            captured_proposal.bundle.contract_digest
+                        ),
+                        "approval_record_digest": approval.attestation_digest,
+                        "main_qualification_record_digest": (
+                            qualification.record_digest
+                        ),
+                        "qualified_main_commit_sha": (
+                            qualification.qualified_main_commit_sha
+                        ),
+                        "qualified_main_tree_sha": (
+                            qualification.qualified_main_tree_sha
+                        ),
+                    }
+                )
+            )
 
         def component_authorized(
             self,
@@ -900,9 +1055,10 @@ def _decision_authority_class_factory(
                 raise Increment5ProfileError(
                     "retrieval component kind must be typed"
                 )
-            approval = captured_loader()
-            if approval is None:
+            if not self.production_authorized:
                 return False
+            approval = captured_loader()
+            assert approval is not None
             expected = captured_proposal.bundle.component_by_kind[
                 kind
             ].identity_digest
@@ -922,6 +1078,16 @@ def _decision_authority_class_factory(
                     "PRODUCTION is not authorized without the admitted "
                     "repository owner approval record"
                 )
+            qualification = captured_main_loader()
+            if qualification is None:
+                raise Increment5ProfileError(
+                    "Increment 5 implementation remains blocked until the "
+                    "admitted post-merge exact-main qualification record exists"
+                )
+            if qualification.approval_record_digest != approval.attestation_digest:
+                raise Increment5ProfileError(
+                    "post-merge qualification does not bind owner approval"
+                )
             for kind in RetrievalComponentKind:
                 expected = captured_proposal.bundle.component_by_kind[
                     kind
@@ -938,6 +1104,7 @@ def _decision_authority_class_factory(
 Increment5ADecisionAuthority = _decision_authority_class_factory(
     proposal=INCREMENT_5A_DECISION_PACKET,
     load_approval=_LOAD_REPOSITORY_APPROVAL,
+    load_main_qualification=_LOAD_MAIN_QUALIFICATION,
     effective_contract_digest_for=_EFFECTIVE_CONTRACT_DIGEST_FOR,
 )
 INCREMENT_5A_DECISION_AUTHORITY = Increment5ADecisionAuthority()
