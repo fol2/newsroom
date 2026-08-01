@@ -1,16 +1,16 @@
 name: Temporary SDLC core worker capacity patch
 
 on:
-  push:
-    branches:
-      - agent/sdlc-core-worksteal-scheduler
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
+    if: github.event.pull_request.head.ref == 'agent/sdlc-core-worksteal-scheduler'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout exact support branch
@@ -18,6 +18,7 @@ jobs:
         with:
           ref: agent/sdlc-core-worksteal-scheduler
           fetch-depth: 0
+          show-progress: false
 
       - name: Apply exact capacity correction and regression
         shell: bash
@@ -66,13 +67,18 @@ def test_core_lane_uses_eight_persistent_loadfile_workers(
           )
           PY
 
-      - name: Commit durable support change
+          rm -f .github/workflows/temp-sdlc-core-worker-capacity.yml
+          python -m compileall -q newsroom scripts
+          git diff --check
+
+      - name: Commit and push clean support head
         shell: bash
         run: |
           set -euo pipefail
+          git add -A
+          git diff --cached --check
+          test -z "$(git diff --name-only)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add scripts/sdlc/workflow_lane.py newsroom/tests/test_sdlc_core_worker_capacity.py
-          git diff --cached --check
           git commit -m "perf(sdlc): restore core lane budget margin"
           git push origin HEAD:agent/sdlc-core-worksteal-scheduler
