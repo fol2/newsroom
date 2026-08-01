@@ -2,7 +2,7 @@
 
 **Status:** Contract proposal; no executable runtime authority
 **Bound decision payload:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`
-**Effective production schema:** `sha256:1dfdb4de6d2d184efb486d1601a3eb246f1d74352f55955a2b69e962336c31ef`
+**Effective production schema:** `sha256:3e2ac38b2c17d11b8ea29afe58bd0cdf6924146969600cad2b89fc82ec8607b9`
 **Fixture schema:** `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e`
 **Applies to:** issues #251–#254 after admitted 5A owner approval
 

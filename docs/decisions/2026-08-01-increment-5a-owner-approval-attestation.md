@@ -9,7 +9,7 @@
 **Proposal record:** `sha256:77fe5544b33a85519b8c1fba57f41fe1a68aa411eb63c64be5429dbbd28ea913`
 **Proposal bundle:** `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`
 **Proposal production-profile schema:** `sha256:2cdaa92a487ff48dd6095e1cc82af6f67362c168c557d9e6c3ecfe83e83cb647`
-**Effective qualification-profile schema:** `sha256:1dfdb4de6d2d184efb486d1601a3eb246f1d74352f55955a2b69e962336c31ef`
+**Effective qualification-profile schema:** `sha256:3e2ac38b2c17d11b8ea29afe58bd0cdf6924146969600cad2b89fc82ec8607b9`
 **Approval-record schema:** `sha256:8e69e5a66949e103ec4a960af34a509f3ba8b86a9f32b08ed77930f0898b8577`
 **Fixture-replay schema:** `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e`
 
@@ -64,11 +64,11 @@ code replacement, not approval evidence.
 
 The owner comment on issue #250 must be the following exact single-line body:
 
-> I approve Increment 5A proposal payload `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`, proposal record `sha256:77fe5544b33a85519b8c1fba57f41fe1a68aa411eb63c64be5429dbbd28ea913`, proposal contract bundle `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`, effective production-qualification schema `sha256:1dfdb4de6d2d184efb486d1601a3eb246f1d74352f55955a2b69e962336c31ef`, approval-attestation schema `sha256:8e69e5a66949e103ec4a960af34a509f3ba8b86a9f32b08ed77930f0898b8577`, and fixture-replay schema `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e` as the exact implementation and production-equivalent qualification contract for issues #251–#254. This approval authorizes no shadow, canary, production activation, publication, public effect, live-source execution, external embedding API call, provider spending, or protected-content vector.
+> I approve Increment 5A proposal payload `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`, proposal record `sha256:77fe5544b33a85519b8c1fba57f41fe1a68aa411eb63c64be5429dbbd28ea913`, proposal contract bundle `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`, effective production-qualification schema `sha256:3e2ac38b2c17d11b8ea29afe58bd0cdf6924146969600cad2b89fc82ec8607b9`, approval-attestation schema `sha256:8e69e5a66949e103ec4a960af34a509f3ba8b86a9f32b08ed77930f0898b8577`, and fixture-replay schema `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e` as the exact implementation and production-equivalent qualification contract for issues #251–#254. This approval authorizes no shadow, canary, production activation, publication, public effect, live-source execution, external embedding API call, provider spending, or protected-content vector.
 
 The exact body digest is:
 
-`sha256:137f423d2630aec1af065968a6a0afac9283918fdad3f6e0631719f23b97952a`
+`sha256:600c6b43c645d8c26d234c7a29d325650ab164791cdde457ac96b55b1b99cacd`
 
 Line wrapping inserted by display is harmless only when the stored body remains
 the exact single line. Editing, paraphrasing, changing a digest, changing the

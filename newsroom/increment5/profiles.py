@@ -130,6 +130,13 @@ def _qualification_component_reference_schema() -> dict[str, object]:
 
 
 _qualification_common_properties = deepcopy(_proposal._COMMON_PROPERTIES)
+_qualification_budgets = deepcopy(_qualification_common_properties["budgets"])
+assert isinstance(_qualification_budgets, dict)
+_budget_properties = _qualification_budgets["properties"]
+assert isinstance(_budget_properties, dict)
+_budget_properties["max_external_calls_per_request"] = {"const": 0}
+_budget_properties["max_gross_cost_microunits_per_request"] = {"const": 0}
+_qualification_common_properties["budgets"] = _qualification_budgets
 _qualification_rights = deepcopy(_qualification_common_properties["rights"])
 assert isinstance(_qualification_rights, dict)
 _rights_properties = _qualification_rights["properties"]

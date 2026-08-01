@@ -254,7 +254,7 @@ def test_approval_module_has_no_runtime_transport_or_capability_minting() -> Non
 
 def test_owner_statement_and_non_effects_are_exact() -> None:
     assert _OWNER_BODY_DIGEST == (
-        "sha256:137f423d2630aec1af065968a6a0afac9283918fdad3f6e0631719f23b97952a"
+        "sha256:600c6b43c645d8c26d234c7a29d325650ab164791cdde457ac96b55b1b99cacd"
     )
     assert tuple(APPROVAL_NON_EFFECTS) == (
         "CANARY",

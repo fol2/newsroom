@@ -85,7 +85,7 @@ schema exports resolve to v2.
 Effective production-equivalent qualification requires:
 
 - qualification profile schema
-  `sha256:1dfdb4de6d2d184efb486d1601a3eb246f1d74352f55955a2b69e962336c31ef`;
+  `sha256:3e2ac38b2c17d11b8ea29afe58bd0cdf6924146969600cad2b89fc82ec8607b9`;
 - approval-record schema
   `sha256:8e69e5a66949e103ec4a960af34a509f3ba8b86a9f32b08ed77930f0898b8577`;
 - the exact proposal record, bundle, components and owner comment evidence;
