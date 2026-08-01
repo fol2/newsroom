@@ -1,0 +1,100 @@
+name: Temporary SDLC worksteal materialiser
+
+on:
+  push:
+    branches:
+      - agent/sdlc-core-worksteal-scheduler
+
+permissions:
+  contents: write
+
+jobs:
+  materialise:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact support branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/sdlc-core-worksteal-scheduler
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Apply exact scheduler correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          lane = Path("scripts/sdlc/workflow_lane.py")
+          source = lane.read_text(encoding="utf-8")
+          old = '_CORE_WORKER_COUNT = 8\n_CORE_DISTRIBUTION = "loadfile"\n'
+          new = '_CORE_WORKER_COUNT = 6\n_CORE_DISTRIBUTION = "worksteal"\n'
+          if source.count(old) != 1:
+              raise SystemExit("expected exactly one eight-worker loadfile contract")
+          lane.write_text(source.replace(old, new, 1), encoding="utf-8")
+
+          existing = Path("newsroom/tests/test_sdlc_workflow_lane.py")
+          source = existing.read_text(encoding="utf-8")
+          replacements = {
+              'assert lane_module._CORE_DISTRIBUTION == "loadfile"':
+                  'assert lane_module._CORE_DISTRIBUTION == "worksteal"',
+              '"--dist=loadfile",': '"--dist=worksteal",',
+              'assert "--dist=loadfile" in command':
+                  'assert "--dist=worksteal" in command',
+          }
+          for old_text, new_text in replacements.items():
+              count = source.count(old_text)
+              if count < 1:
+                  raise SystemExit(f"missing expected test contract: {old_text}")
+              source = source.replace(old_text, new_text)
+          existing.write_text(source, encoding="utf-8")
+
+          focused = Path("newsroom/tests/test_sdlc_core_worker_capacity.py")
+          focused.write_text(
+              '''from __future__ import annotations
+
+from pathlib import Path
+
+import scripts.sdlc.workflow_lane as lane_module
+
+
+def test_core_lane_uses_six_persistent_worksteal_workers(
+    tmp_path: Path,
+) -> None:
+    assert lane_module._CORE_WORKER_COUNT == 6
+    assert lane_module._CORE_DISTRIBUTION == "worksteal"
+
+    command = lane_module._core_worker_command(
+        report=tmp_path / "pytest.xml",
+        basetemp=tmp_path / "pytest",
+    )
+
+    worker_flag = command.index("-n")
+    assert command[worker_flag + 1] == "6"
+    assert "--dist=worksteal" in command
+    assert "--max-worker-restart=0" in command
+    assert command.count("xdist.plugin") == 1
+    assert command.count("newsroom/tests") == 1
+''',
+              encoding="utf-8",
+          )
+
+          Path(".github/temp-sdlc-worksteal-trigger").unlink(missing_ok=True)
+          Path(".github/workflows/temp-sdlc-worksteal-materialise.yml").unlink()
+          PY
+
+          python -m compileall -q newsroom scripts
+          git diff --check
+
+      - name: Commit and push durable scheduler fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "perf(sdlc): schedule core tests by work stealing"
+          git push origin HEAD:agent/sdlc-core-worksteal-scheduler
