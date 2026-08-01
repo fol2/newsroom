@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -13,8 +14,8 @@ from newsroom.authority.canonical import (
     validate_sha256_digest,
 )
 
+from . import _profiles_proposal_v1 as _proposal
 from .contracts import (
-    ComponentDisposition,
     Increment5ADecisionPacket,
     Increment5ContractError,
     Increment5ProfileError,
@@ -25,32 +26,56 @@ from .contracts import (
 )
 
 
-PRODUCTION_PROFILE_SCHEMA_ID = "urn:newsroom:increment5:production-profile:v1"
-FIXTURE_REPLAY_PROFILE_SCHEMA_ID = (
-    "urn:newsroom:increment5:fixture-replay-profile:v1"
+# The original v1 schema remains immutable proposal evidence because its digest is
+# inside the advertised 5A proposal. It is never used to validate an effective
+# production-qualification manifest.
+PROPOSAL_PRODUCTION_PROFILE_SCHEMA = _proposal.PRODUCTION_PROFILE_SCHEMA
+PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST = (
+    _proposal.PRODUCTION_PROFILE_SCHEMA_DIGEST
 )
-PRODUCTION_PROFILE_SCHEMA_VERSION = "increment5-production-profile-v1"
-FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION = "increment5-fixture-replay-profile-v1"
-
-_PROFILE_DATA_ROOT = Path(__file__).resolve().parent / "data"
-PRODUCTION_PROFILE_SCHEMA_PATH = (
-    _PROFILE_DATA_ROOT / "increment5_production_profile_v1.schema.json"
+PROPOSAL_PRODUCTION_PROFILE_SCHEMA_ID = _proposal.PRODUCTION_PROFILE_SCHEMA_ID
+PROPOSAL_PRODUCTION_PROFILE_SCHEMA_PATH = (
+    _proposal.PRODUCTION_PROFILE_SCHEMA_PATH
 )
-FIXTURE_REPLAY_PROFILE_SCHEMA_PATH = (
-    _PROFILE_DATA_ROOT / "increment5_fixture_replay_profile_v1.schema.json"
+PROPOSAL_PRODUCTION_PROFILE_SCHEMA_VERSION = (
+    _proposal.PRODUCTION_PROFILE_SCHEMA_VERSION
 )
 
+# Compatibility aliases retained for the immutable proposal loader and its
+# existing tests. Production validation below always uses the qualification v2
+# schema and exact approval authority.
+PRODUCTION_PROFILE_SCHEMA = PROPOSAL_PRODUCTION_PROFILE_SCHEMA
+PRODUCTION_PROFILE_SCHEMA_DIGEST = PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST
+PRODUCTION_PROFILE_SCHEMA_ID = PROPOSAL_PRODUCTION_PROFILE_SCHEMA_ID
+PRODUCTION_PROFILE_SCHEMA_PATH = PROPOSAL_PRODUCTION_PROFILE_SCHEMA_PATH
+PRODUCTION_PROFILE_SCHEMA_VERSION = PROPOSAL_PRODUCTION_PROFILE_SCHEMA_VERSION
 
+FIXTURE_REPLAY_PROFILE_SCHEMA = _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA
+FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST = (
+    _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
+)
+FIXTURE_REPLAY_PROFILE_SCHEMA_ID = _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA_ID
+FIXTURE_REPLAY_PROFILE_SCHEMA_PATH = _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA_PATH
+FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION = (
+    _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION
+)
+
+QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_ID = (
+    "urn:newsroom:increment5:production-qualification-profile:v2"
+)
+QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_VERSION = (
+    "increment5-production-qualification-profile-v2"
+)
+QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_PATH = (
+    Path(__file__).resolve().parent
+    / "data"
+    / "increment5_production_qualification_profile_v2.schema.json"
+)
 _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
-_COMPONENT_KEYS = tuple(item.value for item in RetrievalComponentKind)
 _REQUIRED_MODES = tuple(item.value for item in RetrievalMode)
 
 
-def _component_reference_schema(
-    *,
-    implementation_kinds: tuple[str, ...],
-    approval_statuses: tuple[str, ...],
-) -> dict[str, object]:
+def _qualification_component_reference_schema() -> dict[str, object]:
     return {
         "type": "object",
         "required": [
@@ -64,7 +89,11 @@ def _component_reference_schema(
         ],
         "additionalProperties": False,
         "properties": {
-            "contract_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "contract_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+            },
             "contract_version": {
                 "type": "string",
                 "minLength": 1,
@@ -83,227 +112,101 @@ def _component_reference_schema(
                 "type": "string",
                 "pattern": _SHA256_PATTERN,
             },
-            "implementation_kind": {"enum": list(implementation_kinds)},
-            "approval_status": {"enum": list(approval_statuses)},
+            "implementation_kind": {"const": "REAL_REPOSITORY_NATIVE"},
+            "approval_status": {"const": "APPROVED_BY_ATTESTATION"},
         },
     }
 
 
-def _components_schema(reference: dict[str, object]) -> dict[str, object]:
-    return {
-        "type": "object",
-        "required": list(_COMPONENT_KEYS),
-        "additionalProperties": False,
-        "properties": {key: reference for key in _COMPONENT_KEYS},
-    }
+_qualification_common_properties = deepcopy(_proposal._COMMON_PROPERTIES)
+_qualification_rights = deepcopy(
+    _qualification_common_properties["rights"]
+)
+assert isinstance(_qualification_rights, dict)
+_rights_properties = _qualification_rights["properties"]
+assert isinstance(_rights_properties, dict)
+_rights_properties["protected_content_allowed"] = {"const": False}
+_qualification_common_properties["rights"] = _qualification_rights
 
-
-_COMMON_REQUIRED = [
-    "schema_version",
-    "profile",
-    "decision_payload_digest",
-    "contract_bundle_digest",
-    "runtime_authority",
-    "qualification_eligible",
-    "required_modes",
-    "graph_free_fallback",
-    "silent_mode_fallback",
-    "components",
-    "budgets",
-    "rights",
-]
-
-
-_COMMON_PROPERTIES: dict[str, object] = {
-    "decision_payload_digest": {"type": "string", "pattern": _SHA256_PATTERN},
-    "contract_bundle_digest": {"type": "string", "pattern": _SHA256_PATTERN},
-    "required_modes": {"const": list(_REQUIRED_MODES)},
-    "graph_free_fallback": {"const": False},
-    "silent_mode_fallback": {"const": False},
-    "budgets": {
-        "type": "object",
-        "required": [
-            "timeout_ms",
-            "branch_result_limit",
-            "retained_candidate_limit",
-            "response_byte_limit",
-            "max_external_calls_per_request",
-            "max_gross_cost_microunits_per_request",
-        ],
-        "additionalProperties": False,
-        "properties": {
-            "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 5000},
-            "branch_result_limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 8,
-            },
-            "retained_candidate_limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 12,
-            },
-            "response_byte_limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 262144,
-            },
-            "max_external_calls_per_request": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 8,
-            },
-            "max_gross_cost_microunits_per_request": {
-                "type": "integer",
-                "minimum": 0,
-            },
-        },
-    },
-    "rights": {
-        "type": "object",
-        "required": [
-            "protected_content_allowed",
-            "rights_rechecked_at_hydration",
-            "purge_required",
-            "rebuild_must_not_resurrect",
-        ],
-        "additionalProperties": False,
-        "properties": {
-            "protected_content_allowed": {"type": "boolean"},
-            "rights_rechecked_at_hydration": {"const": True},
-            "purge_required": {"const": True},
-            "rebuild_must_not_resurrect": {"const": True},
-        },
-    },
-}
-
-
-PRODUCTION_PROFILE_SCHEMA: dict[str, object] = {
+QUALIFICATION_PRODUCTION_PROFILE_SCHEMA: dict[str, object] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": PRODUCTION_PROFILE_SCHEMA_ID,
+    "$id": QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_ID,
     "type": "object",
-    "required": _COMMON_REQUIRED,
+    "required": [
+        *_proposal._COMMON_REQUIRED,
+        "proposal_record_digest",
+        "approval_attestation_digest",
+        "effective_contract_digest",
+    ],
     "additionalProperties": False,
     "properties": {
-        **_COMMON_PROPERTIES,
-        "schema_version": {"const": PRODUCTION_PROFILE_SCHEMA_VERSION},
+        **_qualification_common_properties,
+        "schema_version": {
+            "const": QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_VERSION
+        },
         "profile": {"const": RetrievalProfileKind.PRODUCTION.value},
         "runtime_authority": {
             "const": RuntimeAuthority.PRODUCTION_QUALIFICATION.value
         },
         "qualification_eligible": {"const": True},
-        "components": _components_schema(
-            _component_reference_schema(
-                implementation_kinds=("REAL_REPOSITORY_NATIVE",),
-                approval_statuses=("APPROVED",),
-            )
-        ),
-    },
-}
-
-
-FIXTURE_REPLAY_PROFILE_SCHEMA: dict[str, object] = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": FIXTURE_REPLAY_PROFILE_SCHEMA_ID,
-    "type": "object",
-    "required": _COMMON_REQUIRED + ["fixture"],
-    "additionalProperties": False,
-    "properties": {
-        **_COMMON_PROPERTIES,
-        "schema_version": {"const": FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION},
-        "profile": {"const": RetrievalProfileKind.FIXTURE_REPLAY.value},
-        "runtime_authority": {
-            "const": RuntimeAuthority.CONTRACT_AND_FIXTURE_REPLAY_ONLY.value
+        "proposal_record_digest": {
+            "type": "string",
+            "pattern": _SHA256_PATTERN,
         },
-        "qualification_eligible": {"const": False},
-        "components": _components_schema(
-            _component_reference_schema(
-                implementation_kinds=(
-                    "REPOSITORY_FIXTURE",
-                    "REPOSITORY_REPLAY",
-                ),
-                approval_statuses=("NON_QUALIFYING",),
-            )
-        ),
-        "fixture": {
+        "approval_attestation_digest": {
+            "type": "string",
+            "pattern": _SHA256_PATTERN,
+        },
+        "effective_contract_digest": {
+            "type": "string",
+            "pattern": _SHA256_PATTERN,
+        },
+        "components": {
             "type": "object",
-            "required": [
-                "fixture_id",
-                "fixture_manifest_digest",
-                "protected_content_present",
-                "production_substitution_allowed",
-            ],
+            "required": [item.value for item in RetrievalComponentKind],
             "additionalProperties": False,
             "properties": {
-                "fixture_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 256,
-                },
-                "fixture_manifest_digest": {
-                    "type": "string",
-                    "pattern": _SHA256_PATTERN,
-                },
-                "protected_content_present": {"const": False},
-                "production_substitution_allowed": {"const": False},
+                item.value: _qualification_component_reference_schema()
+                for item in RetrievalComponentKind
             },
         },
     },
 }
-
-
-Draft202012Validator.check_schema(PRODUCTION_PROFILE_SCHEMA)
-Draft202012Validator.check_schema(FIXTURE_REPLAY_PROFILE_SCHEMA)
-_PRODUCTION_VALIDATOR = Draft202012Validator(PRODUCTION_PROFILE_SCHEMA)
-_FIXTURE_REPLAY_VALIDATOR = Draft202012Validator(
-    FIXTURE_REPLAY_PROFILE_SCHEMA
+Draft202012Validator.check_schema(
+    QUALIFICATION_PRODUCTION_PROFILE_SCHEMA
 )
-
-PRODUCTION_PROFILE_SCHEMA_DIGEST = digest_bytes(
-    canonical_json_bytes(PRODUCTION_PROFILE_SCHEMA)
+_QUALIFICATION_PRODUCTION_VALIDATOR = Draft202012Validator(
+    QUALIFICATION_PRODUCTION_PROFILE_SCHEMA
 )
-FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST = digest_bytes(
-    canonical_json_bytes(FIXTURE_REPLAY_PROFILE_SCHEMA)
+QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST = digest_bytes(
+    canonical_json_bytes(QUALIFICATION_PRODUCTION_PROFILE_SCHEMA)
 )
 
 
-def _require_schema_artifact(
-    *,
-    path: Path,
-    expected: Mapping[str, Any],
-    expected_digest: str,
-) -> None:
+def _require_qualification_schema_artifact() -> None:
     try:
-        data = path.read_bytes()
+        data = QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_PATH.read_bytes()
         value = json.loads(data.decode("utf-8", errors="strict"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise Increment5ContractError(
-            f"cannot load retrieval profile schema artifact: {path.name}"
+            "cannot load production-qualification profile schema artifact"
         ) from exc
     if not isinstance(value, dict):
         raise Increment5ContractError(
-            f"retrieval profile schema artifact is not an object: {path.name}"
+            "production-qualification schema artifact must be an object"
         )
-    if data != canonical_json_bytes(value):
+    if (
+        data != canonical_json_bytes(value)
+        or value != QUALIFICATION_PRODUCTION_PROFILE_SCHEMA
+        or digest_bytes(data)
+        != QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST
+    ):
         raise Increment5ContractError(
-            f"retrieval profile schema artifact is not canonical: {path.name}"
-        )
-    if value != dict(expected) or digest_bytes(data) != expected_digest:
-        raise Increment5ContractError(
-            f"retrieval profile schema artifact differs from code: {path.name}"
+            "production-qualification schema artifact differs from code"
         )
 
 
-_require_schema_artifact(
-    path=PRODUCTION_PROFILE_SCHEMA_PATH,
-    expected=PRODUCTION_PROFILE_SCHEMA,
-    expected_digest=PRODUCTION_PROFILE_SCHEMA_DIGEST,
-)
-_require_schema_artifact(
-    path=FIXTURE_REPLAY_PROFILE_SCHEMA_PATH,
-    expected=FIXTURE_REPLAY_PROFILE_SCHEMA,
-    expected_digest=FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,
-)
+_require_qualification_schema_artifact()
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,31 +216,64 @@ class ValidatedRetrievalProfile:
     contract_bundle_digest: str
     manifest_digest: str
     qualification_eligible: bool
+    proposal_record_digest: str | None = None
+    approval_attestation_digest: str | None = None
+    effective_contract_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile, RetrievalProfileKind):
-            raise Increment5ContractError("validated profile kind must be typed")
+            raise Increment5ContractError(
+                "validated profile kind must be typed"
+            )
         for field_name in (
             "decision_payload_digest",
             "contract_bundle_digest",
             "manifest_digest",
         ):
             try:
-                validate_sha256_digest(getattr(self, field_name), field=field_name)
+                validate_sha256_digest(
+                    getattr(self, field_name),
+                    field=field_name,
+                )
             except ValueError as exc:
                 raise Increment5ContractError(
                     f"{field_name} is not a canonical digest"
                 ) from exc
+        optional = (
+            "proposal_record_digest",
+            "approval_attestation_digest",
+            "effective_contract_digest",
+        )
+        for field_name in optional:
+            value = getattr(self, field_name)
+            if value is not None:
+                try:
+                    validate_sha256_digest(value, field=field_name)
+                except ValueError as exc:
+                    raise Increment5ContractError(
+                        f"{field_name} is not a canonical digest"
+                    ) from exc
         if not isinstance(self.qualification_eligible, bool):
             raise Increment5ContractError(
                 "qualification eligibility must be boolean"
             )
-        if (
-            self.profile is RetrievalProfileKind.FIXTURE_REPLAY
-            and self.qualification_eligible
+        if self.profile is RetrievalProfileKind.FIXTURE_REPLAY:
+            if self.qualification_eligible or any(
+                getattr(self, field_name) is not None
+                for field_name in optional
+            ):
+                raise Increment5ContractError(
+                    "fixture replay cannot carry production authority"
+                )
+        elif (
+            not self.qualification_eligible
+            or any(
+                getattr(self, field_name) is None
+                for field_name in optional
+            )
         ):
             raise Increment5ContractError(
-                "fixture replay can never become qualification evidence"
+                "production qualification requires complete approval identity"
             )
 
 
@@ -347,16 +283,34 @@ def _schema_errors(
 ) -> tuple[str, ...]:
     errors = sorted(
         validator.iter_errors(document),
-        key=lambda item: [str(component) for component in item.absolute_path],
+        key=lambda item: [
+            str(component) for component in item.absolute_path
+        ],
     )
     return tuple(
         (
-            "/".join(str(component) for component in error.absolute_path)
+            "/".join(
+                str(component) for component in error.absolute_path
+            )
             or "<root>"
         )
         + ": "
         + error.message
         for error in errors
+    )
+
+
+def _proposal_from_authority(
+    packet_or_authority: object,
+) -> Increment5ADecisionPacket:
+    from .approval import Increment5ADecisionAuthority
+
+    if isinstance(packet_or_authority, Increment5ADecisionPacket):
+        return packet_or_authority
+    if isinstance(packet_or_authority, Increment5ADecisionAuthority):
+        return packet_or_authority.proposal
+    raise Increment5ProfileError(
+        "retrieval profile validation requires typed 5A authority"
     )
 
 
@@ -367,7 +321,9 @@ def _require_component_references(
 ) -> None:
     components = document.get("components")
     if not isinstance(components, Mapping):
-        raise Increment5ProfileError("profile component references are absent")
+        raise Increment5ProfileError(
+            "profile component references are absent"
+        )
     for kind, identity in packet.bundle.component_by_kind.items():
         reference = components.get(kind.value)
         if not isinstance(reference, Mapping):
@@ -384,7 +340,7 @@ def _require_component_references(
         actual = {key: reference.get(key) for key in expected}
         if actual != expected:
             raise Increment5ProfileError(
-                f"profile component {kind.value} differs from the exact decision"
+                f"profile component {kind.value} differs from proposal"
             )
 
 
@@ -400,159 +356,199 @@ def _require_budget_binding(
     actual = {key: budgets.get(key) for key in selected}
     if actual != selected:
         raise Increment5ProfileError(
-            "profile budgets differ from the exact decision packet"
+            "profile budgets differ from the exact proposal"
         )
 
 
 def validate_profile_manifest(
     document: Mapping[str, Any],
     *,
-    packet: Increment5ADecisionPacket,
+    packet: object,
 ) -> ValidatedRetrievalProfile:
     if not isinstance(document, Mapping):
-        raise Increment5ProfileError("retrieval profile manifest must be an object")
+        raise Increment5ProfileError(
+            "retrieval profile manifest must be an object"
+        )
     raw_profile = document.get("profile")
     if not isinstance(raw_profile, str):
-        raise Increment5ProfileError("retrieval profile kind is unknown")
+        raise Increment5ProfileError(
+            "retrieval profile kind is unknown"
+        )
     try:
         profile = RetrievalProfileKind(raw_profile)
     except ValueError as exc:
-        raise Increment5ProfileError("retrieval profile kind is unknown") from exc
+        raise Increment5ProfileError(
+            "retrieval profile kind is unknown"
+        ) from exc
 
-    validator = (
-        _PRODUCTION_VALIDATOR
-        if profile is RetrievalProfileKind.PRODUCTION
-        else _FIXTURE_REPLAY_VALIDATOR
+    proposal = _proposal_from_authority(packet)
+    if profile is RetrievalProfileKind.FIXTURE_REPLAY:
+        validated = _proposal.validate_profile_manifest(
+            document,
+            packet=proposal,
+        )
+        return ValidatedRetrievalProfile(
+            profile=validated.profile,
+            decision_payload_digest=validated.decision_payload_digest,
+            contract_bundle_digest=validated.contract_bundle_digest,
+            manifest_digest=validated.manifest_digest,
+            qualification_eligible=False,
+        )
+
+    from .approval import Increment5ADecisionAuthority
+
+    if not isinstance(packet, Increment5ADecisionAuthority):
+        raise Increment5ProfileError(
+            "PRODUCTION requires exact owner approval authority"
+        )
+    packet.require_profile(RetrievalProfileKind.PRODUCTION)
+    errors = _schema_errors(
+        _QUALIFICATION_PRODUCTION_VALIDATOR,
+        document,
     )
-    errors = _schema_errors(validator, document)
     if errors:
         raise Increment5ProfileError(
             "retrieval profile schema validation failed: " + errors[0]
         )
-
-    if document["decision_payload_digest"] != packet.payload_digest:
+    if document["decision_payload_digest"] != proposal.payload_digest:
         raise Increment5ProfileError(
-            "profile decision digest differs from the exact packet"
+            "profile proposal payload digest differs"
         )
-    if document["contract_bundle_digest"] != packet.bundle.contract_digest:
+    if document["proposal_record_digest"] != proposal.record_digest:
         raise Increment5ProfileError(
-            "profile contract bundle digest differs from the exact packet"
+            "profile proposal record digest differs"
         )
-    _require_component_references(document=document, packet=packet)
-    _require_budget_binding(document=document, packet=packet)
-    packet.require_profile(profile)
-
+    if (
+        document["contract_bundle_digest"]
+        != proposal.bundle.contract_digest
+    ):
+        raise Increment5ProfileError(
+            "profile proposal contract bundle differs"
+        )
+    if (
+        document["approval_attestation_digest"]
+        != packet.approval_attestation_digest
+    ):
+        raise Increment5ProfileError(
+            "profile approval attestation digest differs"
+        )
+    if (
+        document["effective_contract_digest"]
+        != packet.effective_contract_digest
+    ):
+        raise Increment5ProfileError(
+            "profile effective contract digest differs"
+        )
+    _require_component_references(
+        document=document,
+        packet=proposal,
+    )
+    _require_budget_binding(
+        document=document,
+        packet=proposal,
+    )
+    if not all(
+        packet.component_authorized(kind)
+        for kind in RetrievalComponentKind
+    ):
+        raise Increment5ProfileError(
+            "production component approval is incomplete"
+        )
     rights = document["rights"]
-    if not rights["rights_rechecked_at_hydration"]:
+    if rights["protected_content_allowed"] is not False:
         raise Increment5ProfileError(
-            "profile cannot bypass rights recheck during hydration"
+            "Increment 5 v1 prohibits protected-content processing"
         )
-    if not rights["purge_required"] or not rights["rebuild_must_not_resurrect"]:
+    if (
+        not rights["rights_rechecked_at_hydration"]
+        or not rights["purge_required"]
+        or not rights["rebuild_must_not_resurrect"]
+    ):
         raise Increment5ProfileError(
-            "profile cannot weaken purge or non-resurrection"
+            "profile cannot weaken rights, purge or non-resurrection"
         )
-
-    if profile is RetrievalProfileKind.PRODUCTION:
-        for kind, identity in packet.bundle.component_by_kind.items():
-            if identity.disposition is not ComponentDisposition.BOUND_CONTRACT:
-                raise Increment5ProfileError(
-                    f"production component {kind.value} is not fully bound"
-                )
-        if packet.unresolved_decisions:
-            raise Increment5ProfileError(
-                "production profile cannot validate with unresolved decisions"
-            )
-    else:
-        budgets = document["budgets"]
-        if (
-            budgets["max_external_calls_per_request"] != 0
-            or budgets["max_gross_cost_microunits_per_request"] != 0
-            or document["rights"]["protected_content_allowed"]
-        ):
-            raise Increment5ProfileError(
-                "fixture replay must remain local, zero-spend and unprotected"
-            )
-
     return ValidatedRetrievalProfile(
-        profile=profile,
-        decision_payload_digest=packet.payload_digest,
-        contract_bundle_digest=packet.bundle.contract_digest,
-        manifest_digest=digest_bytes(canonical_json_bytes(document)),
-        qualification_eligible=bool(document["qualification_eligible"]),
+        profile=RetrievalProfileKind.PRODUCTION,
+        decision_payload_digest=proposal.payload_digest,
+        proposal_record_digest=proposal.record_digest,
+        contract_bundle_digest=proposal.bundle.contract_digest,
+        approval_attestation_digest=(
+            packet.approval_attestation_digest
+        ),
+        effective_contract_digest=packet.effective_contract_digest,
+        manifest_digest=digest_bytes(
+            canonical_json_bytes(document)
+        ),
+        qualification_eligible=True,
     )
 
 
 def build_fixture_replay_manifest(
     *,
-    packet: Increment5ADecisionPacket,
+    packet: object,
     fixture_id: str,
     fixture_manifest_digest: str,
 ) -> dict[str, object]:
-    packet.require_profile(RetrievalProfileKind.FIXTURE_REPLAY)
-    if (
-        not isinstance(fixture_id, str)
-        or not fixture_id
-        or fixture_id != fixture_id.strip()
-        or len(fixture_id.encode("utf-8")) > 256
-    ):
-        raise Increment5ProfileError(
-            "fixture identity must be bounded canonical text"
-        )
-    try:
-        validate_sha256_digest(
-            fixture_manifest_digest,
-            field="fixture_manifest_digest",
-        )
-    except ValueError as exc:
-        raise Increment5ProfileError(
-            "fixture manifest digest is invalid"
-        ) from exc
+    proposal = _proposal_from_authority(packet)
+    return _proposal.build_fixture_replay_manifest(
+        packet=proposal,
+        fixture_id=fixture_id,
+        fixture_manifest_digest=fixture_manifest_digest,
+    )
 
-    components: dict[str, object] = {}
-    for kind, identity in packet.bundle.component_by_kind.items():
-        implementation_kind = (
-            "REPOSITORY_FIXTURE"
-            if kind
-            in {
-                RetrievalComponentKind.EMBEDDING,
-                RetrievalComponentKind.VECTOR_INDEX,
-            }
-            else "REPOSITORY_REPLAY"
+
+def build_production_qualification_manifest(
+    *,
+    authority: object,
+) -> dict[str, object]:
+    from .approval import Increment5ADecisionAuthority
+
+    if not isinstance(authority, Increment5ADecisionAuthority):
+        raise Increment5ProfileError(
+            "production manifest requires typed owner approval authority"
         )
+    authority.require_profile(RetrievalProfileKind.PRODUCTION)
+    proposal = authority.proposal
+    components: dict[str, object] = {}
+    for kind, identity in proposal.bundle.component_by_kind.items():
+        if not authority.component_authorized(kind):
+            raise Increment5ProfileError(
+                f"production component {kind.value} is not approved"
+            )
         components[kind.value] = {
             "contract_id": identity.contract_id,
             "contract_version": identity.contract_version,
             "implementation_version": identity.implementation_version,
             "configuration_digest": identity.configuration_digest,
             "identity_digest": identity.identity_digest,
-            "implementation_kind": implementation_kind,
-            "approval_status": "NON_QUALIFYING",
+            "implementation_kind": "REAL_REPOSITORY_NATIVE",
+            "approval_status": "APPROVED_BY_ATTESTATION",
         }
-
     return {
-        "schema_version": FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION,
-        "profile": RetrievalProfileKind.FIXTURE_REPLAY.value,
-        "decision_payload_digest": packet.payload_digest,
-        "contract_bundle_digest": packet.bundle.contract_digest,
-        "runtime_authority": (
-            RuntimeAuthority.CONTRACT_AND_FIXTURE_REPLAY_ONLY.value
+        "schema_version": (
+            QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_VERSION
         ),
-        "qualification_eligible": False,
+        "profile": RetrievalProfileKind.PRODUCTION.value,
+        "decision_payload_digest": proposal.payload_digest,
+        "proposal_record_digest": proposal.record_digest,
+        "contract_bundle_digest": proposal.bundle.contract_digest,
+        "approval_attestation_digest": (
+            authority.approval_attestation_digest
+        ),
+        "effective_contract_digest": authority.effective_contract_digest,
+        "runtime_authority": (
+            RuntimeAuthority.PRODUCTION_QUALIFICATION.value
+        ),
+        "qualification_eligible": True,
         "required_modes": list(_REQUIRED_MODES),
         "graph_free_fallback": False,
         "silent_mode_fallback": False,
         "components": components,
-        "budgets": packet.budgets.canonical_value(),
+        "budgets": proposal.budgets.canonical_value(),
         "rights": {
             "protected_content_allowed": False,
             "rights_rechecked_at_hydration": True,
             "purge_required": True,
             "rebuild_must_not_resurrect": True,
-        },
-        "fixture": {
-            "fixture_id": fixture_id,
-            "fixture_manifest_digest": fixture_manifest_digest,
-            "protected_content_present": False,
-            "production_substitution_allowed": False,
         },
     }
