@@ -29,11 +29,33 @@ PROPOSAL_PRODUCTION_PROFILE_SCHEMA_ID = _proposal.PRODUCTION_PROFILE_SCHEMA_ID
 PROPOSAL_PRODUCTION_PROFILE_SCHEMA_PATH = _proposal.PRODUCTION_PROFILE_SCHEMA_PATH
 PROPOSAL_PRODUCTION_PROFILE_SCHEMA_VERSION = _proposal.PRODUCTION_PROFILE_SCHEMA_VERSION
 
-FIXTURE_REPLAY_PROFILE_SCHEMA = _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA
-FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST = _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
-FIXTURE_REPLAY_PROFILE_SCHEMA_ID = _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA_ID
-FIXTURE_REPLAY_PROFILE_SCHEMA_PATH = _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA_PATH
-FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION = _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION
+PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA = (
+    _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA
+)
+PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST = (
+    _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
+)
+PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_ID = (
+    _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA_ID
+)
+PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_PATH = (
+    _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA_PATH
+)
+PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION = (
+    _proposal.FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION
+)
+
+FIXTURE_REPLAY_PROFILE_SCHEMA_ID = (
+    "urn:newsroom:increment5:fixture-replay-profile:v2"
+)
+FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION = (
+    "increment5-fixture-replay-profile-v2"
+)
+FIXTURE_REPLAY_PROFILE_SCHEMA_PATH = (
+    Path(__file__).resolve().parent
+    / "data"
+    / "increment5_fixture_replay_profile_v2.schema.json"
+)
 
 QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_ID = "urn:newsroom:increment5:production-qualification-profile:v2"
 QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_VERSION = "increment5-production-qualification-profile-v2"
@@ -42,6 +64,71 @@ QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_PATH = (
 )
 _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
 _REQUIRED_MODES = tuple(item.value for item in RetrievalMode)
+
+_fixture_replay_schema = deepcopy(
+    PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA
+)
+_fixture_replay_schema["$id"] = FIXTURE_REPLAY_PROFILE_SCHEMA_ID
+_fixture_properties = _fixture_replay_schema["properties"]
+assert isinstance(_fixture_properties, dict)
+_fixture_properties["schema_version"] = {
+    "const": FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION
+}
+_fixture_budgets = deepcopy(_fixture_properties["budgets"])
+assert isinstance(_fixture_budgets, dict)
+_fixture_budget_properties = _fixture_budgets["properties"]
+assert isinstance(_fixture_budget_properties, dict)
+_fixture_budget_properties["max_external_calls_per_request"] = {
+    "const": 0
+}
+_fixture_budget_properties[
+    "max_gross_cost_microunits_per_request"
+] = {"const": 0}
+_fixture_properties["budgets"] = _fixture_budgets
+_fixture_rights = deepcopy(_fixture_properties["rights"])
+assert isinstance(_fixture_rights, dict)
+_fixture_rights_properties = _fixture_rights["properties"]
+assert isinstance(_fixture_rights_properties, dict)
+_fixture_rights_properties["protected_content_allowed"] = {
+    "const": False
+}
+_fixture_properties["rights"] = _fixture_rights
+FIXTURE_REPLAY_PROFILE_SCHEMA: dict[str, object] = (
+    _fixture_replay_schema
+)
+Draft202012Validator.check_schema(FIXTURE_REPLAY_PROFILE_SCHEMA)
+_FIXTURE_REPLAY_VALIDATOR = Draft202012Validator(
+    FIXTURE_REPLAY_PROFILE_SCHEMA
+)
+FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST = digest_bytes(
+    canonical_json_bytes(FIXTURE_REPLAY_PROFILE_SCHEMA)
+)
+
+
+def _require_fixture_schema_artifact() -> None:
+    try:
+        data = FIXTURE_REPLAY_PROFILE_SCHEMA_PATH.read_bytes()
+        value = json.loads(data.decode("utf-8", errors="strict"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise Increment5ContractError(
+            "cannot load effective fixture-replay schema artifact"
+        ) from exc
+    if not isinstance(value, dict):
+        raise Increment5ContractError(
+            "effective fixture-replay schema artifact must be an object"
+        )
+    if (
+        data != canonical_json_bytes(value)
+        or value != FIXTURE_REPLAY_PROFILE_SCHEMA
+        or digest_bytes(data)
+        != FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
+    ):
+        raise Increment5ContractError(
+            "effective fixture-replay schema artifact differs from code"
+        )
+
+
+_require_fixture_schema_artifact()
 
 RepositoryApprovalBinding = tuple[
     object,
@@ -316,12 +403,27 @@ def _validate_profile_manifest_impl(
 
     if profile is RetrievalProfileKind.FIXTURE_REPLAY:
         proposal = _proposal_for_fixture(packet)
-        validated = _proposal.validate_profile_manifest(document, packet=proposal)
+        errors = _schema_errors(_FIXTURE_REPLAY_VALIDATOR, document)
+        if errors:
+            raise Increment5ProfileError(
+                "retrieval profile schema validation failed: "
+                + errors[0]
+            )
+        historical = deepcopy(dict(document))
+        historical["schema_version"] = (
+            PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION
+        )
+        validated = _proposal.validate_profile_manifest(
+            historical,
+            packet=proposal,
+        )
         return ValidatedRetrievalProfile(
             profile=validated.profile,
             decision_payload_digest=validated.decision_payload_digest,
             contract_bundle_digest=validated.contract_bundle_digest,
-            manifest_digest=validated.manifest_digest,
+            manifest_digest=digest_bytes(
+                canonical_json_bytes(document)
+            ),
             qualification_eligible=False,
         )
 
@@ -384,11 +486,20 @@ def build_fixture_replay_manifest(
     fixture_id: str,
     fixture_manifest_digest: str,
 ) -> dict[str, object]:
-    return _proposal.build_fixture_replay_manifest(
+    document = _proposal.build_fixture_replay_manifest(
         packet=_proposal_for_fixture(packet),
         fixture_id=fixture_id,
         fixture_manifest_digest=fixture_manifest_digest,
     )
+    document["schema_version"] = (
+        FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION
+    )
+    errors = _schema_errors(_FIXTURE_REPLAY_VALIDATOR, document)
+    if errors:
+        raise Increment5ProfileError(
+            "fixture-replay schema validation failed: " + errors[0]
+        )
+    return document
 
 
 def _build_production_qualification_manifest_impl(

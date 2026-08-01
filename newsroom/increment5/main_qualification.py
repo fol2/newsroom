@@ -76,6 +76,16 @@ MAIN_QUALIFICATION_WORKFLOW_EVENTS: dict[str, str] = {
     "PROJECTION_B2_B3_C1_NEO4J": "push",
     "SDLC_EVIDENCE_SHADOW": "workflow_dispatch",
 }
+MAIN_QUALIFICATION_WORKFLOW_PATHS: dict[str, str] = {
+    "CI": ".github/workflows/ci.yml",
+    "AUTHORITY_A2A": ".github/workflows/authority-a2a.yml",
+    "AUTHORITY_A2B": ".github/workflows/authority-a2b.yml",
+    "PROJECTION_B1": ".github/workflows/projection-b1.yml",
+    "PROJECTION_B2_B3_C1_NEO4J": (
+        ".github/workflows/projection-b2-neo4j.yml"
+    ),
+    "SDLC_EVIDENCE_SHADOW": ".github/workflows/evidence.yml",
+}
 MAIN_QUALIFICATION_WORKFLOW_NAMES = tuple(MAIN_QUALIFICATION_WORKFLOW_SPECS)
 MAIN_QUALIFICATION_RECORD_SCHEMA_PATH = (
     Path(__file__).resolve().parent
@@ -535,14 +545,14 @@ class WorkflowAttemptEvidence:
             raise Increment5ContractError(
                 "workflow attempt HTML URL differs"
             )
-        if not (
-            self.workflow_ref.startswith(
-                f"{MAIN_QUALIFICATION_REPOSITORY}/"
-            )
-            and self.workflow_ref.endswith(f"@{MAIN_QUALIFICATION_REF}")
-        ):
+        expected_workflow_ref = (
+            f"{MAIN_QUALIFICATION_REPOSITORY}/"
+            f"{MAIN_QUALIFICATION_WORKFLOW_PATHS[self.key]}"
+            f"@{MAIN_QUALIFICATION_REF}"
+        )
+        if self.workflow_ref != expected_workflow_ref:
             raise Increment5ContractError(
-                "workflow ref is not exact main"
+                "workflow ref is not the exact permanent main workflow"
             )
         if self.created_at.value > self.run_started_at.value:
             raise Increment5ContractError(
@@ -832,7 +842,11 @@ def _validate_decision_document(
     expected_event = sdlc_attempt.event
     for field_name, expected in (
         ("repository", MAIN_QUALIFICATION_REPOSITORY),
+        ("repository_id", MAIN_QUALIFICATION_REPOSITORY_ID),
+        ("head_repository", MAIN_QUALIFICATION_REPOSITORY),
+        ("head_repository_id", MAIN_QUALIFICATION_REPOSITORY_ID),
         ("event_name", expected_event),
+        ("event_sha", qualified_main_commit_sha),
         ("ref", MAIN_QUALIFICATION_REF),
         ("evaluated_sha", qualified_main_commit_sha),
         ("evaluated_tree_sha", qualified_main_tree_sha),
@@ -978,6 +992,8 @@ def main_qualification_record_value(
     workflow_attempts: Mapping[str, Mapping[str, Any]],
     decision_document: Mapping[str, Any],
 ) -> dict[str, object]:
+    """Build an untrusted canonical claim pending live GitHub authentication."""
+
     if not isinstance(proposal, Increment5ADecisionPacket):
         raise Increment5ContractError(
             "main qualification builder requires a typed proposal"

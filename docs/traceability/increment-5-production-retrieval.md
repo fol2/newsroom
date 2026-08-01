@@ -29,15 +29,15 @@ The 114 rows cover:
 
 | Delivery boundary | Count | Requirements |
 |---|---:|---|
-| Delivered in 5A / #250 | 24 | `DEVAL-010`, `DEVAL-011`, `DEVAL-012`, `DEVAL-051`, `DEVAL-072`, `DOPS-001`, `DOPS-002`, `DOPS-037`, `DOPS-070`, `DOPS-074`, `DOPS-076`, `GRAG-051`, `GRAG-052`, `GRAG-053`, `GRAG-058`, `GRPROD-002`, `GRPROD-003`, `GRPROD-004`, `GRPROD-013`, `GRPROD-014`, `GRPROD-015`, `GRPROD-020`, `GRPROD-023`, `GRPROD-032` |
+| Delivered in 5A / #250 | 23 | `DEVAL-010`, `DEVAL-011`, `DEVAL-012`, `DEVAL-051`, `DEVAL-072`, `DOPS-001`, `DOPS-002`, `DOPS-037`, `DOPS-070`, `DOPS-076`, `GRAG-051`, `GRAG-052`, `GRAG-053`, `GRAG-058`, `GRPROD-002`, `GRPROD-003`, `GRPROD-004`, `GRPROD-013`, `GRPROD-014`, `GRPROD-015`, `GRPROD-020`, `GRPROD-023`, `GRPROD-032` |
 | Deferred to 5B / #251 | 2 | `GRAG-031`, `TRI-021` |
 | Deferred to 5C / #252 | 7 | `DOPS-026`, `DOPS-060`, `DOPS-067`, `GRAG-033`, `GRAG-034`, `GRAG-035`, `TRI-022` |
 | Deferred to 5D / #253 | 35 | `DOPS-010`, `DOPS-011`, `DOPS-012`, `DOPS-013`, `DOPS-014`, `DOPS-015`, `DOPS-016`, `DOPS-030`, `DOPS-031`, `DOPS-032`, `DOPS-033`, `DOPS-034`, `DOPS-040`, `DOPS-043`, `DOPS-044`, `DOPS-046`, `DOPS-047`, `DOPS-048`, `DOPS-050`, `DOPS-073`, `GRAG-032`, `GRAG-040`, `GRAG-041`, `GRAG-043`, `GRAG-044`, `GRAG-045`, `GRPROD-021`, `GRPROD-024`, `TRI-020`, `TRI-023`, `TRI-024`, `TRI-025`, `TRI-026`, `TRI-027`, `TRI-028` |
-| Deferred to 5E / #254 | 41 | `DEVAL-003`, `DEVAL-013`, `DEVAL-014`, `DEVAL-040`, `DEVAL-041`, `DEVAL-042`, `DEVAL-043`, `DEVAL-044`, `DEVAL-045`, `DEVAL-046`, `DEVAL-047`, `DEVAL-050`, `DEVAL-052`, `DEVAL-053`, `DEVAL-054`, `DEVAL-064`, `DEVAL-070`, `DEVAL-071`, `DEVAL-073`, `DEVAL-074`, `DOPS-035`, `DOPS-036`, `DOPS-045`, `DOPS-052`, `DOPS-054`, `DOPS-064`, `DOPS-072`, `DOPS-075`, `GRAG-046`, `GRAG-050`, `GRAG-054`, `GRAG-055`, `GRAG-056`, `GRAG-057`, `GRPROD-001`, `GRPROD-010`, `GRPROD-011`, `GRPROD-012`, `GRPROD-016`, `GRPROD-030`, `GRPROD-031` |
+| Deferred to 5E / #254 | 42 | `DEVAL-003`, `DEVAL-013`, `DEVAL-014`, `DEVAL-040`, `DEVAL-041`, `DEVAL-042`, `DEVAL-043`, `DEVAL-044`, `DEVAL-045`, `DEVAL-046`, `DEVAL-047`, `DEVAL-050`, `DEVAL-052`, `DEVAL-053`, `DEVAL-054`, `DEVAL-064`, `DEVAL-070`, `DEVAL-071`, `DEVAL-073`, `DEVAL-074`, `DOPS-035`, `DOPS-036`, `DOPS-045`, `DOPS-052`, `DOPS-054`, `DOPS-064`, `DOPS-072`, `DOPS-074`, `DOPS-075`, `GRAG-046`, `GRAG-050`, `GRAG-054`, `GRAG-055`, `GRAG-056`, `GRAG-057`, `GRPROD-001`, `GRPROD-010`, `GRPROD-011`, `GRPROD-012`, `GRPROD-016`, `GRPROD-030`, `GRPROD-031` |
 | Satisfied by Increment 4 / #144 | 4 | `DOPS-007`, `GRAG-030`, `GRAG-042`, `GRPROD-005` |
 | Outside Increment 5 activation | 1 | `GRPROD-022` |
 
-`DEVAL-073` is delivered in 5E because only a completed qualification Run can retain its owner decision or explicit unresolved result. `DOPS-064` is also delivered in 5E because accountable owners, escalation routes and versioned runbooks belong to the qualified operational evidence rather than the 5A contract proposal. `DOPS-072` remains in 5E, where rollback is actually exercised.
+`DEVAL-073` is delivered in 5E because only a completed qualification Run can retain its owner decision or explicit unresolved result. `DOPS-064` is also delivered in 5E because accountable owners, escalation routes and versioned runbooks belong to the qualified operational evidence rather than the 5A contract proposal. `DOPS-072` remains in 5E, where rollback is actually exercised. `DOPS-074` is deferred to 5E/#254, where material rights, terms, pricing, access and credential changes receive accountable review and blocking evidence.
 
 ## Decision status
 

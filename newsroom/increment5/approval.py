@@ -38,6 +38,9 @@ from .main_qualification import (
     Increment5AMainQualificationRecord,
     load_increment5a_main_qualification_record,
 )
+from .github_attempts import (
+    authenticate_repository_main_qualification_record,
+)
 
 
 APPROVAL_ATTESTATION_SCHEMA_ID = (
@@ -256,6 +259,12 @@ def _qualification_schema_digest() -> str:
     from .profiles import QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST
 
     return QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST
+
+
+def _fixture_schema_digest() -> str:
+    from .profiles import FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
+
+    return FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
 
 
 def expected_increment5a_owner_approval_body(
@@ -529,7 +538,7 @@ def approval_attestation_value(
                 _qualification_schema_digest()
             ),
             "fixture_replay_profile_schema_digest": (
-                proposal.bundle.fixture_replay_profile_schema_digest
+                _fixture_schema_digest()
             ),
             "component_identity_digests": {
                 kind.value: proposal.bundle.component_by_kind[
@@ -586,7 +595,7 @@ def _require_approval_binds_proposal(
         and approval.qualification_production_profile_schema_digest
         == _qualification_schema_digest()
         and approval.fixture_replay_profile_schema_digest
-        == proposal.bundle.fixture_replay_profile_schema_digest
+        == _fixture_schema_digest()
         and approval.component_identity_digests == expected_components
         and approval.owner_display_name == proposal.owner
         and approval.evidence.body_digest == expected_body_digest
@@ -824,11 +833,16 @@ def _main_qualification_loader_factory(
     parser: Callable[..., Increment5AMainQualificationRecord] = (
         load_increment5a_main_qualification_record
     ),
+    authenticator: Callable[
+        [Increment5AMainQualificationRecord],
+        Increment5AMainQualificationRecord,
+    ] = authenticate_repository_main_qualification_record,
 ) -> Callable[[], Increment5AMainQualificationRecord | None]:
     captured_path = path
     captured_digest = expected_digest
     captured_approval_digest = approval_record_digest
     captured_parser = parser
+    captured_authenticator = authenticator
 
     def load() -> Increment5AMainQualificationRecord | None:
         if captured_digest is None:
@@ -861,6 +875,11 @@ def _main_qualification_loader_factory(
         if qualification.record_digest != captured_digest:
             raise Increment5ContractError(
                 "post-merge main qualification record digest differs"
+            )
+        authenticated = captured_authenticator(qualification)
+        if authenticated is not qualification:
+            raise Increment5ContractError(
+                "GitHub authenticator substituted main admission"
             )
         return qualification
 

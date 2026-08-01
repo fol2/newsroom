@@ -230,6 +230,7 @@ _DELIVERY_GROUPS: dict[Increment5DeliveryTrace, frozenset[str]] = {
             "DOPS-054",
             "DOPS-064",
             "DOPS-072",
+            "DOPS-074",
             "DOPS-075",
         }
     ),
@@ -257,7 +258,6 @@ _DELIVERY_GROUPS: dict[Increment5DeliveryTrace, frozenset[str]] = {
             "DOPS-002",
             "DOPS-037",
             "DOPS-070",
-            "DOPS-074",
             "DOPS-076",
         }
     ),
@@ -377,7 +377,10 @@ _DOPS_ANCHOR_BY_REQUIREMENT: dict[str, str] = {
     "DOPS-070": _DECISION_PACKET + "#/payload/components",
     "DOPS-072": _DECISION_PACKET + "#/payload/rollback",
     "DOPS-073": _DECISION_PACKET + "#/payload/pr_boundaries/5D",
-    "DOPS-074": _DECISION_PACKET + "#/payload/rights_matrix",
+    "DOPS-074": (
+        "issue:#254:deferred:rights-terms-pricing-access-"
+        "credential-change-review-evidence"
+    ),
     "DOPS-075": "issue:#254:deferred:operational-admission-evidence",
     "DOPS-076": _DECISION_PACKET + "#/payload/runtime_authority",
 }

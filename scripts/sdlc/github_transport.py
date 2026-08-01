@@ -435,6 +435,32 @@ class GitHubActionsClient:
         _run_identity(value, expected_run_id=run)
         return value
 
+    def fetch_run_attempt(
+        self,
+        run_id: int,
+        run_attempt: int,
+    ) -> Mapping[str, object]:
+        run = _positive(run_id, "run_id")
+        attempt = _positive(run_attempt, "run_attempt")
+        value = self._get_json(
+            f"{_API_PREFIX}/actions/runs/{run}/attempts/{attempt}"
+        )
+        identity = _run_identity(value, expected_run_id=run)
+        if identity[1] != attempt:
+            raise GitHubTransportError("run_attempt")
+        return value
+
+    def fetch_git_commit(self, commit_sha: str) -> Mapping[str, object]:
+        sha = _text(commit_sha, "commit_sha", maximum=40)
+        if _GIT_SHA.fullmatch(sha) is None:
+            raise GitHubTransportError("commit_sha")
+        value = self._get_json(f"{_API_PREFIX}/git/commits/{sha}")
+        tree = _mapping(value.get("tree"), "commit_tree")
+        tree_sha = _text(tree.get("sha"), "commit_tree_sha", maximum=40)
+        if value.get("sha") != sha or _GIT_SHA.fullmatch(tree_sha) is None:
+            raise GitHubTransportError("commit_identity")
+        return value
+
     def fetch_jobs(self, run_id: int, run_attempt: int) -> Mapping[str, object]:
         run = _positive(run_id, "run_id")
         attempt = _positive(run_attempt, "run_attempt")

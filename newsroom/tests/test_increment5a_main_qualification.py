@@ -461,6 +461,19 @@ def test_workflow_events_are_specialised_and_truthful(
         )
 
 
+def test_signed_decision_requires_complete_repository_and_event_identity() -> None:
+    source = Path(approval_module.__file__).with_name(
+        "main_qualification.py"
+    ).read_text(encoding="utf-8")
+    for field_name in (
+        "repository_id",
+        "head_repository",
+        "head_repository_id",
+        "event_sha",
+    ):
+        assert f'("{field_name}",' in source
+
+
 def test_main_qualification_record_rejects_noncanonical_time(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

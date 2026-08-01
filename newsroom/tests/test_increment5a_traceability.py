@@ -145,7 +145,12 @@ def test_owner_approval_and_activation_boundaries_remain_visible() -> None:
 
 
 def test_completed_run_decision_ownership_and_rollback_remain_in_5e() -> None:
-    for requirement_id in ("DEVAL-073", "DOPS-064", "DOPS-072"):
+    for requirement_id in (
+        "DEVAL-073",
+        "DOPS-064",
+        "DOPS-072",
+        "DOPS-074",
+    ):
         row = INCREMENT5_TRACEABILITY_BY_REQUIREMENT[requirement_id]
         assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
         assert row.delivery_issue == 254
@@ -171,11 +176,11 @@ def test_no_graph_free_or_fake_production_trace_is_present() -> None:
 
 def test_traceability_delivery_distribution_remains_truthful() -> None:
     counts = Counter(row.delivery_trace for row in INCREMENT5_TRACEABILITY)
-    assert counts[Increment5DeliveryTrace.DELIVERED_IN_5A] == 24
+    assert counts[Increment5DeliveryTrace.DELIVERED_IN_5A] == 23
     assert counts[Increment5DeliveryTrace.DEFERRED_TO_5B] == 2
     assert counts[Increment5DeliveryTrace.DEFERRED_TO_5C] == 7
     assert counts[Increment5DeliveryTrace.DEFERRED_TO_5D] == 35
-    assert counts[Increment5DeliveryTrace.DEFERRED_TO_5E] == 41
+    assert counts[Increment5DeliveryTrace.DEFERRED_TO_5E] == 42
     assert counts[Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT] == 4
     assert counts[Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION] == 1
 
@@ -233,7 +238,11 @@ def test_dops_decision_anchors_are_individual_and_truthful() -> None:
         "DOPS-070": packet + "#/payload/components",
         "DOPS-072": packet + "#/payload/rollback",
         "DOPS-073": packet + "#/payload/pr_boundaries/5D",
-        "DOPS-074": packet + "#/payload/rights_matrix",
+
+"DOPS-074": (
+    "issue:#254:deferred:rights-terms-pricing-access-"
+    "credential-change-review-evidence"
+),
         "DOPS-075": (
             "issue:#254:deferred:operational-admission-evidence"
         ),

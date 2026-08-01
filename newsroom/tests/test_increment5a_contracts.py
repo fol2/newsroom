@@ -29,6 +29,7 @@ from newsroom.increment5 import (
     build_fixture_replay_manifest,
     load_increment5a_decision_packet,
     validate_profile_manifest,
+    PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,
 )
 from newsroom.increment5.decision import DECISION_PACKET_PATH
 
@@ -92,7 +93,7 @@ def test_pending_packet_is_exact_zero_spend_and_fixture_only() -> None:
         PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST
     )
     assert packet.bundle.fixture_replay_profile_schema_digest == (
-        FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
+        PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
     )
 
 
@@ -397,7 +398,10 @@ def test_fixture_profile_tampering_is_rejected() -> None:
 
     tampered = deepcopy(manifest)
     tampered["rights"]["protected_content_allowed"] = True
-    with pytest.raises(Increment5ProfileError, match="local, zero-spend"):
+    with pytest.raises(
+        Increment5ProfileError,
+        match="schema validation failed",
+    ):
         validate_profile_manifest(
             tampered,
             packet=INCREMENT_5A_DECISION_PACKET,

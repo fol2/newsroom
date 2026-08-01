@@ -29,6 +29,12 @@ from newsroom.increment5 import (
     PRODUCTION_PROFILE_SCHEMA,
     PRODUCTION_PROFILE_SCHEMA_DIGEST,
     PRODUCTION_PROFILE_SCHEMA_PATH,
+    FIXTURE_REPLAY_PROFILE_SCHEMA,
+    FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,
+    FIXTURE_REPLAY_PROFILE_SCHEMA_PATH,
+    PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA,
+    PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,
+    PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_PATH,
     PROPOSAL_PRODUCTION_PROFILE_SCHEMA,
     PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,
     PROPOSAL_PRODUCTION_PROFILE_SCHEMA_PATH,
@@ -106,6 +112,35 @@ def test_generic_production_schema_is_only_the_hardened_v2_surface() -> None:
     )
     rights = PRODUCTION_PROFILE_SCHEMA["properties"]["rights"]["properties"]
     assert rights["protected_content_allowed"] == {"const": False}
+
+
+def test_generic_fixture_schema_is_only_the_hardened_v2_surface() -> None:
+    assert FIXTURE_REPLAY_PROFILE_SCHEMA is not (
+        PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA
+    )
+    assert FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST != (
+        PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
+    )
+    assert FIXTURE_REPLAY_PROFILE_SCHEMA_PATH != (
+        PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_PATH
+    )
+    budgets = FIXTURE_REPLAY_PROFILE_SCHEMA["properties"][
+        "budgets"
+    ]["properties"]
+    rights = FIXTURE_REPLAY_PROFILE_SCHEMA["properties"][
+        "rights"
+    ]["properties"]
+    assert budgets["max_external_calls_per_request"] == {"const": 0}
+    assert budgets[
+        "max_gross_cost_microunits_per_request"
+    ] == {"const": 0}
+    assert rights["protected_content_allowed"] == {"const": False}
+    value = _approval_value()
+    proposal = value["proposal"]
+    assert isinstance(proposal, dict)
+    assert proposal["fixture_replay_profile_schema_digest"] == (
+        FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
+    )
 
 
 def test_pending_repository_record_is_fail_closed() -> None:

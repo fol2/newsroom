@@ -30,7 +30,7 @@ from .decision_validation import (
     require_string_tuple,
 )
 from .profiles import (
-    FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,
+    PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,
     PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,
 )
 
@@ -111,7 +111,7 @@ def load_increment5a_decision_packet(
         raise Increment5ContractError(
             "proposal production-profile schema digest differs from repository code"
         )
-    if schemas.get("fixture_replay") != FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST:
+    if schemas.get("fixture_replay") != PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST:
         raise Increment5ContractError(
             "fixture profile schema digest differs from repository code"
         )
@@ -148,7 +148,7 @@ def load_increment5a_decision_packet(
             PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST
         ),
         fixture_replay_profile_schema_digest=(
-            FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
+            PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST
         ),
         required_modes=tuple(
             RetrievalMode(item)

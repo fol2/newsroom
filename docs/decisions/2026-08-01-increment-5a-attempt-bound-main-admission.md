@@ -7,6 +7,8 @@
 **Approval schema:** `sha256:cc87d78551d3e2f2ae61c0bd5e247288c291feced7b63165d55e2e8b05dcc56e`
 **Main-admission schema:** `sha256:4247835d3c200a1012dbc45ec1a7ee609acce44205e3868a1cb5d6e69d7d0d65`
 **Owner-body digest:** `sha256:665e146d420088a1a88e4946741bae187cd950e6e0eb733e103f2fcfda1fe37b`
+**Proposal fixture schema:** `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e`
+**Effective fixture schema:** `sha256:1f8491f3cef73c6a6b189f99d7130628122651e13053c18ccbe1289b5bb1ad22`
 
 The canonical owner record now authorizes production-equivalent qualification
 only. `DOWNSTREAM_IMPLEMENTATION` is an immutable non-effect of that record.
@@ -19,7 +21,11 @@ and Projection B2/B3/C1 Neo4j each require one truthful `push` attempt on
 ID/name, run ID and attempt, repository ID, head commit/tree, workflow
 SHA/ref, successful conclusion, exact API/HTML URLs and canonical timestamps.
 All attempts must be distinct and bind the same declared merged-main
-commit/tree.
+commit/tree. Before the source-pinned record can return authority, its loader
+performs authenticated GitHub REST reads for the exact attempt endpoint of
+every workflow and the exact Git commit endpoint. Missing credentials,
+nonexistent runs, failed or unrelated attempts, changed workflow paths,
+repository mismatch, timestamp mismatch, or a wrong commit tree fail closed.
 
 The signed SDLC evidence is embedded as its exact canonical decision document.
 The loader first validates it through
