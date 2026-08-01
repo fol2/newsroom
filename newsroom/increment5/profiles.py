@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Any, Mapping
 
 from jsonschema import Draft202012Validator
@@ -29,6 +31,14 @@ FIXTURE_REPLAY_PROFILE_SCHEMA_ID = (
 )
 PRODUCTION_PROFILE_SCHEMA_VERSION = "increment5-production-profile-v1"
 FIXTURE_REPLAY_PROFILE_SCHEMA_VERSION = "increment5-fixture-replay-profile-v1"
+
+_PROFILE_DATA_ROOT = Path(__file__).resolve().parent / "data"
+PRODUCTION_PROFILE_SCHEMA_PATH = (
+    _PROFILE_DATA_ROOT / "increment5_production_profile_v1.schema.json"
+)
+FIXTURE_REPLAY_PROFILE_SCHEMA_PATH = (
+    _PROFILE_DATA_ROOT / "increment5_fixture_replay_profile_v1.schema.json"
+)
 
 
 _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
@@ -257,6 +267,45 @@ FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST = digest_bytes(
 )
 
 
+def _require_schema_artifact(
+    *,
+    path: Path,
+    expected: Mapping[str, Any],
+    expected_digest: str,
+) -> None:
+    try:
+        data = path.read_bytes()
+        value = json.loads(data.decode("utf-8", errors="strict"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise Increment5ContractError(
+            f"cannot load retrieval profile schema artifact: {path.name}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise Increment5ContractError(
+            f"retrieval profile schema artifact is not an object: {path.name}"
+        )
+    if data != canonical_json_bytes(value):
+        raise Increment5ContractError(
+            f"retrieval profile schema artifact is not canonical: {path.name}"
+        )
+    if value != dict(expected) or digest_bytes(data) != expected_digest:
+        raise Increment5ContractError(
+            f"retrieval profile schema artifact differs from code: {path.name}"
+        )
+
+
+_require_schema_artifact(
+    path=PRODUCTION_PROFILE_SCHEMA_PATH,
+    expected=PRODUCTION_PROFILE_SCHEMA,
+    expected_digest=PRODUCTION_PROFILE_SCHEMA_DIGEST,
+)
+_require_schema_artifact(
+    path=FIXTURE_REPLAY_PROFILE_SCHEMA_PATH,
+    expected=FIXTURE_REPLAY_PROFILE_SCHEMA,
+    expected_digest=FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ValidatedRetrievalProfile:
     profile: RetrievalProfileKind
@@ -362,8 +411,11 @@ def validate_profile_manifest(
 ) -> ValidatedRetrievalProfile:
     if not isinstance(document, Mapping):
         raise Increment5ProfileError("retrieval profile manifest must be an object")
+    raw_profile = document.get("profile")
+    if not isinstance(raw_profile, str):
+        raise Increment5ProfileError("retrieval profile kind is unknown")
     try:
-        profile = RetrievalProfileKind(str(document.get("profile")))
+        profile = RetrievalProfileKind(raw_profile)
     except ValueError as exc:
         raise Increment5ProfileError("retrieval profile kind is unknown") from exc
 
@@ -437,8 +489,15 @@ def build_fixture_replay_manifest(
     fixture_manifest_digest: str,
 ) -> dict[str, object]:
     packet.require_profile(RetrievalProfileKind.FIXTURE_REPLAY)
-    if not isinstance(fixture_id, str) or not fixture_id.strip():
-        raise Increment5ProfileError("fixture identity must be non-empty")
+    if (
+        not isinstance(fixture_id, str)
+        or not fixture_id
+        or fixture_id != fixture_id.strip()
+        or len(fixture_id.encode("utf-8")) > 256
+    ):
+        raise Increment5ProfileError(
+            "fixture identity must be bounded canonical text"
+        )
     try:
         validate_sha256_digest(
             fixture_manifest_digest,
