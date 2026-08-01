@@ -7,10 +7,11 @@ on:
     paths:
       - scripts/temp_increment5a_review_hardening.py
       - .github/workflows/temp-increment5a-review-hardening.yml
+      - scripts/temp_increment5a_finalize.py
+      - .github/workflows/temp-increment5a-finalize.yml
 
 permissions:
   contents: write
-  actions: read
 
 concurrency:
   group: temporary-increment5a-review-hardening
@@ -19,7 +20,7 @@ concurrency:
 jobs:
   harden:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Check out exact Increment 5A branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -47,230 +48,13 @@ jobs:
           uv lock --check
           uv sync --dev --locked
 
-      - name: Make staging script matching current-head aware
+      - name: Generate the permanent authenticated contract
         shell: bash
         run: |
           set -euo pipefail
-          uv run --no-sync python - <<'PY'
-          from pathlib import Path
+          uv run --no-sync python scripts/temp_increment5a_finalize.py
 
-          path = Path("scripts/temp_increment5a_review_hardening.py")
-          text = path.read_text(encoding="utf-8")
-          old = '''def replace_once(text: str, old: str, new: str, *, label: str) -> str:
-              count = text.count(old)
-              if count != 1:
-                  raise RuntimeError(f"{label}: expected one match, found {count}")
-              return text.replace(old, new, 1)
-          '''
-          new = '''def _indent_block(value: str, width: int) -> str:
-              prefix = " " * width
-              return "\\n".join(
-                  prefix + line if line else line
-                  for line in value.splitlines()
-              )
-
-
-          def replace_once(text: str, old: str, new: str, *, label: str) -> str:
-              candidates = [(old, new)] + [
-                  (_indent_block(old, width), _indent_block(new, width))
-                  for width in (4, 8, 12, 16, 20)
-              ]
-              observed = []
-              for old_value, new_value in candidates:
-                  count = text.count(old_value)
-                  observed.append(count)
-                  if count == 1:
-                      return text.replace(old_value, new_value, 1)
-                  if count > 1:
-                      raise RuntimeError(
-                          f"{label}: ambiguous match count {count}"
-                      )
-              raise RuntimeError(
-                  f"{label}: expected one match, observed {observed}"
-              )
-          '''
-          if text.count(old) != 1:
-              raise SystemExit("replace_once helper source differs")
-          text = text.replace(old, new, 1)
-
-          old_doc_patch = '''postmerge_doc = replace_once(
-              postmerge_doc,
-              "The post-merge record is a separate admission artifact. ",
-              (
-                  "The post-merge record is a separate admission artifact. Its "
-                  "source-pinned loader authenticates every claimed run attempt and the "
-                  "qualified commit tree against GitHub REST before returning authority. "
-              ),
-              label="post-merge live authentication documentation",
-          )
-          '''
-          new_doc_patch = '''postmerge_doc = replace_once(
-              postmerge_doc,
-              dedent(
-                  \'''\
-                  That later record can be created only after PR #255 is merged and the exact
-                  merged `main` commit has passed all six permanent workflows. It binds:
-                  \'''\
-              ).strip("\\n"),
-              dedent(
-                  \'''\
-                  That later record can be created only after PR #255 is merged and the exact
-                  merged `main` commit has passed all six permanent workflows. Before it can
-                  return authority, its source-pinned loader authenticates every claimed run
-                  attempt and the qualified commit tree against GitHub REST. It binds:
-                  \'''\
-              ).strip("\\n"),
-              label="post-merge live authentication documentation",
-          )
-          '''
-          if text.count(old_doc_patch) != 1:
-              raise SystemExit("post-merge documentation patch source differs")
-          text = text.replace(old_doc_patch, new_doc_patch, 1)
-
-          old_trace_patch = '''trace_doc = replace_once(
-              trace_doc,
-              "`DEVAL-073`, `DOPS-064` and `DOPS-072` are deliberately assigned to 5E,",
-              "`DEVAL-073`, `DOPS-064`, `DOPS-072` and `DOPS-074` are deliberately assigned to 5E,",
-              label="DOPS-074 documentation deferral",
-          )
-          '''
-          new_trace_patch = '''trace_doc = replace_once(
-              trace_doc,
-              "| Delivered in 5A / #250 | 24 |",
-              "| Delivered in 5A / #250 | 23 |",
-              label="DOPS-074 delivered count",
-          )
-          trace_doc = replace_once(
-              trace_doc,
-              "`DOPS-070`, `DOPS-074`, `DOPS-076`",
-              "`DOPS-070`, `DOPS-076`",
-              label="remove DOPS-074 from 5A table",
-          )
-          trace_doc = replace_once(
-              trace_doc,
-              "| Deferred to 5E / #254 | 41 |",
-              "| Deferred to 5E / #254 | 42 |",
-              label="DOPS-074 deferred count",
-          )
-          trace_doc = replace_once(
-              trace_doc,
-              "`DOPS-064`, `DOPS-072`, `DOPS-075`",
-              "`DOPS-064`, `DOPS-072`, `DOPS-074`, `DOPS-075`",
-              label="add DOPS-074 to 5E table",
-          )
-          trace_doc = replace_once(
-              trace_doc,
-              "`DOPS-072` remains in 5E, where rollback is actually exercised.",
-              (
-                  "`DOPS-072` remains in 5E, where rollback is actually exercised. "
-                  "`DOPS-074` is deferred to 5E/#254, where material rights, terms, "
-                  "pricing, access and credential changes receive accountable review "
-                  "and blocking evidence."
-              ),
-              label="DOPS-074 documentation deferral",
-          )
-          '''
-          if text.count(old_trace_patch) != 1:
-              raise SystemExit("DOPS-074 documentation patch source differs")
-          text = text.replace(old_trace_patch, new_trace_patch, 1)
-
-          old_owner_patch = '''owner_doc = replace_once(
-              owner_doc,
-              "- the fixture-replay profile schema digest;\\n",
-              "- the hardened effective fixture-replay profile schema digest;\\n",
-              label="effective fixture owner binding documentation",
-          )
-          '''
-          new_owner_patch = '''owner_doc = replace_once(
-              owner_doc,
-              "**Fixture-replay schema:**",
-              "**Historical proposal fixture-replay schema:**",
-              label="historical fixture owner binding documentation",
-          )
-          '''
-          if text.count(old_owner_patch) != 1:
-              raise SystemExit("owner fixture documentation patch source differs")
-          text = text.replace(old_owner_patch, new_owner_patch, 1)
-
-          old_metadata_marker = '''# The approval test must pin the newly generated exact statement digest.
-          approval_test = approval_test_path.read_text(encoding="utf-8")
-          '''
-          new_metadata_marker = '''owner_value = owner_doc_path.read_text(encoding="utf-8")
-          owner_marker = (
-              f"**Historical proposal fixture-replay schema:** "
-              f"`{proposal_fixture_digest}`"
-          )
-          owner_value = replace_once(
-              owner_value,
-              owner_marker,
-              (
-                  owner_marker
-                  + f"\\n**Effective fixture-replay schema:** `{new_fixture_digest}`"
-              ),
-              label="effective fixture owner metadata",
-          )
-          write_text(owner_doc_path, owner_value)
-
-          # The approval test must pin the newly generated exact statement digest.
-          approval_test = approval_test_path.read_text(encoding="utf-8")
-          '''
-          if text.count(old_metadata_marker) != 1:
-              raise SystemExit("owner fixture metadata marker differs")
-          text = text.replace(old_metadata_marker, new_metadata_marker, 1)
-          path.write_text(text, encoding="utf-8", newline="\n")
-          PY
-
-      - name: Preserve immutable proposal fixture identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv run --no-sync python - <<'PY'
-          from pathlib import Path
-
-          path = Path("scripts/temp_increment5a_review_hardening.py")
-          text = path.read_text(encoding="utf-8")
-          marker = '''# ---------------------------------------------------------------------------
-          # Source-pinned loader must authenticate claims against live GitHub
-          # ---------------------------------------------------------------------------
-          '''
-          insertion = '''# ---------------------------------------------------------------------------
-          # Immutable proposal continues to bind the historical fixture schema
-          # ---------------------------------------------------------------------------
-
-          decision_path = ROOT / "newsroom" / "increment5" / "decision.py"
-          decision = decision_path.read_text(encoding="utf-8")
-          decision = replace_once(
-              decision,
-              "    FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,\\n"
-              "    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,\\n",
-              "    PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST,\\n"
-              "    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,\\n",
-              label="proposal fixture schema import",
-          )
-          decision = replace_once(
-              decision,
-              "schemas.get(\"fixture_replay\") != FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST",
-              (
-                  "schemas.get(\"fixture_replay\") "
-                  "!= PROPOSAL_FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST"
-              ),
-              label="proposal fixture schema verification",
-          )
-          write_text(decision_path, decision)
-
-
-          '''
-          if text.count(marker) != 1:
-              raise SystemExit("source-pinned loader marker differs")
-          text = text.replace(marker, insertion + marker, 1)
-          path.write_text(text, encoding="utf-8", newline="\n")
-          PY
-
-      - name: Apply authenticated admission and fixture hardening
-        shell: bash
-        run: uv run --no-sync python scripts/temp_increment5a_review_hardening.py
-
-      - name: Verify focused and adversarial contract
+      - name: Verify focused adversarial coverage
         shell: bash
         run: |
           set -euo pipefail
@@ -296,14 +80,18 @@ jobs:
 
       - name: Verify complete deterministic suite
         shell: bash
-        run: uv run --no-sync python -m pytest -q -n 4 --dist=worksteal
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m pytest -q -n 4 --dist=worksteal
 
-      - name: Commit tested hardening and remove temporary machinery
+      - name: Remove temporary machinery and push permanent result
         shell: bash
         run: |
           set -euo pipefail
           rm .github/workflows/temp-increment5a-review-hardening.yml
           rm scripts/temp_increment5a_review_hardening.py
+          rm .github/workflows/temp-increment5a-finalize.yml
+          rm scripts/temp_increment5a_finalize.py
           git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -311,4 +99,8 @@ jobs:
           git add -f \
             newsroom/increment5/data/increment5_fixture_replay_profile_v2.schema.json
           git commit -m "fix(increment5): authenticate admission evidence"
+          if git diff --name-only origin/main...HEAD | grep -E '(^|/)(temp|diagnostic|publisher|installer|patch-transport|evidence-reader)' ; then
+            echo "temporary or diagnostic material remains in the PR tree" >&2
+            exit 1
+          fi
           git push origin HEAD:agent/increment-5a-retrieval-contract
