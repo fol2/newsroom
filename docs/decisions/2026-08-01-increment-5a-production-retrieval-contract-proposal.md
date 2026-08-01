@@ -1,27 +1,31 @@
 # Increment 5A production retrieval contract proposal
 
-**Status:** Proposed — explicit owner approval required
-**Owner:** Product owner
-**Prepared:** 2026-08-01
-**Issue:** #250
-**Parent:** #145
-**Implementation base:** `main@c9e31879421083e82e2538d57087d04e9b454d34`
-**Decision packet:** `newsroom/increment5/data/increment5a_production_retrieval_decision_v1.json`
-**Decision payload digest:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`
-**Decision record digest:** `sha256:77fe5544b33a85519b8c1fba57f41fe1a68aa411eb63c64be5429dbbd28ea913`
-**Contract bundle digest:** `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`
-**Production profile schema digest:** `sha256:2cdaa92a487ff48dd6095e1cc82af6f67362c168c557d9e6c3ecfe83e83cb647`
-**Fixture replay profile schema digest:** `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e`
+**Status:** Proposed — explicit owner approval required  
+**Owner:** Product owner  
+**Prepared:** 2026-08-01  
+**Issue:** #250  
+**Parent:** #145  
+**Implementation base:** `main@c9e31879421083e82e2538d57087d04e9b454d34`  
+**Decision packet:** `newsroom/increment5/data/increment5a_production_retrieval_decision_v1.json`  
+**Decision payload:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`  
+**Decision record:** `sha256:77fe5544b33a85519b8c1fba57f41fe1a68aa411eb63c64be5429dbbd28ea913`  
+**Contract bundle:** `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`  
+**Approval contract:** [`2026-08-01-increment-5a-owner-approval-attestation.md`](2026-08-01-increment-5a-owner-approval-attestation.md)
 
 ## Decision requested
 
-Approve the exact pending decision payload identified above as the implementation contract for Increment 5B–5E. Approval is deliberately digest-specific. Any change to the embedding model, package, model revision, vector dimension, normalisation, chunking, full-text configuration, graph bounds, fusion, deduplication, hydration, degraded outcomes, rights matrix, budgets, evaluation thresholds, rollback, or PR boundary creates a new payload digest and requires a new decision.
+Approve the immutable proposal identified above together with the hardened
+effective qualification and approval-attestation schemas named in the approval
+contract. The proposal packet itself remains `PENDING_OWNER_REVIEW`; approval
+is represented only by a separate canonical attestation to the exact proposal
+and GitHub approval comment.
 
-The checked-in packet currently grants **contract validation and non-qualifying fixture replay only**. It does not grant model loading, vector creation, protected-content processing, external calls, provider credentials, spending, live-source execution, shadow, canary, publication, or production activation. The production schema exists now so later implementation cannot substitute a fake, fixture, disabled, omitted, or incompatible component.
+Until that attestation exists, only contract validation and non-qualifying
+fixture replay are authorized. Model loading, vector creation, protected
+content, external calls, credentials, spending, live sources, shadow, canary,
+publication and production activation remain blocked.
 
-## Proposed exact embedding identity
-
-The proposed production-target embedding is self-hosted and remains disabled until this exact decision is approved:
+## Exact proposed embedding identity
 
 | Field | Exact value |
 |---|---|
@@ -30,83 +34,90 @@ The proposed production-target embedding is self-hosted and remains disabled unt
 | Package wheel SHA-256 | `d2075b5e687a1611005e20ab04a6846994d51adfcf39610aed066af3c0c0b81f` |
 | Model | `BAAI/bge-m3` |
 | Model revision | `5617a9f61b028005a4858fdac845db406aefb181` |
-| Licence recorded by upstream | `MIT` |
-| Dense dimensions | `1024` |
-| Maximum input tokens | `8192` |
-| Pooling | `CLS` |
-| Normalisation | L2 normalisation enabled |
-| Inference/output | `FLOAT32` / `FLOAT32` |
+| Upstream licence record | MIT |
+| Dense dimensions | 1,024 |
+| Maximum input tokens | 8,192 |
+| Pooling | CLS |
+| Embedding normalization | L2 enabled |
+| Inference/output | float32 / float32 |
 | Remote code | prohibited |
-| Request-time download | prohibited; immutable artifact preload required |
+| Request-time download | prohibited; immutable preload required |
 | Credential reference | none |
-| External calls and spend | zero |
-| Protected content | not authorised by model selection; rights matrix still governs every datum |
+| External calls and provider spend | zero |
+| Protected content | prohibited by effective v2 profile |
 
-Upstream evidence for the proposed identity is the exact [BAAI/bge-m3 model revision](https://huggingface.co/BAAI/bge-m3/tree/5617a9f61b028005a4858fdac845db406aefb181), its [model card](https://huggingface.co/BAAI/bge-m3), pooling and normalisation configuration in the same revision, the [FlagEmbedding repository](https://github.com/FlagOpen/FlagEmbedding), and the pinned [Sentence Transformers release](https://pypi.org/project/sentence-transformers/5.6.0/). Those sources establish the software/model identity only. They do not grant rights to submit or retain newsroom source text.
+Model identity does not expand source rights. Each datum still requires the
+rights decision and purpose declared by the packet.
 
-## Exact retrieval component contract
+## Exact retrieval contracts
 
-| Component | Contract | Decision |
-|---|---|---|
-| Embedding | `retrieval.embedding.production` | Exact self-hosted BGE-M3 identity proposed; execution disabled pending owner approval. |
-| Passage | `retrieval.passage.production` | UTF-8 byte offsets; paragraph → sentence → safe UTF-8 boundaries; 3,072-byte target, 4,096-byte maximum, 384-byte maximum overlap; no cross-representation or cross-revision passage. |
-| Bilingual normalisation | `retrieval.normalization.production` | NFKC search projection, LF line endings, Latin casefold, collapsed whitespace, Traditional Chinese preserved, no free transliteration or automatic Han script conversion, authority aliases only, Han bigrams; source bytes remain unchanged. |
-| Full text | `retrieval.fulltext.production` | Neo4j `2026.06.0-community-trixie`, driver `6.2.0`, `fulltext-2.0`, `standard-no-stop-words`, synchronous and generation-scoped; callers cannot supply Lucene syntax. |
-| Vector index | `retrieval.vector.production` | Neo4j `vector-2026.06`, 1,024 dimensions, cosine, float32, no quantisation, generation-scoped; index creation remains disabled while embedding is disabled. |
-| Graph query | `retrieval.graph-query.production` | Fixed read-only queries only; maximum depth 2, fan-out 32, 31-day default window, exact ACTIVE/complete generation, zero gaps/dead letters, admitted/observed trust allow-list, no generated Cypher or write capability. |
-| Fusion | `retrieval.fusion.production` | Exact, full-text, vector and admitted-graph branches; equal-weight reciprocal-rank fusion with `k=60`; reduced rational scores; fusion is never authority. |
-| Deduplication | `retrieval.deduplication.production` | Deduplicate by authoritative dependency root; best hit per mode; retain branch and exclusion receipts; dependency-root lexical tie-break; maximum 12 retained candidates. |
-| Hydration | `retrieval.hydration.production` | Hydrate exact permitted bytes from SQLite ledger/governed objects; recheck rights at read; projection text cannot become factual authority; missing authority is `INCOMPLETE`, denied rights are `POLICY_BLOCKED`. |
-| Degraded policy | `retrieval.degraded-policy.production` | Explicit `COMPLETE`, `DEGRADED`, `INCOMPLETE`, `POLICY_BLOCKED`, `STALE`, or `UNAVAILABLE`; no silent branch fallback, no graph-free production, and no-match is valid only after complete required retrieval. |
+- Passage construction uses UTF-8 byte offsets, paragraph then sentence then
+  safe-UTF8 boundaries, a 3,072-byte target, 4,096-byte maximum and 384-byte
+  maximum overlap. It never crosses Representation or Revision boundaries.
+- Search normalization uses NFKC, LF, Latin casefold, collapsed whitespace,
+  preserved Hong Kong Traditional Chinese, authority aliases only and Han
+  bigrams. It performs no free transliteration or automatic Han conversion and
+  never mutates authoritative bytes.
+- Full text uses Neo4j `2026.06.0-community-trixie`, driver `6.2.0`,
+  `fulltext-2.0`, `standard-no-stop-words`, synchronous generation-scoped
+  indexes and no caller-supplied Lucene syntax.
+- Vector retrieval uses the exact 1,024-dimensional self-hosted embedding,
+  Neo4j `vector-2026.06`, cosine similarity, float32 and no quantization.
+- Graph retrieval is fixed-template, read-only, depth 2, fan-out 32, a 31-day
+  default window, admitted/observed trust scopes, zero open gaps and dead
+  letters, and no generated Cypher or write capability.
+- Fusion is equal-weight reciprocal-rank fusion with `k=60`, represented as
+  reduced rational scores. Rank and fusion are never authority.
+- Deduplication uses authoritative dependency roots, best hit per mode,
+  retained receipts and a canonical root-ID tie break.
+- Hydration rechecks rights and retrieves exact permitted bytes or decisions
+  from SQLite and governed objects. Projection text cannot become factual
+  authority.
+- Outcomes are explicit `COMPLETE`, `DEGRADED`, `INCOMPLETE`,
+  `POLICY_BLOCKED`, `STALE` or `UNAVAILABLE`. A failed or missing branch is not
+  a no-match.
 
-## Named read-only tools
+## Effective profiles
 
-The accepted family is closed and exact:
+The historical proposal schema digest is retained inside the immutable packet.
+It does not validate an effective production profile.
 
-1. `find_related_event_candidates`
-2. `get_event_or_process_timeline`
-3. `find_source_revision_impact`
-4. `find_shared_origin_dependencies`
-5. `find_conflicting_relation_candidates`
-6. `get_candidate_provenance`
+Effective production-equivalent qualification requires:
 
-Increment 5C may implement only these purpose-specific surfaces under exact authentication, type, trust, depth, fan-out, date, result, timeout, provenance, watermark, and generation controls. No raw Cypher, arbitrary label/property selection, general index search, driver/session access, or mutation tool is approved.
+- qualification profile schema
+  `sha256:1dfdb4de6d2d184efb486d1601a3eb246f1d74352f55955a2b69e962336c31ef`;
+- approval-attestation schema
+  `sha256:8e69e5a66949e103ec4a960af34a509f3ba8b86a9f32b08ed77930f0898b8577`;
+- the exact proposal record, bundle, components and owner evidence; and
+- `protected_content_allowed=false` as a schema constant.
 
-## Authority and budget boundary
-
-SQLite ledger records and governed objects remain authoritative. Neo4j graph, full-text and vector data remain rebuildable projections. Similarity, path, rank, fusion, embeddings and models can rank or explain context but cannot allocate Event Hypothesis identity, merge records, admit a relation, create a Candidate, satisfy an exact collision check, or provide factual bytes without hydration.
-
-The 5A request budget is deliberately zero-runtime: 5,000 ms contract timeout, 8 results per branch, 12 retained candidates, 262,144 response bytes, zero external calls and zero gross external-provider cost. Later local qualification still requires an approved Operational Profile and signed Run manifest; these numbers do not authorise production traffic.
-
-## Rights decision matrix
-
-- Governed synthetic qualification text may be indexed and embedded locally only under a signed dataset manifest.
-- Public governed source text may enter local full-text/vector projections only with current source rights and a signed rights-cleared qualification manifest.
-- Repository fixture text may replay fixed-point fixture vectors, but fixture evidence can never substitute for production-vector qualification.
-- Rights-restricted source text may not enter the Increment 5 v1 vector index or qualification corpus.
-- Personal data, secrets and credentials may not enter the vector index or public qualification artefacts.
-- Tombstoned or revoked material must be purged from graph, full-text and vector derivatives, and rebuild must prove non-resurrection.
-- The self-hosted destination reduces disclosure risk but does not expand source rights, privacy authority, retention, or evaluation authority.
+Fixture replay remains separately identified by
+`sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e`
+and can never substitute for real-vector qualification.
 
 ## Evaluation and rollback
 
-The digest-bound Evaluation Plan is in `docs/evaluation/2026-08-01-increment-5-retrieval-evaluation-plan-v1.md`. Calibration and qualification are separate. Exact, full-text, vector, admitted-graph and hybrid paths are ablated. English, Hong Kong Traditional Chinese, mixed-language, temporal, correction/supersession, shared-origin, distractor false-merge, long-running timeline and rights purge/rebuild slices are mandatory. Zero-tolerance provenance, trust, rights, security, write-containment and false-no-match failures block the affected scope.
+The pre-registered Evaluation Plan compares exact-only, full-text-only,
+vector-only, admitted-graph-only and hybrid modes on English, Hong Kong
+Traditional Chinese, mixed-language, temporal, correction, shared-origin,
+false-merge, long-running timeline and rights-purge/rebuild slices. Calibration
+and qualification are disjoint.
 
-Material component change creates a new evaluation epoch and isolated index generation. Same-generation contract mutation is prohibited. Rollback may serve a prior generation only when its exact contracts and rights remain current; history is never rewritten; disabled-component derivatives must be purged.
+Material changes create a new epoch and isolated index generation. The active
+generation is never destructively rewritten. Rollback requires a rights-current
+prior generation with exact contracts. `DOPS-072` remains delivered and tested
+in 5E/#254, not in this decision unit.
 
-## PR boundaries after approval
+## Dependency boundaries
 
-- **5B / #251:** typed exact, full-text, vector and graph retrievers plus the disabled self-hosted embedding seam; no model load or vector creation until the approved decision record is committed.
-- **5C / #252:** the six bounded named read-only tools; no raw graph/index capability.
-- **5D / #253:** immutable Retrieval Contexts, authoritative hydration, freshness and explicit degraded outcomes; no false no-match.
-- **5E / #254:** pre-registered ablation, security, rights purge, fault injection and authenticated actual-Neo4j qualification for the exact approved implementation.
+- 5B/#251 implements the four independently inspectable retrievers.
+- 5C/#252 implements the six closed authenticated read-only tools.
+- 5D/#253 implements immutable Retrieval Contexts, authority hydration,
+  freshness and explicit degradation.
+- 5E/#254 runs pre-registered ablation, security, purge/rebuild, recovery and
+  authenticated actual-Neo4j qualification.
 
-## Approval effect and non-effect
-
-Approval of this exact payload authorises implementation work under issues #251–#254 and creation of a later immutable approved decision record. It does **not** activate the runtime. Shadow, canary and production remain separate owner decisions with their own operational evidence.
-
-A suitable explicit approval statement is:
-
-> I approve Increment 5A decision payload `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`, contract bundle `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`, production profile schema `sha256:2cdaa92a487ff48dd6095e1cc82af6f67362c168c557d9e6c3ecfe83e83cb647`, and fixture replay schema `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e` as the exact implementation and qualification contract for issues #251–#254. This approval does not authorise shadow, canary, production activation, external embedding calls, protected-content vectors, or spending.
-
-Until that approval is recorded, issue #250 remains open, the production profile remains mechanically blocked, and #251 must not begin.
+Issue #251 remains blocked until the exact owner approval comment is converted
+into a canonical attestation and the 5A merge boundary closes on `main`.
+Approval still creates no shadow, canary, production activation, publication,
+external embedding API authority, protected-content vector authority or spend.
