@@ -47,7 +47,7 @@ jobs:
           uv lock --check
           uv sync --dev --locked
 
-      - name: Repair staging-script class indentation
+      - name: Make staging-script matching indentation-aware
         shell: bash
         run: |
           set -euo pipefail
@@ -56,25 +56,46 @@ jobs:
 
           path = Path("scripts/temp_increment5a_review_hardening.py")
           text = path.read_text(encoding="utf-8")
-          text = text.replace(
-              "from textwrap import dedent\n",
-              "from textwrap import dedent, indent\n",
-              1,
+          old = '''def replace_once(text: str, old: str, new: str, *, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected one match, found {count}")
+              return text.replace(old, new, 1)
+          '''
+          new = '''def _indent_block(value: str, width: int) -> str:
+              prefix = " " * width
+              return "\\n".join(
+                  prefix + line if line else line
+                  for line in value.splitlines()
+              )
+
+
+          def replace_once(text: str, old: str, new: str, *, label: str) -> str:
+              candidates = [(old, new)] + [
+                  (_indent_block(old, width), _indent_block(new, width))
+                  for width in (4, 8, 12, 16, 20)
+              ]
+              observed = []
+              for old_value, new_value in candidates:
+                  count = text.count(old_value)
+                  observed.append(count)
+                  if count == 1:
+                      return text.replace(old_value, new_value, 1)
+                  if count > 1:
+                      raise RuntimeError(
+                          f"{label}: ambiguous match count {count}"
+                      )
+              raise RuntimeError(
+                  f"{label}: expected one match, observed {observed}"
+              )
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("replace_once helper source differs")
+          path.write_text(
+              text.replace(old, new, 1),
+              encoding="utf-8",
+              newline="\n",
           )
-          marker = "write_text(github_transport_path, github_transport)"
-          prefix, suffix = text.split(marker, 1)
-          prefix = prefix.replace(
-              "    dedent(\n",
-              "    indent(dedent(\n",
-              2,
-          )
-          prefix = prefix.replace(
-              '    ).strip("\\n"),\n',
-              '    ).strip("\\n"), "    "),\n',
-              2,
-          )
-          text = prefix + marker + suffix
-          path.write_text(text, encoding="utf-8", newline="\n")
           PY
 
       - name: Apply authenticated admission and fixture hardening
