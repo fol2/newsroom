@@ -1,4 +1,4 @@
-name: Temporary SDLC deterministic shard evaluation
+name: Temporary SDLC prewarmed-core evaluation
 
 on:
   pull_request:
@@ -6,7 +6,6 @@ on:
       - main
     paths:
       - .github/workflows/temp-sdlc-five-worker-evaluation.yml
-      - scripts/temp_sdlc_core_duration_weights.json
 
 permissions:
   contents: read
@@ -45,213 +44,59 @@ jobs:
           uv lock --check
           uv sync --dev --locked
 
-      - name: Run four exact file shards under immutable lane budget
+      - name: Precompile exact repository Python sources outside lane budget
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf .sdlc-core-shard-evaluation
-          mkdir -p .sdlc-core-shard-evaluation
+          started="$(date +%s%3N)"
+          uv run --no-sync python -m compileall -q newsroom scripts
+          finished="$(date +%s%3N)"
+          echo "precompile_elapsed_ms=$((finished - started))"
+          test -d newsroom/__pycache__
+          test -d scripts/__pycache__
+
+      - name: Execute unchanged canonical core lane under immutable budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .sdlc-prewarmed-evaluation
+          mkdir -p .sdlc-prewarmed-evaluation
           started="$(date +%s%3N)"
           set +e
           timeout --signal=TERM --kill-after=2s 110s \
-            uv run --no-sync python - <<'PY'
-          from __future__ import annotations
-
-          from concurrent.futures import ThreadPoolExecutor
-          import json
-          from pathlib import Path
-          import subprocess
-          import sys
-          import time
-          import xml.etree.ElementTree as ET
-
-
-          ROOT = Path.cwd()
-          OUTPUT = ROOT / ".sdlc-core-shard-evaluation"
-          WEIGHTS_PATH = ROOT / "scripts" / "temp_sdlc_core_duration_weights.json"
-          SHARD_COUNT = 4
-          EXPECTED_TESTS = 1954
-          EXPECTED_SKIPS = 38
-
-          test_root = ROOT / "newsroom" / "tests"
-          files = tuple(
-              path.relative_to(ROOT).as_posix()
-              for path in sorted(test_root.rglob("test_*.py"))
-              if path.is_file() and not path.is_symlink()
-          )
-          historical_raw = json.loads(WEIGHTS_PATH.read_text(encoding="utf-8"))
-          if not isinstance(historical_raw, dict):
-              raise SystemExit("duration weights must be an object")
-          historical = {
-              str(path): float(value)
-              for path, value in historical_raw.items()
-          }
-          actual = set(files)
-          matched = actual.intersection(historical)
-          unmatched = actual.difference(historical)
-          stale = set(historical).difference(actual)
-
-          weights: dict[str, float] = {}
-          for relative in files:
-              if relative in historical:
-                  weights[relative] = historical[relative]
-                  continue
-              size = (ROOT / relative).stat().st_size
-              weights[relative] = max(0.05, 0.25 + (size / 12_000.0))
-
-          print(
-              "weight_inventory="
-              + json.dumps(
-                  {
-                      "actual_files": len(actual),
-                      "matched_historical": len(matched),
-                      "size_weighted_unmatched": len(unmatched),
-                      "ignored_stale_historical": len(stale),
-                  },
-                  sort_keys=True,
-                  separators=(",", ":"),
-              ),
-              flush=True,
-          )
-
-          shards: list[list[str]] = [[] for _ in range(SHARD_COUNT)]
-          totals = [0.0] * SHARD_COUNT
-          for relative, weight in sorted(
-              weights.items(),
-              key=lambda item: (-item[1], item[0]),
-          ):
-              index = min(range(SHARD_COUNT), key=lambda item: (totals[item], item))
-              shards[index].append(relative)
-              totals[index] += weight
-
-          flattened = tuple(relative for shard in shards for relative in shard)
-          if len(flattened) != len(files) or set(flattened) != actual:
-              raise SystemExit("shard file inventory differs")
-
-          print(
-              "planned_shards="
-              + json.dumps(
-                  [
-                      {
-                          "index": index,
-                          "files": len(shards[index]),
-                          "estimated_seconds": round(totals[index], 3),
-                      }
-                      for index in range(SHARD_COUNT)
-                  ],
-                  sort_keys=True,
-                  separators=(",", ":"),
-              ),
-              flush=True,
-          )
-
-          def run_shard(index: int) -> tuple[int, float]:
-              report = OUTPUT / f"shard-{index}.xml"
-              log = OUTPUT / f"shard-{index}.log"
-              basetemp = OUTPUT / f"pytest-{index}"
-              command = (
-                  sys.executable,
-                  "-m",
-                  "pytest",
-                  "-qq",
-                  "--tb=no",
-                  "--no-header",
-                  "--assert=plain",
-                  "-p",
-                  "no:cacheprovider",
-                  *tuple(shards[index]),
-                  f"--basetemp={basetemp}",
-                  f"--junitxml={report}",
-              )
-              start = time.monotonic()
-              with log.open("wb") as stream:
-                  completed = subprocess.run(
-                      command,
-                      cwd=ROOT,
-                      stdout=stream,
-                      stderr=subprocess.STDOUT,
-                      check=False,
-                  )
-              return completed.returncode, time.monotonic() - start
-
-          with ThreadPoolExecutor(max_workers=SHARD_COUNT) as executor:
-              results = tuple(executor.map(run_shard, range(SHARD_COUNT)))
-
-          print(
-              "actual_shards="
-              + json.dumps(
-                  [
-                      {
-                          "index": index,
-                          "returncode": results[index][0],
-                          "elapsed_seconds": round(results[index][1], 3),
-                      }
-                      for index in range(SHARD_COUNT)
-                  ],
-                  sort_keys=True,
-                  separators=(",", ":"),
-              ),
-              flush=True,
-          )
-          if any(code != 0 for code, _elapsed in results):
-              for index in range(SHARD_COUNT):
-                  print(f"--- shard {index} ---", flush=True)
-                  print(
-                      (OUTPUT / f"shard-{index}.log").read_text(
-                          encoding="utf-8",
-                          errors="replace",
-                      ),
-                      flush=True,
-                  )
-              raise SystemExit("one or more core shards failed")
-
-          test_count = 0
-          skip_count = 0
-          failure_count = 0
-          error_count = 0
-          for index in range(SHARD_COUNT):
-              report_root = ET.parse(OUTPUT / f"shard-{index}.xml").getroot()
-              for testcase in report_root.iter("testcase"):
-                  test_count += 1
-                  skip_count += sum(1 for _ in testcase.findall("skipped"))
-                  failure_count += sum(1 for _ in testcase.findall("failure"))
-                  error_count += sum(1 for _ in testcase.findall("error"))
-
-          summary = {
-              "tests": test_count,
-              "skips": skip_count,
-              "failures": failure_count,
-              "errors": error_count,
-          }
-          print(
-              "shard_summary="
-              + json.dumps(summary, sort_keys=True, separators=(",", ":")),
-              flush=True,
-          )
-          if summary != {
-              "tests": EXPECTED_TESTS,
-              "skips": EXPECTED_SKIPS,
-              "failures": 0,
-              "errors": 0,
-          }:
-              raise SystemExit(f"unexpected shard summary: {summary}")
-          PY
+            uv run --no-sync python -m scripts.sdlc.workflow_lane \
+              core-tests \
+              --repo-root . \
+              --report .sdlc-prewarmed-evaluation/pytest.xml \
+            > .sdlc-prewarmed-evaluation/output.log 2>&1
           status="$?"
           set -e
           finished="$(date +%s%3N)"
-          echo "deterministic_shard_elapsed_ms=$((finished - started))"
-          echo "deterministic_shard_status=${status}"
-          if test "${status}" -ne 0; then
-            for log in .sdlc-core-shard-evaluation/shard-*.log; do
-              test -e "${log}" || continue
-              echo "--- ${log} ---"
-              cat "${log}"
-            done
-          fi
+          cat .sdlc-prewarmed-evaluation/output.log
+          echo "prewarmed_core_elapsed_ms=$((finished - started))"
+          echo "prewarmed_core_status=${status}"
           test "${status}" -eq 0
+          test -s .sdlc-prewarmed-evaluation/pytest.xml
 
-      - name: Prove repository source was not modified
+      - name: Verify exact successful JUnit inventory and clean tracked source
         shell: bash
         run: |
           set -euo pipefail
+          uv run --no-sync python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          report = Path(".sdlc-prewarmed-evaluation/pytest.xml")
+          root = ET.parse(report).getroot()
+          tests = failures = errors = skips = 0
+          for suite in root.iter("testsuite"):
+              tests += int(suite.attrib.get("tests", "0"))
+              failures += int(suite.attrib.get("failures", "0"))
+              errors += int(suite.attrib.get("errors", "0"))
+              skips += int(suite.attrib.get("skipped", "0"))
+          summary = (tests, failures, errors, skips)
+          print(f"prewarmed_junit={summary}")
+          if summary != (1954, 0, 0, 38):
+              raise SystemExit(f"unexpected JUnit summary: {summary}")
+          PY
           git diff --exit-code
