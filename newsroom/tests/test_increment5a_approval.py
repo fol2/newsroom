@@ -4,7 +4,6 @@ from copy import deepcopy
 import inspect
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -15,7 +14,8 @@ from newsroom.increment5 import (
     APPROVAL_ATTESTATION_SCHEMA_DIGEST,
     APPROVAL_ATTESTATION_SCHEMA_PATH,
     APPROVAL_NON_EFFECTS,
-    GitHubIssueCommentApprovalVerifier,
+    APPROVAL_RECORD_DIGEST,
+    APPROVAL_RECORD_PATH,
     INCREMENT5_TRACEABILITY_BY_REQUIREMENT,
     INCREMENT_5A_DECISION_AUTHORITY,
     INCREMENT_5A_DECISION_PACKET,
@@ -23,6 +23,13 @@ from newsroom.increment5 import (
     Increment5ContractError,
     Increment5DeliveryTrace,
     Increment5ProfileError,
+    PRODUCTION_PROFILE_SCHEMA,
+    PRODUCTION_PROFILE_SCHEMA_DIGEST,
+    PRODUCTION_PROFILE_SCHEMA_PATH,
+    PROPOSAL_PRODUCTION_PROFILE_SCHEMA,
+    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST,
+    PROPOSAL_PRODUCTION_PROFILE_SCHEMA_PATH,
+    QUALIFICATION_PRODUCTION_PROFILE_SCHEMA,
     QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST,
     QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_PATH,
     RetrievalProfileKind,
@@ -31,87 +38,21 @@ from newsroom.increment5 import (
     decision_authority,
     expected_increment5a_owner_approval_body,
     load_increment5a_approval_attestation,
+    repository_approval_record,
     validate_profile_manifest,
-    verify_increment5a_approval,
 )
 
 
 _COMMENT_ID = 123456789
-_CREATED_AT = "2042-03-12T12:00:00Z"
-_CANONICAL_CREATED_AT = UtcTimestamp.parse(_CREATED_AT)
+_APPROVED_AT = UtcTimestamp.parse("2042-03-12T12:00:00.000000Z")
 _OWNER_BODY = expected_increment5a_owner_approval_body()
 _OWNER_BODY_DIGEST = digest_bytes(_OWNER_BODY.encode("utf-8"))
-_API_URL = (
-    "https://api.github.com/repos/fol2/newsroom/issues/comments/"
-    f"{_COMMENT_ID}"
-)
-_HTML_URL = (
-    "https://github.com/fol2/newsroom/issues/250#issuecomment-"
-    f"{_COMMENT_ID}"
-)
-_ISSUE_URL = "https://api.github.com/repos/fol2/newsroom/issues/250"
 
 
-class _FakeResponse:
-    def __init__(
-        self,
-        payload: dict[str, object],
-        *,
-        url: str = _API_URL,
-        status_code: int = 200,
-        content_type: str = "application/json; charset=utf-8",
-        history: list[object] | None = None,
-    ) -> None:
-        self.content = canonical_json_bytes(payload)
-        self.url = url
-        self.status_code = status_code
-        self.headers = {"Content-Type": content_type}
-        self.history = [] if history is None else history
-
-
-class _FakeSession:
-    def __init__(self, response: _FakeResponse) -> None:
-        self.response = response
-        self.calls: list[tuple[str, dict[str, Any]]] = []
-        self.closed = False
-
-    def get(self, url: str, **kwargs: Any) -> _FakeResponse:
-        self.calls.append((url, kwargs))
-        return self.response
-
-    def close(self) -> None:
-        self.closed = True
-
-
-def _github_comment(
-    *,
-    body: str = _OWNER_BODY,
-    login: str = "fol2",
-    user_id: int = 105634418,
-    author_association: str = "OWNER",
-    created_at: str = _CREATED_AT,
-    updated_at: str = _CREATED_AT,
-) -> dict[str, object]:
-    return {
-        "id": _COMMENT_ID,
-        "url": _API_URL,
-        "html_url": _HTML_URL,
-        "issue_url": _ISSUE_URL,
-        "user": {"login": login, "id": user_id},
-        "author_association": author_association,
-        "body": body,
-        "created_at": created_at,
-        "updated_at": updated_at,
-    }
-
-
-def _approval_value(
-    *,
-    approved_at: UtcTimestamp = _CANONICAL_CREATED_AT,
-) -> dict[str, object]:
+def _approval_value() -> dict[str, object]:
     return approval_attestation_value(
         proposal=INCREMENT_5A_DECISION_PACKET,
-        approved_at=approved_at,
+        approved_at=_APPROVED_AT,
         comment_id=_COMMENT_ID,
         approval_comment_body_digest=_OWNER_BODY_DIGEST,
     )
@@ -124,48 +65,6 @@ def _write_approval(
     path = tmp_path / "approval.json"
     path.write_bytes(canonical_json_bytes(value))
     return path
-
-
-def _verified_approval(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    claim_value: dict[str, object] | None = None,
-    comment_value: dict[str, object] | None = None,
-):
-    claim = load_increment5a_approval_attestation(
-        _write_approval(
-            tmp_path,
-            _approval_value() if claim_value is None else claim_value,
-        )
-    )
-    session = _FakeSession(
-        _FakeResponse(
-            _github_comment() if comment_value is None else comment_value
-        )
-    )
-    monkeypatch.setattr(
-        approval_module.requests,
-        "Session",
-        lambda: session,
-    )
-    with GitHubIssueCommentApprovalVerifier(token="test-token") as verifier:
-        authority = verify_increment5a_approval(
-            claim,
-            verifier=verifier,
-        )
-    return claim, authority, session
-
-
-def _approved_authority(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    _claim, authority, _session = _verified_approval(
-        tmp_path,
-        monkeypatch,
-    )
-    return authority
 
 
 def test_approval_and_qualification_schema_artifacts_are_canonical() -> None:
@@ -186,61 +85,143 @@ def test_approval_and_qualification_schema_artifacts_are_canonical() -> None:
         assert digest_bytes(data) == expected_digest
 
 
-def test_pending_proposal_remains_immutable_and_non_authorizing() -> None:
-    assert not INCREMENT_5A_DECISION_AUTHORITY.production_authorized
+def test_generic_production_schema_is_only_the_hardened_v2_surface() -> None:
+    assert PRODUCTION_PROFILE_SCHEMA is QUALIFICATION_PRODUCTION_PROFILE_SCHEMA
     assert (
-        INCREMENT_5A_DECISION_AUTHORITY.proposal
-        is INCREMENT_5A_DECISION_PACKET
+        PRODUCTION_PROFILE_SCHEMA_DIGEST
+        == QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_DIGEST
     )
+    assert PRODUCTION_PROFILE_SCHEMA_PATH == (
+        QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_PATH
+    )
+    assert PRODUCTION_PROFILE_SCHEMA is not PROPOSAL_PRODUCTION_PROFILE_SCHEMA
+    assert PRODUCTION_PROFILE_SCHEMA_DIGEST != (
+        PROPOSAL_PRODUCTION_PROFILE_SCHEMA_DIGEST
+    )
+    assert PRODUCTION_PROFILE_SCHEMA_PATH != (
+        PROPOSAL_PRODUCTION_PROFILE_SCHEMA_PATH
+    )
+    rights = PRODUCTION_PROFILE_SCHEMA["properties"]["rights"]["properties"]
+    assert rights["protected_content_allowed"] == {"const": False}
+
+
+def test_pending_repository_record_is_fail_closed() -> None:
+    assert APPROVAL_RECORD_DIGEST is None
+    assert not APPROVAL_RECORD_PATH.exists()
+    assert repository_approval_record() is None
+    assert not INCREMENT_5A_DECISION_AUTHORITY.production_authorized
+    assert decision_authority() is INCREMENT_5A_DECISION_AUTHORITY
+    assert INCREMENT_5A_DECISION_AUTHORITY.proposal is INCREMENT_5A_DECISION_PACKET
+
     with pytest.raises(
         Increment5ProfileError,
-        match="GitHub-verified owner approval",
+        match="admitted repository owner approval record",
     ):
         INCREMENT_5A_DECISION_AUTHORITY.require_profile(
             RetrievalProfileKind.PRODUCTION
         )
+    with pytest.raises(
+        Increment5ProfileError,
+        match="admitted repository owner approval record",
+    ):
+        build_production_qualification_manifest()
 
 
-def test_unverified_canonical_claim_cannot_create_authority(
+def test_parsed_external_record_is_evidence_not_runtime_authority(
     tmp_path: Path,
 ) -> None:
-    claim = load_increment5a_approval_attestation(
+    record = load_increment5a_approval_attestation(
         _write_approval(tmp_path, _approval_value())
     )
 
+    assert record.evidence.comment_id == _COMMENT_ID
+    assert record.evidence.body_digest == _OWNER_BODY_DIGEST
+    assert record.approved_at == _APPROVED_AT
+    assert record.proposal_payload_digest == INCREMENT_5A_DECISION_PACKET.payload_digest
+    assert repository_approval_record() is None
     with pytest.raises(
-        TypeError,
-        match="unexpected keyword argument 'approval'",
+        Increment5ProfileError,
+        match="admitted repository owner approval record",
     ):
-        decision_authority(approval=claim)  # type: ignore[call-arg]
+        build_production_qualification_manifest()
 
 
-def test_approval_module_exposes_no_raw_capability_minting_path() -> None:
-    source = Path(approval_module.__file__).read_text(encoding="utf-8")
-
-    assert "_make_verified_approval" not in source
-    assert "_verified_approval_factory" not in source
-    assert "decision_authority(approval=" not in source
-    assert tuple(inspect.signature(decision_authority).parameters) == (
-        "proposal",
-    )
-
-
-def test_authenticated_github_comment_authorizes_exact_proposal_without_mutation(
+def test_public_constant_or_loader_reassignment_cannot_admit_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    claim, authority, session = _verified_approval(
-        tmp_path,
-        monkeypatch,
+    path = _write_approval(tmp_path, _approval_value())
+    digest = digest_bytes(path.read_bytes())
+    record = load_increment5a_approval_attestation(path)
+
+    monkeypatch.setattr(approval_module, "APPROVAL_RECORD_PATH", path)
+    monkeypatch.setattr(approval_module, "APPROVAL_RECORD_DIGEST", digest)
+    monkeypatch.setattr(
+        approval_module,
+        "_LOAD_REPOSITORY_APPROVAL",
+        lambda: record,
     )
 
-    assert type(authority) is Increment5ADecisionAuthority
-    assert authority.production_authorized
-    assert authority.proposal is INCREMENT_5A_DECISION_PACKET
-    assert authority.proposal.status.value == "PENDING_OWNER_REVIEW"
-    assert authority.approval_claim_digest == claim.attestation_digest
-    assert authority.approval_attestation_digest is not None
+    # The public functions captured the source-defined loader in their defaults.
+    assert repository_approval_record() is None
+    with pytest.raises(
+        Increment5ProfileError,
+        match="admitted repository owner approval record",
+    ):
+        build_production_qualification_manifest()
+
+
+def test_caller_created_authority_objects_cannot_cross_profile_gate() -> None:
+    forged = Increment5ADecisionAuthority()
+    forged_via_object = object.__new__(Increment5ADecisionAuthority)
+
+    for candidate in (forged, forged_via_object):
+        assert candidate is not INCREMENT_5A_DECISION_AUTHORITY
+        with pytest.raises(
+            Increment5ProfileError,
+            match="canonical repository authority",
+        ):
+            validate_profile_manifest(
+                {
+                    "profile": RetrievalProfileKind.PRODUCTION.value,
+                },
+                packet=candidate,
+            )
+
+    assert not hasattr(forged, "__dict__")
+    assert Increment5ADecisionAuthority.__slots__ == ()
+    with pytest.raises(AttributeError):
+        object.__setattr__(forged, "approval", object())
+
+
+def test_production_builder_accepts_no_caller_authority() -> None:
+    assert tuple(
+        inspect.signature(build_production_qualification_manifest).parameters
+    ) == ()
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        build_production_qualification_manifest(  # type: ignore[call-arg]
+            authority=object()
+        )
+
+
+def test_approval_module_has_no_runtime_transport_or_capability_minting() -> None:
+    source = Path(approval_module.__file__).read_text(encoding="utf-8")
+
+    assert "import requests" not in source
+    assert "GitHubIssueCommentApprovalVerifier" not in source
+    assert "GitHubApprovalComment" not in source
+    assert "verify_increment5a_approval" not in source
+    assert "object.__new__(Increment5ADecisionAuthority)" not in source
+    assert "object.__setattr__(authority" not in source
+    assert "_make_verified_approval" not in source
+    assert "_verified_approval_factory" not in source
+    assert tuple(inspect.signature(decision_authority).parameters) == ()
+
+
+def test_owner_statement_and_non_effects_are_exact() -> None:
+    assert _OWNER_BODY_DIGEST == (
+        "sha256:137f423d2630aec1af065968a6a0afac9283918fdad3f6e0631719f23b97952a"
+    )
     assert tuple(APPROVAL_NON_EFFECTS) == (
         "CANARY",
         "EXTERNAL_EMBEDDING_API_CALLS",
@@ -252,118 +233,16 @@ def test_authenticated_github_comment_authorizes_exact_proposal_without_mutation
         "PRODUCTION_ACTIVATION",
         "SHADOW",
     )
-    authority.require_profile(RetrievalProfileKind.PRODUCTION)
-
-    assert session.closed
-    assert len(session.calls) == 1
-    url, kwargs = session.calls[0]
-    assert url == _API_URL
-    assert kwargs["allow_redirects"] is False
-    assert kwargs["timeout"] == 10.0
-    assert kwargs["headers"] == {
-        "Accept": "application/vnd.github+json",
-        "Authorization": "Bearer test-token",
-        "User-Agent": "fol2-newsroom-increment5a-approval-verifier",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
 
 
-def test_decision_authority_subclasses_cannot_cross_production_gates(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _ForgedAuthority(Increment5ADecisionAuthority):
-        @property
-        def approval_attestation_digest(self) -> str:
-            return "sha256:" + "a" * 64
-
-        @property
-        def effective_contract_digest(self) -> str:
-            return "sha256:" + "b" * 64
-
-        def require_profile(self, profile: RetrievalProfileKind) -> None:
-            assert profile is RetrievalProfileKind.PRODUCTION
-
-        def component_authorized(self, _kind: object) -> bool:
-            return True
-
-    forged = _ForgedAuthority()
-    assert isinstance(forged, Increment5ADecisionAuthority)
-    assert type(forged) is not Increment5ADecisionAuthority
-
-    with pytest.raises(
-        Increment5ProfileError,
-        match="exact sealed owner approval authority",
-    ):
-        build_production_qualification_manifest(authority=forged)
-
-    genuine = _approved_authority(tmp_path, monkeypatch)
-    manifest = build_production_qualification_manifest(authority=genuine)
-    with pytest.raises(
-        Increment5ProfileError,
-        match="exact sealed owner approval authority",
-    ):
-        validate_profile_manifest(manifest, packet=forged)
-
-
-def test_production_manifest_requires_verified_attestation_and_denies_protected_content(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    authority = _approved_authority(tmp_path, monkeypatch)
-    manifest = build_production_qualification_manifest(
-        authority=authority
-    )
-    validated = validate_profile_manifest(
-        manifest,
-        packet=authority,
-    )
-
-    assert validated.profile is RetrievalProfileKind.PRODUCTION
-    assert validated.qualification_eligible
-    assert validated.approval_attestation_digest == (
-        authority.approval_attestation_digest
-    )
-    assert manifest["rights"]["protected_content_allowed"] is False
-
-    tampered = deepcopy(manifest)
-    tampered["rights"]["protected_content_allowed"] = True
-    with pytest.raises(
-        Increment5ProfileError,
-        match="schema validation failed",
-    ):
-        validate_profile_manifest(tampered, packet=authority)
-
-
-def test_production_manifest_cannot_use_bare_pending_proposal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    authority = _approved_authority(tmp_path, monkeypatch)
-    manifest = build_production_qualification_manifest(
-        authority=authority
-    )
-    with pytest.raises(
-        Increment5ProfileError,
-        match="owner approval authority",
-    ):
-        validate_profile_manifest(
-            manifest,
-            packet=INCREMENT_5A_DECISION_PACKET,
-        )
-
-
-def test_attestation_tampering_cannot_approve_another_proposal(
+def test_approval_record_tampering_cannot_bind_another_proposal(
     tmp_path: Path,
 ) -> None:
     value = _approval_value()
     proposal = value["proposal"]
     assert isinstance(proposal, dict)
-    proposal["payload_digest"] = (
-        "sha256:"
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    )
+    proposal["payload_digest"] = "sha256:" + "b" * 64
+
     with pytest.raises(
         Increment5ContractError,
         match="does not bind the exact proposal",
@@ -373,13 +252,12 @@ def test_attestation_tampering_cannot_approve_another_proposal(
         )
 
 
-def test_attestation_cannot_drop_non_effects(
-    tmp_path: Path,
-) -> None:
+def test_approval_record_cannot_drop_non_effects(tmp_path: Path) -> None:
     value = _approval_value()
     non_effects = value["non_effects"]
     assert isinstance(non_effects, list)
     non_effects.remove("PROTECTED_CONTENT_VECTORS")
+
     with pytest.raises(
         Increment5ContractError,
         match="schema validation failed",
@@ -389,7 +267,7 @@ def test_attestation_cannot_drop_non_effects(
         )
 
 
-def test_attestation_requires_canonical_utc_text(tmp_path: Path) -> None:
+def test_approval_record_requires_canonical_utc_text(tmp_path: Path) -> None:
     value = _approval_value()
     value["approved_at"] = "2042-03-12T12:00:00Z"
 
@@ -402,115 +280,27 @@ def test_attestation_requires_canonical_utc_text(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize(
-    ("comment", "message"),
-    (
-        (
-            _github_comment(login="attacker"),
-            "author login differs",
-        ),
-        (
-            _github_comment(user_id=999),
-            "author identity differs",
-        ),
-        (
-            _github_comment(author_association="CONTRIBUTOR"),
-            "not the repository owner",
-        ),
-        (
-            _github_comment(updated_at="2042-03-12T12:00:01Z"),
-            "edited GitHub approval comments",
-        ),
-    ),
-)
-def test_github_verifier_rejects_wrong_or_edited_owner_evidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    comment: dict[str, object],
-    message: str,
-) -> None:
-    with pytest.raises(Increment5ContractError, match=message):
-        _verified_approval(
-            tmp_path,
-            monkeypatch,
-            comment_value=comment,
-        )
-
-
-def test_github_verifier_rejects_wrong_body(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_approval_record_rejects_wrong_comment_digest(tmp_path: Path) -> None:
     with pytest.raises(
         Increment5ContractError,
-        match="body differs from the exact owner statement",
+        match="differs from the exact owner statement",
     ):
-        _verified_approval(
-            tmp_path,
-            monkeypatch,
-            comment_value=_github_comment(body="I approve something else."),
+        approval_attestation_value(
+            proposal=INCREMENT_5A_DECISION_PACKET,
+            approved_at=_APPROVED_AT,
+            comment_id=_COMMENT_ID,
+            approval_comment_body_digest="sha256:" + "a" * 64,
         )
 
 
-def test_github_verifier_binds_claim_time_to_comment_creation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    claim_value = _approval_value(
-        approved_at=UtcTimestamp.parse(
-            "2042-03-12T12:00:01.000000Z"
-        )
-    )
-    with pytest.raises(
-        Increment5ContractError,
-        match="approval time differs",
-    ):
-        _verified_approval(
-            tmp_path,
-            monkeypatch,
-            claim_value=claim_value,
-        )
+def test_protected_content_cannot_be_enabled_in_effective_schema() -> None:
+    schema = deepcopy(PRODUCTION_PROFILE_SCHEMA)
+    rights = schema["properties"]["rights"]["properties"]
+    assert rights["protected_content_allowed"] == {"const": False}
 
 
-def test_github_verifier_rejects_redirects_and_non_json(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    claim = load_increment5a_approval_attestation(
-        _write_approval(tmp_path, _approval_value())
-    )
-    response = _FakeResponse(
-        _github_comment(),
-        url="https://example.invalid/redirect",
-        history=[object()],
-    )
-    session = _FakeSession(response)
-    monkeypatch.setattr(approval_module.requests, "Session", lambda: session)
-    with GitHubIssueCommentApprovalVerifier(token="test-token") as verifier:
-        with pytest.raises(
-            Increment5ContractError,
-            match="redirected unexpectedly",
-        ):
-            verify_increment5a_approval(claim, verifier=verifier)
-
-    response = _FakeResponse(
-        _github_comment(),
-        content_type="text/html",
-    )
-    session = _FakeSession(response)
-    monkeypatch.setattr(approval_module.requests, "Session", lambda: session)
-    with GitHubIssueCommentApprovalVerifier(token="test-token") as verifier:
-        with pytest.raises(
-            Increment5ContractError,
-            match="unexpected content type",
-        ):
-            verify_increment5a_approval(claim, verifier=verifier)
-
-
-def test_dops_072_remains_deferred_to_5e_qualification() -> None:
-    row = INCREMENT5_TRACEABILITY_BY_REQUIREMENT["DOPS-072"]
-    assert (
-        row.delivery_trace
-        is Increment5DeliveryTrace.DEFERRED_TO_5E
-    )
-    assert row.delivery_issue == 254
+def test_completed_run_decision_ownership_and_rollback_remain_in_5e() -> None:
+    for requirement in ("DEVAL-073", "DOPS-064", "DOPS-072"):
+        row = INCREMENT5_TRACEABILITY_BY_REQUIREMENT[requirement]
+        assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
+        assert row.delivery_issue == 254

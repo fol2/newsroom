@@ -1,6 +1,6 @@
 # Increment 5A production retrieval contract proposal
 
-**Status:** Proposed — explicit authenticated owner approval required
+**Status:** Proposed — exact owner comment and repository approval record required
 **Owner:** Product owner
 **Prepared:** 2026-08-01
 **Issue:** #250
@@ -15,20 +15,14 @@
 ## Decision requested
 
 Approve the immutable proposal identified above together with the hardened
-effective qualification and approval-claim schemas named in the approval
-contract. The proposal packet remains `PENDING_OWNER_REVIEW`; owner approval
-never mutates or rehashes it.
+effective qualification schema and exact non-effects. The proposal packet
+itself remains `PENDING_OWNER_REVIEW`; approval is represented by an exact
+owner comment on issue #250 and a canonical, digest-pinned repository record.
 
-A canonical approval claim is not authority. The effective decision is created
-only after the repository verifier performs a fresh authenticated GitHub REST
-read and proves the exact unedited issue #250 owner comment, immutable owner
-user identity, statement body, body digest and comment creation time. No claim
-or verified approval is checked in today.
-
-Until that verification exists, only contract validation and non-qualifying
-fixture replay are authorized. Model loading, vector creation, protected
-content, external calls, provider credentials, spending, live sources, shadow,
-canary, publication and production activation remain blocked.
+Until that record is reviewed and admitted, only contract validation and
+non-qualifying fixture replay are authorized. Model loading, vector creation,
+protected content, external embedding calls, credentials, spending, live
+sources, shadow, canary, publication and production activation remain blocked.
 
 ## Exact proposed embedding identity
 
@@ -51,7 +45,7 @@ canary, publication and production activation remain blocked.
 | External calls and provider spend | zero |
 | Protected content | prohibited by effective v2 profile |
 
-Model identity does not expand source rights. Each datum still requires the
+Model identity never expands source rights. Every datum still requires the
 rights decision and purpose declared by the packet.
 
 ## Exact retrieval contracts
@@ -69,7 +63,7 @@ rights decision and purpose declared by the packet.
 - Vector retrieval uses the exact 1,024-dimensional self-hosted embedding,
   Neo4j `vector-2026.06`, cosine similarity, float32 and no quantization.
 - Graph retrieval is fixed-template, read-only, depth 2, fan-out 32, a 31-day
-  default window, admitted and observed trust scopes, zero open gaps and dead
+  default window, admitted/observed trust scopes, zero open gaps and dead
   letters, and no generated Cypher or write capability.
 - Fusion is equal-weight reciprocal-rank fusion with `k=60`, represented as
   reduced rational scores. Rank and fusion are never authority.
@@ -82,53 +76,40 @@ rights decision and purpose declared by the packet.
   `POLICY_BLOCKED`, `STALE` or `UNAVAILABLE`. A failed or missing branch is not
   a no-match.
 
-## Proposal and effective schemas
+## Effective profiles and owner record
 
-The historical proposal schema digest is retained inside the immutable packet
-and exported only through explicit `PROPOSAL_PRODUCTION_PROFILE_SCHEMA*`
-names. It does not validate an effective production profile.
+The historical proposal schema digest remains inside the immutable packet but
+cannot validate an effective production profile. All unqualified production
+schema exports resolve to v2.
 
-All unqualified `PRODUCTION_PROFILE_SCHEMA*` exports resolve to the hardened
-qualification schema. Effective production-equivalent qualification requires:
+Effective production-equivalent qualification requires:
 
 - qualification profile schema
   `sha256:1dfdb4de6d2d184efb486d1601a3eb246f1d74352f55955a2b69e962336c31ef`;
-- approval-claim schema
+- approval-record schema
   `sha256:8e69e5a66949e103ec4a960af34a509f3ba8b86a9f32b08ed77930f0898b8577`;
-- the exact proposal record, bundle and components;
-- a GitHub-verified owner approval capability and verification digest; and
+- the exact proposal record, bundle, components and owner comment evidence;
+- a canonical approval record whose digest is pinned in reviewed source; and
 - `protected_content_allowed=false` as a schema constant.
 
-Fixture replay remains separately identified by
+Runtime production gates accept no caller-supplied authority or verifier. They
+read only the source-pinned repository record. Fixture replay remains
+separately identified by
 `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e`
-and can never substitute for real-vector qualification.
-
-## Approval verification
-
-The verifier reads only the fixed GitHub issue-comment endpoint, accepts no
-redirect, bounds timeout and response size, rejects malformed or duplicate-key
-JSON, and verifies repository, issue, comment URL, owner login, immutable owner
-user ID and `author_association=OWNER`. It requires the exact generated owner
-statement and binds claim time to GitHub `created_at`. Edited comments are
-rejected by requiring `updated_at == created_at`.
-
-A claimed author, timestamp, body digest or URL cannot create authority. The
-bearer token is explicit and is never retained in the claim, profile or
-effective contract.
+and can never substitute for production qualification.
 
 ## Evaluation and rollback
 
 The pre-registered Evaluation Plan compares exact-only, full-text-only,
 vector-only, admitted-graph-only and hybrid modes on English, Hong Kong
 Traditional Chinese, mixed-language, temporal, correction, shared-origin,
-false-merge, long-running timeline and rights-purge and rebuild slices.
-Calibration and qualification are disjoint.
+false-merge, long-running timeline and rights-purge/rebuild slices. Calibration
+and qualification are disjoint.
 
 Material changes create a new epoch and isolated index generation. The active
 generation is never destructively rewritten. Rollback requires a rights-current
-prior generation with exact contracts. Completed-run decisions, accountable
-runbooks and tested rollback are delivered in 5E/#254 under `DEVAL-073`,
-`DOPS-064` and `DOPS-072`, not claimed by this decision unit.
+prior generation with exact contracts. `DOPS-072` remains delivered and tested
+in 5E/#254, not in this decision unit.
 
 ## Dependency boundaries
 
@@ -136,12 +117,10 @@ runbooks and tested rollback are delivered in 5E/#254 under `DEVAL-073`,
 - 5C/#252 implements the six closed authenticated read-only tools.
 - 5D/#253 implements immutable Retrieval Contexts, authority hydration,
   freshness and explicit degradation.
-- 5E/#254 runs pre-registered ablation, security, purge and rebuild, recovery,
-  authenticated actual-Neo4j qualification, runbooks, rollback evidence and
-  the final retained Run decision.
+- 5E/#254 runs pre-registered ablation, security, purge/rebuild, recovery and
+  authenticated actual-Neo4j qualification.
 
-Issue #251 remains blocked until the exact owner comment has been authenticated,
-a verified approval has been retained through the reviewed 5A boundary, PR #255
-has merged and exact-main evidence has passed. Approval still creates no
+Issue #251 remains blocked until the exact owner comment and repository record
+are reviewed, 5A merges, and exact `main` qualifies. Approval creates no
 shadow, canary, production activation, publication, external embedding API
 authority, protected-content vector authority or spend.
