@@ -1,4 +1,4 @@
-name: Temporary SDLC five-worker evaluation
+name: Temporary SDLC load-scheduler evaluation
 
 on:
   pull_request:
@@ -44,49 +44,68 @@ jobs:
           uv lock --check
           uv sync --dev --locked
 
-      - name: Substitute five persistent worksteal workers in workspace only
+      - name: Substitute four-worker load scheduling in workspace only
         shell: bash
         run: |
           set -euo pipefail
           uv run --no-sync python - <<'PY'
           from pathlib import Path
-          path = Path("scripts/sdlc/workflow_lane.py")
-          text = path.read_text(encoding="utf-8")
-          old = "_CORE_WORKER_COUNT = 4\n"
+
+          source = Path("scripts/sdlc/workflow_lane.py")
+          text = source.read_text(encoding="utf-8")
+          old = '_CORE_DISTRIBUTION = "worksteal"\n'
           if text.count(old) != 1:
-              raise SystemExit("canonical worker count source differs")
-          path.write_text(
-              text.replace(old, "_CORE_WORKER_COUNT = 5\n", 1),
+              raise SystemExit("canonical distribution source differs")
+          source.write_text(
+              text.replace(old, '_CORE_DISTRIBUTION = "load"\n', 1),
               encoding="utf-8",
               newline="\n",
           )
+
+          for relative in (
+              "newsroom/tests/test_sdlc_core_worker_capacity.py",
+              "newsroom/tests/test_sdlc_workflow_lane.py",
+          ):
+              path = Path(relative)
+              value = path.read_text(encoding="utf-8")
+              if "worksteal" not in value:
+                  raise SystemExit(f"scheduler expectation missing: {relative}")
+              path.write_text(
+                  value.replace("worksteal", "load"),
+                  encoding="utf-8",
+                  newline="\n",
+              )
           PY
 
       - name: Execute exact core command under immutable budget
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .sdlc-five-worker
+          mkdir -p .sdlc-load-evaluation
           started="$(date +%s%3N)"
           set +e
           timeout --signal=TERM --kill-after=2s 110s \
             uv run --no-sync python -m scripts.sdlc.workflow_lane \
               core-tests \
               --repo-root . \
-              --report .sdlc-five-worker/pytest.xml \
-            > .sdlc-five-worker/output.log 2>&1
+              --report .sdlc-load-evaluation/pytest.xml \
+            > .sdlc-load-evaluation/output.log 2>&1
           status="$?"
           set -e
           finished="$(date +%s%3N)"
-          cat .sdlc-five-worker/output.log
-          echo "five_worker_elapsed_ms=$((finished - started))"
-          echo "five_worker_status=${status}"
+          cat .sdlc-load-evaluation/output.log
+          echo "load_scheduler_elapsed_ms=$((finished - started))"
+          echo "load_scheduler_status=${status}"
           test "${status}" -eq 0
-          test -s .sdlc-five-worker/pytest.xml
+          test -s .sdlc-load-evaluation/pytest.xml
 
       - name: Prove workspace-only substitution
         shell: bash
         run: |
           set -euo pipefail
-          git diff -- scripts/sdlc/workflow_lane.py
-          test "$(git diff --numstat -- scripts/sdlc/workflow_lane.py | awk '{print $1 ":" $2}')" = "1:1"
+          git diff --check
+          git diff -- \
+            scripts/sdlc/workflow_lane.py \
+            newsroom/tests/test_sdlc_core_worker_capacity.py \
+            newsroom/tests/test_sdlc_workflow_lane.py
+          test "$(git diff --name-only | wc -l)" -eq 3
