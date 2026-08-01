@@ -1,9 +1,9 @@
 name: Temporary Increment 5A attempt-bound admission v2 migration
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/increment-5a-retrieval-contract
+      - main
     paths:
       - scripts/temp_increment5a_attempt_bound_admission.py
       - .github/workflows/temp-increment5a-attempt-bound-admission-v2.yml
