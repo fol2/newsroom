@@ -135,9 +135,27 @@ def require_list(value: Any, *, field: str) -> list[Any]:
     return value
 
 
-def require_string(value: Any, *, field: str) -> str:
+def require_string(
+    value: Any,
+    *,
+    field: str,
+    maximum_bytes: int | None = None,
+) -> str:
     if not isinstance(value, str):
         raise Increment5ContractError(f"{field} must be a string")
+    if maximum_bytes is not None:
+        if (
+            isinstance(maximum_bytes, bool)
+            or not isinstance(maximum_bytes, int)
+            or maximum_bytes <= 0
+        ):
+            raise Increment5ContractError(
+                f"{field} maximum byte bound is invalid"
+            )
+        if len(value.encode("utf-8")) > maximum_bytes:
+            raise Increment5ContractError(
+                f"{field} exceeds its maximum byte bound"
+            )
     return value
 
 
