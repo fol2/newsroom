@@ -1,0 +1,34 @@
+name: Temporary Increment 5A restack
+
+on:
+  push:
+    branches:
+      - agent/increment-5a-retrieval-contract
+    paths:
+      - .github/workflows/temp-restack-increment5a.yml
+
+permissions:
+  contents: write
+
+jobs:
+  restack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact Increment 5A branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: agent/increment-5a-retrieval-contract
+          fetch-depth: 0
+
+      - name: Merge corrected main and remove this workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git merge --no-edit origin/main
+          rm .github/workflows/temp-restack-increment5a.yml
+          git add -A
+          git commit -m "chore(increment5): remove temporary restack workflow"
+          git push origin HEAD:agent/increment-5a-retrieval-contract
