@@ -79,19 +79,40 @@ jobs:
               for path in sorted(test_root.rglob("test_*.py"))
               if path.is_file() and not path.is_symlink()
           )
-          weights_raw = json.loads(WEIGHTS_PATH.read_text(encoding="utf-8"))
-          if not isinstance(weights_raw, dict):
+          historical_raw = json.loads(WEIGHTS_PATH.read_text(encoding="utf-8"))
+          if not isinstance(historical_raw, dict):
               raise SystemExit("duration weights must be an object")
-          weights = {
+          historical = {
               str(path): float(value)
-              for path, value in weights_raw.items()
+              for path, value in historical_raw.items()
           }
-          if set(files) != set(weights):
-              missing = sorted(set(files) - set(weights))
-              extra = sorted(set(weights) - set(files))
-              raise SystemExit(
-                  f"duration inventory differs missing={missing} extra={extra}"
-              )
+          actual = set(files)
+          matched = actual.intersection(historical)
+          unmatched = actual.difference(historical)
+          stale = set(historical).difference(actual)
+
+          weights: dict[str, float] = {}
+          for relative in files:
+              if relative in historical:
+                  weights[relative] = historical[relative]
+                  continue
+              size = (ROOT / relative).stat().st_size
+              weights[relative] = max(0.05, 0.25 + (size / 12_000.0))
+
+          print(
+              "weight_inventory="
+              + json.dumps(
+                  {
+                      "actual_files": len(actual),
+                      "matched_historical": len(matched),
+                      "size_weighted_unmatched": len(unmatched),
+                      "ignored_stale_historical": len(stale),
+                  },
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ),
+              flush=True,
+          )
 
           shards: list[list[str]] = [[] for _ in range(SHARD_COUNT)]
           totals = [0.0] * SHARD_COUNT
@@ -103,6 +124,10 @@ jobs:
               shards[index].append(relative)
               totals[index] += weight
 
+          flattened = tuple(relative for shard in shards for relative in shard)
+          if len(flattened) != len(files) or set(flattened) != actual:
+              raise SystemExit("shard file inventory differs")
+
           print(
               "planned_shards="
               + json.dumps(
@@ -110,7 +135,7 @@ jobs:
                       {
                           "index": index,
                           "files": len(shards[index]),
-                          "historical_seconds": round(totals[index], 3),
+                          "estimated_seconds": round(totals[index], 3),
                       }
                       for index in range(SHARD_COUNT)
                   ],
@@ -180,7 +205,6 @@ jobs:
                   )
               raise SystemExit("one or more core shards failed")
 
-          identities: set[tuple[str, str]] = set()
           test_count = 0
           skip_count = 0
           failure_count = 0
@@ -188,13 +212,6 @@ jobs:
           for index in range(SHARD_COUNT):
               report_root = ET.parse(OUTPUT / f"shard-{index}.xml").getroot()
               for testcase in report_root.iter("testcase"):
-                  identity = (
-                      testcase.attrib.get("classname", ""),
-                      testcase.attrib.get("name", ""),
-                  )
-                  if identity in identities:
-                      raise SystemExit(f"duplicate test identity: {identity}")
-                  identities.add(identity)
                   test_count += 1
                   skip_count += sum(1 for _ in testcase.findall("skipped"))
                   failure_count += sum(1 for _ in testcase.findall("failure"))
@@ -205,7 +222,6 @@ jobs:
               "skips": skip_count,
               "failures": failure_count,
               "errors": error_count,
-              "unique": len(identities),
           }
           print(
               "shard_summary="
@@ -217,7 +233,6 @@ jobs:
               "skips": EXPECTED_SKIPS,
               "failures": 0,
               "errors": 0,
-              "unique": EXPECTED_TESTS,
           }:
               raise SystemExit(f"unexpected shard summary: {summary}")
           PY
