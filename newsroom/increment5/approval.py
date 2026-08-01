@@ -736,11 +736,15 @@ def _repository_loader_factory(
     *,
     path: Path,
     expected_digest: str | None,
+    parser: Callable[[Path], Increment5AApprovalAttestation] = (
+        load_increment5a_approval_attestation
+    ),
 ) -> Callable[[], Increment5AApprovalAttestation | None]:
     # Capture both values in a closure at import.  Reassigning the public path or
     # digest constants cannot substitute another record for production gates.
     captured_path = path
     captured_digest = expected_digest
+    captured_parser = parser
 
     def load() -> Increment5AApprovalAttestation | None:
         if captured_digest is None:
@@ -762,7 +766,7 @@ def _repository_loader_factory(
             raise Increment5ContractError(
                 "admitted repository owner approval record is missing"
             )
-        approval = load_increment5a_approval_attestation(captured_path)
+        approval = captured_parser(captured_path)
         if approval.attestation_digest != captured_digest:
             raise Increment5ContractError(
                 "repository owner approval record digest differs"
@@ -802,80 +806,151 @@ def require_repository_approval_record(
     return approval
 
 
-class Increment5ADecisionAuthority:
-    """Read-only status facade; production gates trust the repository record."""
+def _effective_contract_digest_factory(
+    *,
+    proposal: Increment5ADecisionPacket,
+    qualification_schema_digest: str,
+    approval_effect: str,
+) -> Callable[[Increment5AApprovalAttestation | None], str]:
+    captured_proposal = proposal
+    captured_schema_digest = qualification_schema_digest
+    captured_effect = approval_effect
 
-    __slots__ = ()
-
-    @property
-    def proposal(self) -> Increment5ADecisionPacket:
-        return INCREMENT_5A_DECISION_PACKET
-
-    @property
-    def production_authorized(self) -> bool:
-        return repository_approval_record() is not None
-
-    @property
-    def approval_attestation_digest(self) -> str | None:
-        approval = repository_approval_record()
-        return None if approval is None else approval.attestation_digest
-
-    @property
-    def approval_claim_digest(self) -> str | None:
-        return self.approval_attestation_digest
-
-    @property
-    def effective_contract_digest(self) -> str:
+    def effective_contract_digest_for(
+        approval: Increment5AApprovalAttestation | None,
+    ) -> str:
         return digest_bytes(
             canonical_json_bytes(
                 {
                     "contract": "increment5a-effective-decision-authority-v4",
-                    "proposal_payload_digest": self.proposal.payload_digest,
-                    "proposal_record_digest": self.proposal.record_digest,
+                    "proposal_payload_digest": captured_proposal.payload_digest,
+                    "proposal_record_digest": captured_proposal.record_digest,
                     "proposal_contract_bundle_digest": (
-                        self.proposal.bundle.contract_digest
+                        captured_proposal.bundle.contract_digest
                     ),
-                    "approval_record_digest": self.approval_attestation_digest,
+                    "approval_record_digest": (
+                        None
+                        if approval is None
+                        else approval.attestation_digest
+                    ),
                     "qualification_production_profile_schema_digest": (
-                        _qualification_schema_digest()
+                        captured_schema_digest
                     ),
                     "protected_content_allowed": False,
                     "approval_effect": (
-                        APPROVAL_EFFECT if self.production_authorized else None
+                        captured_effect if approval is not None else None
                     ),
                 }
             )
         )
 
-    def component_authorized(self, kind: RetrievalComponentKind) -> bool:
-        if not isinstance(kind, RetrievalComponentKind):
-            raise Increment5ProfileError(
-                "retrieval component kind must be typed"
-            )
-        approval = repository_approval_record()
-        if approval is None:
-            return False
-        expected = self.proposal.bundle.component_by_kind[kind].identity_digest
-        return approval.component_digest_by_kind.get(kind) == expected
+    return effective_contract_digest_for
 
-    def require_profile(self, profile: RetrievalProfileKind) -> None:
-        if not isinstance(profile, RetrievalProfileKind):
-            raise Increment5ProfileError(
-                "retrieval profile must be typed"
-            )
-        if profile is RetrievalProfileKind.FIXTURE_REPLAY:
-            self.proposal.require_profile(profile)
-            return
-        approval = require_repository_approval_record()
-        for kind in RetrievalComponentKind:
-            expected = self.proposal.bundle.component_by_kind[kind].identity_digest
-            if approval.component_digest_by_kind.get(kind) != expected:
+
+_EFFECTIVE_CONTRACT_DIGEST_FOR = _effective_contract_digest_factory(
+    proposal=INCREMENT_5A_DECISION_PACKET,
+    qualification_schema_digest=_qualification_schema_digest(),
+    approval_effect=APPROVAL_EFFECT,
+)
+
+
+def _decision_authority_class_factory(
+    *,
+    proposal: Increment5ADecisionPacket,
+    load_approval: Callable[[], Increment5AApprovalAttestation | None],
+    effective_contract_digest_for: Callable[
+        [Increment5AApprovalAttestation | None], str
+    ],
+) -> type:
+    captured_proposal = proposal
+    captured_loader = load_approval
+    captured_effective_digest = effective_contract_digest_for
+
+    class Increment5ADecisionAuthority:
+        """Read-only facade closed over the reviewed repository record."""
+
+        __slots__ = ()
+
+        @property
+        def proposal(self) -> Increment5ADecisionPacket:
+            return captured_proposal
+
+        @property
+        def production_authorized(self) -> bool:
+            return captured_loader() is not None
+
+        @property
+        def approval_attestation_digest(self) -> str | None:
+            approval = captured_loader()
+            return None if approval is None else approval.attestation_digest
+
+        @property
+        def approval_claim_digest(self) -> str | None:
+            return self.approval_attestation_digest
+
+        @property
+        def effective_contract_digest(self) -> str:
+            return captured_effective_digest(captured_loader())
+
+        def component_authorized(
+            self,
+            kind: RetrievalComponentKind,
+        ) -> bool:
+            if not isinstance(kind, RetrievalComponentKind):
                 raise Increment5ProfileError(
-                    "production qualification component approval is incomplete"
+                    "retrieval component kind must be typed"
                 )
+            approval = captured_loader()
+            if approval is None:
+                return False
+            expected = captured_proposal.bundle.component_by_kind[
+                kind
+            ].identity_digest
+            return approval.component_digest_by_kind.get(kind) == expected
+
+        def require_profile(self, profile: RetrievalProfileKind) -> None:
+            if not isinstance(profile, RetrievalProfileKind):
+                raise Increment5ProfileError(
+                    "retrieval profile must be typed"
+                )
+            if profile is RetrievalProfileKind.FIXTURE_REPLAY:
+                captured_proposal.require_profile(profile)
+                return
+            approval = captured_loader()
+            if approval is None:
+                raise Increment5ProfileError(
+                    "PRODUCTION is not authorized without the admitted "
+                    "repository owner approval record"
+                )
+            for kind in RetrievalComponentKind:
+                expected = captured_proposal.bundle.component_by_kind[
+                    kind
+                ].identity_digest
+                if approval.component_digest_by_kind.get(kind) != expected:
+                    raise Increment5ProfileError(
+                        "production qualification component approval is "
+                        "incomplete"
+                    )
+
+    return Increment5ADecisionAuthority
 
 
+Increment5ADecisionAuthority = _decision_authority_class_factory(
+    proposal=INCREMENT_5A_DECISION_PACKET,
+    load_approval=_LOAD_REPOSITORY_APPROVAL,
+    effective_contract_digest_for=_EFFECTIVE_CONTRACT_DIGEST_FOR,
+)
 INCREMENT_5A_DECISION_AUTHORITY = Increment5ADecisionAuthority()
+
+
+from . import profiles as _profiles_module
+
+_profiles_module._bind_repository_authority_once(
+    authority=INCREMENT_5A_DECISION_AUTHORITY,
+    load_approval=_LOAD_REPOSITORY_APPROVAL,
+    effective_contract_digest_for=_EFFECTIVE_CONTRACT_DIGEST_FOR,
+)
+del _profiles_module
 
 
 def decision_authority() -> Increment5ADecisionAuthority:

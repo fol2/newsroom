@@ -10,6 +10,7 @@ import pytest
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.types import UtcTimestamp
 import newsroom.increment5.approval as approval_module
+import newsroom.increment5.profiles as profiles_module
 from newsroom.increment5 import (
     APPROVAL_ATTESTATION_SCHEMA_DIGEST,
     APPROVAL_ATTESTATION_SCHEMA_PATH,
@@ -161,14 +162,47 @@ def test_public_constant_or_loader_reassignment_cannot_admit_record(
         "_LOAD_REPOSITORY_APPROVAL",
         lambda: record,
     )
+    monkeypatch.setattr(
+        approval_module,
+        "repository_approval_record",
+        lambda: record,
+    )
+    monkeypatch.setattr(
+        approval_module,
+        "require_repository_approval_record",
+        lambda: record,
+    )
+    monkeypatch.setattr(
+        approval_module,
+        "load_increment5a_approval_attestation",
+        lambda _path: record,
+    )
+    monkeypatch.setattr(
+        approval_module,
+        "INCREMENT_5A_DECISION_AUTHORITY",
+        Increment5ADecisionAuthority(),
+    )
+    monkeypatch.setattr(
+        profiles_module,
+        "_bind_repository_authority_once",
+        lambda **_kwargs: None,
+    )
 
-    # The public functions captured the source-defined loader in their defaults.
+    # Production gates retain their one-time source binding; replacing public
+    # module attributes after import cannot substitute caller evidence.
     assert repository_approval_record() is None
     with pytest.raises(
         Increment5ProfileError,
         match="admitted repository owner approval record",
     ):
         build_production_qualification_manifest()
+    with pytest.raises(
+        Increment5ProfileError,
+        match="admitted repository owner approval record",
+    ):
+        INCREMENT_5A_DECISION_AUTHORITY.require_profile(
+            RetrievalProfileKind.PRODUCTION
+        )
 
 
 def test_caller_created_authority_objects_cannot_cross_profile_gate() -> None:

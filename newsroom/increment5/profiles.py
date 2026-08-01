@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from jsonschema import Draft202012Validator
 
@@ -42,6 +42,58 @@ QUALIFICATION_PRODUCTION_PROFILE_SCHEMA_PATH = (
 )
 _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
 _REQUIRED_MODES = tuple(item.value for item in RetrievalMode)
+
+RepositoryApprovalBinding = tuple[
+    object,
+    Callable[[], object | None],
+    Callable[[object | None], str],
+]
+
+
+def _repository_authority_binding_factory() -> tuple[
+    Callable[..., None],
+    Callable[[], RepositoryApprovalBinding],
+]:
+    binding: RepositoryApprovalBinding | None = None
+
+    def bind_once(
+        *,
+        authority: object,
+        load_approval: Callable[[], object | None],
+        effective_contract_digest_for: Callable[[object | None], str],
+    ) -> None:
+        nonlocal binding
+        candidate = (
+            authority,
+            load_approval,
+            effective_contract_digest_for,
+        )
+        if binding is None:
+            binding = candidate
+            return
+        if (
+            binding[0] is not authority
+            or binding[1] is not load_approval
+            or binding[2] is not effective_contract_digest_for
+        ):
+            raise Increment5ContractError(
+                "repository approval authority is already bound"
+            )
+
+    def get_binding() -> RepositoryApprovalBinding:
+        if binding is None:
+            raise Increment5ProfileError(
+                "repository approval authority is not initialized"
+            )
+        return binding
+
+    return bind_once, get_binding
+
+
+(
+    _bind_repository_authority_once,
+    _get_repository_authority_binding,
+) = _repository_authority_binding_factory()
 
 
 def _proposal_packet() -> Increment5ADecisionPacket:
@@ -239,10 +291,11 @@ def _require_budget_binding(
         raise Increment5ProfileError("profile budgets differ from the exact proposal")
 
 
-def validate_profile_manifest(
+def _validate_profile_manifest_impl(
     document: Mapping[str, Any],
     *,
     packet: object,
+    _repository_binding: RepositoryApprovalBinding,
 ) -> ValidatedRetrievalProfile:
     if not isinstance(document, Mapping):
         raise Increment5ProfileError("retrieval profile manifest must be an object")
@@ -265,12 +318,23 @@ def validate_profile_manifest(
             qualification_eligible=False,
         )
 
-    from .approval import INCREMENT_5A_DECISION_AUTHORITY, require_repository_approval_record
-
-    if packet is not INCREMENT_5A_DECISION_AUTHORITY:
-        raise Increment5ProfileError("PRODUCTION requires canonical repository authority")
+    (
+        authority,
+        load_approval,
+        effective_contract_digest_for,
+    ) = _repository_binding
+    if packet is not authority:
+        raise Increment5ProfileError(
+            "PRODUCTION requires canonical repository authority"
+        )
     proposal = _proposal_packet()
-    approval = require_repository_approval_record()
+    approval = load_approval()
+    if approval is None:
+        raise Increment5ProfileError(
+            "PRODUCTION is not authorized without the admitted repository "
+            "owner approval record"
+        )
+    effective_contract_digest = effective_contract_digest_for(approval)
     errors = _schema_errors(_QUALIFICATION_PRODUCTION_VALIDATOR, document)
     if errors:
         raise Increment5ProfileError("retrieval profile schema validation failed: " + errors[0])
@@ -282,7 +346,7 @@ def validate_profile_manifest(
         raise Increment5ProfileError("profile proposal contract bundle differs")
     if document["approval_attestation_digest"] != approval.attestation_digest:
         raise Increment5ProfileError("profile approval record digest differs")
-    if document["effective_contract_digest"] != INCREMENT_5A_DECISION_AUTHORITY.effective_contract_digest:
+    if document["effective_contract_digest"] != effective_contract_digest:
         raise Increment5ProfileError("profile effective contract digest differs")
     _require_component_references(document=document, packet=proposal)
     _require_budget_binding(document=document, packet=proposal)
@@ -301,7 +365,7 @@ def validate_profile_manifest(
         proposal_record_digest=proposal.record_digest,
         contract_bundle_digest=proposal.bundle.contract_digest,
         approval_attestation_digest=approval.attestation_digest,
-        effective_contract_digest=INCREMENT_5A_DECISION_AUTHORITY.effective_contract_digest,
+        effective_contract_digest=effective_contract_digest,
         manifest_digest=digest_bytes(canonical_json_bytes(document)),
         qualification_eligible=True,
     )
@@ -320,11 +384,23 @@ def build_fixture_replay_manifest(
     )
 
 
-def build_production_qualification_manifest() -> dict[str, object]:
-    from .approval import INCREMENT_5A_DECISION_AUTHORITY, require_repository_approval_record
-
+def _build_production_qualification_manifest_impl(
+    *,
+    _repository_binding: RepositoryApprovalBinding,
+) -> dict[str, object]:
+    (
+        _authority,
+        load_approval,
+        effective_contract_digest_for,
+    ) = _repository_binding
     proposal = _proposal_packet()
-    approval = require_repository_approval_record()
+    approval = load_approval()
+    if approval is None:
+        raise Increment5ProfileError(
+            "PRODUCTION is not authorized without the admitted repository "
+            "owner approval record"
+        )
+    effective_contract_digest = effective_contract_digest_for(approval)
     components: dict[str, object] = {}
     for kind, identity in proposal.bundle.component_by_kind.items():
         if approval.component_digest_by_kind.get(kind) != identity.identity_digest:
@@ -345,7 +421,7 @@ def build_production_qualification_manifest() -> dict[str, object]:
         "proposal_record_digest": proposal.record_digest,
         "contract_bundle_digest": proposal.bundle.contract_digest,
         "approval_attestation_digest": approval.attestation_digest,
-        "effective_contract_digest": INCREMENT_5A_DECISION_AUTHORITY.effective_contract_digest,
+        "effective_contract_digest": effective_contract_digest,
         "runtime_authority": RuntimeAuthority.PRODUCTION_QUALIFICATION.value,
         "qualification_eligible": True,
         "required_modes": list(_REQUIRED_MODES),
@@ -360,3 +436,41 @@ def build_production_qualification_manifest() -> dict[str, object]:
             "rebuild_must_not_resurrect": True,
         },
     }
+
+
+def _public_profile_gate_factory(
+    *,
+    validate_impl: Callable[..., ValidatedRetrievalProfile],
+    build_impl: Callable[..., dict[str, object]],
+    get_binding: Callable[[], RepositoryApprovalBinding],
+) -> tuple[Callable[..., ValidatedRetrievalProfile], Callable[[], dict[str, object]]]:
+    def validate_profile_manifest(
+        document: Mapping[str, Any],
+        *,
+        packet: object,
+    ) -> ValidatedRetrievalProfile:
+        return validate_impl(
+            document,
+            packet=packet,
+            _repository_binding=get_binding(),
+        )
+
+    def build_production_qualification_manifest() -> dict[str, object]:
+        return build_impl(_repository_binding=get_binding())
+
+    return validate_profile_manifest, build_production_qualification_manifest
+
+
+(
+    validate_profile_manifest,
+    build_production_qualification_manifest,
+) = _public_profile_gate_factory(
+    validate_impl=_validate_profile_manifest_impl,
+    build_impl=_build_production_qualification_manifest_impl,
+    get_binding=_get_repository_authority_binding,
+)
+
+del _validate_profile_manifest_impl
+del _build_production_qualification_manifest_impl
+del _public_profile_gate_factory
+del _get_repository_authority_binding
