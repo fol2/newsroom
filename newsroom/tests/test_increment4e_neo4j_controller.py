@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -173,6 +174,31 @@ def test_increment4_replacement_retires_and_purges_prior_generation(
         apply_before_retry = adapter.apply_count
         cleanup_before_retry = adapter.cleanup_count
         reconcile_before_retry = adapter.reconcile_count
+
+        # Cleanup intent is part of the immutable creation-command identity.
+        # A retry cannot attach to this ACTIVE generation while changing the
+        # original request from purge=True to purge=False.
+        with pytest.raises(
+            ProjectionStateError,
+            match="immutable build intent",
+        ):
+            system.increment4.build_and_promote(
+                replace(
+                    replacement_request,
+                    purge_retired_generation=False,
+                ),
+                proof=extraction_proof(),
+            )
+        assert adapter.apply_count == apply_before_retry
+        assert adapter.cleanup_count == cleanup_before_retry
+        assert adapter.reconcile_count == reconcile_before_retry
+        assert any(key[0] == str(GENERATION_1) for key in adapter.deliveries)
+        assert {
+            key: value
+            for key, value in adapter.deliveries.items()
+            if key[0] == str(GENERATION_2)
+        } == serving_before_retry
+
         system.commands.execute(
             authority_command(
                 key="increment4-retired-cleanup-source-advance-v1",

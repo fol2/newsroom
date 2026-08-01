@@ -6,7 +6,10 @@ from typing import Any, Protocol
 
 from newsroom.authority.auth import AuthenticationProof
 from newsroom.authority.canonical import digest_canonical
-from newsroom.authority.persistence import AuthorityPersistenceError
+from newsroom.authority.persistence import (
+    AuthorityPersistenceError,
+    ExpectedVersionConflict,
+)
 from newsroom.authority.types import UtcTimestamp
 from newsroom.increment4.contracts import INCREMENT4_ADMITTED_FAMILY_ID
 from newsroom.increment4.neo4j import (
@@ -191,6 +194,9 @@ class _Increment4Neo4jBoundary:
                     {
                         "generation_id": str(request.generation_id),
                         "snapshot_digest": snapshot_digest,
+                        "purge_retired_generation": (
+                            request.purge_retired_generation
+                        ),
                     },
                 ),
             ),
@@ -214,11 +220,16 @@ class _Increment4Neo4jBoundary:
         # Prove this is the exact immutable creation-command replay before any
         # graph cleanup. A changed request key or snapshot digest cannot attach to
         # an existing ACTIVE identity and trigger predecessor deletion.
-        self._create_generation(
-            request=request,
-            snapshot_digest=request.snapshot.canonical_digest,
-            proof=proof,
-        )
+        try:
+            self._create_generation(
+                request=request,
+                snapshot_digest=request.snapshot.canonical_digest,
+                proof=proof,
+            )
+        except ExpectedVersionConflict:
+            raise ProjectionStateError(
+                "Increment 4 ACTIVE retry differs from immutable build intent"
+            ) from None
         promotion = self._promotion_for_generation(request.generation_id)
         purged_prior = 0
         if (
