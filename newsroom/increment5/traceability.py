@@ -75,48 +75,195 @@ def _ids(prefix: str, values: tuple[int, ...]) -> frozenset[str]:
 
 
 _ALL_REQUIREMENTS = frozenset().union(
-    _ids("GRAG", (30, 31, 32, 33, 34, 35, 40, 41, 42, 43, 44, 45, 46, 50, 51, 52, 53, 54, 55, 56, 57, 58)),
-    _ids("GRPROD", (*range(1, 6), *range(10, 17), *range(20, 25), *range(30, 33))),
+    _ids(
+        "GRAG",
+        (
+            30,
+            31,
+            32,
+            33,
+            34,
+            35,
+            40,
+            41,
+            42,
+            43,
+            44,
+            45,
+            46,
+            50,
+            51,
+            52,
+            53,
+            54,
+            55,
+            56,
+            57,
+            58,
+        ),
+    ),
+    _ids(
+        "GRPROD",
+        (*range(1, 6), *range(10, 17), *range(20, 25), *range(30, 33)),
+    ),
     _ids("TRI", tuple(range(20, 29))),
-    _ids("DEVAL", (3, *range(10, 15), *range(40, 48), *range(50, 55), 64, *range(70, 75))),
-    _ids("DOPS", (1, 2, 7, *range(10, 17), 26, *range(30, 38), 40, *range(43, 49), 50, 52, 54, 60, 64, 67, 70, *range(72, 77))),
+    _ids(
+        "DEVAL",
+        (3, *range(10, 15), *range(40, 48), *range(50, 55), 64, *range(70, 75)),
+    ),
+    _ids(
+        "DOPS",
+        (
+            1,
+            2,
+            7,
+            *range(10, 17),
+            26,
+            *range(30, 38),
+            40,
+            *range(43, 49),
+            50,
+            52,
+            54,
+            60,
+            64,
+            67,
+            70,
+            *range(72, 77),
+        ),
+    ),
 )
 
 _DELIVERY_GROUPS: dict[Increment5DeliveryTrace, frozenset[str]] = {
-    Increment5DeliveryTrace.DEFERRED_TO_5B: frozenset({"GRAG-031", "TRI-021"}),
+    Increment5DeliveryTrace.DEFERRED_TO_5B: frozenset(
+        {"GRAG-031", "TRI-021"}
+    ),
     Increment5DeliveryTrace.DEFERRED_TO_5C: frozenset(
-        {"GRAG-033", "GRAG-034", "GRAG-035", "TRI-022", "DOPS-026", "DOPS-060", "DOPS-067"}
+        {
+            "GRAG-033",
+            "GRAG-034",
+            "GRAG-035",
+            "TRI-022",
+            "DOPS-026",
+            "DOPS-060",
+            "DOPS-067",
+        }
     ),
     Increment5DeliveryTrace.DEFERRED_TO_5D: frozenset(
         {
-            "GRAG-032", "GRAG-040", "GRAG-041", "GRAG-043", "GRAG-044", "GRAG-045",
-            "GRPROD-021", "GRPROD-024",
-            "TRI-020", "TRI-023", "TRI-024", "TRI-025", "TRI-026", "TRI-027", "TRI-028",
-            "DOPS-010", "DOPS-011", "DOPS-012", "DOPS-013", "DOPS-014", "DOPS-015", "DOPS-016",
-            "DOPS-030", "DOPS-031", "DOPS-032", "DOPS-033", "DOPS-034", "DOPS-040", "DOPS-043",
-            "DOPS-044", "DOPS-046", "DOPS-047", "DOPS-048", "DOPS-050", "DOPS-073",
+            "GRAG-032",
+            "GRAG-040",
+            "GRAG-041",
+            "GRAG-043",
+            "GRAG-044",
+            "GRAG-045",
+            "GRPROD-021",
+            "GRPROD-024",
+            "TRI-020",
+            "TRI-023",
+            "TRI-024",
+            "TRI-025",
+            "TRI-026",
+            "TRI-027",
+            "TRI-028",
+            "DOPS-010",
+            "DOPS-011",
+            "DOPS-012",
+            "DOPS-013",
+            "DOPS-014",
+            "DOPS-015",
+            "DOPS-016",
+            "DOPS-030",
+            "DOPS-031",
+            "DOPS-032",
+            "DOPS-033",
+            "DOPS-034",
+            "DOPS-040",
+            "DOPS-043",
+            "DOPS-044",
+            "DOPS-046",
+            "DOPS-047",
+            "DOPS-048",
+            "DOPS-050",
+            "DOPS-073",
         }
     ),
     Increment5DeliveryTrace.DEFERRED_TO_5E: frozenset(
         {
-            "GRAG-046", "GRAG-050", "GRAG-054", "GRAG-055", "GRAG-056", "GRAG-057",
-            "GRPROD-001", "GRPROD-010", "GRPROD-011", "GRPROD-012", "GRPROD-016", "GRPROD-030", "GRPROD-031",
-            "DEVAL-003", "DEVAL-013", "DEVAL-014", "DEVAL-040", "DEVAL-041", "DEVAL-042", "DEVAL-043",
-            "DEVAL-044", "DEVAL-045", "DEVAL-046", "DEVAL-047", "DEVAL-050", "DEVAL-052", "DEVAL-053",
-            "DEVAL-054", "DEVAL-064", "DEVAL-070", "DEVAL-071", "DEVAL-074",
-            "DOPS-035", "DOPS-036", "DOPS-045", "DOPS-052", "DOPS-054", "DOPS-072", "DOPS-075",
+            "GRAG-046",
+            "GRAG-050",
+            "GRAG-054",
+            "GRAG-055",
+            "GRAG-056",
+            "GRAG-057",
+            "GRPROD-001",
+            "GRPROD-010",
+            "GRPROD-011",
+            "GRPROD-012",
+            "GRPROD-016",
+            "GRPROD-030",
+            "GRPROD-031",
+            "DEVAL-003",
+            "DEVAL-013",
+            "DEVAL-014",
+            "DEVAL-040",
+            "DEVAL-041",
+            "DEVAL-042",
+            "DEVAL-043",
+            "DEVAL-044",
+            "DEVAL-045",
+            "DEVAL-046",
+            "DEVAL-047",
+            "DEVAL-050",
+            "DEVAL-052",
+            "DEVAL-053",
+            "DEVAL-054",
+            "DEVAL-064",
+            "DEVAL-070",
+            "DEVAL-071",
+            "DEVAL-073",
+            "DEVAL-074",
+            "DOPS-035",
+            "DOPS-036",
+            "DOPS-045",
+            "DOPS-052",
+            "DOPS-054",
+            "DOPS-064",
+            "DOPS-072",
+            "DOPS-075",
         }
     ),
     Increment5DeliveryTrace.DELIVERED_IN_5A: frozenset(
         {
-            "GRAG-051", "GRAG-052", "GRAG-053", "GRAG-058",
-            "GRPROD-002", "GRPROD-003", "GRPROD-004", "GRPROD-013", "GRPROD-014", "GRPROD-015",
-            "GRPROD-020", "GRPROD-023", "GRPROD-032",
-            "DEVAL-010", "DEVAL-011", "DEVAL-012", "DEVAL-051", "DEVAL-072", "DEVAL-073",
-            "DOPS-001", "DOPS-002", "DOPS-037", "DOPS-064", "DOPS-070", "DOPS-074", "DOPS-076",
+            "GRAG-051",
+            "GRAG-052",
+            "GRAG-053",
+            "GRAG-058",
+            "GRPROD-002",
+            "GRPROD-003",
+            "GRPROD-004",
+            "GRPROD-013",
+            "GRPROD-014",
+            "GRPROD-015",
+            "GRPROD-020",
+            "GRPROD-023",
+            "GRPROD-032",
+            "DEVAL-010",
+            "DEVAL-011",
+            "DEVAL-012",
+            "DEVAL-051",
+            "DEVAL-072",
+            "DOPS-001",
+            "DOPS-002",
+            "DOPS-037",
+            "DOPS-070",
+            "DOPS-074",
+            "DOPS-076",
         }
     ),
-    Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: frozenset({"GRPROD-022"}),
+    Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: frozenset(
+        {"GRPROD-022"}
+    ),
     Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: frozenset(
         {"GRAG-030", "GRAG-042", "GRPROD-005", "DOPS-007"}
     ),
@@ -124,9 +271,15 @@ _DELIVERY_GROUPS: dict[Increment5DeliveryTrace, frozenset[str]] = {
 
 _PENDING_OWNER_APPROVAL = frozenset(
     {
-        "GRAG-058", "GRPROD-022", "GRPROD-032",
-        "DEVAL-010", "DEVAL-051", "DEVAL-073",
-        "DOPS-001", "DOPS-002", "DOPS-076",
+        "GRAG-058",
+        "GRPROD-022",
+        "GRPROD-032",
+        "DEVAL-010",
+        "DEVAL-051",
+        "DEVAL-073",
+        "DOPS-001",
+        "DOPS-002",
+        "DOPS-076",
     }
 )
 _INHERITED_AUTHORITY = frozenset(
@@ -143,20 +296,40 @@ _ISSUE_BY_DELIVERY = {
     Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: 144,
 }
 _SYMBOL_BY_DELIVERY = {
-    Increment5DeliveryTrace.DELIVERED_IN_5A: "newsroom.increment5.decision:load_increment5a_decision_packet",
-    Increment5DeliveryTrace.DEFERRED_TO_5B: "newsroom.retrieval:RetrievalRuntime",
-    Increment5DeliveryTrace.DEFERRED_TO_5C: "newsroom.retrieval.tools:NamedRetrievalToolRegistry",
-    Increment5DeliveryTrace.DEFERRED_TO_5D: "newsroom.retrieval:RetrievalContext",
-    Increment5DeliveryTrace.DEFERRED_TO_5E: "newsroom.increment5.qualification:Increment5QualificationReport",
-    Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: "newsroom.increment5.profiles:validate_profile_manifest",
-    Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: "newsroom.increment4:INCREMENT4_ADMITTED_CONTRACT_REGISTRY",
+    Increment5DeliveryTrace.DELIVERED_IN_5A: (
+        "newsroom.increment5.decision:load_increment5a_decision_packet"
+    ),
+    Increment5DeliveryTrace.DEFERRED_TO_5B: (
+        "newsroom.retrieval:RetrievalRuntime"
+    ),
+    Increment5DeliveryTrace.DEFERRED_TO_5C: (
+        "newsroom.retrieval.tools:NamedRetrievalToolRegistry"
+    ),
+    Increment5DeliveryTrace.DEFERRED_TO_5D: (
+        "newsroom.retrieval:RetrievalContext"
+    ),
+    Increment5DeliveryTrace.DEFERRED_TO_5E: (
+        "newsroom.increment5.qualification:Increment5QualificationReport"
+    ),
+    Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: (
+        "newsroom.increment5.profiles:validate_profile_manifest"
+    ),
+    Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: (
+        "newsroom.increment4:INCREMENT4_ADMITTED_CONTRACT_REGISTRY"
+    ),
 }
 
 
 def _delivery_for(requirement_id: str) -> Increment5DeliveryTrace:
-    matches = [delivery for delivery, ids in _DELIVERY_GROUPS.items() if requirement_id in ids]
+    matches = [
+        delivery
+        for delivery, ids in _DELIVERY_GROUPS.items()
+        if requirement_id in ids
+    ]
     if len(matches) != 1:
-        raise RuntimeError(f"requirement has ambiguous Increment 5 delivery: {requirement_id}")
+        raise RuntimeError(
+            f"requirement has ambiguous Increment 5 delivery: {requirement_id}"
+        )
     return matches[0]
 
 
@@ -200,11 +373,15 @@ def _row(requirement_id: str) -> Increment5TraceabilityRow:
 
 
 if frozenset().union(*_DELIVERY_GROUPS.values()) != _ALL_REQUIREMENTS:
-    raise RuntimeError("Increment 5 delivery groups do not cover exact requirements")
+    raise RuntimeError(
+        "Increment 5 delivery groups do not cover exact requirements"
+    )
 if sum(len(ids) for ids in _DELIVERY_GROUPS.values()) != len(_ALL_REQUIREMENTS):
     raise RuntimeError("Increment 5 delivery groups overlap")
 
-INCREMENT5_TRACEABILITY = tuple(_row(item) for item in sorted(_ALL_REQUIREMENTS))
+INCREMENT5_TRACEABILITY = tuple(
+    _row(item) for item in sorted(_ALL_REQUIREMENTS)
+)
 INCREMENT5_TRACEABILITY_BY_REQUIREMENT = {
     row.requirement_id: row for row in INCREMENT5_TRACEABILITY
 }
