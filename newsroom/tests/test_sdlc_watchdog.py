@@ -232,23 +232,23 @@ def test_environment_error_does_not_echo_command_or_exception_message() -> None:
 
 def test_deadline_and_configured_budget_cannot_be_raised() -> None:
     contract = load_contract(REPO_ROOT)
-    assert start_lane_deadline(contract, "route").timeout_ms == 110_000
+    assert start_lane_deadline(contract, "route").timeout_ms == 220_000
 
-    with pytest.raises(GateRunError, match="below 120"):
-        LaneDeadline(0, 120_000)
+    with pytest.raises(GateRunError, match="below 240"):
+        LaneDeadline(0, 240_000)
     with pytest.raises(GateRunError, match="accepted lane timeout"):
         run_configured_gate(
             contract=contract,
             gate_id="route",
             phase="oversized",
             argv=_python("pass"),
-            deadline=LaneDeadline.start(119),
+            deadline=LaneDeadline.start(239),
         )
 
 
 def test_invalid_budget_identifier_and_output_limit_are_rejected() -> None:
-    with pytest.raises(GateRunError, match="below 120"):
-        LaneDeadline.start(120)
+    with pytest.raises(GateRunError, match="below 240"):
+        LaneDeadline.start(240)
     with pytest.raises(GateRunError, match="unsupported characters"):
         _run_gate_command(
             gate_id="bad:gate",

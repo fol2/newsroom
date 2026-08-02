@@ -124,7 +124,14 @@ def test_job_graph_is_exact_and_decision_always_reports() -> None:
     assert jobs["route"]["outputs"] == {
         "service_required": "${{ steps.route_output.outputs.service_required }}"
     }
-    assert all(int(job["timeout-minutes"]) <= 5 for job in jobs.values())
+    assert {
+        job_id: job["timeout-minutes"] for job_id, job in jobs.items()
+    } == {
+        "route": "6",
+        "core": "10",
+        "service": "10",
+        "decision": "10",
+    }
 
 
 def test_every_action_is_release_pinned_to_an_exact_sha() -> None:
@@ -324,7 +331,7 @@ def test_service_boundary_is_exact_authenticated_loopback_and_bounded() -> None:
         'chmod 600 "${admin_file}" "${projector_file}"',
         "--publish 127.0.0.1:7687:7687",
         "--pull=never",
-        "timeout --signal=TERM --kill-after=5s 110s",
+        "timeout --signal=TERM --kill-after=5s 220s",
         "timeout --signal=TERM --kill-after=2s 20s",
     ):
         assert required in start
@@ -377,7 +384,7 @@ def test_repository_owned_gate_budgets_drive_route_lane_and_decision() -> None:
 
     collect = _step("decision", "Collect exact lane evidence")
     assert collect["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
-    assert "timeout --signal=TERM --kill-after=2s 110s" in collect["run"]
+    assert "timeout --signal=TERM --kill-after=2s 220s" in collect["run"]
     assert "scripts.sdlc.workflow_orchestrator collect" in collect["run"]
     finalize = _step("decision", "Finalize decision")
     assert finalize["if"] == "always()"

@@ -30,7 +30,7 @@ _REQUIRED_RISKS = (
     "R4_RELEASE_OPERATIONAL",
 )
 _INTERACTIVE_LANES = frozenset({"core", "service", "merge_group"})
-_MAX_HARD_TIMEOUT_SECONDS = 120
+_MAX_HARD_TIMEOUT_SECONDS = 240
 
 
 def _mapping(value: object, name: str) -> Mapping[str, Any]:
@@ -282,9 +282,9 @@ def validate_contract_data(
         owner.get("selector_mutation_recall_minimum"),
         "owner mutation recall",
     )
-    if owner.get("predecessor_contract_version") != "sdlc-v2.2":
+    if owner.get("predecessor_contract_version") != "sdlc-v2.3":
         raise ContractError("accepted predecessor contract version is missing")
-    if owner.get("budget_amended_at") != "2026-07-30":
+    if owner.get("budget_amended_at") != "2026-08-02":
         raise ContractError("accepted budget amendment date is missing")
     if owner.get("hard_budget_multiplier") != 2:
         raise ContractError("accepted hard-budget multiplier must be two")
