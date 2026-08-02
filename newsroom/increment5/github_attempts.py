@@ -333,6 +333,24 @@ def _isolated_authenticator_factory(
         subprocess.run
     ),
     read_bytes: Callable[[Path], bytes] = Path.read_bytes,
+    validate_certificate: Callable[..., None] = (
+        _validate_authentication_certificate
+    ),
+    canonical_bytes: Callable[[object], bytes] = canonical_json_bytes,
+    digest: Callable[[bytes], str] = digest_bytes,
+    loads: Callable[..., Any] = json.loads,
+    duplicate_name_hook: Callable[[list[tuple[str, Any]]], dict[str, Any]] = (
+        object_without_duplicate_names
+    ),
+    token_getter: Callable[[str], str | None] = os.environ.get,
+    record_type: type = Increment5AMainQualificationRecord,
+    contract_error_type: type[Exception] = Increment5ContractError,
+    json_error_type: type[Exception] = json.JSONDecodeError,
+    timeout_error_type: type[Exception] = subprocess.TimeoutExpired,
+    process_devnull: int = subprocess.DEVNULL,
+    process_pipe: int = subprocess.PIPE,
+    timeout_seconds: float = _AUTHENTICATION_TIMEOUT_SECONDS,
+    maximum_output_bytes: int = _MAX_AUTHENTICATION_OUTPUT_BYTES,
 ) -> Callable[
     [Increment5AMainQualificationRecord],
     Increment5AMainQualificationRecord,
@@ -346,11 +364,25 @@ def _isolated_authenticator_factory(
     captured_executable = str(Path(executable).resolve())
     captured_run_process = run_process
     captured_read_bytes = read_bytes
+    captured_validate_certificate = validate_certificate
+    captured_canonical_bytes = canonical_bytes
+    captured_digest = digest
+    captured_loads = loads
+    captured_duplicate_name_hook = duplicate_name_hook
+    captured_token_getter = token_getter
+    captured_record_type = record_type
+    captured_contract_error_type = contract_error_type
+    captured_json_error_type = json_error_type
+    captured_timeout_error_type = timeout_error_type
+    captured_process_devnull = process_devnull
+    captured_process_pipe = process_pipe
+    captured_timeout_seconds = timeout_seconds
+    captured_maximum_output_bytes = maximum_output_bytes
     if not captured_verifier_path.is_file():
         raise Increment5ContractError(
             "isolated GitHub admission verifier is missing"
         )
-    verifier_source_digest = digest_bytes(
+    verifier_source_digest = captured_digest(
         captured_read_bytes(captured_verifier_path)
     )
     repository_root = Path(__file__).resolve().parents[2]
@@ -360,31 +392,31 @@ def _isolated_authenticator_factory(
         record: Increment5AMainQualificationRecord,
     ) -> Increment5AMainQualificationRecord:
         nonlocal authenticated_record_digest
-        if not isinstance(record, Increment5AMainQualificationRecord):
-            raise Increment5ContractError(
+        if type(record) is not captured_record_type:
+            raise captured_contract_error_type(
                 "repository admission requires typed main qualification"
             )
         if authenticated_record_digest == record.record_digest:
             return record
-        token = os.environ.get("GITHUB_TOKEN")
+        token = captured_token_getter("GITHUB_TOKEN")
         if (
             not isinstance(token, str)
             or not token
             or any(character.isspace() for character in token)
         ):
-            raise Increment5ContractError(
+            raise captured_contract_error_type(
                 "authenticated GitHub workflow evidence is unavailable"
             )
         try:
-            current_digest = digest_bytes(
+            current_digest = captured_digest(
                 captured_read_bytes(captured_verifier_path)
             )
         except OSError as exc:
-            raise Increment5ContractError(
+            raise captured_contract_error_type(
                 "isolated GitHub admission verifier is unavailable"
             ) from exc
         if current_digest != verifier_source_digest:
-            raise Increment5ContractError(
+            raise captured_contract_error_type(
                 "isolated GitHub admission verifier source differs"
             )
 
@@ -409,42 +441,42 @@ def _isolated_authenticator_factory(
                 command,
                 cwd=repository_root,
                 env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdin=captured_process_devnull,
+                stdout=captured_process_pipe,
+                stderr=captured_process_pipe,
                 check=False,
-                timeout=_AUTHENTICATION_TIMEOUT_SECONDS,
+                timeout=captured_timeout_seconds,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise Increment5ContractError(
+        except (OSError, captured_timeout_error_type) as exc:
+            raise captured_contract_error_type(
                 "authenticated GitHub workflow evidence is unavailable"
             ) from exc
         if completed.returncode != 0:
-            raise Increment5ContractError(
+            raise captured_contract_error_type(
                 "authenticated GitHub workflow evidence is unavailable"
             )
         payload = completed.stdout
         if (
             not isinstance(payload, bytes)
-            or not 0 < len(payload) <= _MAX_AUTHENTICATION_OUTPUT_BYTES
+            or not 0 < len(payload) <= captured_maximum_output_bytes
         ):
-            raise Increment5ContractError(
+            raise captured_contract_error_type(
                 "GitHub authentication certificate is unavailable"
             )
         try:
-            certificate = json.loads(
+            certificate = captured_loads(
                 payload.decode("utf-8", errors="strict"),
-                object_pairs_hook=object_without_duplicate_names,
+                object_pairs_hook=captured_duplicate_name_hook,
             )
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise Increment5ContractError(
+        except (UnicodeError, captured_json_error_type) as exc:
+            raise captured_contract_error_type(
                 "GitHub authentication certificate is invalid"
             ) from exc
-        if payload != canonical_json_bytes(certificate) + b"\n":
-            raise Increment5ContractError(
+        if payload != captured_canonical_bytes(certificate) + b"\n":
+            raise captured_contract_error_type(
                 "GitHub authentication certificate is not canonical"
             )
-        _validate_authentication_certificate(
+        captured_validate_certificate(
             record=record,
             value=certificate,
             verifier_source_digest=verifier_source_digest,
@@ -452,6 +484,13 @@ def _isolated_authenticator_factory(
         authenticated_record_digest = record.record_digest
         return record
 
+    authenticate.__name__ = "authenticate_repository_main_qualification_record"
+    authenticate.__qualname__ = (
+        "authenticate_repository_main_qualification_record"
+    )
+    authenticate.__doc__ = (
+        "Authenticate source-pinned main admission in an isolated process."
+    )
     return authenticate
 
 
@@ -461,18 +500,10 @@ _VERIFIER_PATH = (
     / "sdlc"
     / "increment5_github_admission.py"
 )
-_AUTHENTICATE_REPOSITORY_MAIN_QUALIFICATION = (
+authenticate_repository_main_qualification_record = (
     _isolated_authenticator_factory(
         verifier_path=_VERIFIER_PATH,
         record_path=MAIN_QUALIFICATION_RECORD_PATH,
     )
 )
 del _isolated_authenticator_factory
-
-
-def authenticate_repository_main_qualification_record(
-    record: Increment5AMainQualificationRecord,
-) -> Increment5AMainQualificationRecord:
-    """Authenticate source-pinned main admission in an isolated process."""
-
-    return _AUTHENTICATE_REPOSITORY_MAIN_QUALIFICATION(record)
