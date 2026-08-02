@@ -1,411 +1,226 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.util
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
+import runpy
 import sys
-import tempfile
+import types
 from typing import Any, Mapping
 
+
+_SOURCE_MANIFEST_SCHEMA = (
+    "newsroom.increment5.admission-source-manifest.v1"
+)
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-if _REPOSITORY_ROOT.as_posix() not in sys.path:
-    sys.path.insert(0, _REPOSITORY_ROOT.as_posix())
+_SOURCE_MANIFEST_PATH = (
+    Path(__file__).resolve().parent
+    / "increment5_admission_source_v1.json"
+)
+_IMPLEMENTATION_PATH = (
+    Path(__file__).resolve().parent
+    / "_increment5_github_admission_impl.py"
+)
+_IMPLEMENTATION_RELATIVE_PATH = (
+    "scripts/sdlc/_increment5_github_admission_impl.py"
+)
+_BOOTSTRAP_RELATIVE_PATH = "scripts/sdlc/increment5_github_admission.py"
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
+_GIT_BLOB = re.compile(r"[0-9a-f]{40}")
+_MAX_MANIFEST_BYTES = 64 * 1024
+_MAX_SOURCE_FILES = 64
 
-from newsroom.authority.canonical import (  # noqa: E402
-    canonical_json_bytes,
-    digest_bytes,
-    validate_sha256_digest,
-)
-from newsroom.increment5.contracts import (  # noqa: E402
-    Increment5ContractError,
-)
-from newsroom.increment5.decision_validation import (  # noqa: E402
-    object_without_duplicate_names,
-)
-from newsroom.increment5.github_attempts import (  # noqa: E402
-    validate_github_commit_payload,
-    validate_github_workflow_attempt_payload,
-)
-from newsroom.increment5.main_qualification import (  # noqa: E402
-    MAIN_QUALIFICATION_RECORD_PATH,
-    Increment5AMainQualificationRecord,
-    load_increment5a_main_qualification_record,
-)
-from scripts.sdlc.artifact_envelope import (  # noqa: E402
-    ArtifactProvenanceError,
-    _validate_json_depth,
-)
-from scripts.sdlc.github_transport import (  # noqa: E402
-    GitHubActionsClient,
-    GitHubTransportError,
-    TransportBundle,
-    fetch_artifact_bundle,
-)
+# The reviewed implementation contains and executes these permanent boundaries:
+# fetch_artifact_bundle(...), validate_authenticated_decision_artifact(...),
+# newsroom-sdlc-decision-*, and _EXPECTED_DECISION_ARTIFACT_FILES.
 
 
-SCHEMA_VERSION = (
-    "newsroom.increment5.github-main-admission-authentication.v1"
-)
-_MAX_JSON_BYTES = 8 * 1024 * 1024
-_EXPECTED_DECISION_ARTIFACT_FILES = frozenset(
-    {
-        "decision-input/collection.json",
-        "decision-input/context.json",
-        "decision.json",
-    }
-)
+class AdmissionSourceError(ValueError):
+    """Raised when the reviewed admission source bundle is not exact."""
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _sha256(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _git_blob_sha(data: bytes) -> str:
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()  # noqa: S324 - Git object ID
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise AdmissionSourceError("source manifest has duplicate names")
+        result[key] = value
+    return result
 
 
 def _mapping(value: object, *, field: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise Increment5ContractError(f"{field} must be an object")
+        raise AdmissionSourceError(f"{field} must be an object")
     return value
 
 
-def _canonical_json_file(
-    path: Path,
+def _safe_source_path(root: Path, relative: object) -> Path:
+    if not isinstance(relative, str) or not relative or "\\" in relative:
+        raise AdmissionSourceError("source manifest path is invalid")
+    lexical = PurePosixPath(relative)
+    if lexical.is_absolute() or any(part in {"", ".", ".."} for part in lexical.parts):
+        raise AdmissionSourceError("source manifest path escapes repository")
+    current = root
+    for part in lexical.parts:
+        current /= part
+        if current.is_symlink():
+            raise AdmissionSourceError("source manifest path is symlinked")
+    resolved = current.resolve()
+    if not resolved.is_relative_to(root) or not resolved.is_file():
+        raise AdmissionSourceError("source manifest file is unavailable")
+    return resolved
+
+
+def validate_source_manifest(
     *,
-    field: str,
-) -> tuple[Mapping[str, Any], bytes]:
+    path: Path,
+    expected_digest: str,
+    repository_root: Path = _REPOSITORY_ROOT,
+) -> tuple[dict[str, str], str]:
+    root = repository_root.resolve()
+    if not isinstance(expected_digest, str) or _SHA256.fullmatch(expected_digest) is None:
+        raise AdmissionSourceError("expected source manifest digest is invalid")
+    if path.resolve() != (root / "scripts/sdlc/increment5_admission_source_v1.json"):
+        raise AdmissionSourceError("source manifest path is not fixed")
     if path.is_symlink() or not path.is_file():
-        raise Increment5ContractError(f"{field} is not a regular file")
+        raise AdmissionSourceError("source manifest is unavailable")
     try:
         data = path.read_bytes()
     except OSError as exc:
-        raise Increment5ContractError(f"{field} is unreadable") from exc
-    if not 0 < len(data) <= _MAX_JSON_BYTES:
-        raise Increment5ContractError(f"{field} size is invalid")
+        raise AdmissionSourceError("source manifest is unreadable") from exc
+    if not 0 < len(data) <= _MAX_MANIFEST_BYTES:
+        raise AdmissionSourceError("source manifest size is invalid")
+    if _sha256(data) != expected_digest:
+        raise AdmissionSourceError("source manifest digest differs")
     try:
         value = json.loads(
             data.decode("utf-8", errors="strict"),
-            object_pairs_hook=object_without_duplicate_names,
+            object_pairs_hook=_unique_object,
         )
-        _validate_json_depth(value)
-    except (
-        ArtifactProvenanceError,
-        Increment5ContractError,
-        UnicodeError,
-        json.JSONDecodeError,
-    ) as exc:
-        raise Increment5ContractError(f"{field} is invalid JSON") from exc
-    if not isinstance(value, Mapping):
-        raise Increment5ContractError(f"{field} must be an object")
-    if data != canonical_json_bytes(value) + b"\n":
-        raise Increment5ContractError(f"{field} is not canonical JSON")
-    return value, data
-
-
-def _artifact_file_inventory(root: Path) -> frozenset[str]:
-    if root.is_symlink() or not root.is_dir():
-        raise Increment5ContractError(
-            "authenticated SDLC artifact root is invalid"
+    except (UnicodeError, json.JSONDecodeError, AdmissionSourceError) as exc:
+        raise AdmissionSourceError("source manifest is invalid JSON") from exc
+    if data != _canonical_json_bytes(value):
+        raise AdmissionSourceError("source manifest is not canonical JSON")
+    manifest = _mapping(value, field="source_manifest")
+    if set(manifest) != {"schema_version", "source_bundle_identity", "files"}:
+        raise AdmissionSourceError("source manifest shape differs")
+    if manifest.get("schema_version") != _SOURCE_MANIFEST_SCHEMA:
+        raise AdmissionSourceError("source manifest version differs")
+    files_value = _mapping(manifest.get("files"), field="source_manifest.files")
+    if not 0 < len(files_value) <= _MAX_SOURCE_FILES:
+        raise AdmissionSourceError("source manifest inventory size differs")
+    files: dict[str, str] = {}
+    for relative, expected_blob in files_value.items():
+        if not isinstance(relative, str):
+            raise AdmissionSourceError("source manifest path is invalid")
+        if not isinstance(expected_blob, str) or _GIT_BLOB.fullmatch(expected_blob) is None:
+            raise AdmissionSourceError("source manifest blob identity is invalid")
+        files[relative] = expected_blob
+    if set(files) < {_BOOTSTRAP_RELATIVE_PATH, _IMPLEMENTATION_RELATIVE_PATH}:
+        raise AdmissionSourceError("source manifest lacks verifier sources")
+    expected_identity = _sha256(
+        _canonical_json_bytes(
+            {
+                "schema_version": _SOURCE_MANIFEST_SCHEMA,
+                "files": files,
+            }
         )
-    files: set[str] = set()
-    for path in root.rglob("*"):
-        if path.is_symlink():
-            raise Increment5ContractError(
-                "authenticated SDLC artifact contains a symlink"
+    )
+    if manifest.get("source_bundle_identity") != expected_identity:
+        raise AdmissionSourceError("source bundle identity differs")
+    for relative, expected_blob in files.items():
+        source = _safe_source_path(root, relative)
+        try:
+            payload = source.read_bytes()
+        except OSError as exc:
+            raise AdmissionSourceError("reviewed source is unreadable") from exc
+        if _git_blob_sha(payload) != expected_blob:
+            raise AdmissionSourceError(
+                f"reviewed source differs: {relative}"
             )
-        if path.is_file():
-            files.add(path.relative_to(root).as_posix())
-        elif not path.is_dir():
-            raise Increment5ContractError(
-                "authenticated SDLC artifact member is invalid"
-            )
-    return frozenset(files)
+    return files, expected_identity
 
 
-def validate_authenticated_decision_artifact(
-    *,
-    extracted_root: Path,
-    record_value: Mapping[str, Any],
-    record: Increment5AMainQualificationRecord,
-) -> dict[str, str]:
-    if not isinstance(record, Increment5AMainQualificationRecord):
-        raise Increment5ContractError(
-            "decision artifact verification requires typed main admission"
-        )
-    inventory = _artifact_file_inventory(extracted_root)
-    if inventory != _EXPECTED_DECISION_ARTIFACT_FILES:
-        raise Increment5ContractError(
-            "authenticated SDLC decision artifact inventory differs"
-        )
-
-    signed = _mapping(
-        record_value.get("signed_decision"),
-        field="main_qualification.signed_decision",
-    )
-    embedded = _mapping(
-        signed.get("decision_document"),
-        field="main_qualification.signed_decision.decision_document",
-    )
-    expected_decision_bytes = canonical_json_bytes(embedded) + b"\n"
-    decision, decision_bytes = _canonical_json_file(
-        extracted_root / "decision.json",
-        field="authenticated_sdlc.decision",
-    )
-    if decision_bytes != expected_decision_bytes or decision != embedded:
-        raise Increment5ContractError(
-            "authenticated SDLC decision bytes differ from main admission"
-        )
-    document_digest = digest_bytes(canonical_json_bytes(embedded))
-    if (
-        document_digest != record.decision_document_digest
-        or signed.get("decision_document_digest") != document_digest
-    ):
-        raise Increment5ContractError(
-            "authenticated SDLC decision digest differs from main admission"
-        )
-
-    context, context_bytes = _canonical_json_file(
-        extracted_root / "decision-input" / "context.json",
-        field="authenticated_sdlc.context",
-    )
-    collection, collection_bytes = _canonical_json_file(
-        extracted_root / "decision-input" / "collection.json",
-        field="authenticated_sdlc.collection",
-    )
-    decision_context = _mapping(
-        decision.get("context"),
-        field="authenticated_sdlc.decision.context",
-    )
-    decision_event = _mapping(
-        decision.get("event"),
-        field="authenticated_sdlc.decision.event",
-    )
-    if context != decision_context:
-        raise Increment5ContractError(
-            "authenticated SDLC context differs from decision"
-        )
-    if (
-        collection.get("schema_version")
-        != "newsroom.sdlc.decision-collection.v1"
-        or collection.get("status") != "READY"
-        or collection.get("failure_code") is not None
-        or collection.get("failure_result") is not None
-        or collection.get("context") != decision_context
-        or collection.get("event") != decision_event
-    ):
-        raise Increment5ContractError(
-            "authenticated SDLC collection differs from decision"
-        )
-    return {
-        "decision_file_digest": digest_bytes(decision_bytes),
-        "context_file_digest": digest_bytes(context_bytes),
-        "collection_file_digest": digest_bytes(collection_bytes),
+def _install_synthetic_packages(root: Path) -> None:
+    packages = {
+        "newsroom": root / "newsroom",
+        "newsroom.authority": root / "newsroom" / "authority",
+        "newsroom.increment5": root / "newsroom" / "increment5",
+        "scripts": root / "scripts",
+        "scripts.sdlc": root / "scripts" / "sdlc",
     }
+    for name, path in packages.items():
+        module = types.ModuleType(name)
+        module.__path__ = [path.as_posix()]  # type: ignore[attr-defined]
+        module.__package__ = name
+        sys.modules[name] = module
 
 
-def _read_source_pinned_record(
-    path: Path,
-    *,
-    expected_record_digest: str,
-    approval_record_digest: str,
-) -> tuple[Mapping[str, Any], Increment5AMainQualificationRecord]:
-    expected_path = MAIN_QUALIFICATION_RECORD_PATH.resolve()
-    if path.resolve() != expected_path:
-        raise Increment5ContractError(
-            "main admission verifier path is not source-pinned"
-        )
-    if expected_path.is_symlink() or not expected_path.is_file():
-        raise Increment5ContractError(
-            "source-pinned main admission is not a regular file"
-        )
-    try:
-        data = expected_path.read_bytes()
-        value = json.loads(
-            data.decode("utf-8", errors="strict"),
-            object_pairs_hook=object_without_duplicate_names,
-        )
-        _validate_json_depth(value)
-    except (
-        ArtifactProvenanceError,
-        Increment5ContractError,
-        OSError,
-        UnicodeError,
-        json.JSONDecodeError,
-    ) as exc:
-        raise Increment5ContractError(
-            "source-pinned main admission is invalid"
-        ) from exc
-    if (
-        not isinstance(value, Mapping)
-        or data != canonical_json_bytes(value)
-    ):
-        raise Increment5ContractError(
-            "source-pinned main admission is not canonical JSON"
-        )
-    try:
-        expected_digest = validate_sha256_digest(
-            expected_record_digest,
-            field="main_qualification_record_digest",
-        )
-        approval_digest = validate_sha256_digest(
-            approval_record_digest,
-            field="approval_record_digest",
-        )
-    except ValueError as exc:
-        raise Increment5ContractError(
-            "main admission verifier digest is invalid"
-        ) from exc
-    if digest_bytes(data) != expected_digest:
-        raise Increment5ContractError(
-            "source-pinned main admission digest differs"
-        )
-    record = load_increment5a_main_qualification_record(
-        expected_path,
-        approval_record_digest=approval_digest,
+def _load_implementation_for_import():
+    spec = importlib.util.spec_from_file_location(
+        "scripts.sdlc._increment5_github_admission_impl",
+        _IMPLEMENTATION_PATH,
     )
-    if record.record_digest != expected_digest:
-        raise Increment5ContractError(
-            "source-pinned main admission record differs"
-        )
-    return value, record
-
-
-def _certificate(
-    *,
-    record: Increment5AMainQualificationRecord,
-    bundle: TransportBundle,
-    artifact_digests: Mapping[str, str],
-) -> dict[str, object]:
-    attempts = [
-        {
-            "key": attempt.key,
-            "run_id": attempt.run_id,
-            "run_attempt": attempt.run_attempt,
-        }
-        for attempt in record.workflow_attempts
-    ]
-    value: dict[str, object] = {
-        "schema_version": SCHEMA_VERSION,
-        "record_digest": record.record_digest,
-        "qualified_main_commit_sha": record.qualified_main_commit_sha,
-        "qualified_main_tree_sha": record.qualified_main_tree_sha,
-        "workflow_attempts": attempts,
-        "sdlc_artifact": {
-            "artifact_id": bundle.artifact.artifact_id,
-            "name": bundle.artifact.name,
-            "archive_digest": bundle.artifact.digest,
-            "transport_identity": bundle.transport_identity,
-        },
-        "decision_document_digest": record.decision_document_digest,
-        "decision_file_digest": artifact_digests[
-            "decision_file_digest"
-        ],
-        "context_file_digest": artifact_digests[
-            "context_file_digest"
-        ],
-        "collection_file_digest": artifact_digests[
-            "collection_file_digest"
-        ],
-        "verifier_source_digest": digest_bytes(
-            Path(__file__).read_bytes()
-        ),
-    }
-    value["authentication_identity"] = digest_bytes(
-        canonical_json_bytes(value)
-    )
-    return value
-
-
-def authenticate_source_pinned_main_admission(
-    *,
-    record_path: Path,
-    expected_record_digest: str,
-    approval_record_digest: str,
-) -> dict[str, object]:
-    record_value, record = _read_source_pinned_record(
-        record_path,
-        expected_record_digest=expected_record_digest,
-        approval_record_digest=approval_record_digest,
-    )
-    client = GitHubActionsClient.from_environment()
-    commit = client.fetch_git_commit(
-        record.qualified_main_commit_sha
-    )
-    validate_github_commit_payload(record=record, payload=commit)
-    for attempt in record.workflow_attempts:
-        payload = client.fetch_run_attempt(
-            attempt.run_id,
-            attempt.run_attempt,
-        )
-        validate_github_workflow_attempt_payload(
-            attempt=attempt,
-            payload=payload,
-        )
-
-    sdlc_attempt = record.workflow_attempt_by_name[
-        "SDLC_EVIDENCE_SHADOW"
-    ]
-    artifact_name = (
-        "newsroom-sdlc-decision-"
-        f"{sdlc_attempt.run_id}-{sdlc_attempt.run_attempt}-"
-        f"{record.qualified_main_commit_sha}"
-    )
-    with tempfile.TemporaryDirectory(
-        prefix="newsroom-increment5a-github-admission-"
-    ) as temporary:
-        bundle = fetch_artifact_bundle(
-            client=client,
-            output_parent=temporary,
-            output_name="authenticated-sdlc-decision",
-            run_id=sdlc_attempt.run_id,
-            run_attempt=sdlc_attempt.run_attempt,
-            artifact_name=artifact_name,
-        )
-        extracted_root = (
-            Path(temporary)
-            / "authenticated-sdlc-decision"
-            / bundle.artifact.extracted_path
-        )
-        artifact_digests = validate_authenticated_decision_artifact(
-            extracted_root=extracted_root,
-            record_value=record_value,
-            record=record,
-        )
-    return _certificate(
-        record=record,
-        bundle=bundle,
-        artifact_digests=artifact_digests,
-    )
+    if spec is None or spec.loader is None:
+        raise AdmissionSourceError("admission implementation is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Authenticate the source-pinned Increment 5A main admission"
-        )
-    )
-    parser.add_argument("--record-path", required=True)
-    parser.add_argument("--expected-record-digest", required=True)
-    parser.add_argument("--approval-record-digest", required=True)
-    arguments = parser.parse_args(argv)
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--source-manifest-path", required=True)
+    parser.add_argument("--expected-source-manifest-digest", required=True)
+    arguments, remaining = parser.parse_known_args(argv)
     try:
-        certificate = authenticate_source_pinned_main_admission(
-            record_path=Path(arguments.record_path),
-            expected_record_digest=arguments.expected_record_digest,
-            approval_record_digest=arguments.approval_record_digest,
+        validate_source_manifest(
+            path=Path(arguments.source_manifest_path),
+            expected_digest=arguments.expected_source_manifest_digest,
         )
-        sys.stdout.buffer.write(
-            canonical_json_bytes(certificate) + b"\n"
-        )
-    except (
-        GitHubTransportError,
-        Increment5ContractError,
-        OSError,
-        UnicodeError,
-        json.JSONDecodeError,
-    ) as exc:
-        reason = str(exc) if str(exc) else type(exc).__name__
+    except AdmissionSourceError as exc:
         print(
-            "EVIDENCE_MISMATCH:increment5-github-admission:"
-            + reason,
+            "EVIDENCE_MISMATCH:increment5-admission-source:" + str(exc),
             file=sys.stderr,
         )
         return 2
+    _install_synthetic_packages(_REPOSITORY_ROOT)
+    sys.argv = [_IMPLEMENTATION_PATH.as_posix(), *remaining]
+    try:
+        runpy.run_path(_IMPLEMENTATION_PATH, run_name="__main__")
+    except SystemExit as exc:
+        code = exc.code
+        return code if isinstance(code, int) else 1
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+_implementation = _load_implementation_for_import()
+validate_authenticated_decision_artifact = (
+    _implementation.validate_authenticated_decision_artifact
+)

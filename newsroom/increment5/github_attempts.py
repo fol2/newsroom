@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import subprocess
 import sys
 from typing import Any
@@ -13,331 +15,204 @@ from newsroom.authority.canonical import (
     digest_bytes,
     validate_sha256_digest,
 )
-from newsroom.authority.types import UtcTimestamp
 
+from . import _github_attempts_v1 as _reviewed_v1
 from .contracts import Increment5ContractError
 from .decision_validation import object_without_duplicate_names
 from .main_qualification import (
     MAIN_QUALIFICATION_RECORD_PATH,
-    MAIN_QUALIFICATION_REF,
-    MAIN_QUALIFICATION_REPOSITORY,
-    MAIN_QUALIFICATION_REPOSITORY_ID,
-    MAIN_QUALIFICATION_WORKFLOW_PATHS,
     Increment5AMainQualificationRecord,
-    WorkflowAttemptEvidence,
 )
 
 
-_API_PREFIX = (
-    "https://api.github.com/repos/"
-    + MAIN_QUALIFICATION_REPOSITORY
+validate_github_workflow_attempt_payload = (
+    _reviewed_v1.validate_github_workflow_attempt_payload
 )
-_AUTHENTICATION_SCHEMA_VERSION = (
-    "newsroom.increment5.github-main-admission-authentication.v1"
+validate_github_commit_payload = _reviewed_v1.validate_github_commit_payload
+_validate_authentication_certificate = (
+    _reviewed_v1._validate_authentication_certificate
 )
-_MAX_AUTHENTICATION_OUTPUT_BYTES = 64 * 1024
+
 _AUTHENTICATION_TIMEOUT_SECONDS = 90.0
+_MAX_AUTHENTICATION_OUTPUT_BYTES = 64 * 1024
+_SOURCE_MANIFEST_SCHEMA = (
+    "newsroom.increment5.admission-source-manifest.v1"
+)
+_REVIEWED_SOURCE_MANIFEST_DIGEST = (
+    "sha256:3d52cdab7a57f855d571e5b26c0c3dcd1eb704f9dfa75de6dd35ff00e7036c87"
+)
+_GIT_BLOB_PATTERN = re.compile(r"[0-9a-f]{40}")
+_MAX_SOURCE_MANIFEST_BYTES = 64 * 1024
+_MAX_REVIEWED_SOURCE_FILES = 64
 
 
-def _mapping(value: object, *, field: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise Increment5ContractError(f"{field} must be an object")
-    return value
-
-
-def _canonical_github_time(value: object, *, field: str) -> UtcTimestamp:
-    if not isinstance(value, str) or not value:
-        raise Increment5ContractError(f"{field} must be timestamp text")
-    try:
-        return UtcTimestamp.parse(value)
-    except (TypeError, ValueError) as exc:
-        raise Increment5ContractError(
-            f"{field} is not valid UTC text"
-        ) from exc
-
-
-def _workflow_path(value: object, *, expected: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise Increment5ContractError(
-            "authenticated workflow path is absent"
-        )
-    path, separator, ref = value.partition("@")
-    if path != expected or (separator and ref != MAIN_QUALIFICATION_REF):
-        raise Increment5ContractError(
-            "authenticated workflow path differs"
-        )
-    return path
-
-
-def validate_github_workflow_attempt_payload(
+def _git_blob_sha(
+    data: bytes,
     *,
-    attempt: WorkflowAttemptEvidence,
-    payload: Mapping[str, Any],
-) -> None:
-    if not isinstance(attempt, WorkflowAttemptEvidence):
-        raise Increment5ContractError(
-            "GitHub verification requires typed workflow evidence"
-        )
-    value = _mapping(payload, field="github.workflow_attempt")
-    repository = _mapping(
-        value.get("repository"),
-        field="github.workflow_attempt.repository",
-    )
-    head_repository = _mapping(
-        value.get("head_repository"),
-        field="github.workflow_attempt.head_repository",
-    )
-    expected_path = MAIN_QUALIFICATION_WORKFLOW_PATHS[attempt.key]
-    expected_workflow_ref = (
-        f"{MAIN_QUALIFICATION_REPOSITORY}/{expected_path}"
-        f"@{MAIN_QUALIFICATION_REF}"
-    )
-    expected_run_url = f"{_API_PREFIX}/actions/runs/{attempt.run_id}"
-    expected_attempt_url = (
-        expected_run_url + f"/attempts/{attempt.run_attempt}"
-    )
-    expected = {
-        "id": attempt.run_id,
-        "workflow_id": attempt.workflow_id,
-        "name": attempt.workflow_name,
-        "run_number": attempt.run_number,
-        "run_attempt": attempt.run_attempt,
-        "event": attempt.event,
-        "status": "completed",
-        "conclusion": "success",
-        "head_branch": "main",
-        "head_sha": attempt.head_sha,
-        "head_repository_id": MAIN_QUALIFICATION_REPOSITORY_ID,
-        "url": expected_run_url,
-        "html_url": attempt.html_url,
-    }
-    actual = {key: value.get(key) for key in expected}
-    if actual != expected:
-        raise Increment5ContractError(
-            "authenticated workflow attempt metadata differs"
-        )
-    if attempt.api_url != expected_attempt_url:
-        raise Increment5ContractError(
-            "workflow attempt API URL differs from authenticated endpoint"
-        )
-    if (
-        repository.get("id") != MAIN_QUALIFICATION_REPOSITORY_ID
-        or repository.get("full_name")
-        != MAIN_QUALIFICATION_REPOSITORY
-        or head_repository.get("id")
-        != MAIN_QUALIFICATION_REPOSITORY_ID
-        or head_repository.get("full_name")
-        != MAIN_QUALIFICATION_REPOSITORY
-    ):
-        raise Increment5ContractError(
-            "authenticated workflow repository identity differs"
-        )
-    _workflow_path(value.get("path"), expected=expected_path)
-    if attempt.workflow_ref != expected_workflow_ref:
-        raise Increment5ContractError(
-            "workflow attempt ref differs from permanent workflow"
-        )
-    for field_name in (
-        "created_at",
-        "run_started_at",
-        "updated_at",
-    ):
-        authenticated = _canonical_github_time(
-            value.get(field_name),
-            field=f"github.workflow_attempt.{field_name}",
-        )
-        if authenticated != getattr(attempt, field_name):
-            raise Increment5ContractError(
-                "authenticated workflow attempt timestamp differs"
-            )
+    sha1: Callable[[bytes], Any] = hashlib.sha1,
+) -> str:
+    header = f"blob {len(data)}\0".encode("ascii")
+    return sha1(header + data).hexdigest()  # noqa: S324 - Git object identity
 
 
-def validate_github_commit_payload(
+def _safe_reviewed_source_path(
     *,
-    record: Increment5AMainQualificationRecord,
-    payload: Mapping[str, Any],
-) -> None:
-    if not isinstance(record, Increment5AMainQualificationRecord):
-        raise Increment5ContractError(
-            "GitHub verification requires typed main admission"
-        )
-    value = _mapping(payload, field="github.commit")
-    tree = _mapping(value.get("tree"), field="github.commit.tree")
-    expected_url = (
-        f"{_API_PREFIX}/git/commits/"
-        f"{record.qualified_main_commit_sha}"
-    )
-    if (
-        value.get("sha") != record.qualified_main_commit_sha
-        or value.get("url") != expected_url
-        or tree.get("sha") != record.qualified_main_tree_sha
+    repository_root: Path,
+    relative: object,
+    pure_path_type: type[PurePosixPath] = PurePosixPath,
+    error_type: type[Exception] = Increment5ContractError,
+) -> Path:
+    if not isinstance(relative, str) or not relative or "\\" in relative:
+        raise error_type("reviewed admission source path is invalid")
+    lexical = pure_path_type(relative)
+    if lexical.is_absolute() or any(
+        part in {"", ".", ".."} for part in lexical.parts
     ):
-        raise Increment5ContractError(
-            "authenticated GitHub commit/tree identity differs"
-        )
+        raise error_type("reviewed admission source path escapes repository")
+    current = repository_root
+    for part in lexical.parts:
+        current /= part
+        if current.is_symlink():
+            raise error_type("reviewed admission source path is symlinked")
+    resolved = current.resolve()
+    if not resolved.is_relative_to(repository_root) or not resolved.is_file():
+        raise error_type("reviewed admission source file is unavailable")
+    return resolved
 
 
-def _require_digest(value: object, *, field: str) -> str:
-    if not isinstance(value, str):
-        raise Increment5ContractError(f"{field} must be a digest")
+def _verify_reviewed_source_bundle(
+    *,
+    manifest_path: Path,
+    expected_manifest_digest: str,
+    implementation_path: Path,
+    repository_root: Path,
+    read_bytes: Callable[[Path], bytes] = Path.read_bytes,
+    loads: Callable[..., Any] = json.loads,
+    duplicate_name_hook: Callable[[list[tuple[str, Any]]], dict[str, Any]] = (
+        object_without_duplicate_names
+    ),
+    canonical_bytes: Callable[[object], bytes] = canonical_json_bytes,
+    digest: Callable[[bytes], str] = digest_bytes,
+    git_blob_sha: Callable[[bytes], str] = _git_blob_sha,
+    safe_source_path: Callable[..., Path] = _safe_reviewed_source_path,
+    error_type: type[Exception] = Increment5ContractError,
+    git_blob_pattern: re.Pattern[str] = _GIT_BLOB_PATTERN,
+    manifest_schema: str = _SOURCE_MANIFEST_SCHEMA,
+    maximum_manifest_bytes: int = _MAX_SOURCE_MANIFEST_BYTES,
+    maximum_source_files: int = _MAX_REVIEWED_SOURCE_FILES,
+    validate_digest: Callable[..., str] = validate_sha256_digest,
+    json_error_type: type[Exception] = json.JSONDecodeError,
+    mapping_type: type = Mapping,
+) -> tuple[str, str]:
+    root = repository_root.resolve()
+    expected_path = root / "scripts/sdlc/increment5_admission_source_v1.json"
+    if manifest_path.resolve() != expected_path:
+        raise error_type("reviewed admission source manifest path differs")
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise error_type("reviewed admission source manifest is unavailable")
     try:
-        return validate_sha256_digest(value, field=field)
+        data = read_bytes(manifest_path)
+    except OSError as exc:
+        raise error_type("reviewed admission source manifest is unreadable") from exc
+    if not 0 < len(data) <= maximum_manifest_bytes:
+        raise error_type("reviewed admission source manifest size differs")
+    try:
+        validate_digest(
+            expected_manifest_digest,
+            field="reviewed_source_manifest_digest",
+        )
     except ValueError as exc:
-        raise Increment5ContractError(
-            f"{field} is not canonical"
+        raise error_type(
+            "reviewed admission source manifest digest is invalid"
         ) from exc
-
-
-def _require_positive_integer(value: object, *, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise Increment5ContractError(
-            f"{field} must be a positive integer"
+    if digest(data) != expected_manifest_digest:
+        raise error_type("reviewed admission source manifest digest differs")
+    try:
+        value = loads(
+            data.decode("utf-8", errors="strict"),
+            object_pairs_hook=duplicate_name_hook,
         )
-    return value
-
-
-def _validate_authentication_certificate(
-    *,
-    record: Increment5AMainQualificationRecord,
-    value: object,
-    verifier_source_digest: str,
-) -> None:
-    certificate = _mapping(
-        value,
-        field="github.authentication_certificate",
-    )
-    expected_keys = {
-        "schema_version",
-        "authentication_identity",
-        "record_digest",
-        "qualified_main_commit_sha",
-        "qualified_main_tree_sha",
-        "workflow_attempts",
-        "sdlc_artifact",
-        "decision_document_digest",
-        "decision_file_digest",
-        "context_file_digest",
-        "collection_file_digest",
-        "verifier_source_digest",
+    except (UnicodeError, json_error_type, ValueError) as exc:
+        raise error_type("reviewed admission source manifest is invalid") from exc
+    if data != canonical_bytes(value):
+        raise error_type("reviewed admission source manifest is not canonical")
+    if not isinstance(value, mapping_type):
+        raise error_type("reviewed admission source manifest must be an object")
+    manifest = value
+    if set(manifest) != {"schema_version", "source_bundle_identity", "files"}:
+        raise error_type("reviewed admission source manifest shape differs")
+    if manifest.get("schema_version") != manifest_schema:
+        raise error_type("reviewed admission source manifest version differs")
+    files_value = manifest.get("files")
+    if not isinstance(files_value, mapping_type):
+        raise error_type("reviewed admission source files must be an object")
+    if not 0 < len(files_value) <= maximum_source_files:
+        raise error_type("reviewed admission source inventory differs")
+    files: dict[str, str] = {}
+    for relative, expected_blob in files_value.items():
+        if (
+            not isinstance(relative, str)
+            or not isinstance(expected_blob, str)
+            or git_blob_pattern.fullmatch(expected_blob) is None
+        ):
+            raise error_type("reviewed admission source identity is invalid")
+        files[relative] = expected_blob
+    required_paths = {
+        "newsroom/increment5/_github_attempts_v1.py",
+        "scripts/sdlc/increment5_github_admission.py",
+        "scripts/sdlc/_increment5_github_admission_impl.py",
+        "scripts/sdlc/collection_binding.py",
     }
-    if set(certificate) != expected_keys:
-        raise Increment5ContractError(
-            "GitHub authentication certificate shape differs"
+    if not required_paths.issubset(files):
+        raise error_type("reviewed admission verifier source is absent")
+    identity = digest(
+        canonical_bytes(
+            {
+                "schema_version": manifest_schema,
+                "files": files,
+            }
         )
-    if certificate.get("schema_version") != _AUTHENTICATION_SCHEMA_VERSION:
-        raise Increment5ContractError(
-            "GitHub authentication certificate version differs"
-        )
-    if (
-        certificate.get("record_digest") != record.record_digest
-        or certificate.get("qualified_main_commit_sha")
-        != record.qualified_main_commit_sha
-        or certificate.get("qualified_main_tree_sha")
-        != record.qualified_main_tree_sha
-        or certificate.get("decision_document_digest")
-        != record.decision_document_digest
-        or certificate.get("verifier_source_digest")
-        != verifier_source_digest
-    ):
-        raise Increment5ContractError(
-            "GitHub authentication certificate identity differs"
-        )
-
-    attempts = certificate.get("workflow_attempts")
-    if not isinstance(attempts, list):
-        raise Increment5ContractError(
-            "GitHub authentication attempt certificate differs"
-        )
-    expected_attempts = [
-        {
-            "key": attempt.key,
-            "run_id": attempt.run_id,
-            "run_attempt": attempt.run_attempt,
-        }
-        for attempt in record.workflow_attempts
-    ]
-    if attempts != expected_attempts:
-        raise Increment5ContractError(
-            "GitHub authentication attempt certificate differs"
-        )
-
-    artifact = _mapping(
-        certificate.get("sdlc_artifact"),
-        field="github.authentication_certificate.sdlc_artifact",
     )
-    expected_artifact_keys = {
-        "artifact_id",
-        "name",
-        "archive_digest",
-        "transport_identity",
-    }
-    if set(artifact) != expected_artifact_keys:
-        raise Increment5ContractError(
-            "GitHub authentication artifact certificate differs"
+    if manifest.get("source_bundle_identity") != identity:
+        raise error_type("reviewed admission source bundle identity differs")
+    for relative, expected_blob in files.items():
+        source = safe_source_path(
+            repository_root=root,
+            relative=relative,
         )
-    sdlc_attempt = record.workflow_attempt_by_name[
-        "SDLC_EVIDENCE_SHADOW"
-    ]
-    expected_name = (
-        "newsroom-sdlc-decision-"
-        f"{sdlc_attempt.run_id}-{sdlc_attempt.run_attempt}-"
-        f"{record.qualified_main_commit_sha}"
+        try:
+            source_data = read_bytes(source)
+        except OSError as exc:
+            raise error_type("reviewed admission source is unreadable") from exc
+        if git_blob_sha(source_data) != expected_blob:
+            raise error_type(f"reviewed admission source differs: {relative}")
+    expected_implementation = (
+        root / "scripts/sdlc/_increment5_github_admission_impl.py"
     )
-    if (
-        artifact.get("name") != expected_name
-        or _require_positive_integer(
-            artifact.get("artifact_id"),
-            field="sdlc_artifact.artifact_id",
-        )
-        <= 0
-    ):
-        raise Increment5ContractError(
-            "GitHub authentication artifact certificate differs"
-        )
-    for field_name in (
-        "archive_digest",
-        "transport_identity",
-    ):
-        _require_digest(
-            artifact.get(field_name),
-            field=f"sdlc_artifact.{field_name}",
-        )
-    for field_name in (
-        "decision_file_digest",
-        "context_file_digest",
-        "collection_file_digest",
-    ):
-        _require_digest(
-            certificate.get(field_name),
-            field=field_name,
-        )
-
-    identity = _require_digest(
-        certificate.get("authentication_identity"),
-        field="authentication_identity",
-    )
-    identity_inputs = dict(certificate)
-    del identity_inputs["authentication_identity"]
-    if identity != digest_bytes(canonical_json_bytes(identity_inputs)):
-        raise Increment5ContractError(
-            "GitHub authentication certificate digest differs"
-        )
+    if implementation_path.resolve() != expected_implementation:
+        raise error_type("reviewed admission implementation path differs")
+    try:
+        implementation_digest = digest(read_bytes(implementation_path))
+    except OSError as exc:
+        raise error_type("reviewed admission implementation is unreadable") from exc
+    return identity, implementation_digest
 
 
 def _isolated_authenticator_factory(
     *,
     verifier_path: Path,
+    verifier_implementation_path: Path,
+    source_manifest_path: Path,
+    expected_source_manifest_digest: str,
     record_path: Path,
     executable: str = sys.executable,
     run_process: Callable[..., subprocess.CompletedProcess[bytes]] = (
         subprocess.run
     ),
-    read_bytes: Callable[[Path], bytes] = Path.read_bytes,
     validate_certificate: Callable[..., None] = (
         _validate_authentication_certificate
     ),
     canonical_bytes: Callable[[object], bytes] = canonical_json_bytes,
-    digest: Callable[[bytes], str] = digest_bytes,
     loads: Callable[..., Any] = json.loads,
     duplicate_name_hook: Callable[[list[tuple[str, Any]]], dict[str, Any]] = (
         object_without_duplicate_names
@@ -351,22 +226,26 @@ def _isolated_authenticator_factory(
     process_pipe: int = subprocess.PIPE,
     timeout_seconds: float = _AUTHENTICATION_TIMEOUT_SECONDS,
     maximum_output_bytes: int = _MAX_AUTHENTICATION_OUTPUT_BYTES,
+    verify_source_bundle: Callable[..., tuple[str, str]] = (
+        _verify_reviewed_source_bundle
+    ),
 ) -> Callable[
     [Increment5AMainQualificationRecord],
     Increment5AMainQualificationRecord,
 ]:
-    if verifier_path.is_symlink():
+    if verifier_path.is_symlink() or not verifier_path.is_file():
         raise Increment5ContractError(
             "isolated GitHub admission verifier is missing"
         )
     captured_verifier_path = verifier_path.resolve()
+    captured_implementation_path = verifier_implementation_path.resolve()
+    captured_source_manifest_path = source_manifest_path.resolve()
+    captured_source_manifest_digest = expected_source_manifest_digest
     captured_record_path = record_path.resolve()
     captured_executable = str(Path(executable).resolve())
     captured_run_process = run_process
-    captured_read_bytes = read_bytes
     captured_validate_certificate = validate_certificate
     captured_canonical_bytes = canonical_bytes
-    captured_digest = digest
     captured_loads = loads
     captured_duplicate_name_hook = duplicate_name_hook
     captured_token_getter = token_getter
@@ -378,14 +257,16 @@ def _isolated_authenticator_factory(
     captured_process_pipe = process_pipe
     captured_timeout_seconds = timeout_seconds
     captured_maximum_output_bytes = maximum_output_bytes
-    if not captured_verifier_path.is_file():
-        raise Increment5ContractError(
-            "isolated GitHub admission verifier is missing"
-        )
-    verifier_source_digest = captured_digest(
-        captured_read_bytes(captured_verifier_path)
-    )
+    captured_verify_source_bundle = verify_source_bundle
     repository_root = Path(__file__).resolve().parents[2]
+    source_bundle_identity, verifier_source_digest = (
+        captured_verify_source_bundle(
+            manifest_path=captured_source_manifest_path,
+            expected_manifest_digest=captured_source_manifest_digest,
+            implementation_path=captured_implementation_path,
+            repository_root=repository_root,
+        )
+    )
     authenticated_record_digest: str | None = None
 
     def authenticate(
@@ -407,19 +288,21 @@ def _isolated_authenticator_factory(
             raise captured_contract_error_type(
                 "authenticated GitHub workflow evidence is unavailable"
             )
-        try:
-            current_digest = captured_digest(
-                captured_read_bytes(captured_verifier_path)
+        current_source_identity, current_verifier_digest = (
+            captured_verify_source_bundle(
+                manifest_path=captured_source_manifest_path,
+                expected_manifest_digest=captured_source_manifest_digest,
+                implementation_path=captured_implementation_path,
+                repository_root=repository_root,
             )
-        except OSError as exc:
+        )
+        if (
+            current_source_identity != source_bundle_identity
+            or current_verifier_digest != verifier_source_digest
+        ):
             raise captured_contract_error_type(
-                "isolated GitHub admission verifier is unavailable"
-            ) from exc
-        if current_digest != verifier_source_digest:
-            raise captured_contract_error_type(
-                "isolated GitHub admission verifier source differs"
+                "reviewed GitHub admission source differs"
             )
-
         environment = {
             "GITHUB_TOKEN": token,
             "LANG": "C.UTF-8",
@@ -429,6 +312,10 @@ def _isolated_authenticator_factory(
             captured_executable,
             "-I",
             captured_verifier_path.as_posix(),
+            "--source-manifest-path",
+            captured_source_manifest_path.as_posix(),
+            "--expected-source-manifest-digest",
+            captured_source_manifest_digest,
             "--record-path",
             captured_record_path.as_posix(),
             "--expected-record-digest",
@@ -500,9 +387,26 @@ _VERIFIER_PATH = (
     / "sdlc"
     / "increment5_github_admission.py"
 )
+_VERIFIER_IMPLEMENTATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "sdlc"
+    / "_increment5_github_admission_impl.py"
+)
+_SOURCE_MANIFEST_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "sdlc"
+    / "increment5_admission_source_v1.json"
+)
 authenticate_repository_main_qualification_record = (
     _isolated_authenticator_factory(
         verifier_path=_VERIFIER_PATH,
+        verifier_implementation_path=_VERIFIER_IMPLEMENTATION_PATH,
+        source_manifest_path=_SOURCE_MANIFEST_PATH,
+        expected_source_manifest_digest=(
+            _REVIEWED_SOURCE_MANIFEST_DIGEST
+        ),
         record_path=MAIN_QUALIFICATION_RECORD_PATH,
     )
 )
