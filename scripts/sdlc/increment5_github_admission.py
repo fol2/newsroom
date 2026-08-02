@@ -31,11 +31,21 @@ _BOOTSTRAP_RELATIVE_PATH = "scripts/sdlc/increment5_github_admission.py"
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _GIT_BLOB = re.compile(r"[0-9a-f]{40}")
 _MAX_MANIFEST_BYTES = 64 * 1024
-_MAX_SOURCE_FILES = 64
-
-# The reviewed implementation contains and executes these permanent boundaries:
-# fetch_artifact_bundle(...), validate_authenticated_decision_artifact(...),
-# newsroom-sdlc-decision-*, and _EXPECTED_DECISION_ARTIFACT_FILES.
+_MAX_SOURCE_FILES = 96
+_REQUIRED_REVIEWED_PATHS = frozenset(
+    {
+        "newsroom/increment5/approval.py",
+        "newsroom/increment5/_approval_v1.py",
+        "newsroom/increment5/admission_anchors.py",
+        "newsroom/increment5/github_attempts.py",
+        "newsroom/increment5/_github_attempts_v1.py",
+        "newsroom/increment5/main_qualification.py",
+        "newsroom/increment5/_main_qualification_v2.py",
+        _BOOTSTRAP_RELATIVE_PATH,
+        _IMPLEMENTATION_RELATIVE_PATH,
+        "scripts/sdlc/collection_binding.py",
+    }
+)
 
 
 class AdmissionSourceError(ValueError):
@@ -80,7 +90,9 @@ def _safe_source_path(root: Path, relative: object) -> Path:
     if not isinstance(relative, str) or not relative or "\\" in relative:
         raise AdmissionSourceError("source manifest path is invalid")
     lexical = PurePosixPath(relative)
-    if lexical.is_absolute() or any(part in {"", ".", ".."} for part in lexical.parts):
+    if lexical.is_absolute() or any(
+        part in {"", ".", ".."} for part in lexical.parts
+    ):
         raise AdmissionSourceError("source manifest path escapes repository")
     current = root
     for part in lexical.parts:
@@ -97,12 +109,19 @@ def validate_source_manifest(
     *,
     path: Path,
     expected_digest: str,
+    expected_source_bundle_identity: str,
     repository_root: Path = _REPOSITORY_ROOT,
 ) -> tuple[dict[str, str], str]:
     root = repository_root.resolve()
-    if not isinstance(expected_digest, str) or _SHA256.fullmatch(expected_digest) is None:
-        raise AdmissionSourceError("expected source manifest digest is invalid")
-    if path.resolve() != (root / "scripts/sdlc/increment5_admission_source_v1.json"):
+    for value, label in (
+        (expected_digest, "expected source manifest digest"),
+        (expected_source_bundle_identity, "expected source bundle identity"),
+    ):
+        if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+            raise AdmissionSourceError(f"{label} is invalid")
+    if path.resolve() != (
+        root / "scripts/sdlc/increment5_admission_source_v1.json"
+    ):
         raise AdmissionSourceError("source manifest path is not fixed")
     if path.is_symlink() or not path.is_file():
         raise AdmissionSourceError("source manifest is unavailable")
@@ -128,18 +147,26 @@ def validate_source_manifest(
         raise AdmissionSourceError("source manifest shape differs")
     if manifest.get("schema_version") != _SOURCE_MANIFEST_SCHEMA:
         raise AdmissionSourceError("source manifest version differs")
-    files_value = _mapping(manifest.get("files"), field="source_manifest.files")
+    files_value = _mapping(
+        manifest.get("files"),
+        field="source_manifest.files",
+    )
     if not 0 < len(files_value) <= _MAX_SOURCE_FILES:
         raise AdmissionSourceError("source manifest inventory size differs")
     files: dict[str, str] = {}
     for relative, expected_blob in files_value.items():
         if not isinstance(relative, str):
             raise AdmissionSourceError("source manifest path is invalid")
-        if not isinstance(expected_blob, str) or _GIT_BLOB.fullmatch(expected_blob) is None:
-            raise AdmissionSourceError("source manifest blob identity is invalid")
+        if (
+            not isinstance(expected_blob, str)
+            or _GIT_BLOB.fullmatch(expected_blob) is None
+        ):
+            raise AdmissionSourceError(
+                "source manifest blob identity is invalid"
+            )
         files[relative] = expected_blob
-    if set(files) < {_BOOTSTRAP_RELATIVE_PATH, _IMPLEMENTATION_RELATIVE_PATH}:
-        raise AdmissionSourceError("source manifest lacks verifier sources")
+    if not _REQUIRED_REVIEWED_PATHS.issubset(files):
+        raise AdmissionSourceError("source manifest lacks authority sources")
     expected_identity = _sha256(
         _canonical_json_bytes(
             {
@@ -148,7 +175,10 @@ def validate_source_manifest(
             }
         )
     )
-    if manifest.get("source_bundle_identity") != expected_identity:
+    if (
+        manifest.get("source_bundle_identity") != expected_identity
+        or expected_identity != expected_source_bundle_identity
+    ):
         raise AdmissionSourceError("source bundle identity differs")
     for relative, expected_blob in files.items():
         source = _safe_source_path(root, relative)
@@ -195,11 +225,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--source-manifest-path", required=True)
     parser.add_argument("--expected-source-manifest-digest", required=True)
+    parser.add_argument("--expected-source-bundle-identity", required=True)
     arguments, remaining = parser.parse_known_args(argv)
     try:
         validate_source_manifest(
             path=Path(arguments.source_manifest_path),
             expected_digest=arguments.expected_source_manifest_digest,
+            expected_source_bundle_identity=(
+                arguments.expected_source_bundle_identity
+            ),
         )
     except AdmissionSourceError as exc:
         print(

@@ -17,6 +17,10 @@ from newsroom.authority.canonical import (
 )
 
 from . import _github_attempts_v1 as _reviewed_v1
+from .admission_anchors import (
+    ADMISSION_SOURCE_BUNDLE_IDENTITY,
+    ADMISSION_SOURCE_MANIFEST_DIGEST,
+)
 from .contracts import Increment5ContractError
 from .decision_validation import object_without_duplicate_names
 from .main_qualification import (
@@ -38,12 +42,23 @@ _MAX_AUTHENTICATION_OUTPUT_BYTES = 64 * 1024
 _SOURCE_MANIFEST_SCHEMA = (
     "newsroom.increment5.admission-source-manifest.v1"
 )
-_REVIEWED_SOURCE_MANIFEST_DIGEST = (
-    "sha256:3d52cdab7a57f855d571e5b26c0c3dcd1eb704f9dfa75de6dd35ff00e7036c87"
-)
 _GIT_BLOB_PATTERN = re.compile(r"[0-9a-f]{40}")
 _MAX_SOURCE_MANIFEST_BYTES = 64 * 1024
-_MAX_REVIEWED_SOURCE_FILES = 64
+_MAX_REVIEWED_SOURCE_FILES = 96
+_REQUIRED_REVIEWED_PATHS = frozenset(
+    {
+        "newsroom/increment5/approval.py",
+        "newsroom/increment5/_approval_v1.py",
+        "newsroom/increment5/admission_anchors.py",
+        "newsroom/increment5/github_attempts.py",
+        "newsroom/increment5/_github_attempts_v1.py",
+        "newsroom/increment5/main_qualification.py",
+        "newsroom/increment5/_main_qualification_v2.py",
+        "scripts/sdlc/increment5_github_admission.py",
+        "scripts/sdlc/_increment5_github_admission_impl.py",
+        "scripts/sdlc/collection_binding.py",
+    }
+)
 
 
 def _git_blob_sha(
@@ -84,6 +99,7 @@ def _verify_reviewed_source_bundle(
     *,
     manifest_path: Path,
     expected_manifest_digest: str,
+    expected_source_bundle_identity: str,
     implementation_path: Path,
     repository_root: Path,
     read_bytes: Callable[[Path], bytes] = Path.read_bytes,
@@ -100,6 +116,7 @@ def _verify_reviewed_source_bundle(
     manifest_schema: str = _SOURCE_MANIFEST_SCHEMA,
     maximum_manifest_bytes: int = _MAX_SOURCE_MANIFEST_BYTES,
     maximum_source_files: int = _MAX_REVIEWED_SOURCE_FILES,
+    required_reviewed_paths: frozenset[str] = _REQUIRED_REVIEWED_PATHS,
     validate_digest: Callable[..., str] = validate_sha256_digest,
     json_error_type: type[Exception] = json.JSONDecodeError,
     mapping_type: type = Mapping,
@@ -116,15 +133,14 @@ def _verify_reviewed_source_bundle(
         raise error_type("reviewed admission source manifest is unreadable") from exc
     if not 0 < len(data) <= maximum_manifest_bytes:
         raise error_type("reviewed admission source manifest size differs")
-    try:
-        validate_digest(
-            expected_manifest_digest,
-            field="reviewed_source_manifest_digest",
-        )
-    except ValueError as exc:
-        raise error_type(
-            "reviewed admission source manifest digest is invalid"
-        ) from exc
+    for field, value in (
+        ("reviewed_source_manifest_digest", expected_manifest_digest),
+        ("reviewed_source_bundle_identity", expected_source_bundle_identity),
+    ):
+        try:
+            validate_digest(value, field=field)
+        except ValueError as exc:
+            raise error_type(f"{field} is invalid") from exc
     if digest(data) != expected_manifest_digest:
         raise error_type("reviewed admission source manifest digest differs")
     try:
@@ -157,14 +173,8 @@ def _verify_reviewed_source_bundle(
         ):
             raise error_type("reviewed admission source identity is invalid")
         files[relative] = expected_blob
-    required_paths = {
-        "newsroom/increment5/_github_attempts_v1.py",
-        "scripts/sdlc/increment5_github_admission.py",
-        "scripts/sdlc/_increment5_github_admission_impl.py",
-        "scripts/sdlc/collection_binding.py",
-    }
-    if not required_paths.issubset(files):
-        raise error_type("reviewed admission verifier source is absent")
+    if not required_reviewed_paths.issubset(files):
+        raise error_type("reviewed admission authority source is absent")
     identity = digest(
         canonical_bytes(
             {
@@ -173,7 +183,10 @@ def _verify_reviewed_source_bundle(
             }
         )
     )
-    if manifest.get("source_bundle_identity") != identity:
+    if (
+        manifest.get("source_bundle_identity") != identity
+        or identity != expected_source_bundle_identity
+    ):
         raise error_type("reviewed admission source bundle identity differs")
     for relative, expected_blob in files.items():
         source = safe_source_path(
@@ -200,10 +213,12 @@ def _verify_reviewed_source_bundle(
 
 def _isolated_authenticator_factory(
     *,
+    approval_loader: Callable[[], object | None],
     verifier_path: Path,
     verifier_implementation_path: Path,
     source_manifest_path: Path,
     expected_source_manifest_digest: str,
+    expected_source_bundle_identity: str,
     record_path: Path,
     executable: str = sys.executable,
     run_process: Callable[..., subprocess.CompletedProcess[bytes]] = (
@@ -237,10 +252,12 @@ def _isolated_authenticator_factory(
         raise Increment5ContractError(
             "isolated GitHub admission verifier is missing"
         )
+    captured_approval_loader = approval_loader
     captured_verifier_path = verifier_path.resolve()
     captured_implementation_path = verifier_implementation_path.resolve()
     captured_source_manifest_path = source_manifest_path.resolve()
     captured_source_manifest_digest = expected_source_manifest_digest
+    captured_source_bundle_identity = expected_source_bundle_identity
     captured_record_path = record_path.resolve()
     captured_executable = str(Path(executable).resolve())
     captured_run_process = run_process
@@ -263,6 +280,7 @@ def _isolated_authenticator_factory(
         captured_verify_source_bundle(
             manifest_path=captured_source_manifest_path,
             expected_manifest_digest=captured_source_manifest_digest,
+            expected_source_bundle_identity=captured_source_bundle_identity,
             implementation_path=captured_implementation_path,
             repository_root=repository_root,
         )
@@ -279,6 +297,10 @@ def _isolated_authenticator_factory(
             )
         if authenticated_record_digest == record.record_digest:
             return record
+        if captured_approval_loader() is None:
+            raise captured_contract_error_type(
+                "authenticated main admission requires owner approval"
+            )
         token = captured_token_getter("GITHUB_TOKEN")
         if (
             not isinstance(token, str)
@@ -292,6 +314,7 @@ def _isolated_authenticator_factory(
             captured_verify_source_bundle(
                 manifest_path=captured_source_manifest_path,
                 expected_manifest_digest=captured_source_manifest_digest,
+                expected_source_bundle_identity=captured_source_bundle_identity,
                 implementation_path=captured_implementation_path,
                 repository_root=repository_root,
             )
@@ -316,6 +339,8 @@ def _isolated_authenticator_factory(
             captured_source_manifest_path.as_posix(),
             "--expected-source-manifest-digest",
             captured_source_manifest_digest,
+            "--expected-source-bundle-identity",
+            captured_source_bundle_identity,
             "--record-path",
             captured_record_path.as_posix(),
             "--expected-record-digest",
@@ -381,33 +406,32 @@ def _isolated_authenticator_factory(
     return authenticate
 
 
-_VERIFIER_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "scripts"
-    / "sdlc"
-    / "increment5_github_admission.py"
-)
-_VERIFIER_IMPLEMENTATION_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "scripts"
-    / "sdlc"
-    / "_increment5_github_admission_impl.py"
-)
-_SOURCE_MANIFEST_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "scripts"
-    / "sdlc"
-    / "increment5_admission_source_v1.json"
-)
-authenticate_repository_main_qualification_record = (
-    _isolated_authenticator_factory(
-        verifier_path=_VERIFIER_PATH,
-        verifier_implementation_path=_VERIFIER_IMPLEMENTATION_PATH,
-        source_manifest_path=_SOURCE_MANIFEST_PATH,
-        expected_source_manifest_digest=(
-            _REVIEWED_SOURCE_MANIFEST_DIGEST
+def build_repository_main_qualification_authenticator(
+    *,
+    approval_loader: Callable[[], object | None],
+) -> Callable[
+    [Increment5AMainQualificationRecord],
+    Increment5AMainQualificationRecord,
+]:
+    root = Path(__file__).resolve().parents[2]
+    return _isolated_authenticator_factory(
+        approval_loader=approval_loader,
+        verifier_path=root / "scripts/sdlc/increment5_github_admission.py",
+        verifier_implementation_path=(
+            root / "scripts/sdlc/_increment5_github_admission_impl.py"
         ),
+        source_manifest_path=(
+            root / "scripts/sdlc/increment5_admission_source_v1.json"
+        ),
+        expected_source_manifest_digest=ADMISSION_SOURCE_MANIFEST_DIGEST,
+        expected_source_bundle_identity=ADMISSION_SOURCE_BUNDLE_IDENTITY,
         record_path=MAIN_QUALIFICATION_RECORD_PATH,
     )
-)
-del _isolated_authenticator_factory
+
+
+def authenticate_repository_main_qualification_record(
+    _record: Increment5AMainQualificationRecord,
+) -> Increment5AMainQualificationRecord:
+    raise Increment5ContractError(
+        "repository main authenticator is not bound to owner approval"
+    )
