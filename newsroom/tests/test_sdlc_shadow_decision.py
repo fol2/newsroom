@@ -403,7 +403,7 @@ def test_gate_failure_required_skip_and_budget_precedence(
         route,
         gates=(
             _gate("source-integrity", "source", result="FAIL"),
-            _gate("core-deterministic", "tests", execution_ms=111_000),
+            _gate("core-deterministic", "tests", execution_ms=221_000),
         ),
     )
     _patch_lane_validator(monkeypatch, over_budget)
