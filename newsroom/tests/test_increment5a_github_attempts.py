@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import inspect
+import json
+from pathlib import Path
 
 import pytest
 
 import newsroom.increment5.approval as approval_module
+import newsroom.increment5.github_attempts as github_attempts_module
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.types import UtcTimestamp
 from newsroom.increment5 import Increment5ContractError
 from newsroom.increment5.github_attempts import (
@@ -19,6 +24,9 @@ from newsroom.increment5.main_qualification import (
     MAIN_QUALIFICATION_WORKFLOW_PATHS,
     Increment5AMainQualificationRecord,
     WorkflowAttemptEvidence,
+)
+from scripts.sdlc.increment5_github_admission import (
+    validate_authenticated_decision_artifact,
 )
 
 
@@ -174,6 +182,102 @@ def _record() -> Increment5AMainQualificationRecord:
     )
 
 
+def _decision_artifact(
+    tmp_path: Path,
+) -> tuple[
+    Path,
+    dict[str, object],
+    Increment5AMainQualificationRecord,
+]:
+    context = {
+        "repository": MAIN_QUALIFICATION_REPOSITORY,
+        "repository_id": MAIN_QUALIFICATION_REPOSITORY_ID,
+    }
+    event = {
+        "repository": MAIN_QUALIFICATION_REPOSITORY,
+        "repository_id": MAIN_QUALIFICATION_REPOSITORY_ID,
+    }
+    decision = {
+        "context": context,
+        "event": event,
+    }
+    document_digest = digest_bytes(canonical_json_bytes(decision))
+    record = replace(
+        _record(),
+        decision_document_digest=document_digest,
+    )
+    record_value = {
+        "signed_decision": {
+            "decision_document_digest": document_digest,
+            "decision_document": decision,
+        }
+    }
+    root = tmp_path / "artifact"
+    (root / "decision-input").mkdir(parents=True)
+    (root / "decision.json").write_bytes(
+        canonical_json_bytes(decision) + b"\n"
+    )
+    (root / "decision-input" / "context.json").write_bytes(
+        canonical_json_bytes(context) + b"\n"
+    )
+    collection = {
+        "schema_version": "newsroom.sdlc.decision-collection.v1",
+        "context": context,
+        "event": event,
+        "failure_code": None,
+        "failure_result": None,
+        "status": "READY",
+    }
+    (root / "decision-input" / "collection.json").write_bytes(
+        canonical_json_bytes(collection) + b"\n"
+    )
+    return root, record_value, record
+
+
+def _authentication_certificate(
+    record: Increment5AMainQualificationRecord,
+    *,
+    verifier_source_digest: str,
+) -> dict[str, object]:
+    sdlc = record.workflow_attempt_by_name["SDLC_EVIDENCE_SHADOW"]
+    value: dict[str, object] = {
+        "schema_version": (
+            "newsroom.increment5."
+            "github-main-admission-authentication.v1"
+        ),
+        "record_digest": record.record_digest,
+        "qualified_main_commit_sha": record.qualified_main_commit_sha,
+        "qualified_main_tree_sha": record.qualified_main_tree_sha,
+        "workflow_attempts": [
+            {
+                "key": attempt.key,
+                "run_id": attempt.run_id,
+                "run_attempt": attempt.run_attempt,
+            }
+            for attempt in record.workflow_attempts
+        ],
+        "sdlc_artifact": {
+            "artifact_id": 9001,
+            "name": (
+                "newsroom-sdlc-decision-"
+                f"{sdlc.run_id}-{sdlc.run_attempt}-"
+                f"{record.qualified_main_commit_sha}"
+            ),
+            "archive_digest": "sha256:" + "3" * 64,
+            "transport_identity": "sha256:" + "4" * 64,
+        },
+        "decision_document_digest": record.decision_document_digest,
+        "decision_file_digest": "sha256:" + "5" * 64,
+        "context_file_digest": "sha256:" + "6" * 64,
+        "collection_file_digest": "sha256:" + "7" * 64,
+        "verifier_source_digest": verifier_source_digest,
+    }
+    value["authentication_identity"] = digest_bytes(
+        canonical_json_bytes(value)
+    )
+    return value
+
+
 def test_exact_authenticated_workflow_attempt_is_accepted() -> None:
     validate_github_workflow_attempt_payload(
         attempt=_attempt(),
@@ -242,6 +346,137 @@ def test_authenticated_commit_must_bind_exact_tree() -> None:
             record=record,
             payload=tampered,
         )
+
+
+def test_exact_authenticated_decision_artifact_is_accepted(
+    tmp_path: Path,
+) -> None:
+    root, value, record = _decision_artifact(tmp_path)
+    digests = validate_authenticated_decision_artifact(
+        extracted_root=root,
+        record_value=value,
+        record=record,
+    )
+    assert set(digests) == {
+        "decision_file_digest",
+        "context_file_digest",
+        "collection_file_digest",
+    }
+    assert digests["decision_file_digest"] == digest_bytes(
+        (root / "decision.json").read_bytes()
+    )
+
+
+def test_locally_fabricated_decision_bytes_are_rejected(
+    tmp_path: Path,
+) -> None:
+    root, value, record = _decision_artifact(tmp_path)
+    (root / "decision.json").write_bytes(
+        canonical_json_bytes(
+            {
+                "context": {
+                    "repository": MAIN_QUALIFICATION_REPOSITORY,
+                },
+                "event": {
+                    "repository": MAIN_QUALIFICATION_REPOSITORY,
+                },
+                "locally_fabricated": True,
+            }
+        )
+        + b"\n"
+    )
+    with pytest.raises(
+        Increment5ContractError,
+        match="decision bytes differ",
+    ):
+        validate_authenticated_decision_artifact(
+            extracted_root=root,
+            record_value=value,
+            record=record,
+        )
+
+
+def test_decision_artifact_rejects_extra_or_changed_evidence(
+    tmp_path: Path,
+) -> None:
+    root, value, record = _decision_artifact(tmp_path)
+    (root / "extra.json").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(
+        Increment5ContractError,
+        match="inventory differs",
+    ):
+        validate_authenticated_decision_artifact(
+            extracted_root=root,
+            record_value=value,
+            record=record,
+        )
+
+    (root / "extra.json").unlink()
+    collection_path = root / "decision-input" / "collection.json"
+    collection = json.loads(collection_path.read_text(encoding="utf-8"))
+    collection["status"] = "FAILED"
+    collection_path.write_bytes(
+        canonical_json_bytes(collection) + b"\n"
+    )
+    with pytest.raises(
+        Increment5ContractError,
+        match="collection differs",
+    ):
+        validate_authenticated_decision_artifact(
+            extracted_root=root,
+            record_value=value,
+            record=record,
+        )
+
+
+def test_authentication_certificate_binds_artifact_and_record() -> None:
+    record = _record()
+    verifier_digest = "sha256:" + "8" * 64
+    certificate = _authentication_certificate(
+        record,
+        verifier_source_digest=verifier_digest,
+    )
+    github_attempts_module._validate_authentication_certificate(
+        record=record,
+        value=certificate,
+        verifier_source_digest=verifier_digest,
+    )
+
+    tampered = deepcopy(certificate)
+    artifact = tampered["sdlc_artifact"]
+    assert isinstance(artifact, dict)
+    artifact["archive_digest"] = "sha256:" + "9" * 64
+    with pytest.raises(
+        Increment5ContractError,
+        match="certificate digest differs",
+    ):
+        github_attempts_module._validate_authentication_certificate(
+            record=record,
+            value=tampered,
+            verifier_source_digest=verifier_digest,
+        )
+
+
+def test_transport_authentication_runs_out_of_process() -> None:
+    source = inspect.getsource(github_attempts_module)
+    assert "GitHubActionsClient" not in source
+    assert "fetch_run_attempt(" not in source
+    assert '"-I"' in source
+    assert "increment5_github_admission.py" in source
+    assert "captured_run_process" in source
+    assert "verifier_source_digest" in source
+    assert "PYTHONPATH" not in source
+    assert "SSL_CERT_FILE" not in source
+
+    verifier_source = (
+        github_attempts_module._VERIFIER_PATH.read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "fetch_artifact_bundle(" in verifier_source
+    assert "validate_authenticated_decision_artifact(" in verifier_source
+    assert "newsroom-sdlc-decision-" in verifier_source
+    assert "_EXPECTED_DECISION_ARTIFACT_FILES" in verifier_source
 
 
 def test_synthetic_claim_cannot_authenticate_without_github_token(
