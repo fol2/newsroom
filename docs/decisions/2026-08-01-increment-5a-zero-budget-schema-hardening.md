@@ -1,23 +1,36 @@
 # Increment 5A zero-call and zero-spend schema hardening
 
-**Issue:** #250
-**Pull request:** #255
-**Qualification base:** `main@8f53b1ef2200442b459d5d84087df1905efec4bd`
-**Hardening commit:** `b313b30b712773198844dd680d9b5dd78e690984`
+**Issue:** #250  
+**Pull request:** #255  
+**Effective production-qualification schema:** `sha256:3e2ac38b2c17d11b8ea29afe58bd0cdf6924146969600cad2b89fc82ec8607b9`  
+**Admission-source manifest:** `sha256:70ab68bef6a9654d59164b70340a4c33bcab56d965b27789159fb49155ef87c8`  
+**Admission-source bundle:** `sha256:9a8282231c2665f1e8f5467e7bbd9e16896b6e82704a8be9a17b66949cf11333`  
+**Exact owner-body digest:** `sha256:8e00ded4cec0a95a59b3507b5fb28eba8033f96c2dccb531d4075bdcbe976f87`
 
-The effective production-qualification v2 JSON Schema now makes both external-call and provider-spend boundaries independently enforceable by any standards-compliant schema consumer:
+The effective production-qualification v2 JSON Schema makes both external-call
+and provider-spend boundaries independently enforceable by every
+standards-compliant schema consumer:
 
 - `budgets.max_external_calls_per_request` is exactly `{"const":0}`;
-- `budgets.max_gross_cost_microunits_per_request` is exactly `{"const":0}`.
+- `budgets.max_gross_cost_microunits_per_request` is exactly `{"const":0}`;
+- `rights.protected_content_allowed` is exactly `{"const":false}`.
 
-The canonical schema artifact and source-defined schema are byte- and digest-bound. A standalone `Draft202012Validator` regression proves that an otherwise valid production manifest is accepted at zero and rejected when either field is changed to one. The existing Python profile validator continues to enforce the same proposal-bound zero values as a second boundary.
+The canonical schema artifact and source-defined schema are byte- and
+digest-bound. Standalone `Draft202012Validator` regressions accept the exact
+zero/false manifest and reject external calls, spend or protected-content
+enablement. The Python profile validator independently enforces the same
+proposal-bound values.
 
-The hardened effective schema digest is:
+The historical proposal schemas remain immutable proposal evidence only. All
+unqualified production and fixture-replay schema exports resolve to hardened
+v2. Owner approval does not rewrite the proposal or either historical digest.
 
-`sha256:3e2ac38b2c17d11b8ea29afe58bd0cdf6924146969600cad2b89fc82ec8607b9`
+The exact owner statement additionally binds the reviewed admission-source
+manifest and bundle. Future owner/main record materialisation updates only the
+canonical data anchor and record files; it cannot rebaseline the executable
+schema, parent gate or isolated child.
 
-The corresponding exact owner-statement body digest is:
-
-`sha256:665e146d420088a1a88e4946741bae187cd950e6e0eb733e103f2fcfda1fe37b`
-
-The immutable proposal payload, proposal record, proposal bundle, historical proposal schema and fixture-replay schema are unchanged. No owner approval record is admitted by this change, no model or vector is loaded, no external request is made, no provider credential is used, and no live-source, shadow, canary, publication or production activation occurs.
+No owner approval record or post-merge admission is created by this hardening.
+No model or vector is loaded, no external request is made, no provider
+credential or spend is used, and no live-source, shadow, canary, publication or
+production activation occurs.
