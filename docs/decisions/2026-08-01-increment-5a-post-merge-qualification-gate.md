@@ -1,11 +1,11 @@
 # Increment 5A post-merge exact-main qualification gate
 
-**Issue:** #250  
-**Pull request:** #255  
-**Owner-record effect:** `PRODUCTION_EQUIVALENT_QUALIFICATION_ONLY`  
-**Main-admission effect:** `IMPLEMENTATION_OF_ISSUES_251_254_ONLY`  
-**Main-admission schema:** `sha256:4247835d3c200a1012dbc45ec1a7ee609acce44205e3868a1cb5d6e69d7d0d65`  
-**Admission-source manifest:** `sha256:70ab68bef6a9654d59164b70340a4c33bcab56d965b27789159fb49155ef87c8`  
+**Issue:** #250
+**Pull request:** #255
+**Owner-record effect:** `PRODUCTION_EQUIVALENT_QUALIFICATION_ONLY`
+**Main-admission effect:** `IMPLEMENTATION_OF_ISSUES_251_254_ONLY`
+**Main-admission schema:** `sha256:4247835d3c200a1012dbc45ec1a7ee609acce44205e3868a1cb5d6e69d7d0d65`
+**Admission-source manifest:** `sha256:70ab68bef6a9654d59164b70340a4c33bcab56d965b27789159fb49155ef87c8`
 **Admission-source bundle:** `sha256:9a8282231c2665f1e8f5467e7bbd9e16896b6e82704a8be9a17b66949cf11333`
 
 Owner approval and downstream implementation admission are deliberately

@@ -1,15 +1,15 @@
 # Increment 5A attempt-bound post-merge implementation admission
 
-**Issue:** #250  
-**Pull request:** #255  
-**Owner-record effect:** `PRODUCTION_EQUIVALENT_QUALIFICATION_ONLY`  
-**Main-admission effect:** `IMPLEMENTATION_OF_ISSUES_251_254_ONLY`  
-**Approval schema:** `sha256:cc87d78551d3e2f2ae61c0bd5e247288c291feced7b63165d55e2e8b05dcc56e`  
-**Main-admission schema:** `sha256:4247835d3c200a1012dbc45ec1a7ee609acce44205e3868a1cb5d6e69d7d0d65`  
-**Admission-source manifest:** `sha256:70ab68bef6a9654d59164b70340a4c33bcab56d965b27789159fb49155ef87c8`  
-**Admission-source bundle:** `sha256:9a8282231c2665f1e8f5467e7bbd9e16896b6e82704a8be9a17b66949cf11333`  
-**Owner-body digest:** `sha256:8e00ded4cec0a95a59b3507b5fb28eba8033f96c2dccb531d4075bdcbe976f87`  
-**Proposal fixture schema:** `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e`  
+**Issue:** #250
+**Pull request:** #255
+**Owner-record effect:** `PRODUCTION_EQUIVALENT_QUALIFICATION_ONLY`
+**Main-admission effect:** `IMPLEMENTATION_OF_ISSUES_251_254_ONLY`
+**Approval schema:** `sha256:cc87d78551d3e2f2ae61c0bd5e247288c291feced7b63165d55e2e8b05dcc56e`
+**Main-admission schema:** `sha256:4247835d3c200a1012dbc45ec1a7ee609acce44205e3868a1cb5d6e69d7d0d65`
+**Admission-source manifest:** `sha256:70ab68bef6a9654d59164b70340a4c33bcab56d965b27789159fb49155ef87c8`
+**Admission-source bundle:** `sha256:9a8282231c2665f1e8f5467e7bbd9e16896b6e82704a8be9a17b66949cf11333`
+**Owner-body digest:** `sha256:8e00ded4cec0a95a59b3507b5fb28eba8033f96c2dccb531d4075bdcbe976f87`
+**Proposal fixture schema:** `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e`
 **Effective fixture schema:** `sha256:1f8491f3cef73c6a6b189f99d7130628122651e13053c18ccbe1289b5bb1ad22`
 
 The canonical owner record authorises production-equivalent qualification only.

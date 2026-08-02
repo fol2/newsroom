@@ -1,17 +1,17 @@
 # Increment 5A production retrieval contract proposal
 
-**Status:** Proposed — exact owner comment and repository approval record required  
-**Owner:** Product owner  
-**Prepared:** 2026-08-01  
-**Issue:** #250  
-**Parent:** #145  
-**Immutable proposal base:** `main@c9e31879421083e82e2538d57087d04e9b454d34`  
-**Decision packet:** `newsroom/increment5/data/increment5a_production_retrieval_decision_v1.json`  
-**Decision payload:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`  
-**Decision record:** `sha256:77fe5544b33a85519b8c1fba57f41fe1a68aa411eb63c64be5429dbbd28ea913`  
-**Contract bundle:** `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`  
-**Admission-source manifest:** `sha256:70ab68bef6a9654d59164b70340a4c33bcab56d965b27789159fb49155ef87c8`  
-**Admission-source bundle:** `sha256:9a8282231c2665f1e8f5467e7bbd9e16896b6e82704a8be9a17b66949cf11333`  
+**Status:** Proposed — exact owner comment and repository approval record required
+**Owner:** Product owner
+**Prepared:** 2026-08-01
+**Issue:** #250
+**Parent:** #145
+**Immutable proposal base:** `main@c9e31879421083e82e2538d57087d04e9b454d34`
+**Decision packet:** `newsroom/increment5/data/increment5a_production_retrieval_decision_v1.json`
+**Decision payload:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`
+**Decision record:** `sha256:77fe5544b33a85519b8c1fba57f41fe1a68aa411eb63c64be5429dbbd28ea913`
+**Contract bundle:** `sha256:c0976abd6c2d450f242351f2cd94b2589cac5e6a03f1a2f98bfe1acbcbc4ea8c`
+**Admission-source manifest:** `sha256:70ab68bef6a9654d59164b70340a4c33bcab56d965b27789159fb49155ef87c8`
+**Admission-source bundle:** `sha256:9a8282231c2665f1e8f5467e7bbd9e16896b6e82704a8be9a17b66949cf11333`
 **Approval contract:** [`2026-08-01-increment-5a-owner-approval-attestation.md`](2026-08-01-increment-5a-owner-approval-attestation.md)
 
 ## Decision requested
