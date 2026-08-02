@@ -23,7 +23,7 @@ jobs:
   route:
     name: route
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 6
     outputs:
       service_required: ${{ steps.route_output.outputs.service_required }}
     steps:
@@ -91,7 +91,7 @@ jobs:
       - route
     if: needs.route.result == 'success'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout evaluated head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -191,7 +191,7 @@ jobs:
       - route
     if: needs.route.result == 'success' && needs.route.outputs.service_required == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       NEO4J_B2_IMAGE: neo4j:2026.06.0-community-trixie
       NEO4J_URI: bolt://localhost:7687
@@ -275,7 +275,7 @@ jobs:
           printf 'NEO4J_ADMIN_PASSWORD=%s\n' "${NEO4J_ADMIN_PASSWORD}" > "${admin_file}"
           printf 'NEWSROOM_NEO4J_PROJECTOR_PASSWORD=%s\n' "${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}" > "${projector_file}"
           chmod 600 "${admin_file}" "${projector_file}"
-          timeout --signal=TERM --kill-after=5s 110s \
+          timeout --signal=TERM --kill-after=5s 220s \
             docker pull "${NEO4J_B2_IMAGE}"
           timeout --signal=TERM --kill-after=2s 20s \
             docker run --detach --pull=never \
@@ -419,7 +419,7 @@ jobs:
       - service
     if: always()
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       actions: read
       contents: read
@@ -448,7 +448,7 @@ jobs:
         run: |
           set -uo pipefail
           set +e
-          timeout --signal=TERM --kill-after=2s 110s \
+          timeout --signal=TERM --kill-after=2s 220s \
             python -m scripts.sdlc.workflow_orchestrator collect \
               --output-directory .sdlc-run/decision-input \
               > "${RUNNER_TEMP}/collection-result.json"

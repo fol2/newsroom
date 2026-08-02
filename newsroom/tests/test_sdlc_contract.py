@@ -19,27 +19,27 @@ REPO_ROOT = Path(__file__).parents[2]
 def test_accepted_contract_loads_and_references_exact_source_files() -> None:
     contract = load_contract(REPO_ROOT)
 
-    assert contract.contract_version == "sdlc-v2.3"
+    assert contract.contract_version == "sdlc-v2.4"
     assert contract.classifier_version == "sdlc-risk-v1"
     assert contract.data["status"] == "accepted"
     assert contract.source_path == REPO_ROOT / ".sdlc" / "gates.toml"
     assert contract.data["acceptance_record"] == (
-        "docs/specs/sdlc/2026-07-30-sdlc-v2.3-owner-budget-amendment.md"
+        "docs/specs/sdlc/2026-08-02-sdlc-v2.4-owner-budget-amendment.md"
     )
     assert contract.unknown_path_risk == "R3_EXTERNAL_SERVICE_SECURITY"
 
 
-def test_every_gate_lane_resolves_and_all_hard_timeouts_are_below_two_minutes() -> None:
+def test_every_gate_lane_resolves_and_all_hard_timeouts_are_below_four_minutes() -> None:
     contract = load_contract(REPO_ROOT)
     lanes = contract.data["lanes"]
 
     for gate in contract.data["gate"].values():
         assert gate["lane"] in lanes
-        assert 0 < gate["hard_timeout_seconds"] < 120
+        assert 0 < gate["hard_timeout_seconds"] < 240
     assert contract.data["global"] == {
-        "gate_command_timeout_seconds": 110,
-        "lane_execution_timeout_seconds": 110,
-        "finalization_timeout_seconds": 10,
+        "gate_command_timeout_seconds": 220,
+        "lane_execution_timeout_seconds": 220,
+        "finalization_timeout_seconds": 20,
         "pr_feedback_p50_target_seconds": 30,
         "pr_feedback_p95_target_seconds": 60,
         "runner_queue_p95_target_seconds": 5,
@@ -56,27 +56,27 @@ def test_every_gate_lane_resolves_and_all_hard_timeouts_are_below_two_minutes() 
         name: value["hard_timeout_seconds"]
         for name, value in contract.data["gate"].items()
     } == {
-        "route": 10,
-        "source-integrity": 30,
-        "core-deterministic": 110,
-        "service-neo4j": 110,
-        "merge-exact": 110,
-        "science-shard": 110,
-        "evidence-finalize": 10,
+        "route": 20,
+        "source-integrity": 60,
+        "core-deterministic": 220,
+        "service-neo4j": 220,
+        "merge-exact": 220,
+        "science-shard": 220,
+        "evidence-finalize": 20,
     }
-    assert lanes["decision"] == {"always_reports": True, "hard_timeout_seconds": 10}
-    assert lanes["core"]["hard_timeout_seconds"] == 110
-    assert lanes["service"]["hard_timeout_seconds"] == 110
-    assert lanes["merge_group"]["hard_timeout_seconds"] == 110
-    assert lanes["science"]["per_shard_hard_timeout_seconds"] == 110
+    assert lanes["decision"] == {"always_reports": True, "hard_timeout_seconds": 20}
+    assert lanes["core"]["hard_timeout_seconds"] == 220
+    assert lanes["service"]["hard_timeout_seconds"] == 220
+    assert lanes["merge_group"]["hard_timeout_seconds"] == 220
+    assert lanes["science"]["per_shard_hard_timeout_seconds"] == 220
 
 
-def test_two_minute_ceiling_and_owner_multiplier_are_fail_closed() -> None:
+def test_four_minute_ceiling_and_owner_multiplier_are_fail_closed() -> None:
     contract = load_contract(REPO_ROOT)
 
     oversized = deepcopy(contract.data)
-    oversized["gate"]["core-deterministic"]["hard_timeout_seconds"] = 120
-    with pytest.raises(ContractError, match="below 120"):
+    oversized["gate"]["core-deterministic"]["hard_timeout_seconds"] = 240
+    with pytest.raises(ContractError, match="below 240"):
         validate_contract_data(oversized)
 
     wrong_owner_multiplier = deepcopy(contract.data)
@@ -140,8 +140,8 @@ def test_owner_values_match_review_and_selector_policy() -> None:
 
     assert owner == {
         "accepted_at": "2026-07-22",
-        "budget_amended_at": "2026-07-30",
-        "predecessor_contract_version": "sdlc-v2.2",
+        "budget_amended_at": "2026-08-02",
+        "predecessor_contract_version": "sdlc-v2.3",
         "hard_budget_multiplier": 2,
         "review_net_executable_lines_trigger": 400,
         "review_changed_files_trigger": 12,
@@ -172,5 +172,5 @@ def test_contract_validation_cli_emits_a_small_typed_summary(
     output = capsys.readouterr().out
 
     assert '"status":"PASS"' in output
-    assert '"contract_version":"sdlc-v2.3"' in output
+    assert '"contract_version":"sdlc-v2.4"' in output
     assert "R4_RELEASE_OPERATIONAL" in output

@@ -1,16 +1,16 @@
 schema_version = "newsroom.sdlc.gates.v1"
-contract_version = "sdlc-v2.3"
+contract_version = "sdlc-v2.4"
 status = "accepted"
 owner = "fol2"
 canonical_language = "English"
 specification = "docs/specs/sdlc/high-performance-evidence-sdlc.md"
-acceptance_record = "docs/specs/sdlc/2026-07-30-sdlc-v2.3-owner-budget-amendment.md"
+acceptance_record = "docs/specs/sdlc/2026-08-02-sdlc-v2.4-owner-budget-amendment.md"
 issue = 98
 
 [global]
-gate_command_timeout_seconds = 110
-lane_execution_timeout_seconds = 110
-finalization_timeout_seconds = 10
+gate_command_timeout_seconds = 220
+lane_execution_timeout_seconds = 220
+finalization_timeout_seconds = 20
 pr_feedback_p50_target_seconds = 30
 pr_feedback_p95_target_seconds = 60
 runner_queue_p95_target_seconds = 5
@@ -27,7 +27,7 @@ rerun_can_overwrite_required_result = false
 id = "route"
 p50_target_seconds = 1
 p95_target_seconds = 2
-hard_timeout_seconds = 10
+hard_timeout_seconds = 20
 blocking = true
 lane = "core"
 
@@ -35,7 +35,7 @@ lane = "core"
 id = "source-integrity"
 p50_target_seconds = 3
 p95_target_seconds = 8
-hard_timeout_seconds = 30
+hard_timeout_seconds = 60
 blocking = true
 lane = "core"
 
@@ -43,7 +43,7 @@ lane = "core"
 id = "core-deterministic"
 p50_target_seconds = 15
 p95_target_seconds = 35
-hard_timeout_seconds = 110
+hard_timeout_seconds = 220
 blocking = true
 lane = "core"
 
@@ -51,7 +51,7 @@ lane = "core"
 id = "service-neo4j"
 p50_target_seconds = 25
 p95_target_seconds = 50
-hard_timeout_seconds = 110
+hard_timeout_seconds = 220
 blocking = true
 risk_triggered = true
 lane = "service"
@@ -60,7 +60,7 @@ lane = "service"
 id = "merge-exact"
 p50_target_seconds = 20
 p95_target_seconds = 50
-hard_timeout_seconds = 110
+hard_timeout_seconds = 220
 blocking = true
 lane = "merge_group"
 activation = "after_merge_queue_adoption"
@@ -69,7 +69,7 @@ activation = "after_merge_queue_adoption"
 id = "science-*"
 p50_target_seconds = 20
 p95_target_seconds = 50
-hard_timeout_seconds = 110
+hard_timeout_seconds = 220
 blocking = false
 lane = "science"
 
@@ -77,7 +77,7 @@ lane = "science"
 id = "evidence-finalize"
 p50_target_seconds = 1
 p95_target_seconds = 3
-hard_timeout_seconds = 10
+hard_timeout_seconds = 20
 blocking = true
 lane = "decision"
 
@@ -191,7 +191,7 @@ clustering = [
 [lanes.core]
 bootstrap_once = true
 run_full_suite_when_p95_below_seconds = 35
-hard_timeout_seconds = 110
+hard_timeout_seconds = 220
 required = true
 
 [lanes.service]
@@ -200,21 +200,21 @@ parallel_with = "core"
 condition = "risk.service == true"
 actual_service_required = true
 fake_or_noop_satisfies = false
-hard_timeout_seconds = 110
+hard_timeout_seconds = 220
 
 [lanes.merge_group]
 exact_tree_required = true
 reuse_requires_exact_evidence_identity = true
-hard_timeout_seconds = 110
+hard_timeout_seconds = 220
 
 [lanes.science]
 parallel_shards = true
-per_shard_hard_timeout_seconds = 110
+per_shard_hard_timeout_seconds = 220
 pr_blocking = false
 
 [lanes.decision]
 always_reports = true
-hard_timeout_seconds = 10
+hard_timeout_seconds = 20
 
 [test_strategy]
 full_suite_blocking_default = true
@@ -241,7 +241,7 @@ individual_test_or_file_p95_seconds = 1.0
 individual_test_p95_seconds = 5.0
 
 [test_sizes.science]
-shard_hard_timeout_seconds = 110
+shard_hard_timeout_seconds = 220
 
 [sentinels]
 execution_p95_target_seconds = 5
@@ -307,7 +307,7 @@ decomposition_note_required_above_trigger = true
 
 [slo_error_budget]
 window_days = 7
-execution_p95_max_seconds = 110
+execution_p95_max_seconds = 220
 budget_exceeded_fraction_max = 0.01
 flake_fraction_max = 0.005
 evidence_mismatch_fraction_max = 0.001
@@ -327,8 +327,8 @@ allowed = [
 
 [owner_decisions]
 accepted_at = "2026-07-22"
-budget_amended_at = "2026-07-30"
-predecessor_contract_version = "sdlc-v2.2"
+budget_amended_at = "2026-08-02"
+predecessor_contract_version = "sdlc-v2.3"
 hard_budget_multiplier = 2
 review_net_executable_lines_trigger = 400
 review_changed_files_trigger = 12

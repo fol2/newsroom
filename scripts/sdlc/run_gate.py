@@ -20,7 +20,7 @@ SCHEMA_VERSION = "newsroom.sdlc.gate-run.v1"
 _SECRET_NAME = re.compile(r"(?:AUTH|CREDENTIAL|KEY|PASSWORD|SECRET|TOKEN)", re.IGNORECASE)
 _SAFE_ID = re.compile(r"[A-Za-z0-9_.*-]{1,128}")
 _MAX_OUTPUT_BYTES = 1_048_576
-_MAX_TIMEOUT_SECONDS = 120
+_MAX_TIMEOUT_SECONDS = 240
 _SCHEDULER_MARGIN_SECONDS = 0.05
 
 
@@ -45,7 +45,7 @@ class LaneDeadline:
             or not isinstance(self.timeout_ms, int)
             or not 0 < self.timeout_ms < _MAX_TIMEOUT_SECONDS * 1000
         ):
-            raise GateRunError("lane timeout must be positive and below 120 seconds")
+            raise GateRunError("lane timeout must be positive and below 240 seconds")
 
     @classmethod
     def start(cls, timeout_seconds: float) -> "LaneDeadline":
@@ -132,7 +132,7 @@ def _timeout_seconds(value: object, name: str) -> float:
         raise GateRunError(f"{name} must be numeric")
     timeout = float(value)
     if timeout <= 0 or timeout >= _MAX_TIMEOUT_SECONDS:
-        raise GateRunError(f"{name} must be positive and below 120 seconds")
+        raise GateRunError(f"{name} must be positive and below 240 seconds")
     return timeout
 
 
