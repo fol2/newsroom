@@ -42,7 +42,7 @@ class _Metadata:
 
 @dataclass(frozen=True)
 class _Route:
-    contract_version: str = "sdlc-v2.3"
+    contract_version: str = "sdlc-v2.4"
     risk_classifier_version: str = "sdlc-risk-v1"
     risk_tier: str = "R1_LOCAL_CODE"
     service_required: bool = False
@@ -349,7 +349,6 @@ def test_cross_record_identity_mismatch_fails_closed(
         )
 
 
-
 def test_route_and_lane_gate_semantics_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -430,7 +429,6 @@ def test_record_rejects_shape_policy_and_identity_tampering(
     changed["lane_identity"] = "sha256:" + "0" * 64
     with pytest.raises(ShadowLaneError, match="lane_identity"):
         validate_shadow_lane_record(changed)
-
 
 
 def test_direct_record_rejects_validator_substitution(
