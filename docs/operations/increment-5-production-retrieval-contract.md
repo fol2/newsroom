@@ -1,38 +1,50 @@
 # Increment 5 production retrieval operational contract
 
-**Status:** Contract proposal; no executable runtime authority
-**Bound decision payload:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`
-**Effective production schema:** `sha256:3e2ac38b2c17d11b8ea29afe58bd0cdf6924146969600cad2b89fc82ec8607b9`
-**Fixture schema:** `sha256:c7faf200a77ddb08fee48394594b85e985aecb9ad342b24cbbf6464bf38f387e`
-**Applies to:** issues #251–#254 after admitted 5A owner approval
+**Status:** Contract proposal; no executable runtime authority  
+**Bound decision payload:** `sha256:4cc1de54a8d831358bbbe9b65c724d442401e84e3e72918df45807e140bdea56`  
+**Effective production schema:** `sha256:3e2ac38b2c17d11b8ea29afe58bd0cdf6924146969600cad2b89fc82ec8607b9`  
+**Effective fixture schema:** `sha256:1f8491f3cef73c6a6b189f99d7130628122651e13053c18ccbe1289b5bb1ad22`  
+**Admission-source manifest:** `sha256:70ab68bef6a9654d59164b70340a4c33bcab56d965b27789159fb49155ef87c8`  
+**Admission-source bundle:** `sha256:9a8282231c2665f1e8f5467e7bbd9e16896b6e82704a8be9a17b66949cf11333`  
+**Applies to:** issues #251–#254 only after admitted owner approval and a separately authenticated post-merge exact-main implementation record
 
-## Fail-closed profile and approval loading
+## Fail-closed profile and admission loading
 
 A production retrieval process accepts only a canonical v2 manifest validated
-against the repository-owned effective schema, the exact proposal and the
-source-pinned owner approval record. Every component reference must match its
-contract ID, contract version, implementation version, configuration digest and
-identity digest. Missing, fake, fixture, replay, disabled, incompatible or
-additional components fail validation.
+against the repository-owned effective schema, exact proposal, admitted owner
+record and admitted post-merge exact-main record. Every component reference must
+match its contract ID, contract version, implementation version, configuration
+digest and identity digest. Missing, fake, fixture, replay, disabled,
+incompatible or additional components fail validation.
 
-The approval record is created from the exact owner comment on issue #250 and
-committed with its canonical SHA-256 digest pinned in reviewed source. Runtime
-code performs no approval HTTP request and accepts no approval/verifier object.
-A caller-created authority, subclass, mutable slot, alternate record path or
-parsed external record cannot be supplied to the production builder. The
-production validator accepts only the canonical module façade and reloads the
-same source-pinned record independently.
+The exact owner comment on issue #250 is materialised as a canonical owner
+record. In the same commit, the record SHA-256 is written to
+`approval_record_digest` in
+`newsroom/increment5/data/increment5a_admission_anchors_v1.json`. The later
+post-merge record is admitted by writing its digest to
+`main_qualification_record_digest` in the same canonical anchor. Neither step
+rewrites the immutable executable source closure.
 
-Before owner approval is materialised, the pinned digest is `None` and the
-record path must be absent. A stray unpinned record, missing pinned record,
-changed bytes, noncanonical JSON, duplicate key, schema mismatch or wrong
-proposal/comment binding fails closed.
+The anchor also fixes the reviewed source manifest and bundle identities. The
+actual parent gate verifies its own reviewed Git blob and every listed
+dependency; the isolated child independently verifies the same closure before
+repository imports and authenticated GitHub reads. A caller-created authority,
+subclass, mutable slot, alternate path, parsed external record, substituted
+transport or replaced parent/child gate cannot supply production authority.
 
-Fixture replay uses a separate schema, is non-qualifying, permits no protected
-content, external call or spend, and carries
-`production_substitution_allowed=false`. There is no environment-variable or
-caller-object upgrade from fixture to production and no default production
-manifest.
+Before owner approval is materialised, both record anchors are `null` and both
+record paths must be absent. After owner materialisation but before post-merge
+admission, production-equivalent qualification is allowed but downstream
+implementation remains blocked. A stray unanchored record, missing anchored
+record, changed bytes, noncanonical JSON, duplicate key, schema mismatch, wrong
+source identity, wrong proposal/comment binding or main record without owner
+record fails closed.
+
+Fixture replay uses a separate hardened schema, is non-qualifying, permits no
+protected content, external call or spend, and carries
+`production_substitution_allowed=false`. There is no environment-variable,
+caller-object or fallback upgrade from fixture to production and no default
+production manifest.
 
 ## Artifact and dependency controls
 
@@ -40,14 +52,14 @@ The proposed embedding artifact is preloaded outside the request path and
 pinned by package version, package wheel hash, model ID, exact model revision
 and later downloaded-artifact digest. Request-time network download, remote
 code, external API fallback and unpinned model resolution are prohibited.
-Model load is an authenticated, audited operational action after owner approval
-and before qualification.
+Model load is an authenticated, audited operational action only after the
+required owner and post-merge admissions and before qualification.
 
 Neo4j, driver, full-text provider, vector provider, model package and model
 artifact compatibility are exact. A change creates a new component digest,
-Operational Profile, qualification Epoch and isolated index generation. A prior
-generation never silently receives a new chunker, normaliser, model or index
-contract.
+Operational Profile, qualification Epoch and isolated index generation. A
+prior generation never silently receives a new chunker, normaliser, model or
+index contract.
 
 ## Generation lifecycle
 
@@ -119,12 +131,12 @@ a signed dataset manifest.
 
 ## Purge and non-resurrection
 
-Rights revocation or tombstone blocks new indexing immediately, removes affected
-full-text, vector and graph derivatives from every serving/building generation,
-invalidates any retrieval context whose permitted material changed, and records
-a durable purge receipt. Rebuild reads current authority and cannot recreate
-removed material. Qualification includes destructive graph/index loss followed
-by rebuild and proves zero residual or resurrected derivatives.
+Rights revocation or tombstone blocks new indexing immediately, removes
+affected full-text, vector and graph derivatives from every serving/building
+generation, invalidates any retrieval context whose permitted material changed,
+and records a durable purge receipt. Rebuild reads current authority and cannot
+recreate removed material. Qualification includes destructive graph/index loss
+followed by rebuild and proves zero residual or resurrected derivatives.
 
 An uncertain purge, ambiguous external/model effect, store failure or audit
 failure fails closed and creates a retained Finding/incident. Retry is
@@ -139,7 +151,7 @@ reconciliation. Last complete success is distinct from last source or index
 change.
 
 Metrics and alerts are attributed to exact decision, component, generation,
-tool, purpose and Run versions. Alerts prioritize false no-match, rights
+tool, purpose and Run versions. Alerts prioritise false no-match, rights
 leakage/resurrection, write/scope escape, collision-check loss, gap/dead-letter
 state, stale ACTIVE generation and loss of all credible required modes over raw
 error volume.
