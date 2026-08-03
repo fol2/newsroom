@@ -1,4 +1,4 @@
-name: Increment 5A scope replacement builder
+name: Increment 5A final candidate builder
 
 on:
   pull_request:
@@ -30,26 +30,39 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install uv
 
-      - name: Pin reviewed source and negative regression allowance
+      - name: Materialize closed-world ownership correction
+        run: python scripts/sdlc/_staging_increment5_finalize_candidate.py
+
+      - name: Verify exact generated path set
         run: |
           python - <<'PY'
           from pathlib import Path
-          path = Path("scripts/sdlc/_staging_increment5_expand_scope.py")
-          text = path.read_text(encoding="utf-8")
-          old_head = '    source_head = subprocess.check_output(\n        ["git", "rev-parse", "HEAD^"], cwd=ROOT, text=True\n    ).strip()\n'
-          new_head = '    source_head = "40d387840ee6d2b41042b32191a962ae9baf9502"\n'
-          old_check = '            if old in text:\n                hits.append(str(path.relative_to(ROOT)))\n'
-          new_check = '            if (\n                old == OLD_SCOPE\n                and path.resolve() == PROFILE_TEST.resolve()\n                and text.count(old) == 1\n            ):\n                continue\n            if old in text:\n                hits.append(str(path.relative_to(ROOT)))\n'
-          if text.count(old_head) != 1 or text.count(old_check) != 1:
-              raise SystemExit("staging helper source differs")
-          path.write_text(
-              text.replace(old_head, new_head).replace(old_check, new_check),
-              encoding="utf-8",
-          )
-          PY
+          import subprocess
 
-      - name: Materialize exact scope and digest chain
-        run: python scripts/sdlc/_staging_increment5_expand_scope.py
+          expected = {
+              "docs/decisions/2026-08-02-increment-5a-production-retrieval-contract.md",
+              "docs/operations/increment-5-production-retrieval-contract.md",
+              "docs/traceability/increment-5-production-retrieval.md",
+              "increment5a-final-candidate-manifest.json",
+              "newsroom/increment5/_traceability_anchors.py",
+              "newsroom/increment5/_traceability_model.py",
+              "newsroom/increment5/traceability.py",
+              "newsroom/tests/test_increment5a_traceability.py",
+          }
+          actual = set(
+              subprocess.check_output(
+                  ["git", "diff", "--name-only"], text=True
+              ).splitlines()
+          )
+          if actual != expected:
+              raise SystemExit(
+                  f"generated path set differs: missing={sorted(expected-actual)}, "
+                  f"extra={sorted(actual-expected)}"
+              )
+          for path in actual:
+              if not Path(path).is_file():
+                  raise SystemExit(f"generated path is not a regular file: {path}")
+          PY
 
       - name: Verify locked environment
         run: |
@@ -72,12 +85,20 @@ jobs:
       - name: Source integrity
         run: |
           git diff --check
-          cat increment5a-scope-digests.json
+          cat increment5a-final-candidate-manifest.json
 
       - name: Commit verified staging materialization
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -A
-          git commit -m "build(increment5): materialize complete qualification scope"
+          git add \
+            docs/decisions/2026-08-02-increment-5a-production-retrieval-contract.md \
+            docs/operations/increment-5-production-retrieval-contract.md \
+            docs/traceability/increment-5-production-retrieval.md \
+            increment5a-final-candidate-manifest.json \
+            newsroom/increment5/_traceability_anchors.py \
+            newsroom/increment5/_traceability_model.py \
+            newsroom/increment5/traceability.py \
+            newsroom/tests/test_increment5a_traceability.py
+          git commit -m "build(increment5): materialize final 5A boundary"
           git push origin HEAD:staging/increment-5a-scope-expand-20260803
