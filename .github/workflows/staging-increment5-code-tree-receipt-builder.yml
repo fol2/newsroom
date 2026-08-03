@@ -1,0 +1,126 @@
+name: Increment 5A stdlib exact-blob replacement builder
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches:
+      - agent/increment-5a-retrieval-contract
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout staging builder
+        uses: actions/checkout@v4
+        with:
+          ref: staging/increment-5a-stdlib-blob-builder-20260803
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Align exact-blob documentation
+        run: python scripts/sdlc/_staging_increment5_stdlib_blob_docs.py
+
+      - name: Verify product delta
+        env:
+          SOURCE_HEAD: b89bec7f5bdbedc441f76f24bc771dee5e26c1d7
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+
+          expected = {
+              "docs/decisions/2026-08-02-increment-5a-production-retrieval-contract.md",
+              "docs/evaluation/2026-08-02-increment-5-retrieval-evaluation-plan-v1.md",
+              "docs/operations/increment-5-production-retrieval-contract.md",
+              "newsroom/tests/test_increment5a_profile_semantic_envelope.py",
+              "scripts/sdlc/increment5_profile_validator.py",
+          }
+          actual = set(
+              subprocess.check_output(
+                  ["git", "diff", "--name-only", os.environ["SOURCE_HEAD"]],
+                  text=True,
+              ).splitlines()
+          )
+          helper_paths = {
+              ".github/workflows/staging-increment5-code-tree-receipt-builder.yml",
+              ".github/workflows/staging-increment5-stdlib-blob-builder.yml",
+              "scripts/sdlc/_staging_increment5_stdlib_blob_docs.py",
+          }
+          if actual != expected | helper_paths:
+              raise SystemExit(
+                  f"staging delta differs: missing={sorted((expected|helper_paths)-actual)}, "
+                  f"extra={sorted(actual-(expected|helper_paths))}"
+              )
+          PY
+
+      - name: Build helper-free one-commit candidate
+        env:
+          BASE: 3ea1874de5e1bd6c622a3760eabb74adfe75d169
+          SOURCE_HEAD: b89bec7f5bdbedc441f76f24bc771dee5e26c1d7
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git read-tree "$SOURCE_HEAD"
+          git add \
+            docs/decisions/2026-08-02-increment-5a-production-retrieval-contract.md \
+            docs/evaluation/2026-08-02-increment-5-retrieval-evaluation-plan-v1.md \
+            docs/operations/increment-5-production-retrieval-contract.md \
+            newsroom/tests/test_increment5a_profile_semantic_envelope.py \
+            scripts/sdlc/increment5_profile_validator.py
+          candidate_tree="$(git write-tree)"
+          candidate_commit="$(printf '%s\n' 'feat(increment5): finalize production retrieval contract' | git commit-tree "$candidate_tree" -p "$BASE")"
+          git checkout --detach --force "$candidate_commit"
+          git clean -ffd
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..HEAD")" = "1"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          git diff --check "$BASE" HEAD
+          echo "CANDIDATE_COMMIT=$candidate_commit" >> "$GITHUB_ENV"
+          echo "CANDIDATE_TREE=$candidate_tree" >> "$GITHUB_ENV"
+
+      - name: Verify locked environment
+        run: |
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Focused Increment 5A verification
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_increment5a_contract.py \
+            newsroom/tests/test_increment5a_evaluation_plan.py \
+            newsroom/tests/test_increment5a_package_neutrality.py \
+            newsroom/tests/test_increment5a_profiles.py \
+            newsroom/tests/test_increment5a_profile_semantic_envelope.py \
+            newsroom/tests/test_increment5a_traceability.py
+
+      - name: Full deterministic verification
+        run: uv run python -m pytest -q
+
+      - name: Verify helper-free source integrity
+        env:
+          BASE: 3ea1874de5e1bd6c622a3760eabb74adfe75d169
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          test "$(git rev-list --count "$BASE..HEAD")" = "1"
+          git diff --check "$BASE" HEAD
+
+      - name: Publish verified helper-free candidate
+        run: |
+          git push --force origin \
+            "$CANDIDATE_COMMIT:refs/heads/staging/increment-5a-stdlib-blob-candidate-20260803"
