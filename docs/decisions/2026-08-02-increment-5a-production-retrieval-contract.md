@@ -80,10 +80,10 @@ Delivery ownership is derived rather than patched row by row:
 - 5A / #250 — 10;
 - 5B / #251 — 0 complete requirements (partial branch implementation);
 - 5C / #252 — 4;
-- 5D / #253 — 16;
+- 5D / #253 — 11;
 - prior Increment 4 / #144 — 7;
 - outside Increment 5 activation — 1; and
-- **5E / #254 — the exact closed-world remainder of 117 requirements.**
+- **5E / #254 — the exact closed-world remainder of 122 requirements.**
 
 This replaces the invalid 114-row hand-selected inventory. The complete map is
 in `newsroom/increment5/traceability.py`.
@@ -244,26 +244,34 @@ disagreement required by `DEVAL-020`–`DEVAL-033`.
   purpose, and scope authorization; no raw Cypher, arbitrary index, or writes.
 - **5D / #253:** exact/source-native, formal-process, and explicit-lineage
   retrieval precedes approximate similarity; deterministic fusion and
-  authoritative dependency-root deduplication then produce one request. 5D
-  also owns complete projectable and hydratable
+  authoritative dependency-root deduplication then produce one read-only
+  request. 5D also owns complete projectable and hydratable
   `Source → Revision → Signal → Lead → Hypothesis → Candidate` lineage,
-  authoritative hydration, freshness, collision checks, and request-level
-  explicit outcomes. It stops before triage and Candidate-admission
-  integration.
+  authoritative hydration, freshness, the request's exact collision receipt,
+  and honest request-level no-match or incomplete outcomes. It stops before
+  upstream collection, downstream decisions, Hypothesis or Candidate effects,
+  Candidate admission, and product-profile outage behaviour.
 - **5E / #254:** the closed-world remainder: Epoch-bound profile validation and
   hybrid qualification; complete `DEVAL-*` universe, labels, review,
   adjudication, metrics, role-change and decision evidence; every operational
   `DOPS-*` row except `DOPS-076`; production-readiness validation; monitoring;
   queues; durability; least-privilege credentials and egress; the complete
   governed-projection → hybrid-retrieval → triage → Candidate-admission
-  vertical slice; full reconciliation recovery; scoped containment;
+  vertical slice; downstream exact-fallback/Watch/Hold decisions; Candidate
+  non-creation and collision-gated admission; source-collection and Lead
+  isolation during graph loss; system outage policy; full reconciliation
+  recovery; scoped containment;
   security; purge; rollback; rebuild; and actual-Neo4j evidence.
 
 Four independently working branches are not a hybrid system and cannot satisfy
 `TRI-021`; exact-before-approximate orchestration, fusion, and dependency-aware
-deduplication create that system in 5D. A stable request still does not satisfy
-`GRPROD-021`: 5E must integrate and verify the complete graph-native path through
-triage and Candidate admission. Likewise, request-level
+deduplication create that system in 5D. A request may truthfully return no-match,
+incomplete state, exact collision status, or graph unavailability, but it cannot
+itself create or suppress a Hypothesis or Candidate, gate Candidate admission,
+place a downstream decision into Watch or Operational Hold, keep upstream source
+collection running, or define whether the product has become graph-free. Those
+cross-request effects (`GRAG-044`, `GRAG-045`, `GRPROD-024`, `TRI-024`, and
+`TRI-026`) belong to 5E together with `GRPROD-021`. Likewise, request-level
 `COMPLETE`/`INCOMPLETE`/`UNAVAILABLE` outcomes do not deliver `DOPS-050` full
 operational reconciliation or `DOPS-073` system-level containment. Those require
 5E controls for orphaned ownership, ambiguous calls, duplicate delivery, stale

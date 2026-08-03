@@ -10,6 +10,7 @@ from __future__ import annotations
 from ._traceability_anchors import ANCHOR_BY_REQUIREMENT
 from ._traceability_model import (
     ALL_REQUIREMENTS,
+    CROSS_REQUEST_INTEGRATION_REQUIREMENTS,
     DEFERRED_TO_5E_REQUIREMENTS,
     DELIVERED_IN_5A_REQUIREMENTS,
     DELIVERY_GROUPS,
@@ -129,8 +130,8 @@ def validate_increment5_traceability() -> None:
         Increment5DeliveryTrace.DELIVERED_IN_5A: 10,
         Increment5DeliveryTrace.DEFERRED_TO_5B: 0,
         Increment5DeliveryTrace.DEFERRED_TO_5C: 4,
-        Increment5DeliveryTrace.DEFERRED_TO_5D: 16,
-        Increment5DeliveryTrace.DEFERRED_TO_5E: 117,
+        Increment5DeliveryTrace.DEFERRED_TO_5D: 11,
+        Increment5DeliveryTrace.DEFERRED_TO_5E: 122,
         Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: 1,
         Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: 7,
     }
@@ -155,6 +156,14 @@ def validate_increment5_traceability() -> None:
         DEFERRED_TO_5E_REQUIREMENTS
     ):
         raise RuntimeError("5E differs from the closed-world remainder")
+    if not CROSS_REQUEST_INTEGRATION_REQUIREMENTS.issubset(
+        DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5E]
+    ):
+        raise RuntimeError("cross-request integration must be owned by 5E")
+    if REQUEST_RETRIEVAL_REQUIREMENTS.intersection(
+        CROSS_REQUEST_INTEGRATION_REQUIREMENTS
+    ):
+        raise RuntimeError("5D contains a cross-request integration requirement")
     if any(item.startswith("DOPS-") for item in REQUEST_RETRIEVAL_REQUIREMENTS):
         raise RuntimeError("5D cannot claim operational DOPS delivery")
     if any(
@@ -265,6 +274,26 @@ def validate_increment5_traceability() -> None:
         )
 
     critical_5e = {
+        "GRAG-044": (
+            "issue:#254:deferred:graph-dependent-decision-exact-fallback-"
+            "watch-or-operational-hold"
+        ),
+        "GRAG-045": (
+            "issue:#254:deferred:source-collection-and-lead-creation-"
+            "isolation-during-graph-outage"
+        ),
+        "GRPROD-024": (
+            "issue:#254:deferred:system-outage-degradation-without-"
+            "graph-free-production-profile"
+        ),
+        "TRI-024": (
+            "issue:#254:deferred:empty-retrieval-cannot-create-"
+            "hypothesis-or-candidate"
+        ),
+        "TRI-026": (
+            "issue:#254:deferred:candidate-admission-requires-current-"
+            "authoritative-collision-check"
+        ),
         "GRPROD-021": (
             "issue:#254:deferred:complete-graph-native-vertical-slice-"
             "through-triage-and-candidate-admission"

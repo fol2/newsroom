@@ -42,7 +42,7 @@ Increment 5 uses 155 accepted requirements. The machine inventory includes the
 exact selected `GRAG-*`, `GRPROD-*`, and `TRI-*` ranges plus every requirement
 heading in the accepted `DEVAL-*` and `DOPS-*` specifications.
 
-The exact delivery split is `10 / 0 / 4 / 16 / 117 / 7 / 1` for 5A, 5B, 5C,
+The exact delivery split is `10 / 0 / 4 / 11 / 122 / 7 / 1` for 5A, 5B, 5C,
 5D, 5E, prior Increment 4, and outside activation respectively. 5E is derived as
 the closed-world remainder after the six smaller explicit groups are removed.
 It is not a manually maintained list.
@@ -59,13 +59,17 @@ Tests parse the two accepted specifications and require exact equality with the
 - **5D / #253:** exact/source-native, formal-process, and explicit-lineage
   retrieval before approximate similarity; deterministic fusion, authoritative
   dependency-root deduplication, complete six-stage discovery lineage,
-  hydration, freshness, collision checks, and request-level outcomes.
+  hydration, freshness, an exact request collision receipt, and honest
+  request-level no-match or incomplete outcomes. It creates no upstream or
+  downstream operational or editorial effect.
 - **5E / #254:** the complete closed-world evaluation and operating system:
   universe, labels, review and adjudication; Operational Profiles; scheduling;
   access and parser security; health and coverage; queues and capacity;
   monitoring and incidents; security; rights purge; full reconciliation
   recovery; containment; the complete governed-projection/hybrid-retrieval/
-  triage/Candidate-admission vertical slice; production/canary/live-shadow
+  triage/Candidate-admission vertical slice; downstream decision fallback,
+  Candidate non-creation and collision-gated admission, collection/Lead
+  isolation and system outage semantics; production/canary/live-shadow
   GraphRAG enforcement; rollback and rebuild; and actual-service
   qualification.
 
@@ -140,7 +144,10 @@ Outcomes are:
   and
 - `UNAVAILABLE` — no safe bounded response can be produced.
 
-An empty result is no-match only with `COMPLETE`.
+An empty result is no-match only with `COMPLETE`. This request outcome does
+not itself create a Hypothesis or Candidate, authorize Candidate admission,
+select Watch or Operational Hold, continue source collection, or change the
+product profile; those effects require 5E integration and current authority.
 
 ## Security and DOPS-026 / DOPS-067
 

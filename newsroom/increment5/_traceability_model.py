@@ -125,9 +125,11 @@ ALL_REQUIREMENTS = frozenset().union(
     DOPS_REQUIREMENTS,
 )
 
-# 5D ends at one bounded retrieval request. It owns the hybrid result and its
-# request-local authority semantics, not operational policy, health, queues,
-# durable transition delivery, later reconciliation, containment, or incidents.
+# 5D ends at one bounded read-only retrieval request. It owns the hybrid result
+# and request-local authority semantics. It does not own upstream collection,
+# downstream decisions or Candidate admission, product-profile outage behaviour,
+# operational policy, health, queues, durability, later reconciliation,
+# containment, or incidents.
 REQUEST_RETRIEVAL_REQUIREMENTS = frozenset(
     {
         "GRAG-031",
@@ -136,16 +138,24 @@ REQUEST_RETRIEVAL_REQUIREMENTS = frozenset(
         "GRAG-041",
         "GRAG-042",
         "GRAG-043",
-        "GRAG-044",
-        "GRAG-045",
-        "GRPROD-024",
         "TRI-020",
         "TRI-021",
         "TRI-023",
-        "TRI-024",
         "TRI-025",
-        "TRI-026",
         "TRI-027",
+    }
+)
+
+# These obligations consume retrieval state but cannot be completed by the
+# retrieval request itself. They require upstream or downstream integration or
+# system-level outage policy and therefore belong to the 5E remainder.
+CROSS_REQUEST_INTEGRATION_REQUIREMENTS = frozenset(
+    {
+        "GRAG-044",
+        "GRAG-045",
+        "GRPROD-024",
+        "TRI-024",
+        "TRI-026",
     }
 )
 
@@ -223,8 +233,16 @@ DELIVERY_GROUPS: dict[Increment5DeliveryTrace, frozenset[str]] = {
 
 if len(ALL_REQUIREMENTS) != 155:
     raise RuntimeError("Increment 5 accepted inventory must contain 155 requirements")
-if len(DEFERRED_TO_5E_REQUIREMENTS) != 117:
-    raise RuntimeError("5E closed-world remainder must contain 117 requirements")
+if len(DEFERRED_TO_5E_REQUIREMENTS) != 122:
+    raise RuntimeError("5E closed-world remainder must contain 122 requirements")
+if not CROSS_REQUEST_INTEGRATION_REQUIREMENTS.issubset(
+    DEFERRED_TO_5E_REQUIREMENTS
+):
+    raise RuntimeError("cross-request integration requirements must belong to 5E")
+if REQUEST_RETRIEVAL_REQUIREMENTS.intersection(
+    CROSS_REQUEST_INTEGRATION_REQUIREMENTS
+):
+    raise RuntimeError("request-local and cross-request requirements overlap")
 if not OPERATIONAL_DOPS.issubset(DEFERRED_TO_5E_REQUIREMENTS):
     raise RuntimeError("every operational DOPS row except DOPS-076 must belong to 5E")
 

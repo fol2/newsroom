@@ -59,7 +59,6 @@ _EXPLICIT_ANCHOR_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
                 "GRAG-041",
                 "TRI-020",
                 "TRI-025",
-                "TRI-026",
             }
         ),
     ),
@@ -78,17 +77,35 @@ _EXPLICIT_ANCHOR_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
         frozenset(
             {
                 "GRAG-043",
-                "GRAG-044",
-                "GRPROD-024",
                 "TRI-023",
-                "TRI-024",
                 "TRI-027",
             }
         ),
     ),
     (
-        f"{_CONTRACT}#/payload/delivery_boundaries/5D",
+        "issue:#254:deferred:graph-dependent-decision-exact-fallback-"
+        "watch-or-operational-hold",
+        frozenset({"GRAG-044"}),
+    ),
+    (
+        "issue:#254:deferred:source-collection-and-lead-creation-"
+        "isolation-during-graph-outage",
         frozenset({"GRAG-045"}),
+    ),
+    (
+        "issue:#254:deferred:system-outage-degradation-without-graph-"
+        "free-production-profile",
+        frozenset({"GRPROD-024"}),
+    ),
+    (
+        "issue:#254:deferred:empty-retrieval-cannot-create-hypothesis-"
+        "or-candidate",
+        frozenset({"TRI-024"}),
+    ),
+    (
+        "issue:#254:deferred:candidate-admission-requires-current-"
+        "authoritative-collision-check",
+        frozenset({"TRI-026"}),
     ),
     (
         "issue:#254:deferred:complete-graph-native-vertical-slice-"

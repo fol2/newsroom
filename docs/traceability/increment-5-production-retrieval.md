@@ -35,12 +35,12 @@ The smaller delivery boundaries are explicit:
 - 5B supplies four branch implementations but closes no selected whole
   requirement before composition;
 - 5C contains exactly four named-tool requirements;
-- 5D contains exactly sixteen one-request retrieval requirements;
+- 5D contains exactly eleven request-local retrieval requirements;
 - seven rows cite accepted Increment 4 delivery; and
 - `GRPROD-022` remains outside Increment 5 activation.
 
 **5E is the closed-world remainder.** Once those exact groups are removed from
-the 155-row inventory, the remaining 117 requirements belong to 5E. A newly
+the 155-row inventory, the remaining 122 requirements belong to 5E. A newly
 accepted `DEVAL-*` or `DOPS-*` row therefore cannot disappear through omission.
 
 ## Delivery distribution
@@ -50,8 +50,8 @@ accepted `DEVAL-*` or `DOPS-*` row therefore cannot disappear through omission.
 | 5A / #250 | 10 | contract, safe profiles, frozen Plan/Epoch protocol, and traceability |
 | 5B / #251 | 0 | partial branch implementations; no complete selected requirement |
 | 5C / #252 | 4 | six named read-only tools and tool-local caller/purpose/scope controls |
-| 5D / #253 | 16 | one-request hybrid composition, lineage, hydration, collision, and outcomes |
-| 5E / #254 | 117 | closed-world evaluation, complete graph-native vertical integration, production GraphRAG enforcement, operational policy, monitoring, admission, queues, durability, reconciliation, containment, security, recovery, and qualification |
+| 5D / #253 | 11 | one read-only request: composition, lineage, hydration, exact collision receipt, and honest outcomes |
+| 5E / #254 | 122 | closed-world evaluation, cross-request integration and outage effects, complete graph-native vertical integration, production GraphRAG enforcement, operational policy, monitoring, admission, queues, durability, reconciliation, containment, security, recovery, and qualification |
 | Increment 4 / #144 | 7 | accepted graph authority, ontology, and actual-service CI foundations |
 | Outside Increment 5 activation | 1 | production activation remains unauthorized |
 
@@ -72,17 +72,21 @@ executable operational surfaces, not merely the local named-tool parser.
 
 The complete 5D inventory is:
 
-- `GRAG-031`, `GRAG-032`, and `GRAG-040`–`GRAG-045`;
-- `GRPROD-024`; and
-- `TRI-020`, `TRI-021`, and `TRI-023`–`TRI-027`.
+- `GRAG-031`, `GRAG-032`, and `GRAG-040`–`GRAG-043`; and
+- `TRI-020`, `TRI-021`, `TRI-023`, `TRI-025`, and `TRI-027`.
 
 `TRI-021` belongs here because only the composer can ensure that
 source-native, formal-process, and explicit-lineage retrieval precedes
 approximate similarity. Four independent 5B branches cannot establish that
 ordering.
 
-`GRPROD-021` belongs to 5E because a one-request Retrieval Context stops before
-the required end-to-end triage and Candidate-admission integration.
+Five obligations consume retrieval results but cross the request boundary and
+therefore belong to 5E: `GRAG-044` downstream fallback/Watch/Hold decisions,
+`GRAG-045` upstream collection and Lead isolation, `GRPROD-024` product-level
+outage degradation, `TRI-024` downstream Hypothesis/Candidate non-creation, and
+`TRI-026` Candidate-admission collision enforcement. `GRPROD-021` likewise
+belongs to 5E because a Retrieval Context stops before end-to-end triage and
+Candidate admission.
 
 No `DOPS-*` row is assigned to 5C or 5D. `DOPS-076` is delivered in 5A because
 it states that admission is not activation. Every other `DOPS-*` row belongs to
@@ -169,6 +173,7 @@ Event Hypothesis node.
 
 ## Key ownership boundaries
 
+- `GRAG-044`, `GRAG-045`, `GRPROD-024`, `TRI-024`, and `TRI-026` → 5E/#254: request evidence cannot itself enforce downstream decisions or Candidate admission, continue upstream collection, or define product-level outage semantics.
 - `TRI-021` → 5D/#253: independent retrievers cannot establish exact-before-approximate ordering; the composer must enforce it.
 - `GRPROD-021` → 5E/#254: a one-request hybrid result is not the complete graph-native vertical slice through triage and Candidate admission.
 - `GRPROD-002` and `GRPROD-023` → 5E/#254: policy declarations do not deliver the production, canary, and complete-live-shadow no-omission/no-optional-plugin enforcement paths.
@@ -201,8 +206,9 @@ specification headings and the machine `DEVAL-*`/`DOPS-*` inventories;
 overlapping or incomplete delivery groups; a 5E set that is not the exact
 closed-world remainder; generic or competing anchors; nonexistent prior
 evidence; changed counts; deferred rows without the exact issue; any `DOPS-*`
-row in 5C or 5D; any operational `DOPS-*` row other than `DOPS-076` assigned
-before 5E; `TRI-028` assigned before durable later reconciliation; material
+row in 5C or 5D; any cross-request integration row assigned to 5D; any
+operational `DOPS-*` row other than `DOPS-076` assigned before 5E; `TRI-028`
+assigned before durable later reconciliation; material
 source/query/config changes reusing one Epoch; cross-Epoch pooling; independent
 branches reported as a hybrid; incomplete lineage reported as prior delivery;
 challenger work without its precondition; incomplete six-class `DEVAL-046`

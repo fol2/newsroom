@@ -6,6 +6,7 @@ import re
 
 from newsroom.increment5.traceability import (
     ALL_REQUIREMENTS,
+    CROSS_REQUEST_INTEGRATION_REQUIREMENTS,
     DEFERRED_TO_5E_REQUIREMENTS,
     DELIVERY_GROUPS,
     DEVAL_REQUIREMENTS,
@@ -63,8 +64,8 @@ def test_delivery_distribution_matches_the_dependency_boundary() -> None:
     assert Counter(row.delivery_trace for row in INCREMENT_5_TRACEABILITY) == {
         Increment5DeliveryTrace.DELIVERED_IN_5A: 10,
         Increment5DeliveryTrace.DEFERRED_TO_5C: 4,
-        Increment5DeliveryTrace.DEFERRED_TO_5D: 16,
-        Increment5DeliveryTrace.DEFERRED_TO_5E: 117,
+        Increment5DeliveryTrace.DEFERRED_TO_5D: 11,
+        Increment5DeliveryTrace.DEFERRED_TO_5E: 122,
         Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: 1,
         Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: 7,
     }
@@ -88,15 +89,10 @@ def test_5d_is_exactly_one_request_retrieval_semantics() -> None:
         "GRAG-041",
         "GRAG-042",
         "GRAG-043",
-        "GRAG-044",
-        "GRAG-045",
-        "GRPROD-024",
         "TRI-020",
         "TRI-021",
         "TRI-023",
-        "TRI-024",
         "TRI-025",
-        "TRI-026",
         "TRI-027",
     }
     assert not any(item.startswith("DOPS-") for item in REQUEST_RETRIEVAL_REQUIREMENTS)
@@ -227,6 +223,44 @@ def test_request_composition_and_lineage_are_owned_by_5d() -> None:
         rows[item].delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5D
         for item in ("GRAG-031", "GRAG-042", "TRI-021")
     )
+
+
+
+
+def test_cross_request_integration_is_owned_by_5e() -> None:
+    rows = _rows()
+    expected = {
+        "GRAG-044": (
+            "issue:#254:deferred:graph-dependent-decision-exact-fallback-"
+            "watch-or-operational-hold"
+        ),
+        "GRAG-045": (
+            "issue:#254:deferred:source-collection-and-lead-creation-isolation-"
+            "during-graph-outage"
+        ),
+        "GRPROD-024": (
+            "issue:#254:deferred:system-outage-degradation-without-graph-free-"
+            "production-profile"
+        ),
+        "TRI-024": (
+            "issue:#254:deferred:empty-retrieval-cannot-create-hypothesis-or-"
+            "candidate"
+        ),
+        "TRI-026": (
+            "issue:#254:deferred:candidate-admission-requires-current-"
+            "authoritative-collision-check"
+        ),
+    }
+    assert CROSS_REQUEST_INTEGRATION_REQUIREMENTS == frozenset(expected)
+    assert not REQUEST_RETRIEVAL_REQUIREMENTS.intersection(
+        CROSS_REQUEST_INTEGRATION_REQUIREMENTS
+    )
+    for requirement, anchor in expected.items():
+        row = rows[requirement]
+        assert row.decision_trace is Increment5DecisionTrace.BOUND_BY_5A
+        assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
+        assert row.delivery_issue == 254
+        assert row.decision_anchor == anchor
 
 
 def test_full_untrusted_input_boundary_belongs_to_5e() -> None:
