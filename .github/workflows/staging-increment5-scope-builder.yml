@@ -30,6 +30,22 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install uv
 
+      - name: Pin reviewed source head
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/sdlc/_staging_increment5_expand_scope.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''    source_head = subprocess.check_output(
+              ["git", "rev-parse", "HEAD^"], cwd=ROOT, text=True
+          ).strip()
+          '''
+          new = '    source_head = "40d387840ee6d2b41042b32191a962ae9baf9502"\n'
+          if text.count(old) != 1:
+              raise SystemExit("staging source-head expression differs")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+
       - name: Materialize exact scope and digest chain
         run: python scripts/sdlc/_staging_increment5_expand_scope.py
 
