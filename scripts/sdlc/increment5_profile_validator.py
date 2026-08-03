@@ -1,62 +1,199 @@
 #!/usr/bin/env python3
-"""Validate one canonical Increment 5 profile from an exact Git tree.
+"""Validate one canonical Increment 5 profile from exact Git blobs only.
 
-The receipt proves only that exact manifest bytes passed the reviewed profile
-structure and semantic checks loaded from a cache-free materialization of the
-stated Git commit/tree. It grants no qualification, production, component,
-source, model, provider, spend, write, or public-effect authority.
+This program is not run from the checkout. A signed exact-head workflow streams
+this file's exact Git blob to ``python -I -S -`` and supplies a separate bounded
+manifest file. The validator reads the reviewed contract and profile schemas as
+exact blobs from the same commit and uses only the Python standard library.
+
+The emitted receipt has authority effect ``NONE``. It grants no qualification,
+production, component, source, model, provider, spend, write, or public effect.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from copy import deepcopy
 import hashlib
-import importlib
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import selectors
+import signal
 import stat
 import subprocess
 import sys
-import tarfile
-import tempfile
 import time
-from typing import Any, Iterator
+from typing import Any
 
 
 _MAX_INPUT_BYTES = 1_048_576
-_MAX_GIT_OUTPUT_BYTES = 65_536
-_MAX_ARCHIVE_BYTES = 67_108_864
-_MAX_ARCHIVE_MEMBER_BYTES = 16_777_216
-_MAX_GIT_EXECUTABLE_BYTES = 268_435_456
-_ARCHIVE_READ_CHUNK_BYTES = 65_536
-_ARCHIVE_TIMEOUT_SECONDS = 30.0
+_MAX_BLOB_BYTES = 4_194_304
+_MAX_EXECUTABLE_BYTES = 268_435_456
+_MAX_GIT_TEXT_BYTES = 65_536
+_READ_CHUNK_BYTES = 65_536
+_PROCESS_TIMEOUT_SECONDS = 30.0
 _PROCESS_STOP_TIMEOUT_SECONDS = 2.0
+_MIN_SAFE_INTEGER = -9_007_199_254_740_991
+_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _TRUSTED_GIT_CANDIDATES = (Path("/usr/bin/git"), Path("/bin/git"))
 _TRUSTED_SYSTEM_PATH = "/usr/bin:/bin"
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-_SCRIPT_DIRECTORY = Path(__file__).resolve().parent
-_EXPECTED_FLAGS = frozenset(
+_SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
+_VALIDATOR_PATH = "scripts/sdlc/increment5_profile_validator.py"
+_CONTRACT_PATH = "newsroom/increment5/data/increment5a_retrieval_contract_v1.json"
+_FIXTURE_STRUCTURAL_PATH = (
+    "newsroom/increment5/data/"
+    "increment5_fixture_replay_profile_structural_v1.schema.json"
+)
+_FIXTURE_PUBLIC_PATH = (
+    "newsroom/increment5/data/increment5_fixture_replay_profile_v1.schema.json"
+)
+_QUALIFICATION_STRUCTURAL_PATH = (
+    "newsroom/increment5/data/"
+    "increment5_qualification_profile_structural_v1.schema.json"
+)
+_QUALIFICATION_PUBLIC_PATH = (
+    "newsroom/increment5/data/increment5_qualification_profile_v1.schema.json"
+)
+_CONTRACT_DIGEST = (
+    "sha256:51a3837ad9cdb70fe8aaa4242997b191c7e848bb1d391c6940cccc2bd45ba06c"
+)
+_FIXTURE_STRUCTURAL_DIGEST = (
+    "sha256:7c2e50d952109d834d944c120b8f9a5adcc59c6f39106430fa8728c5ad25c9a0"
+)
+_QUALIFICATION_STRUCTURAL_DIGEST = (
+    "sha256:7b055832c33f9d9bf25f3401fce936bba3a2310da8f272038de4f0625356685b"
+)
+_FIXTURE_PUBLIC_DIGEST = (
+    "sha256:6783030456d1d4ba5744a70932ee2982c099a3cf324ad98e2d05413216d7d571"
+)
+_QUALIFICATION_PUBLIC_DIGEST = (
+    "sha256:5d48af523da006bec804893f0bd42b411a466ca29103a8dde8fc46db49ced354"
+)
+_SAFE_RUNTIME_EFFECTS = {
+    "external_calls": 0,
+    "live_sources": False,
+    "model_load": False,
+    "protected_content": False,
+    "provider_credentials": False,
+    "provider_spend_microunits": 0,
+    "public_effect": False,
+    "write_authority": False,
+}
+_COMMON_ROOT_KEYS = frozenset(
     {
-        "--expected-code-commit-sha",
-        "--expected-code-tree-sha",
+        "schema_version",
+        "profile_kind",
+        "contract_digest",
+        "contract_version",
+        "components",
+        "budgets",
+        "runtime_effects",
+        "vector_source",
+        "qualification_eligible",
+        "production_activation_authorized",
     }
 )
-_REQUIRED_MATERIALIZED_FILES = frozenset(
+_FIXTURE_ROOT_KEYS = _COMMON_ROOT_KEYS | frozenset({"fixture"})
+_QUALIFICATION_ROOT_KEYS = _COMMON_ROOT_KEYS | frozenset(
     {
-        "newsroom/__init__.py",
-        "newsroom/authority/canonical.py",
-        "newsroom/increment5/__init__.py",
-        "newsroom/increment5/profiles.py",
+        "dataset",
+        "actual_neo4j_required",
+        "signed_dataset_manifest_required",
+        "embedding_quality_qualified",
+        "expected_outcome_scope",
+    }
+)
+_FIXTURE_KEYS = frozenset(
+    {
+        "fixture_id",
+        "fixture_manifest_digest",
+        "production_substitution_allowed",
+    }
+)
+_DATASET_KEYS = frozenset(
+    {
+        "dataset_id",
+        "dataset_manifest_digest",
+        "rights_cleared",
+        "repository_safe",
+        "contains_protected_content",
+    }
+)
+_EXPECTED_ARGUMENTS = frozenset(
+    {
+        "--repository-root",
+        "--manifest-path",
+        "--expected-code-commit-sha",
+        "--expected-code-tree-sha",
+        "--expected-validator-blob-digest",
     }
 )
 
 
 class ProfileInputError(ValueError):
-    """The isolated validator input or exact-code identity is invalid."""
+    """The exact-blob validator input is malformed or outside its boundary."""
+
+
+def _fail(message: str) -> int:
+    sys.stderr.write(f"increment5 profile validation failed: {message}\n")
+    return 2
+
+
+def _digest_bytes(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _validate_string(value: str, path: str) -> None:
+    for character in value:
+        if 0xD800 <= ord(character) <= 0xDFFF:
+            raise ProfileInputError(f"lone surrogate is unsupported at {path}")
+
+
+def _validate_restricted_value(value: Any, path: str = "$") -> None:
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        if not _MIN_SAFE_INTEGER <= value <= _MAX_SAFE_INTEGER:
+            raise ProfileInputError(
+                f"integer outside the interoperable safe range at {path}"
+            )
+        return
+    if isinstance(value, float):
+        raise ProfileInputError(f"floating-point values are unsupported at {path}")
+    if isinstance(value, str):
+        _validate_string(value, path)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ProfileInputError(f"object names must be strings at {path}")
+            _validate_string(key, f"{path}.<key>")
+            _validate_restricted_value(item, f"{path}.{key}")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_restricted_value(item, f"{path}[{index}]")
+        return
+    raise ProfileInputError(
+        f"unsupported value type at {path}: {type(value).__name__}"
+    )
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    _validate_restricted_value(value)
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8", errors="strict")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ProfileInputError(f"canonical JSON encoding failed: {exc}") from exc
 
 
 def _without_duplicate_names(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -68,50 +205,79 @@ def _without_duplicate_names(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _fail(message: str) -> int:
-    sys.stderr.write(f"increment5 profile validation failed: {message}\n")
-    return 2
+def _reject_json_constant(value: str) -> None:
+    raise ProfileInputError(f"unsupported JSON constant: {value}")
 
 
-def _canonical_git_sha(value: object, field: str) -> str:
+def _load_canonical_object(
+    raw: bytes,
+    *,
+    label: str,
+    expected_digest: str | None = None,
+) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_without_duplicate_names,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ProfileInputError(f"{label} is not strict UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise ProfileInputError(f"{label} must be an object")
+    if raw != _canonical_json_bytes(value):
+        raise ProfileInputError(f"{label} is not canonical JSON")
+    if expected_digest is not None and _digest_bytes(raw) != expected_digest:
+        raise ProfileInputError(f"{label} digest differs from reviewed identity")
+    return value
+
+
+def _canonical_sha(value: object, field: str) -> str:
     if not isinstance(value, str) or _GIT_SHA.fullmatch(value) is None:
         raise ProfileInputError(f"{field} must be 40 lowercase hexadecimal characters")
     return value
 
 
-def _parse_code_identity_args(argv: list[str]) -> tuple[str, str]:
-    if len(argv) != 4:
+def _canonical_digest(value: object, field: str) -> str:
+    if not isinstance(value, str) or _SHA256_DIGEST.fullmatch(value) is None:
+        raise ProfileInputError(f"{field} must be a canonical sha256 digest")
+    return value
+
+
+def _canonical_identifier(value: object, field: str) -> str:
+    if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
+        raise ProfileInputError(f"{field} must be a canonical identifier")
+    return value
+
+
+def _parse_arguments(argv: list[str]) -> dict[str, str]:
+    if len(argv) != 10:
         raise ProfileInputError(
-            "exact code identity arguments are required: "
-            "--expected-code-commit-sha <sha> "
-            "--expected-code-tree-sha <sha>"
+            "exact validator arguments are required: repository root, manifest "
+            "path, commit SHA, tree SHA, and validator blob digest"
         )
     values: dict[str, str] = {}
     for index in range(0, len(argv), 2):
         flag = argv[index]
-        if flag not in _EXPECTED_FLAGS:
+        if flag not in _EXPECTED_ARGUMENTS:
             raise ProfileInputError(f"unsupported argument: {flag}")
         if flag in values:
             raise ProfileInputError(f"duplicate argument: {flag}")
         values[flag] = argv[index + 1]
-    if frozenset(values) != _EXPECTED_FLAGS:
-        raise ProfileInputError("exact code identity arguments are incomplete")
-    return (
-        _canonical_git_sha(
-            values["--expected-code-commit-sha"],
-            "expected code commit SHA",
-        ),
-        _canonical_git_sha(
-            values["--expected-code-tree-sha"],
-            "expected code tree SHA",
-        ),
+    if frozenset(values) != _EXPECTED_ARGUMENTS:
+        raise ProfileInputError("exact validator arguments are incomplete")
+    _canonical_sha(values["--expected-code-commit-sha"], "expected code commit SHA")
+    _canonical_sha(values["--expected-code-tree-sha"], "expected code tree SHA")
+    _canonical_digest(
+        values["--expected-validator-blob-digest"],
+        "expected validator blob digest",
     )
+    return values
 
 
 def _root_owned_non_writable(path: Path) -> bool:
     try:
-        candidates = (path, *path.parents)
-        for candidate in candidates:
+        for candidate in (path, *path.parents):
             metadata = candidate.stat()
             if metadata.st_uid != 0:
                 return False
@@ -122,64 +288,73 @@ def _root_owned_non_writable(path: Path) -> bool:
     return True
 
 
-def _digest_trusted_file(path: Path) -> str:
+def _digest_regular_file(path: Path) -> str:
     try:
         metadata = path.stat()
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_size <= 0
-            or metadata.st_size > _MAX_GIT_EXECUTABLE_BYTES
+            or metadata.st_size > _MAX_EXECUTABLE_BYTES
         ):
-            raise ProfileInputError("trusted Git executable has an invalid size")
-        digest = hashlib.sha256()
+            raise ProfileInputError("trusted executable has an invalid size")
         remaining = metadata.st_size
+        digest = hashlib.sha256()
         with path.open("rb") as source:
             while remaining:
                 chunk = source.read(min(1_048_576, remaining))
                 if not chunk:
-                    raise ProfileInputError("trusted Git executable is truncated")
+                    raise ProfileInputError("trusted executable is truncated")
                 digest.update(chunk)
                 remaining -= len(chunk)
             if source.read(1):
-                raise ProfileInputError("trusted Git executable changed while reading")
+                raise ProfileInputError("trusted executable changed while reading")
     except OSError as exc:
-        raise ProfileInputError("cannot digest the trusted Git executable") from exc
+        raise ProfileInputError("cannot digest trusted executable") from exc
     return "sha256:" + digest.hexdigest()
 
 
-def _git_executable() -> tuple[Path, str]:
-    if os.name != "posix":
-        raise ProfileInputError("exact code-tree validation requires POSIX")
+def _trusted_python() -> tuple[Path, str, Path]:
+    try:
+        executable = Path(sys.executable).resolve(strict=True)
+        runtime_root = Path(sys.base_prefix).resolve(strict=True)
+    except OSError as exc:
+        raise ProfileInputError("cannot resolve the Python runtime") from exc
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ProfileInputError("Python executable is not a regular executable")
+    if not _root_owned_non_writable(executable):
+        raise ProfileInputError("Python executable is outside the trusted runtime policy")
+    if not runtime_root.is_dir() or not _root_owned_non_writable(runtime_root):
+        raise ProfileInputError("Python runtime root is outside the trusted policy")
+    return executable, _digest_regular_file(executable), runtime_root
+
+
+def _trusted_git(repository_root: Path) -> tuple[Path, str]:
     seen: set[Path] = set()
     for candidate in _TRUSTED_GIT_CANDIDATES:
         try:
-            path = candidate.resolve(strict=True)
+            executable = candidate.resolve(strict=True)
         except OSError:
             continue
-        if path in seen:
+        if executable in seen:
             continue
-        seen.add(path)
+        seen.add(executable)
         try:
-            path.relative_to(_REPOSITORY_ROOT)
+            executable.relative_to(repository_root)
         except ValueError:
             pass
         else:
             continue
-        try:
-            metadata = path.stat()
-        except OSError:
+        if not executable.is_file() or not os.access(executable, os.X_OK):
             continue
-        if not stat.S_ISREG(metadata.st_mode) or not os.access(path, os.X_OK):
+        if not _root_owned_non_writable(executable):
             continue
-        if not _root_owned_non_writable(path):
-            continue
-        return path, _digest_trusted_file(path)
+        return executable, _digest_regular_file(executable)
     raise ProfileInputError(
         "no root-owned non-writable system Git executable is available"
     )
 
 
-def _git_environment(git: Path) -> dict[str, str]:
+def _git_environment() -> dict[str, str]:
     return {
         "GIT_ATTR_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
@@ -195,14 +370,18 @@ def _git_environment(git: Path) -> dict[str, str]:
     }
 
 
-def _git_command(git: Path, *arguments: str) -> list[str]:
-    git_directory = _REPOSITORY_ROOT / ".git"
+def _git_command(
+    git: Path,
+    repository_root: Path,
+    *arguments: str,
+) -> list[str]:
+    git_directory = repository_root / ".git"
     if not git_directory.is_dir():
         raise ProfileInputError("repository Git directory is unavailable")
     return [
         str(git),
         f"--git-dir={git_directory}",
-        f"--work-tree={_REPOSITORY_ROOT}",
+        "--no-replace-objects",
         "-c",
         "core.attributesFile=/dev/null",
         "-c",
@@ -217,67 +396,11 @@ def _git_command(git: Path, *arguments: str) -> list[str]:
     ]
 
 
-def _run_git(git: Path, *arguments: str) -> bytes:
-    try:
-        completed = subprocess.run(
-            _git_command(git, *arguments),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            close_fds=True,
-            timeout=10,
-            env=_git_environment(git),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ProfileInputError("cannot inspect the exact Git code tree") from exc
-    if (
-        completed.returncode != 0
-        or len(completed.stdout) > _MAX_GIT_OUTPUT_BYTES
-        or len(completed.stderr) > _MAX_GIT_OUTPUT_BYTES
-    ):
-        raise ProfileInputError("cannot inspect the exact Git code tree")
-    return completed.stdout
-
-
-def _git_sha(git: Path, revision: str, field: str) -> str:
-    raw = _run_git(git, "rev-parse", "--verify", revision)
-    try:
-        value = raw.decode("ascii", errors="strict").strip()
-    except UnicodeError as exc:
-        raise ProfileInputError(f"{field} is not canonical Git text") from exc
-    return _canonical_git_sha(value, field)
-
-
-def _require_exact_code_tree(
-    expected_commit: str,
-    expected_tree: str,
-) -> tuple[Path, str, str, str]:
-    """Bind HEAD and reject tracked changes before repository imports exist."""
-
-    git, git_digest = _git_executable()
-    actual_commit = _git_sha(git, "HEAD^{commit}", "code commit SHA")
-    actual_tree = _git_sha(git, "HEAD^{tree}", "code tree SHA")
-    if actual_commit != expected_commit:
-        raise ProfileInputError("code commit SHA differs from expected identity")
-    if actual_tree != expected_tree:
-        raise ProfileInputError("code tree SHA differs from expected identity")
-    tracked_status = _run_git(
-        git,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=no",
-    )
-    if tracked_status:
-        raise ProfileInputError("tracked repository checkout differs from HEAD")
-    return git, git_digest, actual_commit, actual_tree
-
-
-def _stop_process(process: subprocess.Popen[bytes]) -> None:
+def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
     try:
-        process.terminate()
+        os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
     try:
@@ -286,291 +409,518 @@ def _stop_process(process: subprocess.Popen[bytes]) -> None:
     except subprocess.TimeoutExpired:
         pass
     try:
-        process.kill()
+        os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         return
     try:
         process.wait(timeout=_PROCESS_STOP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
-        raise ProfileInputError("cannot stop Git archive generation") from exc
+        raise ProfileInputError("cannot stop Git object reader") from exc
 
 
-def _write_git_archive(git: Path, commit: str, archive_path: Path) -> None:
+def _read_git_output(
+    git: Path,
+    repository_root: Path,
+    arguments: tuple[str, ...],
+    *,
+    maximum_bytes: int,
+    label: str,
+) -> bytes:
     process: subprocess.Popen[bytes] | None = None
     selector: selectors.BaseSelector | None = None
     try:
-        with archive_path.open("xb") as output:
-            process = subprocess.Popen(
-                _git_command(
-                    git,
-                    "archive",
-                    "--format=tar",
-                    commit,
-                    "--",
-                    "newsroom",
-                ),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-                start_new_session=True,
-                env=_git_environment(git),
-            )
-            if process.stdout is None:
-                raise ProfileInputError("Git archive stdout is unavailable")
-            selector = selectors.DefaultSelector()
-            selector.register(process.stdout, selectors.EVENT_READ)
-            deadline = time.monotonic() + _ARCHIVE_TIMEOUT_SECONDS
-            total = 0
-            while selector.get_map():
-                remaining_time = deadline - time.monotonic()
-                if remaining_time <= 0:
-                    raise ProfileInputError("Git archive generation timed out")
-                events = selector.select(timeout=remaining_time)
-                if not events:
-                    raise ProfileInputError("Git archive generation timed out")
-                for key, _ in events:
-                    chunk = os.read(key.fd, _ARCHIVE_READ_CHUNK_BYTES)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    if total + len(chunk) > _MAX_ARCHIVE_BYTES:
-                        raise ProfileInputError(
-                            "Git archive exceeds the streaming generation limit"
-                        )
-                    output.write(chunk)
-                    total += len(chunk)
+        process = subprocess.Popen(
+            _git_command(git, repository_root, *arguments),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+            env=_git_environment(),
+        )
+        if process.stdout is None:
+            raise ProfileInputError(f"{label} output is unavailable")
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + _PROCESS_TIMEOUT_SECONDS
+        output = bytearray()
+        while selector.get_map():
             remaining_time = deadline - time.monotonic()
             if remaining_time <= 0:
-                raise ProfileInputError("Git archive generation timed out")
-            return_code = process.wait(timeout=remaining_time)
-            if return_code != 0 or total == 0:
-                raise ProfileInputError("Git archive generation failed")
-            output.flush()
-            os.fsync(output.fileno())
+                raise ProfileInputError(f"{label} timed out")
+            events = selector.select(timeout=remaining_time)
+            if not events:
+                raise ProfileInputError(f"{label} timed out")
+            for key, _ in events:
+                chunk = os.read(key.fd, _READ_CHUNK_BYTES)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if len(output) + len(chunk) > maximum_bytes:
+                    raise ProfileInputError(f"{label} exceeds the byte limit")
+                output.extend(chunk)
+        remaining_time = deadline - time.monotonic()
+        if remaining_time <= 0:
+            raise ProfileInputError(f"{label} timed out")
+        if process.wait(timeout=remaining_time) != 0:
+            raise ProfileInputError(f"{label} failed")
+        return bytes(output)
     except ProfileInputError:
         if process is not None:
-            _stop_process(process)
-        archive_path.unlink(missing_ok=True)
+            _stop_process_group(process)
         raise
     except (OSError, subprocess.SubprocessError) as exc:
         if process is not None:
-            _stop_process(process)
-        archive_path.unlink(missing_ok=True)
-        raise ProfileInputError("cannot materialize the exact Git code tree") from exc
+            _stop_process_group(process)
+        raise ProfileInputError(f"{label} failed") from exc
     finally:
         if selector is not None:
             selector.close()
         if process is not None:
-            _stop_process(process)
+            _stop_process_group(process)
             if process.stdout is not None:
                 process.stdout.close()
 
 
-def _canonical_archive_name(name: str) -> PurePosixPath:
-    if not name or "\\" in name:
-        raise ProfileInputError("Git archive contains an unsafe path")
-    path = PurePosixPath(name)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise ProfileInputError("Git archive contains an unsafe path")
-    if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
-        raise ProfileInputError("Git archive contains executable bytecode")
-    return path
-
-
-def _extract_exact_archive(archive_path: Path, destination: Path) -> None:
-    seen: set[str] = set()
-    total_size = 0
-    try:
-        with tarfile.open(archive_path, mode="r:") as archive:
-            for member in archive:
-                relative = _canonical_archive_name(member.name)
-                canonical_name = relative.as_posix()
-                if canonical_name in seen:
-                    raise ProfileInputError("Git archive contains a duplicate path")
-                seen.add(canonical_name)
-                target = destination.joinpath(*relative.parts)
-                if member.isdir():
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                if not member.isfile() or member.size < 0:
-                    raise ProfileInputError("Git archive contains a non-regular entry")
-                if member.size > _MAX_ARCHIVE_MEMBER_BYTES:
-                    raise ProfileInputError("Git archive member exceeds the size limit")
-                total_size += member.size
-                if total_size > _MAX_ARCHIVE_BYTES:
-                    raise ProfileInputError("Git archive exceeds the extraction limit")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if target.exists():
-                    raise ProfileInputError("Git archive path already exists")
-                source = archive.extractfile(member)
-                if source is None:
-                    raise ProfileInputError("Git archive member cannot be read")
-                remaining = member.size
-                with target.open("xb") as output:
-                    while remaining:
-                        chunk = source.read(min(1_048_576, remaining))
-                        if not chunk:
-                            raise ProfileInputError("Git archive member is truncated")
-                        output.write(chunk)
-                        remaining -= len(chunk)
-                    if source.read(1):
-                        raise ProfileInputError("Git archive member exceeds its size")
-    except (OSError, tarfile.TarError) as exc:
-        raise ProfileInputError("cannot extract the exact Git code tree") from exc
-    if not _REQUIRED_MATERIALIZED_FILES.issubset(seen):
-        raise ProfileInputError("Git archive omits required validator source")
-
-
-def _path_is_within(path: Path, root: Path) -> bool:
-    try:
-        path.resolve(strict=True).relative_to(root.resolve(strict=True))
-    except (OSError, ValueError):
-        return False
-    return True
-
-
-def _verify_newsroom_import_origins(root: Path) -> None:
-    for name, module in tuple(sys.modules.items()):
-        if name != "newsroom" and not name.startswith("newsroom."):
-            continue
-        raw_path = getattr(module, "__file__", None)
-        if not isinstance(raw_path, str):
-            raise ProfileInputError(f"reviewed module has no source path: {name}")
-        path = Path(raw_path)
-        if path.suffix != ".py" or not _path_is_within(path, root):
-            raise ProfileInputError(f"reviewed module did not load from exact tree: {name}")
-
-
-@contextmanager
-def _materialized_repository_api(
+def _git_text(
     git: Path,
+    repository_root: Path,
+    *arguments: str,
+    label: str,
+) -> str:
+    raw = _read_git_output(
+        git,
+        repository_root,
+        tuple(arguments),
+        maximum_bytes=_MAX_GIT_TEXT_BYTES,
+        label=label,
+    )
+    try:
+        return raw.decode("ascii", errors="strict").strip()
+    except UnicodeError as exc:
+        raise ProfileInputError(f"{label} is not canonical Git text") from exc
+
+
+def _read_git_blob(
+    git: Path,
+    repository_root: Path,
     commit: str,
-) -> Iterator[tuple[Any, Any, Any, Any, Any]]:
-    """Load every Newsroom module from a cache-free exact Git materialization."""
+    path: str,
+    *,
+    label: str,
+) -> bytes:
+    return _read_git_output(
+        git,
+        repository_root,
+        ("cat-file", "blob", f"{commit}:{path}"),
+        maximum_bytes=_MAX_BLOB_BYTES,
+        label=label,
+    )
 
-    if any(name == "newsroom" or name.startswith("newsroom.") for name in sys.modules):
-        raise ProfileInputError("Newsroom modules loaded before exact-tree materialization")
-    with tempfile.TemporaryDirectory(prefix="newsroom-increment5-profile-") as raw_temp:
-        temp_root = Path(raw_temp).resolve(strict=True)
-        if _path_is_within(temp_root, _REPOSITORY_ROOT):
-            raise ProfileInputError("exact Git materialization cannot use the checkout")
-        archive_path = temp_root / "tree.tar"
-        source_root = temp_root / "source"
-        source_root.mkdir(mode=0o700)
-        _write_git_archive(git, commit, archive_path)
-        _extract_exact_archive(archive_path, source_root)
-        archive_path.unlink()
 
-        original_path = list(sys.path)
-        original_dont_write = sys.dont_write_bytecode
-        filtered_path = [
-            entry
-            for entry in original_path
-            if entry
-            and Path(entry).resolve() not in {_REPOSITORY_ROOT, _SCRIPT_DIRECTORY}
-        ]
-        sys.path[:] = [str(source_root), *filtered_path]
-        sys.dont_write_bytecode = True
-        importlib.invalidate_caches()
+def _read_manifest(path_text: str) -> bytes:
+    path = Path(path_text)
+    if not path.is_absolute():
+        raise ProfileInputError("manifest path must be absolute")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
         try:
-            canonical_module = importlib.import_module("newsroom.authority.canonical")
-            profiles_module = importlib.import_module("newsroom.increment5.profiles")
-            _verify_newsroom_import_origins(source_root)
-            yield (
-                canonical_module.CanonicalizationError,
-                canonical_module.canonical_json_bytes,
-                canonical_module.digest_bytes,
-                profiles_module.Increment5ProfileError,
-                profiles_module._check_profile_manifest,
-            )
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ProfileInputError("manifest must be a regular file")
+            if metadata.st_size < 1 or metadata.st_size > _MAX_INPUT_BYTES:
+                raise ProfileInputError("manifest exceeds the byte limit")
+            chunks: list[bytes] = []
+            remaining = metadata.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(_READ_CHUNK_BYTES, remaining))
+                if not chunk:
+                    raise ProfileInputError("manifest is truncated")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                raise ProfileInputError("manifest changed while reading")
         finally:
-            for name in tuple(sys.modules):
-                if name == "newsroom" or name.startswith("newsroom."):
-                    del sys.modules[name]
-            sys.path[:] = original_path
-            sys.dont_write_bytecode = original_dont_write
-            importlib.invalidate_caches()
+            os.close(descriptor)
+    except ProfileInputError:
+        raise
+    except OSError as exc:
+        raise ProfileInputError("cannot read manifest file") from exc
+    return b"".join(chunks)
+
+
+def _require_exact_keys(
+    value: object,
+    expected: frozenset[str],
+    field: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProfileInputError(f"{field} must be an object")
+    if frozenset(value) != expected:
+        raise ProfileInputError(f"{field} fields differ from the reviewed profile")
+    return value
+
+
+def _require_exact_object(value: object, expected: object, field: str) -> None:
+    if not isinstance(value, dict) or value != expected:
+        raise ProfileInputError(f"{field} differs from the reviewed profile")
+
+
+def _verify_public_binding(
+    structural: dict[str, Any],
+    public: dict[str, Any],
+    *,
+    binding_id: str,
+    contract_digest: str,
+    component_digests: dict[str, Any],
+) -> None:
+    expected = deepcopy(structural)
+    try:
+        expected["$id"] = binding_id
+        expected["title"] = f"{structural['title']} — reviewed identity binding"
+        properties = expected["properties"]
+        properties["contract_digest"] = {"const": contract_digest}
+        component_properties = properties["components"]["properties"]
+        if set(component_properties) != set(component_digests):
+            raise ProfileInputError("structural component inventory differs")
+        for kind, identity_digest in component_digests.items():
+            component_properties[kind] = {"const": identity_digest}
+    except (KeyError, TypeError) as exc:
+        raise ProfileInputError("structural profile schema shape differs") from exc
+    if public != expected:
+        raise ProfileInputError("public profile schema binding differs")
+
+
+def _validate_profile(
+    manifest: dict[str, Any],
+    contract: dict[str, Any],
+) -> tuple[str, str, str]:
+    try:
+        payload = contract["payload"]
+        component_digests = contract["component_digests"]
+        contract_version = payload["contract_version"]
+        budgets = payload["budgets"]
+        approved_profiles = payload["approved_profiles"]
+    except (KeyError, TypeError) as exc:
+        raise ProfileInputError("reviewed contract profile semantics are malformed") from exc
+    if not isinstance(payload, dict):
+        raise ProfileInputError("reviewed contract payload is malformed")
+    if not isinstance(component_digests, dict):
+        raise ProfileInputError("reviewed component identities are malformed")
+    if not isinstance(contract_version, str):
+        raise ProfileInputError("reviewed contract version is malformed")
+    if not isinstance(budgets, dict):
+        raise ProfileInputError("reviewed profile budgets are malformed")
+    if not isinstance(approved_profiles, list):
+        raise ProfileInputError("reviewed profile inventory is malformed")
+
+    profile_kind = manifest.get("profile_kind")
+    if profile_kind not in approved_profiles:
+        raise ProfileInputError("profile kind is not admitted by Increment 5A")
+    if profile_kind == "FIXTURE_REPLAY":
+        root_keys = _FIXTURE_ROOT_KEYS
+        schema_version = "newsroom.increment5.fixture-replay-profile.v1"
+        eligibility = False
+        structural_digest = _FIXTURE_STRUCTURAL_DIGEST
+        public_digest = _FIXTURE_PUBLIC_DIGEST
+    elif profile_kind == "PRODUCTION_SHAPED_QUALIFICATION":
+        root_keys = _QUALIFICATION_ROOT_KEYS
+        schema_version = (
+            "newsroom.increment5.production-shaped-qualification-profile.v1"
+        )
+        eligibility = True
+        structural_digest = _QUALIFICATION_STRUCTURAL_DIGEST
+        public_digest = _QUALIFICATION_PUBLIC_DIGEST
+    else:
+        raise ProfileInputError("profile kind is unsupported")
+
+    _require_exact_keys(manifest, root_keys, "profile")
+    if manifest.get("schema_version") != schema_version:
+        raise ProfileInputError("profile schema version differs")
+    if manifest.get("contract_digest") != _CONTRACT_DIGEST:
+        raise ProfileInputError("profile contract digest differs")
+    if manifest.get("contract_version") != contract_version:
+        raise ProfileInputError("profile contract version differs")
+    _require_exact_object(
+        manifest.get("components"),
+        component_digests,
+        "profile component identities",
+    )
+    _require_exact_object(manifest.get("budgets"), budgets, "profile budgets")
+    _require_exact_object(
+        manifest.get("runtime_effects"),
+        _SAFE_RUNTIME_EFFECTS,
+        "profile runtime effects",
+    )
+    if manifest.get("vector_source") != "DETERMINISTIC_FIXED_POINT_FIXTURE":
+        raise ProfileInputError("profile vector source differs")
+    if manifest.get("qualification_eligible") is not eligibility:
+        raise ProfileInputError("profile qualification eligibility differs")
+    if manifest.get("production_activation_authorized") is not False:
+        raise ProfileInputError("Increment 5 profiles cannot activate production")
+
+    if profile_kind == "FIXTURE_REPLAY":
+        fixture = _require_exact_keys(
+            manifest.get("fixture"),
+            _FIXTURE_KEYS,
+            "fixture",
+        )
+        _canonical_identifier(fixture.get("fixture_id"), "fixture_id")
+        _canonical_digest(
+            fixture.get("fixture_manifest_digest"),
+            "fixture_manifest_digest",
+        )
+        if fixture.get("production_substitution_allowed") is not False:
+            raise ProfileInputError(
+                "fixture replay cannot substitute for production qualification"
+            )
+    else:
+        dataset = _require_exact_keys(
+            manifest.get("dataset"),
+            _DATASET_KEYS,
+            "dataset",
+        )
+        _canonical_identifier(dataset.get("dataset_id"), "dataset_id")
+        _canonical_digest(
+            dataset.get("dataset_manifest_digest"),
+            "dataset_manifest_digest",
+        )
+        if dataset.get("rights_cleared") is not True:
+            raise ProfileInputError("qualification dataset must be rights cleared")
+        if dataset.get("repository_safe") is not True:
+            raise ProfileInputError("qualification dataset must be repository safe")
+        if dataset.get("contains_protected_content") is not False:
+            raise ProfileInputError(
+                "qualification dataset cannot contain protected content"
+            )
+        if manifest.get("actual_neo4j_required") is not True:
+            raise ProfileInputError("qualification requires an actual Neo4j service")
+        if manifest.get("signed_dataset_manifest_required") is not True:
+            raise ProfileInputError(
+                "qualification requires a signed dataset manifest"
+            )
+        if manifest.get("embedding_quality_qualified") is not False:
+            raise ProfileInputError(
+                "fixed-point fixture vectors cannot qualify embedding quality"
+            )
+        if manifest.get("expected_outcome_scope") != (
+            "RETRIEVER_INDEX_FUSION_DEDUPLICATION_HYDRATION_"
+            "DEGRADATION_AND_RECOVERY_ONLY"
+        ):
+            raise ProfileInputError("qualification outcome scope differs")
+
+    return profile_kind, structural_digest, public_digest
+
+
+def _require_exact_blob_launch() -> None:
+    if sys.argv[0] != "-":
+        raise ProfileInputError(
+            "validator must execute from an exact Git blob through python -I -S -"
+        )
+    if (
+        sys.flags.isolated != 1
+        or sys.flags.no_site != 1
+        or sys.flags.ignore_environment != 1
+        or getattr(sys.flags, "safe_path", 0) != 1
+    ):
+        raise ProfileInputError(
+            "validator requires isolated no-site Python with safe-path semantics"
+        )
+    if any(
+        "site-packages" in entry or "dist-packages" in entry
+        for entry in sys.path
+    ):
+        raise ProfileInputError("third-party import paths are forbidden")
+    if "site" in sys.modules or "jsonschema" in sys.modules:
+        raise ProfileInputError("third-party or site initialization is forbidden")
 
 
 def main() -> int:
     try:
-        expected_commit, expected_tree = _parse_code_identity_args(sys.argv[1:])
-        git, git_digest, actual_commit, actual_tree = _require_exact_code_tree(
-            expected_commit,
-            expected_tree,
+        _require_exact_blob_launch()
+        arguments = _parse_arguments(sys.argv[1:])
+        repository_root_text = arguments["--repository-root"]
+        repository_root_input = Path(repository_root_text)
+        if not repository_root_input.is_absolute():
+            raise ProfileInputError("repository root must be absolute")
+        repository_root = repository_root_input.resolve(strict=True)
+        if not repository_root.is_dir():
+            raise ProfileInputError("repository root must be a directory")
+
+        expected_commit = arguments["--expected-code-commit-sha"]
+        expected_tree = arguments["--expected-code-tree-sha"]
+        expected_validator_digest = arguments[
+            "--expected-validator-blob-digest"
+        ]
+        manifest_raw = _read_manifest(arguments["--manifest-path"])
+
+        python, python_digest, python_root = _trusted_python()
+        git, git_digest = _trusted_git(repository_root)
+        actual_commit = _git_text(
+            git,
+            repository_root,
+            "rev-parse",
+            "--verify",
+            f"{expected_commit}^{{commit}}",
+            label="code commit resolution",
         )
+        actual_tree = _git_text(
+            git,
+            repository_root,
+            "rev-parse",
+            "--verify",
+            f"{expected_commit}^{{tree}}",
+            label="code tree resolution",
+        )
+        if actual_commit != expected_commit:
+            raise ProfileInputError("code commit SHA differs from expected identity")
+        if actual_tree != expected_tree:
+            raise ProfileInputError("code tree SHA differs from expected identity")
+
+        validator_blob = _read_git_blob(
+            git,
+            repository_root,
+            actual_commit,
+            _VALIDATOR_PATH,
+            label="validator source blob",
+        )
+        validator_digest = _digest_bytes(validator_blob)
+        if validator_digest != expected_validator_digest:
+            raise ProfileInputError("validator blob digest differs from expected identity")
+
+        contract_raw = _read_git_blob(
+            git,
+            repository_root,
+            actual_commit,
+            _CONTRACT_PATH,
+            label="reviewed contract blob",
+        )
+        fixture_structural_raw = _read_git_blob(
+            git,
+            repository_root,
+            actual_commit,
+            _FIXTURE_STRUCTURAL_PATH,
+            label="fixture structural schema blob",
+        )
+        fixture_public_raw = _read_git_blob(
+            git,
+            repository_root,
+            actual_commit,
+            _FIXTURE_PUBLIC_PATH,
+            label="fixture public schema blob",
+        )
+        qualification_structural_raw = _read_git_blob(
+            git,
+            repository_root,
+            actual_commit,
+            _QUALIFICATION_STRUCTURAL_PATH,
+            label="qualification structural schema blob",
+        )
+        qualification_public_raw = _read_git_blob(
+            git,
+            repository_root,
+            actual_commit,
+            _QUALIFICATION_PUBLIC_PATH,
+            label="qualification public schema blob",
+        )
+
+        contract = _load_canonical_object(
+            contract_raw,
+            label="reviewed contract",
+            expected_digest=_CONTRACT_DIGEST,
+        )
+        fixture_structural = _load_canonical_object(
+            fixture_structural_raw,
+            label="fixture structural schema",
+            expected_digest=_FIXTURE_STRUCTURAL_DIGEST,
+        )
+        fixture_public = _load_canonical_object(
+            fixture_public_raw,
+            label="fixture public schema",
+            expected_digest=_FIXTURE_PUBLIC_DIGEST,
+        )
+        qualification_structural = _load_canonical_object(
+            qualification_structural_raw,
+            label="qualification structural schema",
+            expected_digest=_QUALIFICATION_STRUCTURAL_DIGEST,
+        )
+        qualification_public = _load_canonical_object(
+            qualification_public_raw,
+            label="qualification public schema",
+            expected_digest=_QUALIFICATION_PUBLIC_DIGEST,
+        )
+        component_digests = contract.get("component_digests")
+        if not isinstance(component_digests, dict):
+            raise ProfileInputError("reviewed component identities are malformed")
+        _verify_public_binding(
+            fixture_structural,
+            fixture_public,
+            binding_id=(
+                "urn:newsroom:increment5:fixture-replay-profile:"
+                "reviewed-binding:v1"
+            ),
+            contract_digest=_CONTRACT_DIGEST,
+            component_digests=component_digests,
+        )
+        _verify_public_binding(
+            qualification_structural,
+            qualification_public,
+            binding_id=(
+                "urn:newsroom:increment5:production-shaped-qualification-"
+                "profile:reviewed-binding:v1"
+            ),
+            contract_digest=_CONTRACT_DIGEST,
+            component_digests=component_digests,
+        )
+
+        manifest = _load_canonical_object(manifest_raw, label="profile manifest")
+        profile_kind, structural_digest, public_digest = _validate_profile(
+            manifest,
+            contract,
+        )
+        receipt = {
+            "authority_effect": "NONE",
+            "code_commit_sha": actual_commit,
+            "code_tree_sha": actual_tree,
+            "contract_digest": _CONTRACT_DIGEST,
+            "git_executable_digest": git_digest,
+            "git_executable_path": str(git),
+            "git_producer_policy": "ROOT_OWNED_NON_WRITABLE_SYSTEM_PATH",
+            "manifest_digest": _digest_bytes(manifest_raw),
+            "profile_kind": profile_kind,
+            "profile_public_schema_digest": public_digest,
+            "profile_structural_schema_digest": structural_digest,
+            "production_activation_authorized": False,
+            "python_executable_digest": python_digest,
+            "python_executable_path": str(python),
+            "python_runtime_policy": (
+                "ROOT_OWNED_NON_WRITABLE_ISOLATED_NO_SITE"
+            ),
+            "python_runtime_root": str(python_root),
+            "qualification_authority_granted": False,
+            "repository_object_access": "EXACT_COMMIT_BLOBS_ONLY",
+            "schema_version": "newsroom.increment5.profile-validation-receipt.v5",
+            "stdlib_only": True,
+            "third_party_imports_used": False,
+            "validator_blob_digest": validator_digest,
+            "validator_launch_mode": "PYTHON_ISOLATED_NO_SITE_STDIN",
+            "validator_source_origin": "EXACT_GIT_BLOB_PIPE",
+            "validation_scope": (
+                "REVIEWED_PROFILE_STRUCTURE_SEMANTICS_AND_EXACT_CODE_BLOBS"
+            ),
+            "worktree_or_index_used": False,
+        }
+        sys.stdout.buffer.write(_canonical_json_bytes(receipt) + b"\n")
+        return 0
     except ProfileInputError as exc:
         return _fail(str(exc))
-
-    raw = sys.stdin.buffer.read(_MAX_INPUT_BYTES + 1)
-    if len(raw) > _MAX_INPUT_BYTES:
-        return _fail("input exceeds 1048576 bytes")
-
-    try:
-        with _materialized_repository_api(git, actual_commit) as repository_api:
-            (
-                canonicalization_error_type,
-                canonical_json_bytes,
-                digest_bytes,
-                profile_error_type,
-                check_profile_manifest,
-            ) = repository_api
-            try:
-                value = json.loads(
-                    raw.decode("utf-8", errors="strict"),
-                    object_pairs_hook=_without_duplicate_names,
-                )
-                canonical = canonical_json_bytes(value)
-            except (
-                UnicodeError,
-                json.JSONDecodeError,
-                canonicalization_error_type,
-                ProfileInputError,
-            ) as exc:
-                return _fail(str(exc))
-
-            if raw != canonical:
-                return _fail("input is not canonical JSON")
-            if not isinstance(value, dict):
-                return _fail("profile manifest must be an object")
-
-            try:
-                check_profile_manifest(value)
-            except profile_error_type as exc:
-                return _fail(str(exc))
-
-            profile_kind = value.get("profile_kind")
-            if not isinstance(profile_kind, str):
-                return _fail("profile kind is not canonical text")
-
-            receipt = {
-                "archive_stream_limit_bytes": _MAX_ARCHIVE_BYTES,
-                "archive_streaming_enforced": True,
-                "authority_effect": "NONE",
-                "code_commit_sha": actual_commit,
-                "code_tree_sha": actual_tree,
-                "git_executable_digest": git_digest,
-                "git_executable_path": str(git),
-                "git_producer_policy": "ROOT_OWNED_NON_WRITABLE_SYSTEM_PATH",
-                "manifest_digest": digest_bytes(raw),
-                "production_activation_authorized": False,
-                "profile_kind": profile_kind,
-                "qualification_authority_granted": False,
-                "schema_version": "newsroom.increment5.profile-validation-receipt.v4",
-                "tracked_checkout_clean": True,
-                "validation_code_origin": "CACHE_FREE_EXACT_GIT_ARCHIVE",
-                "validation_scope": (
-                    "REVIEWED_PROFILE_STRUCTURE_SEMANTICS_AND_EXACT_CODE_TREE"
-                ),
-                "worktree_imports_used": False,
-            }
-            sys.stdout.buffer.write(canonical_json_bytes(receipt) + b"\n")
-            return 0
-    except ProfileInputError as exc:
-        return _fail(str(exc))
-    except Exception as exc:  # pragma: no cover - fail-closed import boundary
-        return _fail(f"cannot load reviewed profile validator: {exc}")
+    except Exception as exc:  # pragma: no cover - fail closed at the process edge
+        return _fail(f"exact-blob validation failed: {exc}")
 
 
 if __name__ == "__main__":
