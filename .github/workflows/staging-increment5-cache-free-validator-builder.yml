@@ -88,7 +88,7 @@ jobs:
           candidate_tree="$(git write-tree)"
           candidate_commit="$(printf '%s\n' 'feat(increment5): finalize production retrieval contract' | git commit-tree "$candidate_tree" -p "$BASE")"
           git checkout --detach --force "$candidate_commit"
-          rm -f increment5a-cache-free-validator-manifest.json
+          git clean -ffd
           test "$(git rev-parse HEAD^)" = "$BASE"
           test "$(git rev-list --count "$BASE..HEAD")" = "1"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
