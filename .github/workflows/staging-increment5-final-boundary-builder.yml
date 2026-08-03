@@ -33,6 +33,27 @@ jobs:
       - name: Materialize final whole-requirement ownership correction
         run: python scripts/sdlc/_staging_increment5_reassign_final_boundaries.py
 
+      - name: Normalize zero-count Counter expectation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("newsroom/tests/test_increment5a_traceability.py")
+          text = path.read_text(encoding="utf-8")
+          old = (
+              "        Increment5DeliveryTrace.DELIVERED_IN_5A: 10,\n"
+              "        Increment5DeliveryTrace.DEFERRED_TO_5B: 0,\n"
+              "        Increment5DeliveryTrace.DEFERRED_TO_5C: 4,\n"
+          )
+          new = (
+              "        Increment5DeliveryTrace.DELIVERED_IN_5A: 10,\n"
+              "        Increment5DeliveryTrace.DEFERRED_TO_5C: 4,\n"
+          )
+          if text.count(old) != 1:
+              raise SystemExit("zero-count Counter expectation differs")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+
       - name: Verify exact generated path set
         run: |
           python - <<'PY'
