@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ctypes
 from copy import deepcopy
-import importlib.util
 import inspect
 import json
 import os
@@ -298,6 +297,54 @@ def test_same_process_closure_mutation_cannot_create_qualification_authority() -
         _set_cell(cell, original)
 
 
+
+
+def test_nonisolated_execution_rejects_before_pythonpath_dependency_import(
+    tmp_path: Path,
+) -> None:
+    fake_root = tmp_path / "pythonpath"
+    fake_package = fake_root / "jsonschema"
+    fake_package.mkdir(parents=True)
+    marker = tmp_path / "fake-jsonschema-imported"
+    fake_package.joinpath("__init__.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n"
+        "class Draft202012Validator:\n"
+        "    def __init__(self, schema): pass\n"
+        "    def iter_errors(self, instance): return iter(())\n",
+        encoding="utf-8",
+    )
+    invalid = _fixture_manifest()
+    invalid["qualification_eligible"] = True
+    environment = _validator_environment()
+    environment["PYTHONPATH"] = str(fake_root)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(_VALIDATOR_SCRIPT),
+            "--expected-code-commit-sha",
+            _CODE_COMMIT_SHA,
+            "--expected-code-tree-sha",
+            _CODE_TREE_SHA,
+        ],
+        input=canonical_json_bytes(invalid),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        cwd=_REPOSITORY_ROOT,
+        env=environment,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stderr == (
+        b"increment5 profile validation failed: "
+        b"isolated Python mode is required\n"
+    )
+    assert completed.stdout == b""
+    assert not marker.exists()
+
 def test_validator_requires_matching_commit_and_tree_arguments() -> None:
     raw = canonical_json_bytes(_fixture_manifest())
     unbound = subprocess.run(
@@ -437,21 +484,9 @@ def test_path_selected_fake_git_cannot_supply_the_archive(tmp_path: Path) -> Non
     assert receipt["validation_code_origin"] == "CACHE_FREE_EXACT_GIT_ARCHIVE"
 
 
-def _load_validator_module() -> Any:
-    spec = importlib.util.spec_from_file_location(
-        "increment5_profile_validator_streaming_test",
-        _VALIDATOR_SCRIPT,
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_archive_limit_kills_the_producer_before_overflow_reaches_disk(
     tmp_path: Path,
 ) -> None:
-    validator = _load_validator_module()
     marker = tmp_path / "producer-completed"
     emitter = tmp_path / "emit-large-archive.py"
     emitter.write_text(
@@ -465,23 +500,58 @@ def test_archive_limit_kills_the_producer_before_overflow_reaches_disk(
         encoding="utf-8",
     )
     archive = tmp_path / "bounded.tar"
+    probe = """
+import runpy
+import sys
+from pathlib import Path
 
-    with pytest.raises(
-        validator.ProfileInputError,
-        match="Git archive exceeds the generation limit",
-    ):
-        validator._stream_bounded_process_to_file(
-            [sys.executable, str(emitter)],
-            archive,
-            env={"LC_ALL": "C", "PYTHONUTF8": "1"},
-            timeout_seconds=20,
-            max_stdout_bytes=1024,
-            max_stderr_bytes=1024,
-            failure_message="cannot materialize the exact Git code tree",
-        )
+namespace = runpy.run_path(
+    sys.argv[1],
+    run_name="increment5_profile_validator_streaming_probe",
+)
+error_type = namespace["ProfileInputError"]
+try:
+    namespace["_stream_bounded_process_to_file"](
+        [sys.executable, sys.argv[2]],
+        Path(sys.argv[3]),
+        env={"LC_ALL": "C", "PYTHONUTF8": "1"},
+        timeout_seconds=20,
+        max_stdout_bytes=1024,
+        max_stderr_bytes=1024,
+        failure_message="cannot materialize the exact Git code tree",
+    )
+except error_type as exc:
+    if str(exc) != "Git archive exceeds the generation limit":
+        raise
+else:
+    raise SystemExit("overflowing producer unexpectedly succeeded")
+if Path(sys.argv[3]).exists():
+    raise SystemExit("partial archive remains after overflow")
+"""
 
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            probe,
+            str(_VALIDATOR_SCRIPT),
+            str(emitter),
+            str(archive),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        cwd=_REPOSITORY_ROOT,
+        env={"LC_ALL": "C", "PYTHONUTF8": "1"},
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    assert completed.stdout == b""
     assert not archive.exists()
     assert not marker.exists()
+
 
 def test_validator_materializes_exact_tree_before_repository_import() -> None:
     source = _VALIDATOR_SCRIPT.read_text(encoding="utf-8")
@@ -498,6 +568,10 @@ def test_validator_materializes_exact_tree_before_repository_import() -> None:
             'importlib.import_module("newsroom.authority.canonical")'
         )
     )
+    bootstrap = source.index("if not sys.flags.isolated:")
+    assert source.index("import sys") < bootstrap
+    assert bootstrap < source.index("from contextlib import contextmanager")
+    assert "isolated Python mode is required" in source
     assert '"--untracked-files=no"' in source
     assert '"--untracked-files=all"' not in source
     assert '_TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")' in source

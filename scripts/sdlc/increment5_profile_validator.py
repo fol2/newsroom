@@ -9,6 +9,18 @@ source, model, provider, spend, write, or public-effect authority.
 
 from __future__ import annotations
 
+import sys
+
+# This executable is an evidence boundary, not an importable convenience. The
+# isolated-interpreter requirement is checked before any dependency import, so
+# PYTHONPATH, user site packages, and caller-selected import roots cannot supply
+# jsonschema or another transitive validator dependency.
+if not sys.flags.isolated:
+    sys.stderr.write(
+        "increment5 profile validation failed: isolated Python mode is required\n"
+    )
+    raise SystemExit(2)
+
 from contextlib import contextmanager
 import hashlib
 import importlib
@@ -19,7 +31,6 @@ import re
 import selectors
 import stat
 import subprocess
-import sys
 import tarfile
 import tempfile
 import time

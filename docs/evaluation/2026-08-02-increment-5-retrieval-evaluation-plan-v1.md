@@ -47,8 +47,10 @@ the exact Epoch digest and all frozen identities must remain equal within that
 Epoch.
 
 Cross-Epoch pooling is prohibited. A missing or mismatched Epoch is
-`NOT_EVALUATED`. Every profile-validation receipt is v3, binds the actual Git
-commit and tree, and records that staged/tracked checkout state was clean and
+`NOT_EVALUATED`. Every profile-validation receipt is v3 and is produced only by
+an interpreter already running in isolated mode; failure to establish isolated
+mode before dependency imports is `NOT_EVALUATED`. The receipt binds the actual
+Git commit and tree and records that staged/tracked checkout state was clean and
 that all Newsroom imports came from a cache-free exact-commit materialization
 rather than checkout or ignored bytecode. The materialization producer is the
 fixed root-owned `/usr/bin/git` binary, never caller `PATH`; its identity is

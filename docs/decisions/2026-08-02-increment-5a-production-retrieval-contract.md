@@ -170,6 +170,13 @@ python -I scripts/sdlc/increment5_profile_validator.py \
   --expected-code-tree-sha "$CODE_TREE_SHA"
 ```
 
+The validator is executable only under Python isolated mode. Immediately after
+importing the built-in `sys` module—and before importing any third-party or
+repository dependency—it requires `sys.flags.isolated`; direct or otherwise
+non-`-I` execution exits with status 2. Caller `PYTHONPATH`, user site packages,
+and caller-selected import roots therefore cannot supply `jsonschema` or another
+transitive validation dependency.
+
 Before importing any Newsroom module, the validator resolves the actual Git
 commit and tree, requires them to equal the caller-supplied identities, and
 rejects staged or tracked differences. Git is never selected from caller

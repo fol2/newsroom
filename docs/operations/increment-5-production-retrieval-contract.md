@@ -22,8 +22,13 @@ python -I scripts/sdlc/increment5_profile_validator.py \
   --expected-code-tree-sha "$CODE_TREE_SHA"
 ```
 
-The validator verifies the supplied Git commit and tree and rejects staged or
-tracked differences before importing any Newsroom module. It ignores caller
+The validator first requires Python isolated mode, immediately after the
+built-in `sys` import and before any dependency import. Non-`-I` execution exits
+with status 2, so caller `PYTHONPATH`, user site packages, and caller-selected
+import roots cannot supply validator dependencies.
+
+It then verifies the supplied Git commit and tree and rejects staged or tracked
+differences before importing any Newsroom module. It ignores caller
 `PATH` and accepts only the fixed `/usr/bin/git` producer after checking that it
 and its parent directories are non-symlink, root-owned, and not group- or
 other-writable; the binary identity is rechecked around every operation.
