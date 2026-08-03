@@ -1,0 +1,125 @@
+name: Increment 5A isolated-bootstrap replacement builder
+
+on:
+  pull_request:
+    branches:
+      - agent/increment-5a-retrieval-contract
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout staging source
+        uses: actions/checkout@v4
+        with:
+          ref: staging/increment-5a-isolated-bootstrap-20260804
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Materialize isolated bootstrap boundary
+        run: python scripts/sdlc/_staging_increment5_isolated_bootstrap.py
+
+      - name: Verify exact generated path set
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          expected = {
+              "docs/decisions/2026-08-02-increment-5a-production-retrieval-contract.md",
+              "docs/evaluation/2026-08-02-increment-5-retrieval-evaluation-plan-v1.md",
+              "docs/operations/increment-5-production-retrieval-contract.md",
+              "increment5a-isolated-bootstrap-manifest.json",
+              "newsroom/tests/test_increment5a_profile_semantic_envelope.py",
+              "scripts/sdlc/increment5_profile_validator.py",
+          }
+          tracked = set(
+              subprocess.check_output(
+                  ["git", "diff", "--name-only"], text=True
+              ).splitlines()
+          )
+          untracked = set(
+              subprocess.check_output(
+                  ["git", "ls-files", "--others", "--exclude-standard"],
+                  text=True,
+              ).splitlines()
+          )
+          actual = tracked | untracked
+          if actual != expected:
+              raise SystemExit(
+                  f"generated path set differs: missing={sorted(expected-actual)}, "
+                  f"extra={sorted(actual-expected)}"
+              )
+          for path in actual:
+              if not Path(path).is_file():
+                  raise SystemExit(f"generated path is not a regular file: {path}")
+          PY
+
+      - name: Commit exact clean staging candidate
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            docs/decisions/2026-08-02-increment-5a-production-retrieval-contract.md \
+            docs/evaluation/2026-08-02-increment-5-retrieval-evaluation-plan-v1.md \
+            docs/operations/increment-5-production-retrieval-contract.md \
+            increment5a-isolated-bootstrap-manifest.json \
+            newsroom/tests/test_increment5a_profile_semantic_envelope.py \
+            scripts/sdlc/increment5_profile_validator.py
+          git commit -m "build(increment5): verify isolated validator bootstrap"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Verify locked environment
+        run: |
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Focused Increment 5A verification
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_increment5a_contract.py \
+            newsroom/tests/test_increment5a_evaluation_plan.py \
+            newsroom/tests/test_increment5a_package_neutrality.py \
+            newsroom/tests/test_increment5a_profiles.py \
+            newsroom/tests/test_increment5a_profile_semantic_envelope.py \
+            newsroom/tests/test_increment5a_traceability.py
+
+      - name: Full deterministic verification
+        run: uv run python -m pytest -q
+
+      - name: Source integrity and staging manifest
+        run: |
+          CODE_COMMIT_SHA="$(git rev-parse --verify 'HEAD^{commit}')"
+          CODE_TREE_SHA="$(git rev-parse --verify 'HEAD^{tree}')"
+          printf '%s' '{"profile_kind":"FIXTURE_REPLAY"}' | \
+            python scripts/sdlc/increment5_profile_validator.py \
+              --expected-code-commit-sha "$CODE_COMMIT_SHA" \
+              --expected-code-tree-sha "$CODE_TREE_SHA" \
+              > nonisolated.stdout 2> nonisolated.stderr && exit 1 || true
+          test ! -s nonisolated.stdout
+          grep -Fx \
+            'increment5 profile validation failed: isolated Python mode is required' \
+            nonisolated.stderr
+          rm nonisolated.stdout nonisolated.stderr
+          python -m py_compile scripts/sdlc/increment5_profile_validator.py
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          git diff --check HEAD^ HEAD
+          cat increment5a-isolated-bootstrap-manifest.json
+
+      - name: Publish verified staging materialization
+        run: |
+          git push origin HEAD:staging/increment-5a-isolated-bootstrap-20260804
