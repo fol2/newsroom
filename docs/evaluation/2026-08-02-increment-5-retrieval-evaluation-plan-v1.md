@@ -3,9 +3,9 @@
 - **Status:** reviewed machine-plan binding for Increment 5A
 - **Execution owner:** 5E / #254
 - **Contract:** `newsroom/increment5/data/increment5a_retrieval_contract_v1.json`
-- **Contract digest:** `sha256:c7dabaf97301f851c67a2d831f6ac87b34b38c78626ea7edf8f5725ff97f1c58`
+- **Contract digest:** `sha256:51a3837ad9cdb70fe8aaa4242997b191c7e848bb1d391c6940cccc2bd45ba06c`
 - **Machine plan:** `newsroom/increment5/data/increment5_retrieval_evaluation_plan_v1.json`
-- **Machine-plan digest:** `sha256:ce10ec46ad56d5a8182f8927d2569f3f9cec3a051ae7ad5a85837b5d0889042e`
+- **Machine-plan digest:** `sha256:c9d169c46a939573ffc6563704adfae973655f6394293ce591ec689f76a30959`
 
 The machine JSON is the authoritative preregistration. This document explains it
 without adding thresholds, exceptions, or authority.

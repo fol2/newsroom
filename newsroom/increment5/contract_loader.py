@@ -26,7 +26,7 @@ from .contract_types import (
 )
 
 EXPECTED_CONTRACT_DIGEST = (
-    "sha256:c7dabaf97301f851c67a2d831f6ac87b34b38c78626ea7edf8f5725ff97f1c58"
+    "sha256:51a3837ad9cdb70fe8aaa4242997b191c7e848bb1d391c6940cccc2bd45ba06c"
 )
 EXPECTED_IMPLEMENTATION_BASE = "3ea1874de5e1bd6c622a3760eabb74adfe75d169"
 

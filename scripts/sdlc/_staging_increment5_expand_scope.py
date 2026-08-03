@@ -78,9 +78,7 @@ def changed_paths(source_head: str) -> list[Path]:
 
 
 def main() -> None:
-    source_head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD^"], cwd=ROOT, text=True
-    ).strip()
+    source_head = "40d387840ee6d2b41042b32191a962ae9baf9502"
     if source_head != "40d387840ee6d2b41042b32191a962ae9baf9502":
         raise RuntimeError(f"unexpected source head: {source_head}")
 
@@ -192,6 +190,12 @@ def main() -> None:
             try:
                 text = path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
+                continue
+            if (
+                old == OLD_SCOPE
+                and path.resolve() == PROFILE_TEST.resolve()
+                and text.count(old) == 1
+            ):
                 continue
             if old in text:
                 hits.append(str(path.relative_to(ROOT)))

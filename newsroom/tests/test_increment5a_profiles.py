@@ -285,7 +285,7 @@ def test_production_shaped_qualification_is_actual_service_but_not_production() 
     assert manifest["embedding_quality_qualified"] is False
     assert manifest["vector_source"] == "DETERMINISTIC_FIXED_POINT_FIXTURE"
     assert manifest["expected_outcome_scope"] == (
-        "RETRIEVER_INDEX_HYDRATION_AND_DEGRADATION_ONLY"
+        "RETRIEVER_INDEX_FUSION_DEDUPLICATION_HYDRATION_DEGRADATION_AND_RECOVERY_ONLY"
     )
 
 
@@ -354,3 +354,31 @@ def test_unknown_or_extra_profile_fields_fail_closed() -> None:
     manifest["profile_kind"] = "PRODUCTION_ACTIVE"
     with pytest.raises(Increment5ProfileError, match="profile kind is unsupported"):
         profiles._check_profile_manifest(manifest)
+
+def test_qualification_scope_is_complete_and_cannot_shrink() -> None:
+    expected = "RETRIEVER_INDEX_FUSION_DEDUPLICATION_HYDRATION_DEGRADATION_AND_RECOVERY_ONLY"
+    structural = _schema(QUALIFICATION_PROFILE_STRUCTURAL_SCHEMA_PATH)
+    public = _schema(QUALIFICATION_PROFILE_SCHEMA_PATH)
+    assert structural["properties"]["expected_outcome_scope"] == {"const": expected}
+    assert public["properties"]["expected_outcome_scope"] == {"const": expected}
+
+    manifest = build_qualification_manifest(
+        dataset_id="increment5-rights-cleared-v1",
+        dataset_manifest_digest=_DIGEST_A,
+    )
+    assert manifest["expected_outcome_scope"] == expected
+    assert all(
+        surface in expected
+        for surface in (
+            "FUSION",
+            "DEDUPLICATION",
+            "HYDRATION",
+            "DEGRADATION",
+            "RECOVERY",
+        )
+    )
+
+    narrowed = deepcopy(manifest)
+    narrowed["expected_outcome_scope"] = "RETRIEVER_INDEX_HYDRATION_AND_DEGRADATION_ONLY"
+    with pytest.raises(Increment5ProfileError, match="schema validation failed"):
+        profiles._check_profile_manifest(narrowed)

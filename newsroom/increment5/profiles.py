@@ -53,7 +53,7 @@ FIXTURE_REPLAY_PROFILE_STRUCTURAL_SCHEMA_DIGEST = (
     "sha256:7c2e50d952109d834d944c120b8f9a5adcc59c6f39106430fa8728c5ad25c9a0"
 )
 QUALIFICATION_PROFILE_STRUCTURAL_SCHEMA_DIGEST = (
-    "sha256:9a79627dbc6814ac132caecde5c6253d20bd10778eeac8f008612eaafd6ae786"
+    "sha256:7b055832c33f9d9bf25f3401fce936bba3a2310da8f272038de4f0625356685b"
 )
 
 # Public schemas are self-contained reviewed bindings. Each is derived from
@@ -66,10 +66,10 @@ QUALIFICATION_PROFILE_SCHEMA_PATH = (
     _DATA_DIR / "increment5_qualification_profile_v1.schema.json"
 )
 FIXTURE_REPLAY_PROFILE_SCHEMA_DIGEST = (
-    "sha256:56de5d698405617731d5e4d6ba403472116f931983f50b2c804377aa1def8bda"
+    "sha256:6783030456d1d4ba5744a70932ee2982c099a3cf324ad98e2d05413216d7d571"
 )
 QUALIFICATION_PROFILE_SCHEMA_DIGEST = (
-    "sha256:81fa28a7e3a66ffe80b7cbef89276769f9c18022a9727650688ad7e8837db75d"
+    "sha256:5d48af523da006bec804893f0bd42b411a466ca29103a8dde8fc46db49ced354"
 )
 
 _PROFILE_STRUCTURAL_SCHEMA_DIGESTS = {
@@ -421,7 +421,7 @@ def _compile_profile_api() -> tuple[
                 "fixed-point fixture vectors cannot qualify embedding quality"
             )
         if snapshot.get("expected_outcome_scope") != (
-            "RETRIEVER_INDEX_HYDRATION_AND_DEGRADATION_ONLY"
+            "RETRIEVER_INDEX_FUSION_DEDUPLICATION_HYDRATION_DEGRADATION_AND_RECOVERY_ONLY"
         ):
             raise error_type("qualification outcome scope differs")
 
@@ -524,7 +524,7 @@ def _compile_profile_api() -> tuple[
                 "qualification_eligible": True,
                 "embedding_quality_qualified": False,
                 "expected_outcome_scope": (
-                    "RETRIEVER_INDEX_HYDRATION_AND_DEGRADATION_ONLY"
+                    "RETRIEVER_INDEX_FUSION_DEDUPLICATION_HYDRATION_DEGRADATION_AND_RECOVERY_ONLY"
                 ),
             }
         )

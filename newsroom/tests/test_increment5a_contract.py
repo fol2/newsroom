@@ -79,7 +79,7 @@ def test_accepted_on_merge_contract_is_narrow_and_non_production() -> None:
     )
     assert contract.required_modes == tuple(RetrievalMode)
     assert contract.contract_digest == (
-        "sha256:c7dabaf97301f851c67a2d831f6ac87b34b38c78626ea7edf8f5725ff97f1c58"
+        "sha256:51a3837ad9cdb70fe8aaa4242997b191c7e848bb1d391c6940cccc2bd45ba06c"
     )
     assert INCREMENT_5A_CONTRACT_DIGEST == contract.contract_digest
 

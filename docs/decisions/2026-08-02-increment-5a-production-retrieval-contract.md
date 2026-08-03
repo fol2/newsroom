@@ -5,8 +5,8 @@
 - **Issue:** #250; parent #145; programme #141
 - **Implementation base:** `main@3ea1874de5e1bd6c622a3760eabb74adfe75d169`
 - **Machine record:** `newsroom/increment5/data/increment5a_retrieval_contract_v1.json`
-- **Contract digest:** `sha256:c7dabaf97301f851c67a2d831f6ac87b34b38c78626ea7edf8f5725ff97f1c58`
-- **Evaluation plan digest:** `sha256:ce10ec46ad56d5a8182f8927d2569f3f9cec3a051ae7ad5a85837b5d0889042e`
+- **Contract digest:** `sha256:51a3837ad9cdb70fe8aaa4242997b191c7e848bb1d391c6940cccc2bd45ba06c`
+- **Evaluation plan digest:** `sha256:c9d169c46a939573ffc6563704adfae973655f6394293ce591ec689f76a30959`
 - **Superseded stack:** `archive/increment-5a-stack-20260802`
 
 ## Decision
@@ -205,7 +205,7 @@ that externally reviewed digest at Run creation, avoiding a Plan self-reference.
 
 The canonical machine Plan is
 `newsroom/increment5/data/increment5_retrieval_evaluation_plan_v1.json`, digest
-`sha256:ce10ec46ad56d5a8182f8927d2569f3f9cec3a051ae7ad5a85837b5d0889042e`.
+`sha256:c9d169c46a939573ffc6563704adfae973655f6394293ce591ec689f76a30959`.
 It binds the contract summary exactly and freezes:
 
 - `HYBRID` as the sole qualification-bearing system;
