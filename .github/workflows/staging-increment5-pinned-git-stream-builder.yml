@@ -31,7 +31,7 @@ jobs:
           python -m pip install uv
 
       - name: Materialize pinned Git and streaming archive boundary
-        run: python scripts/sdlc/_staging_increment5_pin_git_stream_archive.py
+        run: python scripts/sdlc/_staging_increment5_pin_git_stream_archive_runner.py
 
       - name: Verify exact generated path set
         run: |
