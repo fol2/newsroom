@@ -3,12 +3,10 @@ from __future__ import annotations
 import ctypes
 from copy import deepcopy
 import hashlib
-import importlib.util
 import inspect
 import json
 import os
 from pathlib import Path
-import py_compile
 import subprocess
 import sys
 from typing import Any, Callable
@@ -28,34 +26,12 @@ from newsroom.increment5 import profiles
 _DIGEST_A = "sha256:" + "a" * 64
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _VALIDATOR_RELATIVE_PATH = Path("scripts/sdlc/increment5_profile_validator.py")
-_VALIDATOR_SCRIPT = _REPOSITORY_ROOT / _VALIDATOR_RELATIVE_PATH
+_TRUSTED_GIT_CANDIDATES = (Path("/usr/bin/git"), Path("/bin/git"))
 
 
-def _git_text(root: Path, *arguments: str) -> str:
-    completed = subprocess.run(
-        ["git", "-C", str(root), *arguments],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        timeout=20,
-    )
-    assert completed.returncode == 0, completed.stderr.decode("utf-8")
-    return completed.stdout.decode("ascii", errors="strict").strip()
-
-
-def _code_identity(root: Path) -> tuple[str, str]:
-    return (
-        _git_text(root, "rev-parse", "--verify", "HEAD^{commit}"),
-        _git_text(root, "rev-parse", "--verify", "HEAD^{tree}"),
-    )
-
-
-_CODE_COMMIT_SHA, _CODE_TREE_SHA = _code_identity(_REPOSITORY_ROOT)
-
-
-def _trusted_git_identity() -> tuple[str, str]:
+def _trusted_git() -> Path:
     seen: set[Path] = set()
-    for candidate in (Path("/usr/bin/git"), Path("/bin/git")):
+    for candidate in _TRUSTED_GIT_CANDIDATES:
         try:
             path = candidate.resolve(strict=True)
         except OSError:
@@ -63,14 +39,90 @@ def _trusted_git_identity() -> tuple[str, str]:
         if path in seen:
             continue
         seen.add(path)
-        if not path.is_file() or not os.access(path, os.X_OK):
-            continue
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        return str(path), "sha256:" + digest
+        if path.is_file() and os.access(path, os.X_OK):
+            return path
     raise AssertionError("trusted system Git is unavailable")
 
 
-_TRUSTED_GIT_PATH, _TRUSTED_GIT_DIGEST = _trusted_git_identity()
+_TRUSTED_GIT = _trusted_git()
+_TRUSTED_PYTHON = Path(sys.executable).resolve(strict=True)
+_TRUSTED_PYTHON_ROOT = Path(sys.base_prefix).resolve(strict=True)
+
+
+def _file_digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+_TRUSTED_GIT_DIGEST = _file_digest(_TRUSTED_GIT)
+_TRUSTED_PYTHON_DIGEST = _file_digest(_TRUSTED_PYTHON)
+
+
+def _git_command(root: Path, *arguments: str) -> list[str]:
+    return [
+        str(_TRUSTED_GIT),
+        f"--git-dir={root / '.git'}",
+        "--no-replace-objects",
+        "-c",
+        "core.attributesFile=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.untrackedCache=false",
+        *arguments,
+    ]
+
+
+def _git_bytes(root: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(
+        _git_command(root, *arguments),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=30,
+        env={
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "HOME": "/nonexistent",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    return completed.stdout
+
+
+def _git_text(root: Path, *arguments: str) -> str:
+    return _git_bytes(root, *arguments).decode("ascii", errors="strict").strip()
+
+
+def _code_identity(root: Path, commit: str = "HEAD") -> tuple[str, str]:
+    resolved_commit = _git_text(root, "rev-parse", "--verify", f"{commit}^{{commit}}")
+    resolved_tree = _git_text(
+        root,
+        "rev-parse",
+        "--verify",
+        f"{resolved_commit}^{{tree}}",
+    )
+    return resolved_commit, resolved_tree
+
+
+def _validator_blob(root: Path, commit: str) -> bytes:
+    return _git_bytes(
+        root,
+        "cat-file",
+        "blob",
+        f"{commit}:{_VALIDATOR_RELATIVE_PATH.as_posix()}",
+    )
+
+
+_CODE_COMMIT_SHA, _CODE_TREE_SHA = _code_identity(_REPOSITORY_ROOT)
+_VALIDATOR_BLOB = _validator_blob(_REPOSITORY_ROOT, _CODE_COMMIT_SHA)
+_VALIDATOR_BLOB_DIGEST = digest_bytes(_VALIDATOR_BLOB)
 
 
 def _fixture_manifest() -> dict[str, Any]:
@@ -87,55 +139,83 @@ def _qualification_manifest() -> dict[str, Any]:
     )
 
 
-def _validator_environment(path_override: str | None = None) -> dict[str, str]:
-    return {
+def _validator_environment(
+    overrides: dict[str, str] | None = None,
+) -> dict[str, str]:
+    environment = {
         "LC_ALL": "C",
-        "PATH": path_override or os.environ.get("PATH", os.defpath),
+        "PATH": os.environ.get("PATH", os.defpath),
         "PYTHONUTF8": "1",
     }
+    if overrides:
+        environment.update(overrides)
+    return environment
 
 
 def _run_isolated_bytes(
     raw: bytes,
+    tmp_path: Path,
     *,
     root: Path = _REPOSITORY_ROOT,
     expected_commit: str | None = None,
     expected_tree: str | None = None,
-    path_override: str | None = None,
+    expected_validator_digest: str | None = None,
+    source: bytes | None = None,
+    environment_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    if expected_commit is None or expected_tree is None:
-        actual_commit, actual_tree = _code_identity(root)
-        expected_commit = expected_commit or actual_commit
-        expected_tree = expected_tree or actual_tree
+    actual_commit, actual_tree = _code_identity(root, expected_commit or "HEAD")
+    expected_commit = expected_commit or actual_commit
+    expected_tree = expected_tree or actual_tree
+    source = source if source is not None else _validator_blob(root, expected_commit)
+    expected_validator_digest = expected_validator_digest or digest_bytes(source)
+    manifest_path = tmp_path / (
+        "manifest-" + hashlib.sha256(raw + os.urandom(8)).hexdigest() + ".json"
+    )
+    manifest_path.write_bytes(raw)
     return subprocess.run(
         [
-            sys.executable,
+            str(_TRUSTED_PYTHON),
             "-I",
-            str(root / _VALIDATOR_RELATIVE_PATH),
+            "-S",
+            "-",
+            "--repository-root",
+            str(root.resolve(strict=True)),
+            "--manifest-path",
+            str(manifest_path.resolve(strict=True)),
             "--expected-code-commit-sha",
             expected_commit,
             "--expected-code-tree-sha",
             expected_tree,
+            "--expected-validator-blob-digest",
+            expected_validator_digest,
         ],
-        input=raw,
+        input=source,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
         cwd=root,
-        env=_validator_environment(path_override),
+        env=_validator_environment(environment_overrides),
         timeout=30,
     )
 
 
-def _run_isolated(manifest: dict[str, Any]) -> subprocess.CompletedProcess[bytes]:
-    return _run_isolated_bytes(canonical_json_bytes(manifest))
+def _run_isolated(
+    manifest: dict[str, Any],
+    tmp_path: Path,
+    **kwargs: object,
+) -> subprocess.CompletedProcess[bytes]:
+    return _run_isolated_bytes(
+        canonical_json_bytes(manifest),
+        tmp_path,
+        **kwargs,
+    )
 
 
 def _clone_exact_head(destination: Path) -> tuple[Path, str, str]:
     clone = destination / "repo"
-    cloned = subprocess.run(
+    completed = subprocess.run(
         [
-            "git",
+            str(_TRUSTED_GIT),
             "clone",
             "--shared",
             "--no-checkout",
@@ -148,18 +228,26 @@ def _clone_exact_head(destination: Path) -> tuple[Path, str, str]:
         check=False,
         timeout=30,
     )
-    assert cloned.returncode == 0, cloned.stderr.decode("utf-8")
-    checked_out = subprocess.run(
-        ["git", "-C", str(clone), "checkout", "--detach", _CODE_COMMIT_SHA],
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    completed = subprocess.run(
+        [
+            str(_TRUSTED_GIT),
+            f"--git-dir={clone / '.git'}",
+            f"--work-tree={clone}",
+            "checkout",
+            "--detach",
+            _CODE_COMMIT_SHA,
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
         timeout=30,
+        env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
     )
-    assert checked_out.returncode == 0, checked_out.stderr.decode("utf-8")
-    clone_commit, clone_tree = _code_identity(clone)
-    assert (clone_commit, clone_tree) == (_CODE_COMMIT_SHA, _CODE_TREE_SHA)
-    return clone, clone_commit, clone_tree
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    commit, tree = _code_identity(clone)
+    assert (commit, tree) == (_CODE_COMMIT_SHA, _CODE_TREE_SHA)
+    return clone, commit, tree
 
 
 def _closure_cell(
@@ -183,40 +271,59 @@ def _set_cell(cell: object, value: object) -> None:
     assert py_cell_set(cell, value) == 0
 
 
-@pytest.mark.parametrize(
-    "builder",
-    (_fixture_manifest, _qualification_manifest),
-)
-def test_fresh_process_returns_code_tree_bound_non_authoritative_receipt(
+@pytest.mark.parametrize("builder", (_fixture_manifest, _qualification_manifest))
+def test_exact_blob_process_returns_non_authoritative_receipt(
     builder: Callable[[], dict[str, Any]],
+    tmp_path: Path,
 ) -> None:
     manifest = builder()
-    completed = _run_isolated(manifest)
+    completed = _run_isolated(manifest, tmp_path)
 
     assert completed.returncode == 0, completed.stderr.decode("utf-8")
     raw_receipt = completed.stdout.rstrip(b"\n")
     receipt = json.loads(raw_receipt.decode("utf-8"))
     assert raw_receipt == canonical_json_bytes(receipt)
+    expected_public = (
+        "sha256:6783030456d1d4ba5744a70932ee2982c099a3cf324ad98e2d05413216d7d571"
+        if manifest["profile_kind"] == "FIXTURE_REPLAY"
+        else "sha256:5d48af523da006bec804893f0bd42b411a466ca29103a8dde8fc46db49ced354"
+    )
+    expected_structural = (
+        "sha256:7c2e50d952109d834d944c120b8f9a5adcc59c6f39106430fa8728c5ad25c9a0"
+        if manifest["profile_kind"] == "FIXTURE_REPLAY"
+        else "sha256:7b055832c33f9d9bf25f3401fce936bba3a2310da8f272038de4f0625356685b"
+    )
     assert receipt == {
-        "archive_stream_limit_bytes": 67_108_864,
-        "archive_streaming_enforced": True,
         "authority_effect": "NONE",
         "code_commit_sha": _CODE_COMMIT_SHA,
         "code_tree_sha": _CODE_TREE_SHA,
+        "contract_digest": (
+            "sha256:51a3837ad9cdb70fe8aaa4242997b191c7e848bb1d391c6940cccc2bd45ba06c"
+        ),
         "git_executable_digest": _TRUSTED_GIT_DIGEST,
-        "git_executable_path": _TRUSTED_GIT_PATH,
+        "git_executable_path": str(_TRUSTED_GIT),
         "git_producer_policy": "ROOT_OWNED_NON_WRITABLE_SYSTEM_PATH",
         "manifest_digest": digest_bytes(canonical_json_bytes(manifest)),
-        "production_activation_authorized": False,
         "profile_kind": manifest["profile_kind"],
+        "profile_public_schema_digest": expected_public,
+        "profile_structural_schema_digest": expected_structural,
+        "production_activation_authorized": False,
+        "python_executable_digest": _TRUSTED_PYTHON_DIGEST,
+        "python_executable_path": str(_TRUSTED_PYTHON),
+        "python_runtime_policy": "ROOT_OWNED_NON_WRITABLE_ISOLATED_NO_SITE",
+        "python_runtime_root": str(_TRUSTED_PYTHON_ROOT),
         "qualification_authority_granted": False,
-        "schema_version": "newsroom.increment5.profile-validation-receipt.v4",
-        "tracked_checkout_clean": True,
-        "validation_code_origin": "CACHE_FREE_EXACT_GIT_ARCHIVE",
+        "repository_object_access": "EXACT_COMMIT_BLOBS_ONLY",
+        "schema_version": "newsroom.increment5.profile-validation-receipt.v5",
+        "stdlib_only": True,
+        "third_party_imports_used": False,
+        "validator_blob_digest": _VALIDATOR_BLOB_DIGEST,
+        "validator_launch_mode": "PYTHON_ISOLATED_NO_SITE_STDIN",
+        "validator_source_origin": "EXACT_GIT_BLOB_PIPE",
         "validation_scope": (
-            "REVIEWED_PROFILE_STRUCTURE_SEMANTICS_AND_EXACT_CODE_TREE"
+            "REVIEWED_PROFILE_STRUCTURE_SEMANTICS_AND_EXACT_CODE_BLOBS"
         ),
-        "worktree_imports_used": False,
+        "worktree_or_index_used": False,
     }
 
 
@@ -236,32 +343,26 @@ def test_fresh_process_returns_code_tree_bound_non_authoritative_receipt(
         (
             _fixture_manifest,
             lambda manifest: manifest["fixture"].__setitem__(
-                "production_substitution_allowed",
-                True,
+                "production_substitution_allowed", True
             ),
             "fixture replay cannot substitute",
         ),
         (
             _qualification_manifest,
-            lambda manifest: manifest.__setitem__(
-                "actual_neo4j_required",
-                False,
-            ),
+            lambda manifest: manifest.__setitem__("actual_neo4j_required", False),
             "qualification requires an actual Neo4j service",
         ),
         (
             _qualification_manifest,
             lambda manifest: manifest["dataset"].__setitem__(
-                "rights_cleared",
-                False,
+                "rights_cleared", False
             ),
             "qualification dataset must be rights cleared",
         ),
         (
             _qualification_manifest,
             lambda manifest: manifest["runtime_effects"].__setitem__(
-                "external_calls",
-                1,
+                "external_calls", 1
             ),
             "profile runtime effects differs",
         ),
@@ -272,63 +373,75 @@ def test_fresh_process_returns_code_tree_bound_non_authoritative_receipt(
         ),
     ),
 )
-def test_private_semantic_check_survives_json_schema_validator_bypass(
-    monkeypatch: pytest.MonkeyPatch,
+def test_isolated_stdlib_semantics_reject_mutations(
     builder: Callable[[], dict[str, Any]],
     mutate: Callable[[dict[str, Any]], None],
     message: str,
+    tmp_path: Path,
 ) -> None:
     manifest = deepcopy(builder())
     mutate(manifest)
+    completed = _run_isolated(manifest, tmp_path)
+    assert completed.returncode == 2
+    assert message.encode("utf-8") in completed.stderr
+    assert completed.stdout == b""
 
+
+def test_private_semantic_check_survives_json_schema_validator_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _qualification_manifest()
+    manifest["runtime_effects"]["external_calls"] = 1
     monkeypatch.setattr(
         Draft202012Validator,
         "iter_errors",
         lambda self, instance: iter(()),
     )
-
-    with pytest.raises(Increment5ProfileError, match=message):
+    with pytest.raises(Increment5ProfileError, match="profile runtime effects differs"):
         profiles._check_profile_manifest(manifest)
 
 
-def test_same_process_closure_mutation_cannot_create_qualification_authority() -> None:
+def test_same_process_closure_mutation_cannot_cross_exact_blob_process(
+    tmp_path: Path,
+) -> None:
     manifest = _fixture_manifest()
     manifest["qualification_eligible"] = True
-
-    cell, original = _closure_cell(
-        profiles._check_profile_manifest,
-        "check_snapshot",
-    )
+    cell, original = _closure_cell(profiles._check_profile_manifest, "check_snapshot")
 
     def bypass(snapshot: object, *, profile: object) -> None:
         return None
 
     try:
         _set_cell(cell, bypass)
-
-        # Arbitrary code in the same Python process can bypass any Python
-        # helper. The private helper therefore returns no certificate, boolean,
-        # or authority-bearing value even under this exact attack.
         assert profiles._check_profile_manifest(manifest) is None
-
-        # The fresh -I process imports only the cache-free exact Git tree and
-        # rejects the same bytes; the mutated cell cannot cross that boundary.
-        completed = _run_isolated(manifest)
+        completed = _run_isolated(manifest, tmp_path)
         assert completed.returncode == 2
-        assert completed.stderr.startswith(
-            b"increment5 profile validation failed: "
-        )
-        assert b"qualification_eligible" in completed.stderr
+        assert b"profile qualification eligibility differs" in completed.stderr
         assert completed.stdout == b""
     finally:
         _set_cell(cell, original)
 
 
-def test_validator_requires_matching_commit_and_tree_arguments() -> None:
-    raw = canonical_json_bytes(_fixture_manifest())
-    unbound = subprocess.run(
-        [sys.executable, "-I", str(_VALIDATOR_SCRIPT)],
-        input=raw,
+def test_direct_checkout_execution_is_rejected(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_bytes(canonical_json_bytes(_fixture_manifest()))
+    completed = subprocess.run(
+        [
+            str(_TRUSTED_PYTHON),
+            "-I",
+            "-S",
+            str(_REPOSITORY_ROOT / _VALIDATOR_RELATIVE_PATH),
+            "--repository-root",
+            str(_REPOSITORY_ROOT),
+            "--manifest-path",
+            str(manifest_path),
+            "--expected-code-commit-sha",
+            _CODE_COMMIT_SHA,
+            "--expected-code-tree-sha",
+            _CODE_TREE_SHA,
+            "--expected-validator-blob-digest",
+            _VALIDATOR_BLOB_DIGEST,
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -336,107 +449,108 @@ def test_validator_requires_matching_commit_and_tree_arguments() -> None:
         env=_validator_environment(),
         timeout=30,
     )
-    assert unbound.returncode == 2
-    assert b"exact code identity arguments are required" in unbound.stderr
-    assert unbound.stdout == b""
+    assert completed.returncode == 2
+    assert b"must execute from an exact Git blob" in completed.stderr
+    assert completed.stdout == b""
 
-    wrong_commit = _run_isolated_bytes(
-        raw,
-        expected_commit="0" * 40,
-        expected_tree=_CODE_TREE_SHA,
-    )
-    assert wrong_commit.returncode == 2
-    assert b"code commit SHA differs from expected identity" in wrong_commit.stderr
-    assert wrong_commit.stdout == b""
 
+def test_exact_identity_and_validator_digest_are_required(tmp_path: Path) -> None:
+    raw = canonical_json_bytes(_fixture_manifest())
     wrong_tree = _run_isolated_bytes(
         raw,
-        expected_commit=_CODE_COMMIT_SHA,
+        tmp_path,
         expected_tree="0" * 40,
     )
     assert wrong_tree.returncode == 2
     assert b"code tree SHA differs from expected identity" in wrong_tree.stderr
-    assert wrong_tree.stdout == b""
+
+    wrong_validator = _run_isolated_bytes(
+        raw,
+        tmp_path,
+        expected_validator_digest="sha256:" + "0" * 64,
+    )
+    assert wrong_validator.returncode == 2
+    assert b"validator blob digest differs from expected identity" in (
+        wrong_validator.stderr
+    )
 
 
-def test_tracked_repository_code_is_rejected_before_materialization(
+@pytest.mark.parametrize("index_flag", ("--assume-unchanged", "--skip-worktree"))
+def test_hidden_checkout_validator_mutation_cannot_execute(
+    index_flag: str,
     tmp_path: Path,
 ) -> None:
-    clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
-
-    profile_source = clone / "newsroom/increment5/profiles.py"
-    profile_source.write_text(
-        profile_source.read_text(encoding="utf-8")
-        + "\nraise RuntimeError('dirty profile import executed')\n",
-        encoding="utf-8",
-    )
-    completed = _run_isolated_bytes(
-        canonical_json_bytes(_fixture_manifest()),
-        root=clone,
-        expected_commit=clone_commit,
-        expected_tree=clone_tree,
-    )
-    assert completed.returncode == 2
-    assert completed.stderr == (
-        b"increment5 profile validation failed: "
-        b"tracked repository checkout differs from HEAD\n"
-    )
-    assert completed.stdout == b""
-
-
-def test_ignored_bytecode_cannot_replace_materialized_validator_source(
-    tmp_path: Path,
-) -> None:
-    clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
-    cache_tag = sys.implementation.cache_tag
-    assert isinstance(cache_tag, str) and cache_tag
-
-    for relative in (
-        "newsroom/authority/canonical.py",
-        "newsroom/increment5/profiles.py",
-    ):
-        source = clone / relative
-        cache = source.parent / "__pycache__" / (
-            f"{source.stem}.{cache_tag}.pyc"
-        )
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        poison = tmp_path / f"poison-{source.stem}.py"
-        poison.write_text(
-            "raise RuntimeError('ignored checkout bytecode executed')\n",
-            encoding="utf-8",
-        )
-        py_compile.compile(
-            str(poison),
-            cfile=str(cache),
-            dfile=str(source),
-            doraise=True,
-            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
-        )
-
-    assert _git_text(
-        clone,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=no",
-    ) == ""
-    completed = _run_isolated_bytes(
-        canonical_json_bytes(_fixture_manifest()),
-        root=clone,
-        expected_commit=clone_commit,
-        expected_tree=clone_tree,
+    clone, commit, tree = _clone_exact_head(tmp_path)
+    validator_path = clone / _VALIDATOR_RELATIVE_PATH
+    marker = tmp_path / (index_flag.removeprefix("--") + "-executed")
+    completed = subprocess.run(
+        [
+            str(_TRUSTED_GIT),
+            f"--git-dir={clone / '.git'}",
+            f"--work-tree={clone}",
+            "update-index",
+            index_flag,
+            _VALIDATOR_RELATIVE_PATH.as_posix(),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=30,
     )
     assert completed.returncode == 0, completed.stderr.decode("utf-8")
-    assert b"ignored checkout bytecode executed" not in completed.stderr
+    validator_path.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('executed')\n"
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+
+    completed = _run_isolated(
+        _fixture_manifest(),
+        tmp_path,
+        root=clone,
+        expected_commit=commit,
+        expected_tree=tree,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    assert not marker.exists()
     receipt = json.loads(completed.stdout.decode("utf-8"))
-    assert receipt["code_commit_sha"] == clone_commit
-    assert receipt["code_tree_sha"] == clone_tree
-    assert receipt["validation_code_origin"] == "CACHE_FREE_EXACT_GIT_ARCHIVE"
-    assert receipt["worktree_imports_used"] is False
+    assert receipt["validator_blob_digest"] == digest_bytes(
+        _validator_blob(clone, commit)
+    )
+    assert receipt["worktree_or_index_used"] is False
 
 
-def test_caller_path_cannot_replace_trusted_git_producer(
-    tmp_path: Path,
-) -> None:
+def test_hostile_site_packages_and_pythonpath_are_not_loaded(tmp_path: Path) -> None:
+    hostile = tmp_path / "hostile"
+    hostile.mkdir()
+    site_marker = tmp_path / "sitecustomize-loaded"
+    schema_marker = tmp_path / "jsonschema-loaded"
+    (hostile / "sitecustomize.py").write_text(
+        f"open({str(site_marker)!r}, 'w').write('loaded')\n",
+        encoding="utf-8",
+    )
+    (hostile / "jsonschema.py").write_text(
+        f"open({str(schema_marker)!r}, 'w').write('loaded')\n",
+        encoding="utf-8",
+    )
+    completed = _run_isolated(
+        _qualification_manifest(),
+        tmp_path,
+        environment_overrides={
+            "PYTHONPATH": str(hostile),
+            "PYTHONSTARTUP": str(hostile / "sitecustomize.py"),
+        },
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    assert not site_marker.exists()
+    assert not schema_marker.exists()
+    receipt = json.loads(completed.stdout.decode("utf-8"))
+    assert receipt["stdlib_only"] is True
+    assert receipt["third_party_imports_used"] is False
+
+
+def test_caller_path_cannot_replace_git(tmp_path: Path) -> None:
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
     marker = tmp_path / "fake-git-invoked"
@@ -448,79 +562,67 @@ def test_caller_path_cannot_replace_trusted_git_producer(
         encoding="utf-8",
     )
     fake_git.chmod(0o755)
-
-    completed = _run_isolated_bytes(
-        canonical_json_bytes(_fixture_manifest()),
-        path_override=str(fake_bin),
+    completed = _run_isolated(
+        _fixture_manifest(),
+        tmp_path,
+        environment_overrides={"PATH": str(fake_bin)},
     )
     assert completed.returncode == 0, completed.stderr.decode("utf-8")
     assert not marker.exists()
     receipt = json.loads(completed.stdout.decode("utf-8"))
-    assert receipt["git_executable_path"] == _TRUSTED_GIT_PATH
+    assert receipt["git_executable_path"] == str(_TRUSTED_GIT)
     assert receipt["git_executable_digest"] == _TRUSTED_GIT_DIGEST
-    assert receipt["git_producer_policy"] == (
-        "ROOT_OWNED_NON_WRITABLE_SYSTEM_PATH"
-    )
 
 
-def test_archive_limit_stops_generation_before_disk_can_exceed_cap(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    spec = importlib.util.spec_from_file_location(
-        "increment5_profile_validator_stream_test",
-        _VALIDATOR_SCRIPT,
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    git, _ = module._git_executable()
-    archive = tmp_path / "bounded-tree.tar"
-    monkeypatch.setattr(module, "_MAX_ARCHIVE_BYTES", 1_024)
-    with pytest.raises(
-        module.ProfileInputError,
-        match="streaming generation limit",
-    ):
-        module._write_git_archive(git, _CODE_COMMIT_SHA, archive)
-    assert not archive.exists()
-
-
-def test_validator_materializes_exact_tree_before_repository_import() -> None:
-    source = _VALIDATOR_SCRIPT.read_text(encoding="utf-8")
-    main_source = source.split("def main() -> int:", 1)[1]
-    assert main_source.index("_require_exact_code_tree(") < main_source.index(
-        "_materialized_repository_api("
-    )
-    materialized_source = source.split(
-        "def _materialized_repository_api(",
-        1,
-    )[1]
-    assert materialized_source.index("_write_git_archive(") < (
-        materialized_source.index(
-            'importlib.import_module("newsroom.authority.canonical")'
+def test_git_blob_reader_enforces_cap_before_retaining_overflow() -> None:
+    namespace: dict[str, object] = {
+        "__name__": "increment5_profile_validator_test",
+    }
+    exec(compile(_VALIDATOR_BLOB, "<exact-validator-blob>", "exec"), namespace)
+    error_type = namespace["ProfileInputError"]
+    read_output = namespace["_read_git_output"]
+    trusted_git = namespace["_trusted_git"]
+    git, _ = trusted_git(_REPOSITORY_ROOT)  # type: ignore[operator]
+    with pytest.raises(error_type, match="exceeds the byte limit"):  # type: ignore[arg-type]
+        read_output(  # type: ignore[operator]
+            git,
+            _REPOSITORY_ROOT,
+            (
+                "cat-file",
+                "blob",
+                f"{_CODE_COMMIT_SHA}:{_VALIDATOR_RELATIVE_PATH.as_posix()}",
+            ),
+            maximum_bytes=1_024,
+            label="bounded validator blob",
         )
-    )
-    assert '"--untracked-files=no"' in source
-    assert '"--untracked-files=all"' not in source
-    assert "shutil.which" not in source
-    assert "_TRUSTED_GIT_CANDIDATES" in source
-    assert "ROOT_OWNED_NON_WRITABLE_SYSTEM_PATH" in source
-    assert "subprocess.Popen" in source
-    assert "selectors.DefaultSelector" in source
-    assert "os.read" in source
-    assert "stdout=output" not in source
-    assert "archive_path.stat().st_size > _MAX_ARCHIVE_BYTES" not in source
 
 
-def test_isolated_validator_rejects_noncanonical_and_duplicate_json() -> None:
-    valid = _fixture_manifest()
-    pretty = json.dumps(valid, indent=2, sort_keys=True).encode("utf-8")
-    completed = _run_isolated_bytes(pretty)
+def test_validator_source_has_no_checkout_or_third_party_validation_path() -> None:
+    source = _VALIDATOR_BLOB.decode("utf-8", errors="strict")
+    assert "from jsonschema" not in source
+    assert "import jsonschema" not in source
+    assert "import newsroom" not in source
+    assert "Draft202012Validator" not in source
+    assert "git status" not in source
+    assert "update-index" not in source
+    assert "tarfile" not in source
+    assert "git archive" not in source
+    assert "cat-file" in source
+    assert "EXACT_COMMIT_BLOBS_ONLY" in source
+    assert "PYTHON_ISOLATED_NO_SITE_STDIN" in source
+    assert 'sys.argv[0] != "-"' in source
+    assert "worktree_or_index_used" in source
+
+
+def test_isolated_validator_rejects_noncanonical_and_duplicate_json(
+    tmp_path: Path,
+) -> None:
+    pretty = json.dumps(_fixture_manifest(), indent=2, sort_keys=True).encode("utf-8")
+    completed = _run_isolated_bytes(pretty, tmp_path)
     assert completed.returncode == 2
-    assert b"input is not canonical JSON" in completed.stderr
+    assert b"profile manifest is not canonical JSON" in completed.stderr
 
     duplicate = b'{"profile_kind":"FIXTURE_REPLAY","profile_kind":"FIXTURE_REPLAY"}'
-    completed = _run_isolated_bytes(duplicate)
+    completed = _run_isolated_bytes(duplicate, tmp_path)
     assert completed.returncode == 2
     assert b"duplicate JSON object name" in completed.stderr
