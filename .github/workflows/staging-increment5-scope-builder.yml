@@ -49,11 +49,18 @@ jobs:
               "newsroom/increment5/traceability.py",
               "newsroom/tests/test_increment5a_traceability.py",
           }
-          actual = set(
+          tracked = set(
               subprocess.check_output(
                   ["git", "diff", "--name-only"], text=True
               ).splitlines()
           )
+          untracked = set(
+              subprocess.check_output(
+                  ["git", "ls-files", "--others", "--exclude-standard"],
+                  text=True,
+              ).splitlines()
+          )
+          actual = tracked | untracked
           if actual != expected:
               raise SystemExit(
                   f"generated path set differs: missing={sorted(expected-actual)}, "
