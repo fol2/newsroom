@@ -69,6 +69,20 @@ jobs:
                   raise SystemExit(f"generated path is not a regular file: {path}")
           PY
 
+      - name: Commit exact clean staging candidate
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            docs/decisions/2026-08-02-increment-5a-production-retrieval-contract.md \
+            docs/evaluation/2026-08-02-increment-5-retrieval-evaluation-plan-v1.md \
+            docs/operations/increment-5-production-retrieval-contract.md \
+            increment5a-trusted-git-streaming-manifest.json \
+            newsroom/tests/test_increment5a_profile_semantic_envelope.py \
+            scripts/sdlc/increment5_profile_validator.py
+          git commit -m "build(increment5): verify trusted Git streaming boundary"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
       - name: Verify locked environment
         run: |
           uv lock --check
@@ -90,19 +104,10 @@ jobs:
       - name: Source integrity and staging manifest
         run: |
           python -m py_compile scripts/sdlc/increment5_profile_validator.py
-          git diff --check
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          git diff --check HEAD^ HEAD
           cat increment5a-trusted-git-streaming-manifest.json
 
       - name: Publish verified staging materialization
         run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add \
-            docs/decisions/2026-08-02-increment-5a-production-retrieval-contract.md \
-            docs/evaluation/2026-08-02-increment-5-retrieval-evaluation-plan-v1.md \
-            docs/operations/increment-5-production-retrieval-contract.md \
-            increment5a-trusted-git-streaming-manifest.json \
-            newsroom/tests/test_increment5a_profile_semantic_envelope.py \
-            scripts/sdlc/increment5_profile_validator.py
-          git commit -m "build(increment5): verify trusted Git streaming boundary"
           git push origin HEAD:staging/increment-5a-trusted-git-streaming-20260804
