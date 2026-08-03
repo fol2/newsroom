@@ -50,11 +50,15 @@ Cross-Epoch pooling is prohibited. A missing or mismatched Epoch is
 `NOT_EVALUATED`. Every profile-validation receipt is v3, binds the actual Git
 commit and tree, and records that staged/tracked checkout state was clean and
 that all Newsroom imports came from a cache-free exact-commit materialization
-rather than checkout or ignored bytecode. Its `code_tree_sha` must equal the
-Epoch's frozen `code_tree_sha`; a missing, dirty, non-materialized, or mismatched
-code tree is `NOT_EVALUATED`. Superseded Epoch Runs remain retained. The Epoch
-record binds the plan digest externally at Run creation, so the machine plan
-does not contain a self-referential digest.
+rather than checkout or ignored bytecode. The materialization producer is the
+fixed root-owned `/usr/bin/git` binary, never caller `PATH`; its identity is
+rechecked around every operation, and archive bytes are streamed through a hard
+64 MiB pre-write cap that terminates the producer on overflow. The receipt's
+`code_tree_sha` must equal the Epoch's frozen `code_tree_sha`; a missing, dirty,
+untrusted-producer, unbounded, non-materialized, or mismatched code tree is
+`NOT_EVALUATED`. Superseded Epoch Runs remain retained. The Epoch record binds
+the plan digest externally at Run creation, so the machine plan does not contain
+a self-referential digest.
 
 ## Evaluation evidence semantics
 

@@ -23,10 +23,15 @@ python -I scripts/sdlc/increment5_profile_validator.py \
 ```
 
 The validator verifies the supplied Git commit and tree and rejects staged or
-tracked differences before importing any Newsroom module. It imports validation
-code only from a bounded cache-free `git archive` materialization of that exact
-commit; ignored bytecode, untracked runtime artefacts and checkout paths are not
-used. Receipt v3 binds the manifest digest, profile kind, `code_commit_sha`,
+tracked differences before importing any Newsroom module. It ignores caller
+`PATH` and accepts only the fixed `/usr/bin/git` producer after checking that it
+and its parent directories are non-symlink, root-owned, and not group- or
+other-writable; the binary identity is rechecked around every operation.
+Archive stdout and stderr are streamed concurrently, the producer is terminated
+before any byte crossing the 64 MiB cap can reach disk, and only that bounded
+cache-free exact-commit materialization supplies validation imports. Ignored
+bytecode, untracked runtime artefacts and checkout paths are not used. Receipt
+v3 binds the manifest digest, profile kind, `code_commit_sha`,
 `code_tree_sha`, `tracked_checkout_clean=true`,
 `validation_code_origin=CACHE_FREE_EXACT_GIT_ARCHIVE`, and
 `worktree_imports_used=false` while stating `authority_effect=NONE`,

@@ -10,16 +10,19 @@ source, model, provider, spend, write, or public-effect authority.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import importlib
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shutil
+import selectors
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from typing import Any, Iterator
 
 
@@ -27,8 +30,11 @@ _MAX_INPUT_BYTES = 1_048_576
 _MAX_GIT_OUTPUT_BYTES = 65_536
 _MAX_ARCHIVE_BYTES = 67_108_864
 _MAX_ARCHIVE_MEMBER_BYTES = 16_777_216
+_STREAM_CHUNK_BYTES = 65_536
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
+_TRUSTED_GIT_PARENTS = (Path("/usr"), Path("/usr/bin"))
 _SCRIPT_DIRECTORY = Path(__file__).resolve().parent
 _EXPECTED_FLAGS = frozenset(
     {
@@ -99,43 +105,113 @@ def _parse_code_identity_args(argv: list[str]) -> tuple[str, str]:
     )
 
 
-def _git_executable() -> Path:
-    raw = shutil.which("git")
-    if raw is None:
-        raise ProfileInputError("Git is unavailable for exact code-tree validation")
-    path = Path(raw).resolve()
-    if not path.is_file():
-        raise ProfileInputError("Git executable is not a regular file")
-    try:
-        path.relative_to(_REPOSITORY_ROOT)
-    except ValueError:
-        return path
-    raise ProfileInputError("Git executable cannot come from the repository checkout")
+class _TrustedGitProducer:
+    """Exact root-owned Git producer; never selected from caller PATH."""
+
+    __slots__ = ("path", "_identity")
+
+    def __init__(self) -> None:
+        self.path = _TRUSTED_GIT_EXECUTABLE
+        self._identity = self._capture_identity()
+
+    @staticmethod
+    def _require_root_owned_path(path: Path, *, directory: bool) -> os.stat_result:
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise ProfileInputError("trusted Git producer is unavailable") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise ProfileInputError("trusted Git producer path cannot be a symlink")
+        expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+        if not expected_type(info.st_mode):
+            raise ProfileInputError("trusted Git producer path has the wrong type")
+        if info.st_uid != 0 or info.st_gid != 0:
+            raise ProfileInputError("trusted Git producer path is not root owned")
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise ProfileInputError("trusted Git producer path is writable")
+        return info
+
+    @staticmethod
+    def _binary_identity(path: Path) -> tuple[int, int, int, int, int, int, int, str]:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise ProfileInputError("trusted Git producer cannot be opened") from exc
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise ProfileInputError("trusted Git producer is not a regular file")
+            if info.st_uid != 0 or info.st_gid != 0:
+                raise ProfileInputError("trusted Git producer is not root owned")
+            if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                raise ProfileInputError("trusted Git producer is writable")
+            if not info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                raise ProfileInputError("trusted Git producer is not executable")
+            digest = hashlib.sha256()
+            while True:
+                chunk = os.read(descriptor, 1_048_576)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            return (
+                info.st_dev,
+                info.st_ino,
+                stat.S_IMODE(info.st_mode),
+                info.st_uid,
+                info.st_gid,
+                info.st_size,
+                info.st_mtime_ns,
+                digest.hexdigest(),
+            )
+        finally:
+            os.close(descriptor)
+
+    def _capture_identity(self) -> tuple[int, int, int, int, int, int, int, str]:
+        for parent in _TRUSTED_GIT_PARENTS:
+            self._require_root_owned_path(parent, directory=True)
+        self._require_root_owned_path(self.path, directory=False)
+        return self._binary_identity(self.path)
+
+    def require_unchanged(self) -> None:
+        if self._capture_identity() != self._identity:
+            raise ProfileInputError("trusted Git producer identity changed")
+
+    def command(self, *arguments: str) -> list[str]:
+        self.require_unchanged()
+        return [str(self.path), "-C", str(_REPOSITORY_ROOT), *arguments]
 
 
-def _git_environment(git: Path) -> dict[str, str]:
+def _git_environment() -> dict[str, str]:
     return {
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_PAGER": "cat",
+        "GIT_TERMINAL_PROMPT": "0",
+        "HOME": "/nonexistent",
         "LANG": "C",
         "LC_ALL": "C",
-        "PATH": str(git.parent),
+        "PAGER": "cat",
+        "PATH": "/usr/bin:/bin",
     }
 
 
-def _run_git(git: Path, *arguments: str) -> bytes:
+def _run_git(git: _TrustedGitProducer, *arguments: str) -> bytes:
     try:
         completed = subprocess.run(
-            [str(git), "-C", str(_REPOSITORY_ROOT), *arguments],
+            git.command(*arguments),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
             timeout=10,
-            env=_git_environment(git),
+            env=_git_environment(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ProfileInputError("cannot inspect the exact Git code tree") from exc
+    finally:
+        git.require_unchanged()
     if (
         completed.returncode != 0
         or len(completed.stdout) > _MAX_GIT_OUTPUT_BYTES
@@ -145,7 +221,11 @@ def _run_git(git: Path, *arguments: str) -> bytes:
     return completed.stdout
 
 
-def _git_sha(git: Path, revision: str, field: str) -> str:
+def _git_sha(
+    git: _TrustedGitProducer,
+    revision: str,
+    field: str,
+) -> str:
     raw = _run_git(git, "rev-parse", "--verify", revision)
     try:
         value = raw.decode("ascii", errors="strict").strip()
@@ -157,10 +237,10 @@ def _git_sha(git: Path, revision: str, field: str) -> str:
 def _require_exact_code_tree(
     expected_commit: str,
     expected_tree: str,
-) -> tuple[Path, str, str]:
+) -> tuple[_TrustedGitProducer, str, str]:
     """Bind HEAD and reject tracked changes before repository imports exist."""
 
-    git = _git_executable()
+    git = _TrustedGitProducer()
     actual_commit = _git_sha(git, "HEAD^{commit}", "code commit SHA")
     actual_tree = _git_sha(git, "HEAD^{tree}", "code tree SHA")
     if actual_commit != expected_commit:
@@ -178,35 +258,128 @@ def _require_exact_code_tree(
     return git, actual_commit, actual_tree
 
 
-def _write_git_archive(git: Path, commit: str, archive_path: Path) -> None:
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        process.kill()
     try:
-        with archive_path.open("xb") as output:
-            completed = subprocess.run(
-                [
-                    str(git),
-                    "-C",
-                    str(_REPOSITORY_ROOT),
-                    "archive",
-                    "--format=tar",
-                    commit,
-                    "--",
-                    "newsroom",
-                ],
-                stdout=output,
-                stderr=subprocess.PIPE,
-                check=False,
-                timeout=30,
-                env=_git_environment(git),
-            )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ProfileInputError("cannot materialize the exact Git code tree") from exc
-    if (
-        completed.returncode != 0
-        or len(completed.stderr) > _MAX_GIT_OUTPUT_BYTES
-        or not archive_path.is_file()
-        or archive_path.stat().st_size > _MAX_ARCHIVE_BYTES
-    ):
-        raise ProfileInputError("cannot materialize the exact Git code tree")
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            stream.close()
+
+
+def _stream_bounded_process_to_file(
+    command: list[str],
+    output_path: Path,
+    *,
+    env: dict[str, str],
+    timeout_seconds: float,
+    max_stdout_bytes: int,
+    max_stderr_bytes: int,
+    failure_message: str,
+) -> bytes:
+    """Stream both pipes and kill before stdout can exceed the disk cap."""
+
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            bufsize=0,
+            env=env,
+        )
+        if process.stdout is None or process.stderr is None:
+            raise ProfileInputError(failure_message)
+        deadline = time.monotonic() + timeout_seconds
+        stderr = bytearray()
+        written = 0
+        with output_path.open("xb", buffering=0) as output:
+            with selectors.DefaultSelector() as selector:
+                for stream, stream_name in (
+                    (process.stdout, "stdout"),
+                    (process.stderr, "stderr"),
+                ):
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, selectors.EVENT_READ, stream_name)
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ProfileInputError(failure_message)
+                    events = selector.select(min(remaining, 0.25))
+                    if not events:
+                        continue
+                    for key, _ in events:
+                        try:
+                            chunk = os.read(key.fd, _STREAM_CHUNK_BYTES)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        if key.data == "stdout":
+                            if written + len(chunk) > max_stdout_bytes:
+                                raise ProfileInputError(
+                                    "Git archive exceeds the generation limit"
+                                )
+                            output.write(chunk)
+                            written += len(chunk)
+                        else:
+                            if len(stderr) + len(chunk) > max_stderr_bytes:
+                                raise ProfileInputError(failure_message)
+                            stderr.extend(chunk)
+        wait_remaining = deadline - time.monotonic()
+        if wait_remaining <= 0:
+            raise ProfileInputError(failure_message)
+        try:
+            return_code = process.wait(timeout=wait_remaining)
+        except subprocess.TimeoutExpired as exc:
+            raise ProfileInputError(failure_message) from exc
+        if return_code != 0 or written == 0:
+            raise ProfileInputError(failure_message)
+        return bytes(stderr)
+    except ProfileInputError:
+        if process is not None:
+            _terminate_process(process)
+        output_path.unlink(missing_ok=True)
+        raise
+    except (OSError, subprocess.SubprocessError) as exc:
+        if process is not None:
+            _terminate_process(process)
+        output_path.unlink(missing_ok=True)
+        raise ProfileInputError(failure_message) from exc
+    finally:
+        if process is not None and process.poll() is None:
+            _terminate_process(process)
+
+
+def _write_git_archive(
+    git: _TrustedGitProducer,
+    commit: str,
+    archive_path: Path,
+) -> None:
+    git.require_unchanged()
+    try:
+        _stream_bounded_process_to_file(
+            git.command(
+                "archive",
+                "--format=tar",
+                commit,
+                "--",
+                "newsroom",
+            ),
+            archive_path,
+            env=_git_environment(),
+            timeout_seconds=30,
+            max_stdout_bytes=_MAX_ARCHIVE_BYTES,
+            max_stderr_bytes=_MAX_GIT_OUTPUT_BYTES,
+            failure_message="cannot materialize the exact Git code tree",
+        )
+    finally:
+        git.require_unchanged()
 
 
 def _canonical_archive_name(name: str) -> PurePosixPath:
@@ -286,7 +459,7 @@ def _verify_newsroom_import_origins(root: Path) -> None:
 
 @contextmanager
 def _materialized_repository_api(
-    git: Path,
+    git: _TrustedGitProducer,
     commit: str,
 ) -> Iterator[tuple[Any, Any, Any, Any, Any]]:
     """Load every Newsroom module from a cache-free exact Git materialization."""

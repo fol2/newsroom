@@ -172,12 +172,20 @@ python -I scripts/sdlc/increment5_profile_validator.py \
 
 Before importing any Newsroom module, the validator resolves the actual Git
 commit and tree, requires them to equal the caller-supplied identities, and
-rejects staged or tracked differences. Ignored and untracked runtime artefacts
-are never used as code. The validator creates a bounded temporary `git archive`
-materialization from the exact commit, rejects unsafe paths, non-regular entries
-and tracked bytecode, disables bytecode writes, removes checkout paths from the
-import search path, and verifies that every loaded `newsroom.*` module came from
-that cache-free materialization.
+rejects staged or tracked differences. Git is never selected from caller
+`PATH`: the producer is fixed to `/usr/bin/git`, and `/usr`, `/usr/bin`, and the
+binary must be non-symlink, root-owned, and not group- or other-writable. The
+binary's device, inode, mode, ownership, size, modification time, and SHA-256
+identity are captured and rechecked before and after every operation.
+
+Ignored and untracked runtime artefacts are never used as code. Archive stdout
+and stderr are consumed concurrently through the validator; no stdout chunk
+that would cross the 64 MiB generation cap is written, and the producer is
+terminated immediately on overflow, timeout, or stderr-limit failure. The
+bounded archive is then extracted with unsafe paths, non-regular entries,
+oversized members, and tracked bytecode rejected. Bytecode writes are disabled,
+checkout paths are removed from the import search path, and every loaded
+`newsroom.*` module must come from that cache-free exact-commit materialization.
 
 It then rejects non-canonical JSON, duplicate names, identity drift, wrong
 profile/eligibility pairs, widened budgets or effects, fixture substitution,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 from copy import deepcopy
+import importlib.util
 import inspect
 import json
 import os
@@ -79,6 +80,7 @@ def _run_isolated_bytes(
     root: Path = _REPOSITORY_ROOT,
     expected_commit: str | None = None,
     expected_tree: str | None = None,
+    environment: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     if expected_commit is None or expected_tree is None:
         actual_commit, actual_tree = _code_identity(root)
@@ -99,7 +101,7 @@ def _run_isolated_bytes(
         stderr=subprocess.PIPE,
         check=False,
         cwd=root,
-        env=_validator_environment(),
+        env=environment or _validator_environment(),
         timeout=30,
     )
 
@@ -406,6 +408,81 @@ def test_ignored_bytecode_cannot_replace_materialized_validator_source(
     assert receipt["worktree_imports_used"] is False
 
 
+
+
+def test_path_selected_fake_git_cannot_supply_the_archive(tmp_path: Path) -> None:
+    fake_directory = tmp_path / "fake-bin"
+    fake_directory.mkdir()
+    marker = tmp_path / "fake-git-invoked"
+    fake_git = fake_directory / "git"
+    fake_git.write_text(
+        "#!/usr/bin/python3\n"
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('invoked', encoding='utf-8')\n"
+        "raise SystemExit(71)\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+
+    environment = _validator_environment()
+    environment["PATH"] = f"{fake_directory}:{environment['PATH']}"
+    completed = _run_isolated_bytes(
+        canonical_json_bytes(_fixture_manifest()),
+        environment=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    assert not marker.exists()
+    receipt = json.loads(completed.stdout.decode("utf-8"))
+    assert receipt["validation_code_origin"] == "CACHE_FREE_EXACT_GIT_ARCHIVE"
+
+
+def _load_validator_module() -> Any:
+    spec = importlib.util.spec_from_file_location(
+        "increment5_profile_validator_streaming_test",
+        _VALIDATOR_SCRIPT,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_archive_limit_kills_the_producer_before_overflow_reaches_disk(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator_module()
+    marker = tmp_path / "producer-completed"
+    emitter = tmp_path / "emit-large-archive.py"
+    emitter.write_text(
+        "from pathlib import Path\n"
+        "import os\n"
+        "import sys\n"
+        "import time\n"
+        "os.write(sys.stdout.fileno(), b'x' * 8192)\n"
+        "time.sleep(10)\n"
+        f"Path({str(marker)!r}).write_text('completed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    archive = tmp_path / "bounded.tar"
+
+    with pytest.raises(
+        validator.ProfileInputError,
+        match="Git archive exceeds the generation limit",
+    ):
+        validator._stream_bounded_process_to_file(
+            [sys.executable, str(emitter)],
+            archive,
+            env={"LC_ALL": "C", "PYTHONUTF8": "1"},
+            timeout_seconds=20,
+            max_stdout_bytes=1024,
+            max_stderr_bytes=1024,
+            failure_message="cannot materialize the exact Git code tree",
+        )
+
+    assert not archive.exists()
+    assert not marker.exists()
+
 def test_validator_materializes_exact_tree_before_repository_import() -> None:
     source = _VALIDATOR_SCRIPT.read_text(encoding="utf-8")
     main_source = source.split("def main() -> int:", 1)[1]
@@ -423,6 +500,10 @@ def test_validator_materializes_exact_tree_before_repository_import() -> None:
     )
     assert '"--untracked-files=no"' in source
     assert '"--untracked-files=all"' not in source
+    assert '_TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")' in source
+    assert "shutil.which" not in source
+    assert "selectors.DefaultSelector()" in source
+    assert "stdout=subprocess.PIPE" in source
 
 
 def test_isolated_validator_rejects_noncanonical_and_duplicate_json() -> None:
