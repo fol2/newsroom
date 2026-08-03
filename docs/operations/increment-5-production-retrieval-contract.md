@@ -1,0 +1,90 @@
+# Increment 5 production-retrieval operating contract
+
+This runbook applies to the implementation and non-production qualification authorized by 5A. Production activation is outside Increment 5.
+
+## Profiles
+
+`FIXTURE_REPLAY` is hermetic and uses repository-safe fixtures plus deterministic fixed-point vectors. It has zero external calls and is not qualification evidence.
+
+`PRODUCTION_SHAPED_QUALIFICATION` uses the real retriever/index/hydration/degradation code, an authenticated Neo4j service and a signed rights-cleared dataset manifest. It remains non-production: no live source, model load, provider credential/spend, protected content, write authority, public effect or activation.
+
+## Schema surfaces
+
+The contract records structural profile-schema digests. The public profile schema files are self-contained reviewed bindings: each is deterministically derived from the exact structural schema and fixes the accepted contract plus every component digest with JSON-Schema `const` values.
+
+Use the reviewed-binding schemas for manifest exchange or standalone validation. The explicitly named `*_structural_v1.schema.json` schemas exist to keep contract identity non-circular and are not sufficient by themselves to establish an accepted manifest identity.
+
+Neither profile is a production deployment profile. Production rejection of fake, disabled or omitted GraphRAG and production configuration build/readiness validation remain 5E controls.
+
+## Implementation ownership
+
+5B implements the four bounded branches independently and retains their exact receipts. It does not claim that those branches are already a hybrid system.
+
+5D owns deterministic reciprocal-rank fusion, authoritative dependency-root deduplication, final ordering and the complete projectable and hydratable `Source → Revision → Signal → Lead → Hypothesis → Candidate` lineage. Every unverified state remains explicit. The earlier graph foundation is not treated as complete `GRAG-042` delivery because it expressly excluded the Event Hypothesis handoff.
+
+5E qualifies the completed hybrid system. A challenger engine may be tested only after a measured blocker or an owner-approved comparison purpose is retained; multiple engines are not implemented in parallel by default.
+
+## Decision-bearing system
+
+`HYBRID` is the sole qualification target. The contract thresholds, mandatory query-family criteria, required-slice gates, temporal-correctness gate and rebuild-reproducibility gate apply independently to the hybrid result.
+
+Exact-only, full-text-only, vector-only and admitted-graph-only are mandatory comparative ablations. Their quality results are retained separately and cannot replace, pool with or rescue `HYBRID`. A safety or rights violation in any executed system remains blocking.
+
+## Hard limits
+
+- 5,000 ms end-to-end;
+- 8 results per branch;
+- 12 retained candidates;
+- 262,144 response bytes;
+- zero external calls;
+- zero provider cost;
+- graph depth 2, fan-out 32 and date window 31 days.
+
+A breach produces explicit degradation or incompleteness. Limits are never silently widened.
+
+## Outcomes
+
+- `COMPLETE`: every mandatory branch, hydration, rights, freshness, collision and reconciliation check completed.
+- `DEGRADED`: a named optional contribution failed but the bounded result remains useful.
+- `INCOMPLETE`: missing authority bytes, collision result, mandatory branch or reconciliation prevents complete meaning.
+- `POLICY_BLOCKED`: rights, scope or security policy forbids the material.
+- `STALE`: the selected generation or hydrated authority is outside the admitted freshness boundary.
+- `UNAVAILABLE`: no safe bounded response can be produced.
+
+An empty result is no-match only with `COMPLETE`.
+
+## Security boundary
+
+Only the six contract-named tools may expose retrieval. They accept typed bounded inputs and return bounded Retrieval Contexts. Prohibited surfaces include raw/generated Cypher, caller Lucene syntax, arbitrary indexes/predicates/depth/fan-out/windows, write sessions, model/provider credentials, unrestricted source text and projection text as factual payload.
+
+Serving requires the active complete generation, zero open projection gaps and zero dead letters. A stale or incomplete projection cannot be relabelled no-match or replaced by a graph-free contract.
+
+## Rights and purge
+
+Rights are checked at read time. Personal data, secrets, rights-restricted text and public governed source text cannot enter the v1 vector lane.
+
+Withdrawal, tombstone or revocation stops new derivative creation. Purge removes every passage, full-text entry, fixed-point vector, graph derivative and cached context, records derivative identities and a purge receipt, rebuilds an isolated generation and proves non-resurrection before selection. Any residual blocks qualification.
+
+## Version and challenger admission
+
+A reviewed 5A contract change does not by itself deliver the complete no-inherited-authority rule for executable versions. Before 5E can qualify a scope, its Operational Admission must enumerate the exact source, adapter, parser, Profile, worker, retrieval and provider versions and prove that every new version starts without operational authority.
+
+An omitted, changed or unadmitted version blocks the affected scope. Material-change review is not a substitute for this complete version inventory and admission gate. `DOPS-070` therefore remains delivery work for 5E/#254.
+
+A second graph engine has an additional gate. It may enter a retained comparison only after either a measured blocker against the selected Neo4j Community plus Graphiti target or a separately retained owner-approved comparison purpose. Curiosity, availability, or an already-open qualification issue is insufficient. The default remains one implementation, not parallel engine development. `GRAG-051` therefore remains delivery work for 5E/#254.
+
+## Rollback and recovery
+
+Rollback selects a prior generation only when exact component identities still match, rights remain current, freshness/completeness pass and no purged material returns. There is no graph-free rollback, history rewrite or same-generation contract edit.
+
+Otherwise return `UNAVAILABLE`, `STALE` or `POLICY_BLOCKED` until a safe isolated generation qualifies.
+
+## Evidence and observability
+
+Retain bounded records for route/profile/generation identity; system role; branch status, duration, count and truncation; fusion/dedup counts; hydration, rights and collision results; unique qualification case IDs; mandatory query-family, required-case-type, required-slice and family/slice exposure counts; hybrid per-family precision, recall, required-slice recall and additional blocking results; separate comparative-ablation results; temporal-correctness error count; rebuild-reproducibility mismatch count; top-level outcome; response bytes; zero-call/zero-cost counters; component identities; and purge/rebuild linkage. Both zero-tolerance counts must be zero for the hybrid target.
+
+Qualification is not evaluable unless the frozen partition contains 100 unique cases, the three family floors are 30/30/40, every required case type has at least 10 cases, every required slice has at least 20 relevant cases and every mandatory family/required-slice intersection has at least 10. Cross-family case reuse and calibration counting are prohibited. Any exposure shortfall is retained as `NOT_EVALUATED`; operators cannot choose a denominator after seeing results. Once exposure is sufficient, each hybrid family is independently blocking: event/development precision must reach 0.90 with recall 0.80 and perfect distractor false-merge precision; source-revision impact must reach precision/recall 0.80 with provenance completeness 1.00; timeline precision/recall must reach 0.80 with zero temporal errors. Aggregate or comparative results cannot rescue a failed hybrid family.
+
+Logs must exclude secrets, credentials, prohibited source expressions and protected payloads.
+
+Stop the affected profile and preserve evidence on any successful write, generated query execution, external call/spend, model load, protected-content vector, authority bypass, false no-match, purge residual, identity mismatch, component drift, unadmitted version, unapproved challenger or silent branch loss. Recovery requires a new isolated generation and fresh applicable qualification evidence. CI success alone never activates production.
