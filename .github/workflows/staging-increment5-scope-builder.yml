@@ -30,17 +30,22 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install uv
 
-      - name: Pin reviewed source head
+      - name: Pin reviewed source and negative regression allowance
         run: |
           python - <<'PY'
           from pathlib import Path
           path = Path("scripts/sdlc/_staging_increment5_expand_scope.py")
           text = path.read_text(encoding="utf-8")
-          old = '    source_head = subprocess.check_output(\n        ["git", "rev-parse", "HEAD^"], cwd=ROOT, text=True\n    ).strip()\n'
-          new = '    source_head = "40d387840ee6d2b41042b32191a962ae9baf9502"\n'
-          if text.count(old) != 1:
-              raise SystemExit("staging source-head expression differs")
-          path.write_text(text.replace(old, new), encoding="utf-8")
+          old_head = '    source_head = subprocess.check_output(\n        ["git", "rev-parse", "HEAD^"], cwd=ROOT, text=True\n    ).strip()\n'
+          new_head = '    source_head = "40d387840ee6d2b41042b32191a962ae9baf9502"\n'
+          old_check = '            if old in text:\n                hits.append(str(path.relative_to(ROOT)))\n'
+          new_check = '            if (\n                old == OLD_SCOPE\n                and path.resolve() == PROFILE_TEST.resolve()\n                and text.count(old) == 1\n            ):\n                continue\n            if old in text:\n                hits.append(str(path.relative_to(ROOT)))\n'
+          if text.count(old_head) != 1 or text.count(old_check) != 1:
+              raise SystemExit("staging helper source differs")
+          path.write_text(
+              text.replace(old_head, new_head).replace(old_check, new_check),
+              encoding="utf-8",
+          )
           PY
 
       - name: Materialize exact scope and digest chain
