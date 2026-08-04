@@ -41,24 +41,29 @@ def _parse_input_manifest(raw: bytes) -> dict[str, Any]:
         raise ProfileInputError("input is not canonical JSON")
     return value
 '''
-    text = replace_once(text, marker, parser + marker, "input parser insertion")
-    text = replace_once(
-        text,
+    if "def _parse_input_manifest(raw: bytes)" not in text:
+        text = replace_once(text, marker, parser + marker, "input parser insertion")
+    old_main = (
         '        manifest = _parse_canonical_object(raw, "profile manifest")\n'
         '        if raw != _canonical_json_bytes(manifest):\n'
-        '            raise ProfileInputError("input is not canonical JSON")\n',
-        '        manifest = _parse_input_manifest(raw)\n',
-        "main input parser",
+        '            raise ProfileInputError("input is not canonical JSON")\n'
     )
+    if old_main in text:
+        text = text.replace(old_main, '        manifest = _parse_input_manifest(raw)\n', 1)
+    elif '        manifest = _parse_input_manifest(raw)\n' not in text:
+        raise RuntimeError("main input parser is absent")
     VALIDATOR.write_text(text, encoding="utf-8")
 
     tests = TESTS.read_text(encoding="utf-8")
-    tests = replace_once(
-        tests,
-        '            assert b"qualification_eligible" in completed.stderr\n',
-        '            assert b"profile qualification eligibility differs" in completed.stderr\n',
-        "eligibility diagnostic assertion",
+    old_assertion = '            assert b"qualification_eligible" in completed.stderr\n'
+    new_assertion = (
+        '            assert b"profile qualification eligibility differs" '
+        'in completed.stderr\n'
     )
+    if old_assertion in tests:
+        tests = tests.replace(old_assertion, new_assertion, 1)
+    elif new_assertion not in tests:
+        raise RuntimeError("eligibility diagnostic assertion is absent")
     definition = (
         '_CONTRACT_RELATIVE_PATH = "newsroom/increment5/data/'
         'increment5a_retrieval_contract_v1.json"\n'
