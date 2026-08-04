@@ -34,7 +34,7 @@ jobs:
           python -m pip install uv
 
       - name: Materialize exact product candidate
-        run: python scripts/sdlc/_staging_increment5_outer_blob_launcher.py
+        run: python scripts/sdlc/_staging_increment5_outer_blob_launcher_v2.py
 
       - name: Verify generated path set
         run: |
