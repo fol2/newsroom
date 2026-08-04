@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - staging/increment-5a-immutable-object-receipt-20260804
+  pull_request:
+    branches:
+      - staging/increment-5a-immutable-object-receipt-20260804
 
 permissions:
   contents: write
