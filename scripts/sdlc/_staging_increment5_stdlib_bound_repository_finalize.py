@@ -55,14 +55,14 @@ def _parse_input_manifest(raw: bytes) -> dict[str, Any]:
     VALIDATOR.write_text(text, encoding="utf-8")
 
     tests = TESTS.read_text(encoding="utf-8")
-    old_assertion = '            assert b"qualification_eligible" in completed.stderr\n'
-    new_assertion = (
-        '            assert b"profile qualification eligibility differs" '
-        'in completed.stderr\n'
+    old_fragment = 'assert b"qualification_eligible" in completed.stderr'
+    new_fragment = (
+        'assert b"profile qualification eligibility differs" '
+        'in completed.stderr'
     )
-    if old_assertion in tests:
-        tests = tests.replace(old_assertion, new_assertion, 1)
-    elif new_assertion not in tests:
+    if old_fragment in tests:
+        tests = tests.replace(old_fragment, new_fragment, 1)
+    elif new_fragment not in tests:
         raise RuntimeError("eligibility diagnostic assertion is absent")
     definition = (
         '_CONTRACT_RELATIVE_PATH = "newsroom/increment5/data/'
