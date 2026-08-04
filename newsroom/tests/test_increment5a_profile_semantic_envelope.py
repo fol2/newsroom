@@ -745,6 +745,58 @@ def test_fsmonitor_hook_cannot_hide_tracked_checkout_change(tmp_path: Path) -> N
     assert b"tracked repository checkout differs from HEAD" in completed.stderr
 
 
+def test_local_stat_config_cannot_hide_same_size_restored_mtime_edit(
+    tmp_path: Path,
+) -> None:
+    clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
+    relative = "newsroom/increment5/profiles.py"
+    source = clone / relative
+    original = source.read_bytes()
+    baseline = source.stat()
+    for name, value in (
+        ("core.trustctime", "false"),
+        ("core.checkStat", "minimal"),
+        ("core.ignoreStat", "true"),
+        ("core.fileMode", "false"),
+    ):
+        configured = subprocess.run(
+            ["git", "-C", str(clone), "config", name, value],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=20,
+        )
+        assert configured.returncode == 0, configured.stderr.decode("utf-8")
+    refreshed = subprocess.run(
+        ["git", "-C", str(clone), "update-index", "--refresh"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=20,
+    )
+    assert refreshed.returncode == 0, refreshed.stderr.decode("utf-8")
+    changed = bytearray(original)
+    offset = next(index for index, value in enumerate(changed) if 65 <= value <= 90)
+    changed[offset] = 90 if changed[offset] != 90 else 89
+    source.write_bytes(changed)
+    os.utime(source, ns=(baseline.st_atime_ns, baseline.st_mtime_ns))
+    assert source.stat().st_size == baseline.st_size
+    # Git releases differ in whether this adversarial stat configuration hides
+    # the edit. The validator must reject the bytes independently either way.
+    completed = _run_isolated_bytes(
+        canonical_json_bytes(_fixture_manifest()),
+        root=clone,
+        expected_commit=clone_commit,
+        expected_tree=clone_tree,
+    )
+    assert completed.returncode == 2
+    assert completed.stderr == (
+        b"increment5 profile validation failed: "
+        b"tracked repository checkout differs from HEAD\n"
+    )
+    assert completed.stdout == b""
+
+
 def test_bounded_blob_reader_kills_an_overflowing_producer(tmp_path: Path) -> None:
     marker = tmp_path / "producer-completed"
     emitter = tmp_path / "emit.py"
@@ -853,6 +905,14 @@ def test_validator_source_has_closed_outer_launch_and_repository_boundaries() ->
     assert 'f"--work-tree={self.root}"' in source
     assert '"--no-replace-objects"' in source
     assert '"core.fsmonitor=false"' in source
+    assert '"core.trustctime=true"' in source
+    assert '"core.checkStat=default"' in source
+    assert '"core.ignoreStat=false"' in source
+    assert '"core.fileMode=true"' in source
+    assert '"ls-tree"' in source
+    assert '"ls-files",\n            "-s"' in source
+    assert "hashlib.sha1(usedforsecurity=False)" in source
+    assert '"status",' not in source
     assert '"GIT_NO_REPLACE_OBJECTS": "1"' in source
     assert "_reject_hidden_index_flags" in source
     assert "require_validator_blob" in source

@@ -27,7 +27,7 @@ if (
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import selectors
 import stat
@@ -41,6 +41,10 @@ _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _MAX_INPUT_BYTES = 1_048_576
 _MAX_GIT_OUTPUT_BYTES = 65_536
 _MAX_INDEX_LIST_BYTES = 16_777_216
+_MAX_TRACKED_TREE_BYTES = 16_777_216
+_MAX_TRACKED_FILE_BYTES = 67_108_864
+_MAX_TRACKED_TOTAL_BYTES = 536_870_912
+_MAX_TRACKED_PATHS = 100_000
 _MAX_REVIEWED_BLOB_BYTES = 16_777_216
 _MAX_REVIEWED_TOTAL_BYTES = 67_108_864
 _STREAM_CHUNK_BYTES = 65_536
@@ -584,6 +588,14 @@ class _TrustedRepositoryView:
             "--no-replace-objects",
             "-c",
             "core.fsmonitor=false",
+            "-c",
+            "core.trustctime=true",
+            "-c",
+            "core.checkStat=default",
+            "-c",
+            "core.ignoreStat=false",
+            "-c",
+            "core.fileMode=true",
             *arguments,
         ]
 
@@ -615,14 +627,234 @@ class _TrustedRepositoryView:
         if actual_tree != tree:
             raise ProfileInputError("code tree SHA differs from expected identity")
         self._reject_hidden_index_flags()
-        status = self.run(
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=no",
-            "--ignore-submodules=none",
+        expected = self._read_expected_tree(commit)
+        self._require_index_matches_tree(expected)
+        self._require_worktree_matches_tree(expected)
+
+    @staticmethod
+    def _parse_tree_record(
+        record: bytes,
+        *,
+        index: bool,
+    ) -> tuple[str, str, str]:
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            fields = metadata.split(b" ")
+            if index:
+                if len(fields) != 3 or fields[2] != b"0":
+                    raise ValueError
+                mode_raw, oid_raw = fields[:2]
+            else:
+                if len(fields) != 3 or fields[1] != b"blob":
+                    raise ValueError
+                mode_raw, oid_raw = fields[0], fields[2]
+            mode = mode_raw.decode("ascii", errors="strict")
+            oid = oid_raw.decode("ascii", errors="strict")
+            path = raw_path.decode("utf-8", errors="strict")
+        except (ValueError, UnicodeError) as exc:
+            raise ProfileInputError("tracked tree inventory is malformed") from exc
+        if mode not in {"100644", "100755", "120000"}:
+            raise ProfileInputError("tracked tree contains an unsupported entry")
+        if not _GIT_SHA.fullmatch(oid):
+            raise ProfileInputError("tracked tree contains a malformed blob identity")
+        pure = PurePosixPath(path)
+        if (
+            not path
+            or pure.is_absolute()
+            or any(part in {"", ".", ".."} for part in pure.parts)
+        ):
+            raise ProfileInputError("tracked tree contains an unsafe path")
+        return path, mode, oid
+
+    def _read_expected_tree(self, commit: str) -> dict[str, tuple[str, str]]:
+        raw = self.run(
+            "ls-tree",
+            "-r",
+            "-z",
+            "--full-tree",
+            commit,
+            max_stdout_bytes=_MAX_TRACKED_TREE_BYTES,
+            timeout_seconds=30,
+            failure_message="cannot inspect exact tracked tree",
         )
-        if status:
-            raise ProfileInputError("tracked repository checkout differs from HEAD")
+        result: dict[str, tuple[str, str]] = {}
+        for record in raw.split(b"\0"):
+            if not record:
+                continue
+            path, mode, oid = self._parse_tree_record(record, index=False)
+            if path in result:
+                raise ProfileInputError("tracked tree contains a duplicate path")
+            result[path] = (mode, oid)
+            if len(result) > _MAX_TRACKED_PATHS:
+                raise ProfileInputError("tracked tree exceeds the path limit")
+        if not result:
+            raise ProfileInputError("tracked tree is empty")
+        return result
+
+    def _require_index_matches_tree(
+        self,
+        expected: dict[str, tuple[str, str]],
+    ) -> None:
+        raw = self.run(
+            "ls-files",
+            "-s",
+            "-z",
+            "--",
+            max_stdout_bytes=_MAX_TRACKED_TREE_BYTES,
+            timeout_seconds=30,
+            failure_message="cannot inspect exact tracked index",
+        )
+        actual: dict[str, tuple[str, str]] = {}
+        for record in raw.split(b"\0"):
+            if not record:
+                continue
+            path, mode, oid = self._parse_tree_record(record, index=True)
+            if path in actual:
+                raise ProfileInputError("tracked index contains a duplicate path")
+            actual[path] = (mode, oid)
+        if actual != expected:
+            raise ProfileInputError("tracked repository index differs from HEAD")
+
+    def _tracked_path(
+        self,
+        relative: str,
+        directories: set[Path],
+    ) -> Path:
+        pure = PurePosixPath(relative)
+        current = self.root
+        for part in pure.parts[:-1]:
+            current = current / part
+            if current in directories:
+                continue
+            try:
+                info = current.lstat()
+            except OSError as exc:
+                raise ProfileInputError(
+                    "tracked repository checkout differs from HEAD"
+                ) from exc
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise ProfileInputError(
+                    "tracked repository checkout differs from HEAD"
+                )
+            directories.add(current)
+        return current / pure.parts[-1]
+
+    @staticmethod
+    def _blob_digest_for_bytes(data: bytes) -> str:
+        digest = hashlib.sha1(usedforsecurity=False)
+        digest.update(f"blob {len(data)}\0".encode("ascii"))
+        digest.update(data)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _stable_stat_identity(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_mode,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+
+    def _regular_blob_digest(
+        self,
+        path: Path,
+        before: os.stat_result,
+    ) -> tuple[str, int]:
+        if before.st_size > _MAX_TRACKED_FILE_BYTES:
+            raise ProfileInputError("tracked file exceeds the verification limit")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise ProfileInputError(
+                "tracked repository checkout differs from HEAD"
+            ) from exc
+        try:
+            opened = os.fstat(descriptor)
+            if self._stable_stat_identity(opened) != self._stable_stat_identity(before):
+                raise ProfileInputError(
+                    "tracked repository checkout changed during verification"
+                )
+            digest = hashlib.sha1(usedforsecurity=False)
+            digest.update(f"blob {opened.st_size}\0".encode("ascii"))
+            consumed = 0
+            while True:
+                chunk = os.read(descriptor, 1_048_576)
+                if not chunk:
+                    break
+                consumed += len(chunk)
+                if consumed > opened.st_size:
+                    raise ProfileInputError(
+                        "tracked repository checkout changed during verification"
+                    )
+                digest.update(chunk)
+            after = os.fstat(descriptor)
+            if (
+                consumed != opened.st_size
+                or self._stable_stat_identity(after)
+                != self._stable_stat_identity(opened)
+            ):
+                raise ProfileInputError(
+                    "tracked repository checkout changed during verification"
+                )
+            return digest.hexdigest(), consumed
+        finally:
+            os.close(descriptor)
+
+    def _require_worktree_matches_tree(
+        self,
+        expected: dict[str, tuple[str, str]],
+    ) -> None:
+        directories: set[Path] = {self.root}
+        total = 0
+        for relative in sorted(expected):
+            mode, oid = expected[relative]
+            path = self._tracked_path(relative, directories)
+            try:
+                before = path.lstat()
+            except OSError as exc:
+                raise ProfileInputError(
+                    "tracked repository checkout differs from HEAD"
+                ) from exc
+            if mode == "120000":
+                if not stat.S_ISLNK(before.st_mode):
+                    raise ProfileInputError(
+                        "tracked repository checkout differs from HEAD"
+                    )
+                try:
+                    target = os.readlink(os.fsencode(path))
+                    after = path.lstat()
+                except OSError as exc:
+                    raise ProfileInputError(
+                        "tracked repository checkout differs from HEAD"
+                    ) from exc
+                if self._stable_stat_identity(after) != self._stable_stat_identity(before):
+                    raise ProfileInputError(
+                        "tracked repository checkout changed during verification"
+                    )
+                actual_oid = self._blob_digest_for_bytes(target)
+                size = len(target)
+            else:
+                if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+                    raise ProfileInputError(
+                        "tracked repository checkout differs from HEAD"
+                    )
+                executable = bool(stat.S_IMODE(before.st_mode) & 0o111)
+                if executable != (mode == "100755"):
+                    raise ProfileInputError(
+                        "tracked repository checkout differs from HEAD"
+                    )
+                actual_oid, size = self._regular_blob_digest(path, before)
+            total += size
+            if total > _MAX_TRACKED_TOTAL_BYTES:
+                raise ProfileInputError("tracked tree exceeds the verification limit")
+            if actual_oid != oid:
+                raise ProfileInputError(
+                    "tracked repository checkout differs from HEAD"
+                )
 
     def require_validator_blob(self, commit: str, expected_blob: str) -> None:
         actual_blob = _git_sha(

@@ -197,6 +197,8 @@ env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
 
 The inner receipt deliberately sets `executed_source_identity_attested=false` and `validation_code_identity_claim_effect=NONE`. The signed outer workflow must bind the exact validator blob SHA, complete launcher command, system-Python/runtime-image identity, canonical manifest bytes, inner-receipt digest, Epoch, and code tree. A direct worktree-path invocation or an unbound inner receipt is `NOT_EVALUATED`.
 
+The clean-tree decision does not trust Git's index stat cache. The validator compares the stage-zero index inventory directly with the exact commit tree, then computes the Git blob identity and executable/symlink mode of every tracked worktree entry with the Python standard library. Local `trustctime`, `checkStat`, `ignoreStat`, `fileMode`, fsmonitor, restored mtimes, and same-size edits therefore cannot create a false `tracked_checkout_clean=true` claim.
+
 
 ## Safety and failure experiments
 
