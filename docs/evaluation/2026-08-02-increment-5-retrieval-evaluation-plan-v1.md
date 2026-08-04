@@ -1,0 +1,249 @@
+# Increment 5 retrieval evaluation plan v1
+
+- **Status:** reviewed machine-plan binding for Increment 5A
+- **Execution owner:** 5E / #254
+- **Contract:** `newsroom/increment5/data/increment5a_retrieval_contract_v1.json`
+- **Contract digest:** `sha256:51a3837ad9cdb70fe8aaa4242997b191c7e848bb1d391c6940cccc2bd45ba06c`
+- **Machine plan:** `newsroom/increment5/data/increment5_retrieval_evaluation_plan_v1.json`
+- **Machine-plan digest:** `sha256:c9d169c46a939573ffc6563704adfae973655f6394293ce591ec689f76a30959`
+
+The machine JSON is the authoritative preregistration. This document explains it
+without adding thresholds, exceptions, or authority.
+
+## Decision scope
+
+`HYBRID` is the only qualification-bearing system. `EXACT_ONLY`,
+`FULL_TEXT_ONLY`, `VECTOR_ONLY`, and `ADMITTED_GRAPH_ONLY` are mandatory
+comparative ablations.
+
+Every contract threshold, mandatory-family criterion, required-slice criterion,
+temporal gate, and rebuild gate applies independently to `HYBRID`. Comparative
+quality is reported separately, is not decision-bearing, cannot be pooled, and
+cannot rescue a failed hybrid target. A safety or rights violation in any
+executed system remains blocking.
+
+## Frozen Epoch protocol
+
+Before a Run exists, 5E creates a canonical
+`newsroom.increment5.retrieval-evaluation-epoch.v1` record. Its SHA-256 identity
+binds:
+
+- the reviewed contract digest;
+- the externally reviewed evaluation-plan digest;
+- every component digest;
+- the exact source inventory;
+- source/provider, adapter, and parser versions;
+- the exact query set;
+- the threshold set;
+- the policy set;
+- the dataset manifest;
+- the label and adjudication policy;
+- the exact code tree; and
+- the generation identity.
+
+Any difference in a frozen identity is a material change. A material component,
+source, query, threshold, or policy change starts a new Epoch. Every Run binds
+the exact Epoch digest and all frozen identities must remain equal within that
+Epoch.
+
+Cross-Epoch pooling is prohibited. A missing or mismatched Epoch is
+`NOT_EVALUATED`. Every profile-validation receipt is v5 and is produced by
+`/usr/bin/python3 -I -S`: isolated mode is mandatory, `site` initialization is
+disabled, and the root-owned system interpreter identity is checked before
+validation and immediately before output. No environment Python package,
+`.pth` startup code, or repository module participates. One explicit Git
+directory, index and work tree are bound; replacement objects, fsmonitor,
+assume-unchanged and skip-worktree state cannot change or conceal the evidence
+inputs. The validator reads only exact digest-pinned contract/schema blobs and
+rechecks interpreter, commit, tree, index flags and tracked cleanliness
+immediately before output. The receipt tree must equal the Epoch's frozen
+`code_tree_sha`; missing, hidden, changed or mismatched state is
+`NOT_EVALUATED`. Superseded Epoch Runs remain retained. The Epoch record binds
+the plan digest externally at Run creation, so the machine plan does not contain
+a self-referential digest.
+
+## Evaluation evidence semantics
+
+Every retained metric identifies its count, denominator, unit, system role,
+query family, slice, Epoch, generation, exact component identities, and sampling
+status. Raw branch scores are never compared.
+
+Ground truth is the owner-frozen corpus of authoritative identities, revisions,
+dependency roots, valid-time labels, rights decisions, expected Candidate
+dispositions, and relevance judgements. No graph, index, provider, or retrieval
+branch is ground truth.
+
+Performance outcomes, change-evaluation outcomes, operational evidence, and
+exploratory recommendations remain separate. A missing, invalid, withdrawn,
+under-exposed, rights-blocked, wrong-Epoch, or failed Run is retained as such
+and cannot be pooled into a pass.
+
+## Mandatory GraphRAG query families
+
+A missing or under-exposed family is `NOT_EVALUATED`.
+
+1. **Event and development precision** — same-event state, development of an existing event, and related-but-distinct event; precision ≥ 0.90, recall ≥ 0.80, every required family/slice recall ≥ 0.80, and distractor false-merge precision = 1.00.
+2. **Source-revision impact** — correction, supersession, and downstream-Candidate impact; precision and recall ≥ 0.80, every required family/slice recall ≥ 0.80, and provenance completeness = 1.00.
+3. **Long-running policy, case, or process timeline** — ordered development, correction, supersession, and temporal cutoff; precision and recall ≥ 0.80, every required family/slice recall ≥ 0.80, and temporal-correctness errors = 0.
+
+Each sufficiently exposed family is an independent blocking surface. Aggregate
+MRR, aggregate recall, another family, a comparative branch, or reviewer
+judgement cannot rescue it.
+
+## DEVAL-046 triage-error protocol
+
+The hybrid target preregisters and reports all six classes separately. Each
+class retains eligible-opportunity count, error count or counts, rate in parts
+per million, exact case labels, and definition. Cross-class rate pooling is
+prohibited. Each class requires at least 10 relevant preregistered qualification
+cases; a shortfall is `NOT_EVALUATED`.
+
+| Class | Eligible opportunity | Error metrics | Frozen decision treatment |
+|---|---|---|---|
+| `FALSE_MERGE` | authority roots or events labelled related-but-distinct | `false_merge_count`, `false_merge_opportunity_count`, `false_merge_rate_ppm` | automatic blocker through perfect distractor false-merge precision |
+| `FRAGMENTATION` | one authority-labelled event or development expected to remain one result root or disposition | `fragmentation_count`, `fragmentation_opportunity_count`, `fragmentation_rate_ppm` | mandatory separate report; no invented post-hoc threshold |
+| `SNOWBALL_ABSORPTION` | related-but-distinct or shared-origin cases where a broad root must not absorb another event | `snowball_absorption_count`, `snowball_absorption_opportunity_count`, `snowball_absorption_rate_ppm` | mandatory separate report; no invented post-hoc threshold |
+| `FALSE_OR_MISSED_DEVELOPMENT` | labelled developments, corrections, and supersessions | `false_development_count`, `missed_development_count`, `development_opportunity_count`, `false_or_missed_development_rate_ppm` | automatic blocker through frozen event/development precision and recall |
+| `DUPLICATE_CANDIDATE_CREATION` | one expected downstream Candidate disposition for one authoritative dependency root and material development | `duplicate_candidate_creation_count`, `single_candidate_opportunity_count`, `duplicate_candidate_creation_rate_ppm` | mandatory separate report; no invented post-hoc threshold |
+| `UNNECESSARY_CANDIDATE_CREATION` | frozen labels require no new Candidate | `unnecessary_candidate_creation_count`, `no_candidate_expected_opportunity_count`, `unnecessary_candidate_creation_rate_ppm` | mandatory separate report; no invented post-hoc threshold |
+
+Candidate-related evaluation uses read-only expected dispositions. It creates,
+mutates, admits, or publishes no Candidate.
+
+## Exposure minima
+
+The frozen qualification partition contains at least:
+
+- 100 unique qualification cases;
+- 30/30/40 cases across the three mandatory families;
+- 10 cases per required case type;
+- 20 relevant cases per global required slice;
+- 10 cases per mandatory family / required-slice intersection; and
+- 10 relevant cases per triage-error class.
+
+Each case counts once in exactly one mandatory family. It may carry multiple
+independently frozen slice and error-opportunity labels. Cross-family reuse,
+calibration counting, and cross-Epoch pooling are prohibited. Duplicate,
+invalid, withdrawn, and post-freeze cases do not count.
+
+## Frozen gates
+
+The hybrid target must satisfy all contract thresholds, every mandatory-family
+criterion, and these zero-tolerance gates:
+
+- temporal-correctness errors = 0; and
+- rebuild-reproducibility mismatches = 0.
+
+A sufficiently exposed failing family is `FAIL`. An exposure or Epoch-identity
+shortfall is `NOT_EVALUATED`. Aggregate or comparative success cannot override
+a family, slice, temporal, rebuild, safety, or rights failure.
+
+## Signed outer profile-validation launcher
+
+Before any validator byte executes, the signed 5E workflow resolves the validator blob from the frozen Epoch commit with fixed `/usr/bin/git`, streams those exact bytes to trusted no-site system Python, and supplies the canonical manifest on a separate regular-file descriptor. The exact admitted command is:
+
+```bash
+set -euo pipefail
+REPOSITORY_ROOT="$(pwd -P)"
+GIT_DIR="$REPOSITORY_ROOT/.git"
+GIT_INDEX_FILE="$GIT_DIR/index"
+PROFILE_MANIFEST="${PROFILE_MANIFEST:?canonical profile path required}"
+CODE_COMMIT_SHA="$(
+  env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+    GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+    /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+      --no-replace-objects -c core.fsmonitor=false \
+      rev-parse --verify 'HEAD^{commit}'
+)"
+CODE_TREE_SHA="$(
+  env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+    GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+    /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+      --no-replace-objects -c core.fsmonitor=false \
+      rev-parse --verify 'HEAD^{tree}'
+)"
+VALIDATOR_PATH='scripts/sdlc/increment5_profile_validator.py'
+VALIDATOR_BLOB_SHA="$(
+  env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+    GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+    /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+      --no-replace-objects -c core.fsmonitor=false \
+      rev-parse --verify "$CODE_COMMIT_SHA:$VALIDATOR_PATH"
+)"
+env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+  GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+  GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+  /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+    --no-replace-objects -c core.fsmonitor=false \
+    cat-file blob "$VALIDATOR_BLOB_SHA" | \
+  env -i PATH=/usr/bin:/bin LC_ALL=C PYTHONUTF8=1 \
+    /usr/bin/python3 -I -S - \
+      --repository-root "$REPOSITORY_ROOT" \
+      --git-dir "$GIT_DIR" \
+      --index-file "$GIT_INDEX_FILE" \
+      --manifest-fd 3 \
+      --expected-validator-blob-sha "$VALIDATOR_BLOB_SHA" \
+      --expected-code-commit-sha "$CODE_COMMIT_SHA" \
+      --expected-code-tree-sha "$CODE_TREE_SHA" \
+      3<"$PROFILE_MANIFEST"
+```
+
+The inner receipt deliberately sets `executed_source_identity_attested=false` and `validation_code_identity_claim_effect=NONE`. The signed outer workflow must bind the exact validator blob SHA, complete launcher command, system-Python/runtime-image identity, canonical manifest bytes, inner-receipt digest, Epoch, and code tree. A direct worktree-path invocation or an unbound inner receipt is `NOT_EVALUATED`.
+
+The content-addressed checkout comparison is a bounded snapshot completed before receipt write, not a lock over mutable worktree, index, or HEAD state. The receipt therefore records `checkout_snapshot_verified_before_receipt_write=true` and explicitly records `completion_time_checkout_state_attested=false`; it never claims `tracked_checkout_clean`. A concurrent change after the final snapshot cannot falsify the receipt because the signed outer workflow relies on immutable commit, tree, validator-blob, manifest, and receipt identities rather than a mutable checkout-at-handoff assertion.
+
+
+## Safety and failure experiments
+
+5E executes generated/raw Cypher rejection; caller Lucene rejection; arbitrary
+index, predicate, depth, fan-out, and date-window rejection; write and
+credential rejection; stale/incomplete generation behaviour; branch timeout;
+collision conflict; rights withdrawal and purge; graph/index loss and
+reproducible rebuild; rollback; source/dataset/component identity mismatch;
+least-privilege source/provider access; and scoped containment.
+
+Every experiment retains its exact system role, Epoch, contract, components,
+dataset, generation, service, code tree, and outcome. Failed Runs remain
+evidence.
+
+## Public artifact safety
+
+Repository-visible datasets, manifests, reports, receipts, and regression cases
+exclude secrets, credentials, prohibited source expressions, unrestricted query
+payloads, personal data, protected or rights-restricted text, and confidential
+review material.
+
+Protected material may be represented only through permitted hashes, protected
+references, bounded permitted extracts, or independently reproducible fixtures.
+A safety or rights omission blocks the Run; final-report redaction cannot repair
+prohibited material entering an index, log, or retained context.
+
+This section freezes the rule in 5A; it is not executable public-artifact safety
+evidence. `DEVAL-072` belongs to 5E/#254, which must implement and retain the
+validators, redaction/rejection receipts, release gates, and negative tests over
+all repository-visible and retained artifact classes before reporting delivery.
+
+## Decision output
+
+The 5E report retains exact Plan, Epoch, Run, contract, profile, component,
+source/provider, adapter/parser, dataset, query-set, threshold, policy,
+generation, service, and code identities. It includes methods, samples, labels,
+adjudication, counts, denominators, uncertainty, family/slice/error-class
+results, latency, cost, deviations, incidents, reconciliation, containment,
+recovery, and every failed or superseded Run needed for reproduction.
+
+It identifies `HYBRID` as the sole decision-bearing result and reports each
+comparative ablation separately. It separates contract conformance, hybrid
+qualification, comparative results, unqualified embedding quality, operational
+security, reconciliation, containment, recovery, and production activation,
+which remains explicitly unauthorized.
+
+A completed Run ends with a retained owner decision or explicit unresolved
+status. Passing 5E still does not activate production.
