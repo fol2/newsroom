@@ -35,7 +35,7 @@ jobs:
 
       - name: Materialize candidate
         run: |
-          python scripts/sdlc/_staging_increment5_no_site_composer_v2.py
+          python scripts/sdlc/_staging_increment5_no_site_composer_v3.py
 
       - name: Verify exact generated path set
         run: |
@@ -51,6 +51,7 @@ jobs:
               "increment5a-no-site-composer-manifest.json",
               "newsroom/increment5/_traceability_anchors.py",
               "newsroom/increment5/_traceability_model.py",
+              "newsroom/increment5/traceability.py",
               "newsroom/tests/test_increment5a_profile_semantic_envelope.py",
               "newsroom/tests/test_increment5a_traceability.py",
               "scripts/sdlc/increment5_profile_validator.py",
@@ -86,6 +87,7 @@ jobs:
             increment5a-no-site-composer-manifest.json \
             newsroom/increment5/_traceability_anchors.py \
             newsroom/increment5/_traceability_model.py \
+            newsroom/increment5/traceability.py \
             newsroom/tests/test_increment5a_profile_semantic_envelope.py \
             newsroom/tests/test_increment5a_traceability.py \
             scripts/sdlc/increment5_profile_validator.py
