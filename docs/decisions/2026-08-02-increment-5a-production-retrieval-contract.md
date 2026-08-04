@@ -161,11 +161,61 @@ Public builders remain deterministic conveniences only.
 For 5E evidence, canonical manifest bytes are supplied with the exact
 expected commit and tree through one admitted command:
 
-```text
-/usr/bin/python3 -I -S scripts/sdlc/increment5_profile_validator.py \
-  --expected-code-commit-sha "$CODE_COMMIT_SHA" \
-  --expected-code-tree-sha "$CODE_TREE_SHA"
+```bash
+set -euo pipefail
+REPOSITORY_ROOT="$(pwd -P)"
+GIT_DIR="$REPOSITORY_ROOT/.git"
+GIT_INDEX_FILE="$GIT_DIR/index"
+PROFILE_MANIFEST="${PROFILE_MANIFEST:?canonical profile path required}"
+CODE_COMMIT_SHA="$(
+  env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+    GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+    /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+      --no-replace-objects -c core.fsmonitor=false \
+      rev-parse --verify 'HEAD^{commit}'
+)"
+CODE_TREE_SHA="$(
+  env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+    GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+    /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+      --no-replace-objects -c core.fsmonitor=false \
+      rev-parse --verify 'HEAD^{tree}'
+)"
+VALIDATOR_PATH='scripts/sdlc/increment5_profile_validator.py'
+VALIDATOR_BLOB_SHA="$(
+  env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+    GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+    /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+      --no-replace-objects -c core.fsmonitor=false \
+      rev-parse --verify "$CODE_COMMIT_SHA:$VALIDATOR_PATH"
+)"
+env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+  GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+  GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+  /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+    --no-replace-objects -c core.fsmonitor=false \
+    cat-file blob "$VALIDATOR_BLOB_SHA" | \
+  env -i PATH=/usr/bin:/bin LC_ALL=C PYTHONUTF8=1 \
+    /usr/bin/python3 -I -S - \
+      --repository-root "$REPOSITORY_ROOT" \
+      --git-dir "$GIT_DIR" \
+      --index-file "$GIT_INDEX_FILE" \
+      --manifest-fd 3 \
+      --expected-validator-blob-sha "$VALIDATOR_BLOB_SHA" \
+      --expected-code-commit-sha "$CODE_COMMIT_SHA" \
+      --expected-code-tree-sha "$CODE_TREE_SHA" \
+      3<"$PROFILE_MANIFEST"
 ```
+
+The inner receipt deliberately sets `executed_source_identity_attested=false` and `validation_code_identity_claim_effect=NONE`. The signed outer workflow must bind the exact validator blob SHA, complete launcher command, system-Python/runtime-image identity, canonical manifest bytes, inner-receipt digest, Epoch, and code tree. A direct worktree-path invocation or an unbound inner receipt is `NOT_EVALUATED`.
+
 
 The executable requires both isolated mode and disabled `site` initialization
 before any import other than built-in `sys`. It then verifies that the actual
@@ -189,11 +239,11 @@ stdlib semantic validator checks canonical JSON, exact fields, identities,
 budgets, effects, rights, eligibility, and profile-specific invariants. It does
 not execute code from those blobs.
 
-Receipt v5 binds the manifest, commit and tree while recording
+Receipt v6 binds the manifest, commit and tree while recording
 `python_runtime_executable=/usr/bin/python3`,
 `python_runtime_origin=ROOT_OWNED_SYSTEM_PYTHON_NO_SITE`,
 `site_initialization_used=false`, `external_python_packages_used=false`,
-`validation_code_origin=EXACT_TRACKED_EXECUTABLE_STDLIB_ONLY`,
+`validation_code_origin=OUTER_SIGNED_GIT_BLOB_LAUNCHER_REQUIRED`,
 `validation_data_origin=EXACT_REVIEWED_GIT_BLOBS`, and
 `worktree_imports_used=false`. Interpreter identity and the same
 repository/index invariant are rerun immediately before output, so runtime or

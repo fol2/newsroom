@@ -11,24 +11,88 @@ rights-cleared, repository-safe dataset, but still has zero provider spend, no
 model load, no protected content, no write authority, no public effect, and no
 production activation.
 
-Every 5E profile is validated by the exact command
-`/usr/bin/python3 -I -S scripts/sdlc/increment5_profile_validator.py` with the
-expected commit and tree. The executable requires isolated mode with `site`
-initialization disabled, verifies the root-owned system interpreter, is
-stdlib-only, and imports no environment package or repository module. It binds
-an explicit Git directory/index/work tree, disables replacement objects and
-fsmonitor, rejects assume-unchanged and skip-worktree flags, and reads only
-bounded digest-pinned contract/schema blobs from the exact commit.
+Every 5E profile is launched only by the signed outer workflow below. Before
+any validator byte executes, fixed `/usr/bin/git` resolves the exact validator
+blob from the frozen commit and streams those bytes to root-owned system
+Python in isolated no-site stdin mode. The canonical manifest enters on a
+separate inherited regular-file descriptor.
 
-Receipt v5 records `python_runtime_executable=/usr/bin/python3`,
+```bash
+set -euo pipefail
+REPOSITORY_ROOT="$(pwd -P)"
+GIT_DIR="$REPOSITORY_ROOT/.git"
+GIT_INDEX_FILE="$GIT_DIR/index"
+PROFILE_MANIFEST="${PROFILE_MANIFEST:?canonical profile path required}"
+CODE_COMMIT_SHA="$(
+  env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+    GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+    /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+      --no-replace-objects -c core.fsmonitor=false \
+      rev-parse --verify 'HEAD^{commit}'
+)"
+CODE_TREE_SHA="$(
+  env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+    GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+    /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+      --no-replace-objects -c core.fsmonitor=false \
+      rev-parse --verify 'HEAD^{tree}'
+)"
+VALIDATOR_PATH='scripts/sdlc/increment5_profile_validator.py'
+VALIDATOR_BLOB_SHA="$(
+  env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+    GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+    /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+      --no-replace-objects -c core.fsmonitor=false \
+      rev-parse --verify "$CODE_COMMIT_SHA:$VALIDATOR_PATH"
+)"
+env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+  GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+  GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+  /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+    --no-replace-objects -c core.fsmonitor=false \
+    cat-file blob "$VALIDATOR_BLOB_SHA" | \
+  env -i PATH=/usr/bin:/bin LC_ALL=C PYTHONUTF8=1 \
+    /usr/bin/python3 -I -S - \
+      --repository-root "$REPOSITORY_ROOT" \
+      --git-dir "$GIT_DIR" \
+      --index-file "$GIT_INDEX_FILE" \
+      --manifest-fd 3 \
+      --expected-validator-blob-sha "$VALIDATOR_BLOB_SHA" \
+      --expected-code-commit-sha "$CODE_COMMIT_SHA" \
+      --expected-code-tree-sha "$CODE_TREE_SHA" \
+      3<"$PROFILE_MANIFEST"
+```
+
+The inner receipt deliberately sets `executed_source_identity_attested=false` and `validation_code_identity_claim_effect=NONE`. The signed outer workflow must bind the exact validator blob SHA, complete launcher command, system-Python/runtime-image identity, canonical manifest bytes, inner-receipt digest, Epoch, and code tree. A direct worktree-path invocation or an unbound inner receipt is `NOT_EVALUATED`.
+
+The inner executable is standard-library-only and imports no environment package
+or repository Python module. It binds the explicit Git directory, exact index,
+and actual work tree; disables replacement objects and fsmonitor; rejects
+assume-unchanged and skip-worktree flags; verifies the expected validator blob;
+and reads only bounded digest-pinned contract/schema blobs from the exact
+commit.
+
+Receipt v6 records `executed_source_identity_attested=false`,
+`validation_code_identity_claim_effect=NONE`,
+`outer_signed_workflow_binding_required=true`,
+`validation_code_delivery=EXACT_COMMIT_GIT_BLOB_STDIN`,
+`python_runtime_executable=/usr/bin/python3`,
 `python_runtime_origin=ROOT_OWNED_SYSTEM_PYTHON_NO_SITE`,
 `site_initialization_used=false`, `external_python_packages_used=false`,
-`validation_code_origin=EXACT_TRACKED_EXECUTABLE_STDLIB_ONLY`,
+`validation_code_origin=OUTER_SIGNED_GIT_BLOB_LAUNCHER_REQUIRED`,
 `validation_data_origin=EXACT_REVIEWED_GIT_BLOBS`, and
-`worktree_imports_used=false`. Interpreter identity, commit, tree, index flags
-and tracked cleanliness are checked both before validation and immediately
-before receipt output. The receipt retains authority effect `NONE`; it is
-necessary evidence, never sufficient qualification or activation authority.
+`worktree_imports_used=false`. Runtime, commit, tree, validator blob, index
+flags, and tracked cleanliness are checked again immediately before output.
+The receipt retains authority effect `NONE`; it is necessary evidence only and
+cannot authorize qualification or activation without the separately signed
+outer evidence envelope.
 
 ## Epoch admission
 

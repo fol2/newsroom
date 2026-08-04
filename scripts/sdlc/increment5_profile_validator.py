@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
-"""Validate one canonical Increment 5 profile without external Python packages.
+"""Validate one canonical Increment 5 profile from an exact Git blob.
 
-The executable is an evidence boundary. It uses only the Python standard
-library, binds one explicit Git directory/index/work tree, reads exact reviewed
-contract and schema blobs from the supplied commit, and emits a non-authoritative
-receipt only after the repository state is revalidated at completion.
+The signed outer launcher—not this Python process—authenticates and streams the
+validator bytes from the expected commit before Python executes them. This
+stdlib-only inner process then binds the exact repository, validator blob,
+manifest bytes, runtime, and completion-time state into a non-authoritative
+receipt. The receipt cannot authenticate its own executed source and grants no
+authority without the separately signed outer-launch evidence.
 """
 
 from __future__ import annotations
 
 import sys
 
-if not sys.flags.isolated or not sys.flags.no_site:
+if (
+    not sys.flags.isolated
+    or not sys.flags.no_site
+    or sys.argv[0] != "-"
+):
     sys.stderr.write(
-        "increment5 profile validation failed: trusted isolated Python with "
-        "site initialization disabled is required\n"
+        "increment5 profile validation failed: signed outer Git-blob launcher "
+        "with trusted isolated no-site Python is required\n"
     )
     raise SystemExit(2)
 
@@ -39,17 +45,22 @@ _MAX_REVIEWED_BLOB_BYTES = 16_777_216
 _MAX_REVIEWED_TOTAL_BYTES = 67_108_864
 _STREAM_CHUNK_BYTES = 65_536
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _TRUSTED_PYTHON_EXECUTABLE = Path("/usr/bin/python3")
 _TRUSTED_PYTHON_PARENTS = (Path("/usr"), Path("/usr/bin"))
 _TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
 _TRUSTED_GIT_PARENTS = (Path("/usr"), Path("/usr/bin"))
-_EXPECTED_FLAGS = frozenset(
+_INVOCATION_FLAGS = frozenset(
     {
+        "--repository-root",
+        "--git-dir",
+        "--index-file",
+        "--manifest-fd",
+        "--expected-validator-blob-sha",
         "--expected-code-commit-sha",
         "--expected-code-tree-sha",
     }
 )
+_VALIDATOR_PATH = "scripts/sdlc/increment5_profile_validator.py"
 _CONTRACT_PATH = "newsroom/increment5/data/increment5a_retrieval_contract_v1.json"
 _FIXTURE_STRUCTURAL_PATH = (
     "newsroom/increment5/data/"
@@ -516,13 +527,28 @@ def _capture_bounded_process(
 class _TrustedRepositoryView:
     __slots__ = ("root", "git", "git_dir", "index_path", "_environment")
 
-    def __init__(self, root: Path) -> None:
-        self.root = root.resolve(strict=True)
+    def __init__(self, root: Path, git_dir: Path, index_path: Path) -> None:
+        try:
+            self.root = root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ProfileInputError("repository root is unavailable") from exc
+        try:
+            current_root = Path.cwd().resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ProfileInputError("current repository root is unavailable") from exc
+        if current_root != self.root:
+            raise ProfileInputError("repository root differs from current checkout")
+
+        expected_git_dir = self.root / ".git"
+        expected_index = expected_git_dir / "index"
+        if git_dir != expected_git_dir or index_path != expected_index:
+            raise ProfileInputError("outer launcher repository paths differ")
+        self._require_repository_path(expected_git_dir, directory=True)
+        self._require_repository_path(expected_index, directory=False)
+        self.git_dir = expected_git_dir
+        self.index_path = expected_index
         self.git = _TrustedGitBinary()
-        self.git_dir = self._discover_git_dir()
-        self.index_path = self.git_dir / "index"
-        self._require_repository_path(self.git_dir, directory=True)
-        self._require_repository_path(self.index_path, directory=False)
+
         environment = _base_git_environment()
         environment.update(
             {
@@ -548,39 +574,6 @@ class _TrustedRepositoryView:
             raise ProfileInputError("repository metadata path has an unexpected owner")
         if info.st_mode & stat.S_IWOTH:
             raise ProfileInputError("repository metadata path is world writable")
-
-    def _discover_git_dir(self) -> Path:
-        self.git.require_unchanged()
-        try:
-            raw = _capture_bounded_process(
-                [
-                    str(self.git.path),
-                    "-C",
-                    str(self.root),
-                    "--no-replace-objects",
-                    "-c",
-                    "core.fsmonitor=false",
-                    "rev-parse",
-                    "--absolute-git-dir",
-                ],
-                env=_base_git_environment(),
-                timeout_seconds=10,
-                max_stdout_bytes=_MAX_GIT_OUTPUT_BYTES,
-                max_stderr_bytes=_MAX_GIT_OUTPUT_BYTES,
-                failure_message="cannot bind the exact Git repository",
-            )
-        finally:
-            self.git.require_unchanged()
-        try:
-            text = raw.decode("utf-8", errors="strict").strip()
-        except UnicodeError as exc:
-            raise ProfileInputError("cannot bind the exact Git repository") from exc
-        if not text or "\n" in text or "\r" in text:
-            raise ProfileInputError("cannot bind the exact Git repository")
-        path = Path(text)
-        if not path.is_absolute():
-            raise ProfileInputError("Git directory is not absolute")
-        return path.resolve(strict=True)
 
     def command(self, *arguments: str) -> list[str]:
         self.git.require_unchanged()
@@ -631,6 +624,15 @@ class _TrustedRepositoryView:
         if status:
             raise ProfileInputError("tracked repository checkout differs from HEAD")
 
+    def require_validator_blob(self, commit: str, expected_blob: str) -> None:
+        actual_blob = _git_sha(
+            self,
+            f"{commit}:{_VALIDATOR_PATH}",
+            "validator blob SHA",
+        )
+        if actual_blob != expected_blob:
+            raise ProfileInputError("validator blob SHA differs from expected identity")
+
     def _reject_hidden_index_flags(self) -> None:
         raw = self.run(
             "ls-files",
@@ -673,24 +675,75 @@ def _git_sha(repository: _TrustedRepositoryView, revision: str, field: str) -> s
     return value
 
 
-def _parse_expected_identities(arguments: list[str]) -> tuple[str, str]:
-    if len(arguments) != 4:
-        raise ProfileInputError("exact code identity arguments are required")
+def _parse_invocation(
+    arguments: list[str],
+) -> tuple[Path, Path, Path, int, str, str, str]:
+    if len(arguments) != 14:
+        raise ProfileInputError("exact outer launch arguments are required")
     values: dict[str, str] = {}
     for index in range(0, len(arguments), 2):
         name = arguments[index]
         value = arguments[index + 1]
-        if name not in _EXPECTED_FLAGS or name in values:
-            raise ProfileInputError("exact code identity arguments are malformed")
-        if not _GIT_SHA.fullmatch(value):
-            raise ProfileInputError("expected code identity is not a canonical Git SHA")
+        if name not in _INVOCATION_FLAGS or name in values:
+            raise ProfileInputError("exact outer launch arguments are malformed")
         values[name] = value
-    if frozenset(values) != _EXPECTED_FLAGS:
-        raise ProfileInputError("exact code identity arguments are required")
+    if frozenset(values) != _INVOCATION_FLAGS:
+        raise ProfileInputError("exact outer launch arguments are required")
+
+    for field in (
+        "--expected-validator-blob-sha",
+        "--expected-code-commit-sha",
+        "--expected-code-tree-sha",
+    ):
+        if not _GIT_SHA.fullmatch(values[field]):
+            raise ProfileInputError("expected code identity is not a canonical Git SHA")
+
+    paths: list[Path] = []
+    for field in ("--repository-root", "--git-dir", "--index-file"):
+        path = Path(values[field])
+        if not path.is_absolute() or str(path) != values[field]:
+            raise ProfileInputError("outer launcher paths must be canonical absolute paths")
+        paths.append(path)
+
+    fd_text = values["--manifest-fd"]
+    try:
+        manifest_fd = int(fd_text, 10)
+    except ValueError as exc:
+        raise ProfileInputError("manifest descriptor is malformed") from exc
+    if str(manifest_fd) != fd_text or not 3 <= manifest_fd <= 1024:
+        raise ProfileInputError("manifest descriptor is malformed")
+
     return (
+        paths[0],
+        paths[1],
+        paths[2],
+        manifest_fd,
+        values["--expected-validator-blob-sha"],
         values["--expected-code-commit-sha"],
         values["--expected-code-tree-sha"],
     )
+
+
+def _read_manifest_descriptor(descriptor: int) -> bytes:
+    try:
+        duplicate = os.dup(descriptor)
+    except OSError as exc:
+        raise ProfileInputError("manifest descriptor is unavailable") from exc
+    try:
+        info = os.fstat(duplicate)
+        if not stat.S_ISREG(info.st_mode):
+            raise ProfileInputError("manifest descriptor must reference a regular file")
+        if info.st_size > _MAX_INPUT_BYTES:
+            raise ProfileInputError("input exceeds 1048576 bytes")
+        with os.fdopen(duplicate, "rb", closefd=True) as stream:
+            duplicate = -1
+            raw = stream.read(_MAX_INPUT_BYTES + 1)
+    finally:
+        if duplicate >= 0:
+            os.close(duplicate)
+    if len(raw) > _MAX_INPUT_BYTES:
+        raise ProfileInputError("input exceeds 1048576 bytes")
+    return raw
 
 
 def _load_reviewed_profile_data(
@@ -922,48 +975,61 @@ def _emit_receipt(
     repository: _TrustedRepositoryView,
     commit: str,
     tree: str,
+    validator_blob: str,
     receipt: dict[str, Any],
     output: BinaryIO,
 ) -> None:
     raw = _canonical_json_bytes(receipt) + b"\n"
     runtime.require_unchanged()
     repository.require_stable_clean_tree(commit, tree)
+    repository.require_validator_blob(commit, validator_blob)
     output.write(raw)
 
 
 def main() -> int:
     try:
-        expected_commit, expected_tree = _parse_expected_identities(sys.argv[1:])
+        (
+            repository_root,
+            git_dir,
+            index_path,
+            manifest_fd,
+            expected_validator_blob,
+            expected_commit,
+            expected_tree,
+        ) = _parse_invocation(sys.argv[1:])
         runtime = _TrustedPythonRuntime()
-        repository = _TrustedRepositoryView(_REPOSITORY_ROOT)
+        repository = _TrustedRepositoryView(repository_root, git_dir, index_path)
         repository.require_stable_clean_tree(expected_commit, expected_tree)
+        repository.require_validator_blob(expected_commit, expected_validator_blob)
 
-        raw = sys.stdin.buffer.read(_MAX_INPUT_BYTES + 1)
-        if len(raw) > _MAX_INPUT_BYTES:
-            raise ProfileInputError("input exceeds 1048576 bytes")
+        raw = _read_manifest_descriptor(manifest_fd)
         manifest = _parse_input_manifest(raw)
-
         reviewed = _load_reviewed_profile_data(repository, expected_commit)
         profile_kind = _validate_profile_manifest(manifest, reviewed)
         receipt = {
             "authority_effect": "NONE",
             "code_commit_sha": expected_commit,
             "code_tree_sha": expected_tree,
+            "executed_source_identity_attested": False,
             "external_python_packages_used": False,
             "manifest_digest": _digest_bytes(raw),
+            "outer_signed_workflow_binding_required": True,
             "production_activation_authorized": False,
             "profile_kind": profile_kind,
             "python_runtime_executable": "/usr/bin/python3",
             "python_runtime_origin": "ROOT_OWNED_SYSTEM_PYTHON_NO_SITE",
             "qualification_authority_granted": False,
-            "schema_version": "newsroom.increment5.profile-validation-receipt.v5",
+            "schema_version": "newsroom.increment5.profile-validation-receipt.v6",
             "site_initialization_used": False,
             "tracked_checkout_clean": True,
-            "validation_code_origin": "EXACT_TRACKED_EXECUTABLE_STDLIB_ONLY",
+            "validation_code_delivery": "EXACT_COMMIT_GIT_BLOB_STDIN",
+            "validation_code_identity_claim_effect": "NONE",
+            "validation_code_origin": "OUTER_SIGNED_GIT_BLOB_LAUNCHER_REQUIRED",
             "validation_data_origin": "EXACT_REVIEWED_GIT_BLOBS",
             "validation_scope": (
                 "REVIEWED_PROFILE_STRUCTURE_SEMANTICS_AND_EXACT_CODE_TREE"
             ),
+            "validator_blob_sha": expected_validator_blob,
             "worktree_imports_used": False,
         }
         _emit_receipt(
@@ -971,6 +1037,7 @@ def main() -> int:
             repository,
             expected_commit,
             expected_tree,
+            expected_validator_blob,
             receipt,
             sys.stdout.buffer,
         )
@@ -979,5 +1046,7 @@ def main() -> int:
         return _fail(str(exc))
 
 
+if __name__ == "__main__":
+    raise SystemExit(main())
 if __name__ == "__main__":
     raise SystemExit(main())

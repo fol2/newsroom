@@ -138,6 +138,66 @@ A sufficiently exposed failing family is `FAIL`. An exposure or Epoch-identity
 shortfall is `NOT_EVALUATED`. Aggregate or comparative success cannot override
 a family, slice, temporal, rebuild, safety, or rights failure.
 
+## Signed outer profile-validation launcher
+
+Before any validator byte executes, the signed 5E workflow resolves the validator blob from the frozen Epoch commit with fixed `/usr/bin/git`, streams those exact bytes to trusted no-site system Python, and supplies the canonical manifest on a separate regular-file descriptor. The exact admitted command is:
+
+```bash
+set -euo pipefail
+REPOSITORY_ROOT="$(pwd -P)"
+GIT_DIR="$REPOSITORY_ROOT/.git"
+GIT_INDEX_FILE="$GIT_DIR/index"
+PROFILE_MANIFEST="${PROFILE_MANIFEST:?canonical profile path required}"
+CODE_COMMIT_SHA="$(
+  env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+    GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+    /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+      --no-replace-objects -c core.fsmonitor=false \
+      rev-parse --verify 'HEAD^{commit}'
+)"
+CODE_TREE_SHA="$(
+  env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+    GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+    /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+      --no-replace-objects -c core.fsmonitor=false \
+      rev-parse --verify 'HEAD^{tree}'
+)"
+VALIDATOR_PATH='scripts/sdlc/increment5_profile_validator.py'
+VALIDATOR_BLOB_SHA="$(
+  env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+    GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+    /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+      --no-replace-objects -c core.fsmonitor=false \
+      rev-parse --verify "$CODE_COMMIT_SHA:$VALIDATOR_PATH"
+)"
+env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
+  GIT_DIR="$GIT_DIR" GIT_WORK_TREE="$REPOSITORY_ROOT" \
+  GIT_INDEX_FILE="$GIT_INDEX_FILE" \
+  /usr/bin/git --git-dir="$GIT_DIR" --work-tree="$REPOSITORY_ROOT" \
+    --no-replace-objects -c core.fsmonitor=false \
+    cat-file blob "$VALIDATOR_BLOB_SHA" | \
+  env -i PATH=/usr/bin:/bin LC_ALL=C PYTHONUTF8=1 \
+    /usr/bin/python3 -I -S - \
+      --repository-root "$REPOSITORY_ROOT" \
+      --git-dir "$GIT_DIR" \
+      --index-file "$GIT_INDEX_FILE" \
+      --manifest-fd 3 \
+      --expected-validator-blob-sha "$VALIDATOR_BLOB_SHA" \
+      --expected-code-commit-sha "$CODE_COMMIT_SHA" \
+      --expected-code-tree-sha "$CODE_TREE_SHA" \
+      3<"$PROFILE_MANIFEST"
+```
+
+The inner receipt deliberately sets `executed_source_identity_attested=false` and `validation_code_identity_claim_effect=NONE`. The signed outer workflow must bind the exact validator blob SHA, complete launcher command, system-Python/runtime-image identity, canonical manifest bytes, inner-receipt digest, Epoch, and code tree. A direct worktree-path invocation or an unbound inner receipt is `NOT_EVALUATED`.
+
+
 ## Safety and failure experiments
 
 5E executes generated/raw Cypher rejection; caller Lucene rejection; arbitrary
