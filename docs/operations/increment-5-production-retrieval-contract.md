@@ -72,7 +72,7 @@ env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
 
 The inner receipt deliberately sets `executed_source_identity_attested=false` and `validation_code_identity_claim_effect=NONE`. The signed outer workflow must bind the exact validator blob SHA, complete launcher command, system-Python/runtime-image identity, canonical manifest bytes, inner-receipt digest, Epoch, and code tree. A direct worktree-path invocation or an unbound inner receipt is `NOT_EVALUATED`.
 
-The clean-tree decision does not trust Git's index stat cache. The validator compares the stage-zero index inventory directly with the exact commit tree, then computes the Git blob identity and executable/symlink mode of every tracked worktree entry with the Python standard library. Local `trustctime`, `checkStat`, `ignoreStat`, `fileMode`, fsmonitor, restored mtimes, and same-size edits therefore cannot create a false `tracked_checkout_clean=true` claim.
+The content-addressed checkout comparison is a bounded snapshot completed before receipt write, not a lock over mutable worktree, index, or HEAD state. The receipt therefore records `checkout_snapshot_verified_before_receipt_write=true` and explicitly records `completion_time_checkout_state_attested=false`; it never claims `tracked_checkout_clean`. A concurrent change after the final snapshot cannot falsify the receipt because the signed outer workflow relies on immutable commit, tree, validator-blob, manifest, and receipt identities rather than a mutable checkout-at-handoff assertion.
 
 The inner executable is standard-library-only and imports no environment package
 or repository Python module. It binds the explicit Git directory, exact index,
@@ -81,7 +81,7 @@ assume-unchanged and skip-worktree flags; verifies the expected validator blob;
 and reads only bounded digest-pinned contract/schema blobs from the exact
 commit.
 
-Receipt v6 records `executed_source_identity_attested=false`,
+Receipt v7 records `executed_source_identity_attested=false`,
 `validation_code_identity_claim_effect=NONE`,
 `outer_signed_workflow_binding_required=true`,
 `validation_code_delivery=EXACT_COMMIT_GIT_BLOB_STDIN`,

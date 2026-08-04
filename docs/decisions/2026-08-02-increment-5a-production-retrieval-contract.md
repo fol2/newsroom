@@ -216,7 +216,7 @@ env -i PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null \
 
 The inner receipt deliberately sets `executed_source_identity_attested=false` and `validation_code_identity_claim_effect=NONE`. The signed outer workflow must bind the exact validator blob SHA, complete launcher command, system-Python/runtime-image identity, canonical manifest bytes, inner-receipt digest, Epoch, and code tree. A direct worktree-path invocation or an unbound inner receipt is `NOT_EVALUATED`.
 
-The clean-tree decision does not trust Git's index stat cache. The validator compares the stage-zero index inventory directly with the exact commit tree, then computes the Git blob identity and executable/symlink mode of every tracked worktree entry with the Python standard library. Local `trustctime`, `checkStat`, `ignoreStat`, `fileMode`, fsmonitor, restored mtimes, and same-size edits therefore cannot create a false `tracked_checkout_clean=true` claim.
+The content-addressed checkout comparison is a bounded snapshot completed before receipt write, not a lock over mutable worktree, index, or HEAD state. The receipt therefore records `checkout_snapshot_verified_before_receipt_write=true` and explicitly records `completion_time_checkout_state_attested=false`; it never claims `tracked_checkout_clean`. A concurrent change after the final snapshot cannot falsify the receipt because the signed outer workflow relies on immutable commit, tree, validator-blob, manifest, and receipt identities rather than a mutable checkout-at-handoff assertion.
 
 
 The executable requires both isolated mode and disabled `site` initialization
@@ -241,7 +241,7 @@ stdlib semantic validator checks canonical JSON, exact fields, identities,
 budgets, effects, rights, eligibility, and profile-specific invariants. It does
 not execute code from those blobs.
 
-Receipt v6 binds the manifest, commit and tree while recording
+Receipt v7 binds the manifest, commit and tree while recording
 `python_runtime_executable=/usr/bin/python3`,
 `python_runtime_origin=ROOT_OWNED_SYSTEM_PYTHON_NO_SITE`,
 `site_initialization_used=false`, `external_python_packages_used=false`,

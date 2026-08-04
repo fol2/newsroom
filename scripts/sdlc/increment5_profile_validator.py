@@ -1216,6 +1216,7 @@ def _emit_receipt(
     repository.require_stable_clean_tree(commit, tree)
     repository.require_validator_blob(commit, validator_blob)
     output.write(raw)
+    output.flush()
 
 
 def main() -> int:
@@ -1251,15 +1252,16 @@ def main() -> int:
             "python_runtime_executable": "/usr/bin/python3",
             "python_runtime_origin": "ROOT_OWNED_SYSTEM_PYTHON_NO_SITE",
             "qualification_authority_granted": False,
-            "schema_version": "newsroom.increment5.profile-validation-receipt.v6",
+            "schema_version": "newsroom.increment5.profile-validation-receipt.v7",
             "site_initialization_used": False,
-            "tracked_checkout_clean": True,
+            "checkout_snapshot_verified_before_receipt_write": True,
+            "completion_time_checkout_state_attested": False,
             "validation_code_delivery": "EXACT_COMMIT_GIT_BLOB_STDIN",
             "validation_code_identity_claim_effect": "NONE",
             "validation_code_origin": "OUTER_SIGNED_GIT_BLOB_LAUNCHER_REQUIRED",
             "validation_data_origin": "EXACT_REVIEWED_GIT_BLOBS",
             "validation_scope": (
-                "REVIEWED_PROFILE_STRUCTURE_SEMANTICS_AND_EXACT_CODE_TREE"
+                "REVIEWED_PROFILE_STRUCTURE_SEMANTICS_AND_PREWRITE_CODE_TREE_SNAPSHOT"
             ),
             "validator_blob_sha": expected_validator_blob,
             "worktree_imports_used": False,

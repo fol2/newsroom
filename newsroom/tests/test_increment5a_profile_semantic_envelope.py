@@ -276,15 +276,16 @@ def test_fresh_process_returns_code_tree_bound_non_authoritative_receipt(
         "python_runtime_executable": "/usr/bin/python3",
         "python_runtime_origin": "ROOT_OWNED_SYSTEM_PYTHON_NO_SITE",
         "qualification_authority_granted": False,
-        "schema_version": "newsroom.increment5.profile-validation-receipt.v6",
+        "schema_version": "newsroom.increment5.profile-validation-receipt.v7",
         "site_initialization_used": False,
-        "tracked_checkout_clean": True,
+        "checkout_snapshot_verified_before_receipt_write": True,
+        "completion_time_checkout_state_attested": False,
         "validation_code_delivery": "EXACT_COMMIT_GIT_BLOB_STDIN",
         "validation_code_identity_claim_effect": "NONE",
         "validation_code_origin": "OUTER_SIGNED_GIT_BLOB_LAUNCHER_REQUIRED",
         "validation_data_origin": "EXACT_REVIEWED_GIT_BLOBS",
         "validation_scope": (
-            "REVIEWED_PROFILE_STRUCTURE_SEMANTICS_AND_EXACT_CODE_TREE"
+            "REVIEWED_PROFILE_STRUCTURE_SEMANTICS_AND_PREWRITE_CODE_TREE_SNAPSHOT"
         ),
         "validator_blob_sha": _exact_validator_source(
             _REPOSITORY_ROOT, _CODE_COMMIT_SHA
@@ -890,6 +891,74 @@ if buffer.getvalue(): raise SystemExit("receipt bytes escaped")
     assert not output.exists()
 
 
+def test_receipt_handoff_does_not_attest_completion_time_checkout_state(
+    tmp_path: Path,
+) -> None:
+    clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
+    probe = """
+import io, json, sys
+from pathlib import Path
+sys.argv[0] = "-"
+source = Path(sys.argv[1]).read_bytes()
+namespace = {"__name__": "validator-handoff-probe", "__file__": sys.argv[1]}
+exec(compile(source, "-", "exec"), namespace)
+runtime = namespace["_TrustedPythonRuntime"]()
+root = Path(sys.argv[2])
+view = namespace["_TrustedRepositoryView"](root, root / ".git", root / ".git/index")
+blob = namespace["_git_sha"](
+    view,
+    f"{sys.argv[3]}:scripts/sdlc/increment5_profile_validator.py",
+    "validator blob SHA",
+)
+class MutatingOutput(io.BytesIO):
+    def write(self, data):
+        tracked = root / "scripts/sdlc/increment5_profile_validator.py"
+        tracked.write_text(
+            tracked.read_text(encoding="utf-8") + "\\n# changed during handoff\\n",
+            encoding="utf-8",
+        )
+        return super().write(data)
+output = MutatingOutput()
+receipt = {
+    "checkout_snapshot_verified_before_receipt_write": True,
+    "completion_time_checkout_state_attested": False,
+}
+namespace["_emit_receipt"](
+    runtime, view, sys.argv[3], sys.argv[4], blob, receipt, output
+)
+sys.stdout.buffer.write(output.getvalue())
+"""
+    completed = subprocess.run(
+        [
+            str(_TRUSTED_PYTHON),
+            "-I",
+            "-S",
+            "-c",
+            probe,
+            str(clone / _VALIDATOR_RELATIVE_PATH),
+            str(clone),
+            clone_commit,
+            clone_tree,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        cwd=clone,
+        env={"LC_ALL": "C", "PYTHONUTF8": "1"},
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    receipt = json.loads(completed.stdout.decode("utf-8"))
+    assert receipt == {
+        "checkout_snapshot_verified_before_receipt_write": True,
+        "completion_time_checkout_state_attested": False,
+    }
+    assert "tracked_checkout_clean" not in receipt
+    assert (
+        clone / "scripts/sdlc/increment5_profile_validator.py"
+    ).read_text(encoding="utf-8").endswith("# changed during handoff\n")
+
+
 def test_validator_source_has_closed_outer_launch_and_repository_boundaries() -> None:
     source = _VALIDATOR_SCRIPT.read_text(encoding="utf-8")
     bootstrap = source.index('or sys.argv[0] != "-"')
@@ -919,6 +988,9 @@ def test_validator_source_has_closed_outer_launch_and_repository_boundaries() ->
     assert '"executed_source_identity_attested": False' in source
     assert '"outer_signed_workflow_binding_required": True' in source
     assert '"validation_code_delivery": "EXACT_COMMIT_GIT_BLOB_STDIN"' in source
+    assert '"checkout_snapshot_verified_before_receipt_write": True' in source
+    assert '"completion_time_checkout_state_attested": False' in source
+    assert '"tracked_checkout_clean"' not in source
     main = source.split("def main() -> int:", 1)[1]
     assert main.index("repository.require_stable_clean_tree(") < main.index(
         "_load_reviewed_profile_data("
@@ -931,7 +1003,7 @@ def test_validator_source_has_closed_outer_launch_and_repository_boundaries() ->
         "repository.require_stable_clean_tree("
     ) < emit.index("repository.require_validator_blob(") < emit.index(
         "output.write(raw)"
-    )
+    ) < emit.index("output.flush()")
 
 
 def test_isolated_validator_rejects_noncanonical_and_duplicate_json() -> None:
