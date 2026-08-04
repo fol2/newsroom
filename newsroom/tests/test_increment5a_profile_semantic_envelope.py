@@ -1017,3 +1017,24 @@ def test_isolated_validator_rejects_noncanonical_and_duplicate_json() -> None:
     completed = _run_isolated_bytes(duplicate)
     assert completed.returncode == 2
     assert b"duplicate JSON object name" in completed.stderr
+
+
+def test_reviewed_documents_bind_receipt_v7_snapshot_semantics() -> None:
+    evaluation = (
+        _REPOSITORY_ROOT
+        / "docs/evaluation/2026-08-02-increment-5-retrieval-evaluation-plan-v1.md"
+    ).read_text(encoding="utf-8")
+    decision = (
+        _REPOSITORY_ROOT
+        / "docs/decisions/2026-08-02-increment-5a-production-retrieval-contract.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Every profile-validation receipt is v7" in evaluation
+    assert "Every profile-validation receipt is v5" not in evaluation
+    assert "checkout_snapshot_verified_before_receipt_write=true" in evaluation
+    assert "completion_time_checkout_state_attested=false" in evaluation
+    assert "`tracked_checkout_clean` claim" in evaluation
+    assert "does not attest mutable checkout" in evaluation
+    assert "completion-time drift emits no receipt" not in decision
+    assert "Drift detected during that final prewrite" in decision
+    assert "after output handoff are explicitly not attested" in decision

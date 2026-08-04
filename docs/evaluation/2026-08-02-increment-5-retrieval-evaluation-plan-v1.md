@@ -47,17 +47,21 @@ the exact Epoch digest and all frozen identities must remain equal within that
 Epoch.
 
 Cross-Epoch pooling is prohibited. A missing or mismatched Epoch is
-`NOT_EVALUATED`. Every profile-validation receipt is v5 and is produced by
+`NOT_EVALUATED`. Every profile-validation receipt is v7 and is produced by
 `/usr/bin/python3 -I -S`: isolated mode is mandatory, `site` initialization is
 disabled, and the root-owned system interpreter identity is checked before
-validation and immediately before output. No environment Python package,
+validation and immediately before receipt write. No environment Python package,
 `.pth` startup code, or repository module participates. One explicit Git
-directory, index and work tree are bound; replacement objects, fsmonitor,
-assume-unchanged and skip-worktree state cannot change or conceal the evidence
+directory, index, and work tree are bound; replacement objects, fsmonitor,
+assume-unchanged, and skip-worktree state cannot change or conceal the evidence
 inputs. The validator reads only exact digest-pinned contract/schema blobs and
-rechecks interpreter, commit, tree, index flags and tracked cleanliness
-immediately before output. The receipt tree must equal the Epoch's frozen
-`code_tree_sha`; missing, hidden, changed or mismatched state is
+performs a final content-addressed checkout snapshot immediately before receipt
+write. Receipt v7 records
+`checkout_snapshot_verified_before_receipt_write=true` and
+`completion_time_checkout_state_attested=false`; it contains no
+`tracked_checkout_clean` claim and does not attest mutable checkout, index, or
+HEAD state at completion or after handoff. The receipt tree must equal the
+Epoch's frozen `code_tree_sha`; missing, hidden, changed, or mismatched state is
 `NOT_EVALUATED`. Superseded Epoch Runs remain retained. The Epoch record binds
 the plan digest externally at Run creation, so the machine plan does not contain
 a self-referential digest.

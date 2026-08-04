@@ -247,9 +247,10 @@ Receipt v7 binds the manifest, commit and tree while recording
 `site_initialization_used=false`, `external_python_packages_used=false`,
 `validation_code_origin=OUTER_SIGNED_GIT_BLOB_LAUNCHER_REQUIRED`,
 `validation_data_origin=EXACT_REVIEWED_GIT_BLOBS`, and
-`worktree_imports_used=false`. Interpreter identity and the same
-repository/index invariant are rerun immediately before output, so runtime or
-completion-time drift emits no receipt. The receipt retains authority effect
+`worktree_imports_used=false`. Interpreter identity and the same repository/index snapshot are rerun
+immediately before receipt write. Drift detected during that final prewrite
+snapshot emits no receipt; mutable checkout, index, or HEAD changes during or
+after output handoff are explicitly not attested. The receipt retains authority effect
 `NONE` and grants no qualification, component, source, model, provider, spend,
 write, production, or public-effect authority.
 
