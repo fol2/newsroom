@@ -27,13 +27,17 @@ new_head = '''    if sys.argv[5] == "HEAD":
         # Create a different commit identity over the same exact tree. This
         # tests the HEAD recheck without assuming that a shallow checkout
         # contains any parent commit object.
-        commit_bytes = (
-            f"tree {sys.argv[4]}\\n"
-            "author Snapshot Race <snapshot@example.invalid> 0 +0000\\n"
-            "committer Snapshot Race <snapshot@example.invalid> 0 +0000\\n"
-            "\\n"
-            "snapshot race\\n"
-        ).encode("ascii")
+        newline = bytes((10,))
+        commit_bytes = newline.join(
+            (
+                f"tree {sys.argv[4]}".encode("ascii"),
+                b"author Snapshot Race <snapshot@example.invalid> 0 +0000",
+                b"committer Snapshot Race <snapshot@example.invalid> 0 +0000",
+                b"",
+                b"snapshot race",
+                b"",
+            )
+        )
         alternate = subprocess.run(
             [
                 "/usr/bin/git", "-C", str(root), "hash-object",
@@ -63,6 +67,8 @@ if '["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD^"]' in tests:
     raise RuntimeError("history-dependent HEAD race remains")
 if '"hash-object",\n                "-t", "commit", "-w", "--stdin"' not in tests:
     raise RuntimeError("synthetic same-tree commit race is absent")
+if "newline = bytes((10,))" not in tests:
+    raise RuntimeError("nested commit construction still depends on escapes")
 TESTS.write_text(tests, encoding="utf-8")
 
 validator = VALIDATOR.read_text(encoding="utf-8")
@@ -76,7 +82,7 @@ validator = validator.replace(old_mode, new_mode, 1)
 VALIDATOR.write_text(validator, encoding="utf-8")
 
 manifest = {
-    "schema_version": "newsroom.increment5a.shallow-ci-regression.v2",
+    "schema_version": "newsroom.increment5a.shallow-ci-regression.v3",
     "source_head": "cc20190f8548708d1a4c76458cfc9ce8767faed9",
     "product_paths": [
         "newsroom/tests/test_increment5a_profile_semantic_envelope.py",
@@ -84,6 +90,7 @@ manifest = {
     ],
     "invariants": {
         "head_race_requires_parent_history": False,
+        "head_race_nested_escape_dependency": False,
         "alternate_commit_uses_expected_tree": True,
         "alternate_commit_identity_differs": True,
         "index_race_coverage_unchanged": True,
