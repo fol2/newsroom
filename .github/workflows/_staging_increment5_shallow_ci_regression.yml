@@ -40,6 +40,7 @@ jobs:
           expected = {
               "increment5a-shallow-ci-regression-manifest.json",
               "newsroom/tests/test_increment5a_profile_semantic_envelope.py",
+              "scripts/sdlc/increment5_profile_validator.py",
           }
           changed = set(subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines())
           untracked = set(subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], text=True).splitlines())
@@ -57,7 +58,8 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add \
             increment5a-shallow-ci-regression-manifest.json \
-            newsroom/tests/test_increment5a_profile_semantic_envelope.py
+            newsroom/tests/test_increment5a_profile_semantic_envelope.py \
+            scripts/sdlc/increment5_profile_validator.py
           git commit -m "build(increment5): verify shallow-independent race [skip ci]"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
@@ -85,7 +87,10 @@ jobs:
           git diff --check HEAD^ HEAD
           ! grep -F '["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD^"]' newsroom/tests/test_increment5a_profile_semantic_envelope.py
           grep -F '"hash-object",' newsroom/tests/test_increment5a_profile_semantic_envelope.py
-          grep -F 'alternate_commit_uses_expected_tree' increment5a-shallow-ci-regression-manifest.json
+          grep -F 'stat.S_IXUSR' scripts/sdlc/increment5_profile_validator.py
+          ! grep -F 'stat.S_IMODE(before.st_mode) & 0o111' scripts/sdlc/increment5_profile_validator.py
+          grep -F 'test_worktree_mode_matching_uses_owner_execute_bit' newsroom/tests/test_increment5a_profile_semantic_envelope.py
+          grep -F 'group_only_execute_is_rejected' increment5a-shallow-ci-regression-manifest.json
           cat increment5a-shallow-ci-regression-manifest.json
 
       - name: Publish verified materialization
