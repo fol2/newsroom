@@ -169,7 +169,6 @@ DELIVERED_IN_5A_REQUIREMENTS = frozenset(
         "DEVAL-011",
         "DEVAL-012",
         "DEVAL-051",
-        "DEVAL-072",
         "DOPS-076",
     }
 )
@@ -233,8 +232,8 @@ DELIVERY_GROUPS: dict[Increment5DeliveryTrace, frozenset[str]] = {
 
 if len(ALL_REQUIREMENTS) != 155:
     raise RuntimeError("Increment 5 accepted inventory must contain 155 requirements")
-if len(DEFERRED_TO_5E_REQUIREMENTS) != 122:
-    raise RuntimeError("5E closed-world remainder must contain 122 requirements")
+if len(DEFERRED_TO_5E_REQUIREMENTS) != 123:
+    raise RuntimeError("5E closed-world remainder must contain 123 requirements")
 if not CROSS_REQUEST_INTEGRATION_REQUIREMENTS.issubset(
     DEFERRED_TO_5E_REQUIREMENTS
 ):

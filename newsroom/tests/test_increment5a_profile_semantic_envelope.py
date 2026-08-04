@@ -9,6 +9,7 @@ from pathlib import Path
 import py_compile
 import subprocess
 import sys
+import time
 from typing import Any, Callable
 
 import pytest
@@ -689,6 +690,123 @@ if Path(sys.argv[3]).exists():
     assert not marker.exists()
 
 
+
+
+def test_receipt_rechecks_tracked_state_after_materialization_starts(
+    tmp_path: Path,
+) -> None:
+    clone, _, _ = _clone_exact_head(tmp_path)
+    configured = subprocess.run(
+        ["git", "-C", str(clone), "config", "user.name", "receipt-race-test"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=20,
+    )
+    assert configured.returncode == 0, configured.stderr.decode("utf-8")
+    configured = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(clone),
+            "config",
+            "user.email",
+            "receipt-race-test@example.invalid",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=20,
+    )
+    assert configured.returncode == 0, configured.stderr.decode("utf-8")
+
+    for index in range(2):
+        clone.joinpath("newsroom", f"receipt-race-padding-{index}.bin").write_bytes(
+            b"x" * 12_000_000
+        )
+    committed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(clone),
+            "add",
+            "newsroom/receipt-race-padding-0.bin",
+            "newsroom/receipt-race-padding-1.bin",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=30,
+    )
+    assert committed.returncode == 0, committed.stderr.decode("utf-8")
+    committed = subprocess.run(
+        ["git", "-C", str(clone), "commit", "-m", "test: widen receipt race"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=60,
+    )
+    assert committed.returncode == 0, committed.stderr.decode("utf-8")
+    clone_commit, clone_tree = _code_identity(clone)
+
+    temp_parent = tmp_path / "validator-temp"
+    temp_parent.mkdir()
+    environment = _validator_environment()
+    environment["TMPDIR"] = str(temp_parent)
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            str(clone / _VALIDATOR_RELATIVE_PATH),
+            "--expected-code-commit-sha",
+            clone_commit,
+            "--expected-code-tree-sha",
+            clone_tree,
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=clone,
+        env=environment,
+    )
+    assert process.stdin is not None
+    process.stdin.write(canonical_json_bytes(_fixture_manifest()))
+    process.stdin.close()
+
+    deadline = time.monotonic() + 20
+    while not tuple(temp_parent.glob("newsroom-increment5-profile-*")):
+        if process.poll() is not None:
+            stdout = process.stdout.read() if process.stdout is not None else b""
+            stderr = process.stderr.read() if process.stderr is not None else b""
+            raise AssertionError(
+                f"validator exited before materialization: {process.returncode}; "
+                f"stdout={stdout!r}; stderr={stderr!r}"
+            )
+        if time.monotonic() >= deadline:
+            process.kill()
+            process.wait(timeout=5)
+            raise AssertionError("validator never entered exact-tree materialization")
+        time.sleep(0.002)
+
+    profile_source = clone / "newsroom/increment5/profiles.py"
+    profile_source.write_text(
+        profile_source.read_text(encoding="utf-8")
+        + "\nraise RuntimeError('completion-time tracked change executed')\n",
+        encoding="utf-8",
+    )
+
+    assert process.stdout is not None and process.stderr is not None
+    stdout = process.stdout.read()
+    stderr = process.stderr.read()
+    returncode = process.wait(timeout=30)
+    assert returncode == 2
+    assert stderr == (
+        b"increment5 profile validation failed: "
+        b"tracked repository checkout differs from HEAD\n"
+    )
+    assert stdout == b""
+
+
 def test_validator_materializes_exact_tree_before_repository_import() -> None:
     source = _VALIDATOR_SCRIPT.read_text(encoding="utf-8")
     main_source = source.split("def main() -> int:", 1)[1]
@@ -717,6 +835,18 @@ def test_validator_materializes_exact_tree_before_repository_import() -> None:
     assert "shutil.which" not in source
     assert "selectors.DefaultSelector()" in source
     assert "stdout=subprocess.PIPE" in source
+    receipt_bytes = source.index(
+        "receipt_bytes = canonical_json_bytes(receipt) + b\"\\n\""
+    )
+    final_stability_check = source.index(
+        "_require_stable_clean_code_tree(",
+        receipt_bytes,
+    )
+    receipt_write = source.index(
+        "sys.stdout.buffer.write(receipt_bytes)",
+        final_stability_check,
+    )
+    assert receipt_bytes < final_stability_check < receipt_write
 
 
 def test_isolated_validator_rejects_noncanonical_and_duplicate_json() -> None:

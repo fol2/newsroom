@@ -62,10 +62,10 @@ def test_deval_and_dops_are_closed_world_specification_inventories() -> None:
 
 def test_delivery_distribution_matches_the_dependency_boundary() -> None:
     assert Counter(row.delivery_trace for row in INCREMENT_5_TRACEABILITY) == {
-        Increment5DeliveryTrace.DELIVERED_IN_5A: 10,
+        Increment5DeliveryTrace.DELIVERED_IN_5A: 9,
         Increment5DeliveryTrace.DEFERRED_TO_5C: 4,
         Increment5DeliveryTrace.DEFERRED_TO_5D: 11,
-        Increment5DeliveryTrace.DEFERRED_TO_5E: 122,
+        Increment5DeliveryTrace.DEFERRED_TO_5E: 123,
         Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: 1,
         Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: 7,
     }
@@ -160,6 +160,18 @@ def test_omitted_label_review_and_operational_evidence_rows_are_now_owned_by_5e(
             "docs/specs/editorial-automation/discovery-reliability-and-operations.md"
             f"#{requirement}"
         )
+
+
+
+def test_public_artifact_safety_is_executable_5e_work() -> None:
+    row = _rows()["DEVAL-072"]
+    assert row.decision_trace is Increment5DecisionTrace.BOUND_BY_5A
+    assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
+    assert row.delivery_issue == 254
+    assert row.decision_anchor == (
+        "issue:#254:deferred:public-artifact-safety-validation-redaction-"
+        "and-release-controls"
+    )
 
 
 def test_decision_map_has_no_runtime_approval_or_admission_state() -> None:

@@ -254,13 +254,13 @@ def _git_sha(
     return _canonical_git_sha(value, field)
 
 
-def _require_exact_code_tree(
+def _require_stable_clean_code_tree(
+    git: _TrustedGitProducer,
     expected_commit: str,
     expected_tree: str,
-) -> tuple[_TrustedGitProducer, str, str]:
-    """Bind HEAD and reject tracked changes before repository imports exist."""
+) -> tuple[str, str]:
+    """Require one exact commit/tree and a clean tracked checkout now."""
 
-    git = _TrustedGitProducer()
     actual_commit = _git_sha(git, "HEAD^{commit}", "code commit SHA")
     actual_tree = _git_sha(git, "HEAD^{tree}", "code tree SHA")
     if actual_commit != expected_commit:
@@ -275,6 +275,21 @@ def _require_exact_code_tree(
     )
     if tracked_status:
         raise ProfileInputError("tracked repository checkout differs from HEAD")
+    return actual_commit, actual_tree
+
+
+def _require_exact_code_tree(
+    expected_commit: str,
+    expected_tree: str,
+) -> tuple[_TrustedGitProducer, str, str]:
+    """Bind HEAD and reject tracked changes before repository imports exist."""
+
+    git = _TrustedGitProducer()
+    actual_commit, actual_tree = _require_stable_clean_code_tree(
+        git,
+        expected_commit,
+        expected_tree,
+    )
     return git, actual_commit, actual_tree
 
 
@@ -595,7 +610,13 @@ def main() -> int:
                 ),
                 "worktree_imports_used": False,
             }
-            sys.stdout.buffer.write(canonical_json_bytes(receipt) + b"\n")
+            receipt_bytes = canonical_json_bytes(receipt) + b"\n"
+            _require_stable_clean_code_tree(
+                git,
+                actual_commit,
+                actual_tree,
+            )
+            sys.stdout.buffer.write(receipt_bytes)
             return 0
     except ProfileInputError as exc:
         return _fail(str(exc))

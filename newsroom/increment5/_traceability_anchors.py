@@ -203,7 +203,11 @@ _EXPLICIT_ANCHOR_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
         frozenset({"DEVAL-051"}),
     ),
     (f"{_CONTRACT}#/payload/rights_matrix", frozenset({"DEVAL-064"})),
-    (f"{_EVALUATION}#public-artifact-safety", frozenset({"DEVAL-072"})),
+    (
+        "issue:#254:deferred:public-artifact-safety-validation-redaction-"
+        "and-release-controls",
+        frozenset({"DEVAL-072"}),
+    ),
     (
         "issue:#254:deferred:production-profile-rejects-fake-noop-disabled-"
         "or-omitted-graphrag",

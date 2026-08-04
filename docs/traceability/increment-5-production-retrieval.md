@@ -30,7 +30,7 @@ with the machine inventory. A manually selected subset cannot appear complete.
 
 The smaller delivery boundaries are explicit:
 
-- 5A contains the ten contract, Plan, profile, non-activation, and
+- 5A contains the nine contract, Plan, profile, non-activation, and
   traceability requirements it actually delivers;
 - 5B supplies four branch implementations but closes no selected whole
   requirement before composition;
@@ -40,18 +40,18 @@ The smaller delivery boundaries are explicit:
 - `GRPROD-022` remains outside Increment 5 activation.
 
 **5E is the closed-world remainder.** Once those exact groups are removed from
-the 155-row inventory, the remaining 122 requirements belong to 5E. A newly
+the 155-row inventory, the remaining 123 requirements belong to 5E. A newly
 accepted `DEVAL-*` or `DOPS-*` row therefore cannot disappear through omission.
 
 ## Delivery distribution
 
 | Boundary | Count | Ownership |
 |---|---:|---|
-| 5A / #250 | 10 | contract, safe profiles, frozen Plan/Epoch protocol, and traceability |
+| 5A / #250 | 9 | contract, safe profiles, frozen Plan/Epoch protocol, and traceability |
 | 5B / #251 | 0 | partial branch implementations; no complete selected requirement |
 | 5C / #252 | 4 | six named read-only tools and tool-local caller/purpose/scope controls |
 | 5D / #253 | 11 | one read-only request: composition, lineage, hydration, exact collision receipt, and honest outcomes |
-| 5E / #254 | 122 | closed-world evaluation, cross-request integration and outage effects, complete graph-native vertical integration, production GraphRAG enforcement, operational policy, monitoring, admission, queues, durability, reconciliation, containment, security, recovery, and qualification |
+| 5E / #254 | 123 | closed-world evaluation, cross-request integration and outage effects, complete graph-native vertical integration, production GraphRAG enforcement, operational policy, monitoring, admission, queues, durability, reconciliation, containment, security, recovery, and qualification |
 | Increment 4 / #144 | 7 | accepted graph authority, ontology, and actual-service CI foundations |
 | Outside Increment 5 activation | 1 | production activation remains unauthorized |
 
@@ -117,6 +117,11 @@ The Epoch freezes the exact dataset manifest and label/adjudication policy befor
 a Run. 5E must execute and retain these controls; a model, provider, legacy
 pipeline, feed, index, or metric cannot become sole ground truth.
 
+`DEVAL-072` also belongs to 5E. The 5A plan freezes the public-artifact safety
+rule, but #254 must implement validation, redaction/rejection receipts, release
+gates, and negative tests over datasets, manifests, reports, receipts,
+regression cases, logs, indexes, and retained contexts before delivery exists.
+
 ## Closed-world 5E operational ownership
 
 Every `DOPS-*` row except `DOPS-076` belongs to 5E. This includes the
@@ -142,8 +147,7 @@ cannot substitute for their executable 5E evidence.
 
 ## Delivered in 5A
 
-`DEVAL-010`, `DEVAL-011`, `DEVAL-012`, `DEVAL-051`, `DEVAL-072`,
-`DOPS-076`, `GRAG-052`, `GRAG-053`, `GRAG-058`, and `GRPROD-032`.
+`DEVAL-010`, `DEVAL-011`, `DEVAL-012`, `DEVAL-051`, `DOPS-076`, `GRAG-052`, `GRAG-053`, `GRAG-058`, and `GRPROD-032`.
 
 `GRPROD-002` and `GRPROD-023` remain 5E delivery. Their rules are bound by
 5A, but only #254 can implement and verify that production, canary, and complete
@@ -190,6 +194,7 @@ Event Hypothesis node.
 - `GRAG-051` → 5E/#254: a challenger requires a measured blocker or owner-approved bounded comparison purpose.
 - `DEVAL-020`–`DEVAL-033` → 5E/#254: trusted evaluation requires frozen universe, labels, sampling, human review, and adjudication.
 - `DEVAL-046` → 5E/#254: all six error classes are reported separately with counts, opportunity denominators, and rates.
+- `DEVAL-072` → 5E/#254: prose policy is not executable artifact inspection, redaction, release-gate, or negative-test evidence.
 
 ## Decision state
 

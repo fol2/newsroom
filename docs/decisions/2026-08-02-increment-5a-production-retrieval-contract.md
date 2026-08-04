@@ -77,13 +77,13 @@ A hand-selected subset cannot claim completeness.
 
 Delivery ownership is derived rather than patched row by row:
 
-- 5A / #250 — 10;
+- 5A / #250 — 9;
 - 5B / #251 — 0 complete requirements (partial branch implementation);
 - 5C / #252 — 4;
 - 5D / #253 — 11;
 - prior Increment 4 / #144 — 7;
 - outside Increment 5 activation — 1; and
-- **5E / #254 — the exact closed-world remainder of 122 requirements.**
+- **5E / #254 — the exact closed-world remainder of 123 requirements.**
 
 This replaces the invalid 114-row hand-selected inventory. The complete map is
 in `newsroom/increment5/traceability.py`.
@@ -204,7 +204,9 @@ unsafe dataset state, and missing actual-service requirements. Its canonical v3
 receipt binds the manifest digest, profile kind, `code_commit_sha`,
 `code_tree_sha`, `tracked_checkout_clean=true`,
 `validation_code_origin=CACHE_FREE_EXACT_GIT_ARCHIVE`, and
-`worktree_imports_used=false` while stating:
+`worktree_imports_used=false`. Immediately before receipt emission, the same
+trusted producer rechecks the exact commit, tree, and tracked-clean status; any
+completion-time drift emits no receipt. The receipt states:
 
 - `authority_effect = NONE`;
 - `qualification_authority_granted = false`; and
@@ -269,6 +271,11 @@ Epoch before execution. 5E owns the complete event-level universe, prospective
 and contemporaneous labels, negative/failure sampling, authorised human review,
 practical blinding, independent review or adjudication, and retained
 disagreement required by `DEVAL-020`–`DEVAL-033`.
+
+5A also freezes the `DEVAL-072` public-artifact safety rule but does not claim
+its executable delivery. 5E/#254 must implement and retain dataset, manifest,
+report, receipt, regression-case, log, index, and context validation/redaction
+and release controls before that requirement can close.
 
 ## Dependency boundaries
 

@@ -165,6 +165,11 @@ references, bounded permitted extracts, or independently reproducible fixtures.
 A safety or rights omission blocks the Run; final-report redaction cannot repair
 prohibited material entering an index, log, or retained context.
 
+This section freezes the rule in 5A; it is not executable public-artifact safety
+evidence. `DEVAL-072` belongs to 5E/#254, which must implement and retain the
+validators, redaction/rejection receipts, release gates, and negative tests over
+all repository-visible and retained artifact classes before reporting delivery.
+
 ## Decision output
 
 The 5E report retains exact Plan, Epoch, Run, contract, profile, component,

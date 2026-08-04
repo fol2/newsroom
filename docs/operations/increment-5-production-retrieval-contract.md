@@ -44,9 +44,11 @@ v3 binds the manifest digest, profile kind, `code_commit_sha`,
 `validation_code_origin=CACHE_FREE_EXACT_GIT_ARCHIVE`, and
 `worktree_imports_used=false` while stating `authority_effect=NONE`,
 `qualification_authority_granted=false`, and
-`production_activation_authorized=false`. The receipt tree must equal the
-frozen Epoch tree; mismatch is `NOT_EVALUATED`. It is necessary profile
-evidence, never sufficient qualification evidence.
+`production_activation_authorized=false`. Immediately before writing the
+receipt, the validator rechecks the exact commit, tree, trusted Git identity,
+and tracked-clean state; any completion-time drift emits no receipt. The receipt
+tree must equal the frozen Epoch tree; mismatch is `NOT_EVALUATED`. It is
+necessary profile evidence, never sufficient qualification evidence.
 
 ## Epoch admission
 
@@ -67,7 +69,7 @@ Increment 5 uses 155 accepted requirements. The machine inventory includes the
 exact selected `GRAG-*`, `GRPROD-*`, and `TRI-*` ranges plus every requirement
 heading in the accepted `DEVAL-*` and `DOPS-*` specifications.
 
-The exact delivery split is `10 / 0 / 4 / 11 / 122 / 7 / 1` for 5A, 5B, 5C,
+The exact delivery split is `9 / 0 / 4 / 11 / 123 / 7 / 1` for 5A, 5B, 5C,
 5D, 5E, prior Increment 4, and outside activation respectively. 5E is derived as
 the closed-world remainder after the six smaller explicit groups are removed.
 It is not a manually maintained list.
@@ -95,8 +97,8 @@ Tests parse the two accepted specifications and require exact equality with the
   triage/Candidate-admission vertical slice; downstream decision fallback,
   Candidate non-creation and collision-gated admission, collection/Lead
   isolation and system outage semantics; production/canary/live-shadow
-  GraphRAG enforcement; rollback and rebuild; and actual-service
-  qualification.
+  GraphRAG enforcement; executable public-artifact validation, redaction, and
+  release controls; rollback and rebuild; and actual-service qualification.
 
 ## Decision-bearing system
 

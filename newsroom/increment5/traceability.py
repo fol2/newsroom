@@ -127,11 +127,11 @@ def validate_increment5_traceability() -> None:
         raise RuntimeError("prior delivery evidence differs from prior inventory")
 
     expected_counts = {
-        Increment5DeliveryTrace.DELIVERED_IN_5A: 10,
+        Increment5DeliveryTrace.DELIVERED_IN_5A: 9,
         Increment5DeliveryTrace.DEFERRED_TO_5B: 0,
         Increment5DeliveryTrace.DEFERRED_TO_5C: 4,
         Increment5DeliveryTrace.DEFERRED_TO_5D: 11,
-        Increment5DeliveryTrace.DEFERRED_TO_5E: 122,
+        Increment5DeliveryTrace.DEFERRED_TO_5E: 123,
         Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: 1,
         Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: 7,
     }
@@ -309,6 +309,10 @@ def validate_increment5_traceability() -> None:
         "TRI-028": (
             "issue:#254:deferred:urgent-degraded-retrieval-requires-durable-"
             "later-reconciliation"
+        ),
+        "DEVAL-072": (
+            "issue:#254:deferred:public-artifact-safety-validation-redaction-"
+            "and-release-controls"
         ),
         "DOPS-010": "issue:#254:deferred:multidimensional-operational-health",
         "DOPS-015": (
