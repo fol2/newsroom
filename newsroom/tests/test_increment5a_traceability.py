@@ -63,8 +63,8 @@ def test_deval_and_dops_are_closed_world_specification_inventories() -> None:
 def test_delivery_distribution_matches_the_dependency_boundary() -> None:
     assert Counter(row.delivery_trace for row in INCREMENT_5_TRACEABILITY) == {
         Increment5DeliveryTrace.DELIVERED_IN_5A: 9,
-        Increment5DeliveryTrace.DEFERRED_TO_5C: 4,
-        Increment5DeliveryTrace.DEFERRED_TO_5D: 11,
+        Increment5DeliveryTrace.DEFERRED_TO_5C: 2,
+        Increment5DeliveryTrace.DEFERRED_TO_5D: 13,
         Increment5DeliveryTrace.DEFERRED_TO_5E: 123,
         Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: 1,
         Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: 7,
@@ -85,12 +85,14 @@ def test_5d_is_exactly_one_request_retrieval_semantics() -> None:
     assert REQUEST_RETRIEVAL_REQUIREMENTS == {
         "GRAG-031",
         "GRAG-032",
+        "GRAG-035",
         "GRAG-040",
         "GRAG-041",
         "GRAG-042",
         "GRAG-043",
         "TRI-020",
         "TRI-021",
+        "TRI-022",
         "TRI-023",
         "TRI-025",
         "TRI-027",
@@ -237,6 +239,31 @@ def test_request_composition_and_lineage_are_owned_by_5d() -> None:
     )
 
 
+
+
+
+def test_hybrid_metadata_and_receipt_are_owned_by_the_5d_composer() -> None:
+    rows = _rows()
+    expected = {
+        "GRAG-035": (
+            "issue:#253:deferred:hybrid-response-explanation-authority-source-"
+            "freshness-provenance-and-degraded-state"
+        ),
+        "TRI-022": (
+            "issue:#253:deferred:inspectable-hybrid-receipt-candidates-scores-"
+            "deduplication-exclusions-and-known-omissions"
+        ),
+    }
+    assert DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5C] == {
+        "GRAG-033",
+        "GRAG-034",
+    }
+    for requirement, anchor in expected.items():
+        row = rows[requirement]
+        assert row.decision_trace is Increment5DecisionTrace.BOUND_BY_5A
+        assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5D
+        assert row.delivery_issue == 253
+        assert row.decision_anchor == anchor
 
 
 def test_cross_request_integration_is_owned_by_5e() -> None:

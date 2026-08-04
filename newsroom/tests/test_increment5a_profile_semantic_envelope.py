@@ -28,6 +28,7 @@ _DIGEST_A = "sha256:" + "a" * 64
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _VALIDATOR_RELATIVE_PATH = Path("scripts/sdlc/increment5_profile_validator.py")
 _VALIDATOR_SCRIPT = _REPOSITORY_ROOT / _VALIDATOR_RELATIVE_PATH
+_TRUSTED_PYTHON = Path("/usr/bin/python3")
 _CONTRACT_RELATIVE_PATH = "newsroom/increment5/data/increment5a_retrieval_contract_v1.json"
 
 
@@ -89,8 +90,9 @@ def _run_isolated_bytes(
         expected_tree = expected_tree or actual_tree
     return subprocess.run(
         [
-            sys.executable,
+            str(_TRUSTED_PYTHON),
             "-I",
+            "-S",
             str(root / _VALIDATOR_RELATIVE_PATH),
             "--expected-code-commit-sha",
             expected_commit,
@@ -184,9 +186,12 @@ def test_fresh_process_returns_code_tree_bound_non_authoritative_receipt(
         "manifest_digest": digest_bytes(canonical_json_bytes(manifest)),
         "production_activation_authorized": False,
         "profile_kind": manifest["profile_kind"],
+        "python_runtime_executable": "/usr/bin/python3",
+        "python_runtime_origin": "ROOT_OWNED_SYSTEM_PYTHON_NO_SITE",
         "qualification_authority_granted": False,
         "external_python_packages_used": False,
-        "schema_version": "newsroom.increment5.profile-validation-receipt.v4",
+        "schema_version": "newsroom.increment5.profile-validation-receipt.v5",
+        "site_initialization_used": False,
         "tracked_checkout_clean": True,
         "validation_code_origin": "EXACT_TRACKED_EXECUTABLE_STDLIB_ONLY",
         "validation_data_origin": "EXACT_REVIEWED_GIT_BLOBS",
@@ -288,8 +293,9 @@ def test_same_process_closure_mutation_cannot_create_qualification_authority() -
         # or authority-bearing value even under this exact attack.
         assert profiles._check_profile_manifest(manifest) is None
 
-        # The fresh -I process uses only stdlib plus exact reviewed Git blobs and
-        # rejects the same bytes; the mutated cell cannot cross that boundary.
+        # The fixed root-owned -I -S runtime uses only stdlib plus exact
+        # reviewed Git blobs and rejects the same bytes; the mutated cell cannot
+        # cross that boundary.
         completed = _run_isolated(manifest)
         assert completed.returncode == 2
         assert completed.stderr.startswith(
@@ -299,6 +305,7 @@ def test_same_process_closure_mutation_cannot_create_qualification_authority() -
         assert completed.stdout == b""
     finally:
         _set_cell(cell, original)
+
 
 
 
@@ -319,7 +326,7 @@ def test_nonisolated_execution_rejects_before_dependency_import(
     environment["PYTHONPATH"] = str(fake_root)
     completed = subprocess.run(
         [
-            sys.executable,
+            str(_TRUSTED_PYTHON),
             str(_VALIDATOR_SCRIPT),
             "--expected-code-commit-sha",
             _CODE_COMMIT_SHA,
@@ -336,13 +343,43 @@ def test_nonisolated_execution_rejects_before_dependency_import(
     )
     assert completed.returncode == 2
     assert completed.stderr == (
-        b"increment5 profile validation failed: isolated Python mode is required\n"
+        b"increment5 profile validation failed: trusted isolated Python with "
+        b"site initialization disabled is required\n"
     )
     assert completed.stdout == b""
     assert not marker.exists()
 
 
-def test_isolated_virtualenv_site_package_is_never_imported(tmp_path: Path) -> None:
+def test_isolated_mode_without_no_site_is_rejected() -> None:
+    completed = subprocess.run(
+        [
+            str(_TRUSTED_PYTHON),
+            "-I",
+            str(_VALIDATOR_SCRIPT),
+            "--expected-code-commit-sha",
+            _CODE_COMMIT_SHA,
+            "--expected-code-tree-sha",
+            _CODE_TREE_SHA,
+        ],
+        input=canonical_json_bytes(_fixture_manifest()),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        cwd=_REPOSITORY_ROOT,
+        env=_validator_environment(),
+        timeout=30,
+    )
+    assert completed.returncode == 2
+    assert completed.stderr == (
+        b"increment5 profile validation failed: trusted isolated Python with "
+        b"site initialization disabled is required\n"
+    )
+    assert completed.stdout == b""
+
+
+def test_virtualenv_pth_executes_under_i_but_not_the_admitted_runtime(
+    tmp_path: Path,
+) -> None:
     import venv
 
     environment_root = tmp_path / "venv"
@@ -357,16 +394,14 @@ def test_isolated_virtualenv_site_package_is_never_imported(tmp_path: Path) -> N
     )
     assert purelib_result.returncode == 0, purelib_result.stderr.decode("utf-8")
     purelib = Path(purelib_result.stdout.decode("utf-8").strip())
-    fake_package = purelib / "jsonschema"
-    fake_package.mkdir(parents=True)
-    marker = tmp_path / "site-jsonschema-imported"
-    fake_package.joinpath("__init__.py").write_text(
-        "from pathlib import Path\n"
-        f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n"
-        "raise RuntimeError('environment jsonschema imported')\n",
+    marker = tmp_path / "pth-executed-before-validator"
+    purelib.joinpath("increment5_attack.pth").write_text(
+        "import pathlib; "
+        f"pathlib.Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
+
+    vulnerable_shape = subprocess.run(
         [
             python,
             "-I",
@@ -384,17 +419,50 @@ def test_isolated_virtualenv_site_package_is_never_imported(tmp_path: Path) -> N
         env=_validator_environment(),
         timeout=30,
     )
-    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    assert vulnerable_shape.returncode == 2
+    assert marker.read_text(encoding="utf-8") == "executed"
+    marker.unlink()
+
+    wrong_runtime_with_no_site = subprocess.run(
+        [
+            python,
+            "-I",
+            "-S",
+            str(_VALIDATOR_SCRIPT),
+            "--expected-code-commit-sha",
+            _CODE_COMMIT_SHA,
+            "--expected-code-tree-sha",
+            _CODE_TREE_SHA,
+        ],
+        input=canonical_json_bytes(_fixture_manifest()),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        cwd=_REPOSITORY_ROOT,
+        env=_validator_environment(),
+        timeout=30,
+    )
+    assert wrong_runtime_with_no_site.returncode == 2
+    assert b"trusted system Python executable is required" in (
+        wrong_runtime_with_no_site.stderr
+    )
+    assert wrong_runtime_with_no_site.stdout == b""
     assert not marker.exists()
-    receipt = json.loads(completed.stdout.decode("utf-8"))
+
+    admitted = _run_isolated(_fixture_manifest())
+    assert admitted.returncode == 0, admitted.stderr.decode("utf-8")
+    assert not marker.exists()
+    receipt = json.loads(admitted.stdout.decode("utf-8"))
+    assert receipt["python_runtime_executable"] == "/usr/bin/python3"
+    assert receipt["site_initialization_used"] is False
     assert receipt["external_python_packages_used"] is False
-    assert receipt["validation_data_origin"] == "EXACT_REVIEWED_GIT_BLOBS"
+
 
 
 def test_validator_requires_matching_commit_and_tree_arguments() -> None:
     raw = canonical_json_bytes(_fixture_manifest())
     unbound = subprocess.run(
-        [sys.executable, "-I", str(_VALIDATOR_SCRIPT)],
+        [str(_TRUSTED_PYTHON), "-I", "-S", str(_VALIDATOR_SCRIPT)],
         input=raw,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -630,7 +698,7 @@ else:
     raise SystemExit("overflowing producer unexpectedly succeeded")
 """
     completed = subprocess.run(
-        [sys.executable, "-I", "-c", probe, str(_VALIDATOR_SCRIPT), str(emitter)],
+        [str(_TRUSTED_PYTHON), "-I", "-S", "-c", probe, str(_VALIDATOR_SCRIPT), str(emitter)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -649,6 +717,7 @@ def test_completion_state_recheck_suppresses_receipt(tmp_path: Path) -> None:
 import io, runpy, sys
 from pathlib import Path
 namespace = runpy.run_path(sys.argv[1], run_name="validator-completion-probe")
+runtime = namespace["_TrustedPythonRuntime"]()
 view = namespace["_TrustedRepositoryView"](Path(sys.argv[2]))
 view.require_stable_clean_tree(sys.argv[3], sys.argv[4])
 tracked = Path(sys.argv[2]) / "scripts/sdlc/increment5_profile_validator.py"
@@ -656,7 +725,8 @@ tracked.write_text(tracked.read_text(encoding="utf-8") + "\\n# completion drift\
 buffer = io.BytesIO()
 try:
     namespace["_emit_receipt"](
-        view, sys.argv[3], sys.argv[4], {"authority_effect":"NONE"}, buffer
+        runtime, view, sys.argv[3], sys.argv[4],
+        {"authority_effect":"NONE"}, buffer
     )
 except namespace["ProfileInputError"] as exc:
     if str(exc) != "tracked repository checkout differs from HEAD": raise
@@ -666,7 +736,7 @@ if buffer.getvalue(): raise SystemExit("receipt bytes escaped")
 """
     completed = subprocess.run(
         [
-            sys.executable, "-I", "-c", probe,
+            str(_TRUSTED_PYTHON), "-I", "-S", "-c", probe,
             str(clone / _VALIDATOR_RELATIVE_PATH), str(clone),
             clone_commit, clone_tree,
         ],
@@ -683,8 +753,13 @@ if buffer.getvalue(): raise SystemExit("receipt bytes escaped")
 
 def test_validator_source_has_closed_dependency_and_repository_boundaries() -> None:
     source = _VALIDATOR_SCRIPT.read_text(encoding="utf-8")
-    bootstrap = source.index("if not sys.flags.isolated:")
+    bootstrap = source.index(
+        "if not sys.flags.isolated or not sys.flags.no_site:"
+    )
     assert source.index("import sys") < bootstrap < source.index("import hashlib")
+    assert '_TRUSTED_PYTHON_EXECUTABLE = Path("/usr/bin/python3")' in source
+    assert "ROOT_OWNED_SYSTEM_PYTHON_NO_SITE" in source
+    assert '"site_initialization_used": False' in source
     assert "jsonschema" not in source
     assert "importlib" not in source
     assert "tarfile" not in source
@@ -701,9 +776,9 @@ def test_validator_source_has_closed_dependency_and_repository_boundaries() -> N
         "_load_reviewed_profile_data("
     )
     emit = source.split("def _emit_receipt(", 1)[1].split("def main()", 1)[0]
-    assert emit.index("repository.require_stable_clean_tree(") < emit.index(
-        "output.write(raw)"
-    )
+    assert emit.index("runtime.require_unchanged()") < emit.index(
+        "repository.require_stable_clean_tree("
+    ) < emit.index("output.write(raw)")
 
 
 def test_isolated_validator_rejects_noncanonical_and_duplicate_json() -> None:

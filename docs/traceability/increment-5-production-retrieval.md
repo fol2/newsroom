@@ -34,8 +34,8 @@ The smaller delivery boundaries are explicit:
   traceability requirements it actually delivers;
 - 5B supplies four branch implementations but closes no selected whole
   requirement before composition;
-- 5C contains exactly four named-tool requirements;
-- 5D contains exactly eleven request-local retrieval requirements;
+- 5C contains exactly two named-tool-surface requirements;
+- 5D contains exactly thirteen request-local retrieval/composer requirements;
 - seven rows cite accepted Increment 4 delivery; and
 - `GRPROD-022` remains outside Increment 5 activation.
 
@@ -49,8 +49,8 @@ accepted `DEVAL-*` or `DOPS-*` row therefore cannot disappear through omission.
 |---|---:|---|
 | 5A / #250 | 9 | contract, safe profiles, frozen Plan/Epoch protocol, and traceability |
 | 5B / #251 | 0 | partial branch implementations; no complete selected requirement |
-| 5C / #252 | 4 | six named read-only tools and tool-local caller/purpose/scope controls |
-| 5D / #253 | 11 | one read-only request: composition, lineage, hydration, exact collision receipt, and honest outcomes |
+| 5C / #252 | 2 | bounded named-tool surface and tool-local caller/purpose/scope controls |
+| 5D / #253 | 13 | one read-only request: composition, hybrid explanation/receipt, lineage, hydration, exact collision receipt, and honest outcomes |
 | 5E / #254 | 123 | closed-world evaluation, cross-request integration and outage effects, complete graph-native vertical integration, production GraphRAG enforcement, operational policy, monitoring, admission, queues, durability, reconciliation, containment, security, recovery, and qualification |
 | Increment 4 / #144 | 7 | accepted graph authority, ontology, and actual-service CI foundations |
 | Outside Increment 5 activation | 1 | production activation remains unauthorized |
@@ -59,11 +59,11 @@ The groups are disjoint and total 155.
 
 ## Exact 5C boundary
 
-The complete 5C traceability inventory is `GRAG-033`, `GRAG-034`, `GRAG-035`,
-and `TRI-022`. It proves bounded named read-only interfaces, tool-local
-caller/purpose/scope checks, and inspectable receipts. It does not claim that
-source or model content is already unable to alter every operational policy,
-egress rule, budget, credential, destination, or authority surface.
+The complete 5C traceability inventory is `GRAG-033` and `GRAG-034`.
+It proves the bounded named read-only interface and tool-local
+caller/purpose/scope checks. A local tool can retain its own input/output
+receipt, but 5C does not own a composed hybrid response or a receipt containing
+cross-branch fusion, deduplication, exclusions, or omissions.
 
 `DOPS-026` therefore belongs to 5E. Its complete evidence must cover all
 executable operational surfaces, not merely the local named-tool parser.
@@ -72,13 +72,16 @@ executable operational surfaces, not merely the local named-tool parser.
 
 The complete 5D inventory is:
 
-- `GRAG-031`, `GRAG-032`, and `GRAG-040`–`GRAG-043`; and
-- `TRI-020`, `TRI-021`, `TRI-023`, `TRI-025`, and `TRI-027`.
+- `GRAG-031`, `GRAG-032`, `GRAG-035`, and `GRAG-040`–`GRAG-043`; and
+- `TRI-020`–`TRI-023`, `TRI-025`, and `TRI-027`.
 
 `TRI-021` belongs here because only the composer can ensure that
 source-native, formal-process, and explicit-lineage retrieval precedes
-approximate similarity. Four independent 5B branches cannot establish that
-ordering.
+approximate similarity. `GRAG-035` and `TRI-022` belong to the same owner:
+authority/source explanation, upstream freshness, provenance, degraded state,
+fused candidates, scores/ranks, deduplication signals, exclusions, and known
+omissions do not exist until 5D composes the branches. Four independent 5B
+branches and six local 5C tools cannot establish those end-to-end facts.
 
 Five obligations consume retrieval results but cross the request boundary and
 therefore belong to 5E: `GRAG-044` downstream fallback/Watch/Hold decisions,

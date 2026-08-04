@@ -70,7 +70,17 @@ _EXPLICIT_ANCHOR_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
     (f"{_CONTRACT}#/payload/named_tools", frozenset({"GRAG-033"})),
     (
         f"{_CONTRACT}#/payload/delivery_boundaries/5C",
-        frozenset({"GRAG-034", "GRAG-035", "TRI-022"}),
+        frozenset({"GRAG-034"}),
+    ),
+    (
+        "issue:#253:deferred:hybrid-response-explanation-authority-source-"
+        "freshness-provenance-and-degraded-state",
+        frozenset({"GRAG-035"}),
+    ),
+    (
+        "issue:#253:deferred:inspectable-hybrid-receipt-candidates-scores-"
+        "deduplication-exclusions-and-known-omissions",
+        frozenset({"TRI-022"}),
     ),
     (
         f"{_OPERATIONS}#outcomes",

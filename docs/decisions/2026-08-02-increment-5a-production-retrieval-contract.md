@@ -79,8 +79,8 @@ Delivery ownership is derived rather than patched row by row:
 
 - 5A / #250 — 9;
 - 5B / #251 — 0 complete requirements (partial branch implementation);
-- 5C / #252 — 4;
-- 5D / #253 — 11;
+- 5C / #252 — 2;
+- 5D / #253 — 13;
 - prior Increment 4 / #144 — 7;
 - outside Increment 5 activation — 1; and
 - **5E / #254 — the exact closed-world remainder of 123 requirements.**
@@ -158,13 +158,22 @@ that process: closures, globals, function code, and return objects are mutable.
 5A therefore exports no authority-bearing certificate or eligibility boolean.
 Public builders remain deterministic conveniences only.
 
-For 5E evidence, canonical manifest bytes are supplied to the isolated
-standalone executable with the exact expected commit and tree. The executable
-checks isolated mode before any dependency import and then uses **only the
-Python standard library**. It imports neither `jsonschema` nor any repository
-Python package, so caller virtualenv/site-packages, `PYTHONPATH`, user site
-packages, ignored bytecode, and mutable repository module imports are outside the
-evidence path.
+For 5E evidence, canonical manifest bytes are supplied with the exact
+expected commit and tree through one admitted command:
+
+```text
+/usr/bin/python3 -I -S scripts/sdlc/increment5_profile_validator.py \
+  --expected-code-commit-sha "$CODE_COMMIT_SHA" \
+  --expected-code-tree-sha "$CODE_TREE_SHA"
+```
+
+The executable requires both isolated mode and disabled `site` initialization
+before any import other than built-in `sys`. It then verifies that the actual
+interpreter is the root-owned, non-writable `/usr/bin/python3` target and uses
+**only the Python standard library**. It imports neither `jsonschema` nor any
+repository Python package. Caller virtualenv/site-packages, `.pth` startup code,
+`PYTHONPATH`, user site packages, ignored bytecode, and mutable repository module
+imports are therefore outside the admitted evidence path.
 
 The trusted repository view captures one absolute Git directory, one exact index
 file, and `_REPOSITORY_ROOT` as the explicit work tree. Every command carries
@@ -180,14 +189,17 @@ stdlib semantic validator checks canonical JSON, exact fields, identities,
 budgets, effects, rights, eligibility, and profile-specific invariants. It does
 not execute code from those blobs.
 
-Receipt v4 binds the manifest, commit and tree while recording
-`external_python_packages_used=false`,
+Receipt v5 binds the manifest, commit and tree while recording
+`python_runtime_executable=/usr/bin/python3`,
+`python_runtime_origin=ROOT_OWNED_SYSTEM_PYTHON_NO_SITE`,
+`site_initialization_used=false`, `external_python_packages_used=false`,
 `validation_code_origin=EXACT_TRACKED_EXECUTABLE_STDLIB_ONLY`,
 `validation_data_origin=EXACT_REVIEWED_GIT_BLOBS`, and
-`worktree_imports_used=false`. The same repository/index invariant is rerun
-immediately before output, so completion-time drift emits no receipt. The
-receipt retains authority effect `NONE` and grants no qualification, component,
-source, model, provider, spend, write, production, or public-effect authority.
+`worktree_imports_used=false`. Interpreter identity and the same
+repository/index invariant are rerun immediately before output, so runtime or
+completion-time drift emits no receipt. The receipt retains authority effect
+`NONE` and grants no qualification, component, source, model, provider, spend,
+write, production, or public-effect authority.
 
 These profiles are not production deployment profiles. Production rejection of
 fake, disabled, or omitted GraphRAG and production build/readiness validation
@@ -256,11 +268,16 @@ and release controls before that requirement can close.
   orchestration. It is a partial implementation dependency and closes no
   selected whole requirement by itself.
 - **5C / #252:** six bounded named read-only tools plus tool-local caller,
-  purpose, and scope authorization; no raw Cypher, arbitrary index, or writes.
+  purpose, and scope authorization; no raw Cypher, arbitrary index, writes,
+  composed-hybrid response contract, or cross-branch fused receipt.
 - **5D / #253:** exact/source-native, formal-process, and explicit-lineage
   retrieval precedes approximate similarity; deterministic fusion and
   authoritative dependency-root deduplication then produce one read-only
-  request. 5D also owns complete projectable and hydratable
+  request. The composer owns the hybrid response explanation—authority and
+  source basis, upstream freshness, provenance completeness, and degraded
+  state—and one inspectable receipt containing branch and fused candidates,
+  scores/ranks, deduplication signals, exclusions, and known omissions. 5D also
+  owns complete projectable and hydratable
   `Source → Revision → Signal → Lead → Hypothesis → Candidate` lineage,
   authoritative hydration, freshness, the request's exact collision receipt,
   and honest request-level no-match or incomplete outcomes. It stops before

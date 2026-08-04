@@ -11,21 +11,24 @@ rights-cleared, repository-safe dataset, but still has zero provider spend, no
 model load, no protected content, no write authority, no public effect, and no
 production activation.
 
-Every 5E profile is validated by
-`python -I scripts/sdlc/increment5_profile_validator.py` with the exact expected
-commit and tree. The executable is stdlib-only and imports no environment
-package or repository module. It binds an explicit Git directory/index/work tree,
-disables replacement objects and fsmonitor, rejects assume-unchanged and
-skip-worktree flags, and reads only bounded digest-pinned contract/schema blobs
-from the exact commit.
+Every 5E profile is validated by the exact command
+`/usr/bin/python3 -I -S scripts/sdlc/increment5_profile_validator.py` with the
+expected commit and tree. The executable requires isolated mode with `site`
+initialization disabled, verifies the root-owned system interpreter, is
+stdlib-only, and imports no environment package or repository module. It binds
+an explicit Git directory/index/work tree, disables replacement objects and
+fsmonitor, rejects assume-unchanged and skip-worktree flags, and reads only
+bounded digest-pinned contract/schema blobs from the exact commit.
 
-Receipt v4 records `external_python_packages_used=false`,
+Receipt v5 records `python_runtime_executable=/usr/bin/python3`,
+`python_runtime_origin=ROOT_OWNED_SYSTEM_PYTHON_NO_SITE`,
+`site_initialization_used=false`, `external_python_packages_used=false`,
 `validation_code_origin=EXACT_TRACKED_EXECUTABLE_STDLIB_ONLY`,
 `validation_data_origin=EXACT_REVIEWED_GIT_BLOBS`, and
-`worktree_imports_used=false`. Commit, tree, index flags and tracked cleanliness
-are checked both before validation and immediately before receipt output. The
-receipt retains authority effect `NONE`; it is necessary evidence, never
-sufficient qualification or activation authority.
+`worktree_imports_used=false`. Interpreter identity, commit, tree, index flags
+and tracked cleanliness are checked both before validation and immediately
+before receipt output. The receipt retains authority effect `NONE`; it is
+necessary evidence, never sufficient qualification or activation authority.
 
 ## Epoch admission
 
@@ -46,7 +49,7 @@ Increment 5 uses 155 accepted requirements. The machine inventory includes the
 exact selected `GRAG-*`, `GRPROD-*`, and `TRI-*` ranges plus every requirement
 heading in the accepted `DEVAL-*` and `DOPS-*` specifications.
 
-The exact delivery split is `9 / 0 / 4 / 11 / 123 / 7 / 1` for 5A, 5B, 5C,
+The exact delivery split is `9 / 0 / 2 / 13 / 123 / 7 / 1` for 5A, 5B, 5C,
 5D, 5E, prior Increment 4, and outside activation respectively. 5E is derived as
 the closed-world remainder after the six smaller explicit groups are removed.
 It is not a manually maintained list.
@@ -59,12 +62,17 @@ Tests parse the two accepted specifications and require exact equality with the
 - **5B / #251:** four independent retriever branches and exact receipts.
   This is partial implementation: it closes no selected whole requirement
   until 5D composes the branches.
-- **5C / #252:** six typed bounded read-only tools and tool-local authorization.
+- **5C / #252:** six typed bounded read-only tools, tool-local authorization,
+  and tool-local receipts; no composed hybrid response or fused cross-branch
+  receipt.
 - **5D / #253:** exact/source-native, formal-process, and explicit-lineage
   retrieval before approximate similarity; deterministic fusion, authoritative
   dependency-root deduplication, complete six-stage discovery lineage,
   hydration, freshness, an exact request collision receipt, and honest
-  request-level no-match or incomplete outcomes. It creates no upstream or
+  request-level no-match or incomplete outcomes. The composer also retains the
+  response's authority/source basis, upstream freshness, provenance and degraded
+  state, plus fused candidates, scores/ranks, deduplication signals, exclusions,
+  and known omissions in one inspectable receipt. It creates no upstream or
   downstream operational or editorial effect.
 - **5E / #254:** the complete closed-world evaluation and operating system:
   universe, labels, review and adjudication; Operational Profiles; scheduling;

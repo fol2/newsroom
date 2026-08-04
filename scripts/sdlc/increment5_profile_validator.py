@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import sys
 
-if not sys.flags.isolated:
+if not sys.flags.isolated or not sys.flags.no_site:
     sys.stderr.write(
-        "increment5 profile validation failed: isolated Python mode is required\n"
+        "increment5 profile validation failed: trusted isolated Python with "
+        "site initialization disabled is required\n"
     )
     raise SystemExit(2)
 
@@ -39,6 +40,8 @@ _MAX_REVIEWED_TOTAL_BYTES = 67_108_864
 _STREAM_CHUNK_BYTES = 65_536
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_TRUSTED_PYTHON_EXECUTABLE = Path("/usr/bin/python3")
+_TRUSTED_PYTHON_PARENTS = (Path("/usr"), Path("/usr/bin"))
 _TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
 _TRUSTED_GIT_PARENTS = (Path("/usr"), Path("/usr/bin"))
 _EXPECTED_FLAGS = frozenset(
@@ -256,6 +259,157 @@ class _TrustedGitBinary:
     def require_unchanged(self) -> None:
         if self._capture_identity() != self._identity:
             raise ProfileInputError("trusted Git producer identity changed")
+
+
+class _TrustedPythonRuntime:
+    __slots__ = ("launcher", "target", "_identity")
+
+    def __init__(self) -> None:
+        self.launcher = _TRUSTED_PYTHON_EXECUTABLE
+        self.target = self._resolve_target()
+        try:
+            invoked = Path(sys.executable).absolute()
+            actual_target = Path(sys.executable).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ProfileInputError(
+                "trusted system Python executable cannot be resolved"
+            ) from exc
+        if invoked != self.launcher or actual_target != self.target:
+            raise ProfileInputError(
+                "trusted system Python executable is required"
+            )
+        self._identity = self._binary_identity(self.target)
+
+    @staticmethod
+    def _require_secure_path(
+        path: Path,
+        *,
+        directory: bool,
+        symlink_allowed: bool = False,
+    ) -> os.stat_result:
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise ProfileInputError(
+                "trusted system Python path is unavailable"
+            ) from exc
+        if stat.S_ISLNK(info.st_mode):
+            if not symlink_allowed:
+                raise ProfileInputError(
+                    "trusted system Python path cannot be a symlink"
+                )
+            if info.st_uid != 0 or info.st_gid != 0:
+                raise ProfileInputError(
+                    "trusted system Python path is not root owned"
+                )
+            # POSIX symlink permission bits are not access controls and are
+            # commonly reported as 0777. The resolved target is checked below.
+            return info
+        expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+        if not expected_type(info.st_mode):
+            raise ProfileInputError(
+                "trusted system Python path has the wrong type"
+            )
+        if info.st_uid != 0 or info.st_gid != 0:
+            raise ProfileInputError(
+                "trusted system Python path is not root owned"
+            )
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise ProfileInputError(
+                "trusted system Python path is writable"
+            )
+        return info
+
+    @staticmethod
+    def _binary_identity(
+        path: Path,
+    ) -> tuple[int, int, int, int, int, int, int, str]:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise ProfileInputError(
+                "trusted system Python executable cannot be opened"
+            ) from exc
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise ProfileInputError(
+                    "trusted system Python executable is not a regular file"
+                )
+            if info.st_uid != 0 or info.st_gid != 0:
+                raise ProfileInputError(
+                    "trusted system Python executable is not root owned"
+                )
+            if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                raise ProfileInputError(
+                    "trusted system Python executable is writable"
+                )
+            if not info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                raise ProfileInputError(
+                    "trusted system Python executable is not executable"
+                )
+            digest = hashlib.sha256()
+            while True:
+                chunk = os.read(descriptor, 1_048_576)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            return (
+                info.st_dev,
+                info.st_ino,
+                stat.S_IMODE(info.st_mode),
+                info.st_uid,
+                info.st_gid,
+                info.st_size,
+                info.st_mtime_ns,
+                digest.hexdigest(),
+            )
+        finally:
+            os.close(descriptor)
+
+    def _resolve_target(self) -> Path:
+        for parent in _TRUSTED_PYTHON_PARENTS:
+            self._require_secure_path(parent, directory=True)
+        self._require_secure_path(
+            self.launcher,
+            directory=False,
+            symlink_allowed=True,
+        )
+        try:
+            target = self.launcher.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ProfileInputError(
+                "trusted system Python executable cannot be resolved"
+            ) from exc
+        if target.parent != Path("/usr/bin"):
+            raise ProfileInputError(
+                "trusted system Python target is outside /usr/bin"
+            )
+        self._require_secure_path(target, directory=False)
+        return target
+
+    def require_unchanged(self) -> None:
+        try:
+            invoked = Path(sys.executable).absolute()
+            actual_target = Path(sys.executable).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ProfileInputError(
+                "trusted system Python executable cannot be resolved"
+            ) from exc
+        if invoked != self.launcher or actual_target != self.target:
+            raise ProfileInputError(
+                "trusted system Python executable changed"
+            )
+        if self._resolve_target() != self.target:
+            raise ProfileInputError(
+                "trusted system Python executable changed"
+            )
+        if self._binary_identity(self.target) != self._identity:
+            raise ProfileInputError(
+                "trusted system Python executable identity changed"
+            )
 
 
 def _base_git_environment() -> dict[str, str]:
@@ -764,6 +918,7 @@ def _validate_profile_manifest(
 
 
 def _emit_receipt(
+    runtime: _TrustedPythonRuntime,
     repository: _TrustedRepositoryView,
     commit: str,
     tree: str,
@@ -771,6 +926,7 @@ def _emit_receipt(
     output: BinaryIO,
 ) -> None:
     raw = _canonical_json_bytes(receipt) + b"\n"
+    runtime.require_unchanged()
     repository.require_stable_clean_tree(commit, tree)
     output.write(raw)
 
@@ -778,6 +934,7 @@ def _emit_receipt(
 def main() -> int:
     try:
         expected_commit, expected_tree = _parse_expected_identities(sys.argv[1:])
+        runtime = _TrustedPythonRuntime()
         repository = _TrustedRepositoryView(_REPOSITORY_ROOT)
         repository.require_stable_clean_tree(expected_commit, expected_tree)
 
@@ -796,8 +953,11 @@ def main() -> int:
             "manifest_digest": _digest_bytes(raw),
             "production_activation_authorized": False,
             "profile_kind": profile_kind,
+            "python_runtime_executable": "/usr/bin/python3",
+            "python_runtime_origin": "ROOT_OWNED_SYSTEM_PYTHON_NO_SITE",
             "qualification_authority_granted": False,
-            "schema_version": "newsroom.increment5.profile-validation-receipt.v4",
+            "schema_version": "newsroom.increment5.profile-validation-receipt.v5",
+            "site_initialization_used": False,
             "tracked_checkout_clean": True,
             "validation_code_origin": "EXACT_TRACKED_EXECUTABLE_STDLIB_ONLY",
             "validation_data_origin": "EXACT_REVIEWED_GIT_BLOBS",
@@ -807,6 +967,7 @@ def main() -> int:
             "worktree_imports_used": False,
         }
         _emit_receipt(
+            runtime,
             repository,
             expected_commit,
             expected_tree,

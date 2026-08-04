@@ -134,12 +134,14 @@ REQUEST_RETRIEVAL_REQUIREMENTS = frozenset(
     {
         "GRAG-031",
         "GRAG-032",
+        "GRAG-035",
         "GRAG-040",
         "GRAG-041",
         "GRAG-042",
         "GRAG-043",
         "TRI-020",
         "TRI-021",
+        "TRI-022",
         "TRI-023",
         "TRI-025",
         "TRI-027",
@@ -176,12 +178,13 @@ DELIVERED_IN_5A_REQUIREMENTS = frozenset(
 # are necessary for later composition, but no selected whole requirement
 # is complete before 5D applies exact-first orchestration and fusion.
 DEFERRED_TO_5B_REQUIREMENTS = frozenset()
+# 5C owns only the bounded named-tool surface. Composed hybrid response
+# metadata and the fused inspectable receipt do not exist until 5D owns the
+# composer, so GRAG-035 and TRI-022 are request-retrieval requirements.
 DEFERRED_TO_5C_REQUIREMENTS = frozenset(
     {
         "GRAG-033",
         "GRAG-034",
-        "GRAG-035",
-        "TRI-022",
     }
 )
 OUTSIDE_INCREMENT_5_REQUIREMENTS = frozenset({"GRPROD-022"})
