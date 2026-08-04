@@ -1,12 +1,9 @@
-name: Increment 5A content-addressed cleanliness builder
+name: Increment 5A snapshot-scoped receipt builder
 
 on:
   push:
     branches:
-      - staging/increment-5a-content-addressed-cleanliness-20260804
-  pull_request:
-    branches:
-      - staging/increment-5a-final-outer-launch-candidate-20260804
+      - staging/increment-5a-immutable-object-receipt-20260804
 
 permissions:
   contents: write
@@ -20,7 +17,7 @@ jobs:
       - name: Checkout staging source
         uses: actions/checkout@v4
         with:
-          ref: staging/increment-5a-content-addressed-cleanliness-20260804
+          ref: staging/increment-5a-immutable-object-receipt-20260804
           fetch-depth: 0
 
       - name: Set up Python 3.12
@@ -33,8 +30,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install uv
 
-      - name: Materialize exact product candidate
-        run: python scripts/sdlc/_staging_increment5_content_addressed_cleanliness_v3.py
+      - name: Materialize truthful snapshot-scoped receipt
+        run: python scripts/sdlc/_staging_increment5_snapshot_receipt_v1.py
 
       - name: Verify generated path set
         run: |
@@ -45,7 +42,7 @@ jobs:
               "docs/decisions/2026-08-02-increment-5a-production-retrieval-contract.md",
               "docs/evaluation/2026-08-02-increment-5-retrieval-evaluation-plan-v1.md",
               "docs/operations/increment-5-production-retrieval-contract.md",
-              "increment5a-content-addressed-cleanliness-manifest.json",
+              "increment5a-snapshot-receipt-manifest.json",
               "newsroom/tests/test_increment5a_profile_semantic_envelope.py",
               "scripts/sdlc/increment5_profile_validator.py",
           }
@@ -67,10 +64,10 @@ jobs:
             docs/decisions/2026-08-02-increment-5a-production-retrieval-contract.md \
             docs/evaluation/2026-08-02-increment-5-retrieval-evaluation-plan-v1.md \
             docs/operations/increment-5-production-retrieval-contract.md \
-            increment5a-content-addressed-cleanliness-manifest.json \
+            increment5a-snapshot-receipt-manifest.json \
             newsroom/tests/test_increment5a_profile_semantic_envelope.py \
             scripts/sdlc/increment5_profile_validator.py
-          git commit -m "build(increment5): verify content-addressed cleanliness [skip ci]"
+          git commit -m "build(increment5): verify snapshot-scoped receipt [skip ci]"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
       - name: Verify locked environment
@@ -96,11 +93,11 @@ jobs:
           python -m py_compile scripts/sdlc/increment5_profile_validator.py
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
           git diff --check HEAD^ HEAD
-          grep -F '"ls-tree"' scripts/sdlc/increment5_profile_validator.py
-          grep -F 'hashlib.sha1(usedforsecurity=False)' scripts/sdlc/increment5_profile_validator.py
-          grep -F 'core.trustctime=true' scripts/sdlc/increment5_profile_validator.py
-          ! grep -F '"status",' scripts/sdlc/increment5_profile_validator.py
-          cat increment5a-content-addressed-cleanliness-manifest.json
+          grep -F '"checkout_snapshot_verified_before_receipt_write": True' scripts/sdlc/increment5_profile_validator.py
+          grep -F '"completion_time_checkout_state_attested": False' scripts/sdlc/increment5_profile_validator.py
+          ! grep -F '"tracked_checkout_clean"' scripts/sdlc/increment5_profile_validator.py
+          grep -F 'output.flush()' scripts/sdlc/increment5_profile_validator.py
+          cat increment5a-snapshot-receipt-manifest.json
 
       - name: Publish verified staging materialization
-        run: git push origin HEAD:staging/increment-5a-content-addressed-cleanliness-20260804
+        run: git push origin HEAD:staging/increment-5a-immutable-object-receipt-20260804
