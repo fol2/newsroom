@@ -47,19 +47,14 @@ the exact Epoch digest and all frozen identities must remain equal within that
 Epoch.
 
 Cross-Epoch pooling is prohibited. A missing or mismatched Epoch is
-`NOT_EVALUATED`. Every profile-validation receipt is v3 and is produced only by
-an interpreter already running in isolated mode; failure to establish isolated
-mode before dependency imports is `NOT_EVALUATED`. The receipt binds the actual
-Git commit and tree and records that staged/tracked checkout state was clean and
-that all Newsroom imports came from a cache-free exact-commit materialization
-rather than checkout or ignored bytecode. The materialization producer is the
-fixed root-owned `/usr/bin/git` binary, never caller `PATH`; its identity is
-rechecked around every operation. Replacement objects are disabled through both
-the global Git option and environment, repository fsmonitor is disabled through
-an exact command-line override, and archive bytes are streamed through a hard
-64 MiB pre-write cap that terminates the producer on overflow. The receipt's
-`code_tree_sha` must equal the Epoch's frozen `code_tree_sha`; a missing, dirty,
-untrusted-producer, unbounded, non-materialized, or mismatched code tree is
+`NOT_EVALUATED`. Every profile-validation receipt is v4 and is produced by an
+isolated stdlib-only executable: no environment Python package or repository
+module participates. One explicit Git directory, index and work tree are bound;
+replacement objects, fsmonitor, assume-unchanged and skip-worktree state cannot
+change or conceal the evidence inputs. The validator reads only exact
+digest-pinned contract/schema blobs and rechecks commit, tree, index flags and
+tracked cleanliness immediately before output. The receipt tree must equal the
+Epoch's frozen `code_tree_sha`; missing, hidden, changed or mismatched state is
 `NOT_EVALUATED`. Superseded Epoch Runs remain retained. The Epoch record binds
 the plan digest externally at Run creation, so the machine plan does not contain
 a self-referential digest.

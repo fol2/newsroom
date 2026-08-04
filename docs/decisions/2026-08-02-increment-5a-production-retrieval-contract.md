@@ -155,67 +155,39 @@ avoiding a schema-digest/contract-digest cycle.
 
 Python code in one process is not a security principal against arbitrary code in
 that process: closures, globals, function code, and return objects are mutable.
-5A therefore exports no authority-bearing `ValidatedProfileManifest`, public
-in-process validation certificate, or eligibility boolean.
+5A therefore exports no authority-bearing certificate or eligibility boolean.
+Public builders remain deterministic conveniences only.
 
-Public builders are deterministic conveniences. Their private check returns
-only `None` and is not admissible evidence. For 5E evidence, exact canonical
-manifest bytes must be supplied inside the fresh exact-head signed workflow to:
+For 5E evidence, canonical manifest bytes are supplied to the isolated
+standalone executable with the exact expected commit and tree. The executable
+checks isolated mode before any dependency import and then uses **only the
+Python standard library**. It imports neither `jsonschema` nor any repository
+Python package, so caller virtualenv/site-packages, `PYTHONPATH`, user site
+packages, ignored bytecode, and mutable repository module imports are outside the
+evidence path.
 
-```text
-CODE_COMMIT_SHA="$(git rev-parse --verify 'HEAD^{commit}')"
-CODE_TREE_SHA="$(git rev-parse --verify 'HEAD^{tree}')"
-python -I scripts/sdlc/increment5_profile_validator.py \
-  --expected-code-commit-sha "$CODE_COMMIT_SHA" \
-  --expected-code-tree-sha "$CODE_TREE_SHA"
-```
+The trusted repository view captures one absolute Git directory, one exact index
+file, and `_REPOSITORY_ROOT` as the explicit work tree. Every command carries
+`--git-dir`, `--work-tree`, `--no-replace-objects`, and
+`core.fsmonitor=false`; the environment independently fixes `GIT_DIR`,
+`GIT_INDEX_FILE`, `GIT_WORK_TREE`, and `GIT_NO_REPLACE_OBJECTS=1`. Lowercase
+assume-unchanged tags and skip-worktree tags are rejected before cleanliness can
+be claimed.
 
-The validator is executable only under Python isolated mode. Immediately after
-importing the built-in `sys` module—and before importing any third-party or
-repository dependency—it requires `sys.flags.isolated`; direct or otherwise
-non-`-I` execution exits with status 2. Caller `PYTHONPATH`, user site packages,
-and caller-selected import roots therefore cannot supply `jsonschema` or another
-transitive validation dependency.
+Validation reads only five bounded, digest-pinned blobs from the supplied
+commit: the exact contract and four structural/public profile schemas. The
+stdlib semantic validator checks canonical JSON, exact fields, identities,
+budgets, effects, rights, eligibility, and profile-specific invariants. It does
+not execute code from those blobs.
 
-Before importing any Newsroom module, the validator resolves the actual Git
-commit and tree, requires them to equal the caller-supplied identities, and
-rejects staged or tracked differences. Git is never selected from caller
-`PATH`: the producer is fixed to `/usr/bin/git`, and `/usr`, `/usr/bin`, and the
-binary must be non-symlink, root-owned, and not group- or other-writable. The
-binary's device, inode, mode, ownership, size, modification time, and SHA-256
-identity are captured and rechecked before and after every operation. Every Git
-command also uses `--no-replace-objects`, `GIT_NO_REPLACE_OBJECTS=1`, and the
-command-line override `core.fsmonitor=false`; repository replacement refs cannot
-alter resolved or archived objects, and a repository-local fsmonitor cannot hide
-tracked checkout changes.
-
-Ignored and untracked runtime artefacts are never used as code. Archive stdout
-and stderr are consumed concurrently through the validator; no stdout chunk
-that would cross the 64 MiB generation cap is written, and the producer is
-terminated immediately on overflow, timeout, or stderr-limit failure. The
-bounded archive is then extracted with unsafe paths, non-regular entries,
-oversized members, and tracked bytecode rejected. Bytecode writes are disabled,
-checkout paths are removed from the import search path, and every loaded
-`newsroom.*` module must come from that cache-free exact-commit materialization.
-
-It then rejects non-canonical JSON, duplicate names, identity drift, wrong
-profile/eligibility pairs, widened budgets or effects, fixture substitution,
-unsafe dataset state, and missing actual-service requirements. Its canonical v3
-receipt binds the manifest digest, profile kind, `code_commit_sha`,
-`code_tree_sha`, `tracked_checkout_clean=true`,
-`validation_code_origin=CACHE_FREE_EXACT_GIT_ARCHIVE`, and
-`worktree_imports_used=false`. Immediately before receipt emission, the same
-trusted producer rechecks the exact commit, tree, and tracked-clean status; any
-completion-time drift emits no receipt. The receipt states:
-
-- `authority_effect = NONE`;
-- `qualification_authority_granted = false`; and
-- `production_activation_authorized = false`.
-
-The receipt is necessary profile evidence, never sufficient qualification
-evidence. Its `code_tree_sha` must equal the frozen Epoch `code_tree_sha`; a
-missing or mismatched tree is `NOT_EVALUATED`. It grants no component, source,
-model, provider, spend, write, production, or public-effect authority.
+Receipt v4 binds the manifest, commit and tree while recording
+`external_python_packages_used=false`,
+`validation_code_origin=EXACT_TRACKED_EXECUTABLE_STDLIB_ONLY`,
+`validation_data_origin=EXACT_REVIEWED_GIT_BLOBS`, and
+`worktree_imports_used=false`. The same repository/index invariant is rerun
+immediately before output, so completion-time drift emits no receipt. The
+receipt retains authority effect `NONE` and grants no qualification, component,
+source, model, provider, spend, write, production, or public-effect authority.
 
 These profiles are not production deployment profiles. Production rejection of
 fake, disabled, or omitted GraphRAG and production build/readiness validation

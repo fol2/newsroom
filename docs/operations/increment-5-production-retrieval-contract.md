@@ -7,48 +7,25 @@ by 5A. Production activation is outside Increment 5.
 
 `FIXTURE_REPLAY` is hermetic, zero-call, and never qualification evidence.
 `PRODUCTION_SHAPED_QUALIFICATION` may use actual Neo4j and a signed,
-rights-cleared, repository-safe dataset, but it still has zero provider spend,
-no model load, no protected content, no write authority, no public effect, and
-no production activation.
+rights-cleared, repository-safe dataset, but still has zero provider spend, no
+model load, no protected content, no write authority, no public effect, and no
+production activation.
 
-Every 5E evidence manifest is canonical JSON validated inside the fresh
-exact-head signed process with:
+Every 5E profile is validated by
+`python -I scripts/sdlc/increment5_profile_validator.py` with the exact expected
+commit and tree. The executable is stdlib-only and imports no environment
+package or repository module. It binds an explicit Git directory/index/work tree,
+disables replacement objects and fsmonitor, rejects assume-unchanged and
+skip-worktree flags, and reads only bounded digest-pinned contract/schema blobs
+from the exact commit.
 
-```text
-CODE_COMMIT_SHA="$(git rev-parse --verify 'HEAD^{commit}')"
-CODE_TREE_SHA="$(git rev-parse --verify 'HEAD^{tree}')"
-python -I scripts/sdlc/increment5_profile_validator.py \
-  --expected-code-commit-sha "$CODE_COMMIT_SHA" \
-  --expected-code-tree-sha "$CODE_TREE_SHA"
-```
-
-The validator first requires Python isolated mode, immediately after the
-built-in `sys` import and before any dependency import. Non-`-I` execution exits
-with status 2, so caller `PYTHONPATH`, user site packages, and caller-selected
-import roots cannot supply validator dependencies.
-
-It then verifies the supplied Git commit and tree and rejects staged or tracked
-differences before importing any Newsroom module. It ignores caller
-`PATH` and accepts only the fixed `/usr/bin/git` producer after checking that it
-and its parent directories are non-symlink, root-owned, and not group- or
-other-writable; the binary identity is rechecked around every operation. Every
-Git invocation disables replacement objects and overrides
-`core.fsmonitor=false`, so local replacement refs cannot alter archive bytes and
-an fsmonitor hook cannot conceal tracked checkout drift. Archive stdout and
-stderr are streamed concurrently, the producer is terminated
-before any byte crossing the 64 MiB cap can reach disk, and only that bounded
-cache-free exact-commit materialization supplies validation imports. Ignored
-bytecode, untracked runtime artefacts and checkout paths are not used. Receipt
-v3 binds the manifest digest, profile kind, `code_commit_sha`,
-`code_tree_sha`, `tracked_checkout_clean=true`,
-`validation_code_origin=CACHE_FREE_EXACT_GIT_ARCHIVE`, and
-`worktree_imports_used=false` while stating `authority_effect=NONE`,
-`qualification_authority_granted=false`, and
-`production_activation_authorized=false`. Immediately before writing the
-receipt, the validator rechecks the exact commit, tree, trusted Git identity,
-and tracked-clean state; any completion-time drift emits no receipt. The receipt
-tree must equal the frozen Epoch tree; mismatch is `NOT_EVALUATED`. It is
-necessary profile evidence, never sufficient qualification evidence.
+Receipt v4 records `external_python_packages_used=false`,
+`validation_code_origin=EXACT_TRACKED_EXECUTABLE_STDLIB_ONLY`,
+`validation_data_origin=EXACT_REVIEWED_GIT_BLOBS`, and
+`worktree_imports_used=false`. Commit, tree, index flags and tracked cleanliness
+are checked both before validation and immediately before receipt output. The
+receipt retains authority effect `NONE`; it is necessary evidence, never
+sufficient qualification or activation authority.
 
 ## Epoch admission
 

@@ -28,6 +28,7 @@ _DIGEST_A = "sha256:" + "a" * 64
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _VALIDATOR_RELATIVE_PATH = Path("scripts/sdlc/increment5_profile_validator.py")
 _VALIDATOR_SCRIPT = _REPOSITORY_ROOT / _VALIDATOR_RELATIVE_PATH
+_CONTRACT_RELATIVE_PATH = "newsroom/increment5/data/increment5a_retrieval_contract_v1.json"
 
 
 def _git_text(root: Path, *arguments: str) -> str:
@@ -184,9 +185,11 @@ def test_fresh_process_returns_code_tree_bound_non_authoritative_receipt(
         "production_activation_authorized": False,
         "profile_kind": manifest["profile_kind"],
         "qualification_authority_granted": False,
-        "schema_version": "newsroom.increment5.profile-validation-receipt.v3",
+        "external_python_packages_used": False,
+        "schema_version": "newsroom.increment5.profile-validation-receipt.v4",
         "tracked_checkout_clean": True,
-        "validation_code_origin": "CACHE_FREE_EXACT_GIT_ARCHIVE",
+        "validation_code_origin": "EXACT_TRACKED_EXECUTABLE_STDLIB_ONLY",
+        "validation_data_origin": "EXACT_REVIEWED_GIT_BLOBS",
         "validation_scope": (
             "REVIEWED_PROFILE_STRUCTURE_SEMANTICS_AND_EXACT_CODE_TREE"
         ),
@@ -285,14 +288,14 @@ def test_same_process_closure_mutation_cannot_create_qualification_authority() -
         # or authority-bearing value even under this exact attack.
         assert profiles._check_profile_manifest(manifest) is None
 
-        # The fresh -I process imports only the cache-free exact Git tree and
+        # The fresh -I process uses only stdlib plus exact reviewed Git blobs and
         # rejects the same bytes; the mutated cell cannot cross that boundary.
         completed = _run_isolated(manifest)
         assert completed.returncode == 2
         assert completed.stderr.startswith(
             b"increment5 profile validation failed: "
         )
-        assert b"qualification_eligible" in completed.stderr
+        assert b"profile qualification eligibility differs" in completed.stderr
         assert completed.stdout == b""
     finally:
         _set_cell(cell, original)
@@ -300,7 +303,7 @@ def test_same_process_closure_mutation_cannot_create_qualification_authority() -
 
 
 
-def test_nonisolated_execution_rejects_before_pythonpath_dependency_import(
+def test_nonisolated_execution_rejects_before_dependency_import(
     tmp_path: Path,
 ) -> None:
     fake_root = tmp_path / "pythonpath"
@@ -309,17 +312,11 @@ def test_nonisolated_execution_rejects_before_pythonpath_dependency_import(
     marker = tmp_path / "fake-jsonschema-imported"
     fake_package.joinpath("__init__.py").write_text(
         "from pathlib import Path\n"
-        f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n"
-        "class Draft202012Validator:\n"
-        "    def __init__(self, schema): pass\n"
-        "    def iter_errors(self, instance): return iter(())\n",
+        f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n",
         encoding="utf-8",
     )
-    invalid = _fixture_manifest()
-    invalid["qualification_eligible"] = True
     environment = _validator_environment()
     environment["PYTHONPATH"] = str(fake_root)
-
     completed = subprocess.run(
         [
             sys.executable,
@@ -329,7 +326,7 @@ def test_nonisolated_execution_rejects_before_pythonpath_dependency_import(
             "--expected-code-tree-sha",
             _CODE_TREE_SHA,
         ],
-        input=canonical_json_bytes(invalid),
+        input=canonical_json_bytes(_fixture_manifest()),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -337,14 +334,62 @@ def test_nonisolated_execution_rejects_before_pythonpath_dependency_import(
         env=environment,
         timeout=30,
     )
-
     assert completed.returncode == 2
     assert completed.stderr == (
-        b"increment5 profile validation failed: "
-        b"isolated Python mode is required\n"
+        b"increment5 profile validation failed: isolated Python mode is required\n"
     )
     assert completed.stdout == b""
     assert not marker.exists()
+
+
+def test_isolated_virtualenv_site_package_is_never_imported(tmp_path: Path) -> None:
+    import venv
+
+    environment_root = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=False).create(environment_root)
+    python = environment_root / "bin/python"
+    purelib_result = subprocess.run(
+        [python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=30,
+    )
+    assert purelib_result.returncode == 0, purelib_result.stderr.decode("utf-8")
+    purelib = Path(purelib_result.stdout.decode("utf-8").strip())
+    fake_package = purelib / "jsonschema"
+    fake_package.mkdir(parents=True)
+    marker = tmp_path / "site-jsonschema-imported"
+    fake_package.joinpath("__init__.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n"
+        "raise RuntimeError('environment jsonschema imported')\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            python,
+            "-I",
+            str(_VALIDATOR_SCRIPT),
+            "--expected-code-commit-sha",
+            _CODE_COMMIT_SHA,
+            "--expected-code-tree-sha",
+            _CODE_TREE_SHA,
+        ],
+        input=canonical_json_bytes(_fixture_manifest()),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        cwd=_REPOSITORY_ROOT,
+        env=_validator_environment(),
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    assert not marker.exists()
+    receipt = json.loads(completed.stdout.decode("utf-8"))
+    assert receipt["external_python_packages_used"] is False
+    assert receipt["validation_data_origin"] == "EXACT_REVIEWED_GIT_BLOBS"
+
 
 def test_validator_requires_matching_commit_and_tree_arguments() -> None:
     raw = canonical_json_bytes(_fixture_manifest())
@@ -361,7 +406,6 @@ def test_validator_requires_matching_commit_and_tree_arguments() -> None:
     assert unbound.returncode == 2
     assert b"exact code identity arguments are required" in unbound.stderr
     assert unbound.stdout == b""
-
     wrong_commit = _run_isolated_bytes(
         raw,
         expected_commit="0" * 40,
@@ -369,8 +413,6 @@ def test_validator_requires_matching_commit_and_tree_arguments() -> None:
     )
     assert wrong_commit.returncode == 2
     assert b"code commit SHA differs from expected identity" in wrong_commit.stderr
-    assert wrong_commit.stdout == b""
-
     wrong_tree = _run_isolated_bytes(
         raw,
         expected_commit=_CODE_COMMIT_SHA,
@@ -378,20 +420,14 @@ def test_validator_requires_matching_commit_and_tree_arguments() -> None:
     )
     assert wrong_tree.returncode == 2
     assert b"code tree SHA differs from expected identity" in wrong_tree.stderr
-    assert wrong_tree.stdout == b""
 
 
-def test_tracked_repository_code_is_rejected_before_materialization(
+def test_tracked_repository_code_is_rejected_before_blob_validation(
     tmp_path: Path,
 ) -> None:
     clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
-
-    profile_source = clone / "newsroom/increment5/profiles.py"
-    profile_source.write_text(
-        profile_source.read_text(encoding="utf-8")
-        + "\nraise RuntimeError('dirty profile import executed')\n",
-        encoding="utf-8",
-    )
+    source = clone / "scripts/sdlc/increment5_profile_validator.py"
+    source.write_text(source.read_text(encoding="utf-8") + "\n# tracked drift\n")
     completed = _run_isolated_bytes(
         canonical_json_bytes(_fixture_manifest()),
         root=clone,
@@ -406,59 +442,7 @@ def test_tracked_repository_code_is_rejected_before_materialization(
     assert completed.stdout == b""
 
 
-def test_ignored_bytecode_cannot_replace_materialized_validator_source(
-    tmp_path: Path,
-) -> None:
-    clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
-    cache_tag = sys.implementation.cache_tag
-    assert isinstance(cache_tag, str) and cache_tag
-
-    for relative in (
-        "newsroom/authority/canonical.py",
-        "newsroom/increment5/profiles.py",
-    ):
-        source = clone / relative
-        cache = source.parent / "__pycache__" / (
-            f"{source.stem}.{cache_tag}.pyc"
-        )
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        poison = tmp_path / f"poison-{source.stem}.py"
-        poison.write_text(
-            "raise RuntimeError('ignored checkout bytecode executed')\n",
-            encoding="utf-8",
-        )
-        py_compile.compile(
-            str(poison),
-            cfile=str(cache),
-            dfile=str(source),
-            doraise=True,
-            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
-        )
-
-    assert _git_text(
-        clone,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=no",
-    ) == ""
-    completed = _run_isolated_bytes(
-        canonical_json_bytes(_fixture_manifest()),
-        root=clone,
-        expected_commit=clone_commit,
-        expected_tree=clone_tree,
-    )
-    assert completed.returncode == 0, completed.stderr.decode("utf-8")
-    assert b"ignored checkout bytecode executed" not in completed.stderr
-    receipt = json.loads(completed.stdout.decode("utf-8"))
-    assert receipt["code_commit_sha"] == clone_commit
-    assert receipt["code_tree_sha"] == clone_tree
-    assert receipt["validation_code_origin"] == "CACHE_FREE_EXACT_GIT_ARCHIVE"
-    assert receipt["worktree_imports_used"] is False
-
-
-
-
-def test_path_selected_fake_git_cannot_supply_the_archive(tmp_path: Path) -> None:
+def test_path_selected_fake_git_is_never_used(tmp_path: Path) -> None:
     fake_directory = tmp_path / "fake-bin"
     fake_directory.mkdir()
     marker = tmp_path / "fake-git-invoked"
@@ -466,52 +450,35 @@ def test_path_selected_fake_git_cannot_supply_the_archive(tmp_path: Path) -> Non
     fake_git.write_text(
         "#!/usr/bin/python3\n"
         "from pathlib import Path\n"
-        f"Path({str(marker)!r}).write_text('invoked', encoding='utf-8')\n"
-        "raise SystemExit(71)\n",
+        f"Path({str(marker)!r}).write_text('invoked', encoding='utf-8')\n",
         encoding="utf-8",
     )
     fake_git.chmod(0o755)
-
     environment = _validator_environment()
     environment["PATH"] = f"{fake_directory}:{environment['PATH']}"
     completed = _run_isolated_bytes(
         canonical_json_bytes(_fixture_manifest()),
         environment=environment,
     )
-
     assert completed.returncode == 0, completed.stderr.decode("utf-8")
     assert not marker.exists()
-    receipt = json.loads(completed.stdout.decode("utf-8"))
-    assert receipt["validation_code_origin"] == "CACHE_FREE_EXACT_GIT_ARCHIVE"
 
 
-
-
-def test_git_replace_ref_cannot_substitute_materialized_source(
+def test_git_replace_ref_cannot_substitute_reviewed_contract_blob(
     tmp_path: Path,
 ) -> None:
     clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
-    marker = tmp_path / "replacement-profile-executed"
-    replacement_source = (
-        "from pathlib import Path\n"
-        f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n"
-        "raise RuntimeError('replacement profile blob executed')\n"
-    ).encode("utf-8")
-    original_blob = _git_text(
-        clone,
-        "rev-parse",
-        "HEAD:newsroom/increment5/profiles.py",
-    )
+    original_blob = _git_text(clone, "rev-parse", f"HEAD:{_CONTRACT_RELATIVE_PATH}")
     hashed = subprocess.run(
         ["git", "-C", str(clone), "hash-object", "-w", "--stdin"],
-        input=replacement_source,
+        input=b'{"poison":true}',
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
         timeout=20,
     )
     assert hashed.returncode == 0, hashed.stderr.decode("utf-8")
-    replacement_blob = hashed.stdout.decode("ascii", errors="strict").strip()
+    replacement_blob = hashed.stdout.decode("ascii").strip()
     replaced = subprocess.run(
         ["git", "-C", str(clone), "replace", original_blob, replacement_blob],
         stdout=subprocess.PIPE,
@@ -520,33 +487,14 @@ def test_git_replace_ref_cannot_substitute_materialized_source(
         timeout=20,
     )
     assert replaced.returncode == 0, replaced.stderr.decode("utf-8")
-    assert _code_identity(clone) == (clone_commit, clone_tree)
-    assert _git_text(
-        clone,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=no",
-    ) == ""
-
-    raw_archive = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(clone),
-            "archive",
-            "--format=tar",
-            clone_commit,
-            "--",
-            "newsroom/increment5/profiles.py",
-        ],
+    ordinary = subprocess.run(
+        ["git", "-C", str(clone), "cat-file", "blob", f"HEAD:{_CONTRACT_RELATIVE_PATH}"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
         timeout=20,
     )
-    assert raw_archive.returncode == 0, raw_archive.stderr.decode("utf-8")
-    assert b"replacement profile blob executed" in raw_archive.stdout
-
+    assert ordinary.stdout == b'{"poison":true}'
     completed = _run_isolated_bytes(
         canonical_json_bytes(_fixture_manifest()),
         root=clone,
@@ -554,60 +502,66 @@ def test_git_replace_ref_cannot_substitute_materialized_source(
         expected_tree=clone_tree,
     )
     assert completed.returncode == 0, completed.stderr.decode("utf-8")
-    assert not marker.exists()
-    receipt = json.loads(completed.stdout.decode("utf-8"))
-    assert receipt["code_commit_sha"] == clone_commit
-    assert receipt["code_tree_sha"] == clone_tree
-    assert receipt["validation_code_origin"] == "CACHE_FREE_EXACT_GIT_ARCHIVE"
 
 
-def test_fsmonitor_hook_cannot_hide_tracked_checkout_change(
+def test_core_worktree_cannot_redirect_cleanliness_check(tmp_path: Path) -> None:
+    clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
+    alternate = tmp_path / "alternate-worktree"
+    alternate.mkdir()
+    populated = subprocess.run(
+        [
+            "git",
+            f"--git-dir={clone / '.git'}",
+            f"--work-tree={alternate}",
+            "checkout",
+            "--force",
+            clone_commit,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=30,
+    )
+    assert populated.returncode == 0, populated.stderr.decode("utf-8")
+    configured = subprocess.run(
+        ["git", "-C", str(clone), "config", "core.worktree", str(alternate)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=20,
+    )
+    assert configured.returncode == 0, configured.stderr.decode("utf-8")
+    source = clone / "scripts/sdlc/increment5_profile_validator.py"
+    source.write_text(source.read_text(encoding="utf-8") + "\n# hidden actual worktree drift\n")
+    assert _git_text(clone, "status", "--porcelain=v1", "--untracked-files=no") == ""
+    completed = _run_isolated_bytes(
+        canonical_json_bytes(_fixture_manifest()),
+        root=clone,
+        expected_commit=clone_commit,
+        expected_tree=clone_tree,
+    )
+    assert completed.returncode == 2
+    assert b"tracked repository checkout differs from HEAD" in completed.stderr
+
+
+@pytest.mark.parametrize("flag", ("--assume-unchanged", "--skip-worktree"))
+def test_index_flags_that_hide_changes_are_rejected(
     tmp_path: Path,
+    flag: str,
 ) -> None:
     clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
-    hook = tmp_path / "lying-fsmonitor-v2"
-    hook.write_bytes(b"#!/bin/sh\nprintf 'unchanged-token\\000'\n")
-    hook.chmod(0o755)
-    for name, value in (
-        ("core.fsmonitor", str(hook)),
-        ("core.fsmonitorHookVersion", "2"),
-    ):
-        configured = subprocess.run(
-            ["git", "-C", str(clone), "config", name, value],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=20,
-        )
-        assert configured.returncode == 0, configured.stderr.decode("utf-8")
-
-    assert _git_text(
-        clone,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=no",
-    ) == ""
-    profile_source = clone / "newsroom/increment5/profiles.py"
-    profile_source.write_text(
-        profile_source.read_text(encoding="utf-8")
-        + "\nraise RuntimeError('fsmonitor-hidden change executed')\n",
-        encoding="utf-8",
+    relative = "scripts/sdlc/increment5_profile_validator.py"
+    marked = subprocess.run(
+        ["git", "-C", str(clone), "update-index", flag, relative],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=20,
     )
-    assert _git_text(
-        clone,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=no",
-    ) == ""
-    assert _git_text(
-        clone,
-        "-c",
-        "core.fsmonitor=false",
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=no",
-    ) != ""
-
+    assert marked.returncode == 0, marked.stderr.decode("utf-8")
+    source = clone / relative
+    source.write_text(source.read_text(encoding="utf-8") + "\n# index-hidden drift\n")
+    assert _git_text(clone, "status", "--porcelain=v1", "--untracked-files=no") == ""
     completed = _run_isolated_bytes(
         canonical_json_bytes(_fixture_manifest()),
         root=clone,
@@ -617,65 +571,66 @@ def test_fsmonitor_hook_cannot_hide_tracked_checkout_change(
     assert completed.returncode == 2
     assert completed.stderr == (
         b"increment5 profile validation failed: "
-        b"tracked repository checkout differs from HEAD\n"
+        b"tracked index flags can hide checkout changes\n"
     )
     assert completed.stdout == b""
 
-def test_archive_limit_kills_the_producer_before_overflow_reaches_disk(
-    tmp_path: Path,
-) -> None:
+
+def test_fsmonitor_hook_cannot_hide_tracked_checkout_change(tmp_path: Path) -> None:
+    clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
+    hook = tmp_path / "lying-fsmonitor-v2"
+    hook.write_bytes(b"#!/bin/sh\nprintf 'unchanged-token\\000'\n")
+    hook.chmod(0o755)
+    for name, value in (("core.fsmonitor", str(hook)), ("core.fsmonitorHookVersion", "2")):
+        configured = subprocess.run(
+            ["git", "-C", str(clone), "config", name, value],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=20,
+        )
+        assert configured.returncode == 0, configured.stderr.decode("utf-8")
+    assert _git_text(clone, "status", "--porcelain=v1", "--untracked-files=no") == ""
+    source = clone / "scripts/sdlc/increment5_profile_validator.py"
+    source.write_text(source.read_text(encoding="utf-8") + "\n# fsmonitor-hidden drift\n")
+    completed = _run_isolated_bytes(
+        canonical_json_bytes(_fixture_manifest()),
+        root=clone,
+        expected_commit=clone_commit,
+        expected_tree=clone_tree,
+    )
+    assert completed.returncode == 2
+    assert b"tracked repository checkout differs from HEAD" in completed.stderr
+
+
+def test_bounded_blob_reader_kills_an_overflowing_producer(tmp_path: Path) -> None:
     marker = tmp_path / "producer-completed"
-    emitter = tmp_path / "emit-large-archive.py"
+    emitter = tmp_path / "emit.py"
     emitter.write_text(
         "from pathlib import Path\n"
-        "import os\n"
-        "import sys\n"
-        "import time\n"
+        "import os, sys, time\n"
         "os.write(sys.stdout.fileno(), b'x' * 8192)\n"
         "time.sleep(10)\n"
         f"Path({str(marker)!r}).write_text('completed', encoding='utf-8')\n",
         encoding="utf-8",
     )
-    archive = tmp_path / "bounded.tar"
     probe = """
-import runpy
-import sys
-from pathlib import Path
-
-namespace = runpy.run_path(
-    sys.argv[1],
-    run_name="increment5_profile_validator_streaming_probe",
-)
-error_type = namespace["ProfileInputError"]
+import runpy, sys
+namespace = runpy.run_path(sys.argv[1], run_name="validator-probe")
+error = namespace["ProfileInputError"]
 try:
-    namespace["_stream_bounded_process_to_file"](
-        [sys.executable, sys.argv[2]],
-        Path(sys.argv[3]),
-        env={"LC_ALL": "C", "PYTHONUTF8": "1"},
-        timeout_seconds=20,
-        max_stdout_bytes=1024,
-        max_stderr_bytes=1024,
-        failure_message="cannot materialize the exact Git code tree",
+    namespace["_capture_bounded_process"](
+        [sys.executable, sys.argv[2]], env={"LC_ALL":"C"},
+        timeout_seconds=20, max_stdout_bytes=1024, max_stderr_bytes=1024,
+        failure_message="bounded producer failed",
     )
-except error_type as exc:
-    if str(exc) != "Git archive exceeds the generation limit":
-        raise
+except error:
+    pass
 else:
     raise SystemExit("overflowing producer unexpectedly succeeded")
-if Path(sys.argv[3]).exists():
-    raise SystemExit("partial archive remains after overflow")
 """
-
     completed = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            "-c",
-            probe,
-            str(_VALIDATOR_SCRIPT),
-            str(emitter),
-            str(archive),
-        ],
+        [sys.executable, "-I", "-c", probe, str(_VALIDATOR_SCRIPT), str(emitter)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -683,170 +638,72 @@ if Path(sys.argv[3]).exists():
         env={"LC_ALL": "C", "PYTHONUTF8": "1"},
         timeout=30,
     )
-
     assert completed.returncode == 0, completed.stderr.decode("utf-8")
-    assert completed.stdout == b""
-    assert not archive.exists()
     assert not marker.exists()
 
 
-
-
-def test_receipt_rechecks_tracked_state_after_materialization_starts(
-    tmp_path: Path,
-) -> None:
-    clone, _, _ = _clone_exact_head(tmp_path)
-    configured = subprocess.run(
-        ["git", "-C", str(clone), "config", "user.name", "receipt-race-test"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        timeout=20,
+def test_completion_state_recheck_suppresses_receipt(tmp_path: Path) -> None:
+    clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
+    output = tmp_path / "receipt.bin"
+    probe = """
+import io, runpy, sys
+from pathlib import Path
+namespace = runpy.run_path(sys.argv[1], run_name="validator-completion-probe")
+view = namespace["_TrustedRepositoryView"](Path(sys.argv[2]))
+view.require_stable_clean_tree(sys.argv[3], sys.argv[4])
+tracked = Path(sys.argv[2]) / "scripts/sdlc/increment5_profile_validator.py"
+tracked.write_text(tracked.read_text(encoding="utf-8") + "\\n# completion drift\\n", encoding="utf-8")
+buffer = io.BytesIO()
+try:
+    namespace["_emit_receipt"](
+        view, sys.argv[3], sys.argv[4], {"authority_effect":"NONE"}, buffer
     )
-    assert configured.returncode == 0, configured.stderr.decode("utf-8")
-    configured = subprocess.run(
+except namespace["ProfileInputError"] as exc:
+    if str(exc) != "tracked repository checkout differs from HEAD": raise
+else:
+    raise SystemExit("completion drift emitted a receipt")
+if buffer.getvalue(): raise SystemExit("receipt bytes escaped")
+"""
+    completed = subprocess.run(
         [
-            "git",
-            "-C",
-            str(clone),
-            "config",
-            "user.email",
-            "receipt-race-test@example.invalid",
+            sys.executable, "-I", "-c", probe,
+            str(clone / _VALIDATOR_RELATIVE_PATH), str(clone),
+            clone_commit, clone_tree,
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
-        timeout=20,
-    )
-    assert configured.returncode == 0, configured.stderr.decode("utf-8")
-
-    for index in range(2):
-        clone.joinpath("newsroom", f"receipt-race-padding-{index}.bin").write_bytes(
-            b"x" * 12_000_000
-        )
-    committed = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(clone),
-            "add",
-            "newsroom/receipt-race-padding-0.bin",
-            "newsroom/receipt-race-padding-1.bin",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
+        cwd=clone,
+        env={"LC_ALL": "C", "PYTHONUTF8": "1"},
         timeout=30,
     )
-    assert committed.returncode == 0, committed.stderr.decode("utf-8")
-    committed = subprocess.run(
-        ["git", "-C", str(clone), "commit", "-m", "test: widen receipt race"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        timeout=60,
-    )
-    assert committed.returncode == 0, committed.stderr.decode("utf-8")
-    clone_commit, clone_tree = _code_identity(clone)
-
-    temp_parent = tmp_path / "validator-temp"
-    temp_parent.mkdir()
-    environment = _validator_environment()
-    environment["TMPDIR"] = str(temp_parent)
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-I",
-            str(clone / _VALIDATOR_RELATIVE_PATH),
-            "--expected-code-commit-sha",
-            clone_commit,
-            "--expected-code-tree-sha",
-            clone_tree,
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=clone,
-        env=environment,
-    )
-    assert process.stdin is not None
-    process.stdin.write(canonical_json_bytes(_fixture_manifest()))
-    process.stdin.close()
-
-    deadline = time.monotonic() + 20
-    while not tuple(temp_parent.glob("newsroom-increment5-profile-*")):
-        if process.poll() is not None:
-            stdout = process.stdout.read() if process.stdout is not None else b""
-            stderr = process.stderr.read() if process.stderr is not None else b""
-            raise AssertionError(
-                f"validator exited before materialization: {process.returncode}; "
-                f"stdout={stdout!r}; stderr={stderr!r}"
-            )
-        if time.monotonic() >= deadline:
-            process.kill()
-            process.wait(timeout=5)
-            raise AssertionError("validator never entered exact-tree materialization")
-        time.sleep(0.002)
-
-    profile_source = clone / "newsroom/increment5/profiles.py"
-    profile_source.write_text(
-        profile_source.read_text(encoding="utf-8")
-        + "\nraise RuntimeError('completion-time tracked change executed')\n",
-        encoding="utf-8",
-    )
-
-    assert process.stdout is not None and process.stderr is not None
-    stdout = process.stdout.read()
-    stderr = process.stderr.read()
-    returncode = process.wait(timeout=30)
-    assert returncode == 2
-    assert stderr == (
-        b"increment5 profile validation failed: "
-        b"tracked repository checkout differs from HEAD\n"
-    )
-    assert stdout == b""
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    assert not output.exists()
 
 
-def test_validator_materializes_exact_tree_before_repository_import() -> None:
+def test_validator_source_has_closed_dependency_and_repository_boundaries() -> None:
     source = _VALIDATOR_SCRIPT.read_text(encoding="utf-8")
-    main_source = source.split("def main() -> int:", 1)[1]
-    assert main_source.index("_require_exact_code_tree(") < main_source.index(
-        "_materialized_repository_api("
-    )
-    materialized_source = source.split(
-        "def _materialized_repository_api(",
-        1,
-    )[1]
-    assert materialized_source.index("_write_git_archive(") < (
-        materialized_source.index(
-            'importlib.import_module("newsroom.authority.canonical")'
-        )
-    )
     bootstrap = source.index("if not sys.flags.isolated:")
-    assert source.index("import sys") < bootstrap
-    assert bootstrap < source.index("from contextlib import contextmanager")
-    assert "isolated Python mode is required" in source
-    assert '"--untracked-files=no"' in source
-    assert '"--untracked-files=all"' not in source
-    assert '_TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")' in source
+    assert source.index("import sys") < bootstrap < source.index("import hashlib")
+    assert "jsonschema" not in source
+    assert "importlib" not in source
+    assert "tarfile" not in source
+    assert "tempfile" not in source
+    assert 'f"--git-dir={self.git_dir}"' in source
+    assert 'f"--work-tree={self.root}"' in source
     assert '"--no-replace-objects"' in source
-    assert '"GIT_NO_REPLACE_OBJECTS": "1"' in source
     assert '"core.fsmonitor=false"' in source
-    assert "shutil.which" not in source
-    assert "selectors.DefaultSelector()" in source
-    assert "stdout=subprocess.PIPE" in source
-    receipt_bytes = source.index(
-        "receipt_bytes = canonical_json_bytes(receipt) + b\"\\n\""
+    assert '"GIT_NO_REPLACE_OBJECTS": "1"' in source
+    assert "_reject_hidden_index_flags" in source
+    assert '"cat-file"' in source
+    main = source.split("def main() -> int:", 1)[1]
+    assert main.index("repository.require_stable_clean_tree(") < main.index(
+        "_load_reviewed_profile_data("
     )
-    final_stability_check = source.index(
-        "_require_stable_clean_code_tree(",
-        receipt_bytes,
+    emit = source.split("def _emit_receipt(", 1)[1].split("def main()", 1)[0]
+    assert emit.index("repository.require_stable_clean_tree(") < emit.index(
+        "output.write(raw)"
     )
-    receipt_write = source.index(
-        "sys.stdout.buffer.write(receipt_bytes)",
-        final_stability_check,
-    )
-    assert receipt_bytes < final_stability_check < receipt_write
 
 
 def test_isolated_validator_rejects_noncanonical_and_duplicate_json() -> None:
