@@ -54,7 +54,9 @@ Git commit and tree and records that staged/tracked checkout state was clean and
 that all Newsroom imports came from a cache-free exact-commit materialization
 rather than checkout or ignored bytecode. The materialization producer is the
 fixed root-owned `/usr/bin/git` binary, never caller `PATH`; its identity is
-rechecked around every operation, and archive bytes are streamed through a hard
+rechecked around every operation. Replacement objects are disabled through both
+the global Git option and environment, repository fsmonitor is disabled through
+an exact command-line override, and archive bytes are streamed through a hard
 64 MiB pre-write cap that terminates the producer on overflow. The receipt's
 `code_tree_sha` must equal the Epoch's frozen `code_tree_sha`; a missing, dirty,
 untrusted-producer, unbounded, non-materialized, or mismatched code tree is

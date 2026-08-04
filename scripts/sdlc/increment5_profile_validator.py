@@ -191,13 +191,22 @@ class _TrustedGitProducer:
 
     def command(self, *arguments: str) -> list[str]:
         self.require_unchanged()
-        return [str(self.path), "-C", str(_REPOSITORY_ROOT), *arguments]
+        return [
+            str(self.path),
+            "-C",
+            str(_REPOSITORY_ROOT),
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
+            *arguments,
+        ]
 
 
 def _git_environment() -> dict[str, str]:
     return {
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_PAGER": "cat",
         "GIT_TERMINAL_PROMPT": "0",

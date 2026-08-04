@@ -31,8 +31,11 @@ It then verifies the supplied Git commit and tree and rejects staged or tracked
 differences before importing any Newsroom module. It ignores caller
 `PATH` and accepts only the fixed `/usr/bin/git` producer after checking that it
 and its parent directories are non-symlink, root-owned, and not group- or
-other-writable; the binary identity is rechecked around every operation.
-Archive stdout and stderr are streamed concurrently, the producer is terminated
+other-writable; the binary identity is rechecked around every operation. Every
+Git invocation disables replacement objects and overrides
+`core.fsmonitor=false`, so local replacement refs cannot alter archive bytes and
+an fsmonitor hook cannot conceal tracked checkout drift. Archive stdout and
+stderr are streamed concurrently, the producer is terminated
 before any byte crossing the 64 MiB cap can reach disk, and only that bounded
 cache-free exact-commit materialization supplies validation imports. Ignored
 bytecode, untracked runtime artefacts and checkout paths are not used. Receipt

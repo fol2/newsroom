@@ -183,7 +183,11 @@ rejects staged or tracked differences. Git is never selected from caller
 `PATH`: the producer is fixed to `/usr/bin/git`, and `/usr`, `/usr/bin`, and the
 binary must be non-symlink, root-owned, and not group- or other-writable. The
 binary's device, inode, mode, ownership, size, modification time, and SHA-256
-identity are captured and rechecked before and after every operation.
+identity are captured and rechecked before and after every operation. Every Git
+command also uses `--no-replace-objects`, `GIT_NO_REPLACE_OBJECTS=1`, and the
+command-line override `core.fsmonitor=false`; repository replacement refs cannot
+alter resolved or archived objects, and a repository-local fsmonitor cannot hide
+tracked checkout changes.
 
 Ignored and untracked runtime artefacts are never used as code. Archive stdout
 and stderr are consumed concurrently through the validator; no stdout chunk

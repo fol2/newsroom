@@ -484,6 +484,142 @@ def test_path_selected_fake_git_cannot_supply_the_archive(tmp_path: Path) -> Non
     assert receipt["validation_code_origin"] == "CACHE_FREE_EXACT_GIT_ARCHIVE"
 
 
+
+
+def test_git_replace_ref_cannot_substitute_materialized_source(
+    tmp_path: Path,
+) -> None:
+    clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
+    marker = tmp_path / "replacement-profile-executed"
+    replacement_source = (
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n"
+        "raise RuntimeError('replacement profile blob executed')\n"
+    ).encode("utf-8")
+    original_blob = _git_text(
+        clone,
+        "rev-parse",
+        "HEAD:newsroom/increment5/profiles.py",
+    )
+    hashed = subprocess.run(
+        ["git", "-C", str(clone), "hash-object", "-w", "--stdin"],
+        input=replacement_source,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=20,
+    )
+    assert hashed.returncode == 0, hashed.stderr.decode("utf-8")
+    replacement_blob = hashed.stdout.decode("ascii", errors="strict").strip()
+    replaced = subprocess.run(
+        ["git", "-C", str(clone), "replace", original_blob, replacement_blob],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=20,
+    )
+    assert replaced.returncode == 0, replaced.stderr.decode("utf-8")
+    assert _code_identity(clone) == (clone_commit, clone_tree)
+    assert _git_text(
+        clone,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=no",
+    ) == ""
+
+    raw_archive = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(clone),
+            "archive",
+            "--format=tar",
+            clone_commit,
+            "--",
+            "newsroom/increment5/profiles.py",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=20,
+    )
+    assert raw_archive.returncode == 0, raw_archive.stderr.decode("utf-8")
+    assert b"replacement profile blob executed" in raw_archive.stdout
+
+    completed = _run_isolated_bytes(
+        canonical_json_bytes(_fixture_manifest()),
+        root=clone,
+        expected_commit=clone_commit,
+        expected_tree=clone_tree,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    assert not marker.exists()
+    receipt = json.loads(completed.stdout.decode("utf-8"))
+    assert receipt["code_commit_sha"] == clone_commit
+    assert receipt["code_tree_sha"] == clone_tree
+    assert receipt["validation_code_origin"] == "CACHE_FREE_EXACT_GIT_ARCHIVE"
+
+
+def test_fsmonitor_hook_cannot_hide_tracked_checkout_change(
+    tmp_path: Path,
+) -> None:
+    clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
+    hook = tmp_path / "lying-fsmonitor-v2"
+    hook.write_bytes(b"#!/bin/sh\nprintf 'unchanged-token\\000'\n")
+    hook.chmod(0o755)
+    for name, value in (
+        ("core.fsmonitor", str(hook)),
+        ("core.fsmonitorHookVersion", "2"),
+    ):
+        configured = subprocess.run(
+            ["git", "-C", str(clone), "config", name, value],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=20,
+        )
+        assert configured.returncode == 0, configured.stderr.decode("utf-8")
+
+    assert _git_text(
+        clone,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=no",
+    ) == ""
+    profile_source = clone / "newsroom/increment5/profiles.py"
+    profile_source.write_text(
+        profile_source.read_text(encoding="utf-8")
+        + "\nraise RuntimeError('fsmonitor-hidden change executed')\n",
+        encoding="utf-8",
+    )
+    assert _git_text(
+        clone,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=no",
+    ) == ""
+    assert _git_text(
+        clone,
+        "-c",
+        "core.fsmonitor=false",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=no",
+    ) != ""
+
+    completed = _run_isolated_bytes(
+        canonical_json_bytes(_fixture_manifest()),
+        root=clone,
+        expected_commit=clone_commit,
+        expected_tree=clone_tree,
+    )
+    assert completed.returncode == 2
+    assert completed.stderr == (
+        b"increment5 profile validation failed: "
+        b"tracked repository checkout differs from HEAD\n"
+    )
+    assert completed.stdout == b""
+
 def test_archive_limit_kills_the_producer_before_overflow_reaches_disk(
     tmp_path: Path,
 ) -> None:
@@ -575,6 +711,9 @@ def test_validator_materializes_exact_tree_before_repository_import() -> None:
     assert '"--untracked-files=no"' in source
     assert '"--untracked-files=all"' not in source
     assert '_TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")' in source
+    assert '"--no-replace-objects"' in source
+    assert '"GIT_NO_REPLACE_OBJECTS": "1"' in source
+    assert '"core.fsmonitor=false"' in source
     assert "shutil.which" not in source
     assert "selectors.DefaultSelector()" in source
     assert "stdout=subprocess.PIPE" in source
