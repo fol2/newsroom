@@ -853,7 +853,7 @@ class _TrustedRepositoryView:
                     raise ProfileInputError(
                         "tracked repository checkout differs from HEAD"
                     )
-                executable = bool(stat.S_IMODE(before.st_mode) & 0o111)
+                executable = bool(stat.S_IMODE(before.st_mode) & stat.S_IXUSR)
                 if executable != (mode == "100755"):
                     raise ProfileInputError(
                         "tracked repository checkout differs from HEAD"

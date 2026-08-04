@@ -1078,16 +1078,34 @@ original = repository_type._require_worktree_matches_tree
 def mutate_repository_metadata(self, expected):
     original(self, expected)
     if sys.argv[5] == "HEAD":
-        parent = subprocess.run(
-            ["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD^"],
+        # Create a different commit identity over the same exact tree. This
+        # tests the HEAD recheck without assuming that a shallow checkout
+        # contains any parent commit object.
+        newline = bytes((10,))
+        commit_bytes = newline.join(
+            (
+                f"tree {sys.argv[4]}".encode("ascii"),
+                b"author Snapshot Race <snapshot@example.invalid> 0 +0000",
+                b"committer Snapshot Race <snapshot@example.invalid> 0 +0000",
+                b"",
+                b"snapshot race",
+                b"",
+            )
+        )
+        alternate = subprocess.run(
+            [
+                "/usr/bin/git", "-C", str(root), "hash-object",
+                "-t", "commit", "-w", "--stdin",
+            ],
+            input=commit_bytes,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
-        if parent.returncode != 0:
-            raise SystemExit(parent.stderr.decode("utf-8"))
+        if alternate.returncode != 0:
+            raise SystemExit(alternate.stderr.decode("utf-8"))
         changed = subprocess.run(
             [
                 "/usr/bin/git", "-C", str(root), "update-ref", "HEAD",
-                parent.stdout.decode("ascii", errors="strict").strip(),
+                alternate.stdout.decode("ascii", errors="strict").strip(),
             ],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
@@ -1125,6 +1143,52 @@ else:
             clone_tree,
             race,
             expected_error,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        cwd=clone,
+        env={"LC_ALL": "C", "PYTHONUTF8": "1"},
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode semantics required")
+def test_worktree_mode_matching_uses_owner_execute_bit(tmp_path: Path) -> None:
+    clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
+    validator = clone / _VALIDATOR_RELATIVE_PATH
+    validator.chmod(0o650)
+    probe = """
+import sys
+from pathlib import Path
+sys.argv[0] = "-"
+source = Path(sys.argv[1]).read_bytes()
+namespace = {"__name__": "validator-owner-execute-probe", "__file__": sys.argv[1]}
+exec(compile(source, "-", "exec"), namespace)
+root = Path(sys.argv[2])
+view = namespace["_TrustedRepositoryView"](
+    root, root / ".git", root / ".git/index"
+)
+try:
+    view.require_stable_clean_tree(sys.argv[3], sys.argv[4])
+except namespace["ProfileInputError"] as exc:
+    if str(exc) != "tracked repository checkout differs from HEAD":
+        raise
+else:
+    raise SystemExit("group-only execute bit escaped Git mode verification")
+"""
+    completed = subprocess.run(
+        [
+            str(_TRUSTED_PYTHON),
+            "-I",
+            "-S",
+            "-c",
+            probe,
+            str(validator),
+            str(clone),
+            clone_commit,
+            clone_tree,
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
