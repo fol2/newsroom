@@ -1,0 +1,92 @@
+name: Increment 5A shallow-independent race regression
+
+on:
+  pull_request:
+    branches:
+      - staging/increment-5a-final-shallow-ci-regression-20260804
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout support base
+        uses: actions/checkout@v4
+        with:
+          ref: staging/increment-5a-final-shallow-ci-regression-20260804
+          fetch-depth: 1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Materialize shallow-independent regression
+        run: python scripts/sdlc/_staging_increment5_shallow_ci_regression_v1.py
+
+      - name: Verify exact generated path set
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          expected = {
+              "increment5a-shallow-ci-regression-manifest.json",
+              "newsroom/tests/test_increment5a_profile_semantic_envelope.py",
+          }
+          changed = set(subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines())
+          untracked = set(subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], text=True).splitlines())
+          actual = changed | untracked
+          if actual != expected:
+              raise SystemExit(f"generated paths differ: missing={sorted(expected-actual)}, extra={sorted(actual-expected)}")
+          for path in actual:
+              if not Path(path).is_file():
+                  raise SystemExit(f"generated path is not a regular file: {path}")
+          PY
+
+      - name: Commit clean generated candidate
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            increment5a-shallow-ci-regression-manifest.json \
+            newsroom/tests/test_increment5a_profile_semantic_envelope.py
+          git commit -m "build(increment5): verify shallow-independent race [skip ci]"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Verify locked environment
+        run: |
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Focused Increment 5A verification
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_increment5a_contract.py \
+            newsroom/tests/test_increment5a_evaluation_plan.py \
+            newsroom/tests/test_increment5a_package_neutrality.py \
+            newsroom/tests/test_increment5a_profiles.py \
+            newsroom/tests/test_increment5a_profile_semantic_envelope.py \
+            newsroom/tests/test_increment5a_traceability.py
+
+      - name: Full deterministic verification
+        run: uv run python -m pytest -q
+
+      - name: Source integrity
+        run: |
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          git diff --check HEAD^ HEAD
+          ! grep -F '["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD^"]' newsroom/tests/test_increment5a_profile_semantic_envelope.py
+          grep -F '"hash-object",' newsroom/tests/test_increment5a_profile_semantic_envelope.py
+          grep -F 'alternate_commit_uses_expected_tree' increment5a-shallow-ci-regression-manifest.json
+          cat increment5a-shallow-ci-regression-manifest.json
+
+      - name: Publish verified materialization
+        run: git push origin HEAD:staging/increment-5a-final-shallow-ci-regression-20260804
