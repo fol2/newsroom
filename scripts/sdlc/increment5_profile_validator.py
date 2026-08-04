@@ -2,11 +2,12 @@
 """Validate one canonical Increment 5 profile from an exact Git blob.
 
 The signed outer launcher—not this Python process—authenticates and streams the
-validator bytes from the expected commit before Python executes them. This
-stdlib-only inner process then binds the exact repository, validator blob,
-manifest bytes, runtime, and completion-time state into a non-authoritative
-receipt. The receipt cannot authenticate its own executed source and grants no
-authority without the separately signed outer-launch evidence.
+validator bytes from the expected commit before Python executes them. This stdlib-only inner process then binds the exact repository, validator
+blob, manifest bytes, runtime, and a bounded prewrite checkout snapshot into a
+non-authoritative receipt. It does not attest mutable checkout, index, or HEAD
+state at completion or after handoff. The receipt cannot authenticate its own
+executed source and grants no authority without the separately signed
+outer-launch evidence.
 """
 
 from __future__ import annotations
@@ -619,17 +620,27 @@ class _TrustedRepositoryView:
         finally:
             self.git.require_unchanged()
 
-    def require_stable_clean_tree(self, commit: str, tree: str) -> None:
+    def _require_commit_tree_identity(self, commit: str, tree: str) -> None:
         actual_commit = _git_sha(self, "HEAD^{commit}", "code commit SHA")
         actual_tree = _git_sha(self, "HEAD^{tree}", "code tree SHA")
         if actual_commit != commit:
             raise ProfileInputError("code commit SHA differs from expected identity")
         if actual_tree != tree:
             raise ProfileInputError("code tree SHA differs from expected identity")
+
+    def require_stable_clean_tree(self, commit: str, tree: str) -> None:
+        self._require_commit_tree_identity(commit, tree)
         self._reject_hidden_index_flags()
         expected = self._read_expected_tree(commit)
         self._require_index_matches_tree(expected)
         self._require_worktree_matches_tree(expected)
+
+        # The worktree traversal is intentionally bounded but can be long. A
+        # concurrent HEAD or index change during that traversal must not leave
+        # the prewrite snapshot associated with stale repository metadata.
+        self._require_commit_tree_identity(commit, tree)
+        self._reject_hidden_index_flags()
+        self._require_index_matches_tree(expected)
 
     @staticmethod
     def _parse_tree_record(

@@ -985,6 +985,18 @@ def test_validator_source_has_closed_outer_launch_and_repository_boundaries() ->
     assert '"GIT_NO_REPLACE_OBJECTS": "1"' in source
     assert "_reject_hidden_index_flags" in source
     assert "require_validator_blob" in source
+    assert "bounded prewrite checkout snapshot" in source
+    assert "completion-time state into a non-authoritative" not in source
+    stable = source.split(
+        "def require_stable_clean_tree(self, commit: str, tree: str) -> None:",
+        1,
+    )[1].split("@staticmethod", 1)[0]
+    assert stable.count("self._require_commit_tree_identity(commit, tree)") == 2
+    assert stable.count("self._reject_hidden_index_flags()") == 2
+    assert stable.count("self._require_index_matches_tree(expected)") == 2
+    assert stable.index("self._require_worktree_matches_tree(expected)") < stable.rindex(
+        "self._require_commit_tree_identity(commit, tree)"
+    )
     assert '"executed_source_identity_attested": False' in source
     assert '"outer_signed_workflow_binding_required": True' in source
     assert '"validation_code_delivery": "EXACT_COMMIT_GIT_BLOB_STDIN"' in source
@@ -1038,3 +1050,87 @@ def test_reviewed_documents_bind_receipt_v7_snapshot_semantics() -> None:
     assert "completion-time drift emits no receipt" not in decision
     assert "Drift detected during that final prewrite" in decision
     assert "after output handoff are explicitly not attested" in decision
+
+
+@pytest.mark.parametrize(
+    ("race", "expected_error"),
+    (
+        ("HEAD", "code commit SHA differs from expected identity"),
+        ("INDEX", "tracked repository index differs from HEAD"),
+    ),
+)
+def test_prewrite_snapshot_rechecks_head_and_index_after_worktree_hashing(
+    tmp_path: Path,
+    race: str,
+    expected_error: str,
+) -> None:
+    clone, clone_commit, clone_tree = _clone_exact_head(tmp_path)
+    probe = """
+import subprocess, sys
+from pathlib import Path
+sys.argv[0] = "-"
+source = Path(sys.argv[1]).read_bytes()
+namespace = {"__name__": "validator-snapshot-race-probe", "__file__": sys.argv[1]}
+exec(compile(source, "-", "exec"), namespace)
+root = Path(sys.argv[2])
+repository_type = namespace["_TrustedRepositoryView"]
+original = repository_type._require_worktree_matches_tree
+def mutate_repository_metadata(self, expected):
+    original(self, expected)
+    if sys.argv[5] == "HEAD":
+        parent = subprocess.run(
+            ["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD^"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        if parent.returncode != 0:
+            raise SystemExit(parent.stderr.decode("utf-8"))
+        changed = subprocess.run(
+            [
+                "/usr/bin/git", "-C", str(root), "update-ref", "HEAD",
+                parent.stdout.decode("ascii", errors="strict").strip(),
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+    else:
+        changed = subprocess.run(
+            [
+                "/usr/bin/git", "-C", str(root), "update-index",
+                "--force-remove", "--",
+                "scripts/sdlc/increment5_profile_validator.py",
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+    if changed.returncode != 0:
+        raise SystemExit(changed.stderr.decode("utf-8"))
+repository_type._require_worktree_matches_tree = mutate_repository_metadata
+view = repository_type(root, root / ".git", root / ".git/index")
+try:
+    view.require_stable_clean_tree(sys.argv[3], sys.argv[4])
+except namespace["ProfileInputError"] as exc:
+    if str(exc) != sys.argv[6]:
+        raise
+else:
+    raise SystemExit("repository metadata race escaped the prewrite snapshot")
+"""
+    completed = subprocess.run(
+        [
+            str(_TRUSTED_PYTHON),
+            "-I",
+            "-S",
+            "-c",
+            probe,
+            str(clone / _VALIDATOR_RELATIVE_PATH),
+            str(clone),
+            clone_commit,
+            clone_tree,
+            race,
+            expected_error,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        cwd=clone,
+        env={"LC_ALL": "C", "PYTHONUTF8": "1"},
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
