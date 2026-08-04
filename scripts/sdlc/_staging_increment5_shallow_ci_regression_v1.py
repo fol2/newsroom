@@ -13,66 +13,49 @@ TESTS = ROOT / "newsroom/tests/test_increment5a_profile_semantic_envelope.py"
 MANIFEST = ROOT / "increment5a-shallow-ci-regression-manifest.json"
 
 
-def replace_once(text: str, old: str, new: str, label: str) -> str:
-    count = text.count(old)
-    if count != 1:
-        raise RuntimeError(f"{label}: expected one match, found {count}")
-    return text.replace(old, new, 1)
-
-
 tests = TESTS.read_text(encoding="utf-8")
-tests = replace_once(
-    tests,
-    '''        if sys.argv[5] == "HEAD":
-            parent = subprocess.run(
-                ["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD^"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-            )
-            if parent.returncode != 0:
-                raise SystemExit(parent.stderr.decode("utf-8"))
-            changed = subprocess.run(
-                [
-                    "/usr/bin/git", "-C", str(root), "update-ref", "HEAD",
-                    parent.stdout.decode("ascii", errors="strict").strip(),
-                ],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-            )
-''',
-    '''        if sys.argv[5] == "HEAD":
-            # Create a different commit identity over the same exact tree. This
-            # tests the HEAD recheck without assuming that a shallow checkout
-            # contains any parent commit object.
-            commit_bytes = (
-                f"tree {sys.argv[4]}\\n"
-                "author Snapshot Race <snapshot@example.invalid> 0 +0000\\n"
-                "committer Snapshot Race <snapshot@example.invalid> 0 +0000\\n"
-                "\\n"
-                "snapshot race\\n"
-            ).encode("ascii")
-            alternate = subprocess.run(
-                [
-                    "/usr/bin/git", "-C", str(root), "hash-object",
-                    "-t", "commit", "-w", "--stdin",
-                ],
-                input=commit_bytes,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-            )
-            if alternate.returncode != 0:
-                raise SystemExit(alternate.stderr.decode("utf-8"))
-            changed = subprocess.run(
-                [
-                    "/usr/bin/git", "-C", str(root), "update-ref", "HEAD",
-                    alternate.stdout.decode("ascii", errors="strict").strip(),
-                ],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-            )
-''',
-    "shallow-independent HEAD race",
-)
+start_marker = '    if sys.argv[5] == "HEAD":\n'
+end_marker = '    else:\n        changed = subprocess.run(\n'
+if tests.count(start_marker) != 1:
+    raise RuntimeError(
+        f"HEAD race start marker differs: found {tests.count(start_marker)}"
+    )
+start = tests.index(start_marker)
+end = tests.index(end_marker, start)
+new_head = '''    if sys.argv[5] == "HEAD":
+        # Create a different commit identity over the same exact tree. This
+        # tests the HEAD recheck without assuming that a shallow checkout
+        # contains any parent commit object.
+        commit_bytes = (
+            f"tree {sys.argv[4]}\\n"
+            "author Snapshot Race <snapshot@example.invalid> 0 +0000\\n"
+            "committer Snapshot Race <snapshot@example.invalid> 0 +0000\\n"
+            "\\n"
+            "snapshot race\\n"
+        ).encode("ascii")
+        alternate = subprocess.run(
+            [
+                "/usr/bin/git", "-C", str(root), "hash-object",
+                "-t", "commit", "-w", "--stdin",
+            ],
+            input=commit_bytes,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        if alternate.returncode != 0:
+            raise SystemExit(alternate.stderr.decode("utf-8"))
+        changed = subprocess.run(
+            [
+                "/usr/bin/git", "-C", str(root), "update-ref", "HEAD",
+                alternate.stdout.decode("ascii", errors="strict").strip(),
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+'''
+tests = tests[:start] + new_head + tests[end:]
 
 if '["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD^"]' in tests:
     raise RuntimeError("history-dependent HEAD race remains")
-if '"hash-object",\n                    "-t", "commit", "-w", "--stdin"' not in tests:
+if '"hash-object",\n                "-t", "commit", "-w", "--stdin"' not in tests:
     raise RuntimeError("synthetic same-tree commit race is absent")
 
 TESTS.write_text(tests, encoding="utf-8")
