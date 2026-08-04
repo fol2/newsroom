@@ -35,7 +35,7 @@ jobs:
 
       - name: Materialize candidate
         run: |
-          python scripts/sdlc/_staging_increment5_no_site_composer_v3.py
+          python scripts/sdlc/_staging_increment5_no_site_composer_v4.py
 
       - name: Verify exact generated path set
         run: |
@@ -121,6 +121,7 @@ jobs:
           git diff --check HEAD^ HEAD
           grep -F 'if not sys.flags.isolated or not sys.flags.no_site:' scripts/sdlc/increment5_profile_validator.py
           grep -F '_TRUSTED_PYTHON_EXECUTABLE = Path("/usr/bin/python3")' scripts/sdlc/increment5_profile_validator.py
+          grep -F 'POSIX symlink permission bits are not access controls' scripts/sdlc/increment5_profile_validator.py
           grep -F 'ROOT_OWNED_SYSTEM_PYTHON_NO_SITE' scripts/sdlc/increment5_profile_validator.py
           grep -F 'GRAG-035' newsroom/increment5/_traceability_model.py
           grep -F 'TRI-022' newsroom/increment5/_traceability_model.py
