@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Finalize generated stdlib validator diagnostics and prose.
+"""Finalize generated stdlib validator diagnostics, tests, and prose.
 
 Disposable support helper; never merge into PR #255 or main.
 """
@@ -11,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = ROOT / "scripts/sdlc/increment5_profile_validator.py"
+TESTS = ROOT / "newsroom/tests/test_increment5a_profile_semantic_envelope.py"
 EVALUATION = ROOT / "docs/evaluation/2026-08-02-increment-5-retrieval-evaluation-plan-v1.md"
 
 
@@ -50,6 +51,27 @@ def _parse_input_manifest(raw: bytes) -> dict[str, Any]:
         "main input parser",
     )
     VALIDATOR.write_text(text, encoding="utf-8")
+
+    tests = TESTS.read_text(encoding="utf-8")
+    tests = replace_once(
+        tests,
+        '            assert b"qualification_eligible" in completed.stderr\n',
+        '            assert b"profile qualification eligibility differs" in completed.stderr\n',
+        "eligibility diagnostic assertion",
+    )
+    definition = (
+        '_CONTRACT_RELATIVE_PATH = "newsroom/increment5/data/'
+        'increment5a_retrieval_contract_v1.json"\n'
+    )
+    if definition not in tests:
+        tests = replace_once(
+            tests,
+            "_VALIDATOR_SCRIPT = _REPOSITORY_ROOT / _VALIDATOR_RELATIVE_PATH\n",
+            "_VALIDATOR_SCRIPT = _REPOSITORY_ROOT / _VALIDATOR_RELATIVE_PATH\n"
+            + definition,
+            "contract path constant",
+        )
+    TESTS.write_text(tests, encoding="utf-8")
 
     evaluation = EVALUATION.read_text(encoding="utf-8")
     duplicate = "Superseded Epoch Runs remain retained.Superseded Epoch Runs remain retained."
