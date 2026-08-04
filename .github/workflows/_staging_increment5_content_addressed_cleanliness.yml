@@ -34,7 +34,7 @@ jobs:
           python -m pip install uv
 
       - name: Materialize truthful snapshot-scoped receipt
-        run: python scripts/sdlc/_staging_increment5_snapshot_receipt_v1.py
+        run: python scripts/sdlc/_staging_increment5_snapshot_receipt_v2.py
 
       - name: Verify generated path set
         run: |
