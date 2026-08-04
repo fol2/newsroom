@@ -35,7 +35,7 @@ jobs:
 
       - name: Materialize candidate
         run: |
-          python scripts/sdlc/_staging_increment5_no_site_composer.py
+          python scripts/sdlc/_staging_increment5_no_site_composer_v2.py
 
       - name: Verify exact generated path set
         run: |
