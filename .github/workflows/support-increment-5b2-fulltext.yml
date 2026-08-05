@@ -114,11 +114,7 @@ jobs:
         run: |
           set -euo pipefail
           git rm \
-            scripts/support/5b2_payload.00 \
-            scripts/support/5b2_payload.01 \
-            scripts/support/5b2_payload.02 \
-            scripts/support/5b2_payload.03 \
-            scripts/support/5b2_payload.04 \
+            scripts/support/5b2_payload.* \
             scripts/support/materialize_5b2.py \
             .github/workflows/support-increment-5b2-fulltext.yml
           git diff --cached --check
