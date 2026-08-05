@@ -669,6 +669,60 @@ def test_caller_lucene_syntax_is_only_a_bound_escaped_value(
     }
 
 
+def test_early_graph_timeout_is_journaled_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    scenario = default_scenario()
+    scenario.failure_on = "query"
+    driver, _factory, retriever = system(
+        tmp_path,
+        scenario=scenario,
+        clock=SequenceClock((0, 0, 0, 0, 0)),
+    )
+    current_request = request(idempotency_key="early-neo4j-timeout")
+
+    first = retriever.retrieve(current_request)
+    receipt = first.receipt
+
+    assert first.replayed is False
+    assert receipt.outcome is BranchOutcome.UNAVAILABLE
+    assert receipt.reason_code == "NEO4J_READ_UNAVAILABLE"
+    assert receipt.elapsed_ms == 0
+    assert receipt.authority_read_count == 1
+    assert receipt.neo4j_read_count == 2
+    assert receipt.normalized_query is not None
+    assert not receipt.hits
+    assert not receipt.exclusions
+
+    before_calls = list(driver.calls)
+    replay = retriever.retrieve(current_request)
+    assert replay.replayed is True
+    assert replay.receipt.canonical_bytes == receipt.canonical_bytes
+    assert driver.calls == before_calls
+
+
+def test_exact_deadline_before_graph_read_is_query_timeout(
+    tmp_path: Path,
+) -> None:
+    driver, _factory, retriever = system(
+        tmp_path,
+        clock=SequenceClock((0, 5_000_000_000, 5_000_000_000)),
+    )
+    receipt = retriever.retrieve(
+        request(idempotency_key="exact-deadline-before-read")
+    ).receipt
+
+    assert receipt.outcome is BranchOutcome.INCOMPLETE
+    assert receipt.reason_code == "QUERY_TIMEOUT"
+    assert receipt.elapsed_ms == 5_000
+    assert receipt.authority_read_count == 1
+    assert receipt.neo4j_read_count == 0
+    assert not receipt.hits
+    assert not receipt.exclusions
+    assert driver.calls == []
+    assert driver.read_requests == []
+
+
 def test_one_nanosecond_overrun_is_an_explicit_timeout(
     tmp_path: Path,
 ) -> None:

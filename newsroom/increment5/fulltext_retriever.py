@@ -256,11 +256,16 @@ class FullTextRetriever:
             neo4j_reads += query_result.read_count
             rows = list(query_result.rows)
         except Neo4jFullTextReadTimeout:
+            # A port timeout can arrive before the repository-owned cumulative
+            # deadline.  The receipt builder independently promotes elapsed
+            # work at or beyond the hard bound to QUERY_TIMEOUT; an earlier
+            # transport or server timeout is unavailable rather than a false
+            # claim that 5,000 ms elapsed.
             return self._receipt(
                 request,
                 start_ns=start_ns,
-                outcome=BranchOutcome.INCOMPLETE,
-                reason_code="QUERY_TIMEOUT",
+                outcome=BranchOutcome.UNAVAILABLE,
+                reason_code="NEO4J_READ_UNAVAILABLE",
                 authority_read_count=1,
                 neo4j_read_count=neo4j_reads,
                 snapshot=snapshot,
@@ -620,7 +625,7 @@ class FullTextRetriever:
                 "full-text monotonic clock moved backwards"
             )
         elapsed_ns = completed_ns - start_ns
-        timed_out = elapsed_ns > BRANCH_TIMEOUT_MS * 1_000_000
+        timed_out = elapsed_ns >= BRANCH_TIMEOUT_MS * 1_000_000
         if timed_out:
             outcome = BranchOutcome.INCOMPLETE
             reason_code = "QUERY_TIMEOUT"
