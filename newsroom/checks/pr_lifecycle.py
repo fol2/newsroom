@@ -44,6 +44,10 @@ _METADATA_LINE = re.compile(
 _ATOM = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _PR_REFERENCE = re.compile(r"^#([1-9][0-9]*)$")
 _REF_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+_REPOSITORY = re.compile(
+    r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
+)
+HOUSEKEEPING_LABEL = "infra"
 _MAX_DISPOSABLE_PER_CANONICAL = 2
 _STALE_AFTER = timedelta(days=7)
 
@@ -73,6 +77,8 @@ class OpenPullRequest:
     draft: bool
     head_ref: str
     created_at: datetime
+    labels: frozenset[str] = frozenset()
+    head_repository: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.number, bool) or not isinstance(self.number, int) or self.number <= 0:
@@ -84,6 +90,13 @@ class OpenPullRequest:
         _validate_ref(self.head_ref, field="head_ref")
         if not isinstance(self.created_at, datetime) or self.created_at.tzinfo is None:
             raise PrLifecycleError("pull-request creation time must be timezone-aware")
+        if not isinstance(self.labels, frozenset) or any(
+            not isinstance(label, str) or not label or label != label.strip()
+            for label in self.labels
+        ):
+            raise PrLifecycleError("pull-request labels must be immutable text")
+        if self.head_repository is not None:
+            _validate_repository(self.head_repository, field="head_repository")
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +272,7 @@ def plan_housekeeping(
     *,
     merged_canonical_prs: frozenset[int] = frozenset(),
     existing_checkpoint_refs: frozenset[str] = frozenset(),
+    repository_full_name: str | None = None,
     now: datetime | None = None,
 ) -> HousekeepingPlan:
     """Build a deterministic, fail-closed plan for open PRs.
@@ -279,6 +293,11 @@ def plan_housekeeping(
     current = now or datetime.now(timezone.utc)
     if not isinstance(current, datetime) or current.tzinfo is None:
         raise PrLifecycleError("housekeeping time must be timezone-aware")
+    if repository_full_name is not None:
+        _validate_repository(
+            repository_full_name,
+            field="repository_full_name",
+        )
 
     prs = tuple(sorted(open_pull_requests, key=lambda item: item.number))
     if len({item.number for item in prs}) != len(prs):
@@ -365,6 +384,12 @@ def plan_housekeeping(
         if not lifecycle.is_disposable:
             continue
         assert lifecycle.canonical_pr is not None
+        if HOUSEKEEPING_LABEL not in pr.labels:
+            warnings.append(
+                f"#{pr.number} lacks required housekeeping label "
+                f"{HOUSEKEEPING_LABEL}"
+            )
+            continue
         close_reason: str | None = None
         if lifecycle.close_when is CloseWhen.CHECKPOINTED:
             if (
@@ -394,6 +419,13 @@ def plan_housekeeping(
                 raise PrLifecycleError(
                     f"#{pr.number} branch deletion lacks a verified checkpoint"
                 )
+            if (
+                repository_full_name is None
+                or pr.head_repository != repository_full_name
+            ):
+                raise PrLifecycleError(
+                    f"#{pr.number} branch deletion cannot target an external repository"
+                )
             delete_branch = pr.head_ref
         actions.append(
             CloseAction(
@@ -410,6 +442,13 @@ def plan_housekeeping(
 
 
 def _validate_lifecycle_shape(lifecycle: PrLifecycle) -> None:
+    if (
+        lifecycle.checkpoint_ref is not None
+        and not lifecycle.checkpoint_ref.startswith("checkpoint/")
+    ):
+        raise PrLifecycleError(
+            "checkpoint ref must use the dedicated checkpoint/ namespace"
+        )
     if lifecycle.kind is LifecycleKind.CANONICAL:
         if lifecycle.canonical_pr is not None:
             raise PrLifecycleError("canonical lifecycle must reference self")
@@ -434,6 +473,12 @@ def _validate_lifecycle_shape(lifecycle: PrLifecycle) -> None:
         raise PrLifecycleError("branch deletion requires checkpoint ref")
 
 
+def _validate_repository(value: str, *, field: str) -> str:
+    if not isinstance(value, str) or _REPOSITORY.fullmatch(value) is None:
+        raise PrLifecycleError(f"{field} must be owner/name")
+    return value
+
+
 def _validate_ref(value: str, *, field: str) -> str:
     if (
         not isinstance(value, str)
@@ -453,6 +498,7 @@ __all__ = [
     "BranchRetention",
     "CloseAction",
     "CloseWhen",
+    "HOUSEKEEPING_LABEL",
     "HousekeepingPlan",
     "LifecycleKind",
     "OpenPullRequest",

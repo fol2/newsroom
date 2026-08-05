@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -14,14 +15,29 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from newsroom.checks.pr_lifecycle import (
-    HousekeepingPlan,
-    OpenPullRequest,
-    PrLifecycleError,
-    parse_pr_lifecycle,
-    plan_housekeeping,
-    validate_pull_request_event,
+_CONTRACT_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "newsroom"
+    / "checks"
+    / "pr_lifecycle.py"
 )
+_CONTRACT_SPEC = importlib.util.spec_from_file_location(
+    "newsroom_pr_lifecycle_contract",
+    _CONTRACT_PATH,
+)
+if _CONTRACT_SPEC is None or _CONTRACT_SPEC.loader is None:
+    raise RuntimeError("cannot load exact PR lifecycle contract")
+_CONTRACT = importlib.util.module_from_spec(_CONTRACT_SPEC)
+sys.modules[_CONTRACT_SPEC.name] = _CONTRACT
+_CONTRACT_SPEC.loader.exec_module(_CONTRACT)
+
+HOUSEKEEPING_LABEL = _CONTRACT.HOUSEKEEPING_LABEL
+HousekeepingPlan = _CONTRACT.HousekeepingPlan
+OpenPullRequest = _CONTRACT.OpenPullRequest
+PrLifecycleError = _CONTRACT.PrLifecycleError
+parse_pr_lifecycle = _CONTRACT.parse_pr_lifecycle
+plan_housekeeping = _CONTRACT.plan_housekeeping
+validate_pull_request_event = _CONTRACT.validate_pull_request_event
 
 
 _API = "https://api.github.com"
@@ -114,6 +130,12 @@ class GithubClient:
             if page > 20:
                 raise GithubApiError("open pull-request pagination is unbounded")
 
+    def get_pull_request(self, number: int) -> dict[str, object]:
+        value = self.request("GET", f"/pulls/{number}")
+        if not isinstance(value, dict):
+            raise GithubApiError(f"pull request #{number} response is malformed")
+        return value
+
     def pull_request_is_merged(self, number: int) -> bool:
         value = self.request("GET", f"/pulls/{number}")
         if not isinstance(value, dict):
@@ -179,9 +201,13 @@ def validate_event(path: Path) -> int:
 def inventory(*, apply: bool) -> int:
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     token = os.environ.get("GITHUB_TOKEN", "")
-    if apply and os.environ.get("PR_HOUSEKEEPING_APPLY") != "true":
+    if (
+        apply
+        and os.environ.get("PR_HOUSEKEEPING_APPLY")
+        != "CLOSE_ELIGIBLE_DISPOSABLE_PRS"
+    ):
         raise PrLifecycleError(
-            "apply mode requires PR_HOUSEKEEPING_APPLY=true"
+            "apply mode requires the exact housekeeping confirmation"
         )
     client = GithubClient(repository=repository, token=token)
     raw_prs = client.list_open_pull_requests()
@@ -216,6 +242,7 @@ def inventory(*, apply: bool) -> int:
         open_prs,
         merged_canonical_prs=merged_canonical,
         existing_checkpoint_refs=existing_checkpoints,
+        repository_full_name=repository,
         now=datetime.now(timezone.utc),
     )
 
@@ -245,6 +272,20 @@ def _open_pr_from_json(value: dict[str, object]) -> OpenPullRequest:
         if not isinstance(head, dict):
             raise TypeError
         head_ref = head["ref"]
+        raw_head_repository = head.get("repo")
+        if raw_head_repository is None:
+            head_repository = None
+        elif isinstance(raw_head_repository, dict):
+            head_repository = str(raw_head_repository["full_name"])
+        else:
+            raise TypeError
+        raw_labels = value.get("labels", [])
+        if not isinstance(raw_labels, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("name"), str)
+            for item in raw_labels
+        ):
+            raise TypeError
+        labels = frozenset(str(item["name"]) for item in raw_labels)
         created_at = datetime.fromisoformat(
             str(value["created_at"]).replace("Z", "+00:00")
         )
@@ -256,6 +297,8 @@ def _open_pr_from_json(value: dict[str, object]) -> OpenPullRequest:
         draft=draft,  # type: ignore[arg-type]
         head_ref=head_ref,  # type: ignore[arg-type]
         created_at=created_at,
+        labels=labels,
+        head_repository=head_repository,
     )
 
 
@@ -268,8 +311,46 @@ def _apply_plan(
 ) -> None:
     recorded_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     for action in plan.close_actions:
-        lifecycle = lifecycles[action.pr_number]
-        checkpoint = getattr(lifecycle, "checkpoint_ref")
+        current = _open_pr_from_json(
+            client.get_pull_request(action.pr_number)
+        )
+        lifecycle = parse_pr_lifecycle(current.body)
+        if not lifecycle.is_disposable:
+            raise GithubApiError(
+                f"pull request #{action.pr_number} is no longer disposable"
+            )
+        if HOUSEKEEPING_LABEL not in current.labels:
+            raise GithubApiError(
+                f"pull request #{action.pr_number} lost its housekeeping label"
+            )
+        checkpoint = lifecycle.checkpoint_ref
+        if lifecycle.close_when.value == "checkpointed":
+            if checkpoint is None or not client.branch_exists(checkpoint):
+                raise GithubApiError(
+                    f"pull request #{action.pr_number} checkpoint is no longer present"
+                )
+        elif lifecycle.close_when.value == "canonical-merged":
+            if (
+                lifecycle.canonical_pr is None
+                or not client.pull_request_is_merged(lifecycle.canonical_pr)
+            ):
+                raise GithubApiError(
+                    f"pull request #{action.pr_number} canonical PR is not merged"
+                )
+        else:
+            raise GithubApiError(
+                f"pull request #{action.pr_number} close condition changed"
+            )
+        if action.delete_branch is not None:
+            if (
+                current.head_repository != repository
+                or current.head_ref != action.delete_branch
+                or checkpoint is None
+                or not client.branch_exists(checkpoint)
+            ):
+                raise GithubApiError(
+                    f"pull request #{action.pr_number} branch deletion is no longer safe"
+                )
         comment = "\n".join(
             (
                 "Automated lifecycle housekeeping closure.",

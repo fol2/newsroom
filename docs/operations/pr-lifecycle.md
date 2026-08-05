@@ -39,7 +39,9 @@ Branch-Retention: keep
 ```
 
 The branch starts with `support/`. After the exact product tree is verified,
-re-parented and checkpointed, close the support PR in the same work session.
+re-parented and checkpointed, close the support PR in the same work session. The
+repository's existing `infra` label is the explicit automation opt-in; metadata
+alone never authorizes automated closure.
 
 ### Preflight
 
@@ -84,7 +86,9 @@ Valid branch retention policies are:
 - `keep`;
 - `delete-after-checkpoint`.
 
-Branch deletion is never permitted without an independently resolvable checkpoint.
+Every non-`NONE` checkpoint uses the dedicated `checkpoint/` namespace.
+Branch deletion is never permitted without an independently resolvable checkpoint
+and is never attempted for a branch owned by another repository or fork.
 
 ## Operating limits
 
@@ -103,14 +107,18 @@ Branch deletion is never permitted without an independently resolvable checkpoin
 
 On PR creation or metadata changes it validates the event body and actual PR
 surface. Weekly scheduled runs and manual dispatches build a repository-wide
-inventory. Scheduled execution is dry-run only.
+inventory. The dry-run job has read-only permissions. A separate write-capable
+apply job can run only after the dry run succeeds.
 
-Manual apply requires both:
+Manual apply requires all three independently checked values:
 
-1. workflow-dispatch input `apply=true`; and
-2. the workflow-provided `PR_HOUSEKEEPING_APPLY=true` environment guard.
+1. workflow-dispatch input `apply=true`;
+2. workflow-dispatch input `confirmation=CLOSE_ELIGIBLE_DISPOSABLE_PRS`; and
+3. the exact `PR_HOUSEKEEPING_APPLY=CLOSE_ELIGIBLE_DISPOSABLE_PRS` process guard.
 
-Apply mode comments with an audit record before closing an eligible disposable PR.
+Before every mutation, apply mode re-reads the current PR body, labels, head
+repository, checkpoint and canonical merge state. It comments with an audit record
+before closing an eligible, `infra`-labelled disposable PR.
 It never merges or closes a canonical PR. A branch is deleted only after its declared
 checkpoint ref has been verified.
 

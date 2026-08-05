@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 from newsroom.checks.pr_lifecycle import (
+    HOUSEKEEPING_LABEL,
     BranchRetention,
     CloseWhen,
     LifecycleKind,
@@ -51,6 +57,8 @@ def open_pr(
     draft: bool,
     head_ref: str,
     age_days: int = 0,
+    labels: frozenset[str] = frozenset({HOUSEKEEPING_LABEL}),
+    head_repository: str | None = "fol2/newsroom",
 ) -> OpenPullRequest:
     return OpenPullRequest(
         number=number,
@@ -58,6 +66,8 @@ def open_pr(
         draft=draft,
         head_ref=head_ref,
         created_at=NOW - timedelta(days=age_days),
+        labels=labels,
+        head_repository=head_repository,
     )
 
 
@@ -150,6 +160,81 @@ def test_validate_pull_request_event_uses_actual_surface() -> None:
     assert lifecycle.canonical_pr == 10
 
 
+def test_workflow_module_entrypoint_runs_without_installed_package(
+    tmp_path: Path,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    event_path = tmp_path / "pull-request-event.json"
+    event_path.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "number": 10,
+                    "draft": False,
+                    "body": body(),
+                    "head": {"ref": "agent/increment-5b2"},
+                }
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-m",
+            "scripts.sdlc.pr_lifecycle",
+            "validate-event",
+            "--event",
+            str(event_path),
+        ],
+        cwd=repository_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "validated PR lifecycle: canonical / increment-5b2" in result.stdout
+
+
+def test_apply_requires_exact_confirmation_before_api_access() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GITHUB_REPOSITORY": "fol2/newsroom",
+            "GITHUB_TOKEN": "not-used-before-guard",
+            "PR_HOUSEKEEPING_APPLY": "true",
+        }
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-m",
+            "scripts.sdlc.pr_lifecycle",
+            "inventory",
+            "--apply",
+        ],
+        cwd=repository_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 2
+    assert "exact housekeeping confirmation" in result.stderr
+    assert "GitHub API" not in result.stderr
+
+
 def test_plan_never_closes_canonical_and_closes_checkpointed_support() -> None:
     canonical = open_pr(
         10,
@@ -198,6 +283,7 @@ def test_plan_closes_after_canonical_merge_and_can_delete_branch() -> None:
         existing_checkpoint_refs=frozenset(
             {"checkpoint/increment-5b2"}
         ),
+        repository_full_name="fol2/newsroom",
         now=NOW,
     )
 
@@ -287,6 +373,92 @@ def test_plan_warns_for_unexplained_age_without_auto_closing() -> None:
 
     assert plan.close_actions == ()
     assert plan.warnings == ("#10 has remained open for 8 days",)
+
+
+def test_checkpoint_ref_requires_dedicated_namespace() -> None:
+    with pytest.raises(PrLifecycleError, match="checkpoint/ namespace"):
+        parse_pr_lifecycle(
+            body(
+                lifecycle="support",
+                canonical="#10",
+                checkpoint="main",
+                close_when="checkpointed",
+            )
+        )
+
+
+def test_unlabelled_disposable_is_never_closed() -> None:
+    canonical = open_pr(
+        10,
+        pr_body=body(),
+        draft=False,
+        head_ref="agent/increment-5b2",
+    )
+    support = open_pr(
+        11,
+        pr_body=body(
+            lifecycle="support",
+            canonical="#10",
+            close_when="checkpointed",
+        ),
+        draft=True,
+        head_ref="support/increment-5b2-correction",
+        labels=frozenset(),
+    )
+    plan = plan_housekeeping(
+        (canonical, support),
+        existing_checkpoint_refs=frozenset(
+            {"checkpoint/increment-5b2"}
+        ),
+        now=NOW,
+    )
+
+    assert plan.close_actions == ()
+    assert plan.warnings == (
+        "#11 lacks required housekeeping label infra",
+    )
+
+
+def test_external_fork_branch_is_never_deleted() -> None:
+    support = open_pr(
+        11,
+        pr_body=body(
+            lifecycle="support",
+            canonical="#10",
+            close_when="canonical-merged",
+            retention="delete-after-checkpoint",
+        ),
+        draft=True,
+        head_ref="support/increment-5b2-correction",
+        head_repository="external/newsroom-fork",
+    )
+    with pytest.raises(PrLifecycleError, match="external repository"):
+        plan_housekeeping(
+            (support,),
+            merged_canonical_prs=frozenset({10}),
+            existing_checkpoint_refs=frozenset(
+                {"checkpoint/increment-5b2"}
+            ),
+            repository_full_name="fol2/newsroom",
+            now=NOW,
+        )
+
+
+def test_workflow_separates_dry_run_and_two_key_apply() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    workflow = (
+        repository_root / ".github/workflows/pr-lifecycle.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "inventory-dry-run:" in workflow
+    assert "inventory-apply:" in workflow
+    assert "inputs.apply == true" in workflow
+    assert (
+        "inputs.confirmation == 'CLOSE_ELIGIBLE_DISPOSABLE_PRS'"
+        in workflow
+    )
+    assert "PR_HOUSEKEEPING_APPLY: CLOSE_ELIGIBLE_DISPOSABLE_PRS" in workflow
+    assert "python scripts/sdlc/pr_lifecycle.py" not in workflow
 
 
 def test_checkpoint_deletion_fails_closed_without_verified_ref() -> None:
