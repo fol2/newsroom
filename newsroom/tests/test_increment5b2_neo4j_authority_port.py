@@ -112,6 +112,111 @@ def test_authority_port_owns_three_fixed_server_timed_phases() -> None:
     assert driver.closed is True
 
 
+class _Neo4jRecordLike:
+    def __init__(self, values: dict[str, object]) -> None:
+        self._values = dict(values)
+
+    def __iter__(self):
+        return iter(self._values.values())
+
+    def items(self):
+        return self._values.items()
+
+
+class _RecordReturningAdapter:
+    driver_version = "6.2.0"
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def read_increment5_fulltext(
+        self,
+        *,
+        phase: str,
+        index_name: str | None,
+        lucene_expression: str | None,
+        generation_id: str | None,
+        limit: int,
+        timeout_ns: int,
+    ):
+        assert timeout_ns > 0
+        if phase == "COMPONENT":
+            return _Neo4jRecordLike(
+                {
+                    "version": "2026.06.0",
+                    "edition": "community",
+                }
+            )
+        if phase == "INDEX":
+            return (
+                _Neo4jRecordLike(
+                    {
+                        "name": index_name or "",
+                        "state": "ONLINE",
+                    }
+                ),
+            )
+        assert lucene_expression
+        assert generation_id
+        assert limit == 9
+        return (
+            _Neo4jRecordLike(
+                {
+                    "generation_id": generation_id,
+                    "passage_id": "p-en",
+                    "score": 1.0,
+                }
+            ),
+        )
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_authority_port_copies_neo4j_records_to_plain_mappings() -> None:
+    adapter = _RecordReturningAdapter()
+    reader = _open_neo4j_fulltext_reader_with_adapter(adapter)
+
+    component = reader.read(
+        Neo4jFullTextReadRequest.component(timeout_ns=5_000_000_000)
+    )
+    indexes = reader.read(
+        Neo4jFullTextReadRequest.index(
+            index_name=snapshot().index_name,
+            timeout_ns=4_900_000_000,
+        )
+    )
+    rows = reader.read(
+        Neo4jFullTextReadRequest.query(
+            index_name=snapshot().index_name,
+            lucene_expression="retrieval_text:(synthetic)",
+            generation_id=GENERATION_ID,
+            limit=9,
+            timeout_ns=4_800_000_000,
+        )
+    )
+
+    assert component.component == {
+        "version": "2026.06.0",
+        "edition": "community",
+    }
+    assert indexes.indexes == (
+        {
+            "name": snapshot().index_name,
+            "state": "ONLINE",
+        },
+    )
+    assert rows.rows == (
+        {
+            "generation_id": str(GENERATION_ID),
+            "passage_id": "p-en",
+            "score": 1.0,
+        },
+    )
+    reader.close()
+    assert adapter.closed is True
+
+
 def test_authority_port_rejects_generic_or_unbounded_read_controls() -> None:
     with pytest.raises(Neo4jFullTextReadError, match="controls"):
         Neo4jFullTextReadRequest(

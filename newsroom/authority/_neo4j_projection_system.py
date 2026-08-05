@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -164,6 +164,27 @@ def _open_structural_graph_adapter(
     return _open_neo4j_adapter(config)
 
 
+def _increment5_fulltext_record_mapping(
+    value: Any,
+    *,
+    identity: str,
+) -> dict[str, object]:
+    if isinstance(value, Mapping):
+        record = dict(value)
+    else:
+        try:
+            record = dict(value.items())
+        except Exception:
+            raise Neo4jFullTextReadError(
+                f"Neo4j full-text authority read returned malformed {identity}"
+            ) from None
+    if any(not isinstance(key, str) for key in record):
+        raise Neo4jFullTextReadError(
+            f"Neo4j full-text authority read returned malformed {identity}"
+        )
+    return record
+
+
 def _open_neo4j_fulltext_reader_with_adapter(
     adapter: _StructuralGraphAdapter,
 ) -> Neo4jFullTextReader:
@@ -198,13 +219,29 @@ def _open_neo4j_fulltext_reader_with_adapter(
                 "Neo4j full-text authority read is unavailable"
             ) from None
         if request.phase is Neo4jFullTextReadPhase.COMPONENT:
+            component = (
+                None
+                if value is None
+                else _increment5_fulltext_record_mapping(
+                    value,
+                    identity="component",
+                )
+            )
             return Neo4jFullTextReadResult(
                 phase=request.phase,
-                component=value,
+                component=component,
                 driver_version=adapter.driver_version,
             )
         try:
-            records = tuple(value)
+            records = tuple(
+                _increment5_fulltext_record_mapping(
+                    item,
+                    identity="row",
+                )
+                for item in value
+            )
+        except Neo4jFullTextReadError:
+            raise
         except Exception:
             raise Neo4jFullTextReadError(
                 "Neo4j full-text authority read returned malformed rows"
