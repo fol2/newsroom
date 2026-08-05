@@ -8,8 +8,6 @@ from pathlib import Path
 import sqlite3
 
 from newsroom.authority.canonical import digest_bytes
-from newsroom.increment5.branch_contracts import BranchRequestId
-
 from .fulltext_contracts import FullTextBranchRequest, FullTextContractError
 from .fulltext_receipts import FullTextBranchReceipt
 
@@ -92,9 +90,7 @@ class FullTextReceiptJournal:
                 if duplicate is not None:
                     receipt = self._verified_receipt(
                         duplicate,
-                        expected_request_id=request.request_id,
-                        expected_request_digest=request.request_digest,
-                        expected_request_bytes=request.canonical_bytes,
+                        request=request,
                     )
                     connection.commit()
                     return FullTextJournalResult(
@@ -107,13 +103,12 @@ class FullTextReceiptJournal:
                     raise FullTextReceiptJournalError(
                         "full-text producer returned an untyped receipt"
                     )
-                if (
-                    receipt.request_id != request.request_id
-                    or receipt.request_digest != request.request_digest
-                ):
+                try:
+                    self._require_request_binding(receipt, request)
+                except FullTextReceiptJournalError as exc:
                     raise FullTextReceiptJournalError(
                         "produced full-text receipt differs from the stable request"
-                    )
+                    ) from exc
                 receipt_bytes = receipt.canonical_bytes
                 connection.execute(
                     "INSERT INTO increment5_fulltext_receipts("
@@ -137,9 +132,7 @@ class FullTextReceiptJournal:
 
             receipt = self._verified_receipt(
                 row,
-                expected_request_id=request.request_id,
-                expected_request_digest=request.request_digest,
-                expected_request_bytes=request.canonical_bytes,
+                request=request,
             )
             connection.commit()
             return FullTextJournalResult(receipt=receipt, replayed=True)
@@ -161,15 +154,13 @@ class FullTextReceiptJournal:
     def _verified_receipt(
         row: sqlite3.Row,
         *,
-        expected_request_id: BranchRequestId,
-        expected_request_digest: str,
-        expected_request_bytes: bytes,
+        request: FullTextBranchRequest,
     ) -> FullTextBranchReceipt:
         stored_request_digest = str(row["request_digest"])
         stored_request_bytes = bytes(row["request_bytes"])
         if (
-            stored_request_digest != expected_request_digest
-            or stored_request_bytes != expected_request_bytes
+            stored_request_digest != request.request_digest
+            or stored_request_bytes != request.canonical_bytes
         ):
             raise FullTextReceiptIdempotencyConflict(
                 "Increment 5 full-text idempotency key was reused with another request"
@@ -180,14 +171,29 @@ class FullTextReceiptJournal:
                 "stored full-text receipt digest differs"
             )
         receipt = FullTextBranchReceipt.from_canonical_bytes(receipt_bytes)
+        FullTextReceiptJournal._require_request_binding(receipt, request)
+        return receipt
+
+    @staticmethod
+    def _require_request_binding(
+        receipt: FullTextBranchReceipt,
+        request: FullTextBranchRequest,
+    ) -> None:
         if (
-            receipt.request_id != expected_request_id
-            or receipt.request_digest != expected_request_digest
+            receipt.request_id != request.request_id
+            or receipt.request_digest != request.request_digest
+            or receipt.contract_digest != request.contract_digest
+            or receipt.policy_id != request.policy_id
+            or receipt.fulltext_component_digest
+            != request.fulltext_component_digest
+            or receipt.normalization_component_digest
+            != request.normalization_component_digest
+            or receipt.started_at != request.serving_time
+            or receipt.completed_at != request.serving_time
         ):
             raise FullTextReceiptJournalError(
                 "stored full-text receipt request binding differs"
             )
-        return receipt
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
