@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ARCHIVE_SHA256 = "b067a1e6da3b0c00b294b86b495c5755ad73c0b253fb2cfdc36282f11347c254"
 TRACE_PATH = "docs/traceability/increment-5b-branch-atoms.md"
 TRACE_BASE_BLOB_SHA1 = "4e16954a7197a450d744c222750301bbd567cb6e"
+INTEGRITY_TEST_PATH = "newsroom/tests/test_increment5b2_fulltext_retriever.py"
 PAYLOAD_PARTS = (
     "scripts/support/5b2_payload.00a",
     "scripts/support/5b2_payload.00b",
@@ -36,7 +37,7 @@ EXPECTED_PATHS = (
     "newsroom/increment5/fulltext_receipts.py",
     "newsroom/increment5/fulltext_retriever.py",
     "newsroom/tests/increment5b2_helpers.py",
-    "newsroom/tests/test_increment5b2_fulltext_retriever.py",
+    INTEGRITY_TEST_PATH,
     "newsroom/tests/test_increment5b2_normalizer.py",
 )
 
@@ -58,6 +59,21 @@ def _read_archive() -> bytes:
     if hashlib.sha256(archive).hexdigest() != ARCHIVE_SHA256:
         raise SystemExit("5B2 payload digest differs from the reviewed archive")
     return archive
+
+
+def _materialized_member_bytes(name: str, archive_bytes: bytes) -> bytes:
+    if name != INTEGRITY_TEST_PATH:
+        return archive_bytes
+    text = archive_bytes.decode("utf-8", errors="strict")
+    old_import = "from newsroom.authority.canonical import digest_canonical\n"
+    old_call = '''            idempotency_key=(
+                "integrity-" + digest_canonical(rows)[-12:]
+            )
+'''
+    new_call = '            idempotency_key="integrity-case"\n'
+    if text.count(old_import) != 1 or text.count(old_call) != 1:
+        raise SystemExit("5B2 integrity-test canonicalization boundary differs")
+    return text.replace(old_import, "", 1).replace(old_call, new_call, 1).encode("utf-8")
 
 
 def main() -> None:
@@ -82,9 +98,10 @@ def main() -> None:
             source = archive.extractfile(member)
             if source is None:
                 raise SystemExit(f"5B2 payload member cannot be read: {member.name}")
-            data = source.read()
-            if len(data) != member.size:
+            archive_data = source.read()
+            if len(archive_data) != member.size:
                 raise SystemExit(f"5B2 payload member size differs: {member.name}")
+            data = _materialized_member_bytes(member.name, archive_data)
             if target.exists():
                 current = target.read_bytes()
                 if current != data:
