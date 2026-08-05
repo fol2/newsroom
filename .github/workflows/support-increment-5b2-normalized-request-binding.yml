@@ -30,6 +30,17 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/support/apply_5b2_normalized_request_binding.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('newsroom/tests/test_increment5b2_fulltext_retriever.py')
+          text = path.read_text(encoding='utf-8')
+          old = '("language_mode", "en-GB"),'
+          new = '("language_mode", "EN_GB"),'
+          if text.count(old) != 1:
+              raise SystemExit('5B2 valid alternate language-mode anchor differs')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
           python -m py_compile \
             newsroom/increment5/fulltext_normalizer.py \
             newsroom/increment5/fulltext_journal.py \
