@@ -1,0 +1,69 @@
+name: PR Lifecycle
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - reopened
+      - converted_to_draft
+      - ready_for_review
+      - synchronize
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Close eligible disposable PRs after a dry-run review
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  validate:
+    if: github.event_name == 'pull_request_target'
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate lifecycle metadata
+        run: python scripts/sdlc/pr_lifecycle.py validate-event
+
+  inventory:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_HOUSEKEEPING_APPLY: ${{ github.event_name == 'workflow_dispatch' && inputs.apply && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build or apply lifecycle inventory
+        run: |
+          set -euo pipefail
+          if [[ "${PR_HOUSEKEEPING_APPLY}" == "true" ]]; then
+            python scripts/sdlc/pr_lifecycle.py inventory --apply
+          else
+            python scripts/sdlc/pr_lifecycle.py inventory
+          fi
