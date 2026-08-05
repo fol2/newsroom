@@ -10,6 +10,7 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.increment5.branch_contracts import (
     BranchExclusionReason,
     BranchOutcome,
+    BranchRequestId,
 )
 from newsroom.increment5.fulltext_contracts import (
     FULLTEXT_COMPONENT_DIGEST,
@@ -94,6 +95,75 @@ def test_complete_fulltext_receipt_is_bounded_attributable_and_replayable(
     assert replay.replayed is True
     assert replay.receipt.canonical_bytes == receipt.canonical_bytes
     assert driver.calls == before_calls
+
+
+def test_journal_does_not_hold_write_lock_while_producing(
+    tmp_path: Path,
+) -> None:
+    journal_path = tmp_path / "fulltext-receipts.sqlite3"
+    inner_driver = FakeDriver(default_scenario())
+    inner_retriever = FullTextRetriever(
+        graph_reader=inner_driver.reader(),
+        journal=FullTextReceiptJournal(journal_path),
+        authority_view_provider=lambda _request: authority_view(),
+        monotonic_ns=lambda: 0,
+    )
+    inner_request = request(
+        request_id=BranchRequestId.parse(
+            "00000000-0000-4000-8000-000000005271"
+        ),
+        idempotency_key="nested-inner-request",
+    )
+    inner_result = None
+
+    def outer_provider(_request):
+        nonlocal inner_result
+        inner_result = inner_retriever.retrieve(inner_request)
+        return authority_view()
+
+    outer_driver = FakeDriver(default_scenario())
+    outer_retriever = FullTextRetriever(
+        graph_reader=outer_driver.reader(),
+        journal=FullTextReceiptJournal(journal_path),
+        authority_view_provider=outer_provider,
+        monotonic_ns=lambda: 0,
+    )
+    outer_request = request(
+        request_id=BranchRequestId.parse(
+            "00000000-0000-4000-8000-000000005272"
+        ),
+        idempotency_key="nested-outer-request",
+    )
+
+    outer_result = outer_retriever.retrieve(outer_request)
+
+    assert outer_result.replayed is False
+    assert outer_result.receipt.outcome is BranchOutcome.COMPLETE
+    assert inner_result is not None
+    assert inner_result.replayed is False
+    assert inner_result.receipt.outcome is BranchOutcome.COMPLETE
+    assert outer_driver.execute_read_count == 3
+    assert inner_driver.execute_read_count == 3
+
+    replay_journal = FullTextReceiptJournal(journal_path)
+    inner_replay = replay_journal.execute(
+        inner_request,
+        lambda: pytest.fail("retained inner receipt must replay"),
+    )
+    outer_replay = replay_journal.execute(
+        outer_request,
+        lambda: pytest.fail("retained outer receipt must replay"),
+    )
+    assert inner_replay.replayed is True
+    assert outer_replay.replayed is True
+    assert (
+        inner_replay.receipt.canonical_bytes
+        == inner_result.receipt.canonical_bytes
+    )
+    assert (
+        outer_replay.receipt.canonical_bytes
+        == outer_result.receipt.canonical_bytes
+    )
 
 
 def test_restart_returns_first_receipt_without_authority_or_neo4j_calls(

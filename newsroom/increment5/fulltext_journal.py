@@ -77,68 +77,28 @@ class FullTextReceiptJournal:
             raise TypeError("full-text receipt producer must be callable")
 
         try:
-            connection = self._connect()
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT request_digest,request_bytes,receipt_digest,receipt_bytes "
-                "FROM increment5_fulltext_receipts WHERE idempotency_key=?",
-                (request.idempotency_key,),
-            ).fetchone()
-            if row is None:
-                duplicate = connection.execute(
-                    "SELECT request_digest,request_bytes,receipt_digest,receipt_bytes "
-                    "FROM increment5_fulltext_receipts WHERE request_digest=?",
-                    (request.request_digest,),
-                ).fetchone()
-                if duplicate is not None:
-                    receipt = self._verified_receipt(
-                        duplicate,
-                        request=request,
-                    )
-                    connection.commit()
-                    return FullTextJournalResult(
-                        receipt=receipt,
-                        replayed=True,
-                    )
-
-                receipt = producer()
-                if not isinstance(receipt, FullTextBranchReceipt):
-                    raise FullTextReceiptJournalError(
-                        "full-text producer returned an untyped receipt"
-                    )
-                try:
-                    self._require_request_binding(receipt, request)
-                except FullTextReceiptJournalError as exc:
-                    raise FullTextReceiptJournalError(
-                        "produced full-text receipt differs from the stable request"
-                    ) from exc
-                receipt_bytes = receipt.canonical_bytes
-                connection.execute(
-                    "INSERT INTO increment5_fulltext_receipts("
-                    "idempotency_key,request_digest,request_bytes,"
-                    "receipt_digest,receipt_bytes,recorded_at"
-                    ") VALUES(?,?,?,?,?,?)",
-                    (
-                        request.idempotency_key,
-                        request.request_digest,
-                        request.canonical_bytes,
-                        receipt.receipt_digest,
-                        receipt_bytes,
-                        receipt.completed_at.to_text(),
-                    ),
-                )
-                connection.commit()
+            existing = self._read_existing(request)
+            if existing is not None:
                 return FullTextJournalResult(
-                    receipt=receipt,
-                    replayed=False,
+                    receipt=existing,
+                    replayed=True,
                 )
 
-            receipt = self._verified_receipt(
-                row,
-                request=request,
-            )
-            connection.commit()
-            return FullTextJournalResult(receipt=receipt, replayed=True)
+            # Authority and Neo4j work must never execute while this journal
+            # holds a SQLite write reservation.  Concurrent new requests may
+            # therefore run their independently bounded producers in parallel.
+            receipt = producer()
+            if not isinstance(receipt, FullTextBranchReceipt):
+                raise FullTextReceiptJournalError(
+                    "full-text producer returned an untyped receipt"
+                )
+            try:
+                self._require_request_binding(receipt, request)
+            except FullTextReceiptJournalError as exc:
+                raise FullTextReceiptJournalError(
+                    "produced full-text receipt differs from the stable request"
+                ) from exc
+            return self._insert_or_replay(request, receipt)
         except FullTextReceiptIdempotencyConflict:
             raise
         except FullTextReceiptJournalError:
@@ -147,11 +107,79 @@ class FullTextReceiptJournal:
             raise FullTextReceiptJournalError(
                 "Increment 5 full-text receipt journal is unavailable or inconsistent"
             ) from exc
+
+    def _read_existing(
+        self,
+        request: FullTextBranchRequest,
+    ) -> FullTextBranchReceipt | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT request_digest,request_bytes,receipt_digest,receipt_bytes "
+                "FROM increment5_fulltext_receipts WHERE idempotency_key=?",
+                (request.idempotency_key,),
+            ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    "SELECT request_digest,request_bytes,receipt_digest,receipt_bytes "
+                    "FROM increment5_fulltext_receipts WHERE request_digest=?",
+                    (request.request_digest,),
+                ).fetchone()
+            if row is None:
+                return None
+            return self._verified_receipt(row, request=request)
         finally:
-            try:
-                connection.close()
-            except (UnboundLocalError, sqlite3.Error):
-                pass
+            connection.close()
+
+    def _insert_or_replay(
+        self,
+        request: FullTextBranchRequest,
+        receipt: FullTextBranchReceipt,
+    ) -> FullTextJournalResult:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT request_digest,request_bytes,receipt_digest,receipt_bytes "
+                "FROM increment5_fulltext_receipts WHERE idempotency_key=?",
+                (request.idempotency_key,),
+            ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    "SELECT request_digest,request_bytes,receipt_digest,receipt_bytes "
+                    "FROM increment5_fulltext_receipts WHERE request_digest=?",
+                    (request.request_digest,),
+                ).fetchone()
+            if row is not None:
+                retained = self._verified_receipt(row, request=request)
+                connection.commit()
+                return FullTextJournalResult(
+                    receipt=retained,
+                    replayed=True,
+                )
+
+            receipt_bytes = receipt.canonical_bytes
+            connection.execute(
+                "INSERT INTO increment5_fulltext_receipts("
+                "idempotency_key,request_digest,request_bytes,"
+                "receipt_digest,receipt_bytes,recorded_at"
+                ") VALUES(?,?,?,?,?,?)",
+                (
+                    request.idempotency_key,
+                    request.request_digest,
+                    request.canonical_bytes,
+                    receipt.receipt_digest,
+                    receipt_bytes,
+                    receipt.completed_at.to_text(),
+                ),
+            )
+            connection.commit()
+            return FullTextJournalResult(
+                receipt=receipt,
+                replayed=False,
+            )
+        finally:
+            connection.close()
 
     @staticmethod
     def _verified_receipt(
