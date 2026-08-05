@@ -41,6 +41,7 @@ jobs:
           expected = {
               '.github/workflows/pr-lifecycle.yml',
               'newsroom/tests/test_pr_lifecycle.py',
+              'scripts/sdlc/pr_lifecycle.py',
           }
           lines = subprocess.run(
               ['git', 'status', '--porcelain=v1', '--untracked-files=all'],
@@ -61,11 +62,12 @@ jobs:
           set -euo pipefail
           git add \
             .github/workflows/pr-lifecycle.yml \
-            newsroom/tests/test_pr_lifecycle.py
+            newsroom/tests/test_pr_lifecycle.py \
+            scripts/sdlc/pr_lifecycle.py
           git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix: invoke PR lifecycle tooling from repository root'
+          git commit -m 'fix: isolate trusted PR lifecycle contract loading'
 
       - name: Remove disposable support machinery
         run: |
