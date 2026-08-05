@@ -28,6 +28,14 @@ from .persistence import (
 from .policy import CommandRegistry, PayloadSchemaRegistry
 from .service import CommandService
 from .types import TrustScope, UtcTimestamp
+from .neo4j_fulltext_reader import (
+    Neo4jFullTextReadError,
+    Neo4jFullTextReadPhase,
+    Neo4jFullTextReadRequest,
+    Neo4jFullTextReadResult,
+    Neo4jFullTextReadTimeout,
+    Neo4jFullTextReader,
+)
 from newsroom.increment4.neo4j import Increment4Neo4jController
 from newsroom.projection.mapping import (
     ProjectionIdentitySource,
@@ -130,6 +138,22 @@ class _StructuralGraphAdapter(Protocol):
     def cleanup_generation(self, generation_id: str) -> int:
         ...
 
+    @property
+    def driver_version(self) -> str:
+        ...
+
+    def read_increment5_fulltext(
+        self,
+        *,
+        phase: str,
+        index_name: str | None,
+        lucene_expression: str | None,
+        generation_id: str | None,
+        limit: int,
+        timeout_ns: int,
+    ) -> Any:
+        ...
+
     def close(self) -> None:
         ...
 
@@ -138,6 +162,70 @@ def _open_structural_graph_adapter(
     config: Neo4jProjectorConfig,
 ) -> _StructuralGraphAdapter:
     return _open_neo4j_adapter(config)
+
+
+def _open_neo4j_fulltext_reader_with_adapter(
+    adapter: _StructuralGraphAdapter,
+) -> Neo4jFullTextReader:
+    """Reduce the private adapter to one owned, phased read capability."""
+
+    def read(
+        request: Neo4jFullTextReadRequest,
+    ) -> Neo4jFullTextReadResult:
+        try:
+            value = adapter.read_increment5_fulltext(
+                phase=request.phase.value,
+                index_name=request.index_name,
+                lucene_expression=request.lucene_expression,
+                generation_id=(
+                    None
+                    if request.generation_id is None
+                    else str(request.generation_id)
+                ),
+                limit=request.limit,
+                timeout_ns=request.timeout_ns,
+            )
+        except Neo4jReadError as exc:
+            if "timed out" in str(exc).casefold():
+                raise Neo4jFullTextReadTimeout(
+                    "Neo4j full-text authority read timed out"
+                ) from None
+            raise Neo4jFullTextReadError(
+                "Neo4j full-text authority read is unavailable"
+            ) from None
+        except Exception:
+            raise Neo4jFullTextReadError(
+                "Neo4j full-text authority read is unavailable"
+            ) from None
+        if request.phase is Neo4jFullTextReadPhase.COMPONENT:
+            return Neo4jFullTextReadResult(
+                phase=request.phase,
+                component=value,
+                driver_version=adapter.driver_version,
+            )
+        try:
+            records = tuple(value)
+        except Exception:
+            raise Neo4jFullTextReadError(
+                "Neo4j full-text authority read returned malformed rows"
+            ) from None
+        if request.phase is Neo4jFullTextReadPhase.INDEX:
+            return Neo4jFullTextReadResult(
+                phase=request.phase,
+                indexes=records,
+                driver_version=adapter.driver_version,
+            )
+        return Neo4jFullTextReadResult(
+            phase=request.phase,
+            rows=records,
+            driver_version=adapter.driver_version,
+        )
+
+    return Neo4jFullTextReader(
+        driver_version=adapter.driver_version,
+        read=read,
+        close=adapter.close,
+    )
 
 
 class Neo4jStructuralProjector:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+import time
 from threading import RLock
 from typing import Any
 
@@ -41,6 +42,27 @@ _COMPONENT_QUERY = """
 CALL dbms.components() YIELD name, versions, edition
 WHERE name = 'Neo4j Kernel'
 RETURN versions[0] AS version, toLower(edition) AS edition
+"""
+
+_FULLTEXT_INDEX_INVENTORY_QUERY = """
+SHOW INDEXES
+YIELD name, type, state, entityType, labelsOrTypes, properties, indexProvider, options
+WHERE name = $index_name
+RETURN name, type, state, entityType, labelsOrTypes, properties, indexProvider, options
+ORDER BY name
+"""
+
+_FULLTEXT_READ_QUERY = """
+CALL db.index.fulltext.queryNodes($index_name, $query, {limit: $limit})
+YIELD node, score
+WHERE node.generation_id = $generation_id
+RETURN node.generation_id AS generation_id,
+       node.passage_id AS passage_id,
+       node.document_digest AS document_digest,
+       node.language AS language,
+       score
+ORDER BY score DESC, passage_id
+LIMIT $limit
 """
 
 _SCHEMA_QUERIES = (
@@ -224,14 +246,38 @@ RETURN size(nodes) AS deleted_count
 class _Neo4jAdapter:
     """Private fixed-query adapter. It is never returned by a public facade."""
 
-    __slots__ = ("_driver", "_config", "_driver_version", "_closed", "_lock")
+    __slots__ = (
+        "_driver",
+        "_config",
+        "_driver_version",
+        "_closed",
+        "_lock",
+        "_monotonic_ns",
+        "_unit_of_work",
+    )
 
-    def __init__(self, *, driver: Any, config: Neo4jProjectorConfig, driver_version: str) -> None:
+    def __init__(
+        self,
+        *,
+        driver: Any,
+        config: Neo4jProjectorConfig,
+        driver_version: str,
+        monotonic_ns: Callable[[], int] = time.monotonic_ns,
+        unit_of_work_factory: Callable[..., Callable] | None = None,
+    ) -> None:
+        if not callable(monotonic_ns):
+            raise TypeError("Neo4j monotonic clock must be callable")
+        if unit_of_work_factory is None:
+            unit_of_work_factory = _neo4j_unit_of_work_factory()
+        if not callable(unit_of_work_factory):
+            raise TypeError("Neo4j unit-of-work factory must be callable")
         self._driver = driver
         self._config = config
         self._driver_version = driver_version
         self._closed = False
         self._lock = RLock()
+        self._monotonic_ns = monotonic_ns
+        self._unit_of_work = unit_of_work_factory
 
     def verify_compatibility(self) -> Neo4jCompatibility:
         self._require_open()
@@ -301,6 +347,196 @@ class _Neo4jAdapter:
             source_event_id=batch.source_event_id,
             source_event_digest=batch.source_event_digest,
             batch_digest=batch.batch_digest,
+        )
+
+    @property
+    def driver_version(self) -> str:
+        return self._driver_version
+
+    def read_increment5_fulltext(
+        self,
+        *,
+        phase: str,
+        index_name: str | None,
+        lucene_expression: str | None,
+        generation_id: str | None,
+        limit: int,
+        timeout_ns: int,
+    ) -> Any:
+        """Execute one fixed phase of the Increment 5 full-text read port."""
+
+        self._require_open()
+        if phase not in {"COMPONENT", "INDEX", "QUERY"}:
+            raise Neo4jReadError(
+                "Neo4j Increment 5 full-text phase is invalid"
+            )
+        if (
+            isinstance(timeout_ns, bool)
+            or not isinstance(timeout_ns, int)
+            or not 0 < timeout_ns <= 5_000_000_000
+        ):
+            raise Neo4jReadError(
+                "Neo4j Increment 5 full-text timeout is invalid"
+            )
+        if phase == "COMPONENT":
+            if any(
+                value is not None
+                for value in (index_name, lucene_expression, generation_id)
+            ) or limit != 0:
+                raise Neo4jReadError(
+                    "Neo4j component phase carries forbidden controls"
+                )
+            callback = lambda transaction: transaction.run(
+                _COMPONENT_QUERY,
+                {},
+            ).single()
+            operation = "increment5.fulltext.component"
+        else:
+            if (
+                not isinstance(index_name, str)
+                or not index_name
+                or len(index_name.encode("utf-8")) > 128
+                or not index_name.isascii()
+                or not index_name[0].isalpha()
+                or any(
+                    not (character.isalnum() or character == "_")
+                    for character in index_name
+                )
+            ):
+                raise Neo4jReadError(
+                    "Neo4j Increment 5 full-text index identity is invalid"
+                )
+            if phase == "INDEX":
+                if (
+                    lucene_expression is not None
+                    or generation_id is not None
+                    or limit != 0
+                ):
+                    raise Neo4jReadError(
+                        "Neo4j index phase carries forbidden query controls"
+                    )
+                callback = lambda transaction: tuple(
+                    transaction.run(
+                        _FULLTEXT_INDEX_INVENTORY_QUERY,
+                        {"index_name": index_name},
+                    )
+                )
+                operation = "increment5.fulltext.index"
+            else:
+                if (
+                    not isinstance(lucene_expression, str)
+                    or not lucene_expression
+                    or lucene_expression != lucene_expression.strip()
+                    or len(lucene_expression.encode("utf-8")) > 32_768
+                    or any(
+                        ord(character) < 0x20
+                        for character in lucene_expression
+                    )
+                ):
+                    raise Neo4jReadError(
+                        "Neo4j Increment 5 full-text expression is invalid"
+                    )
+                if (
+                    not isinstance(generation_id, str)
+                    or not generation_id
+                    or generation_id != generation_id.strip()
+                    or len(generation_id.encode("utf-8")) > 128
+                    or any(ord(character) < 0x20 for character in generation_id)
+                ):
+                    raise Neo4jReadError(
+                        "Neo4j Increment 5 generation identity is invalid"
+                    )
+                if isinstance(limit, bool) or limit != 9:
+                    raise Neo4jReadError(
+                        "Neo4j Increment 5 full-text overflow limit must equal nine"
+                    )
+                callback = lambda transaction: tuple(
+                    transaction.run(
+                        _FULLTEXT_READ_QUERY,
+                        {
+                            "index_name": index_name,
+                            "query": lucene_expression,
+                            "generation_id": generation_id,
+                            "limit": limit,
+                        },
+                    )
+                )
+                operation = "increment5.fulltext.query"
+
+        with self._lock:
+            started_ns = self._monotonic_ns()
+            if isinstance(started_ns, bool) or not isinstance(started_ns, int):
+                raise Neo4jReadError(
+                    "Neo4j Increment 5 monotonic clock is invalid"
+                )
+            current_ns = self._monotonic_ns()
+            if (
+                isinstance(current_ns, bool)
+                or not isinstance(current_ns, int)
+                or current_ns < started_ns
+            ):
+                raise Neo4jReadError(
+                    "Neo4j Increment 5 monotonic clock moved backwards"
+                )
+            remaining_ns = timeout_ns - (current_ns - started_ns)
+            if remaining_ns <= 0:
+                raise Neo4jReadError(
+                    "Neo4j Increment 5 full-text read timed out"
+                )
+            managed = self._unit_of_work(
+                timeout=remaining_ns / 1_000_000_000,
+                metadata={"newsroom_operation": operation},
+            )(callback)
+            try:
+                with self._driver.session(database=self._config.database) as session:
+                    result = session.execute_read(managed)
+            except Exception as exc:
+                completed_ns = self._monotonic_ns()
+                if (
+                    isinstance(completed_ns, bool)
+                    or not isinstance(completed_ns, int)
+                    or completed_ns < started_ns
+                ):
+                    raise Neo4jReadError(
+                        "Neo4j Increment 5 monotonic clock moved backwards"
+                    ) from None
+                if (
+                    completed_ns - started_ns > timeout_ns
+                    or self._increment5_fulltext_timeout(exc)
+                ):
+                    raise Neo4jReadError(
+                        "Neo4j Increment 5 full-text read timed out"
+                    ) from None
+                raise Neo4jReadError(
+                    "Neo4j Increment 5 full-text read failed"
+                ) from None
+            completed_ns = self._monotonic_ns()
+            if (
+                isinstance(completed_ns, bool)
+                or not isinstance(completed_ns, int)
+                or completed_ns < started_ns
+            ):
+                raise Neo4jReadError(
+                    "Neo4j Increment 5 monotonic clock moved backwards"
+                )
+            if completed_ns - started_ns > timeout_ns:
+                raise Neo4jReadError(
+                    "Neo4j Increment 5 full-text read timed out"
+                )
+            return result
+
+    @staticmethod
+    def _increment5_fulltext_timeout(error: Exception) -> bool:
+        identity = f"{type(error).__name__} {error}".casefold()
+        return any(
+            token in identity
+            for token in (
+                "deadline",
+                "terminated",
+                "timeout",
+                "timed out",
+                "transactiontimedout",
+            )
         )
 
     def read(
