@@ -1,0 +1,102 @@
+name: Support Increment 5B2 canonical authority view
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  correct-and-verify:
+    if: github.head_ref == 'staging/increment-5b2-authority-canonical-view-20260805'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Apply exact canonical authority-view correction
+        run: |
+          set -euo pipefail
+          python scripts/support/apply_5b2_authority_canonical_view_correction.py
+          python -m py_compile \
+            newsroom/increment5/fulltext_retriever.py \
+            newsroom/tests/test_increment5b2_fulltext_retriever.py
+          git diff --check
+          python - <<'PY'
+          import subprocess
+
+          expected = {
+              'newsroom/increment5/fulltext_retriever.py',
+              'newsroom/tests/test_increment5b2_fulltext_retriever.py',
+          }
+          lines = subprocess.run(
+              ['git', 'status', '--porcelain=v1', '--untracked-files=all'],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.splitlines()
+          actual = {line[3:] for line in lines}
+          if actual != expected:
+              raise SystemExit(
+                  f'5B2 authority-view inventory differs: '
+                  f'expected={sorted(expected)!r} actual={sorted(actual)!r}'
+              )
+          PY
+
+      - name: Sync locked development environment
+        run: uv sync --dev --locked
+
+      - name: Focused Increment 5B2 correction evidence
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_increment5b2_normalizer.py \
+            newsroom/tests/test_increment5b2_fulltext_retriever.py \
+            newsroom/tests/test_increment5b2_neo4j_authority_port.py \
+            newsroom/tests/test_projection_b2_boundaries.py
+
+      - name: Commit corrected product tree for clean-checkout evidence
+        run: |
+          set -euo pipefail
+          git add \
+            newsroom/increment5/fulltext_retriever.py \
+            newsroom/tests/test_increment5b2_fulltext_retriever.py
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: journal noncanonical full-text authority views'
+          test -z "$(git status --porcelain)"
+
+      - name: Complete deterministic repository evidence
+        run: uv run python -m pytest -q
+
+      - name: Existing clustering evaluation gate
+        run: |
+          uv run python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+      - name: Publish product-only corrected tree
+        env:
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          git rm \
+            scripts/support/apply_5b2_authority_canonical_view_correction.py \
+            .github/workflows/support-increment-5b2-authority-canonical-view.yml
+          git diff --cached --check
+          git commit -m 'support: retain product-only canonical authority-view correction'
+          test -z "$(git status --porcelain)"
+          git push origin "HEAD:${HEAD_BRANCH}"
