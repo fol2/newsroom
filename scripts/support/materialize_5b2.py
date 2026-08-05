@@ -12,6 +12,21 @@ ROOT = Path(__file__).resolve().parents[2]
 ARCHIVE_SHA256 = "b067a1e6da3b0c00b294b86b495c5755ad73c0b253fb2cfdc36282f11347c254"
 TRACE_PATH = "docs/traceability/increment-5b-branch-atoms.md"
 TRACE_BASE_BLOB_SHA1 = "4e16954a7197a450d744c222750301bbd567cb6e"
+PAYLOAD_PARTS = (
+    "scripts/support/5b2_payload.00a",
+    "scripts/support/5b2_payload.00b",
+    "scripts/support/5b2_payload.01",
+    "scripts/support/5b2_payload.02",
+    "scripts/support/5b2_payload.03",
+    "scripts/support/5b2_payload.04a",
+    "scripts/support/5b2_payload.04b0",
+    "scripts/support/5b2_payload.04b1",
+    "scripts/support/5b2_payload.04b2",
+    "scripts/support/5b2_payload.04b3",
+    "scripts/support/5b2_payload.04b4",
+    "scripts/support/5b2_payload.04b5",
+    "scripts/support/5b2_payload.04b6",
+)
 EXPECTED_PATHS = (
     "docs/operations/increment-5b2-fulltext-retriever.md",
     TRACE_PATH,
@@ -33,10 +48,8 @@ def _git_blob_sha1(data: bytes) -> str:
 
 def _read_archive() -> bytes:
     encoded = "".join(
-        (ROOT / f"scripts/support/5b2_payload.{index:02d}")
-        .read_text(encoding="ascii")
-        .strip()
-        for index in range(5)
+        (ROOT / relative_path).read_text(encoding="ascii").strip()
+        for relative_path in PAYLOAD_PARTS
     )
     try:
         archive = base64.b64decode(encoded, validate=True)
