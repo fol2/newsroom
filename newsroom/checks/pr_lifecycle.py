@@ -47,6 +47,7 @@ _REF_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 _REPOSITORY = re.compile(
     r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
 )
+_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 HOUSEKEEPING_LABEL = "infra"
 _MAX_DISPOSABLE_PER_CANONICAL = 2
 _STALE_AFTER = timedelta(days=7)
@@ -79,6 +80,7 @@ class OpenPullRequest:
     created_at: datetime
     labels: frozenset[str] = frozenset()
     head_repository: str | None = None
+    head_sha: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.number, bool) or not isinstance(self.number, int) or self.number <= 0:
@@ -97,6 +99,13 @@ class OpenPullRequest:
             raise PrLifecycleError("pull-request labels must be immutable text")
         if self.head_repository is not None:
             _validate_repository(self.head_repository, field="head_repository")
+        if self.head_sha is not None and (
+            not isinstance(self.head_sha, str)
+            or _COMMIT_SHA.fullmatch(self.head_sha) is None
+        ):
+            raise PrLifecycleError(
+                "pull-request head SHA must be lowercase full commit text"
+            )
 
 
 @dataclass(frozen=True, slots=True)

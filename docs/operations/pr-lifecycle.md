@@ -116,9 +116,13 @@ Manual apply requires all three independently checked values:
 2. workflow-dispatch input `confirmation=CLOSE_ELIGIBLE_DISPOSABLE_PRS`; and
 3. the exact `PR_HOUSEKEEPING_APPLY=CLOSE_ELIGIBLE_DISPOSABLE_PRS` process guard.
 
-Before every mutation, apply mode re-reads the current PR body, labels, head
-repository, checkpoint and canonical merge state. It comments with an audit record
-before closing an eligible, `infra`-labelled disposable PR.
+Both inventory jobs receive the workflow token explicitly; its effective rights
+remain constrained by each job's permission block. Before every mutation, apply mode
+re-reads the current PR body, labels, head repository, head SHA, checkpoint and
+canonical merge state. A requested branch deletion additionally requires the
+dedicated checkpoint and current same-repository head ref to resolve to the exact
+PR head SHA before closure and again immediately before deletion. Apply mode comments
+with an audit record before closing an eligible, `infra`-labelled disposable PR.
 It never merges or closes a canonical PR. A branch is deleted only after its declared
 checkpoint ref has been verified.
 

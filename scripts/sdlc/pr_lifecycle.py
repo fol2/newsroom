@@ -142,14 +142,31 @@ class GithubClient:
             raise GithubApiError(f"pull request #{number} response is malformed")
         return value.get("merged_at") is not None
 
-    def branch_exists(self, ref: str) -> bool:
+    def branch_sha(self, ref: str) -> str | None:
         encoded = quote(ref, safe="")
         value = self.request(
             "GET",
             f"/git/ref/heads/{encoded}",
             allow_not_found=True,
         )
-        return value is not None
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise GithubApiError(f"branch {ref} response is malformed")
+        raw_object = value.get("object")
+        if not isinstance(raw_object, dict):
+            raise GithubApiError(f"branch {ref} object is malformed")
+        sha = raw_object.get("sha")
+        if (
+            not isinstance(sha, str)
+            or len(sha) != 40
+            or any(character not in "0123456789abcdef" for character in sha)
+        ):
+            raise GithubApiError(f"branch {ref} SHA is malformed")
+        return sha
+
+    def branch_exists(self, ref: str) -> bool:
+        return self.branch_sha(ref) is not None
 
     def comment(self, number: int, body: str) -> None:
         self.request(
@@ -272,6 +289,7 @@ def _open_pr_from_json(value: dict[str, object]) -> OpenPullRequest:
         if not isinstance(head, dict):
             raise TypeError
         head_ref = head["ref"]
+        head_sha = str(head["sha"])
         raw_head_repository = head.get("repo")
         if raw_head_repository is None:
             head_repository = None
@@ -299,6 +317,7 @@ def _open_pr_from_json(value: dict[str, object]) -> OpenPullRequest:
         created_at=created_at,
         labels=labels,
         head_repository=head_repository,
+        head_sha=head_sha,
     )
 
 
@@ -342,11 +361,16 @@ def _apply_plan(
                 f"pull request #{action.pr_number} close condition changed"
             )
         if action.delete_branch is not None:
+            checkpoint_sha = (
+                None if checkpoint is None else client.branch_sha(checkpoint)
+            )
+            head_sha = client.branch_sha(current.head_ref)
             if (
                 current.head_repository != repository
                 or current.head_ref != action.delete_branch
-                or checkpoint is None
-                or not client.branch_exists(checkpoint)
+                or current.head_sha is None
+                or checkpoint_sha != current.head_sha
+                or head_sha != current.head_sha
             ):
                 raise GithubApiError(
                     f"pull request #{action.pr_number} branch deletion is no longer safe"
@@ -367,6 +391,17 @@ def _apply_plan(
         client.comment(action.pr_number, comment)
         client.close_pull_request(action.pr_number)
         if action.delete_branch is not None:
+            assert checkpoint is not None
+            final_head_sha = client.branch_sha(action.delete_branch)
+            final_checkpoint_sha = client.branch_sha(checkpoint)
+            if (
+                current.head_sha is None
+                or final_head_sha != current.head_sha
+                or final_checkpoint_sha != current.head_sha
+            ):
+                raise GithubApiError(
+                    f"pull request #{action.pr_number} branch changed before deletion"
+                )
             client.delete_branch(action.delete_branch)
 
 
