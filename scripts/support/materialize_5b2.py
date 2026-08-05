@@ -12,8 +12,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 ARCHIVE_SHA256 = "b067a1e6da3b0c00b294b86b495c5755ad73c0b253fb2cfdc36282f11347c254"
-OVERLAY_ARCHIVE_SHA256 = "e6c8d5f4867a014492b0e84b2dd6d5fc46a8f533ab4a6cfb19a0be84f74dc04d"
-OVERLAY_SHA256 = "20ccf419dbc8f62d2649c5c05b14f4b241092586f91739ffc6f9678722a00da8"
+OVERLAY_ARCHIVE_SHA256 = "48164f812ea7fb4fb6b90b652d50be98d2f0f39e77ce76abf39623ef74fb0373"
+OVERLAY_SHA256 = "2f89d8510e9314be09d3bfbfd043739285b29636683f7e4f45de8ff918b3de1f"
 OVERLAY_PARTS = tuple(
     f"scripts/support/5b2_refactor_overlay.{index:02d}"
     for index in range(7)
