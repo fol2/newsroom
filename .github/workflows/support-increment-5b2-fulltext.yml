@@ -31,14 +31,18 @@ jobs:
           set -euo pipefail
           python scripts/support/materialize_5b2.py
           python -m py_compile \
+            newsroom/authority/_neo4j_projection_system.py \
+            newsroom/authority/neo4j_fulltext_reader.py \
             newsroom/increment5/fulltext_contracts.py \
             newsroom/increment5/fulltext_normalizer.py \
             newsroom/increment5/fulltext_receipts.py \
             newsroom/increment5/fulltext_journal.py \
             newsroom/increment5/fulltext_retriever.py \
+            newsroom/projection/neo4j/_adapter.py \
             newsroom/tests/increment5b2_helpers.py \
             newsroom/tests/test_increment5b2_normalizer.py \
-            newsroom/tests/test_increment5b2_fulltext_retriever.py
+            newsroom/tests/test_increment5b2_fulltext_retriever.py \
+            newsroom/tests/test_increment5b2_neo4j_authority_port.py
           git diff --check
           python - <<'PY'
           import subprocess
@@ -46,13 +50,17 @@ jobs:
           expected = {
               'docs/operations/increment-5b2-fulltext-retriever.md',
               'docs/traceability/increment-5b-branch-atoms.md',
+              'newsroom/authority/_neo4j_projection_system.py',
+              'newsroom/authority/neo4j_fulltext_reader.py',
               'newsroom/increment5/fulltext_contracts.py',
               'newsroom/increment5/fulltext_journal.py',
               'newsroom/increment5/fulltext_normalizer.py',
               'newsroom/increment5/fulltext_receipts.py',
               'newsroom/increment5/fulltext_retriever.py',
+              'newsroom/projection/neo4j/_adapter.py',
               'newsroom/tests/increment5b2_helpers.py',
               'newsroom/tests/test_increment5b2_fulltext_retriever.py',
+              'newsroom/tests/test_increment5b2_neo4j_authority_port.py',
               'newsroom/tests/test_increment5b2_normalizer.py',
           }
           lines = subprocess.run(
@@ -76,7 +84,9 @@ jobs:
         run: |
           uv run python -m pytest -q \
             newsroom/tests/test_increment5b2_normalizer.py \
-            newsroom/tests/test_increment5b2_fulltext_retriever.py
+            newsroom/tests/test_increment5b2_fulltext_retriever.py \
+            newsroom/tests/test_increment5b2_neo4j_authority_port.py \
+            newsroom/tests/test_projection_b2_boundaries.py
 
       - name: Commit generated product tree for clean-checkout evidence
         run: |
@@ -84,18 +94,22 @@ jobs:
           git add \
             docs/operations/increment-5b2-fulltext-retriever.md \
             docs/traceability/increment-5b-branch-atoms.md \
+            newsroom/authority/_neo4j_projection_system.py \
+            newsroom/authority/neo4j_fulltext_reader.py \
             newsroom/increment5/fulltext_contracts.py \
             newsroom/increment5/fulltext_journal.py \
             newsroom/increment5/fulltext_normalizer.py \
             newsroom/increment5/fulltext_receipts.py \
             newsroom/increment5/fulltext_retriever.py \
+            newsroom/projection/neo4j/_adapter.py \
             newsroom/tests/increment5b2_helpers.py \
             newsroom/tests/test_increment5b2_fulltext_retriever.py \
+            newsroom/tests/test_increment5b2_neo4j_authority_port.py \
             newsroom/tests/test_increment5b2_normalizer.py
           git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'support: materialize 5B2 full-text product tree'
+          git commit -m 'support: materialize 5B2 authority-port product tree'
           test -z "$(git status --porcelain)"
 
       - name: Complete deterministic repository evidence
@@ -115,6 +129,7 @@ jobs:
           set -euo pipefail
           git rm \
             scripts/support/5b2_payload.* \
+            scripts/support/5b2_refactor_overlay.* \
             scripts/support/materialize_5b2.py \
             .github/workflows/support-increment-5b2-fulltext.yml
           git diff --cached --check
