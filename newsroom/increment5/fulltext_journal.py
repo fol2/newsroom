@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 
 from newsroom.authority.canonical import digest_bytes
+from newsroom.increment5.branch_contracts import BranchRequestId
 
 from .fulltext_contracts import FullTextBranchRequest, FullTextContractError
 from .fulltext_receipts import FullTextBranchReceipt
@@ -91,6 +92,7 @@ class FullTextReceiptJournal:
                 if duplicate is not None:
                     receipt = self._verified_receipt(
                         duplicate,
+                        expected_request_id=request.request_id,
                         expected_request_digest=request.request_digest,
                         expected_request_bytes=request.canonical_bytes,
                     )
@@ -135,6 +137,7 @@ class FullTextReceiptJournal:
 
             receipt = self._verified_receipt(
                 row,
+                expected_request_id=request.request_id,
                 expected_request_digest=request.request_digest,
                 expected_request_bytes=request.canonical_bytes,
             )
@@ -158,6 +161,7 @@ class FullTextReceiptJournal:
     def _verified_receipt(
         row: sqlite3.Row,
         *,
+        expected_request_id: BranchRequestId,
         expected_request_digest: str,
         expected_request_bytes: bytes,
     ) -> FullTextBranchReceipt:
@@ -176,7 +180,10 @@ class FullTextReceiptJournal:
                 "stored full-text receipt digest differs"
             )
         receipt = FullTextBranchReceipt.from_canonical_bytes(receipt_bytes)
-        if receipt.request_digest != expected_request_digest:
+        if (
+            receipt.request_id != expected_request_id
+            or receipt.request_digest != expected_request_digest
+        ):
             raise FullTextReceiptJournalError(
                 "stored full-text receipt request binding differs"
             )

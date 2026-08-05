@@ -7,6 +7,7 @@ from enum import StrEnum
 import re
 
 from newsroom.authority.canonical import (
+    MAX_SAFE_INTEGER,
     canonical_json_bytes,
     digest_bytes,
     validate_sha256_digest,
@@ -90,8 +91,14 @@ def _bounded_text(
 
 
 def _non_negative(value: int, *, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise FullTextContractError(f"{field} must be a non-negative integer")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= MAX_SAFE_INTEGER
+    ):
+        raise FullTextContractError(
+            f"{field} must be a canonical non-negative integer"
+        )
     return value
 
 
@@ -498,8 +505,18 @@ class FullTextDocumentBinding:
             )
         if not self.rights_current:
             return BranchExclusionReason.RIGHTS_NOT_CURRENT
-        if self.lifecycle in {"TOMBSTONED", "RETIRED", "REJECTED", "REVOKED"}:
+        if self.lifecycle in {
+            "TOMBSTONED",
+            "RETIRED",
+            "REJECTED",
+            "REVOKED",
+            "MERGED",
+            "SPLIT",
+            "REVERSED",
+        }:
             return BranchExclusionReason.TOMBSTONED
+        if self.lifecycle != "ACTIVE":
+            return BranchExclusionReason.STALE_SOURCE_VERSION
         if (
             self.valid_from is not None
             and query_valid_time.value < self.valid_from.value

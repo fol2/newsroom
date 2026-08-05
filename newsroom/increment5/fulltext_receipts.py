@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from newsroom.authority.canonical import (
+    CanonicalizationError,
     canonical_json_bytes,
     digest_bytes,
     validate_sha256_digest,
@@ -21,7 +22,11 @@ from newsroom.increment5.branch_contracts import (
     BranchReceiptId,
     BranchRequestId,
 )
-from newsroom.retrieval.models import RetrievalBranch, RetrievalBranchHit
+from newsroom.retrieval.models import (
+    RetrievalBranch,
+    RetrievalBranchHit,
+    RetrievalContractError,
+)
 
 from .fulltext_contracts import (
     FULLTEXT_RESPONSE_BYTE_LIMIT,
@@ -167,6 +172,16 @@ class FullTextBranchReceipt:
             raise FullTextContractError(
                 "full-text authority read requires snapshot and view identity"
             )
+        if self.neo4j_read_count and (
+            self.authority_read_count != 1 or self.normalized_query is None
+        ):
+            raise FullTextContractError(
+                "full-text Neo4j evidence requires canonical authority and query evidence"
+            )
+        if self.exclusions and self.neo4j_read_count != 3:
+            raise FullTextContractError(
+                "full-text exclusions require a completed graph query"
+            )
         require_token(
             self.implementation_version,
             field="fulltext_implementation_version",
@@ -263,90 +278,103 @@ class FullTextBranchReceipt:
             raise FullTextContractError(
                 "stored full-text receipt schema differs"
             )
-        snapshot_value = value["snapshot"]
-        normalized_value = value["normalized_query"]
-        hits = tuple(
-            RetrievalBranchHit(
-                branch=RetrievalBranch(str(item["branch"])),
-                query_id=str(item["query_id"]),
-                query_digest=str(item["query_digest"]),
-                rank=int(item["rank"]),
-                raw_score=str(item["raw_score"]),
-                result_key=str(item["result_key"]),
-                dependency_root_id=str(item["dependency_root_id"]),
-                passage_id=(
-                    None
-                    if item["passage_id"] is None
-                    else str(item["passage_id"])
+        try:
+            snapshot_value = value["snapshot"]
+            normalized_value = value["normalized_query"]
+            hits = tuple(
+                RetrievalBranchHit(
+                    branch=RetrievalBranch(str(item["branch"])),
+                    query_id=str(item["query_id"]),
+                    query_digest=str(item["query_digest"]),
+                    rank=int(item["rank"]),
+                    raw_score=str(item["raw_score"]),
+                    result_key=str(item["result_key"]),
+                    dependency_root_id=str(item["dependency_root_id"]),
+                    passage_id=(
+                        None
+                        if item["passage_id"] is None
+                        else str(item["passage_id"])
+                    ),
+                    trust_scope=TrustScope(str(item["trust_scope"])),
+                    source_kind=str(item["source_kind"]),
+                    source_identity=str(item["source_identity"]),
+                )
+                for item in value["hits"]
+            )
+            exclusions = tuple(
+                BranchExclusion(
+                    authority_kind=str(item["authority_kind"]),
+                    authority_id=str(item["authority_id"]),
+                    reason=BranchExclusionReason(str(item["reason"])),
+                )
+                for item in value["exclusions"]
+            )
+            receipt = cls(
+                receipt_id=BranchReceiptId.parse(str(value["receipt_id"])),
+                request_id=BranchRequestId.parse(str(value["request_id"])),
+                request_digest=str(value["request_digest"]),
+                contract_digest=str(value["contract_digest"]),
+                policy_id=str(value["policy_id"]),
+                fulltext_component_digest=str(
+                    value["fulltext_component_digest"]
                 ),
-                trust_scope=TrustScope(str(item["trust_scope"])),
-                source_kind=str(item["source_kind"]),
-                source_identity=str(item["source_identity"]),
+                normalization_component_digest=str(
+                    value["normalization_component_digest"]
+                ),
+                implementation_version=str(value["implementation_version"]),
+                outcome=BranchOutcome(str(value["outcome"])),
+                reason_code=str(value["reason_code"]),
+                started_at=UtcTimestamp.parse(str(value["started_at"])),
+                completed_at=UtcTimestamp.parse(str(value["completed_at"])),
+                elapsed_ms=int(value["elapsed_ms"]),
+                snapshot=(
+                    None
+                    if snapshot_value is None
+                    else FullTextProjectionSnapshot.from_canonical_value(
+                        snapshot_value
+                    )
+                ),
+                authority_view_digest=(
+                    None
+                    if value["authority_view_digest"] is None
+                    else str(value["authority_view_digest"])
+                ),
+                normalized_query=(
+                    None
+                    if normalized_value is None
+                    else NormalizedFullTextQuery.from_canonical_value(
+                        normalized_value
+                    )
+                ),
+                hits=hits,
+                exclusions=exclusions,
+                authority_read_count=int(value["authority_read_count"]),
+                neo4j_read_count=int(value["neo4j_read_count"]),
+                external_call_count=int(value["external_call_count"]),
+                gross_cost_microunits=int(value["gross_cost_microunits"]),
+                authority_effect=str(value["authority_effect"]),
+                hybrid_result_claimed=bool(value["hybrid_result_claimed"]),
+                projection_text_factual_use_allowed=bool(
+                    value["projection_text_factual_use_allowed"]
+                ),
             )
-            for item in value["hits"]
-        )
-        exclusions = tuple(
-            BranchExclusion(
-                authority_kind=str(item["authority_kind"]),
-                authority_id=str(item["authority_id"]),
-                reason=BranchExclusionReason(str(item["reason"])),
-            )
-            for item in value["exclusions"]
-        )
-        receipt = cls(
-            receipt_id=BranchReceiptId.parse(str(value["receipt_id"])),
-            request_id=BranchRequestId.parse(str(value["request_id"])),
-            request_digest=str(value["request_digest"]),
-            contract_digest=str(value["contract_digest"]),
-            policy_id=str(value["policy_id"]),
-            fulltext_component_digest=str(
-                value["fulltext_component_digest"]
-            ),
-            normalization_component_digest=str(
-                value["normalization_component_digest"]
-            ),
-            implementation_version=str(value["implementation_version"]),
-            outcome=BranchOutcome(str(value["outcome"])),
-            reason_code=str(value["reason_code"]),
-            started_at=UtcTimestamp.parse(str(value["started_at"])),
-            completed_at=UtcTimestamp.parse(str(value["completed_at"])),
-            elapsed_ms=int(value["elapsed_ms"]),
-            snapshot=(
-                None
-                if snapshot_value is None
-                else FullTextProjectionSnapshot.from_canonical_value(
-                    snapshot_value
+            if receipt.canonical_bytes != raw:
+                raise FullTextContractError(
+                    "stored full-text receipt is not canonical"
                 )
-            ),
-            authority_view_digest=(
-                None
-                if value["authority_view_digest"] is None
-                else str(value["authority_view_digest"])
-            ),
-            normalized_query=(
-                None
-                if normalized_value is None
-                else NormalizedFullTextQuery.from_canonical_value(
-                    normalized_value
-                )
-            ),
-            hits=hits,
-            exclusions=exclusions,
-            authority_read_count=int(value["authority_read_count"]),
-            neo4j_read_count=int(value["neo4j_read_count"]),
-            external_call_count=int(value["external_call_count"]),
-            gross_cost_microunits=int(value["gross_cost_microunits"]),
-            authority_effect=str(value["authority_effect"]),
-            hybrid_result_claimed=bool(value["hybrid_result_claimed"]),
-            projection_text_factual_use_allowed=bool(
-                value["projection_text_factual_use_allowed"]
-            ),
-        )
-        if receipt.canonical_bytes != raw:
+            return receipt
+        except FullTextContractError:
+            raise
+        except (
+            CanonicalizationError,
+            RetrievalContractError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as exc:
             raise FullTextContractError(
-                "stored full-text receipt is not canonical"
-            )
-        return receipt
+                "stored full-text receipt fields differ from the canonical contract"
+            ) from exc
 
 
 def _without_duplicate_names(
@@ -376,7 +404,13 @@ def _decode_canonical_json(raw: bytes) -> dict[str, Any]:
         raise FullTextContractError(
             "stored full-text receipt is not valid JSON"
         ) from exc
-    if not isinstance(value, dict) or canonical_json_bytes(value) != raw:
+    try:
+        canonical = canonical_json_bytes(value)
+    except CanonicalizationError as exc:
+        raise FullTextContractError(
+            "stored full-text receipt is outside canonical JSON"
+        ) from exc
+    if not isinstance(value, dict) or canonical != raw:
         raise FullTextContractError(
             "stored full-text receipt must use canonical JSON"
         )

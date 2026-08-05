@@ -6,6 +6,7 @@ import sqlite3
 
 import pytest
 
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.increment5.branch_contracts import (
     BranchExclusionReason,
     BranchOutcome,
@@ -132,6 +133,25 @@ def test_no_match_is_complete_only_after_all_three_neo4j_reads(
     assert receipt.neo4j_read_count == 3
     assert not receipt.hits
     assert driver.execute_read_count == 3
+
+
+@pytest.mark.parametrize(
+    ("lifecycle", "reason"),
+    [
+        ("HELD", BranchExclusionReason.STALE_SOURCE_VERSION),
+        ("UNRESOLVED", BranchExclusionReason.STALE_SOURCE_VERSION),
+        ("PROPOSED", BranchExclusionReason.STALE_SOURCE_VERSION),
+        ("MERGED", BranchExclusionReason.TOMBSTONED),
+        ("SPLIT", BranchExclusionReason.TOMBSTONED),
+        ("REVERSED", BranchExclusionReason.TOMBSTONED),
+    ],
+)
+def test_every_nonactive_passage_lifecycle_is_excluded(
+    lifecycle: str,
+    reason: BranchExclusionReason,
+) -> None:
+    binding = replace(bindings()[1], lifecycle=lifecycle)
+    assert binding.exclusion_at(NOW) is reason
 
 
 def test_current_rights_and_lifecycle_exclusions_are_explicit(
@@ -446,11 +466,14 @@ def test_untyped_authority_view_returns_journaled_unavailable_receipt(
 def test_noncanonical_authority_view_returns_journaled_unavailable_receipt(
     tmp_path: Path,
 ) -> None:
+    corrupt_snapshot = snapshot()
+    object.__setattr__(
+        corrupt_snapshot,
+        "contiguous_ledger_seq",
+        9_007_199_254_740_992,
+    )
     noncanonical_view = authority_view(
-        projection_snapshot=replace(
-            snapshot(),
-            contiguous_ledger_seq=9_007_199_254_740_992,
-        )
+        projection_snapshot=corrupt_snapshot
     )
     driver, _factory, retriever = system(
         tmp_path,
@@ -697,6 +720,68 @@ def test_document_binding_rejects_non_token_passage_id(
         replace(bindings()[0], passage_id=passage_id)
 
 
+def test_journal_rejects_rebound_request_identity(tmp_path: Path) -> None:
+    driver, _factory, retriever = system(tmp_path)
+    original = retriever.retrieve(request()).receipt
+    value = original.canonical_value()
+    value["request_id"] = "00000000-0000-4000-8000-000000005299"
+    corrupted = canonical_json_bytes(value)
+    journal_path = tmp_path / "fulltext-receipts.sqlite3"
+    with sqlite3.connect(journal_path) as connection:
+        connection.execute(
+            "DROP TRIGGER immutable_increment5_fulltext_receipt_update"
+        )
+        connection.execute(
+            "UPDATE increment5_fulltext_receipts SET "
+            "receipt_bytes=?,receipt_digest=?",
+            (corrupted, digest_bytes(corrupted)),
+        )
+
+    restarted = FullTextRetriever(
+        graph_reader=driver.reader(),
+        journal=FullTextReceiptJournal(journal_path),
+        authority_view_provider=lambda _request: authority_view(),
+        monotonic_ns=lambda: 0,
+    )
+    with pytest.raises(
+        FullTextReceiptJournalError,
+        match="request binding differs",
+    ):
+        restarted.retrieve(request())
+
+
+def test_journal_translates_canonical_malformed_receipt_fields(
+    tmp_path: Path,
+) -> None:
+    driver, _factory, retriever = system(tmp_path)
+    original = retriever.retrieve(request()).receipt
+    value = original.canonical_value()
+    value["fulltext_component_digest"] = "not-a-digest"
+    corrupted = canonical_json_bytes(value)
+    journal_path = tmp_path / "fulltext-receipts.sqlite3"
+    with sqlite3.connect(journal_path) as connection:
+        connection.execute(
+            "DROP TRIGGER immutable_increment5_fulltext_receipt_update"
+        )
+        connection.execute(
+            "UPDATE increment5_fulltext_receipts SET "
+            "receipt_bytes=?,receipt_digest=?",
+            (corrupted, digest_bytes(corrupted)),
+        )
+
+    restarted = FullTextRetriever(
+        graph_reader=driver.reader(),
+        journal=FullTextReceiptJournal(journal_path),
+        authority_view_provider=lambda _request: authority_view(),
+        monotonic_ns=lambda: 0,
+    )
+    with pytest.raises(
+        FullTextReceiptJournalError,
+        match="unavailable or inconsistent",
+    ):
+        restarted.retrieve(request())
+
+
 def test_request_rejects_oversized_and_unbounded_controls() -> None:
     with pytest.raises(FullTextContractError, match="bounded"):
         request(query_text="x" * 16_385)
@@ -706,6 +791,10 @@ def test_request_rejects_oversized_and_unbounded_controls() -> None:
         request(timeout_ms=5_001)
     with pytest.raises(FullTextContractError, match="response byte limit"):
         request(response_byte_limit=262_145)
+    with pytest.raises(FullTextContractError, match="canonical non-negative"):
+        request(minimum_watermark=9_007_199_254_740_992)
+    with pytest.raises(FullTextContractError, match="canonical non-negative"):
+        snapshot(index_document_count=9_007_199_254_740_992)
 
 
 @pytest.mark.parametrize(
