@@ -390,6 +390,20 @@ def _apply_plan(
             draft=current.draft,
             head_ref=current.head_ref,
         )
+        planned_lifecycle = lifecycles.get(action.pr_number)
+        if planned_lifecycle is None or lifecycle != planned_lifecycle:
+            raise GithubApiError(
+                f"pull request #{action.pr_number} lifecycle changed after planning"
+            )
+        expected_delete_branch = (
+            current.head_ref
+            if lifecycle.branch_retention.value == "delete-after-checkpoint"
+            else None
+        )
+        if action.delete_branch != expected_delete_branch:
+            raise GithubApiError(
+                f"pull request #{action.pr_number} retention differs from its plan"
+            )
         if not lifecycle.is_disposable:
             raise GithubApiError(
                 f"pull request #{action.pr_number} is no longer disposable"
@@ -405,12 +419,31 @@ def _apply_plan(
                     f"pull request #{action.pr_number} checkpoint is no longer present"
                 )
         elif lifecycle.close_when.value == "canonical-merged":
-            if (
-                lifecycle.canonical_pr is None
-                or not client.pull_request_is_merged(lifecycle.canonical_pr)
-            ):
+            if lifecycle.canonical_pr is None:
+                raise GithubApiError(
+                    f"pull request #{action.pr_number} lacks a canonical PR"
+                )
+            raw_canonical = client.get_pull_request(lifecycle.canonical_pr)
+            if raw_canonical.get("merged_at") is None:
                 raise GithubApiError(
                     f"pull request #{action.pr_number} canonical PR is not merged"
+                )
+            canonical_pr = _open_pr_from_json(raw_canonical)
+            canonical_lifecycle = parse_pr_lifecycle(canonical_pr.body)
+            validate_pull_request_lifecycle(
+                canonical_lifecycle,
+                pr_number=canonical_pr.number,
+                draft=canonical_pr.draft,
+                head_ref=canonical_pr.head_ref,
+            )
+            if (
+                not canonical_lifecycle.canonical_is_self
+                or canonical_lifecycle.delivery_atom
+                != lifecycle.delivery_atom
+            ):
+                raise GithubApiError(
+                    f"pull request #{action.pr_number} delivery atom differs "
+                    "from its current merged canonical PR"
                 )
         else:
             raise GithubApiError(

@@ -573,6 +573,160 @@ def test_apply_revalidates_current_disposable_surface() -> None:
     assert client.effects == []
 
 
+def test_apply_rejects_retention_change_after_planning() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
+    spec = importlib.util.spec_from_file_location(
+        "test_pr_lifecycle_retention_cli",
+        module_path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    planned_body = body(
+        lifecycle="support",
+        canonical="#10",
+        close_when="canonical-merged",
+        retention="delete-after-checkpoint",
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.effects: list[str] = []
+
+        def get_pull_request(self, number: int):
+            assert number == 11
+            return {
+                "number": 11,
+                "body": body(
+                    lifecycle="support",
+                    canonical="#10",
+                    close_when="canonical-merged",
+                    retention="keep",
+                ),
+                "draft": True,
+                "head": {
+                    "ref": "support/increment-5b2-correction",
+                    "sha": "a" * 40,
+                    "repo": {"full_name": "fol2/newsroom"},
+                },
+                "labels": [{"name": HOUSEKEEPING_LABEL}],
+                "created_at": "2026-08-05T12:00:00Z",
+            }
+
+        def comment(self, *_args):
+            self.effects.append("comment")
+
+        def close_pull_request(self, *_args):
+            self.effects.append("close")
+
+        def delete_branch(self, *_args):
+            self.effects.append("delete")
+
+    client = FakeClient()
+    plan = HousekeepingPlan(
+        close_actions=(
+            CloseAction(
+                pr_number=11,
+                reason="canonical PR #10 is merged",
+                delete_branch="support/increment-5b2-correction",
+            ),
+        ),
+        warnings=(),
+    )
+    with pytest.raises(module.GithubApiError, match="changed after planning"):
+        module._apply_plan(
+            client,
+            plan,
+            lifecycles={11: module.parse_pr_lifecycle(planned_body)},
+            repository="fol2/newsroom",
+        )
+    assert client.effects == []
+
+
+def test_apply_revalidates_current_merged_canonical_binding() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
+    spec = importlib.util.spec_from_file_location(
+        "test_pr_lifecycle_canonical_apply_cli",
+        module_path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    support_body = body(
+        lifecycle="support",
+        canonical="#10",
+        close_when="canonical-merged",
+        retention="keep",
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.effects: list[str] = []
+
+        def get_pull_request(self, number: int):
+            if number == 11:
+                return {
+                    "number": 11,
+                    "body": support_body,
+                    "draft": True,
+                    "head": {
+                        "ref": "support/increment-5b2-correction",
+                        "sha": "a" * 40,
+                        "repo": {"full_name": "fol2/newsroom"},
+                    },
+                    "labels": [{"name": HOUSEKEEPING_LABEL}],
+                    "created_at": "2026-08-05T12:00:00Z",
+                }
+            assert number == 10
+            return {
+                "number": 10,
+                "body": body(atom="unrelated-atom"),
+                "draft": False,
+                "head": {
+                    "ref": "agent/unrelated-atom",
+                    "sha": "b" * 40,
+                    "repo": {"full_name": "fol2/newsroom"},
+                },
+                "labels": [],
+                "created_at": "2026-08-01T12:00:00Z",
+                "merged_at": "2026-08-02T12:00:00Z",
+            }
+
+        def comment(self, *_args):
+            self.effects.append("comment")
+
+        def close_pull_request(self, *_args):
+            self.effects.append("close")
+
+        def delete_branch(self, *_args):
+            self.effects.append("delete")
+
+    client = FakeClient()
+    plan = HousekeepingPlan(
+        close_actions=(
+            CloseAction(
+                pr_number=11,
+                reason="canonical PR #10 is merged",
+            ),
+        ),
+        warnings=(),
+    )
+    with pytest.raises(module.GithubApiError, match="delivery atom differs"):
+        module._apply_plan(
+            client,
+            plan,
+            lifecycles={11: module.parse_pr_lifecycle(support_body)},
+            repository="fol2/newsroom",
+        )
+    assert client.effects == []
+
+
 def test_apply_rejects_checkpoint_not_bound_to_current_head() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
@@ -590,27 +744,38 @@ def test_apply_rejects_checkpoint_not_bound_to_current_head() -> None:
             self.effects: list[str] = []
 
         def get_pull_request(self, number: int):
-            assert number == 11
+            if number == 11:
+                return {
+                    "number": 11,
+                    "body": body(
+                        lifecycle="support",
+                        canonical="#10",
+                        close_when="canonical-merged",
+                        retention="delete-after-checkpoint",
+                    ),
+                    "draft": True,
+                    "head": {
+                        "ref": "support/increment-5b2-correction",
+                        "sha": "a" * 40,
+                        "repo": {"full_name": "fol2/newsroom"},
+                    },
+                    "labels": [{"name": HOUSEKEEPING_LABEL}],
+                    "created_at": "2026-08-05T12:00:00Z",
+                }
+            assert number == 10
             return {
-                "number": 11,
-                "body": body(
-                    lifecycle="support",
-                    canonical="#10",
-                    close_when="canonical-merged",
-                    retention="delete-after-checkpoint",
-                ),
-                "draft": True,
+                "number": 10,
+                "body": body(),
+                "draft": False,
                 "head": {
-                    "ref": "support/increment-5b2-correction",
-                    "sha": "a" * 40,
+                    "ref": "agent/increment-5b2",
+                    "sha": "c" * 40,
                     "repo": {"full_name": "fol2/newsroom"},
                 },
-                "labels": [{"name": HOUSEKEEPING_LABEL}],
-                "created_at": "2026-08-05T12:00:00Z",
+                "labels": [],
+                "created_at": "2026-08-01T12:00:00Z",
+                "merged_at": "2026-08-02T12:00:00Z",
             }
-
-        def pull_request_is_merged(self, number: int) -> bool:
-            return number == 10
 
         def branch_sha(self, ref: str):
             if ref == "checkpoint/increment-5b2":
@@ -641,7 +806,16 @@ def test_apply_rejects_checkpoint_not_bound_to_current_head() -> None:
         module._apply_plan(
             client,
             plan,
-            lifecycles={},
+            lifecycles={
+                11: module.parse_pr_lifecycle(
+                    body(
+                        lifecycle="support",
+                        canonical="#10",
+                        close_when="canonical-merged",
+                        retention="delete-after-checkpoint",
+                    )
+                )
+            },
             repository="fol2/newsroom",
         )
     assert client.effects == []
