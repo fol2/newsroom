@@ -1,0 +1,117 @@
+name: Support PR lifecycle final export v3
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-export:
+    if: github.head_ref == 'support/pr-lifecycle-token-ref-binding-20260805'
+    runs-on: ubuntu-latest
+    env:
+      CANONICAL_PARENT: aabad06b45145729d9ec6a27dba07ccff698d71a
+      EXPORT_BRANCH: staging/pr-lifecycle-final-nonworkflow-export-20260805
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Materialize exact final workflow and review corrections
+        run: |
+          set -euo pipefail
+          python scripts/support/apply_pr_lifecycle_workflow_tokens.py
+          python scripts/support/fix_pr_lifecycle_remaining_materializer.py
+          python scripts/support/apply_pr_lifecycle_remaining_review.py
+          python -m py_compile \
+            newsroom/checks/pr_lifecycle.py \
+            newsroom/tests/test_pr_lifecycle.py \
+            scripts/sdlc/pr_lifecycle.py
+          git diff --check
+          python - <<'PY'
+          import subprocess
+
+          expected = {
+              '.github/workflows/pr-lifecycle.yml',
+              'newsroom/tests/test_pr_lifecycle.py',
+              'scripts/sdlc/pr_lifecycle.py',
+              'scripts/support/apply_pr_lifecycle_remaining_review.py',
+          }
+          lines = subprocess.run(
+              ['git', 'status', '--porcelain=v1', '--untracked-files=all'],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.splitlines()
+          actual = {line[3:] for line in lines}
+          if actual != expected:
+              raise SystemExit(
+                  f'final lifecycle candidate inventory differs: '
+                  f'expected={sorted(expected)!r} actual={sorted(actual)!r}'
+              )
+          PY
+
+      - name: Restore materializer and commit exact candidate
+        run: |
+          set -euo pipefail
+          git restore scripts/support/apply_pr_lifecycle_remaining_review.py
+          git add \
+            .github/workflows/pr-lifecycle.yml \
+            newsroom/tests/test_pr_lifecycle.py \
+            scripts/sdlc/pr_lifecycle.py
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: bind lifecycle housekeeping to exact current state'
+          test -z "$(git status --porcelain)"
+
+      - name: Sync locked development environment
+        run: uv sync --dev --locked
+
+      - name: Focused lifecycle authorization evidence
+        run: uv run python -m pytest -q newsroom/tests/test_pr_lifecycle.py
+
+      - name: Complete deterministic repository evidence
+        run: uv run python -m pytest -q
+
+      - name: Existing clustering evaluation gate
+        run: |
+          uv run python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+      - name: Export only final verified non-workflow product blobs
+        run: |
+          set -euo pipefail
+          candidate="$(git rev-parse HEAD)"
+          git read-tree "${CANONICAL_PARENT}^{tree}"
+          for path in \
+            docs/operations/pr-lifecycle.md \
+            newsroom/checks/pr_lifecycle.py \
+            newsroom/tests/test_pr_lifecycle.py \
+            scripts/sdlc/pr_lifecycle.py
+          do
+            mode="$(git ls-tree "${candidate}" -- "${path}" | awk '{print $1}')"
+            blob="$(git rev-parse "${candidate}:${path}")"
+            git update-index --add --cacheinfo "${mode},${blob},${path}"
+          done
+          tree="$(git write-tree)"
+          export_commit="$({
+            printf '%s\n\n' 'support: export final verified lifecycle blobs'
+            printf '%s\n' 'Export only the four final reviewed non-workflow product blobs over the workflow-clean canonical parent.'
+          } | git commit-tree "${tree}" -p "${CANONICAL_PARENT}")"
+          test "$(git rev-parse "${export_commit}^")" = "${CANONICAL_PARENT}"
+          git push origin "+${export_commit}:refs/heads/${EXPORT_BRANCH}"
