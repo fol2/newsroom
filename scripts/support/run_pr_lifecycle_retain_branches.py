@@ -57,6 +57,10 @@ def main() -> None:
     }
     exec(compile(patched, str(TARGET), "exec"), namespace)
 
+    test_path = TARGET.resolve().parents[2] / "newsroom/tests/test_pr_lifecycle.py"
+    test_text = test_path.read_text(encoding="utf-8")
+    test_path.write_text(test_text.rstrip() + "\n", encoding="utf-8")
+
 
 if __name__ == "__main__":
     main()
