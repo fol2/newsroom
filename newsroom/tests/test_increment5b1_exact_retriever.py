@@ -394,7 +394,7 @@ def test_remaining_exact_lookup_kinds_are_fixed_and_attributable(
 
 def test_elapsed_overrun_is_an_explicit_incomplete_timeout(tmp_path: Path) -> None:
     authority, journal_path, _system_value = _system(tmp_path)
-    ticks = iter((0, 5_001_000_000))
+    ticks = iter((0, 5_000_000_001))
     system = SQLiteExactRetriever(
         authority_database=authority,
         journal=BranchReceiptJournal(journal_path),
