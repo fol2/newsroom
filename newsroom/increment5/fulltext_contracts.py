@@ -34,6 +34,7 @@ NORMALIZATION_COMPONENT_DIGEST = (
 FULLTEXT_POLICY_ID = "increment5-fulltext-branch-v1"
 FULLTEXT_ACTOR_ID = "retrieval_worker"
 FULLTEXT_PURPOSE = "bounded_fulltext_lookup"
+FULLTEXT_QUERY_ID = "increment5.fulltext.v1"
 FULLTEXT_PROVIDER = "fulltext-2.0"
 FULLTEXT_ANALYZER = "standard-no-stop-words"
 FULLTEXT_RESPONSE_BYTE_LIMIT = 262_144
@@ -749,6 +750,7 @@ __all__ = [
     "FULLTEXT_POLICY_ID",
     "FULLTEXT_PROVIDER",
     "FULLTEXT_PURPOSE",
+    "FULLTEXT_QUERY_ID",
     "FULLTEXT_RESPONSE_BYTE_LIMIT",
     "FullTextAuthorityView",
     "FullTextBranchRequest",

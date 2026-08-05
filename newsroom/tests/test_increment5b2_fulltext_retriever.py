@@ -14,6 +14,7 @@ from newsroom.increment5.branch_contracts import (
 from newsroom.increment5.fulltext_contracts import (
     FULLTEXT_COMPONENT_DIGEST,
     FULLTEXT_INDEXED_FIELDS,
+    FULLTEXT_QUERY_ID,
     NORMALIZATION_COMPONENT_DIGEST,
     FullTextContractError,
     FullTextIndexState,
@@ -72,6 +73,11 @@ def test_complete_fulltext_receipt_is_bounded_attributable_and_replayable(
     assert receipt.projection_text_factual_use_allowed is False
     assert receipt.snapshot is not None
     assert receipt.normalized_query is not None
+    assert all(
+        item.query_id == FULLTEXT_QUERY_ID
+        and item.query_digest == receipt.normalized_query.query_digest
+        for item in receipt.hits
+    )
     assert receipt.authority_view_digest is not None
     assert len(receipt.canonical_bytes) < 262_144
 
@@ -746,6 +752,48 @@ def test_journal_rejects_rebound_request_identity(tmp_path: Path) -> None:
     with pytest.raises(
         FullTextReceiptJournalError,
         match="request binding differs",
+    ):
+        restarted.retrieve(request())
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("query_id", "increment5.fulltext.other"),
+        ("query_digest", digest("another-normalized-query")),
+    ],
+)
+def test_journal_rejects_hits_rebound_to_another_query(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    driver, _factory, retriever = system(tmp_path)
+    original = retriever.retrieve(request()).receipt
+    value = original.canonical_value()
+    assert value["hits"]
+    value["hits"][0][field] = replacement
+    corrupted = canonical_json_bytes(value)
+    journal_path = tmp_path / "fulltext-receipts.sqlite3"
+    with sqlite3.connect(journal_path) as connection:
+        connection.execute(
+            "DROP TRIGGER immutable_increment5_fulltext_receipt_update"
+        )
+        connection.execute(
+            "UPDATE increment5_fulltext_receipts SET "
+            "receipt_bytes=?,receipt_digest=?",
+            (corrupted, digest_bytes(corrupted)),
+        )
+
+    restarted = FullTextRetriever(
+        graph_reader=driver.reader(),
+        journal=FullTextReceiptJournal(journal_path),
+        authority_view_provider=lambda _request: authority_view(),
+        monotonic_ns=lambda: 0,
+    )
+    with pytest.raises(
+        FullTextReceiptJournalError,
+        match="unavailable or inconsistent",
     ):
         restarted.retrieve(request())
 

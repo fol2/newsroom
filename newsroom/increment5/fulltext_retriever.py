@@ -41,6 +41,7 @@ from .fulltext_contracts import (
     FULLTEXT_INDEXED_FIELDS,
     FULLTEXT_POLICY_ID,
     FULLTEXT_PROVIDER,
+    FULLTEXT_QUERY_ID,
     INCREMENT5_RETRIEVAL_CONTRACT_DIGEST,
     NORMALIZATION_COMPONENT_DIGEST,
     FullTextAuthorityView,
@@ -52,9 +53,6 @@ from .fulltext_contracts import (
 from .fulltext_journal import FullTextJournalResult, FullTextReceiptJournal
 from .fulltext_normalizer import BilingualSearchNormalizer
 from .fulltext_receipts import FullTextBranchReceipt
-
-
-_QUERY_ID = "increment5.fulltext.v1"
 
 
 class FullTextRetrieverError(RuntimeError):
@@ -639,7 +637,7 @@ class FullTextRetriever:
             hits.append(
                 RetrievalBranchHit(
                     branch=RetrievalBranch.FULL_TEXT,
-                    query_id=_QUERY_ID,
+                    query_id=FULLTEXT_QUERY_ID,
                     query_digest=normalized.query_digest,
                     rank=len(hits) + 1,
                     raw_score=canonical_score(score),

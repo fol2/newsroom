@@ -29,6 +29,7 @@ from newsroom.retrieval.models import (
 )
 
 from .fulltext_contracts import (
+    FULLTEXT_QUERY_ID,
     FULLTEXT_RESPONSE_BYTE_LIMIT,
     FullTextContractError,
     FullTextProjectionSnapshot,
@@ -137,6 +138,18 @@ class FullTextBranchReceipt:
         if len({hit.result_key for hit in self.hits}) != len(self.hits):
             raise FullTextContractError(
                 "full-text receipt result keys must be unique"
+            )
+        if self.hits and self.normalized_query is None:
+            raise FullTextContractError(
+                "full-text hits require normalized query evidence"
+            )
+        if self.normalized_query is not None and any(
+            hit.query_id != FULLTEXT_QUERY_ID
+            or hit.query_digest != self.normalized_query.query_digest
+            for hit in self.hits
+        ):
+            raise FullTextContractError(
+                "full-text hit query identity differs from normalized query"
             )
         if not isinstance(self.exclusions, tuple) or any(
             not isinstance(item, BranchExclusion)
