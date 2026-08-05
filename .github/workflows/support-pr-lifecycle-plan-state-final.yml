@@ -31,6 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/support/apply_pr_lifecycle_plan_state_final.py
+          python scripts/support/fix_pr_lifecycle_action_state_fixtures.py
           python -m py_compile \
             newsroom/checks/pr_lifecycle.py \
             newsroom/tests/test_pr_lifecycle.py \
@@ -94,6 +95,7 @@ jobs:
           set -euo pipefail
           git rm \
             scripts/support/apply_pr_lifecycle_plan_state_final.py \
+            scripts/support/fix_pr_lifecycle_action_state_fixtures.py \
             .github/workflows/support-pr-lifecycle-plan-state-final.yml
           git diff --cached --check
           git commit -m 'support: retain product-only plan and action-state hardening'
