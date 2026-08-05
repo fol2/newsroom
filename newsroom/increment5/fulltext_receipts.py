@@ -106,6 +106,13 @@ class FullTextBranchReceipt:
             raise FullTextContractError(
                 "full-text elapsed time exceeds its hard bound"
             )
+        if self.reason_code == "QUERY_TIMEOUT" and (
+            self.outcome is not BranchOutcome.INCOMPLETE
+            or self.elapsed_ms != BRANCH_TIMEOUT_MS
+        ):
+            raise FullTextContractError(
+                "full-text timeout receipt differs from its hard deadline"
+            )
         if self.snapshot is not None and not isinstance(
             self.snapshot, FullTextProjectionSnapshot
         ):

@@ -340,6 +340,10 @@ def test_timeout_override_of_stale_snapshot_is_journaled_and_replayed(
     assert not receipt.hits
     assert not receipt.exclusions
     assert driver.calls == []
+    with pytest.raises(FullTextContractError, match="timeout receipt"):
+        replace(receipt, elapsed_ms=4_999)
+    with pytest.raises(FullTextContractError, match="timeout receipt"):
+        replace(receipt, outcome=BranchOutcome.STALE)
 
     replay = retriever.retrieve(current_request)
     assert replay.replayed is True
