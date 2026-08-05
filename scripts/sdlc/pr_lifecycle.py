@@ -187,10 +187,6 @@ class GithubClient:
         if not isinstance(value, dict) or value.get("state") != "closed":
             raise GithubApiError(f"pull request #{number} did not close")
 
-    def delete_branch(self, ref: str) -> None:
-        encoded = quote(ref, safe="")
-        self.request("DELETE", f"/git/refs/heads/{encoded}")
-
 
 def validate_event(path: Path) -> int:
     try:
@@ -433,30 +429,6 @@ def _validated_current_canonical(
     return canonical_lifecycle
 
 
-def _require_exclusive_current_head(
-    client: GithubClient,
-    *,
-    current: OpenPullRequest,
-    repository: str,
-) -> None:
-    if current.head_repository != repository:
-        raise GithubApiError(
-            f"pull request #{current.number} branch belongs to another repository"
-        )
-    for raw in client.list_open_pull_requests():
-        candidate = _open_pr_from_json(raw)
-        if candidate.number == current.number:
-            continue
-        if (
-            candidate.head_repository == repository
-            and candidate.head_ref == current.head_ref
-        ):
-            raise GithubApiError(
-                f"pull request #{current.number} branch is shared by open PR "
-                f"#{candidate.number}"
-            )
-
-
 def _apply_plan(
     client: GithubClient,
     plan: HousekeepingPlan,
@@ -487,14 +459,10 @@ def _apply_plan(
             raise GithubApiError(
                 f"pull request #{action.pr_number} lifecycle changed after planning"
             )
-        expected_delete_branch = (
-            current.head_ref
-            if lifecycle.branch_retention.value == "delete-after-checkpoint"
-            else None
-        )
-        if action.delete_branch != expected_delete_branch:
+        if lifecycle.branch_retention.value != "keep":
             raise GithubApiError(
-                f"pull request #{action.pr_number} retention differs from its plan"
+                f"pull request #{action.pr_number} requests unsupported "
+                "automatic branch deletion"
             )
         if not lifecycle.is_disposable:
             raise GithubApiError(
@@ -536,26 +504,6 @@ def _apply_plan(
             raise GithubApiError(
                 f"pull request #{action.pr_number} close condition changed"
             )
-        if action.delete_branch is not None:
-            checkpoint_sha = (
-                None if checkpoint is None else client.branch_sha(checkpoint)
-            )
-            head_sha = client.branch_sha(current.head_ref)
-            if (
-                current.head_repository != repository
-                or current.head_ref != action.delete_branch
-                or current.head_sha is None
-                or checkpoint_sha != current.head_sha
-                or head_sha != current.head_sha
-            ):
-                raise GithubApiError(
-                    f"pull request #{action.pr_number} branch deletion is no longer safe"
-                )
-            _require_exclusive_current_head(
-                client,
-                current=current,
-                repository=repository,
-            )
         comment = "\n".join(
             (
                 "Automated lifecycle housekeeping closure.",
@@ -564,31 +512,14 @@ def _apply_plan(
                 f"- Recorded at: `{recorded_at}`",
                 f"- Reason: {action.reason}",
                 f"- Checkpoint: `{checkpoint or 'NONE'}`",
-                f"- Branch deletion: `{action.delete_branch or 'NONE'}`",
+                "- Automatic branch deletion: `DISABLED`",
+                "- Branch retention: `keep`",
                 "",
                 "This action never merges or auto-closes a canonical PR.",
             )
         )
         client.comment(action.pr_number, comment)
         client.close_pull_request(action.pr_number)
-        if action.delete_branch is not None:
-            assert checkpoint is not None
-            final_head_sha = client.branch_sha(action.delete_branch)
-            final_checkpoint_sha = client.branch_sha(checkpoint)
-            if (
-                current.head_sha is None
-                or final_head_sha != current.head_sha
-                or final_checkpoint_sha != current.head_sha
-            ):
-                raise GithubApiError(
-                    f"pull request #{action.pr_number} branch changed before deletion"
-                )
-            _require_exclusive_current_head(
-                client,
-                current=current,
-                repository=repository,
-            )
-            client.delete_branch(action.delete_branch)
 
 
 def _render_plan(
@@ -604,18 +535,18 @@ def _render_plan(
         f"- Open PRs inspected: `{open_count}`",
         f"- Disposable PRs eligible for closure: `{len(plan.close_actions)}`",
         f"- Age warnings: `{len(plan.warnings)}`",
+        "- Automatic branch deletion: `DISABLED`",
         "",
     ]
     if plan.close_actions:
         lines.extend(
             (
-                "| PR | Reason | Delete branch |",
-                "|---:|---|---|",
+                "| PR | Reason |",
+                "|---:|---|",
             )
         )
         lines.extend(
-            f"| #{item.pr_number} | {item.reason} | "
-            f"`{item.delete_branch or 'NONE'}` |"
+            f"| #{item.pr_number} | {item.reason} |"
             for item in plan.close_actions
         )
         lines.append("")

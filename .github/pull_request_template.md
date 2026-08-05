@@ -10,6 +10,7 @@ Required lifecycle metadata:
 - canonical: Canonical-PR self, Close-When merged, Branch-Retention keep
 - support: draft, support/ branch, reference canonical #, never merge
 - preflight: draft, preflight/ branch, reference canonical #, never merge
+- Branch-Retention must always be keep; automated branch deletion is unsupported.
 See docs/operations/pr-lifecycle.md.
 -->
 

@@ -112,7 +112,6 @@ class OpenPullRequest:
 class CloseAction:
     pr_number: int
     reason: str
-    delete_branch: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +204,11 @@ def validate_pull_request_lifecycle(
     if not isinstance(draft, bool):
         raise PrLifecycleError("pull-request draft state must be boolean")
     _validate_ref(head_ref, field="head_ref")
+    if lifecycle.branch_retention is not BranchRetention.KEEP:
+        raise PrLifecycleError(
+            "automatic branch deletion is unsupported; "
+            "Branch-Retention must be keep"
+        )
 
     if lifecycle.kind is LifecycleKind.CANONICAL:
         if lifecycle.canonical_pr is not None:
@@ -240,13 +244,6 @@ def validate_pull_request_lifecycle(
     ):
         raise PrLifecycleError(
             "checkpointed disposable PR requires a checkpoint ref"
-        )
-    if (
-        lifecycle.branch_retention is BranchRetention.DELETE_AFTER_CHECKPOINT
-        and lifecycle.checkpoint_ref is None
-    ):
-        raise PrLifecycleError(
-            "branch deletion requires a checkpoint ref"
         )
 
 
@@ -439,28 +436,10 @@ def plan_housekeeping(
         if close_reason is None:
             continue
 
-        delete_branch: str | None = None
-        if lifecycle.branch_retention is BranchRetention.DELETE_AFTER_CHECKPOINT:
-            if (
-                lifecycle.checkpoint_ref is None
-                or lifecycle.checkpoint_ref not in existing_checkpoint_refs
-            ):
-                raise PrLifecycleError(
-                    f"#{pr.number} branch deletion lacks a verified checkpoint"
-                )
-            if (
-                repository_full_name is None
-                or pr.head_repository != repository_full_name
-            ):
-                raise PrLifecycleError(
-                    f"#{pr.number} branch deletion cannot target an external repository"
-                )
-            delete_branch = pr.head_ref
         actions.append(
             CloseAction(
                 pr_number=pr.number,
                 reason=close_reason,
-                delete_branch=delete_branch,
             )
         )
 
@@ -477,6 +456,11 @@ def _validate_lifecycle_shape(lifecycle: PrLifecycle) -> None:
     ):
         raise PrLifecycleError(
             "checkpoint ref must use the dedicated checkpoint/ namespace"
+        )
+    if lifecycle.branch_retention is not BranchRetention.KEEP:
+        raise PrLifecycleError(
+            "automatic branch deletion is unsupported; "
+            "Branch-Retention must be keep"
         )
     if lifecycle.kind is LifecycleKind.CANONICAL:
         if lifecycle.canonical_pr is not None:
@@ -495,11 +479,6 @@ def _validate_lifecycle_shape(lifecycle: PrLifecycle) -> None:
         and lifecycle.checkpoint_ref is None
     ):
         raise PrLifecycleError("checkpoint closure requires checkpoint ref")
-    if (
-        lifecycle.branch_retention is BranchRetention.DELETE_AFTER_CHECKPOINT
-        and lifecycle.checkpoint_ref is None
-    ):
-        raise PrLifecycleError("branch deletion requires checkpoint ref")
 
 
 def _validate_repository(value: str, *, field: str) -> str:

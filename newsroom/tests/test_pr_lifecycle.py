@@ -267,39 +267,25 @@ def test_plan_never_closes_canonical_and_closes_checkpointed_support() -> None:
 
     assert [item.pr_number for item in plan.close_actions] == [11]
     assert "checkpoint/increment-5b2" in plan.close_actions[0].reason
-    assert plan.close_actions[0].delete_branch is None
+    assert set(plan.close_actions[0].__dataclass_fields__) == {
+        "pr_number",
+        "reason",
+    }
 
 
-def test_plan_closes_after_canonical_merge_and_can_delete_branch() -> None:
-    support = open_pr(
-        11,
-        pr_body=body(
-            lifecycle="support",
-            canonical="#10",
-            close_when="canonical-merged",
-            retention="delete-after-checkpoint",
-        ),
-        draft=True,
-        head_ref="support/increment-5b2-correction",
-    )
-    plan = plan_housekeeping(
-        (support,),
-        merged_canonical_prs=frozenset({10}),
-        existing_checkpoint_refs=frozenset(
-            {"checkpoint/increment-5b2"}
-        ),
-        repository_full_name="fol2/newsroom",
-        now=NOW,
-    )
-
-    assert plan.close_actions == (
-        type(plan.close_actions[0])(
-            pr_number=11,
-            reason="canonical PR #10 is merged",
-            delete_branch="support/increment-5b2-correction",
-        ),
-    )
-
+def test_automatic_branch_deletion_metadata_is_rejected() -> None:
+    with pytest.raises(
+        PrLifecycleError,
+        match="automatic branch deletion is unsupported",
+    ):
+        parse_pr_lifecycle(
+            body(
+                lifecycle="support",
+                canonical="#10",
+                close_when="canonical-merged",
+                retention="delete-after-checkpoint",
+            )
+        )
 
 def test_plan_rejects_unknown_or_mismatched_canonical_reference() -> None:
     support = open_pr(
@@ -390,7 +376,7 @@ def test_plan_rejects_shared_same_repository_head_refs() -> None:
             lifecycle="support",
             canonical="#10",
             close_when="checkpointed",
-            retention="delete-after-checkpoint",
+            retention="keep",
         ),
         draft=True,
         head_ref="support/shared-head",
@@ -466,31 +452,6 @@ def test_unlabelled_disposable_is_never_closed() -> None:
     assert plan.warnings == (
         "#11 lacks required housekeeping label infra",
     )
-
-
-def test_external_fork_branch_is_never_deleted() -> None:
-    support = open_pr(
-        11,
-        pr_body=body(
-            lifecycle="support",
-            canonical="#10",
-            close_when="canonical-merged",
-            retention="delete-after-checkpoint",
-        ),
-        draft=True,
-        head_ref="support/increment-5b2-correction",
-        head_repository="external/newsroom-fork",
-    )
-    with pytest.raises(PrLifecycleError, match="external repository"):
-        plan_housekeeping(
-            (support,),
-            merged_canonical_prs=frozenset({10}),
-            existing_checkpoint_refs=frozenset(
-                {"checkpoint/increment-5b2"}
-            ),
-            repository_full_name="fol2/newsroom",
-            now=NOW,
-        )
 
 
 def test_merged_canonical_metadata_must_match_disposable_atom() -> None:
@@ -874,197 +835,6 @@ def test_checkpointed_apply_revalidates_current_canonical(
     assert client.effects == []
 
 
-def test_apply_refuses_branch_shared_by_another_open_pr() -> None:
-    repository_root = Path(__file__).resolve().parents[2]
-    module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
-    spec = importlib.util.spec_from_file_location(
-        "test_pr_lifecycle_shared_head_cli",
-        module_path,
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-
-    support_body = body(
-        lifecycle="support",
-        canonical="#10",
-        close_when="canonical-merged",
-        retention="delete-after-checkpoint",
-    )
-
-    current_raw = {
-        "number": 11,
-        "state": "open",
-        "body": support_body,
-        "draft": True,
-        "head": {
-            "ref": "support/shared-head",
-            "sha": "a" * 40,
-            "repo": {"full_name": "fol2/newsroom"},
-        },
-        "labels": [{"name": HOUSEKEEPING_LABEL}],
-        "created_at": "2026-08-05T12:00:00Z",
-        "merged_at": None,
-    }
-    shared_raw = {
-        "number": 12,
-        "state": "open",
-        "body": body(
-            lifecycle="support",
-            canonical="#10",
-            close_when="canonical-merged",
-            retention="keep",
-        ),
-        "draft": True,
-        "head": {
-            "ref": "support/shared-head",
-            "sha": "a" * 40,
-            "repo": {"full_name": "fol2/newsroom"},
-        },
-        "labels": [{"name": HOUSEKEEPING_LABEL}],
-        "created_at": "2026-08-05T12:01:00Z",
-        "merged_at": None,
-    }
-
-    class FakeClient:
-        def __init__(self) -> None:
-            self.effects: list[str] = []
-
-        def get_pull_request(self, number: int):
-            if number == 11:
-                return current_raw
-            assert number == 10
-            return {
-                "number": 10,
-                "state": "closed",
-                "body": body(),
-                "draft": False,
-                "head": {
-                    "ref": "agent/increment-5b2",
-                    "sha": "b" * 40,
-                    "repo": {"full_name": "fol2/newsroom"},
-                },
-                "labels": [],
-                "created_at": "2026-08-01T12:00:00Z",
-                "merged_at": "2026-08-02T12:00:00Z",
-            }
-
-        def list_open_pull_requests(self):
-            return [current_raw, shared_raw]
-
-        def branch_sha(self, ref: str):
-            assert ref in {
-                "checkpoint/increment-5b2",
-                "support/shared-head",
-            }
-            return "a" * 40
-
-        def comment(self, *_args):
-            self.effects.append("comment")
-
-        def close_pull_request(self, *_args):
-            self.effects.append("close")
-
-        def delete_branch(self, *_args):
-            self.effects.append("delete")
-
-    client = FakeClient()
-    plan = HousekeepingPlan(
-        close_actions=(
-            CloseAction(
-                pr_number=11,
-                reason="canonical PR #10 is merged",
-                delete_branch="support/shared-head",
-            ),
-        ),
-        warnings=(),
-    )
-    with pytest.raises(module.GithubApiError, match="shared by open PR #12"):
-        module._apply_plan(
-            client,
-            plan,
-            lifecycles={11: module.parse_pr_lifecycle(support_body)},
-            repository="fol2/newsroom",
-        )
-    assert client.effects == []
-
-
-def test_apply_rejects_retention_change_after_planning() -> None:
-    repository_root = Path(__file__).resolve().parents[2]
-    module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
-    spec = importlib.util.spec_from_file_location(
-        "test_pr_lifecycle_retention_cli",
-        module_path,
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-
-    planned_body = body(
-        lifecycle="support",
-        canonical="#10",
-        close_when="canonical-merged",
-        retention="delete-after-checkpoint",
-    )
-
-    class FakeClient:
-        def __init__(self) -> None:
-            self.effects: list[str] = []
-
-        def get_pull_request(self, number: int):
-            assert number == 11
-            return {
-                "number": 11,
-                "state": "open",
-                "body": body(
-                    lifecycle="support",
-                    canonical="#10",
-                    close_when="canonical-merged",
-                    retention="keep",
-                ),
-                "draft": True,
-                "head": {
-                    "ref": "support/increment-5b2-correction",
-                    "sha": "a" * 40,
-                    "repo": {"full_name": "fol2/newsroom"},
-                },
-                "labels": [{"name": HOUSEKEEPING_LABEL}],
-                "created_at": "2026-08-05T12:00:00Z",
-                "merged_at": None,
-            }
-
-        def comment(self, *_args):
-            self.effects.append("comment")
-
-        def close_pull_request(self, *_args):
-            self.effects.append("close")
-
-        def delete_branch(self, *_args):
-            self.effects.append("delete")
-
-    client = FakeClient()
-    plan = HousekeepingPlan(
-        close_actions=(
-            CloseAction(
-                pr_number=11,
-                reason="canonical PR #10 is merged",
-                delete_branch="support/increment-5b2-correction",
-            ),
-        ),
-        warnings=(),
-    )
-    with pytest.raises(module.GithubApiError, match="changed after planning"):
-        module._apply_plan(
-            client,
-            plan,
-            lifecycles={11: module.parse_pr_lifecycle(planned_body)},
-            repository="fol2/newsroom",
-        )
-    assert client.effects == []
-
-
 def test_apply_revalidates_current_merged_canonical_binding() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
@@ -1148,106 +918,13 @@ def test_apply_revalidates_current_merged_canonical_binding() -> None:
     assert client.effects == []
 
 
-def test_apply_rejects_checkpoint_not_bound_to_current_head() -> None:
-    repository_root = Path(__file__).resolve().parents[2]
-    module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
-    spec = importlib.util.spec_from_file_location(
-        "test_pr_lifecycle_cli",
-        module_path,
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-
-    class FakeClient:
-        def __init__(self) -> None:
-            self.effects: list[str] = []
-
-        def get_pull_request(self, number: int):
-            if number == 11:
-                return {
-                    "number": 11,
-                    "state": "open",
-                    "body": body(
-                        lifecycle="support",
-                        canonical="#10",
-                        close_when="canonical-merged",
-                        retention="delete-after-checkpoint",
-                    ),
-                    "draft": True,
-                    "head": {
-                        "ref": "support/increment-5b2-correction",
-                        "sha": "a" * 40,
-                        "repo": {"full_name": "fol2/newsroom"},
-                    },
-                    "labels": [{"name": HOUSEKEEPING_LABEL}],
-                    "created_at": "2026-08-05T12:00:00Z",
-                    "merged_at": None,
-                }
-            assert number == 10
-            return {
-                "number": 10,
-                "body": body(),
-                "draft": False,
-                "head": {
-                    "ref": "agent/increment-5b2",
-                    "sha": "c" * 40,
-                    "repo": {"full_name": "fol2/newsroom"},
-                },
-                "labels": [],
-                "created_at": "2026-08-01T12:00:00Z",
-                "merged_at": "2026-08-02T12:00:00Z",
-            }
-
-        def branch_sha(self, ref: str):
-            if ref == "checkpoint/increment-5b2":
-                return "b" * 40
-            return "a" * 40
-
-        def comment(self, *_args):
-            self.effects.append("comment")
-
-        def close_pull_request(self, *_args):
-            self.effects.append("close")
-
-        def delete_branch(self, *_args):
-            self.effects.append("delete")
-
-    client = FakeClient()
-    plan = HousekeepingPlan(
-        close_actions=(
-            CloseAction(
-                pr_number=11,
-                reason="canonical PR #10 is merged",
-                delete_branch="support/increment-5b2-correction",
-            ),
-        ),
-        warnings=(),
-    )
-    with pytest.raises(module.GithubApiError, match="no longer safe"):
-        module._apply_plan(
-            client,
-            plan,
-            lifecycles={
-                11: module.parse_pr_lifecycle(
-                    body(
-                        lifecycle="support",
-                        canonical="#10",
-                        close_when="canonical-merged",
-                        retention="delete-after-checkpoint",
-                    )
-                )
-            },
-            repository="fol2/newsroom",
-        )
-    assert client.effects == []
-
-
 def test_workflow_separates_dry_run_and_two_key_apply() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     workflow = (
         repository_root / ".github/workflows/pr-lifecycle.yml"
+    ).read_text(encoding="utf-8")
+    cli = (
+        repository_root / "scripts/sdlc/pr_lifecycle.py"
     ).read_text(encoding="utf-8")
 
     assert "inventory-dry-run:" in workflow
@@ -1260,7 +937,15 @@ def test_workflow_separates_dry_run_and_two_key_apply() -> None:
     assert "PR_HOUSEKEEPING_APPLY: CLOSE_ELIGIBLE_DISPOSABLE_PRS" in workflow
     assert workflow.count("GITHUB_TOKEN: ${{ github.token }}") == 2
     assert "python scripts/sdlc/pr_lifecycle.py" not in workflow
-
+    apply_permissions = workflow.split("inventory-apply:", 1)[1].split(
+        "runs-on:", 1
+    )[0]
+    assert "contents: read" in apply_permissions
+    assert "contents: write" not in workflow
+    assert "def delete_branch" not in cli
+    assert "client.delete_branch" not in cli
+    assert 'request("DELETE", f"/git/refs/heads/' not in cli
+    assert "Automatic branch deletion: `DISABLED`" in cli
 
 def test_pull_request_head_sha_must_be_full_lowercase_commit() -> None:
     with pytest.raises(PrLifecycleError, match="head SHA"):
@@ -1273,22 +958,8 @@ def test_pull_request_head_sha_must_be_full_lowercase_commit() -> None:
         )
 
 
-def test_checkpoint_deletion_fails_closed_without_verified_ref() -> None:
-    support = open_pr(
-        11,
-        pr_body=body(
-            lifecycle="support",
-            canonical="#10",
-            close_when="canonical-merged",
-            retention="delete-after-checkpoint",
-        ),
-        draft=True,
-        head_ref="support/increment-5b2-correction",
-    )
-    with pytest.raises(PrLifecycleError, match="branch deletion lacks"):
-        plan_housekeeping(
-            (support,),
-            merged_canonical_prs=frozenset({10}),
-            existing_checkpoint_refs=frozenset(),
-            now=NOW,
-        )
+def test_close_action_has_no_branch_deletion_capability() -> None:
+    assert set(CloseAction.__dataclass_fields__) == {"pr_number", "reason"}
+    action = CloseAction(pr_number=11, reason="checkpoint verified")
+    assert action.pr_number == 11
+    assert action.reason == "checkpoint verified"

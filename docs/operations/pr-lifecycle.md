@@ -1,8 +1,8 @@
 # Pull-request lifecycle and housekeeping
 
 Open pull requests are an operational queue, not an archive. Historical evidence
-belongs in commits, workflow runs, comments and checkpoint refs. A PR must remain
-open only while it represents current work.
+belongs in commits, workflow runs, comments and checkpoint refs. A PR remains open
+only while it represents current work.
 
 ## Lifecycle classes
 
@@ -73,33 +73,34 @@ Branch-Retention:
 ```
 
 `Delivery-Atom` is a bounded lowercase identifier. `Canonical-PR` is `self` or
-`#<number>`. `Checkpoint-Ref` is a safe branch ref or `NONE`.
+`#<number>`. `Checkpoint-Ref` is a safe branch ref or `NONE`. Every non-`NONE`
+checkpoint uses the dedicated `checkpoint/` namespace.
 
 Valid close conditions are:
 
 - `merged`: canonical PR only;
-- `checkpointed`: disposable PR closes after its declared checkpoint exists;
-- `canonical-merged`: disposable PR closes after its canonical PR is merged.
+- `checkpointed`: disposable PR closes only when its declared checkpoint resolves
+  to its current head and its canonical binding remains valid;
+- `canonical-merged`: disposable PR closes only after its canonical PR is
+  independently revalidated as merged.
 
-Valid branch retention policies are:
-
-- `keep`;
-- `delete-after-checkpoint`.
-
-Every non-`NONE` checkpoint uses the dedicated `checkpoint/` namespace.
-Branch deletion is never permitted without an independently resolvable checkpoint
-and is never attempted for a branch owned by another repository or fork.
+`Branch-Retention` has exactly one supported value: `keep`. Automated branch
+cleanup is deliberately unsupported. GitHub's ref deletion endpoint has no
+compare-and-delete operation, so a check followed by deletion cannot safely bind
+the mutation to the checked commit. Branch cleanup is therefore a separate manual
+owner action outside this automation; checkpoint refs and disposable branches are
+retained by every automated closure.
 
 ## Operating limits
 
 - One open canonical PR per delivery atom.
 - No more than two open support/preflight PRs per canonical PR.
+- Duplicate same-repository open head refs fail the inventory closed.
 - A disposable PR closes in the same work session after its declared condition is
   satisfied.
 - No unexplained open PR may remain older than seven days.
-- Closing a PR does not delete its commits or branch unless the metadata explicitly
-  requests deletion and a checkpoint exists.
 - Canonical PRs are never closed by automation.
+- Automated housekeeping never deletes a Git ref.
 
 ## Automation
 
@@ -107,8 +108,9 @@ and is never attempted for a branch owned by another repository or fork.
 
 On PR creation or metadata changes it validates the event body and actual PR
 surface. Weekly scheduled runs and manual dispatches build a repository-wide
-inventory. The dry-run job has read-only permissions. A separate write-capable
-apply job can run only after the dry run succeeds.
+inventory. The dry-run job has read-only permissions. A separate apply job has
+only the issue and pull-request write permissions needed to comment and close an
+eligible disposable PR; repository contents remain read-only.
 
 Manual apply requires all three independently checked values:
 
@@ -117,14 +119,13 @@ Manual apply requires all three independently checked values:
 3. the exact `PR_HOUSEKEEPING_APPLY=CLOSE_ELIGIBLE_DISPOSABLE_PRS` process guard.
 
 Both inventory jobs receive the workflow token explicitly; its effective rights
-remain constrained by each job's permission block. Before every mutation, apply mode
-re-reads the current PR body, labels, head repository, head SHA, checkpoint and
-canonical merge state. A requested branch deletion additionally requires the
-dedicated checkpoint and current same-repository head ref to resolve to the exact
-PR head SHA before closure and again immediately before deletion. Apply mode comments
-with an audit record before closing an eligible, `infra`-labelled disposable PR.
-It never merges or closes a canonical PR. A branch is deleted only after its declared
-checkpoint ref has been verified.
+remain constrained by each job's permission block. Before every mutation, apply
+mode re-reads the current PR state, body, labels, head repository, head SHA,
+checkpoint and canonical binding. The target must remain open and unmerged, the
+lifecycle must match the planned snapshot, and checkpointed closures must bind the
+checkpoint to the current head. Apply comments with an audit record before closing
+an eligible, `infra`-labelled disposable PR. It never merges or closes a canonical
+PR and never deletes a branch.
 
 ## Recovery
 
@@ -137,4 +138,5 @@ The source of truth for recovery is:
 5. closure comments.
 
 An open support PR is not a recovery mechanism and must not be retained merely as
-historical evidence.
+historical evidence. Its branch and checkpoint may remain as immutable recovery
+refs until an owner performs a separate, deliberate cleanup.
