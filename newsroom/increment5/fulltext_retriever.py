@@ -157,6 +157,8 @@ class FullTextRetriever:
                 raise FullTextContractError(
                     "authority provider returned an untyped full-text view"
                 )
+            snapshot = view.snapshot
+            view_digest = view.view_digest
             authority_read_count = 1
         except Exception:
             return self._receipt(
@@ -167,8 +169,6 @@ class FullTextRetriever:
                 authority_read_count=authority_read_count,
             )
 
-        snapshot = view.snapshot
-        view_digest = view.view_digest
         snapshot_failure = self._snapshot_failure(request, view)
         if snapshot_failure is not None:
             outcome, reason = snapshot_failure
