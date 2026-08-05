@@ -44,13 +44,27 @@ def main() -> None:
 
     replace_once(
         "newsroom/increment5/fulltext_contracts.py",
-        """        _bounded_text(
-            self.passage_id,
-            field=\"fulltext_passage_id\",
-            maximum_bytes=256,
-        )
+        """        for field_name in (
+            \"passage_id\",
+            \"dependency_root_id\",
+            \"source_identity\",
+        ):
+            _bounded_text(
+                getattr(self, field_name),
+                field=field_name,
+                maximum_bytes=256,
+            )
 """,
         """        require_token(self.passage_id, field=\"fulltext_passage_id\")
+        for field_name in (
+            \"dependency_root_id\",
+            \"source_identity\",
+        ):
+            _bounded_text(
+                getattr(self, field_name),
+                field=field_name,
+                maximum_bytes=256,
+            )
 """,
     )
 
