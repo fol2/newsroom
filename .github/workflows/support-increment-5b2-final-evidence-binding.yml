@@ -1,9 +1,9 @@
 name: Support Increment 5B2 final evidence binding
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/increment-5b2-fulltext-retriever
+      - main
 
 permissions:
   contents: write
@@ -14,12 +14,12 @@ concurrency:
 
 jobs:
   correct-and-verify:
-    if: github.event.head_commit.message == 'support: launch final 5B2 evidence binding'
+    if: github.head_ref == 'support/increment-5b2-final-evidence-binding-20260805'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: agent/increment-5b2-fulltext-retriever
+          ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
@@ -106,6 +106,8 @@ jobs:
             --fail-on-regression
 
       - name: Publish product-only corrected tree
+        env:
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
           git rm \
@@ -114,4 +116,4 @@ jobs:
           git diff --cached --check
           git commit -m 'support: retain product-only final 5B2 evidence binding'
           test -z "$(git status --porcelain)"
-          git push origin HEAD:agent/increment-5b2-fulltext-retriever
+          git push origin "HEAD:${HEAD_BRANCH}"
