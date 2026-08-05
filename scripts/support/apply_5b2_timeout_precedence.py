@@ -21,6 +21,17 @@ def replace_once(relative_path: str, old: str, new: str) -> None:
 def main() -> None:
     replace_once(
         "newsroom/increment5/fulltext_journal.py",
+        """from newsroom.authority.canonical import digest_bytes
+from .fulltext_contracts import FullTextBranchRequest, FullTextContractError
+""",
+        """from newsroom.authority.canonical import digest_bytes
+from newsroom.increment5.branch_contracts import BranchOutcome
+from .fulltext_contracts import FullTextBranchRequest, FullTextContractError
+""",
+    )
+
+    replace_once(
+        "newsroom/increment5/fulltext_journal.py",
         """            if snapshot_failure is not None:
                 expected_outcome, expected_reason = snapshot_failure
                 if (
