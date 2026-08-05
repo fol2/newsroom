@@ -1,0 +1,76 @@
+name: Support Increment 5B1 stale source version
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-and-verify:
+    if: github.head_ref == 'staging/increment-5b1-stale-source-version-20260805'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Materialize corrected product tree
+        run: |
+          set -euo pipefail
+          python scripts/support/materialize_5b1_stale.py
+          python -m py_compile \
+            newsroom/increment5/branch_contracts.py \
+            newsroom/increment5/exact_queries.py \
+            newsroom/increment5/exact_retriever.py \
+            newsroom/tests/test_increment5b1_stale_source_version.py
+          git diff --check
+
+      - name: Sync locked development environment
+        run: uv sync --dev --locked
+
+      - name: Focused Increment 5B1 evidence
+        run: |
+          uv run python -m pytest -q \
+            newsroom/tests/test_increment5b1_exact_retriever.py \
+            newsroom/tests/test_increment5b1_stale_source_version.py
+
+      - name: Complete deterministic repository evidence
+        run: uv run python -m pytest -q
+
+      - name: Existing clustering evaluation gate
+        run: |
+          uv run python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+      - name: Publish product-only verified tree to support branch
+        env:
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          git rm \
+            scripts/support/materialize_5b1_stale.py \
+            .github/workflows/support-increment-5b1-stale-source-version.yml
+          git add \
+            newsroom/increment5/branch_contracts.py \
+            newsroom/increment5/exact_queries.py \
+            newsroom/increment5/exact_retriever.py \
+            newsroom/tests/test_increment5b1_stale_source_version.py
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'test(increment5): verify stale source-version boundary'
+          git push origin "HEAD:${HEAD_BRANCH}"
