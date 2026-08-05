@@ -500,6 +500,10 @@ def test_result_overflow_is_incomplete_instead_of_truncated(
             "document-digest",
             [result_row("p-en", 1.0, document_digest=digest("tampered"))],
         ),
+        (
+            "malformed-document-digest",
+            [result_row("p-en", 1.0, document_digest="not-a-digest")],
+        ),
         ("language", [result_row("p-en", 1.0, language="zh-HK")]),
         (
             "duplicate-passage",

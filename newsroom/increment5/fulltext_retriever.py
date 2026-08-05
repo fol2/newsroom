@@ -7,7 +7,10 @@ import math
 import time
 from typing import Any
 
-from newsroom.authority.canonical import validate_sha256_digest
+from newsroom.authority.canonical import (
+    CanonicalizationError,
+    validate_sha256_digest,
+)
 from newsroom.authority.neo4j_fulltext_reader import (
     Neo4jFullTextReadError,
     Neo4jFullTextReadRequest,
@@ -565,10 +568,15 @@ class FullTextRetriever:
                 raise FullTextContractError(
                     "full-text result passage identity is invalid"
                 )
-            validate_sha256_digest(
-                document_digest,
-                field="fulltext_result_document_digest",
-            )
+            try:
+                validate_sha256_digest(
+                    document_digest,
+                    field="fulltext_result_document_digest",
+                )
+            except CanonicalizationError:
+                raise FullTextContractError(
+                    "full-text result document digest is invalid"
+                ) from None
             if language not in {"en-GB", "zh-HK"}:
                 raise FullTextContractError(
                     "full-text result language is invalid"
