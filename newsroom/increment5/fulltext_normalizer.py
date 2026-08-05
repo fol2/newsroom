@@ -68,6 +68,22 @@ def _bounded_sorted(values: set[str], *, field: str) -> tuple[str, ...]:
     return tuple(sorted(values))
 
 
+def _ascii_word_edge(character: str) -> bool:
+    return character.isascii() and character.isalnum()
+
+
+def _alias_is_mentioned(
+    normalized_text: str,
+    normalized_alias: str,
+) -> bool:
+    left = r"(?<![a-z0-9])" if _ascii_word_edge(normalized_alias[0]) else ""
+    right = r"(?![a-z0-9])" if _ascii_word_edge(normalized_alias[-1]) else ""
+    return re.search(
+        f"{left}{re.escape(normalized_alias)}{right}",
+        normalized_text,
+    ) is not None
+
+
 def _normalization_core(
     surface_text: str,
 ) -> tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
@@ -166,7 +182,8 @@ class BilingualSearchNormalizer:
         if bool(query.authority_alias_terms) != bool(
             query.authority_alias_ids
         ) or any(
-            item not in normalized for item in query.authority_alias_terms
+            not _alias_is_mentioned(normalized, item)
+            for item in query.authority_alias_terms
         ):
             raise FullTextContractError(
                 "retained full-text authority aliases differ from request text"
@@ -224,7 +241,7 @@ class BilingualSearchNormalizer:
                 raise FullTextContractError(
                     "authority alias normalized text differs from reviewed normalizer"
                 )
-            if normalized_alias in normalized:
+            if _alias_is_mentioned(normalized, normalized_alias):
                 alias_pairs.append((alias.alias_id, normalized_alias))
 
         alias_pairs = sorted(set(alias_pairs))

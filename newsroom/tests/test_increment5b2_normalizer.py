@@ -87,6 +87,39 @@ def test_normalizer_uses_only_current_typed_authority_aliases() -> None:
     assert "expired authority" not in result.authority_alias_terms
 
 
+def test_normalizer_requires_ascii_alias_term_boundaries() -> None:
+    base = aliases()[1]
+    ai_alias = type(base)(
+        alias_id="alias-ai",
+        surface_text="AI",
+        normalized_text="ai",
+        valid_from=base.valid_from,
+        valid_until=base.valid_until,
+        rights_current=True,
+        lifecycle="ACTIVE",
+    )
+
+    false_positive = BilingualSearchNormalizer().normalize(
+        surface_text="Paid leave policy",
+        language_mode=FullTextLanguageMode.EN_GB,
+        query_valid_time=NOW,
+        authority_aliases=(ai_alias,),
+    )
+    exact_mention = BilingualSearchNormalizer().normalize(
+        surface_text="AI policy",
+        language_mode=FullTextLanguageMode.EN_GB,
+        query_valid_time=NOW,
+        authority_aliases=(ai_alias,),
+    )
+
+    assert false_positive.authority_alias_ids == ()
+    assert false_positive.authority_alias_terms == ()
+    assert 'authority_aliases:"ai"' not in false_positive.lucene_query
+    assert exact_mention.authority_alias_ids == ("alias-ai",)
+    assert exact_mention.authority_alias_terms == ("ai",)
+    assert 'authority_aliases:"ai"' in exact_mention.lucene_query
+
+
 def test_normalizer_deduplicates_multiple_authority_ids_for_one_term() -> None:
     base = aliases()[1]
     duplicate = type(base)(

@@ -11,6 +11,7 @@ from newsroom.authority.canonical import digest_bytes
 from .fulltext_contracts import FullTextBranchRequest, FullTextContractError
 from .fulltext_normalizer import BilingualSearchNormalizer
 from .fulltext_receipts import FullTextBranchReceipt
+from .fulltext_snapshot_policy import fulltext_snapshot_failure
 
 
 class FullTextReceiptJournalError(RuntimeError):
@@ -195,6 +196,25 @@ class FullTextReceiptJournal:
             raise FullTextReceiptJournalError(
                 "stored full-text receipt request binding differs"
             )
+        if receipt.snapshot is not None:
+            snapshot_failure = fulltext_snapshot_failure(
+                request,
+                receipt.snapshot,
+            )
+            if snapshot_failure is not None:
+                expected_outcome, expected_reason = snapshot_failure
+                if (
+                    receipt.outcome is not expected_outcome
+                    or receipt.reason_code != expected_reason
+                    or receipt.normalized_query is not None
+                    or receipt.neo4j_read_count != 0
+                    or receipt.hits
+                    or receipt.exclusions
+                ):
+                    raise FullTextReceiptJournalError(
+                        "stored full-text receipt request binding differs"
+                    )
+                return
         if receipt.normalized_query is not None:
             try:
                 BilingualSearchNormalizer().validate_request_binding(

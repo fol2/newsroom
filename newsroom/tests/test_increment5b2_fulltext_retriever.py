@@ -801,6 +801,77 @@ def test_journal_rejects_hits_rebound_to_another_query(
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
+        ("generation_state", "RETIRED"),
+        (
+            "generation_id",
+            "00000000-0000-4000-8000-000000005299",
+        ),
+        (
+            "generation_identity_digest",
+            digest("another-generation-identity"),
+        ),
+        (
+            "fulltext_component_digest",
+            digest("another-snapshot-fulltext-component"),
+        ),
+        (
+            "normalization_component_digest",
+            digest("another-snapshot-normalization-component"),
+        ),
+        (
+            "rights_manifest_digest",
+            digest("another-rights-manifest"),
+        ),
+        ("contiguous_ledger_seq", 41),
+        ("open_gap_count", 1),
+        ("dead_letter_count", 1),
+        (
+            "freshness_deadline",
+            "2042-03-12T11:45:00.000000Z",
+        ),
+        ("index_state", "FAILED"),
+    ],
+)
+def test_journal_rejects_snapshot_rebound_from_request(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    driver, _factory, retriever = system(tmp_path)
+    original = retriever.retrieve(request()).receipt
+    value = original.canonical_value()
+    assert value["snapshot"] is not None
+    value["snapshot"][field] = replacement
+    corrupted = canonical_json_bytes(value)
+    journal_path = tmp_path / "fulltext-receipts.sqlite3"
+    with sqlite3.connect(journal_path) as connection:
+        connection.execute(
+            "DROP TRIGGER immutable_increment5_fulltext_receipt_update"
+        )
+        connection.execute(
+            "UPDATE increment5_fulltext_receipts SET "
+            "receipt_bytes=?,receipt_digest=?",
+            (corrupted, digest_bytes(corrupted)),
+        )
+
+    before_calls = list(driver.calls)
+    restarted = FullTextRetriever(
+        graph_reader=driver.reader(),
+        journal=FullTextReceiptJournal(journal_path),
+        authority_view_provider=lambda _request: authority_view(),
+        monotonic_ns=lambda: 0,
+    )
+    with pytest.raises(
+        FullTextReceiptJournalError,
+        match="request binding differs",
+    ):
+        restarted.retrieve(request())
+    assert driver.calls == before_calls
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
         ("language_mode", "EN_GB"),
         ("lucene_query", 'retrieval_text:"another"'),
         ("implementation_version", "another-normalizer-version"),
