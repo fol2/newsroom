@@ -366,6 +366,50 @@ def test_plan_rejects_more_than_two_disposable_prs_per_canonical() -> None:
         plan_housekeeping((canonical, *disposable), now=NOW)
 
 
+def test_plan_rejects_shared_same_repository_head_refs() -> None:
+    canonical = open_pr(
+        10,
+        pr_body=body(),
+        draft=False,
+        head_ref="agent/increment-5b2",
+    )
+    keep = open_pr(
+        11,
+        pr_body=body(
+            lifecycle="support",
+            canonical="#10",
+            close_when="checkpointed",
+            retention="keep",
+        ),
+        draft=True,
+        head_ref="support/shared-head",
+    )
+    delete = open_pr(
+        12,
+        pr_body=body(
+            lifecycle="support",
+            canonical="#10",
+            close_when="checkpointed",
+            retention="delete-after-checkpoint",
+        ),
+        draft=True,
+        head_ref="support/shared-head",
+    )
+
+    with pytest.raises(
+        PrLifecycleError,
+        match="share same-repository head refs",
+    ):
+        plan_housekeeping(
+            (canonical, keep, delete),
+            existing_checkpoint_refs=frozenset(
+                {"checkpoint/increment-5b2"}
+            ),
+            repository_full_name="fol2/newsroom",
+            now=NOW,
+        )
+
+
 def test_plan_warns_for_unexplained_age_without_auto_closing() -> None:
     canonical = open_pr(
         10,
@@ -509,6 +553,85 @@ def test_merged_canonical_metadata_must_match_disposable_atom() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("current_state", "merged_at"),
+    (
+        ("closed", None),
+        ("closed", "2026-08-05T12:30:00Z"),
+        ("open", "2026-08-05T12:30:00Z"),
+    ),
+)
+def test_apply_requires_action_pr_to_remain_open_and_unmerged(
+    current_state: str,
+    merged_at: str | None,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
+    spec = importlib.util.spec_from_file_location(
+        "test_pr_lifecycle_action_state_cli",
+        module_path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    support_body = body(
+        lifecycle="support",
+        canonical="#10",
+        close_when="checkpointed",
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.effects: list[str] = []
+
+        def get_pull_request(self, number: int):
+            assert number == 11
+            return {
+                "number": 11,
+                "state": current_state,
+                "body": support_body,
+                "draft": True,
+                "head": {
+                    "ref": "support/increment-5b2-correction",
+                    "sha": "a" * 40,
+                    "repo": {"full_name": "fol2/newsroom"},
+                },
+                "labels": [{"name": HOUSEKEEPING_LABEL}],
+                "created_at": "2026-08-05T12:00:00Z",
+                "merged_at": merged_at,
+            }
+
+        def comment(self, *_args):
+            self.effects.append("comment")
+
+        def close_pull_request(self, *_args):
+            self.effects.append("close")
+
+        def delete_branch(self, *_args):
+            self.effects.append("delete")
+
+    client = FakeClient()
+    plan = HousekeepingPlan(
+        close_actions=(
+            CloseAction(
+                pr_number=11,
+                reason="declared checkpoint exists",
+            ),
+        ),
+        warnings=(),
+    )
+    with pytest.raises(module.GithubApiError, match="open and unmerged"):
+        module._apply_plan(
+            client,
+            plan,
+            lifecycles={11: module.parse_pr_lifecycle(support_body)},
+            repository="fol2/newsroom",
+        )
+    assert client.effects == []
+
+
 def test_apply_revalidates_current_disposable_surface() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
@@ -529,6 +652,7 @@ def test_apply_revalidates_current_disposable_surface() -> None:
             assert number == 11
             return {
                 "number": 11,
+                "state": "open",
                 "body": body(
                     lifecycle="support",
                     canonical="#10",
@@ -542,6 +666,7 @@ def test_apply_revalidates_current_disposable_surface() -> None:
                 },
                 "labels": [{"name": HOUSEKEEPING_LABEL}],
                 "created_at": "2026-08-05T12:00:00Z",
+                "merged_at": None,
             }
 
         def comment(self, *_args):
@@ -600,6 +725,7 @@ def test_checkpointed_keep_closure_requires_current_head_checkpoint() -> None:
             assert number == 11
             return {
                 "number": 11,
+                "state": "open",
                 "body": support_body,
                 "draft": True,
                 "head": {
@@ -609,6 +735,7 @@ def test_checkpointed_keep_closure_requires_current_head_checkpoint() -> None:
                 },
                 "labels": [{"name": HOUSEKEEPING_LABEL}],
                 "created_at": "2026-08-05T12:00:00Z",
+                "merged_at": None,
             }
 
         def branch_sha(self, ref: str):
@@ -890,6 +1017,7 @@ def test_apply_rejects_retention_change_after_planning() -> None:
             assert number == 11
             return {
                 "number": 11,
+                "state": "open",
                 "body": body(
                     lifecycle="support",
                     canonical="#10",
@@ -904,6 +1032,7 @@ def test_apply_rejects_retention_change_after_planning() -> None:
                 },
                 "labels": [{"name": HOUSEKEEPING_LABEL}],
                 "created_at": "2026-08-05T12:00:00Z",
+                "merged_at": None,
             }
 
         def comment(self, *_args):
@@ -963,6 +1092,7 @@ def test_apply_revalidates_current_merged_canonical_binding() -> None:
             if number == 11:
                 return {
                     "number": 11,
+                    "state": "open",
                     "body": support_body,
                     "draft": True,
                     "head": {
@@ -972,6 +1102,7 @@ def test_apply_revalidates_current_merged_canonical_binding() -> None:
                     },
                     "labels": [{"name": HOUSEKEEPING_LABEL}],
                     "created_at": "2026-08-05T12:00:00Z",
+                    "merged_at": None,
                 }
             assert number == 10
             return {
@@ -1037,6 +1168,7 @@ def test_apply_rejects_checkpoint_not_bound_to_current_head() -> None:
             if number == 11:
                 return {
                     "number": 11,
+                    "state": "open",
                     "body": body(
                         lifecycle="support",
                         canonical="#10",
@@ -1051,6 +1183,7 @@ def test_apply_rejects_checkpoint_not_bound_to_current_head() -> None:
                     },
                     "labels": [{"name": HOUSEKEEPING_LABEL}],
                     "created_at": "2026-08-05T12:00:00Z",
+                    "merged_at": None,
                 }
             assert number == 10
             return {

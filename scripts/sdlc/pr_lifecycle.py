@@ -466,9 +466,15 @@ def _apply_plan(
 ) -> None:
     recorded_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     for action in plan.close_actions:
-        current = _open_pr_from_json(
-            client.get_pull_request(action.pr_number)
-        )
+        raw_current = client.get_pull_request(action.pr_number)
+        if (
+            raw_current.get("state") != "open"
+            or raw_current.get("merged_at") is not None
+        ):
+            raise GithubApiError(
+                f"pull request #{action.pr_number} is no longer open and unmerged"
+            )
+        current = _open_pr_from_json(raw_current)
         lifecycle = parse_pr_lifecycle(current.body)
         validate_pull_request_lifecycle(
             lifecycle,

@@ -323,6 +323,26 @@ def plan_housekeeping(
         )
         parsed[pr.number] = lifecycle
 
+    if repository_full_name is not None:
+        same_repository_heads: dict[str, list[int]] = {}
+        for pr in prs:
+            if pr.head_repository != repository_full_name:
+                continue
+            same_repository_heads.setdefault(pr.head_ref, []).append(pr.number)
+        shared_heads = {
+            ref: tuple(numbers)
+            for ref, numbers in same_repository_heads.items()
+            if len(numbers) > 1
+        }
+        if shared_heads:
+            detail = ", ".join(
+                f"{ref}: " + ", ".join(f"#{number}" for number in numbers)
+                for ref, numbers in sorted(shared_heads.items())
+            )
+            raise PrLifecycleError(
+                "open pull requests share same-repository head refs: " + detail
+            )
+
     canonical_by_atom: dict[str, OpenPullRequest] = {}
     for pr in prs:
         lifecycle = parsed[pr.number]
