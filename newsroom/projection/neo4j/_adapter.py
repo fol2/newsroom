@@ -463,12 +463,12 @@ class _Neo4jAdapter:
                 )
                 operation = "increment5.fulltext.query"
 
+        started_ns = self._monotonic_ns()
+        if isinstance(started_ns, bool) or not isinstance(started_ns, int):
+            raise Neo4jReadError(
+                "Neo4j Increment 5 monotonic clock is invalid"
+            )
         with self._lock:
-            started_ns = self._monotonic_ns()
-            if isinstance(started_ns, bool) or not isinstance(started_ns, int):
-                raise Neo4jReadError(
-                    "Neo4j Increment 5 monotonic clock is invalid"
-                )
             current_ns = self._monotonic_ns()
             if (
                 isinstance(current_ns, bool)

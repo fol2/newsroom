@@ -238,6 +238,44 @@ def test_authority_port_rejects_generic_or_unbounded_read_controls() -> None:
         )
 
 
+class _ClockConsumingLock:
+    def __init__(self, clock: SequenceClock) -> None:
+        self._clock = clock
+
+    def __enter__(self):
+        self._clock()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+
+def test_authority_port_charges_lock_wait_to_phase_timeout() -> None:
+    clock = SequenceClock((0, 5_000_000_001, 5_000_000_001))
+    factory = RecordingUnitOfWorkFactory()
+    driver = FakeDriver(default_scenario())
+    adapter = _Neo4jAdapter(
+        driver=driver,
+        config=config(),
+        driver_version="6.2.0",
+        monotonic_ns=clock,
+        unit_of_work_factory=factory,
+    )
+    adapter._lock = _ClockConsumingLock(clock)
+    reader = _open_neo4j_fulltext_reader_with_adapter(adapter)
+
+    with pytest.raises(Neo4jFullTextReadTimeout, match="timed out"):
+        reader.read(
+            Neo4jFullTextReadRequest.component(
+                timeout_ns=5_000_000_000,
+            )
+        )
+
+    assert factory.options == []
+    assert driver.calls == []
+    assert driver.execute_read_count == 0
+
+
 def test_authority_port_maps_server_timeout_to_typed_failure() -> None:
     clock = SequenceClock((0, 100_000_000, 200_000_000))
     driver = FakeDriver(default_scenario())
