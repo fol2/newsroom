@@ -19,7 +19,7 @@ a fact, or activate production.
 
 ## Exact lookup surface
 
-`SQLiteExactRetriever` admits only six typed lookup kinds:
+`SQLiteExactRetriever` admits only typed lookup kinds:
 
 1. source-definition-scoped source-native identity;
 2. global Source Revision identity or item-scoped source-native revision token;
@@ -36,24 +36,40 @@ denies write, schema, attach, detach and transaction actions.
 
 The branch limit remains exactly eight results and the hard timeout remains
 5,000 ms. The query asks for at most nine rows so an over-bound result becomes
-`INCOMPLETE / RESULT_BOUND_EXCEEDED`; it is never silently truncated.
+`INCOMPLETE / RESULT_BOUND_EXCEEDED`; it is never silently truncated. Timeout
+comparison is performed at nanosecond precision. Even a one-nanosecond overrun
+becomes `INCOMPLETE / QUERY_TIMEOUT` and cannot retain hits or Candidate
+collision occupancy.
 
-## Authority and eligibility
+## Authority, current-version and eligibility rules
 
 SQLite tables and governed records remain authoritative. A hit retains its
 exact authority kind and identifier, dependency root, match signal, source
-identity, trust scope and provenance digest. Every source lookup joins the current Source Definition Version head before
-eligibility is decided. Historical item/revision/representation versions cannot
-resurrect rights withdrawn by the current source head. Current versions whose
-allowed use is prohibited, denied or revoked are excluded. Retired, rejected,
-merged, split or reversed authority state is excluded. Alias validity is checked
-against the request's exact query-valid time.
+identity, trust scope and provenance digest.
 
-A matching but wholly ineligible set is `POLICY_BLOCKED`, not `NO_MATCH`.
+Every source lookup binds both:
+
+- the looked-up row's own immutable `definition_version_id`; and
+- the current `source_definition_version_heads.current_version_id`.
+
+The current head supplies current rights and lifecycle policy. The looked-up
+row is eligible only when its own source-definition version is still that exact
+current head. A historical Source Item, Source Revision or Discovery
+Representation therefore cannot inherit a later permitted version and appear as
+a current match. Such a row is retained as an explicit
+`STALE_SOURCE_VERSION` exclusion. If every matching row is stale, the branch is
+`STALE / SOURCE_VERSION_STALE`, never `COMPLETE / NO_MATCH`.
+
+Current versions whose allowed use is prohibited, denied or revoked are
+excluded as `RIGHTS_NOT_CURRENT`; a matching set that is wholly rights-blocked
+is `POLICY_BLOCKED / RIGHTS_BLOCKED`. Retired, rejected, merged, split or
+reversed authority state is excluded. Alias validity is checked against the
+request's exact query-valid time.
+
 A stale ledger watermark is `STALE`. Missing schema or an unreadable authority
 database is `UNAVAILABLE`. A fixed-query timeout or over-bound result is
-`INCOMPLETE`. Only a successfully completed exact query may report an empty
-`COMPLETE / NO_MATCH` branch receipt.
+`INCOMPLETE`. Only a successfully completed current-version exact query may
+report an empty `COMPLETE / NO_MATCH` branch receipt.
 
 ## Receipt journal
 
