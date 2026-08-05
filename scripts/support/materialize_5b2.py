@@ -14,9 +14,20 @@ ROOT = Path(__file__).resolve().parents[2]
 ARCHIVE_SHA256 = "b067a1e6da3b0c00b294b86b495c5755ad73c0b253fb2cfdc36282f11347c254"
 OVERLAY_ARCHIVE_SHA256 = "48164f812ea7fb4fb6b90b652d50be98d2f0f39e77ce76abf39623ef74fb0373"
 OVERLAY_SHA256 = "2f89d8510e9314be09d3bfbfd043739285b29636683f7e4f45de8ff918b3de1f"
-OVERLAY_PARTS = tuple(
-    f"scripts/support/5b2_refactor_overlay.{index:02d}"
-    for index in range(7)
+OVERLAY_PARTS = (
+    "scripts/support/5b2_refactor_overlay.00",
+    "scripts/support/5b2_refactor_overlay.01a",
+    "scripts/support/5b2_refactor_overlay.01b",
+    "scripts/support/5b2_refactor_overlay.01c",
+    "scripts/support/5b2_refactor_overlay.01d",
+    "scripts/support/5b2_refactor_overlay.02a",
+    "scripts/support/5b2_refactor_overlay.02b",
+    "scripts/support/5b2_refactor_overlay.02c",
+    "scripts/support/5b2_refactor_overlay.02d",
+    "scripts/support/5b2_refactor_overlay.03",
+    "scripts/support/5b2_refactor_overlay.04",
+    "scripts/support/5b2_refactor_overlay.05",
+    "scripts/support/5b2_refactor_overlay.06",
 )
 TRACE_PATH = "docs/traceability/increment-5b-branch-atoms.md"
 TRACE_BASE_BLOB_SHA1 = "4e16954a7197a450d744c222750301bbd567cb6e"
