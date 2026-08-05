@@ -310,6 +310,43 @@ def test_snapshot_failures_have_explicit_outcomes(
         assert receipt.neo4j_read_count == 0
 
 
+def test_timeout_override_of_stale_snapshot_is_journaled_and_replayed(
+    tmp_path: Path,
+) -> None:
+    current = snapshot(
+        generation_state=ProjectionGenerationState.RETIRED,
+    )
+    driver, _factory, retriever = system(
+        tmp_path,
+        view=authority_view(projection_snapshot=current),
+        scenario=default_scenario(projection_snapshot=current),
+        clock=SequenceClock((0, 5_000_000_001)),
+    )
+    current_request = request(
+        idempotency_key="stale-timeout-override"
+    )
+
+    first = retriever.retrieve(current_request)
+    receipt = first.receipt
+
+    assert first.replayed is False
+    assert receipt.outcome is BranchOutcome.INCOMPLETE
+    assert receipt.reason_code == "QUERY_TIMEOUT"
+    assert receipt.elapsed_ms == 5_000
+    assert receipt.snapshot == current
+    assert receipt.authority_read_count == 1
+    assert receipt.neo4j_read_count == 0
+    assert receipt.normalized_query is None
+    assert not receipt.hits
+    assert not receipt.exclusions
+    assert driver.calls == []
+
+    replay = retriever.retrieve(current_request)
+    assert replay.replayed is True
+    assert replay.receipt.canonical_bytes == receipt.canonical_bytes
+    assert driver.calls == []
+
+
 def test_projection_age_beyond_hard_hour_is_stale(tmp_path: Path) -> None:
     current = snapshot(
         validation_recorded_at=type(NOW).parse(

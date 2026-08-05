@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 
 from newsroom.authority.canonical import digest_bytes
+from newsroom.increment5.branch_contracts import BranchOutcome
 from .fulltext_contracts import FullTextBranchRequest, FullTextContractError
 from .fulltext_normalizer import BilingualSearchNormalizer
 from .fulltext_receipts import FullTextBranchReceipt
@@ -203,6 +204,21 @@ class FullTextReceiptJournal:
             )
             if snapshot_failure is not None:
                 expected_outcome, expected_reason = snapshot_failure
+                timeout_override = (
+                    receipt.outcome is BranchOutcome.INCOMPLETE
+                    and receipt.reason_code == "QUERY_TIMEOUT"
+                )
+                if timeout_override:
+                    if (
+                        receipt.normalized_query is not None
+                        or receipt.neo4j_read_count != 0
+                        or receipt.hits
+                        or receipt.exclusions
+                    ):
+                        raise FullTextReceiptJournalError(
+                            "stored full-text receipt request binding differs"
+                        )
+                    return
                 if (
                     receipt.outcome is not expected_outcome
                     or receipt.reason_code != expected_reason
