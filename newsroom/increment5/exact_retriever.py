@@ -465,8 +465,10 @@ class SQLiteExactRetriever:
         completed = self._monotonic_ns()
         if completed < start_ns:
             raise ExactRetrieverError("monotonic clock moved backwards")
-        actual_ms = (completed - start_ns) // 1_000_000
-        return min(BRANCH_TIMEOUT_MS, actual_ms), actual_ms > BRANCH_TIMEOUT_MS
+        elapsed_ns = completed - start_ns
+        actual_ms = elapsed_ns // 1_000_000
+        timed_out = elapsed_ns > BRANCH_TIMEOUT_MS * 1_000_000
+        return min(BRANCH_TIMEOUT_MS, actual_ms), timed_out
 
     def _open_read_only(self) -> sqlite3.Connection:
         if not self._authority_database.is_file():
