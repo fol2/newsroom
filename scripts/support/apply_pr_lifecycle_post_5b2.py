@@ -35,6 +35,18 @@ def main() -> None:
         "python -m scripts.sdlc.pr_lifecycle inventory\n",
     )
 
+    cli = "scripts/sdlc/pr_lifecycle.py"
+    replace_once(
+        cli,
+        """import argparse\nfrom datetime import datetime, timezone\nimport json\nimport os\nfrom pathlib import Path\nimport sys\nfrom typing import Any\n""",
+        """import argparse\nfrom datetime import datetime, timezone\nimport importlib.util\nimport json\nimport os\nfrom pathlib import Path\nimport sys\nfrom typing import Any\n""",
+    )
+    replace_once(
+        cli,
+        """from newsroom.checks.pr_lifecycle import (\n    HousekeepingPlan,\n    OpenPullRequest,\n    PrLifecycleError,\n    parse_pr_lifecycle,\n    plan_housekeeping,\n    validate_pull_request_event,\n)\n\n\n_API = \"https://api.github.com\"\n""",
+        """_CONTRACT_PATH = (\n    Path(__file__).resolve().parents[2]\n    / \"newsroom\"\n    / \"checks\"\n    / \"pr_lifecycle.py\"\n)\n_CONTRACT_SPEC = importlib.util.spec_from_file_location(\n    \"newsroom_pr_lifecycle_contract\",\n    _CONTRACT_PATH,\n)\nif _CONTRACT_SPEC is None or _CONTRACT_SPEC.loader is None:\n    raise RuntimeError(\"cannot load exact PR lifecycle contract\")\n_CONTRACT = importlib.util.module_from_spec(_CONTRACT_SPEC)\nsys.modules[_CONTRACT_SPEC.name] = _CONTRACT\n_CONTRACT_SPEC.loader.exec_module(_CONTRACT)\n\nHousekeepingPlan = _CONTRACT.HousekeepingPlan\nOpenPullRequest = _CONTRACT.OpenPullRequest\nPrLifecycleError = _CONTRACT.PrLifecycleError\nparse_pr_lifecycle = _CONTRACT.parse_pr_lifecycle\nplan_housekeeping = _CONTRACT.plan_housekeeping\nvalidate_pull_request_event = _CONTRACT.validate_pull_request_event\n\n\n_API = \"https://api.github.com\"\n""",
+    )
+
     tests = "newsroom/tests/test_pr_lifecycle.py"
     replace_once(
         tests,
