@@ -414,9 +414,16 @@ def _apply_plan(
             )
         checkpoint = lifecycle.checkpoint_ref
         if lifecycle.close_when.value == "checkpointed":
-            if checkpoint is None or not client.branch_exists(checkpoint):
+            checkpoint_sha = (
+                None if checkpoint is None else client.branch_sha(checkpoint)
+            )
+            if (
+                current.head_sha is None
+                or checkpoint_sha != current.head_sha
+            ):
                 raise GithubApiError(
-                    f"pull request #{action.pr_number} checkpoint is no longer present"
+                    f"pull request #{action.pr_number} checkpoint no longer "
+                    "identifies its current head"
                 )
         elif lifecycle.close_when.value == "canonical-merged":
             if lifecycle.canonical_pr is None:

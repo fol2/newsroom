@@ -573,6 +573,77 @@ def test_apply_revalidates_current_disposable_surface() -> None:
     assert client.effects == []
 
 
+def test_checkpointed_keep_closure_requires_current_head_checkpoint() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
+    spec = importlib.util.spec_from_file_location(
+        "test_pr_lifecycle_checkpoint_keep_cli",
+        module_path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    support_body = body(
+        lifecycle="support",
+        canonical="#10",
+        close_when="checkpointed",
+        retention="keep",
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.effects: list[str] = []
+
+        def get_pull_request(self, number: int):
+            assert number == 11
+            return {
+                "number": 11,
+                "body": support_body,
+                "draft": True,
+                "head": {
+                    "ref": "support/increment-5b2-correction",
+                    "sha": "a" * 40,
+                    "repo": {"full_name": "fol2/newsroom"},
+                },
+                "labels": [{"name": HOUSEKEEPING_LABEL}],
+                "created_at": "2026-08-05T12:00:00Z",
+            }
+
+        def branch_sha(self, ref: str):
+            assert ref == "checkpoint/increment-5b2"
+            return "b" * 40
+
+        def comment(self, *_args):
+            self.effects.append("comment")
+
+        def close_pull_request(self, *_args):
+            self.effects.append("close")
+
+        def delete_branch(self, *_args):
+            self.effects.append("delete")
+
+    client = FakeClient()
+    plan = HousekeepingPlan(
+        close_actions=(
+            CloseAction(
+                pr_number=11,
+                reason="declared checkpoint exists",
+            ),
+        ),
+        warnings=(),
+    )
+    with pytest.raises(module.GithubApiError, match="current head"):
+        module._apply_plan(
+            client,
+            plan,
+            lifecycles={11: module.parse_pr_lifecycle(support_body)},
+            repository="fol2/newsroom",
+        )
+    assert client.effects == []
+
+
 def test_apply_rejects_retention_change_after_planning() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
