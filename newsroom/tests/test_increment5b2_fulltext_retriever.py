@@ -411,6 +411,38 @@ def test_driver_version_mismatch_fails_before_authority_read(
     assert driver.calls == []
 
 
+def test_untyped_authority_view_returns_journaled_unavailable_receipt(
+    tmp_path: Path,
+) -> None:
+    driver = FakeDriver(default_scenario())
+    retriever = FullTextRetriever(
+        graph_reader=driver.reader(),
+        journal=FullTextReceiptJournal(
+            tmp_path / "untyped-authority.sqlite3"
+        ),
+        authority_view_provider=lambda _request: object(),
+        monotonic_ns=lambda: 0,
+    )
+    current_request = request(idempotency_key="untyped-authority-view")
+
+    first = retriever.retrieve(current_request)
+    receipt = first.receipt
+
+    assert first.replayed is False
+    assert receipt.outcome is BranchOutcome.UNAVAILABLE
+    assert receipt.reason_code == "AUTHORITY_VIEW_UNAVAILABLE"
+    assert receipt.authority_read_count == 0
+    assert receipt.neo4j_read_count == 0
+    assert receipt.snapshot is None
+    assert receipt.authority_view_digest is None
+    assert driver.calls == []
+
+    replay = retriever.retrieve(current_request)
+    assert replay.replayed is True
+    assert replay.receipt.canonical_bytes == receipt.canonical_bytes
+    assert driver.calls == []
+
+
 def test_result_overflow_is_incomplete_instead_of_truncated(
     tmp_path: Path,
 ) -> None:
@@ -616,6 +648,14 @@ def test_journal_detects_corrupted_receipt_bytes(tmp_path: Path) -> None:
         match="digest differs",
     ):
         restarted.retrieve(request())
+
+
+@pytest.mark.parametrize("passage_id", ["bad passage", "1bad"])
+def test_document_binding_rejects_non_token_passage_id(
+    passage_id: str,
+) -> None:
+    with pytest.raises(ValueError, match="valid authority token"):
+        replace(bindings()[0], passage_id=passage_id)
 
 
 def test_request_rejects_oversized_and_unbounded_controls() -> None:

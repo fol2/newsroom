@@ -150,11 +150,11 @@ class FullTextRetriever:
         authority_read_count = 0
         try:
             view = self._authority_view_provider(request)
-            authority_read_count = 1
             if not isinstance(view, FullTextAuthorityView):
                 raise FullTextContractError(
                     "authority provider returned an untyped full-text view"
                 )
+            authority_read_count = 1
         except Exception:
             return self._receipt(
                 request,

@@ -449,8 +449,8 @@ class FullTextDocumentBinding:
     trust_scope: TrustScope = TrustScope.OBSERVED
 
     def __post_init__(self) -> None:
+        require_token(self.passage_id, field="fulltext_passage_id")
         for field_name in (
-            "passage_id",
             "dependency_root_id",
             "source_identity",
         ):
