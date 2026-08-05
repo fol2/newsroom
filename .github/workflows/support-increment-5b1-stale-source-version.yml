@@ -46,6 +46,20 @@ jobs:
             newsroom/tests/test_increment5b1_exact_retriever.py \
             newsroom/tests/test_increment5b1_stale_source_version.py
 
+      - name: Commit generated product tree for clean-checkout evidence
+        run: |
+          set -euo pipefail
+          git add \
+            newsroom/increment5/branch_contracts.py \
+            newsroom/increment5/exact_queries.py \
+            newsroom/increment5/exact_retriever.py \
+            newsroom/tests/test_increment5b1_stale_source_version.py
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'support: materialize stale source-version boundary'
+          test -z "$(git status --porcelain)"
+
       - name: Complete deterministic repository evidence
         run: uv run python -m pytest -q
 
@@ -64,13 +78,6 @@ jobs:
           git rm \
             scripts/support/materialize_5b1_stale.py \
             .github/workflows/support-increment-5b1-stale-source-version.yml
-          git add \
-            newsroom/increment5/branch_contracts.py \
-            newsroom/increment5/exact_queries.py \
-            newsroom/increment5/exact_retriever.py \
-            newsroom/tests/test_increment5b1_stale_source_version.py
           git diff --cached --check
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'test(increment5): verify stale source-version boundary'
+          git commit -m 'support: retain product-only verified tree'
           git push origin "HEAD:${HEAD_BRANCH}"
