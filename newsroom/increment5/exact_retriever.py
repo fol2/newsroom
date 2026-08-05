@@ -146,6 +146,19 @@ class SQLiteExactRetriever:
                     )
                 hits, exclusions = self._admit_rows(rows, request.query_valid_time)
                 if not hits and exclusions:
+                    if all(
+                        item.reason
+                        is BranchExclusionReason.STALE_SOURCE_VERSION
+                        for item in exclusions
+                    ):
+                        return self._exact_receipt(
+                            request,
+                            start_ns=start_ns,
+                            outcome=BranchOutcome.STALE,
+                            reason_code="SOURCE_VERSION_STALE",
+                            authority_watermark=watermark,
+                            exclusions=exclusions,
+                        )
                     reason = (
                         "RIGHTS_BLOCKED"
                         if any(
@@ -342,8 +355,23 @@ class SQLiteExactRetriever:
         hits: list[ExactBranchHit] = []
         exclusions: list[BranchExclusion] = []
         for row in rows:
+            keys = frozenset(row.keys())
             authority_kind = str(row["authority_kind"])
             authority_id = str(row["authority_id"])
+            if "source_policy_available" in keys:
+                policy_available = row["source_policy_available"]
+                if (
+                    isinstance(policy_available, bool)
+                    or not isinstance(policy_available, int)
+                    or policy_available not in {0, 1}
+                ):
+                    raise Increment5BranchContractError(
+                        "source policy availability flag is malformed"
+                    )
+                if policy_available == 0:
+                    raise Increment5BranchContractError(
+                        "current Source Definition policy is unavailable"
+                    )
             allowed_use = str(row["allowed_use"] or "").upper()
             lifecycle = str(row["lifecycle_state"] or "").upper()
             if any(token in allowed_use for token in ("PROHIBITED", "DENIED", "REVOKED")):
@@ -364,6 +392,25 @@ class SQLiteExactRetriever:
                     )
                 )
                 continue
+            if "source_version_current" in keys:
+                version_current = row["source_version_current"]
+                if (
+                    isinstance(version_current, bool)
+                    or not isinstance(version_current, int)
+                    or version_current not in {0, 1}
+                ):
+                    raise Increment5BranchContractError(
+                        "source version current flag is malformed"
+                    )
+                if version_current == 0:
+                    exclusions.append(
+                        BranchExclusion(
+                            authority_kind=authority_kind,
+                            authority_id=authority_id,
+                            reason=BranchExclusionReason.STALE_SOURCE_VERSION,
+                        )
+                    )
+                    continue
             valid_from = row["valid_from"]
             valid_until = row["valid_until"]
             if (

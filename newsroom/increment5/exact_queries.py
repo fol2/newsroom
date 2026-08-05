@@ -70,17 +70,23 @@ SELECT 'SOURCE_ITEM' AS authority_kind,
        i.item_id AS authority_id,
        i.item_id AS dependency_root_id,
        'SOURCE_NATIVE_ID_EQUAL' AS match_signal,
-       i.definition_id || ':' || h.current_version_id AS source_identity,
+       i.definition_id || ':' || i.definition_version_id AS source_identity,
        'OBSERVED' AS trust_scope,
        i.identity_digest AS provenance_digest,
        v.allowed_use AS allowed_use,
        v.lifecycle_stage AS lifecycle_state,
+       CASE
+         WHEN h.current_version_id IS NOT NULL AND v.version_id IS NOT NULL
+         THEN 1 ELSE 0
+       END AS source_policy_available,
+       CASE WHEN i.definition_version_id=h.current_version_id THEN 1 ELSE 0 END
+         AS source_version_current,
        NULL AS valid_from,
        NULL AS valid_until
 FROM source_items AS i
-JOIN source_definition_version_heads AS h
+LEFT JOIN source_definition_version_heads AS h
   ON h.definition_id=i.definition_id
-JOIN source_definition_versions AS v
+LEFT JOIN source_definition_versions AS v
   ON v.version_id=h.current_version_id
  AND v.definition_id=h.definition_id
 WHERE i.definition_id=? AND i.source_native_id=?
@@ -93,17 +99,23 @@ SELECT 'SOURCE_REVISION' AS authority_kind,
        r.revision_id AS authority_id,
        r.item_id AS dependency_root_id,
        'REVISION_ID_EQUAL' AS match_signal,
-       r.definition_id || ':' || h.current_version_id AS source_identity,
+       r.definition_id || ':' || r.definition_version_id AS source_identity,
        'OBSERVED' AS trust_scope,
        r.revision_identity_digest AS provenance_digest,
        v.allowed_use AS allowed_use,
        v.lifecycle_stage AS lifecycle_state,
+       CASE
+         WHEN h.current_version_id IS NOT NULL AND v.version_id IS NOT NULL
+         THEN 1 ELSE 0
+       END AS source_policy_available,
+       CASE WHEN r.definition_version_id=h.current_version_id THEN 1 ELSE 0 END
+         AS source_version_current,
        NULL AS valid_from,
        NULL AS valid_until
 FROM source_revisions AS r
-JOIN source_definition_version_heads AS h
+LEFT JOIN source_definition_version_heads AS h
   ON h.definition_id=r.definition_id
-JOIN source_definition_versions AS v
+LEFT JOIN source_definition_versions AS v
   ON v.version_id=h.current_version_id
  AND v.definition_id=h.definition_id
 WHERE r.revision_id=?
@@ -116,17 +128,23 @@ SELECT 'SOURCE_REVISION' AS authority_kind,
        r.revision_id AS authority_id,
        r.item_id AS dependency_root_id,
        'SOURCE_NATIVE_REVISION_TOKEN_EQUAL' AS match_signal,
-       r.definition_id || ':' || h.current_version_id AS source_identity,
+       r.definition_id || ':' || r.definition_version_id AS source_identity,
        'OBSERVED' AS trust_scope,
        r.revision_identity_digest AS provenance_digest,
        v.allowed_use AS allowed_use,
        v.lifecycle_stage AS lifecycle_state,
+       CASE
+         WHEN h.current_version_id IS NOT NULL AND v.version_id IS NOT NULL
+         THEN 1 ELSE 0
+       END AS source_policy_available,
+       CASE WHEN r.definition_version_id=h.current_version_id THEN 1 ELSE 0 END
+         AS source_version_current,
        NULL AS valid_from,
        NULL AS valid_until
 FROM source_revisions AS r
-JOIN source_definition_version_heads AS h
+LEFT JOIN source_definition_version_heads AS h
   ON h.definition_id=r.definition_id
-JOIN source_definition_versions AS v
+LEFT JOIN source_definition_versions AS v
   ON v.version_id=h.current_version_id
  AND v.definition_id=h.definition_id
 WHERE r.item_id=? AND r.source_native_revision_token=?
@@ -139,17 +157,23 @@ SELECT 'DISCOVERY_REPRESENTATION' AS authority_kind,
        d.representation_id AS authority_id,
        d.revision_id AS dependency_root_id,
        'REPRESENTATION_ID_EQUAL' AS match_signal,
-       d.definition_id || ':' || h.current_version_id AS source_identity,
+       d.definition_id || ':' || d.definition_version_id AS source_identity,
        'OBSERVED' AS trust_scope,
        d.representation_identity_digest AS provenance_digest,
        v.allowed_use AS allowed_use,
        v.lifecycle_stage AS lifecycle_state,
+       CASE
+         WHEN h.current_version_id IS NOT NULL AND v.version_id IS NOT NULL
+         THEN 1 ELSE 0
+       END AS source_policy_available,
+       CASE WHEN d.definition_version_id=h.current_version_id THEN 1 ELSE 0 END
+         AS source_version_current,
        NULL AS valid_from,
        NULL AS valid_until
 FROM discovery_representations AS d
-JOIN source_definition_version_heads AS h
+LEFT JOIN source_definition_version_heads AS h
   ON h.definition_id=d.definition_id
-JOIN source_definition_versions AS v
+LEFT JOIN source_definition_versions AS v
   ON v.version_id=h.current_version_id
  AND v.definition_id=h.definition_id
 WHERE d.representation_id=?
