@@ -9,6 +9,7 @@ import sqlite3
 
 from newsroom.authority.canonical import digest_bytes
 from .fulltext_contracts import FullTextBranchRequest, FullTextContractError
+from .fulltext_normalizer import BilingualSearchNormalizer
 from .fulltext_receipts import FullTextBranchReceipt
 
 
@@ -194,6 +195,17 @@ class FullTextReceiptJournal:
             raise FullTextReceiptJournalError(
                 "stored full-text receipt request binding differs"
             )
+        if receipt.normalized_query is not None:
+            try:
+                BilingualSearchNormalizer().validate_request_binding(
+                    receipt.normalized_query,
+                    surface_text=request.query_text,
+                    language_mode=request.language_mode,
+                )
+            except FullTextContractError as exc:
+                raise FullTextReceiptJournalError(
+                    "stored full-text receipt request binding differs"
+                ) from exc
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(

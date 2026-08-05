@@ -799,6 +799,57 @@ def test_journal_rejects_hits_rebound_to_another_query(
 
 
 @pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("language_mode", "EN_GB"),
+        ("lucene_query", 'retrieval_text:"another"'),
+        ("implementation_version", "another-normalizer-version"),
+        ("component_digest", digest("another-normalizer-component")),
+    ],
+)
+def test_journal_rejects_normalized_query_rebound_from_request(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    driver, _factory, retriever = system(tmp_path)
+    original = retriever.retrieve(request()).receipt
+    value = original.canonical_value()
+    assert value["normalized_query"] is not None
+    value["normalized_query"][field] = replacement
+    rebound_digest = digest_bytes(
+        canonical_json_bytes(value["normalized_query"])
+    )
+    for hit in value["hits"]:
+        hit["query_digest"] = rebound_digest
+    corrupted = canonical_json_bytes(value)
+    journal_path = tmp_path / "fulltext-receipts.sqlite3"
+    with sqlite3.connect(journal_path) as connection:
+        connection.execute(
+            "DROP TRIGGER immutable_increment5_fulltext_receipt_update"
+        )
+        connection.execute(
+            "UPDATE increment5_fulltext_receipts SET "
+            "receipt_bytes=?,receipt_digest=?",
+            (corrupted, digest_bytes(corrupted)),
+        )
+
+    before_calls = list(driver.calls)
+    restarted = FullTextRetriever(
+        graph_reader=driver.reader(),
+        journal=FullTextReceiptJournal(journal_path),
+        authority_view_provider=lambda _request: authority_view(),
+        monotonic_ns=lambda: 0,
+    )
+    with pytest.raises(
+        FullTextReceiptJournalError,
+        match="request binding differs",
+    ):
+        restarted.retrieve(request())
+    assert driver.calls == before_calls
+
+
+@pytest.mark.parametrize(
     "changes",
     [
         {"contract_digest": digest("another-contract")},
