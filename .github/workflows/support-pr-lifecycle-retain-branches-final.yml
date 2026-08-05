@@ -30,7 +30,7 @@ jobs:
       - name: Remove automatic branch deletion capability
         run: |
           set -euo pipefail
-          python scripts/support/apply_pr_lifecycle_retain_branches.py
+          python scripts/support/run_pr_lifecycle_retain_branches.py
           python -m py_compile \
             newsroom/checks/pr_lifecycle.py \
             newsroom/tests/test_pr_lifecycle.py \
@@ -100,6 +100,7 @@ jobs:
           set -euo pipefail
           git rm \
             scripts/support/apply_pr_lifecycle_retain_branches.py \
+            scripts/support/run_pr_lifecycle_retain_branches.py \
             .github/workflows/support-pr-lifecycle-retain-branches-final.yml
           git diff --cached --check
           git commit -m 'support: retain product-only branch-retention hardening'
