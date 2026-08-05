@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,9 @@ import pytest
 from newsroom.checks.pr_lifecycle import (
     HOUSEKEEPING_LABEL,
     BranchRetention,
+    CloseAction,
     CloseWhen,
+    HousekeepingPlan,
     LifecycleKind,
     OpenPullRequest,
     PrLifecycleError,
@@ -59,6 +62,7 @@ def open_pr(
     age_days: int = 0,
     labels: frozenset[str] = frozenset({HOUSEKEEPING_LABEL}),
     head_repository: str | None = "fol2/newsroom",
+    head_sha: str | None = "a" * 40,
 ) -> OpenPullRequest:
     return OpenPullRequest(
         number=number,
@@ -68,6 +72,7 @@ def open_pr(
         created_at=NOW - timedelta(days=age_days),
         labels=labels,
         head_repository=head_repository,
+        head_sha=head_sha,
     )
 
 
@@ -444,6 +449,204 @@ def test_external_fork_branch_is_never_deleted() -> None:
         )
 
 
+def test_merged_canonical_metadata_must_match_disposable_atom() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
+    spec = importlib.util.spec_from_file_location(
+        "test_pr_lifecycle_merged_cli",
+        module_path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    support = module._open_pr_from_json(
+        {
+            "number": 11,
+            "body": body(
+                lifecycle="support",
+                atom="increment-5b3",
+                canonical="#10",
+                close_when="canonical-merged",
+            ),
+            "draft": True,
+            "head": {
+                "ref": "support/increment-5b3",
+                "sha": "a" * 40,
+                "repo": {"full_name": "fol2/newsroom"},
+            },
+            "labels": [{"name": HOUSEKEEPING_LABEL}],
+            "created_at": "2026-08-05T12:00:00Z",
+        }
+    )
+
+    class FakeClient:
+        def get_pull_request(self, number: int):
+            assert number == 10
+            return {
+                "number": 10,
+                "body": body(atom="different-atom"),
+                "draft": False,
+                "head": {
+                    "ref": "agent/different-atom",
+                    "sha": "b" * 40,
+                    "repo": {"full_name": "fol2/newsroom"},
+                },
+                "labels": [],
+                "created_at": "2026-08-01T12:00:00Z",
+                "merged_at": "2026-08-02T12:00:00Z",
+            }
+
+    lifecycles = {
+        support.number: module.parse_pr_lifecycle(support.body)
+    }
+    with pytest.raises(module.GithubApiError, match="delivery atom differs"):
+        module._verified_merged_canonical_prs(
+            FakeClient(),
+            open_prs=(support,),
+            lifecycles=lifecycles,
+        )
+
+
+def test_apply_revalidates_current_disposable_surface() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
+    spec = importlib.util.spec_from_file_location(
+        "test_pr_lifecycle_surface_cli",
+        module_path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.effects: list[str] = []
+
+        def get_pull_request(self, number: int):
+            assert number == 11
+            return {
+                "number": 11,
+                "body": body(
+                    lifecycle="support",
+                    canonical="#10",
+                    close_when="checkpointed",
+                ),
+                "draft": False,
+                "head": {
+                    "ref": "support/increment-5b2-correction",
+                    "sha": "a" * 40,
+                    "repo": {"full_name": "fol2/newsroom"},
+                },
+                "labels": [{"name": HOUSEKEEPING_LABEL}],
+                "created_at": "2026-08-05T12:00:00Z",
+            }
+
+        def comment(self, *_args):
+            self.effects.append("comment")
+
+        def close_pull_request(self, *_args):
+            self.effects.append("close")
+
+        def delete_branch(self, *_args):
+            self.effects.append("delete")
+
+    client = FakeClient()
+    plan = HousekeepingPlan(
+        close_actions=(
+            CloseAction(
+                pr_number=11,
+                reason="declared checkpoint exists",
+            ),
+        ),
+        warnings=(),
+    )
+    with pytest.raises(module.PrLifecycleError, match="must remain drafts"):
+        module._apply_plan(
+            client,
+            plan,
+            lifecycles={},
+            repository="fol2/newsroom",
+        )
+    assert client.effects == []
+
+
+def test_apply_rejects_checkpoint_not_bound_to_current_head() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    module_path = repository_root / "scripts/sdlc/pr_lifecycle.py"
+    spec = importlib.util.spec_from_file_location(
+        "test_pr_lifecycle_cli",
+        module_path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.effects: list[str] = []
+
+        def get_pull_request(self, number: int):
+            assert number == 11
+            return {
+                "number": 11,
+                "body": body(
+                    lifecycle="support",
+                    canonical="#10",
+                    close_when="canonical-merged",
+                    retention="delete-after-checkpoint",
+                ),
+                "draft": True,
+                "head": {
+                    "ref": "support/increment-5b2-correction",
+                    "sha": "a" * 40,
+                    "repo": {"full_name": "fol2/newsroom"},
+                },
+                "labels": [{"name": HOUSEKEEPING_LABEL}],
+                "created_at": "2026-08-05T12:00:00Z",
+            }
+
+        def pull_request_is_merged(self, number: int) -> bool:
+            return number == 10
+
+        def branch_sha(self, ref: str):
+            if ref == "checkpoint/increment-5b2":
+                return "b" * 40
+            return "a" * 40
+
+        def comment(self, *_args):
+            self.effects.append("comment")
+
+        def close_pull_request(self, *_args):
+            self.effects.append("close")
+
+        def delete_branch(self, *_args):
+            self.effects.append("delete")
+
+    client = FakeClient()
+    plan = HousekeepingPlan(
+        close_actions=(
+            CloseAction(
+                pr_number=11,
+                reason="canonical PR #10 is merged",
+                delete_branch="support/increment-5b2-correction",
+            ),
+        ),
+        warnings=(),
+    )
+    with pytest.raises(module.GithubApiError, match="no longer safe"):
+        module._apply_plan(
+            client,
+            plan,
+            lifecycles={},
+            repository="fol2/newsroom",
+        )
+    assert client.effects == []
+
+
 def test_workflow_separates_dry_run_and_two_key_apply() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     workflow = (
@@ -458,7 +661,19 @@ def test_workflow_separates_dry_run_and_two_key_apply() -> None:
         in workflow
     )
     assert "PR_HOUSEKEEPING_APPLY: CLOSE_ELIGIBLE_DISPOSABLE_PRS" in workflow
+    assert workflow.count("GITHUB_TOKEN: ${{ github.token }}") == 2
     assert "python scripts/sdlc/pr_lifecycle.py" not in workflow
+
+
+def test_pull_request_head_sha_must_be_full_lowercase_commit() -> None:
+    with pytest.raises(PrLifecycleError, match="head SHA"):
+        open_pr(
+            11,
+            pr_body=body(),
+            draft=True,
+            head_ref="agent/increment-5b2",
+            head_sha="ABC",
+        )
 
 
 def test_checkpoint_deletion_fails_closed_without_verified_ref() -> None:

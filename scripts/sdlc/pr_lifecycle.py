@@ -38,6 +38,9 @@ PrLifecycleError = _CONTRACT.PrLifecycleError
 parse_pr_lifecycle = _CONTRACT.parse_pr_lifecycle
 plan_housekeeping = _CONTRACT.plan_housekeeping
 validate_pull_request_event = _CONTRACT.validate_pull_request_event
+validate_pull_request_lifecycle = (
+    _CONTRACT.validate_pull_request_lifecycle
+)
 
 
 _API = "https://api.github.com"
@@ -142,14 +145,31 @@ class GithubClient:
             raise GithubApiError(f"pull request #{number} response is malformed")
         return value.get("merged_at") is not None
 
-    def branch_exists(self, ref: str) -> bool:
+    def branch_sha(self, ref: str) -> str | None:
         encoded = quote(ref, safe="")
         value = self.request(
             "GET",
             f"/git/ref/heads/{encoded}",
             allow_not_found=True,
         )
-        return value is not None
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise GithubApiError(f"branch {ref} response is malformed")
+        raw_object = value.get("object")
+        if not isinstance(raw_object, dict):
+            raise GithubApiError(f"branch {ref} object is malformed")
+        sha = raw_object.get("sha")
+        if (
+            not isinstance(sha, str)
+            or len(sha) != 40
+            or any(character not in "0123456789abcdef" for character in sha)
+        ):
+            raise GithubApiError(f"branch {ref} SHA is malformed")
+        return sha
+
+    def branch_exists(self, ref: str) -> bool:
+        return self.branch_sha(ref) is not None
 
     def comment(self, number: int, body: str) -> None:
         self.request(
@@ -198,6 +218,59 @@ def validate_event(path: Path) -> int:
     return 0
 
 
+def _verified_merged_canonical_prs(
+    client: GithubClient,
+    *,
+    open_prs: tuple[OpenPullRequest, ...],
+    lifecycles: dict[int, object],
+) -> frozenset[int]:
+    open_numbers = {item.number for item in open_prs}
+    referenced = {
+        getattr(lifecycle, "canonical_pr")
+        for lifecycle in lifecycles.values()
+        if getattr(lifecycle, "canonical_pr") is not None
+    }
+    verified: dict[int, object] = {}
+    for number in sorted(referenced - open_numbers):
+        raw = client.get_pull_request(number)
+        if raw.get("merged_at") is None:
+            continue
+        canonical_pr = _open_pr_from_json(raw)
+        canonical_lifecycle = parse_pr_lifecycle(canonical_pr.body)
+        validate_pull_request_lifecycle(
+            canonical_lifecycle,
+            pr_number=canonical_pr.number,
+            draft=canonical_pr.draft,
+            head_ref=canonical_pr.head_ref,
+        )
+        if not canonical_lifecycle.canonical_is_self:
+            raise GithubApiError(
+                f"merged pull request #{number} is not canonical"
+            )
+        verified[number] = canonical_lifecycle
+
+    for pr in open_prs:
+        lifecycle = lifecycles[pr.number]
+        canonical_number = getattr(lifecycle, "canonical_pr")
+        if (
+            not getattr(lifecycle, "is_disposable")
+            or canonical_number in open_numbers
+        ):
+            continue
+        canonical_lifecycle = verified.get(canonical_number)
+        if canonical_lifecycle is None:
+            continue
+        if (
+            getattr(canonical_lifecycle, "delivery_atom")
+            != getattr(lifecycle, "delivery_atom")
+        ):
+            raise GithubApiError(
+                f"#{pr.number} delivery atom differs from merged canonical "
+                f"#{canonical_number}"
+            )
+    return frozenset(verified)
+
+
 def inventory(*, apply: bool) -> int:
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -217,16 +290,10 @@ def inventory(*, apply: bool) -> int:
         item.number: parse_pr_lifecycle(item.body)
         for item in open_prs
     }
-    referenced_canonical = {
-        lifecycle.canonical_pr
-        for lifecycle in lifecycles.values()
-        if lifecycle.canonical_pr is not None
-    }
-    open_numbers = {item.number for item in open_prs}
-    merged_canonical = frozenset(
-        number
-        for number in sorted(referenced_canonical - open_numbers)
-        if client.pull_request_is_merged(number)
+    merged_canonical = _verified_merged_canonical_prs(
+        client,
+        open_prs=open_prs,
+        lifecycles=lifecycles,
     )
     checkpoint_refs = {
         lifecycle.checkpoint_ref
@@ -272,6 +339,7 @@ def _open_pr_from_json(value: dict[str, object]) -> OpenPullRequest:
         if not isinstance(head, dict):
             raise TypeError
         head_ref = head["ref"]
+        head_sha = str(head["sha"])
         raw_head_repository = head.get("repo")
         if raw_head_repository is None:
             head_repository = None
@@ -299,6 +367,7 @@ def _open_pr_from_json(value: dict[str, object]) -> OpenPullRequest:
         created_at=created_at,
         labels=labels,
         head_repository=head_repository,
+        head_sha=head_sha,
     )
 
 
@@ -315,6 +384,12 @@ def _apply_plan(
             client.get_pull_request(action.pr_number)
         )
         lifecycle = parse_pr_lifecycle(current.body)
+        validate_pull_request_lifecycle(
+            lifecycle,
+            pr_number=current.number,
+            draft=current.draft,
+            head_ref=current.head_ref,
+        )
         if not lifecycle.is_disposable:
             raise GithubApiError(
                 f"pull request #{action.pr_number} is no longer disposable"
@@ -342,11 +417,16 @@ def _apply_plan(
                 f"pull request #{action.pr_number} close condition changed"
             )
         if action.delete_branch is not None:
+            checkpoint_sha = (
+                None if checkpoint is None else client.branch_sha(checkpoint)
+            )
+            head_sha = client.branch_sha(current.head_ref)
             if (
                 current.head_repository != repository
                 or current.head_ref != action.delete_branch
-                or checkpoint is None
-                or not client.branch_exists(checkpoint)
+                or current.head_sha is None
+                or checkpoint_sha != current.head_sha
+                or head_sha != current.head_sha
             ):
                 raise GithubApiError(
                     f"pull request #{action.pr_number} branch deletion is no longer safe"
@@ -367,6 +447,17 @@ def _apply_plan(
         client.comment(action.pr_number, comment)
         client.close_pull_request(action.pr_number)
         if action.delete_branch is not None:
+            assert checkpoint is not None
+            final_head_sha = client.branch_sha(action.delete_branch)
+            final_checkpoint_sha = client.branch_sha(checkpoint)
+            if (
+                current.head_sha is None
+                or final_head_sha != current.head_sha
+                or final_checkpoint_sha != current.head_sha
+            ):
+                raise GithubApiError(
+                    f"pull request #{action.pr_number} branch changed before deletion"
+                )
             client.delete_branch(action.delete_branch)
 
 
