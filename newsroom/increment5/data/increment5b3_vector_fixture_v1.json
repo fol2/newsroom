@@ -1,0 +1,232 @@
+{
+  "schema_version": "newsroom.increment5.vector-fixture-catalog.v1",
+  "catalog_id": "increment5b3-vector-fixture-v1",
+  "provider_id": "vector-2026.06",
+  "profile_id": "increment5-vector-fixture-replay-v1",
+  "contract_digest": "sha256:51a3837ad9cdb70fe8aaa4242997b191c7e848bb1d391c6940cccc2bd45ba06c",
+  "vector_component_digest": "sha256:efa34511338c4f28f7698db3aab7afbdde36c36e7d9ea36745367180b678db82",
+  "embedding_component_digest": "sha256:cb084be3748ace7a75f68e2f2641566248c53566365f8f802c6c24b75e99c5e9",
+  "source_dimensions": 16,
+  "output_dimensions": 1024,
+  "component_scale": 1000000,
+  "output_type": "FLOAT32",
+  "byte_order": "BIG_ENDIAN",
+  "similarity": "COSINE",
+  "quantization": "NONE",
+  "queries": [
+    {
+      "query_id": "query:harbour-development",
+      "source_vector": [1000000, 900000, 800000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "query_id": "query:policy-correction",
+      "source_vector": [0, 0, 0, 1000000, 900000, 800000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "query_id": "query:overflow-nine",
+      "source_vector": [1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000]
+    }
+  ],
+  "documents": [
+    {
+      "passage_id": "passage:harbour:001",
+      "dependency_root_id": "root:harbour",
+      "source_revision_id": "revision:harbour:001",
+      "language": "EN_GB",
+      "query_ids": ["query:harbour-development"],
+      "source_vector": [1000000, 900000, 800000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:harbour:002",
+      "dependency_root_id": "root:harbour",
+      "source_revision_id": "revision:harbour:002",
+      "language": "ZH_HANT_HK",
+      "query_ids": ["query:harbour-development"],
+      "source_vector": [1000000, 850000, 750000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:harbour:003",
+      "dependency_root_id": "root:harbour-process",
+      "source_revision_id": "revision:harbour:003",
+      "language": "MIXED",
+      "query_ids": ["query:harbour-development"],
+      "source_vector": [900000, 1000000, 700000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:harbour:004",
+      "dependency_root_id": "root:harbour-correction",
+      "source_revision_id": "revision:harbour:004",
+      "language": "ZH_HANT_HK",
+      "query_ids": ["query:harbour-development"],
+      "source_vector": [800000, 700000, 1000000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:harbour:005",
+      "dependency_root_id": "root:harbour-associated",
+      "source_revision_id": "revision:harbour:005",
+      "language": "EN_GB",
+      "query_ids": ["query:harbour-development"],
+      "source_vector": [700000, 600000, 500000, 100000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:harbour:006",
+      "dependency_root_id": "root:unrelated",
+      "source_revision_id": "revision:harbour:006",
+      "language": "EN_GB",
+      "query_ids": ["query:harbour-development"],
+      "source_vector": [-1000000, -900000, -800000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:policy:001",
+      "dependency_root_id": "root:policy",
+      "source_revision_id": "revision:policy:001",
+      "language": "EN_GB",
+      "query_ids": ["query:policy-correction"],
+      "source_vector": [0, 0, 0, 1000000, 900000, 800000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:policy:002",
+      "dependency_root_id": "root:policy",
+      "source_revision_id": "revision:policy:002",
+      "language": "ZH_HANT_HK",
+      "query_ids": ["query:policy-correction"],
+      "source_vector": [0, 0, 0, 1000000, 850000, 750000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:policy:003",
+      "dependency_root_id": "root:policy-correction",
+      "source_revision_id": "revision:policy:003",
+      "language": "MIXED",
+      "query_ids": ["query:policy-correction"],
+      "source_vector": [0, 0, 0, 900000, 1000000, 700000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:policy:004",
+      "dependency_root_id": "root:policy-supersession",
+      "source_revision_id": "revision:policy:004",
+      "language": "EN_GB",
+      "query_ids": ["query:policy-correction"],
+      "source_vector": [0, 0, 0, 700000, 600000, 500000, 100000, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:policy:005",
+      "dependency_root_id": "root:unrelated",
+      "source_revision_id": "revision:policy:005",
+      "language": "EN_GB",
+      "query_ids": ["query:policy-correction"],
+      "source_vector": [0, 0, 0, -1000000, -900000, -800000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:overflow:001",
+      "dependency_root_id": "root:overflow:001",
+      "source_revision_id": "revision:overflow:001",
+      "language": "EN_GB",
+      "query_ids": ["query:overflow-nine"],
+      "source_vector": [1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:overflow:002",
+      "dependency_root_id": "root:overflow:002",
+      "source_revision_id": "revision:overflow:002",
+      "language": "ZH_HANT_HK",
+      "query_ids": ["query:overflow-nine"],
+      "source_vector": [1000000, 999999, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:overflow:003",
+      "dependency_root_id": "root:overflow:003",
+      "source_revision_id": "revision:overflow:003",
+      "language": "MIXED",
+      "query_ids": ["query:overflow-nine"],
+      "source_vector": [1000000, 1000000, 999998, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:overflow:004",
+      "dependency_root_id": "root:overflow:004",
+      "source_revision_id": "revision:overflow:004",
+      "language": "EN_GB",
+      "query_ids": ["query:overflow-nine"],
+      "source_vector": [1000000, 1000000, 1000000, 999997, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:overflow:005",
+      "dependency_root_id": "root:overflow:005",
+      "source_revision_id": "revision:overflow:005",
+      "language": "ZH_HANT_HK",
+      "query_ids": ["query:overflow-nine"],
+      "source_vector": [1000000, 1000000, 1000000, 1000000, 999996, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:overflow:006",
+      "dependency_root_id": "root:overflow:006",
+      "source_revision_id": "revision:overflow:006",
+      "language": "MIXED",
+      "query_ids": ["query:overflow-nine"],
+      "source_vector": [1000000, 1000000, 1000000, 1000000, 1000000, 999995, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:overflow:007",
+      "dependency_root_id": "root:overflow:007",
+      "source_revision_id": "revision:overflow:007",
+      "language": "EN_GB",
+      "query_ids": ["query:overflow-nine"],
+      "source_vector": [1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 999994, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:overflow:008",
+      "dependency_root_id": "root:overflow:008",
+      "source_revision_id": "revision:overflow:008",
+      "language": "ZH_HANT_HK",
+      "query_ids": ["query:overflow-nine"],
+      "source_vector": [1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 999993, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    },
+    {
+      "passage_id": "passage:overflow:009",
+      "dependency_root_id": "root:overflow:009",
+      "source_revision_id": "revision:overflow:009",
+      "language": "MIXED",
+      "query_ids": ["query:overflow-nine"],
+      "source_vector": [1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 999992, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000, 1000000],
+      "valid_from": "2020-01-01T00:00:00Z",
+      "valid_to": "2035-01-01T00:00:00Z"
+    }
+  ]
+}
