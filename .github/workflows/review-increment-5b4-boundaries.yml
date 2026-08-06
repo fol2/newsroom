@@ -1,0 +1,159 @@
+name: Review Increment 5B4 temporal and receipt boundaries
+
+on:
+  push:
+    branches:
+      - support/review-increment-5b4-boundaries-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fix-increment-5b4-temporal-cutoff
+  cancel-in-progress: true
+
+jobs:
+  harden-and-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: fol2/newsroom
+      SOURCE_BRANCH: support/materialize-increment-5b4-20260806
+      EXPECTED_SOURCE: 30eb9dd5e7d6c03018d30289ef3fa05f3b76d523
+      FIXED_BRANCH: support/increment-5b4-reviewed-boundaries-20260806
+      CHECKPOINT_BRANCH: checkpoint/increment-5b4-reviewed-boundaries-20260806
+    steps:
+      - name: Apply one coherent pre-canonical boundary correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
+
+          git init -q repo
+          git -C repo remote add origin "https://github.com/$REPOSITORY.git"
+          git -C repo fetch --no-tags --depth=1 origin \
+            "refs/heads/$SOURCE_BRANCH:refs/remotes/origin/source"
+          git -C repo checkout -q --detach "$EXPECTED_SOURCE"
+
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path("repo")
+          reader = root / "newsroom/authority/neo4j_admitted_graph_reader.py"
+          retriever = root / "newsroom/increment5/admitted_graph_retriever.py"
+          core_tests = root / "newsroom/tests/test_increment5b4_admitted_graph_retriever.py"
+          port_tests = root / "newsroom/tests/test_increment5b4_neo4j_authority_port.py"
+          service_tests = root / "newsroom/tests/test_increment5b4_neo4j_service.py"
+
+          reader_text = reader.read_text(encoding="utf-8")
+          old_cypher = "  AND relation.observed_at >= $temporal_lower_bound\nRETURN\n"
+          new_cypher = (
+              "  AND relation.observed_at >= $temporal_lower_bound\n"
+              "  AND relation.observed_at <= $query_valid_time\n"
+              "RETURN\n"
+          )
+          if old_cypher not in reader_text:
+              raise SystemExit("fixed Cypher observation boundary was not found")
+          reader.write_text(reader_text.replace(old_cypher, new_cypher, 1), encoding="utf-8")
+
+          text = retriever.read_text(encoding="utf-8")
+          old_hop = '''        for name in ("relation_id", "source_id", "target_id"):\n            _require_text(getattr(self, name), field=name)\n        _require_token(self.predicate, field="graph_hop_predicate")\n'''
+          new_hop = '''        for name in ("relation_id", "source_id", "target_id"):\n            _require_text(getattr(self, name), field=name)\n        if self.source_id == self.target_id:\n            raise AdmittedGraphContractError("graph hop self-loop is prohibited")\n        _require_token(self.predicate, field="graph_hop_predicate")\n'''
+          if old_hop not in text:
+              raise SystemExit("graph hop invariant insertion point was not found")
+          text = text.replace(old_hop, new_hop, 1)
+
+          old_identity = '''        _require_token(self.profile_id, field="graph_receipt_profile_id")\n        _require_digest(self.graph_component_digest, field="graph_receipt_component")\n        _require_digest(\n            self.relation_contract_digest,\n            field="graph_receipt_relation_contract",\n        )\n        _require_text(self.root_id, field="graph_receipt_root")\n        _require_digest(self.root_identity_digest, field="graph_receipt_root_digest")\n        _parse_utc(self.query_valid_time, field="graph_receipt_query_valid")\n        _parse_utc(self.serving_time, field="graph_receipt_serving")\n        _parse_utc(self.temporal_lower_bound, field="graph_receipt_temporal_lower")\n'''
+          new_identity = '''        _require_token(self.profile_id, field="graph_receipt_profile_id")\n        _require_digest(self.graph_component_digest, field="graph_receipt_component")\n        _require_digest(\n            self.relation_contract_digest,\n            field="graph_receipt_relation_contract",\n        )\n        if self.profile_id != GRAPH_PROFILE_ID:\n            raise AdmittedGraphContractError("graph receipt profile identity drifted")\n        if self.graph_component_digest != GRAPH_QUERY_COMPONENT_DIGEST:\n            raise AdmittedGraphContractError("graph receipt component identity drifted")\n        if self.relation_contract_digest != GRAPH_RELATION_CONTRACT_DIGEST:\n            raise AdmittedGraphContractError("graph receipt relation contract drifted")\n        _require_text(self.root_id, field="graph_receipt_root")\n        _require_digest(self.root_identity_digest, field="graph_receipt_root_digest")\n        if self.root_identity_digest != canonical_node_digest(self.root_id):\n            raise AdmittedGraphContractError("graph receipt root identity does not match root")\n        query_valid = _parse_utc(\n            self.query_valid_time,\n            field="graph_receipt_query_valid",\n        )\n        serving = _parse_utc(self.serving_time, field="graph_receipt_serving")\n        temporal_lower = _parse_utc(\n            self.temporal_lower_bound,\n            field="graph_receipt_temporal_lower",\n        )\n        if query_valid > serving:\n            raise AdmittedGraphContractError("graph receipt query-valid time is after serving")\n        expected_lower = query_valid - timedelta(\n            seconds=GRAPH_TEMPORAL_WINDOW_SECONDS\n        )\n        if temporal_lower != expected_lower:\n            raise AdmittedGraphContractError("graph receipt temporal lower bound drifted")\n'''
+          if old_identity not in text:
+              raise SystemExit("receipt identity insertion point was not found")
+          text = text.replace(old_identity, new_identity, 1)
+
+          old_counts = '''        for name in (\n            "authority_read_count",\n            "graph_port_read_count",\n            "projection_edge_count",\n        ):\n            _require_non_negative_int(getattr(self, name), field=name)\n        if any(\n'''
+          new_counts = '''        for name in (\n            "authority_read_count",\n            "graph_port_read_count",\n            "projection_edge_count",\n        ):\n            _require_non_negative_int(getattr(self, name), field=name)\n        if self.authority_read_count not in {0, 1}:\n            raise AdmittedGraphContractError("graph authority read count must be zero or one")\n        if self.graph_port_read_count > GRAPH_MAX_DEPTH + 1:\n            raise AdmittedGraphContractError("graph port read count exceeds fixed traversal")\n        maximum_projection_edges = (GRAPH_MAX_FANOUT + 1) * (GRAPH_MAX_FANOUT + 1)\n        if self.projection_edge_count > maximum_projection_edges:\n            raise AdmittedGraphContractError("graph projection edge count exceeds fixed traversal")\n        authority_metadata = (\n            self.generation_id,\n            self.generation_digest,\n            self.watermark_seq,\n            self.rights_manifest_digest,\n        )\n        if self.authority_read_count == 0:\n            if any(value is not None for value in authority_metadata):\n                raise AdmittedGraphContractError("graph receipt has authority metadata without a read")\n            if self.graph_port_read_count or self.projection_edge_count:\n                raise AdmittedGraphContractError("graph receipt has projection work without authority")\n        else:\n            if any(value is None for value in authority_metadata):\n                raise AdmittedGraphContractError("graph receipt is missing authority attribution")\n        if self.graph_port_read_count and self.authority_read_count != 1:\n            raise AdmittedGraphContractError("graph port work requires one authority read")\n        if self.projection_edge_count and self.graph_port_read_count < 2:\n            raise AdmittedGraphContractError("graph edges require a frontier read")\n        expected_receipt_id = str(\n            uuid.uuid5(\n                uuid.NAMESPACE_URL,\n                "|".join(\n                    (\n                        self.request_digest,\n                        self.outcome.value,\n                        "NONE" if self.reason is None else self.reason.value,\n                        self.generation_digest or "NO_GENERATION",\n                    )\n                ),\n            )\n        )\n        if self.receipt_id != expected_receipt_id:\n            raise AdmittedGraphContractError("graph receipt identity does not match evidence")\n        if any(\n'''
+          if old_counts not in text:
+              raise SystemExit("receipt attribution insertion point was not found")
+          text = text.replace(old_counts, new_counts, 1)
+
+          old_outcomes = '''        if len(self.hits) > GRAPH_RESULT_LIMIT:\n            raise AdmittedGraphContractError("graph receipt exceeds result bound")\n        if [hit.rank for hit in self.hits] != list(range(1, len(self.hits) + 1)):\n            raise AdmittedGraphContractError("graph hit ranks must be contiguous")\n        if self.outcome is BranchOutcome.COMPLETE:\n'''
+          new_outcomes = '''        if len(self.hits) > GRAPH_RESULT_LIMIT:\n            raise AdmittedGraphContractError("graph receipt exceeds result bound")\n        if [hit.rank for hit in self.hits] != list(range(1, len(self.hits) + 1)):\n            raise AdmittedGraphContractError("graph hit ranks must be contiguous")\n        hit_ids: set[str] = set()\n        for hit in self.hits:\n            if hit.canonical_id in hit_ids:\n                raise AdmittedGraphContractError("graph receipt contains duplicate hits")\n            hit_ids.add(hit.canonical_id)\n            if hit.canonical_id == self.root_id:\n                raise AdmittedGraphContractError("graph receipt cannot return the root as a hit")\n            if hit.identity_digest != canonical_node_digest(hit.canonical_id):\n                raise AdmittedGraphContractError("graph hit identity does not match canonical id")\n            current = self.root_id\n            seen_nodes = {self.root_id}\n            seen_relations: set[str] = set()\n            for hop in hit.path:\n                if hop.relation_id in seen_relations:\n                    raise AdmittedGraphContractError("graph path repeats a relation")\n                seen_relations.add(hop.relation_id)\n                if hop.direction is GraphDirection.OUTGOING:\n                    if hop.source_id != current:\n                        raise AdmittedGraphContractError("graph path is not root-contiguous")\n                    next_node = hop.target_id\n                else:\n                    if hop.target_id != current:\n                        raise AdmittedGraphContractError("graph path is not root-contiguous")\n                    next_node = hop.source_id\n                if next_node in seen_nodes:\n                    raise AdmittedGraphContractError("graph path repeats a node")\n                seen_nodes.add(next_node)\n                current = next_node\n            if current != hit.canonical_id:\n                raise AdmittedGraphContractError("graph path does not end at its hit")\n        if self.outcome is not BranchOutcome.COMPLETE and self.reason is None:\n            raise AdmittedGraphContractError("non-complete graph receipt requires a reason")\n        if self.outcome is BranchOutcome.COMPLETE:\n            if self.authority_read_count != 1 or self.graph_port_read_count < 2:\n                raise AdmittedGraphContractError("complete graph receipt lacks mandatory reads")\n'''
+          if old_outcomes not in text:
+              raise SystemExit("receipt outcome insertion point was not found")
+          text = text.replace(old_outcomes, new_outcomes, 1)
+
+          old_relation = '''        valid = _parse_utc(query_valid_time, field="graph_query_valid_time")\n        if not (\n            _parse_utc(relation.valid_from, field="relation_valid_from")\n            <= valid\n            < _parse_utc(relation.valid_to, field="relation_valid_to")\n        ):\n            return GraphExclusionReason.OUTSIDE_QUERY_VALID_TIME\n        if _parse_utc(relation.observed_at, field="relation_observed_at") < _parse_utc(\n            lower_bound,\n            field="graph_temporal_lower_bound",\n        ):\n            return GraphExclusionReason.OUTSIDE_TEMPORAL_WINDOW\n'''
+          new_relation = '''        valid = _parse_utc(query_valid_time, field="graph_query_valid_time")\n        observed = _parse_utc(relation.observed_at, field="relation_observed_at")\n        if observed > valid:\n            return GraphExclusionReason.OUTSIDE_QUERY_VALID_TIME\n        if not (\n            _parse_utc(relation.valid_from, field="relation_valid_from")\n            <= valid\n            < _parse_utc(relation.valid_to, field="relation_valid_to")\n        ):\n            return GraphExclusionReason.OUTSIDE_QUERY_VALID_TIME\n        if observed < _parse_utc(\n            lower_bound,\n            field="graph_temporal_lower_bound",\n        ):\n            return GraphExclusionReason.OUTSIDE_TEMPORAL_WINDOW\n'''
+          if old_relation not in text:
+              raise SystemExit("retriever temporal boundary was not found")
+          retriever.write_text(text.replace(old_relation, new_relation, 1), encoding="utf-8")
+
+          core_text = core_tests.read_text(encoding="utf-8").rstrip()
+          regressions = '''\n\ndef test_future_observed_relation_cannot_leak_into_historical_query(tmp_path: Path) -> None:\n    root = make_node("source:root", "Source")\n    future = make_node("signal:future", "Signal")\n    relation = make_relation(\n        "relation:future-observation",\n        root.canonical_id,\n        future.canonical_id,\n        "ABOUT_EVENT",\n        observed_at="2026-08-07T00:00:00Z",\n    )\n    view = make_view(nodes=(root, future), relations=(relation,))\n    receipt = make_retriever(\n        tmp_path,\n        view,\n        journal_name="future-observation.sqlite",\n    )[0].retrieve(make_request())\n    assert receipt.outcome is BranchOutcome.COMPLETE\n    assert receipt.reason is GraphFailureReason.NO_MATCH\n    assert not receipt.hits\n    assert any(\n        item.subject_id == future.canonical_id\n        and item.relation_id == relation.relation_id\n        and item.reason is GraphExclusionReason.OUTSIDE_QUERY_VALID_TIME\n        for item in receipt.exclusions\n    )\n\n\ndef test_receipt_rejects_contradictory_attribution_and_identity(tmp_path: Path) -> None:\n    receipt = make_retriever(tmp_path, make_view())[0].retrieve(make_request())\n    with pytest.raises(AdmittedGraphContractError, match="metadata without a read"):\n        replace(receipt, authority_read_count=0)\n    with pytest.raises(AdmittedGraphContractError, match="identity does not match evidence"):\n        replace(receipt, receipt_id=str(uuid.uuid4()))\n    with pytest.raises(AdmittedGraphContractError, match="root identity"):\n        replace(receipt, root_identity_digest=ZERO_DIGEST)\n    with pytest.raises(AdmittedGraphContractError, match="temporal lower bound"):\n        replace(receipt, temporal_lower_bound="2026-07-06T08:58:59Z")\n    with pytest.raises(AdmittedGraphContractError, match="requires a reason"):\n        replace(receipt, outcome=BranchOutcome.INCOMPLETE, reason=None, hits=())\n\n\ndef test_receipt_rejects_disconnected_or_repeated_paths(tmp_path: Path) -> None:\n    receipt = make_retriever(tmp_path, make_view())[0].retrieve(make_request())\n    first = receipt.hits[0]\n    disconnected_hop = replace(\n        first.path[0],\n        source_id="source:not-root",\n    )\n    disconnected = replace(first, path=(disconnected_hop,))\n    with pytest.raises(AdmittedGraphContractError, match="root-contiguous"):\n        replace(receipt, hits=(disconnected,) + receipt.hits[1:])\n    repeated = replace(first, path=first.path + first.path)\n    with pytest.raises(AdmittedGraphContractError, match="repeats a relation"):\n        replace(receipt, hits=(repeated,) + receipt.hits[1:])\n'''
+          if "test_future_observed_relation_cannot_leak_into_historical_query" in core_text:
+              raise SystemExit("reviewed 5B4 regressions already exist")
+          core_tests.write_text(core_text + regressions + "\n", encoding="utf-8")
+
+          port_text = port_tests.read_text(encoding="utf-8").rstrip()
+          port_regression = '''\n\ndef test_fixed_expand_query_closes_the_observation_window() -> None:\n    text = Neo4jAdmittedGraphReadPort.fixed_expand_cypher()\n    assert "relation.observed_at >= $temporal_lower_bound" in text\n    assert "relation.observed_at <= $query_valid_time" in text\n'''
+          if "test_fixed_expand_query_closes_the_observation_window" in port_text:
+              raise SystemExit("port temporal regression already exists")
+          port_tests.write_text(port_text + port_regression + "\n", encoding="utf-8")
+
+          service_text = service_tests.read_text(encoding="utf-8")
+          replacements = (
+              (
+                  """                    CREATE (foreign:Revision {\n                      generation_id: $other_generation,\n                      canonical_id: 'revision:foreign',\n                      identity_digest: $foreign_digest\n                    })\n""",
+                  """                    CREATE (foreign:Revision {\n                      generation_id: $other_generation,\n                      canonical_id: 'revision:foreign',\n                      identity_digest: $foreign_digest\n                    })\n                    CREATE (future:Signal {\n                      generation_id: $generation,\n                      canonical_id: 'signal:future',\n                      identity_digest: $future_digest\n                    })\n""",
+              ),
+              (
+                  """                    CREATE (root)-[:DEVELOPMENT_OF {\n                      generation_id: $other_generation,\n                      relation_id: 'relation:cross-generation',\n                      valid_from: '2020-01-01T00:00:00Z',\n                      valid_to: '2035-01-01T00:00:00Z',\n                      observed_at: '2026-08-01T00:00:00Z'\n                    }]->(foreign)\n""",
+                  """                    CREATE (root)-[:DEVELOPMENT_OF {\n                      generation_id: $other_generation,\n                      relation_id: 'relation:cross-generation',\n                      valid_from: '2020-01-01T00:00:00Z',\n                      valid_to: '2035-01-01T00:00:00Z',\n                      observed_at: '2026-08-01T00:00:00Z'\n                    }]->(foreign)\n                    CREATE (root)-[:ABOUT_EVENT {\n                      generation_id: $generation,\n                      relation_id: 'relation:future-observation',\n                      valid_from: '2020-01-01T00:00:00Z',\n                      valid_to: '2035-01-01T00:00:00Z',\n                      observed_at: '2026-08-07T00:00:00Z'\n                    }]->(future)\n""",
+              ),
+              (
+                  '                    foreign_digest=canonical_node_digest("revision:foreign"),\n',
+                  '                    foreign_digest=canonical_node_digest("revision:foreign"),\n                    future_digest=canonical_node_digest("signal:future"),\n',
+              ),
+              (
+                  '            assert all(edge.relation_id != "relation:old" for edge in first + second)\n',
+                  '            assert all(edge.relation_id != "relation:old" for edge in first + second)\n            assert all(\n                edge.relation_id != "relation:future-observation"\n                for edge in first + second\n            )\n',
+              ),
+          )
+          for old, new in replacements:
+              if old not in service_text:
+                  raise SystemExit("actual-service temporal insertion point was not found")
+              service_text = service_text.replace(old, new, 1)
+          service_tests.write_text(service_text, encoding="utf-8")
+          PY
+
+          cd repo
+          python -m compileall -q \
+            newsroom/authority/neo4j_admitted_graph_reader.py \
+            newsroom/increment5/admitted_graph_retriever.py \
+            newsroom/tests/test_increment5b4_admitted_graph_retriever.py \
+            newsroom/tests/test_increment5b4_neo4j_authority_port.py \
+            newsroom/tests/test_increment5b4_neo4j_service.py
+          python -m pip install --disable-pip-version-check -q pytest==9.0.2
+          python -m pytest -q \
+            newsroom/tests/test_increment5b4_admitted_graph_retriever.py \
+            newsroom/tests/test_increment5b4_neo4j_authority_port.py \
+            newsroom/tests/test_increment5b4_neo4j_service.py
+
+          git config user.name "James To"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          git add \
+            newsroom/authority/neo4j_admitted_graph_reader.py \
+            newsroom/increment5/admitted_graph_retriever.py \
+            newsroom/tests/test_increment5b4_admitted_graph_retriever.py \
+            newsroom/tests/test_increment5b4_neo4j_authority_port.py \
+            newsroom/tests/test_increment5b4_neo4j_service.py
+          git diff --cached --check
+          git commit -m "Increment 5B4: harden temporal and receipt integrity"
+          git push --force origin "HEAD:refs/heads/$FIXED_BRANCH"
+          git push --force origin "HEAD:refs/heads/$CHECKPOINT_BRANCH"
+          printf 'head=%s\ntree=%s\nparent=%s\n' \
+            "$(git rev-parse HEAD)" \
+            "$(git rev-parse 'HEAD^{tree}')" \
+            "$(git rev-parse HEAD^)"
