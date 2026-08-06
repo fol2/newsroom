@@ -44,7 +44,7 @@ jobs:
 
           git init -q carrier
           git -C carrier remote add origin "https://github.com/$REPOSITORY.git"
-          git -C carrier fetch --no-tags --depth=2 origin \
+          git -C carrier fetch --no-tags --depth=10 origin \
             "refs/heads/$CARRIER_BRANCH:refs/remotes/origin/carrier"
           git -C carrier cat-file -e "$CARRIER_COMMIT^{commit}"
           git -C carrier show "$CARRIER_COMMIT:$CARRIER_PATH" > /tmp/increment5b4-carrier.yml
