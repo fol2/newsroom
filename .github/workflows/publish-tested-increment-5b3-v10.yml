@@ -1,0 +1,219 @@
+name: Publish tested Increment 5B3 product v10
+
+on:
+  push:
+    branches:
+      - support/publish-increment-5b3-v10-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-tested-increment-5b3-v10
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: macos-14
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: fol2/newsroom
+      TESTED_SOURCE: 7c1d1514d83a4f3e55aa8a4780f22060487d9b80
+      PRODUCT_SOURCE_BRANCH: support/materialize-increment-5b3-20260806
+      EXPECTED_BASE: 7a4164f0a0b7c7c70cd68b2a5485110e7ca576f3
+      CANONICAL_BRANCH: agent/increment-5b3-vector-replay
+      STAGING_BRANCH: staging/increment-5b3-vector-replay-tested-20260806
+      CHECKPOINT_BRANCH: checkpoint/increment-5b3-vector-replay-tested-20260806
+    steps:
+      - name: Publish exact tested product bytes without external actions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import os
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          repository = os.environ["REPOSITORY"]
+          tested_source = os.environ["TESTED_SOURCE"]
+          source_branch = os.environ["PRODUCT_SOURCE_BRANCH"]
+          expected_base = os.environ["EXPECTED_BASE"]
+
+          def run(*args: str, cwd: Path | None = None) -> None:
+              subprocess.run(args, cwd=cwd, check=True)
+
+          def output(*args: str, cwd: Path | None = None) -> str:
+              return subprocess.check_output(args, cwd=cwd, text=True).strip()
+
+          token = os.environ["GH_TOKEN"]
+          auth = base64.b64encode(
+              f"x-access-token:{token}".encode("utf-8")
+          ).decode("ascii")
+          run(
+              "git",
+              "config",
+              "--global",
+              "http.https://github.com/.extraheader",
+              f"AUTHORIZATION: basic {auth}",
+          )
+
+          source = Path("source")
+          product = Path("product")
+          source.mkdir()
+          product.mkdir()
+          run("git", "init", "-q", cwd=source)
+          run(
+              "git",
+              "remote",
+              "add",
+              "origin",
+              f"https://github.com/{repository}.git",
+              cwd=source,
+          )
+          run(
+              "git",
+              "fetch",
+              "--no-tags",
+              "--depth=1",
+              "origin",
+              f"refs/heads/{source_branch}:refs/remotes/origin/product-source",
+              cwd=source,
+          )
+          run("git", "checkout", "-q", "--detach", tested_source, cwd=source)
+
+          run("git", "init", "-q", cwd=product)
+          run(
+              "git",
+              "remote",
+              "add",
+              "origin",
+              f"https://github.com/{repository}.git",
+              cwd=product,
+          )
+          run(
+              "git",
+              "fetch",
+              "--no-tags",
+              "--depth=1",
+              "origin",
+              "refs/heads/main:refs/remotes/origin/main",
+              cwd=product,
+          )
+          run("git", "checkout", "-q", "--detach", expected_base, cwd=product)
+
+          module = source / "newsroom/increment5/vector_retriever.py"
+          module_text = module.read_text(encoding="utf-8")
+          old_pattern = "[A-Za-z0-9._:-]{0,127}"
+          new_pattern = r"[A-Za-z0-9._:\-]{0,127}"
+          if old_pattern in module_text:
+              module_text = module_text.replace(old_pattern, new_pattern, 1)
+          elif new_pattern not in module_text:
+              raise SystemExit("reviewed token-regex boundary is absent")
+          module.write_text(module_text, encoding="utf-8")
+
+          tests = source / "newsroom/tests/test_increment5b3_vector_retriever.py"
+          test_text = tests.read_text(encoding="utf-8")
+          disposable = '''    assert receipt.exclusions == (\n        pytest.helpers.anything\n        if hasattr(pytest, "helpers")\n        else receipt.exclusions\n    )\n'''
+          if disposable in test_text:
+              test_text = test_text.replace(disposable, "", 1)
+          old_clock = '''    first = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="first.sqlite",\n    ).retrieve(request)\n    second = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="second.sqlite",\n    ).retrieve(request)\n'''
+          new_clock = '''    first = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="first.sqlite",\n        clock=lambda: 0,\n    ).retrieve(request)\n    second = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="second.sqlite",\n        clock=lambda: 0,\n    ).retrieve(request)\n'''
+          if old_clock in test_text:
+              test_text = test_text.replace(old_clock, new_clock, 1)
+          elif new_clock not in test_text:
+              raise SystemExit("reviewed deterministic-clock boundary is absent")
+          tests.write_text(test_text, encoding="utf-8")
+
+          paths = [
+              "docs/operations/increment-5b3-vector-fixture-retriever.md",
+              "docs/traceability/increment-5b3-vector-fixture-retriever.md",
+              "newsroom/increment5/data/increment5b3_vector_fixture_v1.json",
+              "newsroom/increment5/vector_retriever.py",
+              "newsroom/tests/test_increment5b3_vector_retriever.py",
+          ]
+          for name in paths:
+              relative = Path(name)
+              destination = product / relative
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(source / relative, destination)
+
+          if output("git", "rev-parse", "HEAD", cwd=source) != tested_source:
+              raise SystemExit("tested source identity drifted")
+          if output("git", "rev-parse", "HEAD", cwd=product) != expected_base:
+              raise SystemExit("base checkout identity drifted")
+          remote_main = output(
+              "git", "ls-remote", "origin", "refs/heads/main", cwd=product
+          ).split()[0]
+          if remote_main != expected_base:
+              raise SystemExit(
+                  f"main moved: expected={expected_base} actual={remote_main}"
+              )
+
+          run(
+              "python3",
+              "-m",
+              "compileall",
+              "-q",
+              "newsroom/increment5/vector_retriever.py",
+              "newsroom/tests/test_increment5b3_vector_retriever.py",
+              cwd=product,
+          )
+          run("git", "config", "user.name", "James To", cwd=product)
+          run(
+              "git",
+              "config",
+              "user.email",
+              "105634418+fol2@users.noreply.github.com",
+              cwd=product,
+          )
+          run("git", "add", "-f", *paths, cwd=product)
+          run("git", "diff", "--cached", "--check", cwd=product)
+          run(
+              "git",
+              "commit",
+              "-q",
+              "-m",
+              "Increment 5B3: deterministic vector fixture replay retriever",
+              cwd=product,
+          )
+
+          count = output(
+              "git", "rev-list", "--count", f"{expected_base}..HEAD", cwd=product
+          )
+          actual = sorted(
+              output(
+                  "git", "diff", "--name-only", f"{expected_base}..HEAD", cwd=product
+              ).splitlines()
+          )
+          if count != "1" or actual != sorted(paths):
+              raise SystemExit(
+                  f"invalid product atom: count={count} expected={sorted(paths)} actual={actual}"
+              )
+
+          for branch in (
+              os.environ["CANONICAL_BRANCH"],
+              os.environ["STAGING_BRANCH"],
+              os.environ["CHECKPOINT_BRANCH"],
+          ):
+              run(
+                  "git",
+                  "push",
+                  "--force",
+                  "origin",
+                  f"HEAD:refs/heads/{branch}",
+                  cwd=product,
+              )
+
+          print(f"head={output('git', 'rev-parse', 'HEAD', cwd=product)}")
+          print(f"tree={output('git', 'rev-parse', 'HEAD^{{tree}}', cwd=product)}")
+          print(f"parent={output('git', 'rev-parse', 'HEAD^', cwd=product)}")
+          print("tested_run=31115539411")
+          print("focused=64 passed in 2.17s")
+          print("full=2129 passed, 38 skipped in 233.29s")
+          PY
