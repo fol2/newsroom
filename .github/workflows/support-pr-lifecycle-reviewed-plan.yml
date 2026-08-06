@@ -120,6 +120,14 @@ jobs:
       - name: Focused lifecycle verification
         run: uv run python -m pytest -q newsroom/tests/test_pr_lifecycle.py
 
+      - name: Restore committed checkout before repository-wide proof
+        run: |
+          cmp \
+            .github/workflows/pr-lifecycle.yml \
+            scripts/support/exported_pr_lifecycle_reviewed_plan.yml
+          git restore .github/workflows/pr-lifecycle.yml
+          test -z "$(git status --porcelain=v1)"
+
       - name: Complete deterministic repository verification
         run: uv run python -m pytest -q
 
@@ -132,10 +140,8 @@ jobs:
 
       - name: Verify clean committed product identity
         run: |
-          cmp \
-            .github/workflows/pr-lifecycle.yml \
-            scripts/support/exported_pr_lifecycle_reviewed_plan.yml
-          git restore .github/workflows/pr-lifecycle.yml
+          git show HEAD:scripts/support/exported_pr_lifecycle_reviewed_plan.yml \
+            | cmp - scripts/support/exported_pr_lifecycle_reviewed_plan.yml
           test -z "$(git status --porcelain=v1)"
 
       - name: Push verified product correction
