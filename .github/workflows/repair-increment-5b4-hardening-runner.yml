@@ -1,0 +1,64 @@
+name: Repair Increment 5B4 hardening runner contract
+
+on:
+  push:
+    branches:
+      - support/repair-increment-5b4-hardening-runner-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repair-increment-5b4-hardening-runner
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: fol2/newsroom
+      TARGET_BRANCH: support/review-increment-5b4-boundaries-20260806
+      EXPECTED_HEAD: d8f92de968edccdeb58d4ae80a15a04919e25e18
+    steps:
+      - name: Pin the reviewed hardening workflow to Python 3.12 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
+
+          git init -q repo
+          git -C repo remote add origin "https://github.com/$REPOSITORY.git"
+          git -C repo fetch --no-tags --depth=1 origin \
+            "refs/heads/$TARGET_BRANCH:refs/remotes/origin/target"
+          actual="$(git -C repo rev-parse refs/remotes/origin/target)"
+          if [[ "$actual" != "$EXPECTED_HEAD" ]]; then
+            echo "target head moved: expected=$EXPECTED_HEAD actual=$actual" >&2
+            exit 1
+          fi
+          git -C repo checkout -q -b repair refs/remotes/origin/target
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("repo/.github/workflows/review-increment-5b4-boundaries.yml")
+          text = path.read_text(encoding="utf-8")
+          old = "    runs-on: ubuntu-22.04\n"
+          new = "    runs-on: ubuntu-24.04\n"
+          if text.count(old) != 1:
+              raise SystemExit("expected one Ubuntu 22.04 runner boundary")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+          git -C repo config user.name "James To"
+          git -C repo config user.email "105634418+fol2@users.noreply.github.com"
+          git -C repo add .github/workflows/review-increment-5b4-boundaries.yml
+          git -C repo diff --cached --check
+          git -C repo commit -m "Support: run Increment 5B4 hardening on Python 3.12"
+          git -C repo push origin "HEAD:refs/heads/$TARGET_BRANCH"
+          printf 'head=%s\ntree=%s\n' \
+            "$(git -C repo rev-parse HEAD)" \
+            "$(git -C repo rev-parse 'HEAD^{tree}')"
