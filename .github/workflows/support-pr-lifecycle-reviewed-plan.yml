@@ -104,29 +104,23 @@ jobs:
             .github/workflows/pr-lifecycle.yml \
             scripts/support/exported_pr_lifecycle_reviewed_plan.yml
 
-      - name: Commit non-workflow product and exact workflow carrier
+      - name: Commit exact local proof tree
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
             .github/pull_request_template.md \
+            .github/workflows/pr-lifecycle.yml \
             docs/operations/pr-lifecycle.md \
             newsroom/checks/pr_lifecycle.py \
             newsroom/tests/test_pr_lifecycle.py \
             scripts/sdlc/pr_lifecycle.py \
             scripts/support/exported_pr_lifecycle_reviewed_plan.yml
-          git commit -m "fix: bind lifecycle apply to a reviewed plan"
+          git commit -m "proof: bind lifecycle apply to a reviewed plan"
+          test -z "$(git status --porcelain=v1)"
 
       - name: Focused lifecycle verification
         run: uv run python -m pytest -q newsroom/tests/test_pr_lifecycle.py
-
-      - name: Restore committed checkout before repository-wide proof
-        run: |
-          cmp \
-            .github/workflows/pr-lifecycle.yml \
-            scripts/support/exported_pr_lifecycle_reviewed_plan.yml
-          git restore .github/workflows/pr-lifecycle.yml
-          test -z "$(git status --porcelain=v1)"
 
       - name: Complete deterministic repository verification
         run: uv run python -m pytest -q
@@ -138,10 +132,44 @@ jobs:
             --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
             --fail-on-regression
 
-      - name: Verify clean committed product identity
+      - name: Rewrite proof commit to carrier-only support commit
         run: |
-          git show HEAD:scripts/support/exported_pr_lifecycle_reviewed_plan.yml \
+          proof_commit="$(git rev-parse HEAD)"
+          proof_parent="$(git rev-parse HEAD^)"
+          printf '%s\n' "$proof_commit" > /tmp/pr-lifecycle-proof-commit
+          git reset --soft "$proof_parent"
+          git restore --staged .github/workflows/pr-lifecycle.yml
+          git restore .github/workflows/pr-lifecycle.yml
+          git commit -m "fix: bind lifecycle apply to a reviewed plan"
+
+      - name: Verify exact tested carrier and rewritten product identity
+        run: |
+          proof_commit="$(cat /tmp/pr-lifecycle-proof-commit)"
+          git show "$proof_commit:.github/workflows/pr-lifecycle.yml" \
             | cmp - scripts/support/exported_pr_lifecycle_reviewed_plan.yml
+          git diff --exit-code "$proof_commit" HEAD -- \
+            .github/pull_request_template.md \
+            docs/operations/pr-lifecycle.md \
+            newsroom/checks/pr_lifecycle.py \
+            newsroom/tests/test_pr_lifecycle.py \
+            scripts/sdlc/pr_lifecycle.py \
+            scripts/support/exported_pr_lifecycle_reviewed_plan.yml
+          python - "$proof_commit" <<'PY'
+          from __future__ import annotations
+
+          import subprocess
+          import sys
+
+          proof_commit = sys.argv[1]
+          changed = subprocess.check_output(
+              ["git", "diff", "--name-only", proof_commit, "HEAD"],
+              text=True,
+          ).splitlines()
+          if changed != [".github/workflows/pr-lifecycle.yml"]:
+              raise SystemExit(
+                  f"proof/support tree delta is not workflow-only: {changed}"
+              )
+          PY
           test -z "$(git status --porcelain=v1)"
 
       - name: Push verified product correction
