@@ -6,7 +6,8 @@ on:
       - support/pr-lifecycle-stale-checkpoint-plan-20260806
     paths:
       - .github/workflows/support-pr-lifecycle-reviewed-plan.yml
-      - scripts/support/apply_pr_lifecycle_reviewed_plan_fix.py.gz.b64
+      - scripts/support/pr_lifecycle_reviewed_plan_chunks/**
+      - scripts/support/pr_lifecycle_reviewed_plan_chunks.manifest.json
 
 permissions:
   contents: write
@@ -34,20 +35,35 @@ jobs:
           uv lock --check
           uv sync --dev --locked
 
-      - name: Materialise bounded correction source
+      - name: Materialise and verify bounded correction source
         run: |
           python - <<'PY'
           from pathlib import Path
           import base64
           import gzip
+          import hashlib
+          import json
 
-          encoded = "".join(
+          root = Path("scripts/support/pr_lifecycle_reviewed_plan_chunks")
+          manifest = json.loads(
               Path(
-                  "scripts/support/apply_pr_lifecycle_reviewed_plan_fix.py.gz.b64"
-              ).read_text(encoding="ascii").split()
-          ).rstrip("=")
-          encoded += "=" * ((4 - len(encoded) % 4) % 4)
-          source = gzip.decompress(base64.b64decode(encoded))
+                  "scripts/support/pr_lifecycle_reviewed_plan_chunks.manifest.json"
+              ).read_text(encoding="utf-8")
+          )
+          chunks = sorted(root.glob("*.b64"))
+          if [path.name for path in chunks] != manifest["chunks"]:
+              raise SystemExit("reviewed-plan carrier chunk inventory mismatch")
+          encoded = "".join(path.read_text(encoding="ascii") for path in chunks)
+          if len(encoded) != manifest["encoded_length"]:
+              raise SystemExit("reviewed-plan carrier encoded length mismatch")
+          compressed = base64.b64decode(encoded, validate=True)
+          if hashlib.sha256(compressed).hexdigest() != manifest["gzip_sha256"]:
+              raise SystemExit("reviewed-plan carrier gzip digest mismatch")
+          source = gzip.decompress(compressed)
+          if len(source) != manifest["source_length"]:
+              raise SystemExit("reviewed-plan correction source length mismatch")
+          if hashlib.sha256(source).hexdigest() != manifest["source_sha256"]:
+              raise SystemExit("reviewed-plan correction source digest mismatch")
           path = Path("/tmp/apply_pr_lifecycle_reviewed_plan_fix.py")
           path.write_bytes(source)
           PY
