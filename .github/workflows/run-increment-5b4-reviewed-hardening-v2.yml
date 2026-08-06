@@ -1,0 +1,72 @@
+name: Run exact reviewed Increment 5B4 hardening v2
+
+on:
+  push:
+    branches:
+      - support/run-increment-5b4-reviewed-hardening-v2-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  harden-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: fol2/newsroom
+      TARGET_BRANCH: support/run-increment-5b4-reviewed-hardening-v2-20260806
+      REVIEWED_CARRIER: d8f92de968edccdeb58d4ae80a15a04919e25e18
+      SOURCE_BRANCH: support/materialize-increment-5b4-20260806
+      EXPECTED_SOURCE: 30eb9dd5e7d6c03018d30289ef3fa05f3b76d523
+      FIXED_BRANCH: support/increment-5b4-reviewed-boundaries-v2-20260806
+      CHECKPOINT_BRANCH: checkpoint/increment-5b4-reviewed-boundaries-v2-20260806
+    steps:
+      - name: Execute exact reviewed hardening script under Python 3.12
+        shell: bash
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
+
+          git init -q carrier
+          git -C carrier remote add origin "https://github.com/$REPOSITORY.git"
+          git -C carrier fetch --no-tags --depth=20 origin \
+            "refs/heads/$TARGET_BRANCH:refs/remotes/origin/target"
+          git -C carrier cat-file -e "$REVIEWED_CARRIER^{commit}"
+          git -C carrier show \
+            "$REVIEWED_CARRIER:.github/workflows/review-increment-5b4-boundaries.yml" \
+            > /tmp/reviewed-increment5b4-workflow.yml
+
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("/tmp/reviewed-increment5b4-workflow.yml").read_text(
+              encoding="utf-8"
+          ).splitlines()
+          marker = "        run: |"
+          try:
+              start = source.index(marker) + 1
+          except ValueError as exc:
+              raise SystemExit("reviewed hardening script marker is absent") from exc
+
+          script_lines: list[str] = []
+          for line in source[start:]:
+              if line and not line.startswith("          "):
+                  break
+              script_lines.append(line[10:] if line.startswith("          ") else "")
+          if not script_lines or not any(line.strip() for line in script_lines):
+              raise SystemExit("reviewed hardening script is empty")
+          reviewed = Path("/tmp/reviewed-increment5b4-workflow.yml").read_text(
+              encoding="utf-8"
+          )
+          if "EXPECTED_SOURCE: 30eb9dd5e7d6c03018d30289ef3fa05f3b76d523" not in reviewed:
+              raise SystemExit("reviewed carrier source identity drifted")
+          Path("/tmp/run-reviewed-increment5b4-hardening.sh").write_text(
+              "\n".join(script_lines).rstrip() + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          bash /tmp/run-reviewed-increment5b4-hardening.sh
