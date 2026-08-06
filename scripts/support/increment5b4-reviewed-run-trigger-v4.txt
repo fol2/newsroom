@@ -1,0 +1,6 @@
+Open a same-repository support-only pull request so the repaired base-owned 5B4 hardening workflow receives a pull_request event.
+
+base=support/run-increment-5b4-reviewed-hardening-v2-20260806
+base_head=a2275ebcb58e1bef9b2adf681ede73b969035463
+reviewed_carrier=d8f92de968edccdeb58d4ae80a15a04919e25e18
+source=30eb9dd5e7d6c03018d30289ef3fa05f3b76d523
