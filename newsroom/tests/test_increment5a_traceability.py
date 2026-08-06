@@ -4,91 +4,100 @@ from collections import Counter
 from pathlib import Path
 import re
 
-from newsroom.increment5.traceability import (
+import pytest
+
+from newsroom.increment5._traceability_anchors import ANCHOR_BY_REQUIREMENT
+from newsroom.increment5._traceability_model import (
     ALL_REQUIREMENTS,
     CROSS_REQUEST_INTEGRATION_REQUIREMENTS,
+    DEFERRED_TO_5C_REQUIREMENTS,
     DEFERRED_TO_5E_REQUIREMENTS,
+    DEFERRED_TO_INCREMENT_6_REQUIREMENTS,
+    DEFERRED_TO_INCREMENT_8_REQUIREMENTS,
+    DELIVERED_IN_5A_REQUIREMENTS,
     DELIVERY_GROUPS,
     DEVAL_REQUIREMENTS,
     DOPS_REQUIREMENTS,
-    INCREMENT_5_TRACEABILITY,
+    INHERITED_AUTHORITY,
     OPERATIONAL_DOPS,
+    OUTSIDE_INCREMENT_5_REQUIREMENTS,
     REQUEST_RETRIEVAL_REQUIREMENTS,
-    Increment5DecisionTrace,
     Increment5DeliveryTrace,
+    Increment5TraceabilityRow,
+)
+from newsroom.increment5.traceability import (
+    INCREMENT_5_TRACEABILITY,
     validate_increment5_traceability,
 )
 
 
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-_DEVAL_SPEC = _REPOSITORY_ROOT / (
-    "docs/specs/editorial-automation/discovery-shadow-evaluation.md"
+ROOT = Path(__file__).resolve().parents[2]
+DEVAL_SPEC = (
+    ROOT
+    / "docs/specs/editorial-automation/discovery-shadow-evaluation.md"
 )
-_DOPS_SPEC = _REPOSITORY_ROOT / (
-    "docs/specs/editorial-automation/discovery-reliability-and-operations.md"
+DOPS_SPEC = (
+    ROOT
+    / "docs/specs/editorial-automation/discovery-reliability-and-operations.md"
 )
+PLAN = (
+    ROOT
+    / "docs/plans/2026-08-06-010-increment-5-scope-and-gates-amendment.md"
+)
+HUMAN_MAP = ROOT / "docs/traceability/increment-5-production-retrieval.md"
 
 
-def _rows() -> dict[str, object]:
+def _spec_requirements(path: Path, prefix: str) -> frozenset[str]:
+    pattern = re.compile(rf"^\*\*({prefix}-[0-9]{{3}})\s+—", re.MULTILINE)
+    return frozenset(pattern.findall(path.read_text(encoding="utf-8")))
+
+
+def _rows_by_id() -> dict[str, Increment5TraceabilityRow]:
     return {row.requirement_id: row for row in INCREMENT_5_TRACEABILITY}
 
 
-def _requirements_from_spec(path: Path, prefix: str) -> frozenset[str]:
-    text = path.read_text(encoding="utf-8")
-    return frozenset(
-        re.findall(rf"^\*\*({prefix}-[0-9]{{3}})\s+—", text, flags=re.MULTILINE)
-    )
+def test_closed_world_inventory_matches_accepted_specs() -> None:
+    assert _spec_requirements(DEVAL_SPEC, "DEVAL") == DEVAL_REQUIREMENTS
+    assert _spec_requirements(DOPS_SPEC, "DOPS") == DOPS_REQUIREMENTS
+    assert len(DEVAL_REQUIREMENTS) == 43
+    assert len(DOPS_REQUIREMENTS) == 61
+    assert len(ALL_REQUIREMENTS) == 155
 
 
-def test_traceability_is_complete_unique_disjoint_and_self_validating() -> None:
+def test_amended_delivery_groups_are_disjoint_and_complete() -> None:
     validate_increment5_traceability()
-    identifiers = [row.requirement_id for row in INCREMENT_5_TRACEABILITY]
-    assert len(identifiers) == len(set(identifiers)) == 155
-    assert frozenset(identifiers) == ALL_REQUIREMENTS
 
     seen: set[str] = set()
     for requirements in DELIVERY_GROUPS.values():
         assert not seen.intersection(requirements)
         seen.update(requirements)
+
     assert seen == set(ALL_REQUIREMENTS)
+    assert len(INCREMENT_5_TRACEABILITY) == 155
+    assert len({row.requirement_id for row in INCREMENT_5_TRACEABILITY}) == 155
 
-
-def test_deval_and_dops_are_closed_world_specification_inventories() -> None:
-    assert _requirements_from_spec(_DEVAL_SPEC, "DEVAL") == DEVAL_REQUIREMENTS
-    assert _requirements_from_spec(_DOPS_SPEC, "DOPS") == DOPS_REQUIREMENTS
-    assert len(DEVAL_REQUIREMENTS) == 43
-    assert len(DOPS_REQUIREMENTS) == 61
-
-
-def test_delivery_distribution_matches_the_dependency_boundary() -> None:
     assert Counter(row.delivery_trace for row in INCREMENT_5_TRACEABILITY) == {
         Increment5DeliveryTrace.DELIVERED_IN_5A: 9,
         Increment5DeliveryTrace.DEFERRED_TO_5C: 2,
-        Increment5DeliveryTrace.DEFERRED_TO_5D: 13,
-        Increment5DeliveryTrace.DEFERRED_TO_5E: 123,
-        Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: 1,
+        Increment5DeliveryTrace.DEFERRED_TO_5D: 12,
+        Increment5DeliveryTrace.DEFERRED_TO_5E: 9,
+        Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_6: 6,
+        Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_8: 110,
         Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: 7,
     }
-    assert DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5E] == (
-        DEFERRED_TO_5E_REQUIREMENTS
-    )
 
 
-def test_5b_is_partial_branch_delivery_without_whole_requirement_credit() -> None:
+def test_increment5_is_bounded_retrieval_not_full_admission() -> None:
     assert DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5B] == frozenset()
+    assert OUTSIDE_INCREMENT_5_REQUIREMENTS == frozenset()
 
-
-def test_5d_is_exactly_one_request_retrieval_semantics() -> None:
-    assert DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5D] == (
-        REQUEST_RETRIEVAL_REQUIREMENTS
-    )
+    assert DEFERRED_TO_5C_REQUIREMENTS == {"GRAG-033", "GRAG-034"}
     assert REQUEST_RETRIEVAL_REQUIREMENTS == {
         "GRAG-031",
         "GRAG-032",
         "GRAG-035",
         "GRAG-040",
         "GRAG-041",
-        "GRAG-042",
         "GRAG-043",
         "TRI-020",
         "TRI-021",
@@ -97,283 +106,157 @@ def test_5d_is_exactly_one_request_retrieval_semantics() -> None:
         "TRI-025",
         "TRI-027",
     }
-    assert not any(item.startswith("DOPS-") for item in REQUEST_RETRIEVAL_REQUIREMENTS)
+    assert DEFERRED_TO_5E_REQUIREMENTS == {
+        "GRAG-050",
+        "GRAG-051",
+        "GRAG-054",
+        "GRAG-055",
+        "GRAG-056",
+        "GRPROD-001",
+        "GRPROD-010",
+        "GRPROD-015",
+        "GRPROD-023",
+    }
 
-
-def test_all_operational_dops_except_admission_nonactivation_have_one_owner_in_5e() -> None:
-    rows = _rows()
-    assert OPERATIONAL_DOPS == DOPS_REQUIREMENTS.difference({"DOPS-076"})
-    assert all(
-        rows[item].delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
-        and rows[item].delivery_issue == 254
-        for item in OPERATIONAL_DOPS
-    )
     assert not any(
-        item.startswith("DOPS-")
-        for item in DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5C]
-    )
-    assert rows["DOPS-076"].delivery_trace is Increment5DeliveryTrace.DELIVERED_IN_5A
-
-
-def test_omitted_label_review_and_operational_evidence_rows_are_now_owned_by_5e() -> None:
-    rows = _rows()
-    omitted_deval = {
-        "DEVAL-001",
-        "DEVAL-002",
-        "DEVAL-004",
-        *{f"DEVAL-{value:03d}" for value in range(20, 27)},
-        *{f"DEVAL-{value:03d}" for value in range(30, 34)},
-        *{f"DEVAL-{value:03d}" for value in range(60, 64)},
-    }
-    omitted_dops = {
-        *{f"DOPS-{value:03d}" for value in range(3, 7)},
-        "DOPS-008",
-        *{f"DOPS-{value:03d}" for value in range(20, 26)},
-        "DOPS-041",
-        "DOPS-042",
-        "DOPS-051",
-        "DOPS-053",
-        "DOPS-055",
-        "DOPS-061",
-        "DOPS-062",
-        "DOPS-063",
-        "DOPS-065",
-        "DOPS-066",
-        "DOPS-068",
-        "DOPS-071",
-    }
-    assert len(omitted_deval) == 18
-    assert len(omitted_dops) == 23
-
-    for requirement in omitted_deval:
-        row = rows[requirement]
-        assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
-        assert row.delivery_issue == 254
-        assert row.decision_anchor == (
-            "docs/specs/editorial-automation/discovery-shadow-evaluation.md"
-            f"#{requirement}"
-        )
-
-    for requirement in omitted_dops:
-        row = rows[requirement]
-        assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
-        assert row.delivery_issue == 254
-        assert row.decision_anchor == (
-            "docs/specs/editorial-automation/discovery-reliability-and-operations.md"
-            f"#{requirement}"
-        )
-
-
-
-def test_public_artifact_safety_is_executable_5e_work() -> None:
-    row = _rows()["DEVAL-072"]
-    assert row.decision_trace is Increment5DecisionTrace.BOUND_BY_5A
-    assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
-    assert row.delivery_issue == 254
-    assert row.decision_anchor == (
-        "issue:#254:deferred:public-artifact-safety-validation-redaction-"
-        "and-release-controls"
+        requirement.startswith(("DEVAL-", "DOPS-"))
+        for requirement in DEFERRED_TO_5E_REQUIREMENTS
     )
 
 
-def test_decision_map_has_no_runtime_approval_or_admission_state() -> None:
-    assert {row.decision_trace for row in INCREMENT_5_TRACEABILITY} == {
-        Increment5DecisionTrace.BOUND_BY_5A,
-        Increment5DecisionTrace.INHERITED_ACCEPTED_AUTHORITY,
+def test_cross_request_effects_are_owned_by_increment6() -> None:
+    expected = {
+        "GRAG-042",
+        "GRAG-044",
+        "GRPROD-021",
+        "TRI-024",
+        "TRI-026",
+        "TRI-028",
     }
-    assert all("approval" not in row.delivery_target.lower() for row in INCREMENT_5_TRACEABILITY)
-    assert all("github" not in row.verification_target.lower() for row in INCREMENT_5_TRACEABILITY)
+    assert DEFERRED_TO_INCREMENT_6_REQUIREMENTS == expected
+    assert CROSS_REQUEST_INTEGRATION_REQUIREMENTS == expected
 
-
-def test_prior_delivery_points_to_existing_increment4_evidence() -> None:
-    rows = _rows()
-    expected = DELIVERY_GROUPS[Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT]
-    assert expected == {
-        "GRAG-030",
-        "GRPROD-003",
-        "GRPROD-005",
-        "GRPROD-013",
-        "GRPROD-014",
-        "GRPROD-016",
-        "GRPROD-020",
-    }
+    rows = _rows_by_id()
     for requirement in expected:
+        assert rows[requirement].delivery_trace is (
+            Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_6
+        )
+        assert rows[requirement].delivery_issue == 146
+
+    assert not expected.intersection(REQUEST_RETRIEVAL_REQUIREMENTS)
+
+
+def test_full_evaluation_and_operations_are_owned_by_increment8() -> None:
+    rows = _rows_by_id()
+
+    assert (
+        DEVAL_REQUIREMENTS.difference(DELIVERED_IN_5A_REQUIREMENTS)
+        == DEVAL_REQUIREMENTS.intersection(
+            DEFERRED_TO_INCREMENT_8_REQUIREMENTS
+        )
+    )
+    assert OPERATIONAL_DOPS == DOPS_REQUIREMENTS.intersection(
+        DEFERRED_TO_INCREMENT_8_REQUIREMENTS
+    )
+
+    for requirement in (
+        DEVAL_REQUIREMENTS.difference(DELIVERED_IN_5A_REQUIREMENTS)
+        | OPERATIONAL_DOPS
+    ):
+        assert rows[requirement].delivery_trace is (
+            Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_8
+        )
+        assert rows[requirement].delivery_issue == 148
+
+    for requirement in {
+        "GRAG-045",
+        "GRAG-046",
+        "GRAG-057",
+        "GRPROD-002",
+        "GRPROD-004",
+        "GRPROD-011",
+        "GRPROD-012",
+        "GRPROD-022",
+        "GRPROD-024",
+        "GRPROD-030",
+        "GRPROD-031",
+    }:
+        assert rows[requirement].delivery_issue == 148
+
+
+def test_existing_5a_and_increment4_evidence_remain_exact() -> None:
+    rows = _rows_by_id()
+
+    assert {
+        requirement
+        for requirement, row in rows.items()
+        if row.delivery_trace is Increment5DeliveryTrace.DELIVERED_IN_5A
+    } == DELIVERED_IN_5A_REQUIREMENTS
+
+    for requirement in INHERITED_AUTHORITY:
         row = rows[requirement]
-        assert row.decision_trace is Increment5DecisionTrace.INHERITED_ACCEPTED_AUTHORITY
         assert row.delivery_issue == 144
+        assert row.delivery_target == "increment-4-accepted-authority"
+        assert (
+            row.verification_target
+            == "main@c9e31879421083e82e2538d57087d04e9b454d34"
+        )
         assert row.decision_anchor == (
             "main@c9e31879421083e82e2538d57087d04e9b454d34:"
             f"newsroom/increment4/traceability.py#{requirement}"
         )
-        _, location = row.decision_anchor.split(":", 1)
-        path_text, fragment = location.split("#", 1)
-        assert fragment in (_REPOSITORY_ROOT / path_text).read_text(encoding="utf-8")
 
 
-def test_epoch_and_six_class_protocols_use_exact_machine_anchors() -> None:
-    rows = _rows()
-    plan = "newsroom/increment5/data/increment5_retrieval_evaluation_plan_v1.json"
-    assert rows["DEVAL-011"].decision_anchor == plan + "#/epoch_protocol"
-    assert rows["DEVAL-011"].delivery_trace is Increment5DeliveryTrace.DELIVERED_IN_5A
-    assert rows["DEVAL-046"].decision_anchor == plan + "#/triage_error_protocol"
-    assert rows["DEVAL-046"].delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
+def test_decision_anchors_cover_every_requirement_without_issue_as_authority() -> None:
+    assert frozenset(ANCHOR_BY_REQUIREMENT) == ALL_REQUIREMENTS
+    for requirement, anchor in ANCHOR_BY_REQUIREMENT.items():
+        assert anchor == anchor.strip()
+        assert anchor
+        assert not anchor.startswith("issue:")
+        if requirement in INHERITED_AUTHORITY:
+            assert anchor.startswith(
+                "main@c9e31879421083e82e2538d57087d04e9b454d34:"
+            )
+        elif requirement.startswith(("GRAG-", "GRPROD-", "TRI-", "DEVAL-", "DOPS-")):
+            assert "#" in anchor
 
-
-def test_request_composition_and_lineage_are_owned_by_5d() -> None:
-    rows = _rows()
-    assert rows["GRAG-031"].decision_anchor == (
-        "issue:#253:deferred:deterministic-hybrid-fusion-and-dependency-root-"
-        "deduplication"
+    assert ANCHOR_BY_REQUIREMENT["DEVAL-011"].endswith(
+        "#/epoch_protocol"
     )
-    assert rows["GRAG-042"].decision_anchor == (
-        "issue:#253:deferred:source-revision-signal-lead-hypothesis-and-"
-        "candidate-lineage-projection-and-hydration"
-    )
-    assert rows["TRI-021"].decision_anchor == (
-        "issue:#253:deferred:exact-source-formal-process-and-explicit-"
-        "lineage-before-approximate-similarity"
-    )
-    assert all(
-        rows[item].delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5D
-        for item in ("GRAG-031", "GRAG-042", "TRI-021")
+    assert ANCHOR_BY_REQUIREMENT["DOPS-076"].endswith(
+        "#/payload/non_effects"
     )
 
 
+def test_human_map_and_amendment_record_the_transfers() -> None:
+    plan = PLAN.read_text(encoding="utf-8")
+    human_map = HUMAN_MAP.read_text(encoding="utf-8")
+
+    for text in (plan, human_map):
+        assert "9 / 0 / 2 / 12 / 9 / 6 / 110 / 7" in text
+        assert "#146" in text
+        assert "#148" in text
+        assert "GRAG-042" in text
+        assert "TRI-028" in text
+        assert "GRPROD-022" in text
+        assert "123" not in text
+
+    assert "Tier L" in plan
+    assert "Tier S" in plan
+    assert "Tier M" in plan
+    assert "full evaluation" in plan.lower()
+    assert "operational admission" in plan.lower()
 
 
-
-def test_hybrid_metadata_and_receipt_are_owned_by_the_5d_composer() -> None:
-    rows = _rows()
-    expected = {
-        "GRAG-035": (
-            "issue:#253:deferred:hybrid-response-explanation-authority-source-"
-            "freshness-provenance-and-degraded-state"
-        ),
-        "TRI-022": (
-            "issue:#253:deferred:inspectable-hybrid-receipt-candidates-scores-"
-            "deduplication-exclusions-and-known-omissions"
-        ),
-    }
-    assert DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5C] == {
-        "GRAG-033",
-        "GRAG-034",
-    }
-    for requirement, anchor in expected.items():
-        row = rows[requirement]
-        assert row.decision_trace is Increment5DecisionTrace.BOUND_BY_5A
-        assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5D
-        assert row.delivery_issue == 253
-        assert row.decision_anchor == anchor
-
-
-def test_cross_request_integration_is_owned_by_5e() -> None:
-    rows = _rows()
-    expected = {
-        "GRAG-044": (
-            "issue:#254:deferred:graph-dependent-decision-exact-fallback-"
-            "watch-or-operational-hold"
-        ),
-        "GRAG-045": (
-            "issue:#254:deferred:source-collection-and-lead-creation-isolation-"
-            "during-graph-outage"
-        ),
-        "GRPROD-024": (
-            "issue:#254:deferred:system-outage-degradation-without-graph-free-"
-            "production-profile"
-        ),
-        "TRI-024": (
-            "issue:#254:deferred:empty-retrieval-cannot-create-hypothesis-or-"
-            "candidate"
-        ),
-        "TRI-026": (
-            "issue:#254:deferred:candidate-admission-requires-current-"
-            "authoritative-collision-check"
-        ),
-    }
-    assert CROSS_REQUEST_INTEGRATION_REQUIREMENTS == frozenset(expected)
-    assert not REQUEST_RETRIEVAL_REQUIREMENTS.intersection(
-        CROSS_REQUEST_INTEGRATION_REQUIREMENTS
-    )
-    for requirement, anchor in expected.items():
-        row = rows[requirement]
-        assert row.decision_trace is Increment5DecisionTrace.BOUND_BY_5A
-        assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
-        assert row.delivery_issue == 254
-        assert row.decision_anchor == anchor
-
-
-def test_full_untrusted_input_boundary_belongs_to_5e() -> None:
-    row = _rows()["DOPS-026"]
-    assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
-    assert row.delivery_issue == 254
-    assert row.decision_anchor == (
-        "issue:#254:deferred:source-and-model-content-cannot-alter-operational-"
-        "policy-egress-budgets-or-authority"
-    )
-
-
-def test_later_reconciliation_health_queues_and_failures_belong_to_5e() -> None:
-    rows = _rows()
-    expected = {
-        "TRI-028": "urgent-degraded-retrieval-requires-durable-later-reconciliation",
-        "DOPS-010": "multidimensional-operational-health",
-        "DOPS-015": "active-obligation-path-loss-and-scoped-coverage-containment",
-        "DOPS-043": "queue-backpressure-and-current-authority-revalidation-before-commit",
-        "DOPS-046": "atomic-or-deterministically-reconcilable-transition-delivery",
-        "DOPS-048": (
-            "dependency-specific-scheduler-network-parser-store-retrieval-model-"
-            "search-and-evidence-intake-failure"
-        ),
-        "DOPS-050": (
-            "full-reconciliation-orphaned-ownership-ambiguous-calls-duplicate-"
-            "delivery-stale-work-and-pending-handoffs"
-        ),
-        "DOPS-073": "narrowest-safe-scope-pause-and-broadened-operational-containment",
-    }
-    for requirement, suffix in expected.items():
-        row = rows[requirement]
-        assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
-        assert row.delivery_issue == 254
-        assert row.decision_anchor == f"issue:#254:deferred:{suffix}"
-
-
-
-
-
-
-def test_complete_graph_native_vertical_slice_is_owned_by_5e() -> None:
-    row = _rows()["GRPROD-021"]
-    assert row.decision_trace is Increment5DecisionTrace.BOUND_BY_5A
-    assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
-    assert row.delivery_issue == 254
-    assert row.decision_anchor == (
-        "issue:#254:deferred:complete-graph-native-vertical-slice-through-"
-        "triage-and-candidate-admission"
-    )
-
-
-def test_production_graphrag_enforcement_is_owned_by_5e() -> None:
-    rows = _rows()
-    expected = {
-        "GRPROD-002": (
-            "issue:#254:deferred:no-production-canary-or-complete-live-shadow-"
-            "without-graphrag"
-        ),
-        "GRPROD-023": (
-            "issue:#254:deferred:graphrag-cannot-be-an-optional-production-"
-            "plugin"
-        ),
-    }
-    for requirement, anchor in expected.items():
-        row = rows[requirement]
-        assert row.decision_trace is Increment5DecisionTrace.BOUND_BY_5A
-        assert row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_5E
-        assert row.delivery_issue == 254
-        assert row.decision_anchor == anchor
-
-
-def test_every_requirement_has_one_explicit_anchor() -> None:
-    anchors = [row.decision_anchor for row in INCREMENT_5_TRACEABILITY]
-    assert len(anchors) == 155
-    assert all(anchor and anchor == anchor.strip() for anchor in anchors)
-    assert all("prefix-default" not in anchor for anchor in anchors)
+def test_traceability_row_rejects_unknown_delivery_issue() -> None:
+    row = INCREMENT_5_TRACEABILITY[0]
+    with pytest.raises(ValueError, match="outside the admitted chain"):
+        Increment5TraceabilityRow(
+            requirement_id=row.requirement_id,
+            decision_anchor=row.decision_anchor,
+            decision_trace=row.decision_trace,
+            delivery_trace=row.delivery_trace,
+            delivery_issue=999,
+            delivery_target=row.delivery_target,
+            verification_target=row.verification_target,
+        )
