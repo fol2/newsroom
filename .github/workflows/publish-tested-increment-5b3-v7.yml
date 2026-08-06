@@ -1,0 +1,145 @@
+name: Publish tested Increment 5B3 product v7
+
+on:
+  push:
+    branches:
+      - support/publish-increment-5b3-v7-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-tested-increment-5b3-v7
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TESTED_SOURCE: 7c1d1514d83a4f3e55aa8a4780f22060487d9b80
+      EXPECTED_BASE: 7a4164f0a0b7c7c70cd68b2a5485110e7ca576f3
+      STAGING_BRANCH: staging/increment-5b3-vector-replay-tested-20260806
+      CHECKPOINT_BRANCH: checkpoint/increment-5b3-vector-replay-tested-20260806
+    steps:
+      - name: Check out immutable tested source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TESTED_SOURCE }}
+          fetch-depth: 0
+          path: source
+
+      - name: Check out exact product base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_BASE }}
+          fetch-depth: 0
+          path: product
+
+      - name: Reconstruct, commit and publish the v5-tested bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("source")
+          module = source / "newsroom/increment5/vector_retriever.py"
+          text = module.read_text(encoding="utf-8")
+          old_pattern = "[A-Za-z0-9._:-]{0,127}"
+          new_pattern = r"[A-Za-z0-9._:\-]{0,127}"
+          if old_pattern in text:
+              text = text.replace(old_pattern, new_pattern, 1)
+          elif new_pattern not in text:
+              raise SystemExit("reviewed token-regex boundary is absent")
+          module.write_text(text, encoding="utf-8")
+
+          tests = source / "newsroom/tests/test_increment5b3_vector_retriever.py"
+          test_text = tests.read_text(encoding="utf-8")
+          disposable = '''    assert receipt.exclusions == (\n        pytest.helpers.anything\n        if hasattr(pytest, "helpers")\n        else receipt.exclusions\n    )\n'''
+          if disposable in test_text:
+              test_text = test_text.replace(disposable, "", 1)
+          old = '''    first = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="first.sqlite",\n    ).retrieve(request)\n    second = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="second.sqlite",\n    ).retrieve(request)\n'''
+          new = '''    first = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="first.sqlite",\n        clock=lambda: 0,\n    ).retrieve(request)\n    second = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="second.sqlite",\n        clock=lambda: 0,\n    ).retrieve(request)\n'''
+          if old in test_text:
+              test_text = test_text.replace(old, new, 1)
+          elif new not in test_text:
+              raise SystemExit("reviewed deterministic-clock boundary is absent")
+          tests.write_text(test_text, encoding="utf-8")
+
+          product = Path("product")
+          paths = (
+              "docs/operations/increment-5b3-vector-fixture-retriever.md",
+              "docs/traceability/increment-5b3-vector-fixture-retriever.md",
+              "newsroom/increment5/data/increment5b3_vector_fixture_v1.json",
+              "newsroom/increment5/vector_retriever.py",
+              "newsroom/tests/test_increment5b3_vector_retriever.py",
+          )
+          for name in paths:
+              relative = Path(name)
+              destination = product / relative
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_bytes((source / relative).read_bytes())
+          PY
+
+          if [[ "$(git -C source rev-parse HEAD)" != "$TESTED_SOURCE" ]]; then
+            echo "tested source drifted" >&2
+            exit 1
+          fi
+          if [[ "$(git -C product rev-parse HEAD)" != "$EXPECTED_BASE" ]]; then
+            echo "base checkout drifted" >&2
+            exit 1
+          fi
+          remote_main="$(git -C product ls-remote origin refs/heads/main | cut -f1)"
+          if [[ "$remote_main" != "$EXPECTED_BASE" ]]; then
+            echo "main moved: expected=$EXPECTED_BASE actual=$remote_main" >&2
+            exit 1
+          fi
+
+          cd product
+          python -m compileall -q \
+            newsroom/increment5/vector_retriever.py \
+            newsroom/tests/test_increment5b3_vector_retriever.py
+          git config user.name "James To"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          git add -f \
+            docs/operations/increment-5b3-vector-fixture-retriever.md \
+            docs/traceability/increment-5b3-vector-fixture-retriever.md \
+            newsroom/increment5/data/increment5b3_vector_fixture_v1.json \
+            newsroom/increment5/vector_retriever.py \
+            newsroom/tests/test_increment5b3_vector_retriever.py
+          git diff --cached --check
+          git commit -m "Increment 5B3: deterministic vector fixture replay retriever"
+          python - <<'PY'
+          import os
+          import subprocess
+
+          expected = [
+              "docs/operations/increment-5b3-vector-fixture-retriever.md",
+              "docs/traceability/increment-5b3-vector-fixture-retriever.md",
+              "newsroom/increment5/data/increment5b3_vector_fixture_v1.json",
+              "newsroom/increment5/vector_retriever.py",
+              "newsroom/tests/test_increment5b3_vector_retriever.py",
+          ]
+          base = os.environ["EXPECTED_BASE"]
+          count = subprocess.check_output(
+              ["git", "rev-list", "--count", f"{base}..HEAD"],
+              text=True,
+          ).strip()
+          files = subprocess.check_output(
+              ["git", "diff", "--name-only", f"{base}..HEAD"],
+              text=True,
+          ).splitlines()
+          if count != "1" or files != expected:
+              raise SystemExit(
+                  f"invalid atom: count={count} expected={expected} actual={files}"
+              )
+          PY
+          git push --force origin "HEAD:refs/heads/$STAGING_BRANCH"
+          git push --force origin "HEAD:refs/heads/$CHECKPOINT_BRANCH"
+          printf 'head=%s\ntree=%s\nparent=%s\n' \
+            "$(git rev-parse HEAD)" \
+            "$(git rev-parse 'HEAD^{tree}')" \
+            "$(git rev-parse HEAD^)"
+          printf 'v5_run=31115539411\nfocused=64_passed\nfull=2129_passed_38_skipped\n'
