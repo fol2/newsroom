@@ -228,6 +228,14 @@ Their decision anchors remain pinned to
 
 5C implementation does not start until this amendment and #251 are complete.
 
+## Amendment acceptance gate
+
+This planning-only PR is a Tier L atom. It merges only after complete
+deterministic CI once on its exact head, the focused inventory/anchor tests, one
+substantive current-head review and zero unresolved P1 or material P2 findings.
+Its merge accepts the corrected map; it does not itself close #251 or grant
+runtime, qualification, publication or activation authority.
+
 ## Verification
 
 The machine tests prove:
