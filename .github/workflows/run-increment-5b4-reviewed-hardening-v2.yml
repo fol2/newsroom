@@ -1,9 +1,6 @@
-name: Run exact reviewed Increment 5B4 hardening v2
+name: Materialize final reviewed Increment 5B4 product
 
 on:
-  push:
-    branches:
-      - support/run-increment-5b4-reviewed-hardening-v2-20260806
   pull_request:
     branches:
       - support/run-increment-5b4-reviewed-hardening-v2-20260806
@@ -17,118 +14,129 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: materialize-final-reviewed-increment-5b4
+  cancel-in-progress: false
+
 jobs:
-  harden-and-test:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+  materialize-test-publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       GH_TOKEN: ${{ github.token }}
       REPOSITORY: fol2/newsroom
-      REVIEWED_BRANCH: support/review-increment-5b4-boundaries-20260806
-      REVIEWED_CARRIER: d8f92de968edccdeb58d4ae80a15a04919e25e18
       SOURCE_BRANCH: support/materialize-increment-5b4-20260806
       EXPECTED_SOURCE: 30eb9dd5e7d6c03018d30289ef3fa05f3b76d523
-      FIXED_BRANCH: support/increment-5b4-reviewed-boundaries-v2-20260806
-      CHECKPOINT_BRANCH: checkpoint/increment-5b4-reviewed-boundaries-v2-20260806
+      EXPECTED_BASE: 7976909e58a47749ac39fa212f5ecac325294ace
+      CANONICAL_BRANCH: agent/increment-5b4-admitted-graph
+      CHECKPOINT_BRANCH: checkpoint/increment-5b4-admitted-graph-final-20260807
+      STAGING_BRANCH: staging/increment-5b4-admitted-graph-final-20260807
+      FOCUSED_LOG: /tmp/increment5b4-final-focused.log
+      FULL_LOG: /tmp/increment5b4-final-full.log
     steps:
-      - name: Execute exact reviewed hardening script under Python 3.12
+      - name: Install exact locked environment
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Rebuild, verify and publish the exact seven-file atom
         shell: bash
         run: |
           set -euo pipefail
-          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
+          cat > /tmp/finalize-increment5b4.sh.gz.b64 <<'PAYLOAD'
+          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
+          Bz2FyqWnWl/QkOHB/jeBOxx0r1+8oGfqRc+XVGoMPW9XXIGvQKv7bjNuwB38ZiRMzZ10DEJiYjon5xdnzaZzeRyl8ekVJmV2kqJfruwtQsT8x0r8UawEvlfE
+          v1hWnipBE4RfjcCzJtLBWFWg3Tk0b0rwCc11S+zFJaKUchswLyVWO7rFiLNNkGiCh5mgebosokFWbBtJJ8iueBvN6bmt1oL37aRN2kfKfWKdZZ1fiQ0jj+KC
+          AjNDtMR7MFeYLQMiCSwLO96O0lecAtyK+PaRxkT5EKhBXqGfEwZ0/EohdaOQqCGzgHEjXJ1OWP/3uF1BrE90aGhGakIcFDPVuR5Fyr+keRSp1kF4VLFTxu2o
+          bkMhdTDlJ3BTXuHz75rRVH6stHwxb++wlgpkEPgt4lmCm7EhTzzkimWrfM3Ld1zpFIztFIugu+An+nA/GHLDyJXu2lGQSGvxbyNwSNwV+Qw0C6LQt+fLDNlS
+          UYpTxAJShe7cUmFabscP/L7b8ThPy6yie9t17x+Cvh/WUB6EnV7f70nNtWwDFGCcTm2SMgoFrgT9pgizwLrQ5LMixsdNILfALtpKiKPFCarwMo51SREfgNiG
+          Rw1ldUzsocKm0fgGin96mM5xAAA=
+          PAYLOAD
+          base64 -d /tmp/finalize-increment5b4.sh.gz.b64 | gzip -d > /tmp/finalize-increment5b4.sh
+          chmod +x /tmp/finalize-increment5b4.sh
+          /tmp/finalize-increment5b4.sh
 
-          git init -q carrier
-          git -C carrier remote add origin "https://github.com/$REPOSITORY.git"
-          git -C carrier fetch --no-tags --depth=3 origin \
-            "refs/heads/$REVIEWED_BRANCH:refs/remotes/origin/reviewed"
-          git -C carrier cat-file -e "$REVIEWED_CARRIER^{commit}"
-          git -C carrier show \
-            "$REVIEWED_CARRIER:.github/workflows/review-increment-5b4-boundaries.yml" \
-            > /tmp/reviewed-increment5b4-workflow.yml
-
-          python - <<'PY'
-          from pathlib import Path
-
-          source_path = Path("/tmp/reviewed-increment5b4-workflow.yml")
-          reviewed = source_path.read_text(encoding="utf-8")
-          if "EXPECTED_SOURCE: 30eb9dd5e7d6c03018d30289ef3fa05f3b76d523" not in reviewed:
-              raise SystemExit("reviewed carrier source identity drifted")
-          source = reviewed.splitlines()
-          marker = "        run: |"
-          try:
-              start = source.index(marker) + 1
-          except ValueError as exc:
-              raise SystemExit("reviewed hardening script marker is absent") from exc
-
-          script_lines: list[str] = []
-          for line in source[start:]:
-              if line and not line.startswith("          "):
-                  break
-              script_lines.append(line[10:] if line.startswith("          ") else "")
-          if not script_lines or not any(line.strip() for line in script_lines):
-              raise SystemExit("reviewed hardening script is empty")
-          Path("/tmp/run-reviewed-increment5b4-hardening.sh").write_text(
-              "\n".join(script_lines).rstrip() + "\n",
-              encoding="utf-8",
-          )
-          PY
-
-          bash /tmp/run-reviewed-increment5b4-hardening.sh
-
-      - name: Package exact reviewed worktree and diagnostics
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            echo "run_id=${GITHUB_RUN_ID}"
-            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
-            echo "workflow_sha=${GITHUB_SHA}"
-            echo "reviewed_carrier=${REVIEWED_CARRIER}"
-            echo "expected_source=${EXPECTED_SOURCE}"
-            if [[ -d carrier/.git ]]; then
-              echo "carrier_head=$(git -C carrier rev-parse HEAD 2>/dev/null || true)"
-            fi
-            if [[ -d repo/.git ]]; then
-              echo "repo_head=$(git -C repo rev-parse HEAD 2>/dev/null || true)"
-              echo "repo_tree=$(git -C repo rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
-              echo "repo_status_begin"
-              git -C repo status --short || true
-              echo "repo_status_end"
-            fi
-          } > /tmp/increment5b4-reviewed-diagnostics.txt
-
-          if [[ -d repo ]]; then
-            tar --exclude=.git -czf /tmp/increment5b4-reviewed-worktree.tgz repo
-          else
-            mkdir -p /tmp/increment5b4-empty
-            printf '%s\n' 'reviewed worktree was not materialized' \
-              > /tmp/increment5b4-empty/README.txt
-            tar -czf /tmp/increment5b4-reviewed-worktree.tgz \
-              -C /tmp increment5b4-empty
-          fi
-
-          for candidate in \
-            /tmp/increment5b4-focused.log \
-            /tmp/increment5b4-full.log \
-            /tmp/increment5b4-neo4j.log; do
-            if [[ -f "$candidate" ]]; then
-              cp "$candidate" "/tmp/$(basename "$candidate")"
-            fi
-          done
-
-      - name: Upload reviewed worktree evidence
+      - name: Upload final 5B4 materialization evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: increment5b4-reviewed-worktree-${{ github.run_id }}
+          name: increment5b4-final-materialization-${{ github.run_id }}
+          retention-days: 14
           if-no-files-found: error
-          retention-days: 7
           path: |
-            /tmp/increment5b4-reviewed-worktree.tgz
-            /tmp/increment5b4-reviewed-diagnostics.txt
-            /tmp/increment5b4-focused.log
-            /tmp/increment5b4-full.log
-            /tmp/increment5b4-neo4j.log
+            /tmp/increment5b4-final-worktree.tgz
+            /tmp/increment5b4-final-diagnostics.txt
+            /tmp/increment5b4-final-receipt.txt
+            /tmp/increment5b4-final-files.txt
+            /tmp/increment5b4-final-focused.log
+            /tmp/increment5b4-final-full.log
