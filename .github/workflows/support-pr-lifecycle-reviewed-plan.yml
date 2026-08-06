@@ -64,13 +64,18 @@ jobs:
               raise SystemExit("reviewed-plan correction source length mismatch")
           if hashlib.sha256(source).hexdigest() != manifest["source_sha256"]:
               raise SystemExit("reviewed-plan correction source digest mismatch")
-          path = Path("/tmp/apply_pr_lifecycle_reviewed_plan_fix.py")
+          path = Path(
+              "scripts/support/_runtime_apply_pr_lifecycle_reviewed_plan_fix.py"
+          )
           path.write_bytes(source)
           PY
-          python -m py_compile /tmp/apply_pr_lifecycle_reviewed_plan_fix.py
+          python -m py_compile \
+            scripts/support/_runtime_apply_pr_lifecycle_reviewed_plan_fix.py
 
       - name: Apply reviewed-plan and leading-metadata correction
-        run: python /tmp/apply_pr_lifecycle_reviewed_plan_fix.py
+        run: |
+          python scripts/support/_runtime_apply_pr_lifecycle_reviewed_plan_fix.py
+          rm scripts/support/_runtime_apply_pr_lifecycle_reviewed_plan_fix.py
 
       - name: Verify bounded product diff and workflow carrier
         run: |
