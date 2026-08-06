@@ -41,10 +41,13 @@ jobs:
           import base64
           import gzip
 
-          encoded = Path(
-              "scripts/support/apply_pr_lifecycle_reviewed_plan_fix.py.gz.b64"
-          ).read_text(encoding="ascii")
-          source = gzip.decompress(base64.b64decode(encoded, validate=True))
+          encoded = "".join(
+              Path(
+                  "scripts/support/apply_pr_lifecycle_reviewed_plan_fix.py.gz.b64"
+              ).read_text(encoding="ascii").split()
+          ).rstrip("=")
+          encoded += "=" * ((4 - len(encoded) % 4) % 4)
+          source = gzip.decompress(base64.b64decode(encoded))
           path = Path("/tmp/apply_pr_lifecycle_reviewed_plan_fix.py")
           path.write_bytes(source)
           PY
