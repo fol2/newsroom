@@ -1,0 +1,479 @@
+name: Publish Increment 5B4 admitted-graph retriever
+
+on:
+  push:
+    branches:
+      - support/publish-increment-5b4-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: publish-increment-5b4-admitted-graph
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    services:
+      neo4j:
+        image: neo4j:5.26-community
+        env:
+          NEO4J_AUTH: neo4j/increment5b4-password
+          NEO4J_server_memory_heap_initial__size: 256m
+          NEO4J_server_memory_heap_max__size: 512m
+          NEO4J_server_memory_pagecache_size: 256m
+        ports:
+          - 7474:7474
+          - 7687:7687
+    env:
+      REPOSITORY: fol2/newsroom
+      PRODUCT_SOURCE_BRANCH: support/materialize-increment-5b4-20260806
+      CANONICAL_BRANCH: agent/increment-5b4-admitted-graph
+      CHECKPOINT_BRANCH: checkpoint/increment-5b4-admitted-graph-20260806
+      BASE_PATH: /tmp/increment5b4-base
+      PRODUCT_ARCHIVE: /tmp/increment5b4-product.tgz
+      FOCUSED_LOG: /tmp/increment5b4-focused.log
+      SERVICE_LOG: /tmp/increment5b4-service.log
+      FULL_LOG: /tmp/increment5b4-full.log
+      RECEIPT_PATH: /tmp/increment5b4-publication-receipt.json
+      PR_NUMBER_PATH: /tmp/increment5b4-pr-number
+      NEWSROOM_NEO4J_URI: bolt://localhost:7687
+      NEWSROOM_NEO4J_USER: neo4j
+      NEWSROOM_NEO4J_PASSWORD: increment5b4-password
+    steps:
+      - name: Check out exact 5B4 source carrier
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCT_SOURCE_BRANCH }}
+          fetch-depth: 0
+
+      - name: Wait for verified 5B3 predecessor on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=false
+          for attempt in $(seq 1 80); do
+            issue_state="$(gh issue view 303 --repo "$REPOSITORY" --json state --jq .state 2>/dev/null || true)"
+            main_head="$(gh api "repos/$REPOSITORY/branches/main" --jq .commit.sha 2>/dev/null || true)"
+            has_vector=false
+            if [[ -n "$main_head" ]] && gh api \
+              "repos/$REPOSITORY/contents/newsroom/increment5/vector_retriever.py?ref=$main_head" \
+              >/tmp/increment5b4-vector-presence.json 2>/dev/null
+            then
+              has_vector=true
+            fi
+            merged_5b3="$(gh pr list \
+              --repo "$REPOSITORY" \
+              --head agent/increment-5b3-vector-replay \
+              --base main \
+              --state merged \
+              --json number,mergeCommit \
+              --jq 'length' 2>/dev/null || echo 0)"
+            if [[ "$issue_state" == "CLOSED" && "$has_vector" == "true" && "$merged_5b3" != "0" ]]; then
+              printf '%s\n' "$main_head" | tee "$BASE_PATH"
+              ready=true
+              break
+            fi
+            echo "waiting for 5B3: attempt=$attempt issue=$issue_state main=$main_head vector=$has_vector merged_prs=$merged_5b3"
+            sleep 30
+          done
+          if [[ "$ready" != "true" ]]; then
+            echo "5B3 predecessor did not become verifiably complete within the bounded wait" >&2
+            exit 1
+          fi
+
+      - name: Normalize reviewed Neo4j and deterministic-test seams
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          adapter = Path("newsroom/authority/neo4j_admitted_graph_reader.py")
+          text = adapter.read_text(encoding="utf-8")
+          replacements = [
+              (
+                  "from contextlib import AbstractContextManager\n",
+                  "",
+              ),
+              (
+                  "from typing import Any, Callable, Iterable, Mapping, Protocol\n",
+                  "from typing import Any, Callable, Iterable, Mapping, Protocol\n\nfrom neo4j import Query\n",
+              ),
+              (
+                  "class _Session(AbstractContextManager[Any], Protocol):\n    def execute_read(\n",
+                  "class _Session(Protocol):\n    def __enter__(self) -> \"_Session\":\n        ...\n\n    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:\n        ...\n\n    def execute_read(\n",
+              ),
+              (
+                  "transaction.run(\n                    _ROOT_CYPHER,\n",
+                  "transaction.run(\n                    Query(_ROOT_CYPHER, timeout=timeout_seconds),\n",
+              ),
+              (
+                  "transaction.run(\n                    _EXPAND_CYPHER,\n",
+                  "transaction.run(\n                    Query(_EXPAND_CYPHER, timeout=timeout_seconds),\n",
+              ),
+              (
+                  "rows = session.execute_read(work, timeout=timeout_seconds)\n",
+                  "rows = session.execute_read(work)\n",
+              ),
+          ]
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f"expected adapter normalization boundary is absent: {old!r}")
+              text = text.replace(old, new)
+          adapter.write_text(text, encoding="utf-8")
+
+          tests = Path("newsroom/tests/test_increment5b4_admitted_graph_retriever.py")
+          test_text = tests.read_text(encoding="utf-8")
+          old_nodes = '        "nodes": nodes or base_nodes(),\n'
+          new_nodes = '        "nodes": base_nodes() if nodes is None else nodes,\n'
+          old_relations = '        "relations": relations or base_relations(),\n'
+          new_relations = '        "relations": base_relations() if relations is None else relations,\n'
+          for old, new in ((old_nodes, new_nodes), (old_relations, new_relations)):
+              if old not in test_text:
+                  raise SystemExit(f"expected test normalization boundary is absent: {old!r}")
+              test_text = test_text.replace(old, new, 1)
+          tests.write_text(test_text, encoding="utf-8")
+          PY
+          python -m compileall -q \
+            newsroom/increment5/admitted_graph_retriever.py \
+            newsroom/authority/neo4j_admitted_graph_reader.py \
+            newsroom/tests/test_increment5b4_admitted_graph_retriever.py \
+            newsroom/tests/test_increment5b4_neo4j_authority_port.py \
+            newsroom/tests/test_increment5b4_neo4j_service.py
+
+      - name: Preserve exact seven-file product inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "$PRODUCT_ARCHIVE" \
+            newsroom/increment5/admitted_graph_retriever.py \
+            newsroom/authority/neo4j_admitted_graph_reader.py \
+            newsroom/tests/test_increment5b4_admitted_graph_retriever.py \
+            newsroom/tests/test_increment5b4_neo4j_authority_port.py \
+            newsroom/tests/test_increment5b4_neo4j_service.py \
+            docs/operations/increment-5b4-admitted-graph-retriever.md \
+            docs/traceability/increment-5b4-admitted-graph-retriever.md
+
+      - name: Reconstruct exact predecessor-bound product tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(cat "$BASE_PATH")"
+          git fetch --no-tags origin main
+          current_main="$(git rev-parse origin/main)"
+          if [[ "$current_main" != "$base" ]]; then
+            echo "main moved after predecessor lock: locked=$base current=$current_main" >&2
+            exit 1
+          fi
+          git checkout --detach "$base"
+          tar -xzf "$PRODUCT_ARCHIVE"
+          if [[ -z "$(git status --porcelain --untracked-files=all)" ]]; then
+            echo "5B4 materialization produced no product diff" >&2
+            exit 1
+          fi
+
+      - name: Install exact locked environment
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Validate common 5B branch substrate
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen
+          uv run python - <<'PY'
+          from newsroom.increment5.branch_contracts import BranchMode, BranchOutcome
+
+          assert "ADMITTED_GRAPH" in BranchMode.__members__
+          for name in ("COMPLETE", "INCOMPLETE", "POLICY_BLOCKED", "STALE", "UNAVAILABLE"):
+              assert name in BranchOutcome.__members__, name
+          PY
+
+      - name: Run focused deterministic 5B4 qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run pytest -q \
+            newsroom/tests/test_increment5b4_admitted_graph_retriever.py \
+            newsroom/tests/test_increment5b4_neo4j_authority_port.py \
+            | tee "$FOCUSED_LOG"
+
+      - name: Wait for authenticated Neo4j service
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python - <<'PY'
+          import os
+          import time
+          from neo4j import GraphDatabase
+
+          driver = GraphDatabase.driver(
+              os.environ["NEWSROOM_NEO4J_URI"],
+              auth=(
+                  os.environ["NEWSROOM_NEO4J_USER"],
+                  os.environ["NEWSROOM_NEO4J_PASSWORD"],
+              ),
+          )
+          try:
+              deadline = time.monotonic() + 90
+              while True:
+                  try:
+                      driver.verify_connectivity()
+                      break
+                  except Exception:
+                      if time.monotonic() >= deadline:
+                          raise
+                      time.sleep(2)
+          finally:
+              driver.close()
+          PY
+
+      - name: Run mandatory actual-Neo4j proof with zero required skips
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run pytest -q newsroom/tests/test_increment5b4_neo4j_service.py \
+            | tee "$SERVICE_LOG"
+          if grep -Eqi 'skipped|deselected' "$SERVICE_LOG"; then
+            echo "actual Neo4j proof contained a required skip or deselection" >&2
+            exit 1
+          fi
+          grep -Eq '[1-9][0-9]* passed' "$SERVICE_LOG"
+
+      - name: Run complete repository suite on exact product bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run pytest -q | tee "$FULL_LOG"
+
+      - name: Commit and push one clean canonical 5B4 atom
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(cat "$BASE_PATH")"
+          git config user.name "James To"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          git add \
+            newsroom/increment5/admitted_graph_retriever.py \
+            newsroom/authority/neo4j_admitted_graph_reader.py \
+            newsroom/tests/test_increment5b4_admitted_graph_retriever.py \
+            newsroom/tests/test_increment5b4_neo4j_authority_port.py \
+            newsroom/tests/test_increment5b4_neo4j_service.py \
+            docs/operations/increment-5b4-admitted-graph-retriever.md \
+            docs/traceability/increment-5b4-admitted-graph-retriever.md
+          git diff --cached --check
+          git commit -m "Increment 5B4: bounded admitted graph retriever"
+          if [[ "$(git rev-list --count "$base"..HEAD)" != "1" ]]; then
+            echo "5B4 must remain exactly one commit over its locked predecessor base" >&2
+            exit 1
+          fi
+          expected_files="$(cat <<'EOF'
+docs/operations/increment-5b4-admitted-graph-retriever.md
+docs/traceability/increment-5b4-admitted-graph-retriever.md
+newsroom/authority/neo4j_admitted_graph_reader.py
+newsroom/increment5/admitted_graph_retriever.py
+newsroom/tests/test_increment5b4_admitted_graph_retriever.py
+newsroom/tests/test_increment5b4_neo4j_authority_port.py
+newsroom/tests/test_increment5b4_neo4j_service.py
+EOF
+          )"
+          actual_files="$(git diff --name-only "$base"..HEAD | sort)"
+          if [[ "$actual_files" != "$expected_files" ]]; then
+            printf '5B4 inventory drifted\nexpected:\n%s\nactual:\n%s\n' \
+              "$expected_files" "$actual_files" >&2
+            exit 1
+          fi
+          git push --force origin "HEAD:refs/heads/$CANONICAL_BRANCH"
+          git push --force origin "HEAD:refs/heads/$CHECKPOINT_BRANCH"
+
+      - name: Create or update canonical PR and request exact-head review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(cat "$BASE_PATH")"
+          head="$(git rev-parse HEAD)"
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          focused="$(tail -n 1 "$FOCUSED_LOG")"
+          service="$(tail -n 1 "$SERVICE_LOG")"
+          full="$(tail -n 1 "$FULL_LOG")"
+          cat > /tmp/increment5b4-pr-body.md <<EOF
+          Lifecycle: canonical
+          Delivery-Atom: increment-5b4-admitted-graph-v1
+          Canonical-PR: self
+          Checkpoint-Ref: checkpoint/increment-5b4-admitted-graph-20260806
+          Close-When: merged
+          Branch-Retention: keep
+
+          ## Scope
+
+          Implements Increment 5B4 / #308 as one independently attributable
+          \`ADMITTED_GRAPH\` branch over exact predecessor base \`$base\`.
+
+          The atom provides an authority-owned two-operation Neo4j read port, fixed
+          admitted labels and predicates, two-phase bounded traversal, current
+          node/relation authority validation, rights/lifecycle/trust/temporal
+          exclusions, deterministic path ordering, fan-out/result sentinels,
+          cumulative timeout including lock wait, and immutable restart replay.
+
+          ## Exact evidence
+
+          - head: \`$head\`
+          - tree: \`$tree\`
+          - focused deterministic tests: \`$focused\`
+          - mandatory actual Neo4j: \`$service\`
+          - complete repository: \`$full\`
+
+          ## Disabled boundary
+
+          No arbitrary Cypher, write session, driver, credential, exact/full-text/vector
+          branch call, fusion, hydration, Candidate creation, relation mutation,
+          provider/model execution, publication or production activation is exposed.
+
+          Closes #308.
+          EOF
+          pr_number="$(gh pr list --repo "$REPOSITORY" --head "$CANONICAL_BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+          if [[ -z "$pr_number" ]]; then
+            gh pr create \
+              --repo "$REPOSITORY" \
+              --base main \
+              --head "$CANONICAL_BRANCH" \
+              --title "Increment 5B4: bounded admitted-graph retriever" \
+              --body-file /tmp/increment5b4-pr-body.md \
+              --draft
+            pr_number="$(gh pr list --repo "$REPOSITORY" --head "$CANONICAL_BRANCH" --base main --state open --json number --jq '.[0].number')"
+          else
+            gh pr edit "$pr_number" \
+              --repo "$REPOSITORY" \
+              --title "Increment 5B4: bounded admitted-graph retriever" \
+              --body-file /tmp/increment5b4-pr-body.md
+          fi
+          printf '%s\n' "$pr_number" | tee "$PR_NUMBER_PATH"
+          is_draft="$(gh pr view "$pr_number" --repo "$REPOSITORY" --json isDraft --jq .isDraft)"
+          if [[ "$is_draft" == "true" ]]; then
+            gh pr ready "$pr_number" --repo "$REPOSITORY"
+          fi
+          gh pr comment "$pr_number" --repo "$REPOSITORY" --body "$(cat <<EOF
+          Exact 5B4 publication checkpoint:
+
+          - head: \`$head\`
+          - tree: \`$tree\`
+          - parent: \`$base\`
+          - focused: \`$focused\`
+          - actual Neo4j: \`$service\`
+          - complete repository: \`$full\`
+          - external/model/embedding/provider calls: \`0\`
+          - provider spend: \`0\`
+          - authority effect: \`NONE\`
+          - production activation: \`false\`
+
+          @codex review
+
+          Please perform a fresh substantive review of this exact head only. Report
+          every current P1/P2 finding in one pass, focusing on fixed-query isolation,
+          read-only driver boundaries, generation crossing, current authority binding,
+          admitted-only trust, rights/lifecycle/tombstones, temporal filtering,
+          cycle/duplicate handling, fan-out/result sentinels, cumulative timeout and
+          SQLite lock discipline.
+          EOF
+          )"
+          gh issue comment 308 --repo "$REPOSITORY" --body "Canonical 5B4 product is published in PR #$pr_number at \`$head\` / tree \`$tree\`. Focused, mandatory actual-Neo4j and complete repository suites passed. Permanent exact-head workflows and current-head substantive review remain the merge gate."
+
+      - name: Record publication failure without merge claim
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh issue comment 308 --repo "$REPOSITORY" --body "Increment 5B4 publisher run $GITHUB_RUN_ID failed. No completion or merge is claimed. Any pushed checkpoint remains non-mergeable until the exact retained evidence is corrected." || true
+          if [[ -f "$PR_NUMBER_PATH" ]]; then
+            pr_number="$(cat "$PR_NUMBER_PATH")"
+            gh pr comment "$pr_number" --repo "$REPOSITORY" --body "The exact 5B4 publication runner failed. Do not merge. Inspect workflow run $GITHUB_RUN_ID and its artifact." || true
+          fi
+
+      - name: Emit exact publication receipt
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          def command(*args: str) -> str | None:
+              try:
+                  return subprocess.check_output(args, text=True).strip()
+              except Exception:
+                  return None
+
+          def digest(path: str) -> str | None:
+              candidate = Path(path)
+              if not candidate.exists():
+                  return None
+              return "sha256:" + hashlib.sha256(candidate.read_bytes()).hexdigest()
+
+          def summary(path: str) -> str | None:
+              candidate = Path(path)
+              if not candidate.exists():
+                  return None
+              lines = candidate.read_text(encoding="utf-8", errors="replace").splitlines()
+              return lines[-1] if lines else None
+
+          base_path = Path(os.environ["BASE_PATH"])
+          pr_path = Path(os.environ["PR_NUMBER_PATH"])
+          payload = {
+              "schema_version": "newsroom.increment5b4.publication-receipt.v1",
+              "base": base_path.read_text(encoding="utf-8").strip() if base_path.exists() else None,
+              "head": command("git", "rev-parse", "HEAD"),
+              "tree": command("git", "rev-parse", "HEAD^{tree}"),
+              "parent": command("git", "rev-parse", "HEAD^"),
+              "canonical_branch": os.environ["CANONICAL_BRANCH"],
+              "checkpoint_branch": os.environ["CHECKPOINT_BRANCH"],
+              "pull_request_number": pr_path.read_text(encoding="utf-8").strip() if pr_path.exists() else None,
+              "focused_log_digest": digest(os.environ["FOCUSED_LOG"]),
+              "service_log_digest": digest(os.environ["SERVICE_LOG"]),
+              "full_log_digest": digest(os.environ["FULL_LOG"]),
+              "focused_summary": summary(os.environ["FOCUSED_LOG"]),
+              "service_summary": summary(os.environ["SERVICE_LOG"]),
+              "full_summary": summary(os.environ["FULL_LOG"]),
+              "external_call_count": 0,
+              "provider_call_count": 0,
+              "model_call_count": 0,
+              "embedding_call_count": 0,
+              "provider_spend_micros": 0,
+              "authority_effect": "NONE",
+              "production_activation_authorized": False,
+          }
+          receipt = Path(os.environ["RECEIPT_PATH"])
+          receipt.write_text(
+              json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          print(receipt.read_text(encoding="utf-8"))
+          PY
+
+      - name: Upload publication evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5b4-publication-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5b4-publication-receipt.json
+            /tmp/increment5b4-focused.log
+            /tmp/increment5b4-service.log
+            /tmp/increment5b4-full.log
