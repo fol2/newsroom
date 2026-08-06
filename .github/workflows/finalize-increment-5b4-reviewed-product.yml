@@ -1,0 +1,113 @@
+name: Finalize corrected reviewed Increment 5B4 product
+
+on:
+  pull_request:
+    branches:
+      - support/run-increment-5b4-reviewed-hardening-v2-20260806
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-corrected-reviewed-increment-5b4
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: fol2/newsroom
+      CARRIER_BRANCH: support/run-increment-5b4-reviewed-hardening-v2-20260806
+      CARRIER_COMMIT: 14e149f4866cdefa3f4f6be6527a6422c6537009
+      CARRIER_PATH: .github/workflows/run-increment-5b4-reviewed-hardening-v2.yml
+    steps:
+      - name: Install exact locked environment
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Execute the reviewed materializer with only its path bookkeeping corrected
+        shell: bash
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
+
+          git init -q carrier
+          git -C carrier remote add origin "https://github.com/$REPOSITORY.git"
+          git -C carrier fetch --no-tags --depth=1 origin \
+            "refs/heads/$CARRIER_BRANCH:refs/remotes/origin/carrier"
+          if [[ "$(git -C carrier rev-parse refs/remotes/origin/carrier)" != "$CARRIER_COMMIT" ]]; then
+            echo "carrier moved from pinned commit" >&2
+            exit 1
+          fi
+          git -C carrier show "$CARRIER_COMMIT:$CARRIER_PATH" > /tmp/increment5b4-carrier.yml
+
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import gzip
+          from pathlib import Path
+
+          carrier = Path("/tmp/increment5b4-carrier.yml").read_text(encoding="utf-8")
+          start_marker = "          cat > /tmp/finalize-increment5b4.sh.gz.b64 <<'PAYLOAD'\n"
+          end_marker = "          PAYLOAD\n"
+          if carrier.count(start_marker) != 1:
+              raise SystemExit("reviewed payload start marker drifted")
+          prefix, remainder = carrier.split(start_marker, 1)
+          del prefix
+          if remainder.count(end_marker) != 1:
+              raise SystemExit("reviewed payload end marker drifted")
+          payload_block, _suffix = remainder.split(end_marker, 1)
+          payload = "".join(
+              line[10:] if line.startswith("          ") else line
+              for line in payload_block.splitlines()
+          )
+          script = gzip.decompress(base64.b64decode(payload)).decode("utf-8")
+          old = '''cd product
+uv run pytest -q | tee "$FULL_LOG"
+
+cd product
+git config user.name "James To"
+'''
+          new = '''uv run pytest -q | tee "$FULL_LOG"
+
+git config user.name "James To"
+'''
+          if script.count(old) != 1:
+              raise SystemExit("reviewed path-bookkeeping boundary drifted")
+          corrected = script.replace(old, new, 1)
+          if corrected.count("cd product") != 1:
+              raise SystemExit("unexpected product-directory transition remains")
+          destination = Path("/tmp/finalize-increment5b4-corrected.sh")
+          destination.write_text(corrected, encoding="utf-8")
+          destination.chmod(0o755)
+          PY
+
+          bash -n /tmp/finalize-increment5b4-corrected.sh
+          /tmp/finalize-increment5b4-corrected.sh
+
+      - name: Upload final materialization evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5b4-corrected-final-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5b4-final-worktree.tgz
+            /tmp/increment5b4-final-diagnostics.txt
+            /tmp/increment5b4-final-receipt.txt
+            /tmp/increment5b4-final-files.txt
+            /tmp/increment5b4-final-focused.log
+            /tmp/increment5b4-final-full.log
