@@ -1,0 +1,378 @@
+name: Publish Increment 5C1 named-tool authorization substrate
+
+on:
+  push:
+    branches:
+      - support/publish-increment-5c1-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: publish-increment-5c1-named-tool-authorization
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      REPOSITORY: fol2/newsroom
+      PRODUCT_SOURCE_BRANCH: support/materialize-increment-5c1-20260806
+      CANONICAL_BRANCH: agent/increment-5c1-named-tool-authorization
+      CHECKPOINT_BRANCH: checkpoint/increment-5c1-named-tool-authorization-20260806
+      BASE_PATH: /tmp/increment5c1-base
+      CHILD_ISSUE_PATH: /tmp/increment5c1-child-issue
+      PRODUCT_ARCHIVE: /tmp/increment5c1-product.tgz
+      FOCUSED_LOG: /tmp/increment5c1-focused.log
+      FULL_LOG: /tmp/increment5c1-full.log
+      RECEIPT_PATH: /tmp/increment5c1-publication-receipt.json
+      PR_NUMBER_PATH: /tmp/increment5c1-pr-number
+    steps:
+      - name: Check out exact 5C1 source carrier
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCT_SOURCE_BRANCH }}
+          fetch-depth: 0
+
+      - name: Wait for completed 5B parent and lock current main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=false
+          for attempt in $(seq 1 90); do
+            parent_state="$(gh issue view 251 --repo "$REPOSITORY" --json state --jq .state 2>/dev/null || true)"
+            main_head="$(gh api "repos/$REPOSITORY/branches/main" --jq .commit.sha 2>/dev/null || true)"
+            has_graph=false
+            if [[ -n "$main_head" ]] && gh api \
+              "repos/$REPOSITORY/contents/newsroom/increment5/admitted_graph_retriever.py?ref=$main_head" \
+              >/tmp/increment5c1-graph-presence.json 2>/dev/null
+            then
+              has_graph=true
+            fi
+            if [[ "$parent_state" == "CLOSED" && "$has_graph" == "true" ]]; then
+              printf '%s\n' "$main_head" | tee "$BASE_PATH"
+              ready=true
+              break
+            fi
+            echo "waiting for completed 5B: attempt=$attempt parent=$parent_state main=$main_head graph=$has_graph"
+            sleep 30
+          done
+          if [[ "$ready" != "true" ]]; then
+            echo "Increment 5B did not become verifiably complete within the bounded wait" >&2
+            exit 1
+          fi
+          child_issue="$(gh issue list \
+            --repo "$REPOSITORY" \
+            --state open \
+            --search 'Increment 5C1 in:title' \
+            --json number,title \
+            --jq '[.[] | select(.title | startswith("Increment 5C1"))][0].number // empty')"
+          if [[ -z "$child_issue" ]]; then
+            echo "prepared 5C1 child issue is absent" >&2
+            exit 1
+          fi
+          printf '%s\n' "$child_issue" | tee "$CHILD_ISSUE_PATH"
+
+      - name: Normalize review-only source assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          contracts_test = Path(
+              "newsroom/tests/test_increment5c1_named_tool_contracts.py"
+          )
+          text = contracts_test.read_text(encoding="utf-8")
+          old = '''        "provider",\n'''
+          new = '''        "provider_client",\n        "embedding_client",\n        "model_client",\n'''
+          if old not in text:
+              raise SystemExit("expected broad provider assertion is absent")
+          contracts_test.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          auth_test = Path(
+              "newsroom/tests/test_increment5c1_named_tool_authorization.py"
+          )
+          auth_text = auth_test.read_text(encoding="utf-8")
+          for token in ('        "dops-026",\n', '        "dops-067",\n'):
+              if token not in auth_text:
+                  raise SystemExit(f"expected over-broad DOPS assertion is absent: {token!r}")
+              auth_text = auth_text.replace(token, "", 1)
+          auth_test.write_text(auth_text, encoding="utf-8")
+          PY
+          python -m compileall -q \
+            newsroom/increment5/named_tool_contracts.py \
+            newsroom/increment5/named_tool_authorization.py \
+            newsroom/tests/test_increment5c1_named_tool_contracts.py \
+            newsroom/tests/test_increment5c1_named_tool_authorization.py
+
+      - name: Preserve exact six-file 5C1 product inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "$PRODUCT_ARCHIVE" \
+            newsroom/increment5/named_tool_contracts.py \
+            newsroom/increment5/named_tool_authorization.py \
+            newsroom/tests/test_increment5c1_named_tool_contracts.py \
+            newsroom/tests/test_increment5c1_named_tool_authorization.py \
+            docs/operations/increment-5c1-named-tool-authorization.md \
+            docs/traceability/increment-5c1-named-tool-authorization.md
+
+      - name: Reconstruct exact post-5B product tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(cat "$BASE_PATH")"
+          git fetch --no-tags origin main
+          current_main="$(git rev-parse origin/main)"
+          if [[ "$current_main" != "$base" ]]; then
+            echo "main moved after 5C1 base lock: locked=$base current=$current_main" >&2
+            exit 1
+          fi
+          git checkout --detach "$base"
+          tar -xzf "$PRODUCT_ARCHIVE"
+          if [[ -z "$(git status --porcelain --untracked-files=all)" ]]; then
+            echo "5C1 materialization produced no product diff" >&2
+            exit 1
+          fi
+
+      - name: Install exact locked environment
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Run focused 5C1 qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen
+          uv run pytest -q \
+            newsroom/tests/test_increment5c1_named_tool_contracts.py \
+            newsroom/tests/test_increment5c1_named_tool_authorization.py \
+            | tee "$FOCUSED_LOG"
+
+      - name: Run complete deterministic repository suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run pytest -q | tee "$FULL_LOG"
+
+      - name: Commit and push one clean 5C1 atom
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(cat "$BASE_PATH")"
+          git config user.name "James To"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          git add \
+            newsroom/increment5/named_tool_contracts.py \
+            newsroom/increment5/named_tool_authorization.py \
+            newsroom/tests/test_increment5c1_named_tool_contracts.py \
+            newsroom/tests/test_increment5c1_named_tool_authorization.py \
+            docs/operations/increment-5c1-named-tool-authorization.md \
+            docs/traceability/increment-5c1-named-tool-authorization.md
+          git diff --cached --check
+          git commit -m "Increment 5C1: strict named tool authorization substrate"
+          [[ "$(git rev-list --count "$base"..HEAD)" == "1" ]]
+          expected_files="$(cat <<'EOF'
+docs/operations/increment-5c1-named-tool-authorization.md
+docs/traceability/increment-5c1-named-tool-authorization.md
+newsroom/increment5/named_tool_authorization.py
+newsroom/increment5/named_tool_contracts.py
+newsroom/tests/test_increment5c1_named_tool_authorization.py
+newsroom/tests/test_increment5c1_named_tool_contracts.py
+EOF
+          )"
+          actual_files="$(git diff --name-only "$base"..HEAD | sort)"
+          if [[ "$actual_files" != "$expected_files" ]]; then
+            printf '5C1 inventory drifted\nexpected:\n%s\nactual:\n%s\n' \
+              "$expected_files" "$actual_files" >&2
+            exit 1
+          fi
+          git push --force origin "HEAD:refs/heads/$CANONICAL_BRANCH"
+          git push --force origin "HEAD:refs/heads/$CHECKPOINT_BRANCH"
+
+      - name: Create or update canonical PR and request review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(cat "$BASE_PATH")"
+          child_issue="$(cat "$CHILD_ISSUE_PATH")"
+          head="$(git rev-parse HEAD)"
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          focused="$(tail -n 1 "$FOCUSED_LOG")"
+          full="$(tail -n 1 "$FULL_LOG")"
+          cat > /tmp/increment5c1-pr-body.md <<EOF
+          Lifecycle: canonical
+          Delivery-Atom: increment-5c1-named-tool-authorization-v1
+          Canonical-PR: self
+          Checkpoint-Ref: checkpoint/increment-5c1-named-tool-authorization-20260806
+          Close-When: merged
+          Branch-Retention: keep
+
+          ## Scope
+
+          Implements child issue #$child_issue as the branch-neutral 5C1 contract and
+          local authorization substrate over exact post-5B base \`$base\`.
+
+          It defines six strict tool request schemas, exact actor/principal/grant/
+          purpose/scope/version/time authorization, hard bounds, deterministic local
+          outcomes and an immutable non-authoritative replay journal.
+
+          ## Exact non-effects
+
+          No retriever, Neo4j read, collision check, hydration, source-impact read,
+          provider/model call, external call, spend, Candidate/relation mutation,
+          operational admission, publication or production activation occurs. A
+          successful receipt states only local mechanics and retains branch/authority
+          execution as false.
+
+          ## Evidence
+
+          - head: \`$head\`
+          - tree: \`$tree\`
+          - focused: \`$focused\`
+          - complete repository: \`$full\`
+
+          Closes #$child_issue. Parent #252 remains open for 5C2 and 5C3.
+          EOF
+          pr_number="$(gh pr list --repo "$REPOSITORY" --head "$CANONICAL_BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+          if [[ -z "$pr_number" ]]; then
+            gh pr create \
+              --repo "$REPOSITORY" \
+              --base main \
+              --head "$CANONICAL_BRANCH" \
+              --title "Increment 5C1: strict named-tool authorization substrate" \
+              --body-file /tmp/increment5c1-pr-body.md \
+              --draft
+            pr_number="$(gh pr list --repo "$REPOSITORY" --head "$CANONICAL_BRANCH" --base main --state open --json number --jq '.[0].number')"
+          else
+            gh pr edit "$pr_number" \
+              --repo "$REPOSITORY" \
+              --title "Increment 5C1: strict named-tool authorization substrate" \
+              --body-file /tmp/increment5c1-pr-body.md
+          fi
+          printf '%s\n' "$pr_number" | tee "$PR_NUMBER_PATH"
+          if [[ "$(gh pr view "$pr_number" --repo "$REPOSITORY" --json isDraft --jq .isDraft)" == "true" ]]; then
+            gh pr ready "$pr_number" --repo "$REPOSITORY"
+          fi
+          gh pr comment "$pr_number" --repo "$REPOSITORY" --body "$(cat <<EOF
+          Exact 5C1 publication checkpoint:
+
+          - head: \`$head\`
+          - tree: \`$tree\`
+          - parent: \`$base\`
+          - focused: \`$focused\`
+          - complete repository: \`$full\`
+          - branch executed: \`false\`
+          - authority read executed: \`false\`
+          - external/model/embedding/provider calls and spend: \`0\`
+          - authority effect: \`NONE\`
+          - production activation: \`false\`
+
+          @codex review
+
+          Please perform a fresh substantive review of this exact head only. Report
+          every current P1/P2 finding in one pass, focusing on strict-key decoding,
+          duplicate JSON handling, payload-derived scope, actor/principal/grant/
+          purpose/version/time matching, deterministic denial ordering, journal
+          lock discipline and the impossibility of branch/authority/operational or
+          activation claims.
+          EOF
+          )"
+          gh issue comment "$child_issue" --repo "$REPOSITORY" --body "Canonical 5C1 product is published in PR #$pr_number at \`$head\` / tree \`$tree\`. Focused and complete deterministic suites passed. Permanent exact-head workflows and current-head substantive review remain the merge gate."
+
+      - name: Record failure without completion claim
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f "$CHILD_ISSUE_PATH" ]]; then
+            child_issue="$(cat "$CHILD_ISSUE_PATH")"
+            gh issue comment "$child_issue" --repo "$REPOSITORY" --body "5C1 publisher run $GITHUB_RUN_ID failed. No completion or merge is claimed; any pushed checkpoint remains non-mergeable until corrected." || true
+          fi
+          if [[ -f "$PR_NUMBER_PATH" ]]; then
+            gh pr comment "$(cat "$PR_NUMBER_PATH")" --repo "$REPOSITORY" --body "The exact 5C1 publication runner failed. Do not merge. Inspect run $GITHUB_RUN_ID and its artifact." || true
+          fi
+
+      - name: Emit exact publication receipt
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          def command(*args: str) -> str | None:
+              try:
+                  return subprocess.check_output(args, text=True).strip()
+              except Exception:
+                  return None
+
+          def digest(path: str) -> str | None:
+              candidate = Path(path)
+              if not candidate.exists():
+                  return None
+              return "sha256:" + hashlib.sha256(candidate.read_bytes()).hexdigest()
+
+          def summary(path: str) -> str | None:
+              candidate = Path(path)
+              if not candidate.exists():
+                  return None
+              lines = candidate.read_text(encoding="utf-8", errors="replace").splitlines()
+              return lines[-1] if lines else None
+
+          base = Path(os.environ["BASE_PATH"])
+          child = Path(os.environ["CHILD_ISSUE_PATH"])
+          pr = Path(os.environ["PR_NUMBER_PATH"])
+          payload = {
+              "schema_version": "newsroom.increment5c1.publication-receipt.v1",
+              "base": base.read_text().strip() if base.exists() else None,
+              "head": command("git", "rev-parse", "HEAD"),
+              "tree": command("git", "rev-parse", "HEAD^{tree}"),
+              "parent": command("git", "rev-parse", "HEAD^"),
+              "child_issue": child.read_text().strip() if child.exists() else None,
+              "pull_request_number": pr.read_text().strip() if pr.exists() else None,
+              "focused_log_digest": digest(os.environ["FOCUSED_LOG"]),
+              "full_log_digest": digest(os.environ["FULL_LOG"]),
+              "focused_summary": summary(os.environ["FOCUSED_LOG"]),
+              "full_summary": summary(os.environ["FULL_LOG"]),
+              "branch_executed": False,
+              "authority_read_executed": False,
+              "external_call_count": 0,
+              "provider_spend_micros": 0,
+              "authority_effect": "NONE",
+              "production_activation_authorized": False,
+          }
+          receipt = Path(os.environ["RECEIPT_PATH"])
+          receipt.write_text(
+              json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          print(receipt.read_text(encoding="utf-8"))
+          PY
+
+      - name: Upload publication evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5c1-publication-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5c1-publication-receipt.json
+            /tmp/increment5c1-focused.log
+            /tmp/increment5c1-full.log
