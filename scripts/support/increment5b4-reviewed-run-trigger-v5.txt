@@ -1,5 +1,6 @@
-Keep this support-only pull request open until the repaired Increment 5B4 runner uploads its exact reviewed worktree artifact.
+Keep this support-only pull request open until the final clean Increment 5B4 materializer publishes and uploads its exact seven-file worktree.
 
-base=2ddd6833c28790905f2e6c69c0e175a44b62bdf8
-reviewed_carrier=d8f92de968edccdeb58d4ae80a15a04919e25e18
-source=30eb9dd5e7d6c03018d30289ef3fa05f3b76d523
+base_workflow=24264dec641c87f7fe51e763347dd9f9a98ce689
+expected_base=7976909e58a47749ac39fa212f5ecac325294ace
+expected_source=30eb9dd5e7d6c03018d30289ef3fa05f3b76d523
+canonical_branch=agent/increment-5b4-admitted-graph
