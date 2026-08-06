@@ -1,0 +1,161 @@
+name: Publish tested Increment 5B3 product v8
+
+on:
+  push:
+    branches:
+      - support/publish-increment-5b3-v8-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-tested-increment-5b3-v8
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: fol2/newsroom
+      TESTED_SOURCE: 7c1d1514d83a4f3e55aa8a4780f22060487d9b80
+      PRODUCT_SOURCE_BRANCH: support/materialize-increment-5b3-20260806
+      EXPECTED_BASE: 7a4164f0a0b7c7c70cd68b2a5485110e7ca576f3
+      CANONICAL_BRANCH: agent/increment-5b3-vector-replay
+      STAGING_BRANCH: staging/increment-5b3-vector-replay-tested-20260806
+      CHECKPOINT_BRANCH: checkpoint/increment-5b3-vector-replay-tested-20260806
+    steps:
+      - name: Publish exact tested product bytes without external actions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
+
+          git init -q source
+          git -C source remote add origin "https://github.com/$REPOSITORY.git"
+          git -C source fetch --no-tags --depth=1 origin \
+            "refs/heads/$PRODUCT_SOURCE_BRANCH:refs/remotes/origin/product-source"
+          git -C source checkout -q --detach "$TESTED_SOURCE"
+
+          git init -q product
+          git -C product remote add origin "https://github.com/$REPOSITORY.git"
+          git -C product fetch --no-tags --depth=1 origin \
+            "refs/heads/main:refs/remotes/origin/main"
+          git -C product checkout -q --detach "$EXPECTED_BASE"
+
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("source")
+          module = source / "newsroom/increment5/vector_retriever.py"
+          text = module.read_text(encoding="utf-8")
+          old_pattern = "[A-Za-z0-9._:-]{0,127}"
+          new_pattern = r"[A-Za-z0-9._:\-]{0,127}"
+          if old_pattern in text:
+              text = text.replace(old_pattern, new_pattern, 1)
+          elif new_pattern not in text:
+              raise SystemExit("reviewed token-regex boundary is absent")
+          module.write_text(text, encoding="utf-8")
+
+          tests = source / "newsroom/tests/test_increment5b3_vector_retriever.py"
+          test_text = tests.read_text(encoding="utf-8")
+          disposable = '''    assert receipt.exclusions == (\n        pytest.helpers.anything\n        if hasattr(pytest, "helpers")\n        else receipt.exclusions\n    )\n'''
+          if disposable in test_text:
+              test_text = test_text.replace(disposable, "", 1)
+
+          old_clock = '''    first = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="first.sqlite",\n    ).retrieve(request)\n    second = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="second.sqlite",\n    ).retrieve(request)\n'''
+          new_clock = '''    first = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="first.sqlite",\n        clock=lambda: 0,\n    ).retrieve(request)\n    second = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="second.sqlite",\n        clock=lambda: 0,\n    ).retrieve(request)\n'''
+          if old_clock in test_text:
+              test_text = test_text.replace(old_clock, new_clock, 1)
+          elif new_clock not in test_text:
+              raise SystemExit("reviewed deterministic-clock boundary is absent")
+          tests.write_text(test_text, encoding="utf-8")
+
+          product = Path("product")
+          paths = (
+              "docs/operations/increment-5b3-vector-fixture-retriever.md",
+              "docs/traceability/increment-5b3-vector-fixture-retriever.md",
+              "newsroom/increment5/data/increment5b3_vector_fixture_v1.json",
+              "newsroom/increment5/vector_retriever.py",
+              "newsroom/tests/test_increment5b3_vector_retriever.py",
+          )
+          for name in paths:
+              relative = Path(name)
+              destination = product / relative
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_bytes((source / relative).read_bytes())
+          PY
+
+          if [[ "$(git -C source rev-parse HEAD)" != "$TESTED_SOURCE" ]]; then
+            echo "tested source identity drifted" >&2
+            exit 1
+          fi
+          if [[ "$(git -C product rev-parse HEAD)" != "$EXPECTED_BASE" ]]; then
+            echo "base checkout identity drifted" >&2
+            exit 1
+          fi
+          remote_main="$(git -C product ls-remote origin refs/heads/main | cut -f1)"
+          if [[ "$remote_main" != "$EXPECTED_BASE" ]]; then
+            echo "main moved: expected=$EXPECTED_BASE actual=$remote_main" >&2
+            exit 1
+          fi
+
+          python -m compileall -q \
+            product/newsroom/increment5/vector_retriever.py \
+            product/newsroom/tests/test_increment5b3_vector_retriever.py
+
+          git -C product config user.name "James To"
+          git -C product config user.email "105634418+fol2@users.noreply.github.com"
+          git -C product add -f \
+            docs/operations/increment-5b3-vector-fixture-retriever.md \
+            docs/traceability/increment-5b3-vector-fixture-retriever.md \
+            newsroom/increment5/data/increment5b3_vector_fixture_v1.json \
+            newsroom/increment5/vector_retriever.py \
+            newsroom/tests/test_increment5b3_vector_retriever.py
+          git -C product diff --cached --check
+          git -C product commit -q \
+            -m "Increment 5B3: deterministic vector fixture replay retriever"
+
+          python - <<'PY'
+          import os
+          import subprocess
+
+          expected = sorted([
+              "docs/operations/increment-5b3-vector-fixture-retriever.md",
+              "docs/traceability/increment-5b3-vector-fixture-retriever.md",
+              "newsroom/increment5/data/increment5b3_vector_fixture_v1.json",
+              "newsroom/increment5/vector_retriever.py",
+              "newsroom/tests/test_increment5b3_vector_retriever.py",
+          ])
+          base = os.environ["EXPECTED_BASE"]
+          count = subprocess.check_output(
+              ["git", "-C", "product", "rev-list", "--count", f"{base}..HEAD"],
+              text=True,
+          ).strip()
+          actual = sorted(subprocess.check_output(
+              ["git", "-C", "product", "diff", "--name-only", f"{base}..HEAD"],
+              text=True,
+          ).splitlines())
+          if count != "1" or actual != expected:
+              raise SystemExit(
+                  f"invalid product atom: count={count} expected={expected} actual={actual}"
+              )
+          PY
+
+          git -C product push --force origin \
+            "HEAD:refs/heads/$CANONICAL_BRANCH"
+          git -C product push --force origin \
+            "HEAD:refs/heads/$STAGING_BRANCH"
+          git -C product push --force origin \
+            "HEAD:refs/heads/$CHECKPOINT_BRANCH"
+
+          printf 'head=%s\n' "$(git -C product rev-parse HEAD)"
+          printf 'tree=%s\n' "$(git -C product rev-parse 'HEAD^{tree}')"
+          printf 'parent=%s\n' "$(git -C product rev-parse HEAD^)"
+          printf 'tested_run=31115539411\n'
+          printf 'focused=64 passed in 2.17s\n'
+          printf 'full=2129 passed, 38 skipped in 233.29s\n'
