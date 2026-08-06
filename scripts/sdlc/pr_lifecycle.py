@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Validate PR lifecycle metadata and plan/apply bounded housekeeping."""
+"""Validate lifecycle metadata and bind apply to an exact reviewed plan."""
 
 from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+from hashlib import sha256
 import importlib.util
 import json
 import os
@@ -219,14 +220,14 @@ def _verified_merged_canonical_prs(
     *,
     open_prs: tuple[OpenPullRequest, ...],
     lifecycles: dict[int, object],
-) -> frozenset[int]:
+) -> dict[int, tuple[OpenPullRequest, object]]:
     open_numbers = {item.number for item in open_prs}
     referenced = {
         getattr(lifecycle, "canonical_pr")
         for lifecycle in lifecycles.values()
         if getattr(lifecycle, "canonical_pr") is not None
     }
-    verified: dict[int, object] = {}
+    verified: dict[int, tuple[OpenPullRequest, object]] = {}
     for number in sorted(referenced - open_numbers):
         raw = client.get_pull_request(number)
         if raw.get("merged_at") is None:
@@ -243,7 +244,7 @@ def _verified_merged_canonical_prs(
             raise GithubApiError(
                 f"merged pull request #{number} is not canonical"
             )
-        verified[number] = canonical_lifecycle
+        verified[number] = (canonical_pr, canonical_lifecycle)
 
     for pr in open_prs:
         lifecycle = lifecycles[pr.number]
@@ -253,9 +254,10 @@ def _verified_merged_canonical_prs(
             or canonical_number in open_numbers
         ):
             continue
-        canonical_lifecycle = verified.get(canonical_number)
-        if canonical_lifecycle is None:
+        verified_record = verified.get(canonical_number)
+        if verified_record is None:
             continue
+        canonical_lifecycle = verified_record[1]
         if (
             getattr(canonical_lifecycle, "delivery_atom")
             != getattr(lifecycle, "delivery_atom")
@@ -264,10 +266,185 @@ def _verified_merged_canonical_prs(
                 f"#{pr.number} delivery atom differs from merged canonical "
                 f"#{canonical_number}"
             )
-    return frozenset(verified)
+    return verified
 
 
-def inventory(*, apply: bool) -> int:
+def _validated_commit_sha(value: str, *, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 40
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise PrLifecycleError(
+            f"{field} must be a lowercase full commit SHA"
+        )
+    return value
+
+
+def _validated_plan_digest(value: str, *, field: str) -> str:
+    prefix = "sha256:"
+    if not isinstance(value, str) or not value.startswith(prefix):
+        raise PrLifecycleError(
+            f"{field} must be sha256:<64 lowercase hex characters>"
+        )
+    payload = value[len(prefix) :]
+    if (
+        len(payload) != 64
+        or any(character not in "0123456789abcdef" for character in payload)
+    ):
+        raise PrLifecycleError(
+            f"{field} must be sha256:<64 lowercase hex characters>"
+        )
+    return value
+
+
+def _parse_evaluation_time(value: str | None) -> datetime:
+    if value is None or not value:
+        return datetime.now(timezone.utc).replace(microsecond=0)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PrLifecycleError(
+            "plan evaluation time must be RFC3339 UTC seconds"
+        ) from exc
+    if (
+        parsed.tzinfo is None
+        or parsed.utcoffset() != timezone.utc.utcoffset(parsed)
+        or parsed.microsecond != 0
+        or not value.endswith("Z")
+    ):
+        raise PrLifecycleError(
+            "plan evaluation time must be RFC3339 UTC seconds"
+        )
+    return parsed.astimezone(timezone.utc)
+
+
+def _utc_text(value: datetime) -> str:
+    return (
+        value.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _lifecycle_record(lifecycle: object) -> dict[str, object]:
+    canonical_pr = getattr(lifecycle, "canonical_pr")
+    return {
+        "kind": getattr(lifecycle, "kind").value,
+        "delivery_atom": getattr(lifecycle, "delivery_atom"),
+        "canonical_pr": canonical_pr,
+        "checkpoint_ref": getattr(lifecycle, "checkpoint_ref"),
+        "close_when": getattr(lifecycle, "close_when").value,
+        "branch_retention": getattr(lifecycle, "branch_retention").value,
+    }
+
+
+def _pull_request_record(
+    pr: OpenPullRequest,
+    lifecycle: object,
+) -> dict[str, object]:
+    return {
+        "number": pr.number,
+        "body_sha256": "sha256:"
+        + sha256(pr.body.encode("utf-8")).hexdigest(),
+        "draft": pr.draft,
+        "head_ref": pr.head_ref,
+        "head_repository": pr.head_repository,
+        "head_sha": pr.head_sha,
+        "created_at": _utc_text(pr.created_at),
+        "labels": sorted(pr.labels),
+        "lifecycle": _lifecycle_record(lifecycle),
+    }
+
+
+def _build_mutation_plan_document(
+    *,
+    repository: str,
+    revision: str,
+    evaluation_time: datetime,
+    open_prs: tuple[OpenPullRequest, ...],
+    lifecycles: dict[int, object],
+    merged_canonical_records: dict[
+        int,
+        tuple[OpenPullRequest, object],
+    ],
+    checkpoint_head_shas: dict[str, str],
+    plan: HousekeepingPlan,
+) -> dict[str, object]:
+    return {
+        "schema": "newsroom.pr-lifecycle-mutation-plan.v1",
+        "repository": repository,
+        "revision": revision,
+        "evaluation_time": _utc_text(evaluation_time),
+        "open_pull_requests": [
+            _pull_request_record(pr, lifecycles[pr.number])
+            for pr in sorted(open_prs, key=lambda item: item.number)
+        ],
+        "verified_merged_canonical_pull_requests": [
+            _pull_request_record(pr, lifecycle)
+            for _, (pr, lifecycle) in sorted(
+                merged_canonical_records.items()
+            )
+        ],
+        "checkpoint_head_shas": {
+            ref: checkpoint_head_shas[ref]
+            for ref in sorted(checkpoint_head_shas)
+        },
+        "close_actions": [
+            {
+                "pr_number": action.pr_number,
+                "reason": action.reason,
+            }
+            for action in plan.close_actions
+        ],
+        "warnings": list(plan.warnings),
+    }
+
+
+def _canonical_plan_bytes(document: dict[str, object]) -> bytes:
+    return json.dumps(
+        document,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _mutation_plan_digest(document: dict[str, object]) -> str:
+    return "sha256:" + sha256(_canonical_plan_bytes(document)).hexdigest()
+
+
+def _write_plan_document(
+    path: Path,
+    document: dict[str, object],
+    *,
+    plan_digest: str,
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "digest": plan_digest,
+                "plan": document,
+            },
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def inventory(
+    *,
+    apply: bool,
+    revision: str,
+    evaluation_time: str | None = None,
+    reviewed_revision: str | None = None,
+    reviewed_plan_digest: str | None = None,
+    plan_output: Path | None = None,
+) -> int:
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     token = os.environ.get("GITHUB_TOKEN", "")
     if (
@@ -278,6 +455,27 @@ def inventory(*, apply: bool) -> int:
         raise PrLifecycleError(
             "apply mode requires the exact housekeeping confirmation"
         )
+
+    executing_revision = _validated_commit_sha(
+        revision,
+        field="executing revision",
+    )
+    evaluated_at = _parse_evaluation_time(evaluation_time)
+    expected_digest: str | None = None
+    if apply:
+        reviewed = _validated_commit_sha(
+            reviewed_revision or "",
+            field="reviewed revision",
+        )
+        if reviewed != executing_revision:
+            raise PrLifecycleError(
+                "reviewed revision does not match executing revision"
+            )
+        expected_digest = _validated_plan_digest(
+            reviewed_plan_digest or "",
+            field="reviewed plan digest",
+        )
+
     client = GithubClient(repository=repository, token=token)
     raw_prs = client.list_open_pull_requests()
     open_prs = tuple(_open_pr_from_json(item) for item in raw_prs)
@@ -286,7 +484,7 @@ def inventory(*, apply: bool) -> int:
         item.number: parse_pr_lifecycle(item.body)
         for item in open_prs
     }
-    merged_canonical = _verified_merged_canonical_prs(
+    merged_canonical_records = _verified_merged_canonical_prs(
         client,
         open_prs=open_prs,
         lifecycles=lifecycles,
@@ -296,20 +494,42 @@ def inventory(*, apply: bool) -> int:
         for lifecycle in lifecycles.values()
         if lifecycle.checkpoint_ref is not None
     }
-    existing_checkpoints = frozenset(
-        ref
+    checkpoint_head_shas = {
+        ref: sha
         for ref in sorted(checkpoint_refs)
-        if client.branch_exists(ref)
-    )
+        if (sha := client.branch_sha(ref)) is not None
+    }
     plan = plan_housekeeping(
         open_prs,
-        merged_canonical_prs=merged_canonical,
-        existing_checkpoint_refs=existing_checkpoints,
+        merged_canonical_prs=frozenset(merged_canonical_records),
+        checkpoint_head_shas=checkpoint_head_shas,
         repository_full_name=repository,
-        now=datetime.now(timezone.utc),
+        now=evaluated_at,
     )
+    document = _build_mutation_plan_document(
+        repository=repository,
+        revision=executing_revision,
+        evaluation_time=evaluated_at,
+        open_prs=open_prs,
+        lifecycles=lifecycles,
+        merged_canonical_records=merged_canonical_records,
+        checkpoint_head_shas=checkpoint_head_shas,
+        plan=plan,
+    )
+    plan_digest = _mutation_plan_digest(document)
+    if plan_output is not None:
+        _write_plan_document(
+            plan_output,
+            document,
+            plan_digest=plan_digest,
+        )
 
     if apply:
+        assert expected_digest is not None
+        if plan_digest != expected_digest:
+            raise PrLifecycleError(
+                "current mutation plan digest does not match reviewed plan"
+            )
         _apply_plan(
             client,
             plan,
@@ -320,6 +540,9 @@ def inventory(*, apply: bool) -> int:
         plan,
         open_count=len(open_prs),
         apply=apply,
+        revision=executing_revision,
+        evaluation_time=evaluated_at,
+        plan_digest=plan_digest,
     )
     print(output)
     _write_summary(output)
@@ -527,14 +750,20 @@ def _render_plan(
     *,
     open_count: int,
     apply: bool,
+    revision: str,
+    evaluation_time: datetime,
+    plan_digest: str,
 ) -> str:
     lines = [
         "## PR lifecycle housekeeping",
         "",
-        f"- Mode: `{'APPLY' if apply else 'DRY_RUN'}`",
+        f"- Mode: `{'APPLY' if apply else 'PLAN'}`",
+        f"- Immutable revision: `{revision}`",
+        f"- Plan evaluation time: `{_utc_text(evaluation_time)}`",
+        f"- Reviewed mutation plan digest: `{plan_digest}`",
         f"- Open PRs inspected: `{open_count}`",
         f"- Disposable PRs eligible for closure: `{len(plan.close_actions)}`",
-        f"- Age warnings: `{len(plan.warnings)}`",
+        f"- Warnings: `{len(plan.warnings)}`",
         "- Automatic branch deletion: `DISABLED`",
         "",
     ]
@@ -581,6 +810,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     inventory_parser = subparsers.add_parser("inventory")
     inventory_parser.add_argument("--apply", action="store_true")
+    inventory_parser.add_argument(
+        "--revision",
+        default=os.environ.get("GITHUB_SHA", ""),
+    )
+    inventory_parser.add_argument(
+        "--evaluation-time",
+        default="",
+    )
+    inventory_parser.add_argument(
+        "--reviewed-revision",
+        default="",
+    )
+    inventory_parser.add_argument(
+        "--reviewed-plan-digest",
+        default="",
+    )
+    inventory_parser.add_argument(
+        "--plan-output",
+        type=Path,
+    )
     return parser
 
 
@@ -592,7 +841,14 @@ def main(argv: list[str] | None = None) -> int:
                 raise PrLifecycleError("GitHub event path is required")
             return validate_event(args.event)
         if args.command == "inventory":
-            return inventory(apply=args.apply)
+            return inventory(
+                apply=args.apply,
+                revision=args.revision,
+                evaluation_time=args.evaluation_time,
+                reviewed_revision=args.reviewed_revision,
+                reviewed_plan_digest=args.reviewed_plan_digest,
+                plan_output=args.plan_output,
+            )
         raise PrLifecycleError("unsupported lifecycle command")
     except (PrLifecycleError, GithubApiError) as exc:
         print(f"PR lifecycle error: {exc}", file=sys.stderr)
