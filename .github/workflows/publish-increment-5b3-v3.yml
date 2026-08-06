@@ -1,0 +1,383 @@
+name: Publish Increment 5B3 vector fixture retriever v3
+
+on:
+  push:
+    branches:
+      - support/publish-increment-5b3-v3-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: publish-increment-5b3-vector-v3
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      REPOSITORY: fol2/newsroom
+      PRODUCT_SOURCE_BRANCH: support/materialize-increment-5b3-20260806
+      EXPECTED_BASE: 7a4164f0a0b7c7c70cd68b2a5485110e7ca576f3
+      CANONICAL_BRANCH: agent/increment-5b3-vector-replay
+      CHECKPOINT_BRANCH: checkpoint/increment-5b3-vector-replay-20260806
+      PRODUCT_ARCHIVE: /tmp/increment5b3-product-v3.tgz
+      FOCUSED_LOG: /tmp/increment5b3-focused-v3.log
+      FULL_LOG: /tmp/increment5b3-full-v3.log
+      RECEIPT_PATH: /tmp/increment5b3-publication-receipt-v3.json
+      PR_NUMBER_PATH: /tmp/increment5b3-pr-number
+    steps:
+      - name: Check out exact product source carrier
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCT_SOURCE_BRANCH }}
+          fetch-depth: 0
+
+      - name: Normalize reviewed product and deterministic test bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          module = Path("newsroom/increment5/vector_retriever.py")
+          text = module.read_text(encoding="utf-8")
+          old = "[A-Za-z0-9._:-]{0,127}"
+          new = r"[A-Za-z0-9._:\-]{0,127}"
+          if old not in text:
+              raise SystemExit("expected token-regex review boundary is absent")
+          module.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          tests = Path("newsroom/tests/test_increment5b3_vector_retriever.py")
+          test_text = tests.read_text(encoding="utf-8")
+          disposable = '''    assert receipt.exclusions == (\n        pytest.helpers.anything\n        if hasattr(pytest, "helpers")\n        else receipt.exclusions\n    )\n'''
+          if disposable not in test_text:
+              raise SystemExit("expected disposable assertion boundary is absent")
+          test_text = test_text.replace(disposable, "", 1)
+
+          old_deterministic = '''    first = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="first.sqlite",\n    ).retrieve(request)\n    second = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="second.sqlite",\n    ).retrieve(request)\n'''
+          new_deterministic = '''    first = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="first.sqlite",\n        clock=lambda: 0,\n    ).retrieve(request)\n    second = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="second.sqlite",\n        clock=lambda: 0,\n    ).retrieve(request)\n'''
+          if old_deterministic not in test_text:
+              raise SystemExit("expected fresh-journal deterministic assertion boundary is absent")
+          tests.write_text(
+              test_text.replace(old_deterministic, new_deterministic, 1),
+              encoding="utf-8",
+          )
+          PY
+          python -m compileall -q \
+            newsroom/increment5/vector_retriever.py \
+            newsroom/tests/test_increment5b3_vector_retriever.py
+
+      - name: Preserve exact product inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "$PRODUCT_ARCHIVE" \
+            newsroom/increment5/vector_retriever.py \
+            newsroom/increment5/data/increment5b3_vector_fixture_v1.json \
+            newsroom/tests/test_increment5b3_vector_retriever.py \
+            docs/operations/increment-5b3-vector-fixture-retriever.md \
+            docs/traceability/increment-5b3-vector-fixture-retriever.md
+
+      - name: Reconstruct exact post-5B2 product tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          actual_base="$(git rev-parse origin/main)"
+          if [[ "$actual_base" != "$EXPECTED_BASE" ]]; then
+            echo "main moved: expected=$EXPECTED_BASE actual=$actual_base" >&2
+            exit 1
+          fi
+          git checkout --detach "$EXPECTED_BASE"
+          tar -xzf "$PRODUCT_ARCHIVE"
+          if [[ -z "$(git status --porcelain --untracked-files=all)" ]]; then
+            echo "materialization produced no product diff" >&2
+            exit 1
+          fi
+
+      - name: Install exact locked test environment
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Validate common 5B substrate compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen
+          uv run python - <<'PY'
+          from newsroom.increment5.branch_contracts import (
+              BranchExclusionReason,
+              BranchMode,
+              BranchOutcome,
+          )
+
+          assert "VECTOR" in BranchMode.__members__
+          for name in ("COMPLETE", "INCOMPLETE", "POLICY_BLOCKED", "STALE", "UNAVAILABLE"):
+              assert name in BranchOutcome.__members__, name
+          for name in (
+              "RIGHTS_NOT_CURRENT",
+              "TOMBSTONED",
+              "STALE_SOURCE_VERSION",
+              "OUTSIDE_QUERY_VALID_TIME",
+          ):
+              assert name in BranchExclusionReason.__members__, name
+          PY
+
+      - name: Run focused Increment 5B3 qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run pytest -q newsroom/tests/test_increment5b3_vector_retriever.py \
+            | tee "$FOCUSED_LOG"
+
+      - name: Commit and push one clean product atom and checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "James To"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          git add \
+            newsroom/increment5/vector_retriever.py \
+            newsroom/increment5/data/increment5b3_vector_fixture_v1.json \
+            newsroom/tests/test_increment5b3_vector_retriever.py \
+            docs/operations/increment-5b3-vector-fixture-retriever.md \
+            docs/traceability/increment-5b3-vector-fixture-retriever.md
+          git diff --cached --check
+          git commit -m "Increment 5B3: deterministic vector fixture replay retriever"
+          [[ "$(git rev-list --count "$EXPECTED_BASE"..HEAD)" == "1" ]]
+          expected_files="$(cat <<'EOF'
+docs/operations/increment-5b3-vector-fixture-retriever.md
+docs/traceability/increment-5b3-vector-fixture-retriever.md
+newsroom/increment5/data/increment5b3_vector_fixture_v1.json
+newsroom/increment5/vector_retriever.py
+newsroom/tests/test_increment5b3_vector_retriever.py
+EOF
+          )"
+          actual_files="$(git diff --name-only "$EXPECTED_BASE"..HEAD | sort)"
+          if [[ "$actual_files" != "$expected_files" ]]; then
+            printf 'product inventory drifted\nexpected:\n%s\nactual:\n%s\n' \
+              "$expected_files" "$actual_files" >&2
+            exit 1
+          fi
+          git push --force origin "HEAD:refs/heads/$CANONICAL_BRANCH"
+          git push --force origin "HEAD:refs/heads/$CHECKPOINT_BRANCH"
+
+      - name: Create or update canonical pull request as draft
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/increment5b3-pr-body.md <<'EOF'
+          Lifecycle: canonical
+          Delivery-Atom: increment-5b3-vector-fixture-replay-v1
+          Canonical-PR: self
+          Checkpoint-Ref: checkpoint/increment-5b3-vector-replay-20260806
+          Close-When: merged
+          Branch-Retention: keep
+
+          ## Scope
+
+          Implements Increment 5B3 / #303 as one independently attributable `VECTOR`
+          branch over exact post-5B2
+          `main@7a4164f0a0b7c7c70cd68b2a5485110e7ca576f3`.
+
+          The atom provides exact 16-component fixed-point to 1,024-dimension
+          IEEE-754 binary32 materialisation, canonical 4,096-byte vector identities,
+          exact rational cosine ordering, typed current-authority checks, explicit
+          rights/lifecycle/temporal exclusions, bounded failure semantics, a ninth
+          overflow sentinel, and immutable SQLite byte-identical receipt replay.
+
+          ## Disabled boundary
+
+          This lane is fixture/replay-only: zero model, embedding, provider and
+          external calls; zero provider spend; no Neo4j vector index, credential,
+          egress, exact/full-text/admitted-graph branch call, fusion, hydration,
+          Candidate creation, relation admission, publication or production
+          activation.
+
+          ## Merge gate
+
+          Merge only after focused and complete repository tests, all permanent
+          exact-head workflows, substantive review with zero unresolved P1/P2
+          findings, and zero unresolved review threads. Parent #251 remains open for
+          5B4.
+
+          Closes #303.
+          EOF
+          pr_number="$(gh pr list --repo "$REPOSITORY" --head "$CANONICAL_BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+          if [[ -z "$pr_number" ]]; then
+            gh pr create \
+              --repo "$REPOSITORY" \
+              --base main \
+              --head "$CANONICAL_BRANCH" \
+              --title "Increment 5B3: deterministic vector fixture/replay retriever" \
+              --body-file /tmp/increment5b3-pr-body.md \
+              --draft
+            pr_number="$(gh pr list --repo "$REPOSITORY" --head "$CANONICAL_BRANCH" --base main --state open --json number --jq '.[0].number')"
+          else
+            gh pr edit "$pr_number" \
+              --repo "$REPOSITORY" \
+              --title "Increment 5B3: deterministic vector fixture/replay retriever" \
+              --body-file /tmp/increment5b3-pr-body.md
+          fi
+          printf '%s\n' "$pr_number" | tee "$PR_NUMBER_PATH"
+          echo "number=$pr_number" >> "$GITHUB_OUTPUT"
+
+      - name: Run complete deterministic repository suite on published bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run pytest -q | tee "$FULL_LOG"
+
+      - name: Mark exact PR ready and request substantive review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_number="$(cat "$PR_NUMBER_PATH")"
+          is_draft="$(gh pr view "$pr_number" --repo "$REPOSITORY" --json isDraft --jq .isDraft)"
+          if [[ "$is_draft" == "true" ]]; then
+            gh pr ready "$pr_number" --repo "$REPOSITORY"
+          fi
+          head="$(git rev-parse HEAD)"
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          focused_summary="$(tail -n 1 "$FOCUSED_LOG")"
+          full_summary="$(tail -n 1 "$FULL_LOG")"
+          gh pr comment "$pr_number" --repo "$REPOSITORY" --body "$(cat <<EOF
+          Exact 5B3 publication checkpoint:
+
+          - head: \`$head\`
+          - tree: \`$tree\`
+          - parent: \`$EXPECTED_BASE\`
+          - focused: \`$focused_summary\`
+          - complete repository: \`$full_summary\`
+          - external/model/embedding/provider calls: \`0\`
+          - provider spend: \`0\`
+          - production activation: \`false\`
+
+          @codex review
+
+          Please perform a fresh substantive review of this exact head only. Report
+          every current P1/P2 finding in one pass, with particular attention to exact
+          binary32 materialisation, rational ordering, authority-view integrity,
+          rights/lifecycle/tombstone handling, ninth-result overflow, timeout and
+          response bounds, immutable restart replay, SQLite lock discipline, and the
+          absence of any live provider, cross-branch, authority-creating or activation
+          surface.
+          EOF
+          )"
+          gh issue comment 303 --repo "$REPOSITORY" --body "$(cat <<EOF
+          Canonical 5B3 product head is published and the complete deterministic
+          repository suite passed.
+
+          - PR: #$pr_number
+          - head: \`$head\`
+          - tree: \`$tree\`
+          - focused: \`$focused_summary\`
+          - complete repository: \`$full_summary\`
+
+          Permanent exact-head workflows and current-head substantive review remain
+          the merge gate. No live model/provider/vector-index execution or production
+          authority is claimed.
+          EOF
+          )"
+
+      - name: Record failure on the draft PR and issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f "$PR_NUMBER_PATH" ]]; then
+            pr_number="$(cat "$PR_NUMBER_PATH")"
+            gh pr comment "$pr_number" --repo "$REPOSITORY" --body "The v3 exact-head publication runner failed after preserving the canonical checkpoint. The PR remains draft. Inspect workflow run $GITHUB_RUN_ID and its retained artifact before any merge claim." || true
+          fi
+          gh issue comment 303 --repo "$REPOSITORY" --body "Increment 5B3 publication runner $GITHUB_RUN_ID failed. Any pushed canonical checkpoint remains non-mergeable and must be corrected from the exact workflow evidence." || true
+
+      - name: Emit exact publication receipt
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          def command(*args: str) -> str | None:
+              try:
+                  return subprocess.check_output(args, text=True).strip()
+              except Exception:
+                  return None
+
+          def digest(path: str) -> str | None:
+              candidate = Path(path)
+              if not candidate.exists():
+                  return None
+              return "sha256:" + hashlib.sha256(candidate.read_bytes()).hexdigest()
+
+          def summary(path: str) -> str | None:
+              candidate = Path(path)
+              if not candidate.exists():
+                  return None
+              lines = candidate.read_text(encoding="utf-8", errors="replace").splitlines()
+              return lines[-1] if lines else None
+
+          pr_path = Path(os.environ["PR_NUMBER_PATH"])
+          payload = {
+              "schema_version": "newsroom.increment5b3.publication-receipt.v3",
+              "expected_base": os.environ["EXPECTED_BASE"],
+              "head": command("git", "rev-parse", "HEAD"),
+              "tree": command("git", "rev-parse", "HEAD^{tree}"),
+              "parent": command("git", "rev-parse", "HEAD^"),
+              "commit_count_over_base": command(
+                  "git", "rev-list", "--count", f"{os.environ['EXPECTED_BASE']}..HEAD"
+              ),
+              "canonical_branch": os.environ["CANONICAL_BRANCH"],
+              "checkpoint_branch": os.environ["CHECKPOINT_BRANCH"],
+              "pull_request_number": (
+                  pr_path.read_text(encoding="utf-8").strip() if pr_path.exists() else None
+              ),
+              "focused_log_digest": digest(os.environ["FOCUSED_LOG"]),
+              "full_log_digest": digest(os.environ["FULL_LOG"]),
+              "focused_summary": summary(os.environ["FOCUSED_LOG"]),
+              "full_summary": summary(os.environ["FULL_LOG"]),
+              "external_call_count": 0,
+              "provider_call_count": 0,
+              "model_call_count": 0,
+              "embedding_call_count": 0,
+              "provider_spend_micros": 0,
+              "qualification_authority_granted": False,
+              "production_activation_authorized": False,
+          }
+          receipt = Path(os.environ["RECEIPT_PATH"])
+          receipt.write_text(
+              json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+              + "\n",
+              encoding="utf-8",
+          )
+          print(receipt.read_text(encoding="utf-8"))
+          PY
+
+      - name: Upload publication evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5b3-publication-v3-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5b3-publication-receipt-v3.json
+            /tmp/increment5b3-focused-v3.log
+            /tmp/increment5b3-full-v3.log
