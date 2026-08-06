@@ -1,0 +1,394 @@
+name: Finalize Increment 5B4 and parent 5B
+
+on:
+  push:
+    branches:
+      - support/finalize-increment-5b4-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  checks: read
+  actions: read
+
+concurrency:
+  group: finalize-increment-5b4-exact-head
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: fol2/newsroom
+      OWNER: fol2
+      REPO: newsroom
+      CANONICAL_BRANCH: agent/increment-5b4-admitted-graph
+      GATE_REPORT: /tmp/increment5b4-final-gate.json
+      GATE_STATE: /tmp/increment5b4-final-gate-state
+      PR_NUMBER_PATH: /tmp/increment5b4-final-pr-number
+      HEAD_PATH: /tmp/increment5b4-final-head
+      BASE_PATH: /tmp/increment5b4-final-base
+    steps:
+      - name: Check out disposable exact-head gate
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for exact-head workflows, actual-service evidence and review
+        shell: bash
+        run: |
+          set -euo pipefail
+          permanent_paths=(
+            ".github/workflows/ci.yml"
+            ".github/workflows/authority-a2a.yml"
+            ".github/workflows/authority-a2b.yml"
+            ".github/workflows/projection-b1.yml"
+            ".github/workflows/projection-b2-neo4j.yml"
+            ".github/workflows/evidence.yml"
+          )
+
+          gate_passed=false
+          for attempt in $(seq 1 70); do
+            pr_number="$(gh pr list \
+              --repo "$REPOSITORY" \
+              --head "$CANONICAL_BRANCH" \
+              --base main \
+              --state open \
+              --json number \
+              --jq '.[0].number // empty')"
+            if [[ -z "$pr_number" ]]; then
+              printf '{"pass":false,"reasons":["canonical 5B4 PR is not open"],"attempt":%s}\n' \
+                "$attempt" | tee "$GATE_REPORT"
+              sleep 30
+              continue
+            fi
+            printf '%s\n' "$pr_number" > "$PR_NUMBER_PATH"
+
+            gh pr view "$pr_number" \
+              --repo "$REPOSITORY" \
+              --json number,state,isDraft,mergeable,headRefOid,baseRefOid,url,title \
+              > /tmp/pr.json
+            head="$(jq -r .headRefOid /tmp/pr.json)"
+            base="$(jq -r .baseRefOid /tmp/pr.json)"
+            printf '%s\n' "$head" > "$HEAD_PATH"
+            printf '%s\n' "$base" > "$BASE_PATH"
+
+            main_head="$(gh api "repos/$REPOSITORY/branches/main" --jq .commit.sha)"
+            issue303_state="$(gh issue view 303 --repo "$REPOSITORY" --json state --jq .state)"
+            vector_present=false
+            if gh api \
+              "repos/$REPOSITORY/contents/newsroom/increment5/vector_retriever.py?ref=$base" \
+              >/tmp/vector-at-base.json 2>/dev/null
+            then
+              vector_present=true
+            fi
+
+            gh api "repos/$REPOSITORY/commits/$head" > /tmp/head-commit.json
+            gh api --paginate "repos/$REPOSITORY/pulls/$pr_number/files?per_page=100" \
+              --slurp > /tmp/pr-files-pages.json
+            gh api "repos/$REPOSITORY/actions/runs?head_sha=$head&per_page=100" \
+              > /tmp/workflow-runs.json
+            gh api --paginate "repos/$REPOSITORY/issues/$pr_number/comments?per_page=100" \
+              --slurp > /tmp/pr-comment-pages.json
+            gh api graphql \
+              -f owner="$OWNER" \
+              -f repo="$REPO" \
+              -F number="$pr_number" \
+              -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){totalCount nodes{isResolved}}}}}' \
+              > /tmp/review-threads.json
+
+            PERMANENT_PATHS="$(printf '%s\n' "${permanent_paths[@]}")" \
+            ATTEMPT="$attempt" \
+            MAIN_HEAD="$main_head" \
+            ISSUE303_STATE="$issue303_state" \
+            VECTOR_PRESENT="$vector_present" \
+            python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          permanent_paths = [
+              item for item in os.environ["PERMANENT_PATHS"].splitlines() if item
+          ]
+          pr = json.loads(Path("/tmp/pr.json").read_text(encoding="utf-8"))
+          commit = json.loads(Path("/tmp/head-commit.json").read_text(encoding="utf-8"))
+          file_pages = json.loads(
+              Path("/tmp/pr-files-pages.json").read_text(encoding="utf-8")
+          )
+          files = [item for page in file_pages for item in page]
+          runs = json.loads(
+              Path("/tmp/workflow-runs.json").read_text(encoding="utf-8")
+          ).get("workflow_runs", [])
+          comment_pages = json.loads(
+              Path("/tmp/pr-comment-pages.json").read_text(encoding="utf-8")
+          )
+          comments = [item for page in comment_pages for item in page]
+          threads = json.loads(
+              Path("/tmp/review-threads.json").read_text(encoding="utf-8")
+          )["data"]["repository"]["pullRequest"]["reviewThreads"]
+
+          reasons: list[str] = []
+          head = pr.get("headRefOid")
+          base = pr.get("baseRefOid")
+          if pr.get("state") != "OPEN":
+              reasons.append("PR is not open")
+          if pr.get("isDraft"):
+              reasons.append("PR is still draft")
+          if pr.get("mergeable") != "MERGEABLE":
+              reasons.append(f"PR mergeable state is {pr.get('mergeable')}")
+          if base != os.environ["MAIN_HEAD"]:
+              reasons.append("main moved after the 5B4 predecessor base was locked")
+          if os.environ["ISSUE303_STATE"] != "CLOSED":
+              reasons.append("5B3 issue #303 is not closed completed")
+          if os.environ["VECTOR_PRESENT"] != "true":
+              reasons.append("5B3 vector product is absent from the 5B4 base")
+
+          parents = commit.get("parents", [])
+          if len(parents) != 1 or parents[0].get("sha") != base:
+              reasons.append("5B4 candidate is not exactly one commit over its PR base")
+
+          expected_files = {
+              "docs/operations/increment-5b4-admitted-graph-retriever.md",
+              "docs/traceability/increment-5b4-admitted-graph-retriever.md",
+              "newsroom/authority/neo4j_admitted_graph_reader.py",
+              "newsroom/increment5/admitted_graph_retriever.py",
+              "newsroom/tests/test_increment5b4_admitted_graph_retriever.py",
+              "newsroom/tests/test_increment5b4_neo4j_authority_port.py",
+              "newsroom/tests/test_increment5b4_neo4j_service.py",
+          }
+          actual_files = {item.get("filename") for item in files}
+          if actual_files != expected_files:
+              reasons.append(
+                  "5B4 product inventory mismatch: "
+                  f"expected={sorted(expected_files)} actual={sorted(actual_files)}"
+              )
+
+          latest_by_path: dict[str, dict[str, object]] = {}
+          for run in runs:
+              path = run.get("path")
+              if path in permanent_paths and path not in latest_by_path:
+                  latest_by_path[path] = run
+          workflow_state: dict[str, object] = {}
+          for path in permanent_paths:
+              run = latest_by_path.get(path)
+              if run is None:
+                  reasons.append(f"missing exact-head permanent workflow: {path}")
+                  workflow_state[path] = None
+                  continue
+              state = {
+                  "id": run.get("id"),
+                  "status": run.get("status"),
+                  "conclusion": run.get("conclusion"),
+                  "head_sha": run.get("head_sha"),
+                  "event": run.get("event"),
+              }
+              workflow_state[path] = state
+              if run.get("head_sha") != head:
+                  reasons.append(f"workflow {path} is not bound to the current head")
+              if run.get("status") != "completed" or run.get("conclusion") != "success":
+                  reasons.append(
+                      f"workflow {path} is not successful: "
+                      f"status={run.get('status')} conclusion={run.get('conclusion')}"
+                  )
+
+          bodies = [str(comment.get("body") or "") for comment in comments]
+          publication_marker = any(
+              "Exact 5B4 publication checkpoint:" in body
+              and f"head: `{head}`" in body
+              and "actual Neo4j:" in body
+              and "complete repository:" in body
+              and "passed" in body.lower()
+              for body in bodies
+          )
+          if not publication_marker:
+              reasons.append(
+                  "current-head focused, actual-Neo4j and complete-suite evidence is absent"
+              )
+
+          codex_clean = False
+          codex_reviewed = None
+          for body in bodies:
+              if "Codex Review:" not in body:
+                  continue
+              match = re.search(r"Reviewed commit:\*\*\s*`([0-9a-f]+)`", body)
+              if match is None:
+                  match = re.search(r"Reviewed commit:\s*`([0-9a-f]+)`", body)
+              if match is None:
+                  continue
+              reviewed = match.group(1)
+              if not str(head).startswith(reviewed):
+                  continue
+              if "didn't find any major issues" in body.lower():
+                  codex_clean = True
+                  codex_reviewed = reviewed
+                  break
+          if not codex_clean:
+              reasons.append("clean Codex review for the current 5B4 head is absent")
+
+          if threads.get("totalCount", 0) > 100:
+              reasons.append("review thread count exceeds the bounded gate query")
+          unresolved = [
+              node for node in threads.get("nodes", []) if not node.get("isResolved")
+          ]
+          if unresolved:
+              reasons.append(f"{len(unresolved)} review threads remain unresolved")
+
+          report = {
+              "schema_version": "newsroom.increment5b4.final-merge-gate.v1",
+              "attempt": int(os.environ["ATTEMPT"]),
+              "pass": not reasons,
+              "reasons": reasons,
+              "pull_request": pr,
+              "head": head,
+              "base": base,
+              "head_tree": commit.get("commit", {}).get("tree", {}).get("sha"),
+              "files": sorted(actual_files),
+              "permanent_workflows": workflow_state,
+              "publication_marker": publication_marker,
+              "codex_clean": codex_clean,
+              "codex_reviewed_commit": codex_reviewed,
+              "review_thread_total": threads.get("totalCount"),
+              "unresolved_review_threads": len(unresolved),
+          }
+          Path(os.environ["GATE_REPORT"]).write_text(
+              json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+              + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(report, indent=2, sort_keys=True))
+          Path(os.environ["GATE_STATE"]).write_text(
+              "PASS\n" if not reasons else "WAIT\n",
+              encoding="utf-8",
+          )
+          PY
+
+            if [[ "$(cat "$GATE_STATE")" == "PASS" ]]; then
+              gate_passed=true
+              break
+            fi
+            sleep 30
+          done
+
+          if [[ "$gate_passed" != "true" ]]; then
+            if [[ -f "$PR_NUMBER_PATH" ]]; then
+              pr_number="$(cat "$PR_NUMBER_PATH")"
+              gh pr comment "$pr_number" --repo "$REPOSITORY" --body "The exact 5B4 merge gate did not pass within its bounded wait. No merge occurred. Latest retained report:\n\n\`\`\`json\n$(cat "$GATE_REPORT")\n\`\`\`" || true
+            fi
+            exit 1
+          fi
+
+      - name: Squash merge exact gated 5B4 head
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_number="$(cat "$PR_NUMBER_PATH")"
+          head="$(cat "$HEAD_PATH")"
+          base="$(cat "$BASE_PATH")"
+          merge_response="$(gh api \
+            --method PUT \
+            "repos/$REPOSITORY/pulls/$pr_number/merge" \
+            -f merge_method=squash \
+            -f sha="$head" \
+            -f commit_title="Increment 5B4: bounded admitted graph retriever" \
+            -f commit_message="Deliver the independently attributable admitted-graph branch with fixed read-only Neo4j operations, current authority binding, admitted-only trust, rights/lifecycle/tombstone safety, deterministic bounded traversal and immutable restart replay. Exact-head permanent workflows and substantive review passed. Closes #308.")"
+          printf '%s\n' "$merge_response" > /tmp/increment5b4-merge-response.json
+          if [[ "$(jq -r .merged <<<"$merge_response")" != "true" ]]; then
+            echo "GitHub did not merge the exact gated 5B4 head" >&2
+            exit 1
+          fi
+          merge_commit="$(jq -r .sha <<<"$merge_response")"
+          main_head="$(gh api "repos/$REPOSITORY/branches/main" --jq .commit.sha)"
+          if [[ "$main_head" != "$merge_commit" ]]; then
+            echo "main did not advance to the returned 5B4 squash commit" >&2
+            exit 1
+          fi
+          head_tree="$(gh api "repos/$REPOSITORY/commits/$head" --jq .commit.tree.sha)"
+          merge_tree="$(gh api "repos/$REPOSITORY/commits/$merge_commit" --jq .commit.tree.sha)"
+          merge_parent="$(gh api "repos/$REPOSITORY/commits/$merge_commit" --jq '.parents[0].sha')"
+          if [[ "$head_tree" != "$merge_tree" || "$merge_parent" != "$base" ]]; then
+            echo "5B4 squash merge tree or parent does not match the exact gate" >&2
+            exit 1
+          fi
+          cat > /tmp/increment5b4-merge-receipt.json <<EOF
+          {"schema_version":"newsroom.increment5b4.merge-receipt.v1","pull_request":$pr_number,"reviewed_head":"$head","reviewed_tree":"$head_tree","base":"$base","merge_commit":"$merge_commit","merge_tree":"$merge_tree"}
+          EOF
+          issue_state="$(gh issue view 308 --repo "$REPOSITORY" --json state --jq .state)"
+          if [[ "$issue_state" != "CLOSED" ]]; then
+            gh issue close 308 --repo "$REPOSITORY" --reason completed
+          fi
+
+      - name: Close parent 5B only after all four atoms are completed
+        shell: bash
+        run: |
+          set -euo pipefail
+          merge_commit="$(jq -r .merge_commit /tmp/increment5b4-merge-receipt.json)"
+          merge_tree="$(jq -r .merge_tree /tmp/increment5b4-merge-receipt.json)"
+          reviewed_head="$(jq -r .reviewed_head /tmp/increment5b4-merge-receipt.json)"
+          reviewed_tree="$(jq -r .reviewed_tree /tmp/increment5b4-merge-receipt.json)"
+          child_states="$(for issue in 289 292 303 308; do gh issue view "$issue" --repo "$REPOSITORY" --json number,state --jq '[.number,.state]|@tsv'; done)"
+          if grep -vq $'\tCLOSED$' <<<"$child_states"; then
+            echo "not every 5B atom is closed completed" >&2
+            printf '%s\n' "$child_states" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          git checkout --detach origin/main
+          merge_5b1="$(git log --all --format='%H%x09%s' --grep='Increment 5B1' -1 || true)"
+          merge_5b2="$(git log --all --format='%H%x09%s' --grep='Increment 5B2' -1 || true)"
+          merge_5b3="$(git log --all --format='%H%x09%s' --grep='Increment 5B3' -1 || true)"
+          gate_json="$(cat "$GATE_REPORT")"
+          gh issue comment 251 --repo "$REPOSITORY" --body "$(cat <<EOF
+          Increment 5B is complete after all four independent branches passed and
+          merged in dependency order.
+
+          - 5B1: \`$merge_5b1\`
+          - 5B2: \`$merge_5b2\`
+          - 5B3: \`$merge_5b3\`
+          - 5B4 reviewed head/tree: \`$reviewed_head\` / \`$reviewed_tree\`
+          - 5B4 squash merge/tree: \`$merge_commit\` / \`$merge_tree\`
+          - child states:\n\`\`\`text\n$child_states\n\`\`\`
+
+          The exact, full-text, fixture/replay vector and admitted-graph branches are
+          independently attributable and bounded. No branch calls another and no
+          hybrid composition, final fusion, dependency-root deduplication, complete
+          hydration, production embedding/provider execution, publication or
+          activation is claimed.
+
+          Exact 5B4 final gate:\n\`\`\`json\n$gate_json\n\`\`\`
+          EOF
+          )"
+          parent_state="$(gh issue view 251 --repo "$REPOSITORY" --json state --jq .state)"
+          if [[ "$parent_state" != "CLOSED" ]]; then
+            gh issue close 251 --repo "$REPOSITORY" --reason completed
+          fi
+          gh issue comment 252 --repo "$REPOSITORY" --body "Increment 5B / #251 is now closed completed on \`main@$merge_commit\` (tree \`$merge_tree\`). The canonical 5C implementation may begin from this exact base. 5C remains limited to six bounded named read-only tools and must not claim 5D composition or 5E operational controls."
+
+      - name: Upload exact gate, merge and parent-completion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5b4-final-gate-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5b4-final-gate.json
+            /tmp/increment5b4-merge-response.json
+            /tmp/increment5b4-merge-receipt.json
+
+      - name: Remove disposable 5B4 support carriers after successful parent completion
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          for branch in \
+            support/materialize-increment-5b4-20260806 \
+            support/publish-increment-5b4-20260806 \
+            support/finalize-increment-5b4-20260806
+          do
+            encoded="$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$branch")"
+            gh api --method DELETE "repos/$REPOSITORY/git/refs/heads/$encoded" || true
+          done
