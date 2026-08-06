@@ -1,6 +1,9 @@
 name: Run exact reviewed Increment 5B4 hardening v2
 
 on:
+  push:
+    branches:
+      - support/run-increment-5b4-reviewed-hardening-v2-20260806
   pull_request:
     branches:
       - support/run-increment-5b4-reviewed-hardening-v2-20260806
@@ -16,7 +19,7 @@ permissions:
 
 jobs:
   harden-and-test:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
