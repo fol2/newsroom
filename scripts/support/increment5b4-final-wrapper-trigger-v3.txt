@@ -1,0 +1,6 @@
+Emit one same-repository pull_request event against the widened pinned carrier wrapper.
+
+base_commit=5e83aa07b25e42c9773835d649df7939e1999343
+carrier_commit=14e149f4866cdefa3f4f6be6527a6422c6537009
+product_base=7976909e58a47749ac39fa212f5ecac325294ace
+canonical_branch=agent/increment-5b4-admitted-graph
