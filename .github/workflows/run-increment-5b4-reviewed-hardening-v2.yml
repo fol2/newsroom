@@ -25,7 +25,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       REPOSITORY: fol2/newsroom
-      TARGET_BRANCH: support/run-increment-5b4-reviewed-hardening-v2-20260806
+      REVIEWED_BRANCH: support/review-increment-5b4-boundaries-20260806
       REVIEWED_CARRIER: d8f92de968edccdeb58d4ae80a15a04919e25e18
       SOURCE_BRANCH: support/materialize-increment-5b4-20260806
       EXPECTED_SOURCE: 30eb9dd5e7d6c03018d30289ef3fa05f3b76d523
@@ -41,8 +41,8 @@ jobs:
 
           git init -q carrier
           git -C carrier remote add origin "https://github.com/$REPOSITORY.git"
-          git -C carrier fetch --no-tags --depth=20 origin \
-            "refs/heads/$TARGET_BRANCH:refs/remotes/origin/target"
+          git -C carrier fetch --no-tags --depth=3 origin \
+            "refs/heads/$REVIEWED_BRANCH:refs/remotes/origin/reviewed"
           git -C carrier cat-file -e "$REVIEWED_CARRIER^{commit}"
           git -C carrier show \
             "$REVIEWED_CARRIER:.github/workflows/review-increment-5b4-boundaries.yml" \
@@ -76,3 +76,59 @@ jobs:
           PY
 
           bash /tmp/run-reviewed-increment5b4-hardening.sh
+
+      - name: Package exact reviewed worktree and diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "workflow_sha=${GITHUB_SHA}"
+            echo "reviewed_carrier=${REVIEWED_CARRIER}"
+            echo "expected_source=${EXPECTED_SOURCE}"
+            if [[ -d carrier/.git ]]; then
+              echo "carrier_head=$(git -C carrier rev-parse HEAD 2>/dev/null || true)"
+            fi
+            if [[ -d repo/.git ]]; then
+              echo "repo_head=$(git -C repo rev-parse HEAD 2>/dev/null || true)"
+              echo "repo_tree=$(git -C repo rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+              echo "repo_status_begin"
+              git -C repo status --short || true
+              echo "repo_status_end"
+            fi
+          } > /tmp/increment5b4-reviewed-diagnostics.txt
+
+          if [[ -d repo ]]; then
+            tar --exclude=.git -czf /tmp/increment5b4-reviewed-worktree.tgz repo
+          else
+            mkdir -p /tmp/increment5b4-empty
+            printf '%s\n' 'reviewed worktree was not materialized' \
+              > /tmp/increment5b4-empty/README.txt
+            tar -czf /tmp/increment5b4-reviewed-worktree.tgz \
+              -C /tmp increment5b4-empty
+          fi
+
+          for candidate in \
+            /tmp/increment5b4-focused.log \
+            /tmp/increment5b4-full.log \
+            /tmp/increment5b4-neo4j.log; do
+            if [[ -f "$candidate" ]]; then
+              cp "$candidate" "/tmp/$(basename "$candidate")"
+            fi
+          done
+
+      - name: Upload reviewed worktree evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5b4-reviewed-worktree-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            /tmp/increment5b4-reviewed-worktree.tgz
+            /tmp/increment5b4-reviewed-diagnostics.txt
+            /tmp/increment5b4-focused.log
+            /tmp/increment5b4-full.log
+            /tmp/increment5b4-neo4j.log
