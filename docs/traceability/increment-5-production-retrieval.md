@@ -1,224 +1,200 @@
-# Increment 5 production retrieval traceability
+# Increment 5 bounded-retrieval traceability
 
-- **Status:** exact 5A decision and closed-world delivery map
+- **Status:** amended closed-world ownership map
+- **Owner amendment:** #327
 - **Machine source:** `newsroom/increment5/traceability.py`
 - **Verification:** `newsroom/tests/test_increment5a_traceability.py`
-- **Contract:** `newsroom/increment5/data/increment5a_retrieval_contract_v1.json`
+- **Planning record:** `docs/plans/2026-08-06-010-increment-5-scope-and-gates-amendment.md`
 - **Rows:** 155 unique accepted requirements
 
 ## Meaning
 
-A row separates the decision bound by 5A from executable delivery. It does not
-claim that a deferred retriever, tool, hybrid composer, operational policy,
-health control, queue control, reconciliation control, containment control,
-Operational Profile, review process, or qualification Run already exists.
+A row separates accepted decision authority from complete delivery ownership.
+Increment 5 may define a seam or produce supporting evidence without claiming
+that a later triage, Candidate, evaluation or operational requirement has been
+completely delivered.
 
-The inventory is closed-world:
+Normative decision anchors point to accepted specifications, the 5A contract or
+exact accepted Increment 4 evidence. GitHub issues identify delivery ownership;
+they are not a competing source of product authority.
 
-- the readiness ladder selects the exact Increment 5 `GRAG-*`, `GRPROD-*`, and
-  `TRI-*` ranges;
-- it selects **every `DEVAL-*` requirement** in the accepted shadow-evaluation
-  specification; and
-- it selects **every `DOPS-*` requirement** in the accepted reliability and
-  operations specification.
+## Closed-world inventory
 
-The accepted specifications currently contain 43 `DEVAL-*` and 61 `DOPS-*`
-requirements. Tests parse both specification files and require exact equality
-with the machine inventory. A manually selected subset cannot appear complete.
+The inventory contains the selected `GRAG-*`, `GRPROD-*` and `TRI-*` ranges,
+all 43 accepted `DEVAL-*` requirements and all 61 accepted `DOPS-*`
+requirements.
 
-## Delivery derivation
+The amended complete distribution is:
 
-The smaller delivery boundaries are explicit:
+`9 / 0 / 2 / 12 / 9 / 6 / 110 / 7`
 
-- 5A contains the nine contract, Plan, profile, non-activation, and
-  traceability requirements it actually delivers;
-- 5B supplies four branch implementations but closes no selected whole
-  requirement before composition;
-- 5C contains exactly two named-tool-surface requirements;
-- 5D contains exactly thirteen request-local retrieval/composer requirements;
-- seven rows cite accepted Increment 4 delivery; and
-- `GRPROD-022` remains outside Increment 5 activation.
+for 5A, 5B, 5C, 5D, 5E, Increment 6, Increment 8 and accepted Increment 4
+delivery. The groups are disjoint and total 155. There is no ownerless
+activation bucket.
 
-**5E is the closed-world remainder.** Once those exact groups are removed from
-the 155-row inventory, the remaining 123 requirements belong to 5E. A newly
-accepted `DEVAL-*` or `DOPS-*` row therefore cannot disappear through omission.
+## Delivery ownership
 
-## Delivery distribution
-
-| Boundary | Count | Ownership |
+| Boundary | Count | Complete ownership |
 |---|---:|---|
-| 5A / #250 | 9 | contract, safe profiles, frozen Plan/Epoch protocol, and traceability |
-| 5B / #251 | 0 | partial branch implementations; no complete selected requirement |
-| 5C / #252 | 2 | bounded named-tool surface and tool-local caller/purpose/scope controls |
-| 5D / #253 | 13 | one read-only request: composition, hybrid explanation/receipt, lineage, hydration, exact collision receipt, and honest outcomes |
-| 5E / #254 | 123 | closed-world evaluation, cross-request integration and outage effects, complete graph-native vertical integration, production GraphRAG enforcement, operational policy, monitoring, admission, queues, durability, reconciliation, containment, security, recovery, and qualification |
-| Increment 4 / #144 | 7 | accepted graph authority, ontology, and actual-service CI foundations |
-| Outside Increment 5 activation | 1 | production activation remains unauthorized |
+| 5A / #250 | 9 | accepted contract, Plan/Epoch, non-execution and traceability decisions |
+| 5B / #251 | 0 | four required retriever implementation atoms; credited at composition/integration |
+| 5C / #252 | 2 | bounded named read-only tools and no unrestricted graph mutation |
+| 5D / #253 | 12 | one-request composition, hydration, current collision receipt and truthful outcomes |
+| 5E / #254 | 9 | retrieval-specific target/configuration, ablation, provenance, security, rights and recovery |
+| Increment 6 / #146 | 6 | cross-request Hypothesis, Candidate, Watch/Hold and later Handoff effects |
+| Increment 8 / #148 | 110 | full evaluation, operations, recovery, security and Operational Admission |
+| Increment 4 / #144 | 7 | accepted graph authority, canonical contract and actual-service foundations |
 
-The groups are disjoint and total 155.
+## 5A
 
-## Exact 5C boundary
+The nine 5A rows are:
 
-The complete 5C traceability inventory is `GRAG-033` and `GRAG-034`.
-It proves the bounded named read-only interface and tool-local
-caller/purpose/scope checks. A local tool can retain its own input/output
-receipt, but 5C does not own a composed hybrid response or a receipt containing
-cross-branch fusion, deduplication, exclusions, or omissions.
+- `DEVAL-010`, `DEVAL-011`, `DEVAL-012`, `DEVAL-051`;
+- `DOPS-076`;
+- `GRAG-052`, `GRAG-053`, `GRAG-058`; and
+- `GRPROD-032`.
 
-`DOPS-026` therefore belongs to 5E. Its complete evidence must cover all
-executable operational surfaces, not merely the local named-tool parser.
+These rows bind the accepted contract and safe non-execution semantics. They do
+not imply that later evaluation, operational or production systems exist.
 
-## Exact 5D request boundary
+## 5B
 
-The complete 5D inventory is:
+5B supplies the exact, full-text, fixture-vector and admitted-graph retrievers.
+No selected whole requirement is credited to an independent branch before
+composition. #251 closes once, after all four branches, under the milestone
+gate.
 
-- `GRAG-031`, `GRAG-032`, `GRAG-035`, and `GRAG-040`–`GRAG-043`; and
-- `TRI-020`–`TRI-023`, `TRI-025`, and `TRI-027`.
+## 5C
 
-`TRI-021` belongs here because only the composer can ensure that
-source-native, formal-process, and explicit-lineage retrieval precedes
-approximate similarity. `GRAG-035` and `TRI-022` belong to the same owner:
-authority/source explanation, upstream freshness, provenance, degraded state,
-fused candidates, scores/ranks, deduplication signals, exclusions, and known
-omissions do not exist until 5D composes the branches. Four independent 5B
-branches and six local 5C tools cannot establish those end-to-end facts.
+The exact 5C set is:
 
-Five obligations consume retrieval results but cross the request boundary and
-therefore belong to 5E: `GRAG-044` downstream fallback/Watch/Hold decisions,
-`GRAG-045` upstream collection and Lead isolation, `GRPROD-024` product-level
-outage degradation, `TRI-024` downstream Hypothesis/Candidate non-creation, and
-`TRI-026` Candidate-admission collision enforcement. `GRPROD-021` likewise
-belongs to 5E because a Retrieval Context stops before end-to-end triage and
-Candidate admission.
+`GRAG-033`, `GRAG-034`.
 
-No `DOPS-*` row is assigned to 5C or 5D. `DOPS-076` is delivered in 5A because
-it states that admission is not activation. Every other `DOPS-*` row belongs to
-5E.
+The tools are purpose-specific, read-only and bounded. They do not create a
+composed hybrid response, Candidate authority or unrestricted graph access.
 
-`TRI-028` also belongs to 5E. A 5D request may record that urgent work proceeded
-without advisory semantic retrieval, but delivery requires the mandatory later
-reconciliation to be durably arranged and completed or retained as blocked.
+## 5D request-local boundary
 
-## Closed-world 5E evaluation ownership
+The exact 5D set is:
 
-Every `DEVAL-*` row not delivered by 5A belongs to 5E. This includes the
-requirements previously omitted from the hand-selected map:
+- `GRAG-031`, `GRAG-032`, `GRAG-035`, `GRAG-040`, `GRAG-041`, `GRAG-043`;
+- `TRI-020`, `TRI-021`, `TRI-022`, `TRI-023`, `TRI-025`, `TRI-027`.
 
-- `DEVAL-001`, `DEVAL-002`, and `DEVAL-004`;
-- `DEVAL-020`–`DEVAL-026`;
-- `DEVAL-030`–`DEVAL-033`; and
-- `DEVAL-060`–`DEVAL-063`.
+5D owns exact-first orchestration, deterministic fusion, authoritative
+dependency-root deduplication, permitted hydration, current deterministic
+collision evidence, inspectable provenance and explicit complete, blocked,
+stale, incomplete or unavailable outcomes.
 
-They require no-public-effect and authority isolation, an event-level reviewed
-universe, prospective and contemporaneous labels, explicit unreviewable and
-negative/failure sampling, authorised human review, practical blinding,
-independent review or adjudication, retained disagreement, evidence-based source
-role changes, quiet-period protection, Comparator non-promotion, and exact
-search-purpose attribution.
+5D creates no Event Hypothesis, Candidate, Watch/Operational Hold, source
+collection effect or later Handoff. `GRAG-042`, `TRI-024`, `TRI-026` and
+`TRI-028` therefore do not belong to this request-local group.
 
-The Epoch freezes the exact dataset manifest and label/adjudication policy before
-a Run. 5E must execute and retain these controls; a model, provider, legacy
-pipeline, feed, index, or metric cannot become sole ground truth.
+## 5E retrieval-specific boundary
 
-`DEVAL-072` also belongs to 5E. The 5A plan freezes the public-artifact safety
-rule, but #254 must implement validation, redaction/rejection receipts, release
-gates, and negative tests over datasets, manifests, reports, receipts,
-regression cases, logs, indexes, and retained contexts before delivery exists.
+The exact 5E set is:
 
-## Closed-world 5E operational ownership
+- `GRAG-050`, `GRAG-051`, `GRAG-054`, `GRAG-055`, `GRAG-056`;
+- `GRPROD-001`, `GRPROD-010`, `GRPROD-015`, `GRPROD-023`.
 
-Every `DOPS-*` row except `DOPS-076` belongs to 5E. This includes the
-requirements previously omitted from the hand-selected map:
+This boundary covers the repository-native target, mandatory-mode and
+configuration enforcement, conditional challenger rule, deterministic
+retrieval corpus, exact/full-text/vector/graph/hybrid ablation, provenance and
+temporal blockers, named-surface security, rights purge and graph/index
+recovery.
 
-- `DOPS-003`–`DOPS-006` and `DOPS-008`;
-- `DOPS-020`–`DOPS-025`;
-- `DOPS-041`, `DOPS-042`;
-- `DOPS-051`, `DOPS-053`, `DOPS-055`;
-- `DOPS-061`–`DOPS-063`;
-- `DOPS-065`, `DOPS-066`, `DOPS-068`; and
-- `DOPS-071`.
+It does not claim complete human evaluation, live shadow, canary, Operational
+Profiles, scheduling, queues, backup/restore of the complete newsroom,
+capacity, licence or Operational Admission.
 
-They cover logical-operation idempotence, no-model scheduling, missed-work
-visibility, bounded ownership, strict source access, status and parser safety,
-webhook provenance, queue fairness and Urgent capacity, ambiguous-effect
-reconciliation, bounded catch-up, post-restore reconciliation, health metrics,
-correlated records, consequence-based alerts, retained incidents, regression
-learning, authenticated manual actions, and scoped canary evidence.
+## Increment 6 transfer
 
-These are system-operation controls. A successful request or green unit test
-cannot substitute for their executable 5E evidence.
+The exact transfer to #146 is:
 
-## Delivered in 5A
+`GRAG-042`, `GRAG-044`, `GRPROD-021`, `TRI-024`, `TRI-026`, `TRI-028`.
 
-`DEVAL-010`, `DEVAL-011`, `DEVAL-012`, `DEVAL-051`, `DOPS-076`, `GRAG-052`, `GRAG-053`, `GRAG-058`, and `GRPROD-032`.
+These requirements need cross-request state or effects:
 
-`GRPROD-002` and `GRPROD-023` remain 5E delivery. Their rules are bound by
-5A, but only #254 can implement and verify that production, canary, and complete
-live shadow reject omitted GraphRAG and cannot treat GraphRAG as an optional
-plugin.
+- complete Source/Revision/Signal/Lead to Hypothesis/Candidate integration;
+- exact fallback, Watch or Operational Hold decisions;
+- a graph-native vertical slice through Candidate admission;
+- empty-retrieval non-creation;
+- Candidate-admission enforcement of current collision evidence; and
+- durable later reconciliation/Handoff after guarded urgent degradation.
 
-`DEVAL-011` points directly to the machine Plan’s `#/epoch_protocol`. Before a
-Run, the Epoch binds exact contract, Plan, component, source, provider, adapter,
-parser, query, threshold, policy, dataset, label/adjudication, code-tree, and
-generation identities. Any frozen identity difference starts a new Epoch;
-cross-Epoch pooling is prohibited and mismatch is `NOT_EVALUATED`.
+A Retrieval Context may carry a collision receipt and
+`reconciliation_required`; only Increment 6 can prove the corresponding
+downstream effect.
 
-## Exact prior delivery
+## Increment 8 transfer
 
-Only seven rows are satisfied by prior increments, all from accepted Increment
-4: `GRAG-030`, `GRPROD-003`, `GRPROD-005`, `GRPROD-013`, `GRPROD-014`,
-`GRPROD-016`, and `GRPROD-020`.
+Every non-5A `DEVAL-*` row and every operational `DOPS-*` row belongs to #148.
 
-Every row retains issue #144, accepted
-`main@c9e31879421083e82e2538d57087d04e9b454d34`, the exact repository file,
-and an existing requirement fragment. Tests open each referenced path and prove
-the fragment exists.
+The additional graph/product rows owned by #148 are:
 
-Increment 3 remains a graph foundation but is not credited with `GRAG-042`:
-its accepted evidence excluded the Event Hypothesis handoff and contained no
-Event Hypothesis node.
+`GRAG-045`, `GRAG-046`, `GRAG-057`, `GRPROD-002`, `GRPROD-004`,
+`GRPROD-011`, `GRPROD-012`, `GRPROD-022`, `GRPROD-024`, `GRPROD-030`,
+`GRPROD-031`.
 
-## Key ownership boundaries
+They require system-level or admission evidence: collection/Lead isolation
+during graph outage, complete live-shadow gates, operational/licence
+qualification, production-profile enforcement, repair/replacement and
+production-equivalent evaluation, outage semantics, activation identity and
+readiness.
 
-- `GRAG-044`, `GRAG-045`, `GRPROD-024`, `TRI-024`, and `TRI-026` → 5E/#254: request evidence cannot itself enforce downstream decisions or Candidate admission, continue upstream collection, or define product-level outage semantics.
-- `TRI-021` → 5D/#253: independent retrievers cannot establish exact-before-approximate ordering; the composer must enforce it.
-- `GRPROD-021` → 5E/#254: a one-request hybrid result is not the complete graph-native vertical slice through triage and Candidate admission.
-- `GRPROD-002` and `GRPROD-023` → 5E/#254: policy declarations do not deliver the production, canary, and complete-live-shadow no-omission/no-optional-plugin enforcement paths.
-- `GRAG-031` → 5D/#253: independent branches are not a hybrid until fusion and authoritative dependency-root deduplication exist.
-- `GRAG-042` → 5D/#253: complete `Source → Revision → Signal → Lead → Hypothesis → Candidate` projection and hydration remains required.
-- `TRI-028` → 5E/#254: guarded urgent request degradation is not complete delivery without durable later reconciliation.
-- `DOPS-010`–`DOPS-016` → 5E/#254: multidimensional health, successful observation, freshness, stale-state honesty, coverage posture, Active-path containment, and comparator non-substitution are Operational Profile work.
-- `DOPS-026` → 5E/#254: local tool validation does not prove source/model content cannot alter operational policy, egress, budgets, or authority.
-- `DOPS-043` and `DOPS-044` → 5E/#254: queue backpressure and current-authority revalidation precede commit.
-- `DOPS-046`–`DOPS-048` → 5E/#254: durable transition delivery, authoritative-store/audit failure policy, and cross-system failure classification are operational recovery controls.
-- `DOPS-050` → 5E/#254: full reconciliation includes orphaned ownership, ambiguous calls, duplicate delivery, stale work, and pending Handoffs.
-- `DOPS-061`–`DOPS-068` → 5E/#254: monitoring, incidents, regression learning, least privilege, and manual actions require retained operational evidence.
-- `DOPS-073` → 5E/#254: a request outcome is not a system-level ability to pause the narrowest safe scope and broaden containment.
-- `GRAG-051` → 5E/#254: a challenger requires a measured blocker or owner-approved bounded comparison purpose.
-- `DEVAL-020`–`DEVAL-033` → 5E/#254: trusted evaluation requires frozen universe, labels, sampling, human review, and adjudication.
-- `DEVAL-046` → 5E/#254: all six error classes are reported separately with counts, opportunity denominators, and rates.
-- `DEVAL-072` → 5E/#254: prose policy is not executable artifact inspection, redaction, release-gate, or negative-test evidence.
+The 110-row Increment 8 group includes:
 
-## Decision state
+- prospective event universes, sampling and production labels;
+- human review, blinding, second review, adjudication and disagreement;
+- source-role and release-evidence decisions;
+- exact Operational Profiles and numerical objectives;
+- schedules, leases, retries, circuits, quarantine, queues and capacity;
+- multidimensional health and coverage posture;
+- observability, alerts, incidents, owners and runbooks;
+- credentials, access, egress and authenticated manual actions;
+- complete reconciliation, backup/restore, fault injection and rollback; and
+- intended-hardware, cost, licence and Operational Admission evidence.
 
-Repository governance decides accepted source through owner control,
-substantive review, required exact-head checks, resolved threads, and merge to
-`main`. Non-inherited rows are `BOUND_BY_5A`; prior rows are
-`INHERITED_ACCEPTED_AUTHORITY`. Digests identify content and do not form a
-competing runtime admission system.
+`GRPROD-022` now has explicit #148 ownership.
+
+## Accepted prior delivery
+
+Seven rows retain exact accepted Increment 4 evidence:
+
+`GRAG-030`, `GRPROD-003`, `GRPROD-005`, `GRPROD-013`, `GRPROD-014`,
+`GRPROD-016`, `GRPROD-020`.
+
+Each anchor is pinned to
+`main@c9e31879421083e82e2538d57087d04e9b454d34` and the exact requirement
+fragment in `newsroom/increment4/traceability.py`.
+
+## Gate granularity
+
+- **Tier L:** focused leaf tests, complete deterministic CI once, source
+  integrity, substantive review, no P1/material P2.
+- **Tier S:** focused/full deterministic CI, only affected service/authority
+  lanes, substantive review, no P1/material P2.
+- **Tier M:** once per integrated milestone, all applicable workflows on one
+  exact `main` head, affected actual services, signed SDLC, integrated
+  replay/rights/failure evidence, and no P1/P2 or open review thread.
+
+The gate follows risk and integration scope; it is not duplicated as a final
+release exercise on every leaf.
 
 ## Verification invariants
 
-Tests reject missing or duplicate IDs; any difference between the accepted
-specification headings and the machine `DEVAL-*`/`DOPS-*` inventories;
-overlapping or incomplete delivery groups; a 5E set that is not the exact
-closed-world remainder; generic or competing anchors; nonexistent prior
-evidence; changed counts; deferred rows without the exact issue; any `DOPS-*`
-row in 5C or 5D; any cross-request integration row assigned to 5D; any
-operational `DOPS-*` row other than `DOPS-076` assigned before 5E; `TRI-028`
-assigned before durable later reconciliation; material
-source/query/config changes reusing one Epoch; cross-Epoch pooling; independent
-branches reported as a hybrid; incomplete lineage reported as prior delivery;
-challenger work without its precondition; incomplete six-class `DEVAL-046`
-measurement; production activation inside Increment 5; and runtime GitHub
-approval or admission targets.
+Tests reject:
+
+- a missing, duplicate or unknown accepted requirement;
+- any difference between accepted DEVAL/DOPS headings and machine inventory;
+- overlapping or incomplete ownership groups;
+- a count different from `9 / 0 / 2 / 12 / 9 / 6 / 110 / 7`;
+- a cross-request effect in 5D;
+- a complete DEVAL or operational DOPS claim in 5E;
+- an Increment 6 transfer not owned by #146;
+- a full evaluation/operations row not owned by #148;
+- an ownerless `GRPROD-022`;
+- changed accepted Increment 4 evidence; or
+- an issue reference substituted for normative decision authority.
+
+The amendment changes no runtime behavior and authorises no source, provider,
+credential, call, spend, publication, shadow, canary or activation.

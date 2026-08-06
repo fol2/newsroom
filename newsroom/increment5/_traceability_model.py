@@ -1,4 +1,4 @@
-"""Immutable Increment 5 traceability types and closed-world delivery inventory."""
+"""Immutable Increment 5 traceability types and amended delivery inventory."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ class Increment5DeliveryTrace(StrEnum):
     DEFERRED_TO_5C = "DEFERRED_TO_5C"
     DEFERRED_TO_5D = "DEFERRED_TO_5D"
     DEFERRED_TO_5E = "DEFERRED_TO_5E"
+    DEFERRED_TO_INCREMENT_6 = "DEFERRED_TO_INCREMENT_6"
+    DEFERRED_TO_INCREMENT_8 = "DEFERRED_TO_INCREMENT_8"
     OUTSIDE_INCREMENT_5_ACTIVATION = "OUTSIDE_INCREMENT_5_ACTIVATION"
     SATISFIED_BY_PRIOR_INCREMENT = "SATISFIED_BY_PRIOR_INCREMENT"
 
@@ -46,7 +48,17 @@ class Increment5TraceabilityRow:
             raise ValueError("decision trace must be typed")
         if not isinstance(self.delivery_trace, Increment5DeliveryTrace):
             raise ValueError("delivery trace must be typed")
-        if self.delivery_issue not in {143, 144, 250, 251, 252, 253, 254}:
+        if self.delivery_issue not in {
+            143,
+            144,
+            146,
+            148,
+            250,
+            251,
+            252,
+            253,
+            254,
+        }:
             raise ValueError("delivery issue is outside the admitted chain")
 
 
@@ -87,9 +99,8 @@ GRPROD_REQUIREMENTS = _ids(
 )
 TRI_REQUIREMENTS = _ids("TRI", tuple(range(20, 29)))
 
-# The readiness ladder selects DEVAL-* and DOPS-* as closed-world normative
-# families. These inventories therefore contain every requirement heading in
-# the two accepted specifications, not a manually curated applicability subset.
+# The readiness ladder selected the complete accepted DEVAL and DOPS families.
+# Replanning changes the delivery owner, never the normative inventory.
 DEVAL_REQUIREMENTS = _ids(
     "DEVAL",
     (
@@ -125,42 +136,6 @@ ALL_REQUIREMENTS = frozenset().union(
     DOPS_REQUIREMENTS,
 )
 
-# 5D ends at one bounded read-only retrieval request. It owns the hybrid result
-# and request-local authority semantics. It does not own upstream collection,
-# downstream decisions or Candidate admission, product-profile outage behaviour,
-# operational policy, health, queues, durability, later reconciliation,
-# containment, or incidents.
-REQUEST_RETRIEVAL_REQUIREMENTS = frozenset(
-    {
-        "GRAG-031",
-        "GRAG-032",
-        "GRAG-035",
-        "GRAG-040",
-        "GRAG-041",
-        "GRAG-042",
-        "GRAG-043",
-        "TRI-020",
-        "TRI-021",
-        "TRI-022",
-        "TRI-023",
-        "TRI-025",
-        "TRI-027",
-    }
-)
-
-# These obligations consume retrieval state but cannot be completed by the
-# retrieval request itself. They require upstream or downstream integration or
-# system-level outage policy and therefore belong to the 5E remainder.
-CROSS_REQUEST_INTEGRATION_REQUIREMENTS = frozenset(
-    {
-        "GRAG-044",
-        "GRAG-045",
-        "GRPROD-024",
-        "TRI-024",
-        "TRI-026",
-    }
-)
-
 DELIVERED_IN_5A_REQUIREMENTS = frozenset(
     {
         "GRAG-052",
@@ -174,20 +149,100 @@ DELIVERED_IN_5A_REQUIREMENTS = frozenset(
         "DOPS-076",
     }
 )
-# 5B is a partial implementation dependency. Four independent branches
-# are necessary for later composition, but no selected whole requirement
-# is complete before 5D applies exact-first orchestration and fusion.
+
+# 5B supplies four independently attributable retriever branches. Whole selected
+# requirements are credited only at composition or a later integrated boundary.
 DEFERRED_TO_5B_REQUIREMENTS = frozenset()
-# 5C owns only the bounded named-tool surface. Composed hybrid response
-# metadata and the fused inspectable receipt do not exist until 5D owns the
-# composer, so GRAG-035 and TRI-022 are request-retrieval requirements.
-DEFERRED_TO_5C_REQUIREMENTS = frozenset(
+
+DEFERRED_TO_5C_REQUIREMENTS = frozenset({"GRAG-033", "GRAG-034"})
+
+# 5D ends at one bounded read-only request. It owns exact-first composition,
+# hydration, inspectable receipts and truthful request outcomes. Event
+# Hypothesis/Candidate effects and later Handoff reconciliation are not local to
+# that request.
+REQUEST_RETRIEVAL_REQUIREMENTS = frozenset(
     {
-        "GRAG-033",
-        "GRAG-034",
+        "GRAG-031",
+        "GRAG-032",
+        "GRAG-035",
+        "GRAG-040",
+        "GRAG-041",
+        "GRAG-043",
+        "TRI-020",
+        "TRI-021",
+        "TRI-022",
+        "TRI-023",
+        "TRI-025",
+        "TRI-027",
     }
 )
-OUTSIDE_INCREMENT_5_REQUIREMENTS = frozenset({"GRPROD-022"})
+
+# Increment 5E is deliberately small and retrieval-specific: actual-service
+# implementation identity, mandatory-mode/configuration enforcement, bounded
+# challenger policy, corpus/ablation and provenance/temporal qualification.
+DEFERRED_TO_5E_REQUIREMENTS = frozenset(
+    {
+        "GRAG-050",
+        "GRAG-051",
+        "GRAG-054",
+        "GRAG-055",
+        "GRAG-056",
+        "GRPROD-001",
+        "GRPROD-010",
+        "GRPROD-015",
+        "GRPROD-023",
+    }
+)
+RETRIEVAL_QUALIFICATION_REQUIREMENTS = DEFERRED_TO_5E_REQUIREMENTS
+
+# Cross-request triage and Candidate effects are owned by Increment 6.
+DEFERRED_TO_INCREMENT_6_REQUIREMENTS = frozenset(
+    {
+        "GRAG-042",
+        "GRAG-044",
+        "GRPROD-021",
+        "TRI-024",
+        "TRI-026",
+        "TRI-028",
+    }
+)
+CROSS_REQUEST_INTEGRATION_REQUIREMENTS = (
+    DEFERRED_TO_INCREMENT_6_REQUIREMENTS
+)
+
+# Full evaluation, operations, production-equivalent shadow and operational
+# admission are restored to Increment 8. Increment 5 may produce seams or
+# supporting retrieval evidence, but cannot claim these complete requirements.
+_INCREMENT_8_GRAPH_AND_PRODUCT = frozenset(
+    {
+        "GRAG-045",
+        "GRAG-046",
+        "GRAG-057",
+        "GRPROD-002",
+        "GRPROD-004",
+        "GRPROD-011",
+        "GRPROD-012",
+        "GRPROD-022",
+        "GRPROD-024",
+        "GRPROD-030",
+        "GRPROD-031",
+    }
+)
+DEFERRED_TO_INCREMENT_8_REQUIREMENTS = frozenset().union(
+    DEVAL_REQUIREMENTS.difference(DELIVERED_IN_5A_REQUIREMENTS),
+    DOPS_REQUIREMENTS.difference(DELIVERED_IN_5A_REQUIREMENTS),
+    _INCREMENT_8_GRAPH_AND_PRODUCT,
+)
+
+# DOPS-076 is the 5A admission-is-not-activation rule. Every other DOPS row is
+# complete operational work deferred to Increment 8.
+OPERATIONAL_DOPS = DOPS_REQUIREMENTS.difference({"DOPS-076"})
+
+# The previous "outside Increment 5 activation" bucket is retained as a typed
+# compatibility category, but ownership is now explicit: GRPROD-022 belongs to
+# Increment 8 rather than an ownerless remainder.
+OUTSIDE_INCREMENT_5_REQUIREMENTS = frozenset()
+
 INHERITED_AUTHORITY = frozenset(
     {
         "GRAG-030",
@@ -200,53 +255,53 @@ INHERITED_AUTHORITY = frozenset(
     }
 )
 
-# 5E is the closed-world remainder after every smaller, exact delivery boundary
-# is removed. New accepted DEVAL/DOPS requirements cannot disappear silently:
-# once present in the family inventory they belong to 5E unless explicitly
-# assigned to another reviewed boundary.
-_NON_5E_REQUIREMENTS = frozenset().union(
-    DELIVERED_IN_5A_REQUIREMENTS,
-    DEFERRED_TO_5B_REQUIREMENTS,
-    DEFERRED_TO_5C_REQUIREMENTS,
-    REQUEST_RETRIEVAL_REQUIREMENTS,
-    OUTSIDE_INCREMENT_5_REQUIREMENTS,
-    INHERITED_AUTHORITY,
-)
-DEFERRED_TO_5E_REQUIREMENTS = ALL_REQUIREMENTS.difference(_NON_5E_REQUIREMENTS)
-
-# DOPS is the operational specification. DOPS-076 is the 5A
-# admission-not-activation rule; every other accepted DOPS row is executable
-# operational work owned by 5E. 5C still validates the local named-tool input
-# shape, but it does not claim the complete DOPS-026 policy/egress/budget/
-# authority boundary.
-OPERATIONAL_DOPS = DOPS_REQUIREMENTS.difference({"DOPS-076"})
-
 DELIVERY_GROUPS: dict[Increment5DeliveryTrace, frozenset[str]] = {
     Increment5DeliveryTrace.DELIVERED_IN_5A: DELIVERED_IN_5A_REQUIREMENTS,
     Increment5DeliveryTrace.DEFERRED_TO_5B: DEFERRED_TO_5B_REQUIREMENTS,
     Increment5DeliveryTrace.DEFERRED_TO_5C: DEFERRED_TO_5C_REQUIREMENTS,
     Increment5DeliveryTrace.DEFERRED_TO_5D: REQUEST_RETRIEVAL_REQUIREMENTS,
     Increment5DeliveryTrace.DEFERRED_TO_5E: DEFERRED_TO_5E_REQUIREMENTS,
+    Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_6: (
+        DEFERRED_TO_INCREMENT_6_REQUIREMENTS
+    ),
+    Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_8: (
+        DEFERRED_TO_INCREMENT_8_REQUIREMENTS
+    ),
     Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: (
         OUTSIDE_INCREMENT_5_REQUIREMENTS
     ),
     Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: INHERITED_AUTHORITY,
 }
 
+_EXPECTED_COUNTS = {
+    Increment5DeliveryTrace.DELIVERED_IN_5A: 9,
+    Increment5DeliveryTrace.DEFERRED_TO_5B: 0,
+    Increment5DeliveryTrace.DEFERRED_TO_5C: 2,
+    Increment5DeliveryTrace.DEFERRED_TO_5D: 12,
+    Increment5DeliveryTrace.DEFERRED_TO_5E: 9,
+    Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_6: 6,
+    Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_8: 110,
+    Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: 0,
+    Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: 7,
+}
+
 if len(ALL_REQUIREMENTS) != 155:
     raise RuntimeError("Increment 5 accepted inventory must contain 155 requirements")
-if len(DEFERRED_TO_5E_REQUIREMENTS) != 123:
-    raise RuntimeError("5E closed-world remainder must contain 123 requirements")
-if not CROSS_REQUEST_INTEGRATION_REQUIREMENTS.issubset(
-    DEFERRED_TO_5E_REQUIREMENTS
+if {delivery: len(rows) for delivery, rows in DELIVERY_GROUPS.items()} != (
+    _EXPECTED_COUNTS
 ):
-    raise RuntimeError("cross-request integration requirements must belong to 5E")
-if REQUEST_RETRIEVAL_REQUIREMENTS.intersection(
-    CROSS_REQUEST_INTEGRATION_REQUIREMENTS
+    raise RuntimeError("amended delivery counts differ from the accepted map")
+_seen: set[str] = set()
+for _delivery, _requirements in DELIVERY_GROUPS.items():
+    if _seen.intersection(_requirements):
+        raise RuntimeError(f"delivery groups overlap at {_delivery.value}")
+    _seen.update(_requirements)
+if _seen != set(ALL_REQUIREMENTS):
+    raise RuntimeError("amended delivery groups do not cover the accepted inventory")
+if OPERATIONAL_DOPS != DOPS_REQUIREMENTS.intersection(
+    DEFERRED_TO_INCREMENT_8_REQUIREMENTS
 ):
-    raise RuntimeError("request-local and cross-request requirements overlap")
-if not OPERATIONAL_DOPS.issubset(DEFERRED_TO_5E_REQUIREMENTS):
-    raise RuntimeError("every operational DOPS row except DOPS-076 must belong to 5E")
+    raise RuntimeError("all operational DOPS requirements must belong to Increment 8")
 
 PRIOR_DELIVERY_EVIDENCE: dict[str, tuple[int, str, str]] = {
     requirement: (
@@ -263,7 +318,9 @@ ISSUE_BY_DELIVERY = {
     Increment5DeliveryTrace.DEFERRED_TO_5C: 252,
     Increment5DeliveryTrace.DEFERRED_TO_5D: 253,
     Increment5DeliveryTrace.DEFERRED_TO_5E: 254,
-    Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: 250,
+    Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_6: 146,
+    Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_8: 148,
+    Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: 145,
 }
 TARGET_BY_DELIVERY = {
     Increment5DeliveryTrace.DELIVERED_IN_5A: (
@@ -273,13 +330,19 @@ TARGET_BY_DELIVERY = {
         "issue:#251:four-independent-retriever-implementations"
     ),
     Increment5DeliveryTrace.DEFERRED_TO_5C: (
-        "issue:#252:six-named-read-only-tools"
+        "issue:#252:bounded-named-read-only-tools"
     ),
     Increment5DeliveryTrace.DEFERRED_TO_5D: (
-        "issue:#253:one-request-hybrid-composition-lineage-hydration-and-outcomes"
+        "issue:#253:one-request-composition-hydration-and-truthful-outcomes"
     ),
     Increment5DeliveryTrace.DEFERRED_TO_5E: (
-        "issue:#254:closed-world-operational-admission-evaluation-security-and-recovery"
+        "issue:#254:retrieval-specific-qualification-security-rights-and-recovery"
+    ),
+    Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_6: (
+        "issue:#146:cross-request-triage-candidate-and-handoff-effects"
+    ),
+    Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_8: (
+        "issue:#148:full-evaluation-operations-recovery-security-and-admission"
     ),
     Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: (
         "explicitly-not-authorized-by-increment-5"
@@ -293,6 +356,12 @@ VERIFY_BY_DELIVERY = {
     Increment5DeliveryTrace.DEFERRED_TO_5C: "issue:#252:completion-evidence",
     Increment5DeliveryTrace.DEFERRED_TO_5D: "issue:#253:completion-evidence",
     Increment5DeliveryTrace.DEFERRED_TO_5E: "issue:#254:completion-evidence",
+    Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_6: (
+        "issue:#146:completion-evidence"
+    ),
+    Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_8: (
+        "issue:#148:completion-evidence"
+    ),
     Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: (
         "contract:#/payload/non_effects"
     ),

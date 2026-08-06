@@ -1,8 +1,8 @@
-"""Truthful requirement-to-decision and requirement-to-delivery mapping.
+"""Truthful requirement-to-decision and amended delivery ownership mapping.
 
-A 5A row says that the reviewed contract binds a requirement. It does not claim
-that a deferred retriever, tool, composer, operational control, or qualification
-run already exists.
+A row states where an accepted requirement is completely delivered. Supporting
+seams or evidence produced by Increment 5 do not move full evaluation,
+operational, triage or Candidate obligations out of their later owner.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ from ._traceability_model import (
     ALL_REQUIREMENTS,
     CROSS_REQUEST_INTEGRATION_REQUIREMENTS,
     DEFERRED_TO_5E_REQUIREMENTS,
+    DEFERRED_TO_INCREMENT_6_REQUIREMENTS,
+    DEFERRED_TO_INCREMENT_8_REQUIREMENTS,
     DELIVERED_IN_5A_REQUIREMENTS,
     DELIVERY_GROUPS,
     DEVAL_REQUIREMENTS,
@@ -21,6 +23,7 @@ from ._traceability_model import (
     OPERATIONAL_DOPS,
     PRIOR_DELIVERY_EVIDENCE,
     REQUEST_RETRIEVAL_REQUIREMENTS,
+    RETRIEVAL_QUALIFICATION_REQUIREMENTS,
     TARGET_BY_DELIVERY,
     VERIFY_BY_DELIVERY,
     Increment5DecisionTrace,
@@ -87,23 +90,6 @@ def _rows() -> tuple[Increment5TraceabilityRow, ...]:
 INCREMENT_5_TRACEABILITY = _rows()
 
 
-def _require_deferred_anchor(
-    rows: dict[str, Increment5TraceabilityRow],
-    requirement: str,
-    delivery: Increment5DeliveryTrace,
-    issue: int,
-    anchor: str,
-) -> None:
-    row = rows[requirement]
-    if (
-        row.decision_trace is not Increment5DecisionTrace.BOUND_BY_5A
-        or row.delivery_trace is not delivery
-        or row.delivery_issue != issue
-        or row.decision_anchor != anchor
-    ):
-        raise RuntimeError(f"deferred ownership differs: {requirement}")
-
-
 def validate_increment5_traceability() -> None:
     identifiers = tuple(row.requirement_id for row in INCREMENT_5_TRACEABILITY)
     if len(identifiers) != 155 or len(set(identifiers)) != 155:
@@ -122,17 +108,15 @@ def validate_increment5_traceability() -> None:
     if seen != set(ALL_REQUIREMENTS):
         raise RuntimeError("delivery groups do not cover the accepted inventory")
 
-    prior = DELIVERY_GROUPS[Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT]
-    if frozenset(PRIOR_DELIVERY_EVIDENCE) != prior:
-        raise RuntimeError("prior delivery evidence differs from prior inventory")
-
     expected_counts = {
         Increment5DeliveryTrace.DELIVERED_IN_5A: 9,
         Increment5DeliveryTrace.DEFERRED_TO_5B: 0,
         Increment5DeliveryTrace.DEFERRED_TO_5C: 2,
-        Increment5DeliveryTrace.DEFERRED_TO_5D: 13,
-        Increment5DeliveryTrace.DEFERRED_TO_5E: 123,
-        Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: 1,
+        Increment5DeliveryTrace.DEFERRED_TO_5D: 12,
+        Increment5DeliveryTrace.DEFERRED_TO_5E: 9,
+        Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_6: 6,
+        Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_8: 110,
+        Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION: 0,
         Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT: 7,
     }
     actual_counts = {
@@ -142,55 +126,57 @@ def validate_increment5_traceability() -> None:
         for delivery in Increment5DeliveryTrace
     }
     if actual_counts != expected_counts:
-        raise RuntimeError("delivery counts differ from the accepted dependency map")
+        raise RuntimeError("delivery counts differ from the accepted amendment")
 
     if DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5B]:
-        raise RuntimeError(
-            "5B branch implementation cannot claim a complete requirement"
-        )
+        raise RuntimeError("5B cannot claim a complete selected requirement")
     if DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5D] != (
         REQUEST_RETRIEVAL_REQUIREMENTS
     ):
-        raise RuntimeError("5D differs from the exact one-request retrieval boundary")
+        raise RuntimeError("5D differs from the exact request-local boundary")
     if DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5E] != (
-        DEFERRED_TO_5E_REQUIREMENTS
+        RETRIEVAL_QUALIFICATION_REQUIREMENTS
     ):
-        raise RuntimeError("5E differs from the closed-world remainder")
-    if not CROSS_REQUEST_INTEGRATION_REQUIREMENTS.issubset(
-        DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5E]
-    ):
-        raise RuntimeError("cross-request integration must be owned by 5E")
-    if REQUEST_RETRIEVAL_REQUIREMENTS.intersection(
+        raise RuntimeError("5E differs from the retrieval-specific boundary")
+    if DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_6] != (
         CROSS_REQUEST_INTEGRATION_REQUIREMENTS
     ):
-        raise RuntimeError("5D contains a cross-request integration requirement")
+        raise RuntimeError("Increment 6 differs from cross-request ownership")
+    if DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_8] != (
+        DEFERRED_TO_INCREMENT_8_REQUIREMENTS
+    ):
+        raise RuntimeError("Increment 8 differs from evaluation/operations ownership")
+
+    if REQUEST_RETRIEVAL_REQUIREMENTS.intersection(
+        DEFERRED_TO_INCREMENT_6_REQUIREMENTS
+    ):
+        raise RuntimeError("5D contains a cross-request effect")
+    if DEFERRED_TO_5E_REQUIREMENTS.intersection(
+        DEFERRED_TO_INCREMENT_8_REQUIREMENTS
+    ):
+        raise RuntimeError("retrieval qualification claims full operational work")
     if any(item.startswith("DOPS-") for item in REQUEST_RETRIEVAL_REQUIREMENTS):
         raise RuntimeError("5D cannot claim operational DOPS delivery")
-    if any(
-        item.startswith("DOPS-")
-        for item in DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5C]
+    if any(item.startswith("DOPS-") for item in DEFERRED_TO_5E_REQUIREMENTS):
+        raise RuntimeError("5E cannot claim complete operational DOPS delivery")
+    if OPERATIONAL_DOPS != DOPS_REQUIREMENTS.intersection(
+        DEFERRED_TO_INCREMENT_8_REQUIREMENTS
     ):
-        raise RuntimeError("5C cannot claim the complete operational DOPS boundary")
-    if not OPERATIONAL_DOPS.issubset(
-        DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5E]
-    ):
-        raise RuntimeError("operational DOPS requirements must be owned by 5E")
+        raise RuntimeError("all operational DOPS rows must be owned by Increment 8")
 
-    expected_5e_deval = DEVAL_REQUIREMENTS.difference(
+    expected_later_deval = DEVAL_REQUIREMENTS.difference(
         DELIVERED_IN_5A_REQUIREMENTS
     )
-    actual_5e_deval = DEVAL_REQUIREMENTS.intersection(
-        DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5E]
-    )
-    if actual_5e_deval != expected_5e_deval:
-        raise RuntimeError("all non-5A DEVAL requirements must be owned by 5E")
+    if expected_later_deval != DEVAL_REQUIREMENTS.intersection(
+        DEFERRED_TO_INCREMENT_8_REQUIREMENTS
+    ):
+        raise RuntimeError("all non-5A DEVAL rows must be owned by Increment 8")
 
-    expected_5e_dops = DOPS_REQUIREMENTS.difference({"DOPS-076"})
-    actual_5e_dops = DOPS_REQUIREMENTS.intersection(
-        DELIVERY_GROUPS[Increment5DeliveryTrace.DEFERRED_TO_5E]
-    )
-    if actual_5e_dops != expected_5e_dops:
-        raise RuntimeError("all operational DOPS requirements must be owned by 5E")
+    prior = DELIVERY_GROUPS[
+        Increment5DeliveryTrace.SATISFIED_BY_PRIOR_INCREMENT
+    ]
+    if frozenset(PRIOR_DELIVERY_EVIDENCE) != prior:
+        raise RuntimeError("prior delivery evidence differs from prior inventory")
 
     for row in INCREMENT_5_TRACEABILITY:
         if not row.decision_anchor or row.decision_anchor != row.decision_anchor.strip():
@@ -209,153 +195,68 @@ def validate_increment5_traceability() -> None:
                 raise RuntimeError(
                     f"prior delivery metadata differs: {row.requirement_id}"
                 )
+        elif row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_6:
+            if row.delivery_issue != 146:
+                raise RuntimeError("Increment 6 row has the wrong owner")
+        elif row.delivery_trace is Increment5DeliveryTrace.DEFERRED_TO_INCREMENT_8:
+            if row.delivery_issue != 148:
+                raise RuntimeError("Increment 8 row has the wrong owner")
         elif row.delivery_trace is Increment5DeliveryTrace.OUTSIDE_INCREMENT_5_ACTIVATION:
-            if row.requirement_id != "GRPROD-022":
-                raise RuntimeError("outside-activation row differs from v1")
+            raise RuntimeError("ownerless outside-activation requirements remain")
         elif row.delivery_issue not in {251, 252, 253, 254}:
-            raise RuntimeError("deferred row has the wrong issue")
-
-    if any(
-        "approval" in row.delivery_target.lower()
-        or "github" in row.verification_target.lower()
-        for row in INCREMENT_5_TRACEABILITY
-    ):
-        raise RuntimeError("runtime approval or GitHub admission target reintroduced")
+            raise RuntimeError("Increment 5 deferred row has the wrong issue")
 
     rows = {row.requirement_id: row for row in INCREMENT_5_TRACEABILITY}
     machine_plan = (
         "newsroom/increment5/data/increment5_retrieval_evaluation_plan_v1.json"
     )
-    for requirement, fragment in {
-        "GRAG-054": "#/mandatory_query_families",
-        "GRAG-055": "#/decision_scope",
-        "GRAG-056": "#/zero_tolerance_gates",
-        "DEVAL-011": "#/epoch_protocol",
-        "DEVAL-046": "#/triage_error_protocol",
-    }.items():
-        if rows[requirement].decision_anchor != machine_plan + fragment:
-            raise RuntimeError(f"qualification plan anchor differs: {requirement}")
-
+    if rows["DEVAL-011"].decision_anchor != machine_plan + "#/epoch_protocol":
+        raise RuntimeError("qualification Epoch anchor differs")
     for requirement in prior:
-        row = rows[requirement]
         expected_anchor = (
             "main@c9e31879421083e82e2538d57087d04e9b454d34:"
             f"newsroom/increment4/traceability.py#{requirement}"
         )
         if (
-            row.decision_trace
+            rows[requirement].decision_trace
             is not Increment5DecisionTrace.INHERITED_ACCEPTED_AUTHORITY
-            or row.delivery_issue != 144
-            or row.decision_anchor != expected_anchor
+            or rows[requirement].delivery_issue != 144
+            or rows[requirement].decision_anchor != expected_anchor
         ):
             raise RuntimeError(f"prior evidence differs: {requirement}")
 
-    critical_5d = {
-        "GRAG-031": (
-            "issue:#253:deferred:deterministic-hybrid-fusion-and-dependency-"
-            "root-deduplication"
-        ),
-        "GRAG-042": (
-            "issue:#253:deferred:source-revision-signal-lead-hypothesis-and-"
-            "candidate-lineage-projection-and-hydration"
-        ),
-        "TRI-021": (
-            "issue:#253:deferred:exact-source-formal-process-and-explicit-"
-            "lineage-before-approximate-similarity"
-        ),
+    expected_increment6 = {
+        "GRAG-042",
+        "GRAG-044",
+        "GRPROD-021",
+        "TRI-024",
+        "TRI-026",
+        "TRI-028",
     }
-    for requirement, anchor in critical_5d.items():
-        _require_deferred_anchor(
-            rows,
-            requirement,
-            Increment5DeliveryTrace.DEFERRED_TO_5D,
-            253,
-            anchor,
-        )
+    if {
+        row.requirement_id
+        for row in INCREMENT_5_TRACEABILITY
+        if row.delivery_issue == 146
+    } != expected_increment6:
+        raise RuntimeError("Increment 6 transfer differs from owner amendment")
 
-    critical_5e = {
-        "GRAG-044": (
-            "issue:#254:deferred:graph-dependent-decision-exact-fallback-"
-            "watch-or-operational-hold"
-        ),
-        "GRAG-045": (
-            "issue:#254:deferred:source-collection-and-lead-creation-"
-            "isolation-during-graph-outage"
-        ),
-        "GRPROD-024": (
-            "issue:#254:deferred:system-outage-degradation-without-"
-            "graph-free-production-profile"
-        ),
-        "TRI-024": (
-            "issue:#254:deferred:empty-retrieval-cannot-create-"
-            "hypothesis-or-candidate"
-        ),
-        "TRI-026": (
-            "issue:#254:deferred:candidate-admission-requires-current-"
-            "authoritative-collision-check"
-        ),
-        "GRPROD-021": (
-            "issue:#254:deferred:complete-graph-native-vertical-slice-"
-            "through-triage-and-candidate-admission"
-        ),
-        "GRPROD-002": (
-            "issue:#254:deferred:no-production-canary-or-complete-"
-            "live-shadow-without-graphrag"
-        ),
-        "GRPROD-023": (
-            "issue:#254:deferred:graphrag-cannot-be-an-optional-"
-            "production-plugin"
-        ),
-        "TRI-028": (
-            "issue:#254:deferred:urgent-degraded-retrieval-requires-durable-"
-            "later-reconciliation"
-        ),
-        "DEVAL-072": (
-            "issue:#254:deferred:public-artifact-safety-validation-redaction-"
-            "and-release-controls"
-        ),
-        "DOPS-010": "issue:#254:deferred:multidimensional-operational-health",
-        "DOPS-015": (
-            "issue:#254:deferred:active-obligation-path-loss-and-scoped-"
-            "coverage-containment"
-        ),
-        "DOPS-026": (
-            "issue:#254:deferred:source-and-model-content-cannot-alter-"
-            "operational-policy-egress-budgets-or-authority"
-        ),
-        "DOPS-043": (
-            "issue:#254:deferred:queue-backpressure-and-current-authority-"
-            "revalidation-before-commit"
-        ),
-        "DOPS-046": (
-            "issue:#254:deferred:atomic-or-deterministically-reconcilable-"
-            "transition-delivery"
-        ),
-        "DOPS-048": (
-            "issue:#254:deferred:dependency-specific-scheduler-network-parser-"
-            "store-retrieval-model-search-and-evidence-intake-failure"
-        ),
-        "DOPS-050": (
-            "issue:#254:deferred:full-reconciliation-orphaned-ownership-"
-            "ambiguous-calls-duplicate-delivery-stale-work-and-pending-handoffs"
-        ),
-        "DOPS-067": (
-            "issue:#254:deferred:least-privilege-credential-source-access-and-"
-            "approved-network-destination-evidence"
-        ),
-        "DOPS-073": (
-            "issue:#254:deferred:narrowest-safe-scope-pause-and-broadened-"
-            "operational-containment"
-        ),
+    expected_increment8_graph = {
+        "GRAG-045",
+        "GRAG-046",
+        "GRAG-057",
+        "GRPROD-002",
+        "GRPROD-004",
+        "GRPROD-011",
+        "GRPROD-012",
+        "GRPROD-022",
+        "GRPROD-024",
+        "GRPROD-030",
+        "GRPROD-031",
     }
-    for requirement, anchor in critical_5e.items():
-        _require_deferred_anchor(
-            rows,
-            requirement,
-            Increment5DeliveryTrace.DEFERRED_TO_5E,
-            254,
-            anchor,
-        )
+    if not expected_increment8_graph.issubset(
+        DEFERRED_TO_INCREMENT_8_REQUIREMENTS
+    ):
+        raise RuntimeError("Increment 8 graph/product transfer is incomplete")
 
 
 validate_increment5_traceability()
