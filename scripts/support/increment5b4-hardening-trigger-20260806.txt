@@ -2,3 +2,4 @@ Reviewed carrier: d8f92de968edccdeb58d4ae80a15a04919e25e18
 Launcher: b288f5e03d261e904751828ea84f206552490eaf
 Source: 30eb9dd5e7d6c03018d30289ef3fa05f3b76d523
 Purpose: trigger the Python 3.12 support hardening run without changing product bytes.
+Retrigger: 2026-08-06T21:05:00+01:00 after Increment 5B3 merged.
