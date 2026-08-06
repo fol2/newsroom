@@ -1,8 +1,9 @@
 Keep this support-only pull request open until the final clean Increment 5B4 materializer publishes and uploads its exact seven-file worktree.
 
-base_workflow_commit=14e149f4866cdefa3f4f6be6527a6422c6537009
-base_workflow_blob=7b01e89f81300cba3a3a496c45721eb0537270a7
+carrier_commit=14e149f4866cdefa3f4f6be6527a6422c6537009
+wrapper_commit=6060d3453e19bd64aaca8360751c6ee043b1d5ab
 expected_base=7976909e58a47749ac39fa212f5ecac325294ace
 expected_source=30eb9dd5e7d6c03018d30289ef3fa05f3b76d523
 canonical_branch=agent/increment-5b4-admitted-graph
-focused_local=64 passed, 1 skipped
+focused_github=64 passed, 2 skipped
+correction=remove exactly two redundant cd product transitions
