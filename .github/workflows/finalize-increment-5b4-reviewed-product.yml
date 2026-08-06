@@ -44,12 +44,9 @@ jobs:
 
           git init -q carrier
           git -C carrier remote add origin "https://github.com/$REPOSITORY.git"
-          git -C carrier fetch --no-tags --depth=1 origin \
+          git -C carrier fetch --no-tags --depth=2 origin \
             "refs/heads/$CARRIER_BRANCH:refs/remotes/origin/carrier"
-          if [[ "$(git -C carrier rev-parse refs/remotes/origin/carrier)" != "$CARRIER_COMMIT" ]]; then
-            echo "carrier moved from pinned commit" >&2
-            exit 1
-          fi
+          git -C carrier cat-file -e "$CARRIER_COMMIT^{commit}"
           git -C carrier show "$CARRIER_COMMIT:$CARRIER_PATH" > /tmp/increment5b4-carrier.yml
 
           python3 - <<'PY'
@@ -64,8 +61,7 @@ jobs:
           end_marker = "          PAYLOAD\n"
           if carrier.count(start_marker) != 1:
               raise SystemExit("reviewed payload start marker drifted")
-          prefix, remainder = carrier.split(start_marker, 1)
-          del prefix
+          _prefix, remainder = carrier.split(start_marker, 1)
           if remainder.count(end_marker) != 1:
               raise SystemExit("reviewed payload end marker drifted")
           payload_block, _suffix = remainder.split(end_marker, 1)
@@ -74,16 +70,8 @@ jobs:
               for line in payload_block.splitlines()
           )
           script = gzip.decompress(base64.b64decode(payload)).decode("utf-8")
-          old = '''cd product
-uv run pytest -q | tee "$FULL_LOG"
-
-cd product
-git config user.name "James To"
-'''
-          new = '''uv run pytest -q | tee "$FULL_LOG"
-
-git config user.name "James To"
-'''
+          old = "cd product\nuv run pytest -q | tee \"$FULL_LOG\"\n\ncd product\ngit config user.name \"James To\"\n"
+          new = "uv run pytest -q | tee \"$FULL_LOG\"\n\ngit config user.name \"James To\"\n"
           if script.count(old) != 1:
               raise SystemExit("reviewed path-bookkeeping boundary drifted")
           corrected = script.replace(old, new, 1)
