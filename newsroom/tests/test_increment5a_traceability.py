@@ -22,6 +22,7 @@ from newsroom.increment5._traceability_model import (
     OPERATIONAL_DOPS,
     OUTSIDE_INCREMENT_5_REQUIREMENTS,
     REQUEST_RETRIEVAL_REQUIREMENTS,
+    Increment5DecisionTrace,
     Increment5DeliveryTrace,
     Increment5TraceabilityRow,
 )
@@ -223,8 +224,53 @@ def test_decision_anchors_cover_every_requirement_without_issue_as_authority() -
     assert ANCHOR_BY_REQUIREMENT["DEVAL-011"].endswith(
         "#/epoch_protocol"
     )
+    assert ANCHOR_BY_REQUIREMENT["DEVAL-046"].endswith(
+        "#/triage_error_protocol"
+    )
+    assert ANCHOR_BY_REQUIREMENT["GRAG-054"].endswith(
+        "#/mandatory_query_families"
+    )
+    assert ANCHOR_BY_REQUIREMENT["GRAG-055"].endswith(
+        "#/decision_scope"
+    )
+    assert ANCHOR_BY_REQUIREMENT["GRAG-056"].endswith(
+        "#/zero_tolerance_gates"
+    )
+    assert ANCHOR_BY_REQUIREMENT["DEVAL-064"].endswith(
+        "#/payload/rights_matrix"
+    )
+    assert ANCHOR_BY_REQUIREMENT["GRPROD-001"].endswith(
+        "#/payload/required_modes"
+    )
+    assert ANCHOR_BY_REQUIREMENT["GRPROD-022"].endswith(
+        "#/payload/non_effects"
+    )
+    assert ANCHOR_BY_REQUIREMENT["DEVAL-072"] == (
+        "docs/specs/editorial-automation/discovery-shadow-evaluation.md"
+        "#DEVAL-072"
+    )
     assert ANCHOR_BY_REQUIREMENT["DOPS-076"].endswith(
         "#/payload/non_effects"
+    )
+
+    for requirement in INHERITED_AUTHORITY:
+        _, location = ANCHOR_BY_REQUIREMENT[requirement].split(":", 1)
+        path_text, fragment = location.split("#", 1)
+        assert fragment in (ROOT / path_text).read_text(encoding="utf-8")
+
+
+def test_decision_map_has_no_runtime_approval_or_github_evidence() -> None:
+    assert {row.decision_trace for row in INCREMENT_5_TRACEABILITY} == {
+        Increment5DecisionTrace.BOUND_BY_5A,
+        Increment5DecisionTrace.INHERITED_ACCEPTED_AUTHORITY,
+    }
+    assert all(
+        "approval" not in row.delivery_target.lower()
+        for row in INCREMENT_5_TRACEABILITY
+    )
+    assert all(
+        "github" not in row.verification_target.lower()
+        for row in INCREMENT_5_TRACEABILITY
     )
 
 
