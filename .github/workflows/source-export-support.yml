@@ -1,0 +1,33 @@
+name: Source export support
+
+on:
+  push:
+    branches:
+      - support/source-export-20260806
+
+permissions:
+  contents: read
+
+jobs:
+  export-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact pushed revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Pack repository source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --exclude=.git -czf /tmp/newsroom-source.tgz .
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: newsroom-source-${{ github.sha }}
+          path: /tmp/newsroom-source.tgz
+          retention-days: 1
+          if-no-files-found: error
