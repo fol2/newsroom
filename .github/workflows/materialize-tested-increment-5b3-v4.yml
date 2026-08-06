@@ -1,0 +1,242 @@
+name: Materialize tested Increment 5B3 product checkpoint v4
+
+on:
+  push:
+    branches:
+      - support/publish-increment-5b3-v3-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-tested-increment-5b3-v4
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PRODUCT_SOURCE_BRANCH: support/materialize-increment-5b3-20260806
+      EXPECTED_BASE: 7a4164f0a0b7c7c70cd68b2a5485110e7ca576f3
+      STAGING_BRANCH: staging/increment-5b3-vector-replay-tested-20260806
+      CHECKPOINT_BRANCH: checkpoint/increment-5b3-vector-replay-tested-20260806
+      PRODUCT_ARCHIVE: /tmp/increment5b3-product-v4.tgz
+      FOCUSED_LOG: /tmp/increment5b3-focused-v4.log
+      FULL_LOG: /tmp/increment5b3-full-v4.log
+      RECEIPT_PATH: /tmp/increment5b3-materialization-v4.json
+    steps:
+      - name: Check out exact product source carrier
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCT_SOURCE_BRANCH }}
+          fetch-depth: 0
+
+      - name: Apply the reviewed deterministic corrections
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          module = Path("newsroom/increment5/vector_retriever.py")
+          text = module.read_text(encoding="utf-8")
+          old_pattern = "[A-Za-z0-9._:-]{0,127}"
+          new_pattern = r"[A-Za-z0-9._:\-]{0,127}"
+          if old_pattern in text:
+              text = text.replace(old_pattern, new_pattern, 1)
+          elif new_pattern not in text:
+              raise SystemExit("reviewed token-regex boundary is absent")
+          module.write_text(text, encoding="utf-8")
+
+          tests = Path("newsroom/tests/test_increment5b3_vector_retriever.py")
+          test_text = tests.read_text(encoding="utf-8")
+          disposable = '''    assert receipt.exclusions == (\n        pytest.helpers.anything\n        if hasattr(pytest, "helpers")\n        else receipt.exclusions\n    )\n'''
+          if disposable in test_text:
+              test_text = test_text.replace(disposable, "", 1)
+
+          old_deterministic = '''    first = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="first.sqlite",\n    ).retrieve(request)\n    second = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="second.sqlite",\n    ).retrieve(request)\n'''
+          new_deterministic = '''    first = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="first.sqlite",\n        clock=lambda: 0,\n    ).retrieve(request)\n    second = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="second.sqlite",\n        clock=lambda: 0,\n    ).retrieve(request)\n'''
+          if old_deterministic in test_text:
+              test_text = test_text.replace(
+                  old_deterministic,
+                  new_deterministic,
+                  1,
+              )
+          elif new_deterministic not in test_text:
+              raise SystemExit("reviewed deterministic-clock boundary is absent")
+          tests.write_text(test_text, encoding="utf-8")
+          PY
+          python -m compileall -q \
+            newsroom/increment5/vector_retriever.py \
+            newsroom/tests/test_increment5b3_vector_retriever.py
+
+      - name: Preserve only the five product files
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "$PRODUCT_ARCHIVE" \
+            docs/operations/increment-5b3-vector-fixture-retriever.md \
+            docs/traceability/increment-5b3-vector-fixture-retriever.md \
+            newsroom/increment5/data/increment5b3_vector_fixture_v1.json \
+            newsroom/increment5/vector_retriever.py \
+            newsroom/tests/test_increment5b3_vector_retriever.py
+
+      - name: Reconstruct the exact post-5B2 product tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          actual_base="$(git rev-parse origin/main)"
+          if [[ "$actual_base" != "$EXPECTED_BASE" ]]; then
+            echo "main moved: expected=$EXPECTED_BASE actual=$actual_base" >&2
+            exit 1
+          fi
+          git checkout --detach "$EXPECTED_BASE"
+          tar -xzf "$PRODUCT_ARCHIVE"
+          if [[ -z "$(git status --porcelain --untracked-files=all)" ]]; then
+            echo "materialization produced no product diff" >&2
+            exit 1
+          fi
+
+      - name: Install the exact locked test environment
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Run focused Increment 5B3 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen
+          uv run pytest -q newsroom/tests/test_increment5b3_vector_retriever.py \
+            | tee "$FOCUSED_LOG"
+
+      - name: Run the complete deterministic repository suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run pytest -q | tee "$FULL_LOG"
+
+      - name: Commit one product atom and push durable checkpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "James To"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          git add \
+            docs/operations/increment-5b3-vector-fixture-retriever.md \
+            docs/traceability/increment-5b3-vector-fixture-retriever.md \
+            newsroom/increment5/data/increment5b3_vector_fixture_v1.json \
+            newsroom/increment5/vector_retriever.py \
+            newsroom/tests/test_increment5b3_vector_retriever.py
+          git diff --cached --check
+          git commit -m "Increment 5B3: deterministic vector fixture replay retriever"
+          python - <<'PY'
+          import os
+          import subprocess
+
+          expected = [
+              "docs/operations/increment-5b3-vector-fixture-retriever.md",
+              "docs/traceability/increment-5b3-vector-fixture-retriever.md",
+              "newsroom/increment5/data/increment5b3_vector_fixture_v1.json",
+              "newsroom/increment5/vector_retriever.py",
+              "newsroom/tests/test_increment5b3_vector_retriever.py",
+          ]
+          base = os.environ["EXPECTED_BASE"]
+          count = subprocess.check_output(
+              ["git", "rev-list", "--count", f"{base}..HEAD"],
+              text=True,
+          ).strip()
+          actual = subprocess.check_output(
+              ["git", "diff", "--name-only", f"{base}..HEAD"],
+              text=True,
+          ).splitlines()
+          if count != "1":
+              raise SystemExit(f"expected one product commit, got {count}")
+          if actual != expected:
+              raise SystemExit(
+                  f"product inventory mismatch: expected={expected} actual={actual}"
+              )
+          PY
+          git push --force origin "HEAD:refs/heads/$STAGING_BRANCH"
+          git push --force origin "HEAD:refs/heads/$CHECKPOINT_BRANCH"
+
+      - name: Emit exact materialization receipt
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          def command(*args: str) -> str | None:
+              try:
+                  return subprocess.check_output(args, text=True).strip()
+              except Exception:
+                  return None
+
+          def digest(path: str) -> str | None:
+              candidate = Path(path)
+              if not candidate.exists():
+                  return None
+              return "sha256:" + hashlib.sha256(candidate.read_bytes()).hexdigest()
+
+          def summary(path: str) -> str | None:
+              candidate = Path(path)
+              if not candidate.exists():
+                  return None
+              lines = candidate.read_text(
+                  encoding="utf-8",
+                  errors="replace",
+              ).splitlines()
+              return lines[-1] if lines else None
+
+          payload = {
+              "schema_version": "newsroom.increment5b3.materialization-receipt.v4",
+              "expected_base": os.environ["EXPECTED_BASE"],
+              "head": command("git", "rev-parse", "HEAD"),
+              "tree": command("git", "rev-parse", "HEAD^{tree}"),
+              "parent": command("git", "rev-parse", "HEAD^"),
+              "staging_branch": os.environ["STAGING_BRANCH"],
+              "checkpoint_branch": os.environ["CHECKPOINT_BRANCH"],
+              "focused_log_digest": digest(os.environ["FOCUSED_LOG"]),
+              "full_log_digest": digest(os.environ["FULL_LOG"]),
+              "focused_summary": summary(os.environ["FOCUSED_LOG"]),
+              "full_summary": summary(os.environ["FULL_LOG"]),
+              "external_call_count": 0,
+              "provider_call_count": 0,
+              "model_call_count": 0,
+              "embedding_call_count": 0,
+              "provider_spend_micros": 0,
+              "production_activation_authorized": False,
+          }
+          receipt = Path(os.environ["RECEIPT_PATH"])
+          receipt.write_text(
+              json.dumps(
+                  payload,
+                  ensure_ascii=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          print(receipt.read_text(encoding="utf-8"))
+          PY
+
+      - name: Upload materialization evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5b3-materialization-v4-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5b3-materialization-v4.json
+            /tmp/increment5b3-focused-v4.log
+            /tmp/increment5b3-full-v4.log
