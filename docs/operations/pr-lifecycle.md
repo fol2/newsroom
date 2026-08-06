@@ -61,7 +61,9 @@ The branch starts with `preflight/`.
 
 ## Metadata contract
 
-The following six fields are mandatory and unique:
+The following six fields are mandatory. They must be the visible first six
+lines of the PR body, in this exact order, with no blank line, HTML comment, code
+fence or prose before them:
 
 ```text
 Lifecycle:
@@ -71,6 +73,10 @@ Checkpoint-Ref:
 Close-When:
 Branch-Retention:
 ```
+
+Only that leading block is authoritative. Hidden comments, fenced examples and
+later repeated fields are documentation only and are never parsed as lifecycle
+metadata.
 
 `Delivery-Atom` is a bounded lowercase identifier. `Canonical-PR` is `self` or
 `#<number>`. `Checkpoint-Ref` is a safe branch ref or `NONE`. Every non-`NONE`
@@ -107,28 +113,42 @@ retained by every automated closure.
 `.github/workflows/pr-lifecycle.yml` runs trusted default-branch code.
 
 On PR creation or metadata changes it validates the event body and actual PR
-surface. Weekly scheduled runs and manual dispatches build a repository-wide
-inventory. Inventory resolves every declared checkpoint to its full commit SHA;
-the planner emits a checkpointed close action only when that SHA equals the
-inventoried PR head. A stale checkpoint is reported as a warning and cannot block
-later eligible actions. The dry-run job has read-only permissions. A separate
-apply job has only the issue and pull-request write permissions needed to comment
-and close an eligible disposable PR; repository contents remain read-only.
+surface. Weekly scheduled runs and `mode=plan` manual dispatches build a
+repository-wide inventory at one immutable `${{ github.sha }}`. Inventory resolves
+every declared checkpoint to its full commit SHA; the planner emits a checkpointed
+close action only when that SHA equals the inventoried PR head. A stale checkpoint
+is reported as a warning and cannot block later eligible actions.
 
-Manual apply requires all three independently checked values:
+The plan job has read-only permissions, writes the complete deterministic mutation
+plan to `pr-lifecycle-plan.json`, publishes it as an artifact and prints three
+review coordinates: the immutable revision, the exact RFC3339 evaluation time and
+the SHA-256 plan digest. The digest covers the repository, revision, evaluation
+time, every open PR surface and lifecycle, every independently verified merged
+canonical, every checkpoint SHA, every proposed close action and every warning.
 
-1. workflow-dispatch input `apply=true`;
-2. workflow-dispatch input `confirmation=CLOSE_ELIGIBLE_DISPOSABLE_PRS`; and
-3. the exact `PR_HOUSEKEEPING_APPLY=CLOSE_ELIGIBLE_DISPOSABLE_PRS` process guard.
+Apply is a separate `mode=apply` dispatch; it is never launched automatically by
+the plan job. The operator must dispatch the exact reviewed revision and supply:
+
+1. `reviewed_revision=<40-character reviewed revision>`;
+2. `reviewed_evaluation_time=<reviewed RFC3339 UTC time>`;
+3. `reviewed_plan_digest=<reviewed sha256 digest>`;
+4. `confirmation=CLOSE_ELIGIBLE_DISPOSABLE_PRS`; and
+5. the workflow supplies the independent
+   `PR_HOUSEKEEPING_APPLY=CLOSE_ELIGIBLE_DISPOSABLE_PRS` process guard.
+
+Both jobs check out the immutable dispatch SHA. Before any mutation, apply requires
+the executing revision to equal the reviewed revision, rebuilds the complete plan
+at the reviewed evaluation time and requires byte-canonical digest equality. Any
+new PR, changed metadata, label, head, checkpoint, canonical state, action or
+warning invalidates the reviewed plan.
 
 Both inventory jobs receive the workflow token explicitly; its effective rights
-remain constrained by each job's permission block. Before every mutation, apply
-mode re-reads the current PR state, body, labels, head repository, head SHA,
-checkpoint and canonical binding. The target must remain open and unmerged, the
-lifecycle must match the planned snapshot, and checkpointed closures must bind the
-checkpoint to the current head. Apply comments with an audit record before closing
-an eligible, `infra`-labelled disposable PR. It never merges or closes a canonical
-PR and never deletes a branch.
+remain constrained by each job's permission block. The apply job has only the issue
+and pull-request write permissions needed to comment and close an eligible
+disposable PR; repository contents remain read-only. It then re-reads the current
+target PR state, body, labels, head repository, head SHA, checkpoint and canonical
+binding before every effect. It never merges or closes a canonical PR and never
+deletes a branch.
 
 ## Recovery
 

@@ -7,6 +7,8 @@ Branch-Retention: keep
 
 <!--
 Required lifecycle metadata:
+- the six visible metadata lines above must remain the first six body lines
+- hidden comments, fenced examples and later fields are never authoritative
 - canonical: Canonical-PR self, Close-When merged, Branch-Retention keep
 - support: draft, support/ branch, reference canonical #, never merge
 - preflight: draft, preflight/ branch, reference canonical #, never merge

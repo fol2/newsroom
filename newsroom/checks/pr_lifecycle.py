@@ -121,29 +121,34 @@ class HousekeepingPlan:
 
 
 def parse_pr_lifecycle(body: str) -> PrLifecycle:
-    """Parse exactly one value for every lifecycle field from a PR body."""
+    """Parse the visible leading six-line lifecycle block from a PR body."""
 
     if not isinstance(body, str):
         raise PrLifecycleError("pull-request body must be text")
+    lines = body.splitlines()
+    if len(lines) < len(_METADATA_KEYS):
+        raise PrLifecycleError(
+            "lifecycle metadata must be the visible leading six-line block"
+        )
+
     values: dict[str, str] = {}
-    duplicates: set[str] = set()
-    for raw_line in body.splitlines():
+    for expected_key, raw_line in zip(
+        _METADATA_KEYS,
+        lines[: len(_METADATA_KEYS)],
+        strict=True,
+    ):
         match = _METADATA_LINE.fullmatch(raw_line)
         if match is None:
-            continue
+            raise PrLifecycleError(
+                "lifecycle metadata must be the visible leading six-line block"
+            )
         key, raw_value = match.groups()
-        if key in values:
-            duplicates.add(key)
+        if key != expected_key:
+            raise PrLifecycleError(
+                "lifecycle metadata fields must appear once in canonical order"
+            )
         values[key] = raw_value.strip()
-    if duplicates:
-        raise PrLifecycleError(
-            "duplicate lifecycle fields: " + ", ".join(sorted(duplicates))
-        )
-    missing = [key for key in _METADATA_KEYS if key not in values]
-    if missing:
-        raise PrLifecycleError(
-            "missing lifecycle fields: " + ", ".join(missing)
-        )
+
     empty = [key for key in _METADATA_KEYS if not values[key]]
     if empty:
         raise PrLifecycleError(
