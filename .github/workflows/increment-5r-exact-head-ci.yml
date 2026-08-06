@@ -1,0 +1,87 @@
+name: Increment 5R exact-head deterministic CI
+
+on:
+  push:
+    branches:
+      - support/increment-5r-exact-head-ci-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: increment-5r-exact-head-ci-20260806
+  cancel-in-progress: true
+
+jobs:
+  deterministic-ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EXPECTED_HEAD_SHA: f190067dfb505657ab210ebab66a1a551b1b91a1
+      EXPECTED_TREE_SHA: 85ffd019f5095583114a861e94fea0b97d1c76b5
+    steps:
+      - name: Check out the exact amendment head
+        uses: actions/checkout@v4
+        with:
+          ref: f190067dfb505657ab210ebab66a1a551b1b91a1
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_head="$(git rev-parse --verify HEAD^{commit})"
+          actual_tree="$(git rev-parse --verify HEAD^{tree})"
+          test "$actual_head" = "$EXPECTED_HEAD_SHA"
+          test "$actual_tree" = "$EXPECTED_TREE_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          printf 'exact_head=%s\nexact_tree=%s\n' "$actual_head" "$actual_tree" \
+            | tee exact-head-identity.txt
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Lockfile check
+        run: uv lock --check
+
+      - name: Sync development environment
+        run: uv sync --dev --locked
+
+      - name: Focused amended traceability tests
+        run: uv run python -m pytest -q newsroom/tests/test_increment5a_traceability.py
+
+      - name: Complete deterministic test suite
+        run: uv run python -m pytest -q
+
+      - name: Clustering evaluation gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+      - name: Record exact-head evidence
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Increment 5R exact-head evidence'
+            echo
+            echo "- Head: \`$EXPECTED_HEAD_SHA\`"
+            echo "- Tree: \`$EXPECTED_TREE_SHA\`"
+            echo "- Workflow source branch: \`support/increment-5r-exact-head-ci-20260806\`"
+            echo '- Product branch was checked out read-only; this workflow does not push or mutate repository content.'
+          } >> "$GITHUB_STEP_SUMMARY"
