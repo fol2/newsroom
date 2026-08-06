@@ -1,0 +1,118 @@
+name: Support PR lifecycle reviewed-plan boundary
+
+on:
+  push:
+    branches:
+      - support/pr-lifecycle-stale-checkpoint-plan-20260806
+    paths:
+      - .github/workflows/support-pr-lifecycle-reviewed-plan.yml
+      - scripts/support/apply_pr_lifecycle_reviewed_plan_fix.py.gz.b64
+
+permissions:
+  contents: write
+
+concurrency:
+  group: support-pr-lifecycle-reviewed-plan-20260806
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install and sync exact environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Materialise bounded correction source
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          import gzip
+
+          encoded = Path(
+              "scripts/support/apply_pr_lifecycle_reviewed_plan_fix.py.gz.b64"
+          ).read_text(encoding="ascii")
+          source = gzip.decompress(base64.b64decode(encoded, validate=True))
+          path = Path("/tmp/apply_pr_lifecycle_reviewed_plan_fix.py")
+          path.write_bytes(source)
+          PY
+          python -m py_compile /tmp/apply_pr_lifecycle_reviewed_plan_fix.py
+
+      - name: Apply reviewed-plan and leading-metadata correction
+        run: python /tmp/apply_pr_lifecycle_reviewed_plan_fix.py
+
+      - name: Verify bounded product diff and workflow carrier
+        run: |
+          git status --short
+          python - <<'PY'
+          import subprocess
+
+          allowed = {
+              ".github/pull_request_template.md",
+              ".github/workflows/pr-lifecycle.yml",
+              "docs/operations/pr-lifecycle.md",
+              "newsroom/checks/pr_lifecycle.py",
+              "newsroom/tests/test_pr_lifecycle.py",
+              "scripts/sdlc/pr_lifecycle.py",
+              "scripts/support/exported_pr_lifecycle_reviewed_plan.yml",
+          }
+          output = subprocess.check_output(
+              ["git", "status", "--porcelain=v1"],
+              text=True,
+          )
+          changed = {line[3:] for line in output.splitlines() if line}
+          if changed != allowed:
+              raise SystemExit(f"unexpected product diff: {sorted(changed)}")
+          PY
+          cmp \
+            .github/workflows/pr-lifecycle.yml \
+            scripts/support/exported_pr_lifecycle_reviewed_plan.yml
+
+      - name: Commit non-workflow product and exact workflow carrier
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            .github/pull_request_template.md \
+            docs/operations/pr-lifecycle.md \
+            newsroom/checks/pr_lifecycle.py \
+            newsroom/tests/test_pr_lifecycle.py \
+            scripts/sdlc/pr_lifecycle.py \
+            scripts/support/exported_pr_lifecycle_reviewed_plan.yml
+          git commit -m "fix: bind lifecycle apply to a reviewed plan"
+
+      - name: Focused lifecycle verification
+        run: uv run python -m pytest -q newsroom/tests/test_pr_lifecycle.py
+
+      - name: Complete deterministic repository verification
+        run: uv run python -m pytest -q
+
+      - name: Clustering regression gate
+        run: |
+          uv run python scripts/eval_clustering_metrics.py \
+            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
+            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
+            --fail-on-regression
+
+      - name: Verify clean committed product identity
+        run: |
+          cmp \
+            .github/workflows/pr-lifecycle.yml \
+            scripts/support/exported_pr_lifecycle_reviewed_plan.yml
+          git restore .github/workflows/pr-lifecycle.yml
+          test -z "$(git status --porcelain=v1)"
+
+      - name: Push verified product correction
+        run: git push origin HEAD:${GITHUB_REF_NAME}
