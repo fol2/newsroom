@@ -108,9 +108,12 @@ retained by every automated closure.
 
 On PR creation or metadata changes it validates the event body and actual PR
 surface. Weekly scheduled runs and manual dispatches build a repository-wide
-inventory. The dry-run job has read-only permissions. A separate apply job has
-only the issue and pull-request write permissions needed to comment and close an
-eligible disposable PR; repository contents remain read-only.
+inventory. Inventory resolves every declared checkpoint to its full commit SHA;
+the planner emits a checkpointed close action only when that SHA equals the
+inventoried PR head. A stale checkpoint is reported as a warning and cannot block
+later eligible actions. The dry-run job has read-only permissions. A separate
+apply job has only the issue and pull-request write permissions needed to comment
+and close an eligible disposable PR; repository contents remain read-only.
 
 Manual apply requires all three independently checked values:
 

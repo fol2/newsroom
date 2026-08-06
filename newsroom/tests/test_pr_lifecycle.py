@@ -259,9 +259,7 @@ def test_plan_never_closes_canonical_and_closes_checkpointed_support() -> None:
     )
     plan = plan_housekeeping(
         (canonical, support),
-        existing_checkpoint_refs=frozenset(
-            {"checkpoint/increment-5b2"}
-        ),
+        checkpoint_head_shas={"checkpoint/increment-5b2": "a" * 40},
         now=NOW,
     )
 
@@ -271,6 +269,63 @@ def test_plan_never_closes_canonical_and_closes_checkpointed_support() -> None:
         "pr_number",
         "reason",
     }
+
+
+def test_plan_excludes_stale_checkpoint_without_blocking_later_closure() -> None:
+    canonical = open_pr(
+        10,
+        pr_body=body(),
+        draft=False,
+        head_ref="agent/increment-5b2",
+        head_sha="d" * 40,
+    )
+    stale = open_pr(
+        11,
+        pr_body=body(
+            lifecycle="support",
+            canonical="#10",
+            checkpoint="checkpoint/stale-support",
+            close_when="checkpointed",
+        ),
+        draft=True,
+        head_ref="support/stale-checkpoint",
+        head_sha="a" * 40,
+    )
+    current = open_pr(
+        12,
+        pr_body=body(
+            lifecycle="preflight",
+            canonical="#10",
+            checkpoint="checkpoint/current-preflight",
+            close_when="checkpointed",
+        ),
+        draft=True,
+        head_ref="preflight/current-checkpoint",
+        head_sha="c" * 40,
+    )
+
+    plan = plan_housekeeping(
+        (canonical, stale, current),
+        checkpoint_head_shas={
+            "checkpoint/stale-support": "b" * 40,
+            "checkpoint/current-preflight": "c" * 40,
+        },
+        now=NOW,
+    )
+
+    assert [action.pr_number for action in plan.close_actions] == [12]
+    assert plan.warnings == (
+        "#11 declared checkpoint is stale: checkpoint/stale-support",
+    )
+
+
+def test_plan_rejects_malformed_checkpoint_head_sha() -> None:
+    with pytest.raises(PrLifecycleError, match="checkpoint head SHA"):
+        plan_housekeeping(
+            (),
+            checkpoint_head_shas={"checkpoint/example": "ABC"},
+            now=NOW,
+        )
 
 
 def test_automatic_branch_deletion_metadata_is_rejected() -> None:
@@ -388,9 +443,7 @@ def test_plan_rejects_shared_same_repository_head_refs() -> None:
     ):
         plan_housekeeping(
             (canonical, keep, delete),
-            existing_checkpoint_refs=frozenset(
-                {"checkpoint/increment-5b2"}
-            ),
+            checkpoint_head_shas={"checkpoint/increment-5b2": "a" * 40},
             repository_full_name="fol2/newsroom",
             now=NOW,
         )
@@ -442,9 +495,7 @@ def test_unlabelled_disposable_is_never_closed() -> None:
     )
     plan = plan_housekeeping(
         (canonical, support),
-        existing_checkpoint_refs=frozenset(
-            {"checkpoint/increment-5b2"}
-        ),
+        checkpoint_head_shas={"checkpoint/increment-5b2": "a" * 40},
         now=NOW,
     )
 

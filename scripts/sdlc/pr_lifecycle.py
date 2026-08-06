@@ -296,15 +296,15 @@ def inventory(*, apply: bool) -> int:
         for lifecycle in lifecycles.values()
         if lifecycle.checkpoint_ref is not None
     }
-    existing_checkpoints = frozenset(
-        ref
+    checkpoint_head_shas = {
+        ref: sha
         for ref in sorted(checkpoint_refs)
-        if client.branch_exists(ref)
-    )
+        if (sha := client.branch_sha(ref)) is not None
+    }
     plan = plan_housekeeping(
         open_prs,
         merged_canonical_prs=merged_canonical,
-        existing_checkpoint_refs=existing_checkpoints,
+        checkpoint_head_shas=checkpoint_head_shas,
         repository_full_name=repository,
         now=datetime.now(timezone.utc),
     )

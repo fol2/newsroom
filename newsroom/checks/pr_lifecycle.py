@@ -277,7 +277,7 @@ def plan_housekeeping(
     open_pull_requests: Iterable[OpenPullRequest],
     *,
     merged_canonical_prs: frozenset[int] = frozenset(),
-    existing_checkpoint_refs: frozenset[str] = frozenset(),
+    checkpoint_head_shas: Mapping[str, str] | None = None,
     repository_full_name: str | None = None,
     now: datetime | None = None,
 ) -> HousekeepingPlan:
@@ -292,10 +292,22 @@ def plan_housekeeping(
         for item in merged_canonical_prs
     ):
         raise PrLifecycleError("merged canonical PR inventory is malformed")
-    if not isinstance(existing_checkpoint_refs, frozenset):
-        raise PrLifecycleError("checkpoint ref inventory must be immutable")
-    for ref in existing_checkpoint_refs:
-        _validate_ref(ref, field="checkpoint ref")
+    if checkpoint_head_shas is None:
+        checkpoint_shas: dict[str, str] = {}
+    elif not isinstance(checkpoint_head_shas, Mapping):
+        raise PrLifecycleError("checkpoint head inventory must be a mapping")
+    else:
+        checkpoint_shas = {}
+        for ref, sha in checkpoint_head_shas.items():
+            _validate_ref(ref, field="checkpoint ref")
+            if (
+                not isinstance(sha, str)
+                or _COMMIT_SHA.fullmatch(sha) is None
+            ):
+                raise PrLifecycleError(
+                    "checkpoint head SHA must be lowercase full commit text"
+                )
+            checkpoint_shas[ref] = sha
     current = now or datetime.now(timezone.utc)
     if not isinstance(current, datetime) or current.tzinfo is None:
         raise PrLifecycleError("housekeeping time must be timezone-aware")
@@ -418,14 +430,27 @@ def plan_housekeeping(
             continue
         close_reason: str | None = None
         if lifecycle.close_when is CloseWhen.CHECKPOINTED:
-            if (
-                lifecycle.checkpoint_ref is not None
-                and lifecycle.checkpoint_ref in existing_checkpoint_refs
-            ):
-                close_reason = (
-                    "declared checkpoint exists: "
-                    f"{lifecycle.checkpoint_ref}"
-                )
+            assert lifecycle.checkpoint_ref is not None
+            checkpoint_sha = checkpoint_shas.get(
+                lifecycle.checkpoint_ref
+            )
+            if checkpoint_sha is not None:
+                if pr.head_sha is None:
+                    warnings.append(
+                        f"#{pr.number} current head SHA is unavailable for "
+                        "checkpoint verification: "
+                        f"{lifecycle.checkpoint_ref}"
+                    )
+                elif checkpoint_sha != pr.head_sha:
+                    warnings.append(
+                        f"#{pr.number} declared checkpoint is stale: "
+                        f"{lifecycle.checkpoint_ref}"
+                    )
+                else:
+                    close_reason = (
+                        "declared checkpoint matches current head: "
+                        f"{lifecycle.checkpoint_ref}"
+                    )
         elif (
             lifecycle.close_when is CloseWhen.CANONICAL_MERGED
             and lifecycle.canonical_pr in merged_canonical_prs
