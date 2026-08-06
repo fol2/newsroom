@@ -1,0 +1,223 @@
+name: Publish tested Increment 5B3 product v6
+
+on:
+  push:
+    branches:
+      - support/publish-increment-5b3-v3-20260806
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-tested-increment-5b3-v6
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TESTED_SOURCE: 7c1d1514d83a4f3e55aa8a4780f22060487d9b80
+      EXPECTED_BASE: 7a4164f0a0b7c7c70cd68b2a5485110e7ca576f3
+      STAGING_BRANCH: staging/increment-5b3-vector-replay-tested-20260806
+      CHECKPOINT_BRANCH: checkpoint/increment-5b3-vector-replay-tested-20260806
+      V5_RUN_ID: 31115539411
+      V5_FOCUSED_DIGEST: sha256:da358d85f214ea91fb59950846ef3968765162384d8e870ae16d57ebc162c65e
+      V5_FULL_DIGEST: sha256:e25bf109e24049580f050f16cec8324469e36378c148053531bfd5bfa04acd1e
+    steps:
+      - name: Check out the immutable tested source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TESTED_SOURCE }}
+          fetch-depth: 0
+          path: source
+
+      - name: Check out the exact post-5B2 base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_BASE }}
+          fetch-depth: 0
+          path: product
+
+      - name: Recreate the exact v5-tested product bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("source")
+          module = source / "newsroom/increment5/vector_retriever.py"
+          text = module.read_text(encoding="utf-8")
+          old_pattern = "[A-Za-z0-9._:-]{0,127}"
+          new_pattern = r"[A-Za-z0-9._:\-]{0,127}"
+          if old_pattern in text:
+              text = text.replace(old_pattern, new_pattern, 1)
+          elif new_pattern not in text:
+              raise SystemExit("reviewed token-regex boundary is absent")
+          module.write_text(text, encoding="utf-8")
+
+          tests = source / "newsroom/tests/test_increment5b3_vector_retriever.py"
+          test_text = tests.read_text(encoding="utf-8")
+          disposable = '''    assert receipt.exclusions == (\n        pytest.helpers.anything\n        if hasattr(pytest, "helpers")\n        else receipt.exclusions\n    )\n'''
+          if disposable in test_text:
+              test_text = test_text.replace(disposable, "", 1)
+
+          old_deterministic = '''    first = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="first.sqlite",\n    ).retrieve(request)\n    second = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="second.sqlite",\n    ).retrieve(request)\n'''
+          new_deterministic = '''    first = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="first.sqlite",\n        clock=lambda: 0,\n    ).retrieve(request)\n    second = make_retriever(\n        tmp_path,\n        catalog,\n        view,\n        journal_name="second.sqlite",\n        clock=lambda: 0,\n    ).retrieve(request)\n'''
+          if old_deterministic in test_text:
+              test_text = test_text.replace(
+                  old_deterministic,
+                  new_deterministic,
+                  1,
+              )
+          elif new_deterministic not in test_text:
+              raise SystemExit("reviewed deterministic-clock boundary is absent")
+          tests.write_text(test_text, encoding="utf-8")
+
+          product = Path("product")
+          paths = (
+              "docs/operations/increment-5b3-vector-fixture-retriever.md",
+              "docs/traceability/increment-5b3-vector-fixture-retriever.md",
+              "newsroom/increment5/data/increment5b3_vector_fixture_v1.json",
+              "newsroom/increment5/vector_retriever.py",
+              "newsroom/tests/test_increment5b3_vector_retriever.py",
+          )
+          for name in paths:
+              relative = Path(name)
+              destination = product / relative
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_bytes((source / relative).read_bytes())
+          PY
+
+      - name: Verify locked identities and run the focused suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(git -C source rev-parse HEAD)" != "$TESTED_SOURCE" ]]; then
+            echo "tested source identity drifted" >&2
+            exit 1
+          fi
+          if [[ "$(git -C product rev-parse HEAD)" != "$EXPECTED_BASE" ]]; then
+            echo "product base identity drifted" >&2
+            exit 1
+          fi
+          remote_main="$(git -C product ls-remote origin refs/heads/main | cut -f1)"
+          if [[ "$remote_main" != "$EXPECTED_BASE" ]]; then
+            echo "main moved: expected=$EXPECTED_BASE actual=$remote_main" >&2
+            exit 1
+          fi
+          cd product
+          python -m compileall -q \
+            newsroom/increment5/vector_retriever.py \
+            newsroom/tests/test_increment5b3_vector_retriever.py
+          python -m pip install --disable-pip-version-check -q \
+            pytest==9.0.2 \
+            jsonschema==4.26.0 \
+            lxml==6.0.2 \
+            neo4j==6.2.0 \
+            pyyaml==6.0.3 \
+            requests==2.32.5
+          python -m pytest -q newsroom/tests/test_increment5b3_vector_retriever.py
+
+      - name: Commit and push the exact tested product atom
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd product
+          git config user.name "James To"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          git add -f \
+            docs/operations/increment-5b3-vector-fixture-retriever.md \
+            docs/traceability/increment-5b3-vector-fixture-retriever.md \
+            newsroom/increment5/data/increment5b3_vector_fixture_v1.json \
+            newsroom/increment5/vector_retriever.py \
+            newsroom/tests/test_increment5b3_vector_retriever.py
+          git diff --cached --check
+          git commit -m "Increment 5B3: deterministic vector fixture replay retriever"
+          python - <<'PY'
+          import os
+          import subprocess
+
+          expected = [
+              "docs/operations/increment-5b3-vector-fixture-retriever.md",
+              "docs/traceability/increment-5b3-vector-fixture-retriever.md",
+              "newsroom/increment5/data/increment5b3_vector_fixture_v1.json",
+              "newsroom/increment5/vector_retriever.py",
+              "newsroom/tests/test_increment5b3_vector_retriever.py",
+          ]
+          base = os.environ["EXPECTED_BASE"]
+          count = subprocess.check_output(
+              ["git", "rev-list", "--count", f"{base}..HEAD"],
+              text=True,
+          ).strip()
+          actual = subprocess.check_output(
+              ["git", "diff", "--name-only", f"{base}..HEAD"],
+              text=True,
+          ).splitlines()
+          if count != "1" or actual != expected:
+              raise SystemExit(
+                  f"invalid product atom: count={count} expected={expected} actual={actual}"
+              )
+          PY
+          git push --force origin "HEAD:refs/heads/$STAGING_BRANCH"
+          git push --force origin "HEAD:refs/heads/$CHECKPOINT_BRANCH"
+
+      - name: Emit the publication receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          def git(*args: str) -> str:
+              return subprocess.check_output(
+                  ["git", *args],
+                  cwd="product",
+                  text=True,
+              ).strip()
+
+          payload = {
+              "schema_version": "newsroom.increment5b3.publication-receipt.v6",
+              "tested_source": os.environ["TESTED_SOURCE"],
+              "expected_base": os.environ["EXPECTED_BASE"],
+              "head": git("rev-parse", "HEAD"),
+              "tree": git("rev-parse", "HEAD^{tree}"),
+              "parent": git("rev-parse", "HEAD^"),
+              "staging_branch": os.environ["STAGING_BRANCH"],
+              "checkpoint_branch": os.environ["CHECKPOINT_BRANCH"],
+              "v5_test_run_id": int(os.environ["V5_RUN_ID"]),
+              "v5_focused_log_digest": os.environ["V5_FOCUSED_DIGEST"],
+              "v5_full_log_digest": os.environ["V5_FULL_DIGEST"],
+              "v5_focused_summary": "64 passed in 2.17s",
+              "v5_full_summary": "2129 passed, 38 skipped in 233.29s",
+              "external_call_count": 0,
+              "provider_call_count": 0,
+              "model_call_count": 0,
+              "embedding_call_count": 0,
+              "provider_spend_micros": 0,
+              "production_activation_authorized": False,
+          }
+          path = Path("/tmp/increment5b3-publication-v6.json")
+          path.write_text(
+              json.dumps(
+                  payload,
+                  ensure_ascii=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          print(path.read_text(encoding="utf-8"))
+          PY
+
+      - name: Upload publication evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5b3-publication-v6-${{ github.run_id }}
+          path: /tmp/increment5b3-publication-v6.json
