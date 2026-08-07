@@ -1,0 +1,41 @@
+name: Repair exact Increment 5B Tier-M reconciliation v4
+
+on:
+  push:
+    branches: [support/repair-increment-5b-tierm-reconciliation-20260807]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repair-exact-increment5b-tierm-v4
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/repair-increment-5b-tierm-reconciliation-20260807
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Build, verify and publish reconciliation atom
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/support/repair_increment5b_tierm_v4.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5b-tierm-service-reconciliation-v4-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5b-tierm-reconciliation-focused.log
+            /tmp/increment5b-tierm-reconciliation-full.log
+            /tmp/increment5b-tierm-reconciliation-receipt.txt
