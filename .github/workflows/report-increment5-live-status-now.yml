@@ -1,0 +1,32 @@
+name: Report Increment 5 live status now
+
+on:
+  push:
+    branches: [support/publish-increment5c2-final-review-20260807]
+    paths:
+      - '.github/workflows/report-increment5-live-status-now.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  observe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/publish-increment5c2-final-review-20260807
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Write exact live status to issue 145
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m scripts.support.report_increment5_live_status
