@@ -25,7 +25,10 @@ jobs:
           mkdir -p /tmp/increment5c2-authority-recovery
           parts=(scripts/support/data/increment5c2_authority_patch/part*.b64)
           printf '%s\n' "${parts[@]}" > /tmp/increment5c2-authority-recovery/parts.txt
-          cat "${parts[@]}" | base64 --decode > /tmp/increment5c2-authority-recovery/patch.gz
+          : > /tmp/increment5c2-authority-recovery/patch.gz
+          for part in "${parts[@]}"; do
+            base64 --decode "$part" >> /tmp/increment5c2-authority-recovery/patch.gz
+          done
           set +e
           gzip -dc /tmp/increment5c2-authority-recovery/patch.gz > /tmp/increment5c2-authority-recovery/patch.partial 2> /tmp/increment5c2-authority-recovery/gzip.stderr
           status=$?
