@@ -32,6 +32,10 @@ jobs:
       - name: Inspect exact patch parts
         run: |
           set -euo pipefail
+          # Previous diagnostics split three canonical chunks into smaller files.
+          # They are support-only and never contribute bytes to the bound patch.
+          find scripts/support/patches -type f \
+            -name 'increment5c2_final_review.patch.b64.part??.??' -delete
           wc -c scripts/support/patches/increment5c2_final_review.patch.b64.part*
           sha256sum scripts/support/patches/increment5c2_final_review.patch.b64.part*
       - name: Reassemble, verify and publish exact correction
