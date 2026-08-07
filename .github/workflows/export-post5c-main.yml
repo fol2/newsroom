@@ -1,0 +1,50 @@
+name: Export exact post-5C main source
+
+on:
+  push:
+    branches: [support/export-post5c-main-20260807]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: export-exact-post5c-main-source
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 67ec62e4fca8b16d87af401674ffaef445feb7c4
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify and archive exact source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "67ec62e4fca8b16d87af401674ffaef445feb7c4"
+          test "$(git rev-parse 'HEAD^{tree}')" = "26db84a690ff6547aac2dc7b8ce2616e8015d286"
+          archive="${RUNNER_TEMP}/newsroom-post5c-main-67ec62e4fca8b16d87af401674ffaef445feb7c4.tar.gz"
+          git archive --format=tar.gz --output="${archive}" HEAD
+          sha256sum "${archive}" | tee "${RUNNER_TEMP}/newsroom-post5c-main.sha256"
+          jq -nc \
+            --arg schema_version newsroom.post5c-source-export.v1 \
+            --arg head 67ec62e4fca8b16d87af401674ffaef445feb7c4 \
+            --arg tree 26db84a690ff6547aac2dc7b8ce2616e8015d286 \
+            --arg archive "$(basename "${archive}")" \
+            --arg sha256 "$(sha256sum "${archive}" | cut -d' ' -f1)" \
+            '{schema_version:$schema_version,head:$head,tree:$tree,archive:$archive,sha256:("sha256:"+$sha256)}' \
+            | tee "${RUNNER_TEMP}/newsroom-post5c-main-receipt.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: newsroom-post5c-main-67ec62e4fca8b16d87af401674ffaef445feb7c4
+          path: |
+            ${{ runner.temp }}/newsroom-post5c-main-67ec62e4fca8b16d87af401674ffaef445feb7c4.tar.gz
+            ${{ runner.temp }}/newsroom-post5c-main.sha256
+            ${{ runner.temp }}/newsroom-post5c-main-receipt.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
