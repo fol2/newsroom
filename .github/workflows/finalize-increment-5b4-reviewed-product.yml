@@ -1,4 +1,4 @@
-name: Finalize corrected reviewed Increment 5B4 product
+name: Publish exact nine-file Increment 5B4 product
 
 on:
   pull_request:
@@ -15,95 +15,159 @@ permissions:
   contents: write
 
 concurrency:
-  group: finalize-corrected-reviewed-increment-5b4
+  group: publish-exact-nine-file-increment-5b4
   cancel-in-progress: false
 
 jobs:
-  finalize:
+  verify-and-publish:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 50
     env:
       GH_TOKEN: ${{ github.token }}
       REPOSITORY: fol2/newsroom
-      CARRIER_BRANCH: support/run-increment-5b4-reviewed-hardening-v2-20260806
-      CARRIER_COMMIT: 14e149f4866cdefa3f4f6be6527a6422c6537009
-      CARRIER_PATH: .github/workflows/run-increment-5b4-reviewed-hardening-v2.yml
-      SOURCE_BRANCH: support/materialize-increment-5b4-20260806
-      EXPECTED_SOURCE: 30eb9dd5e7d6c03018d30289ef3fa05f3b76d523
+      SUPPORT_BRANCH: support/run-increment-5b4-reviewed-hardening-v2-20260806
+      SUPPORT_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
       EXPECTED_BASE: 7976909e58a47749ac39fa212f5ecac325294ace
+      PAYLOAD_SHA256: 02049f9d5b446a77344bc52f167ab98bc2c42170b3d2356fc299308f90e09a13
       CANONICAL_BRANCH: agent/increment-5b4-admitted-graph
-      CHECKPOINT_BRANCH: checkpoint/increment-5b4-admitted-graph-final-20260807
       STAGING_BRANCH: staging/increment-5b4-admitted-graph-final-20260807
-      FOCUSED_LOG: /tmp/increment5b4-final-focused.log
-      FULL_LOG: /tmp/increment5b4-final-full.log
+      CHECKPOINT_BRANCH: checkpoint/increment-5b4-admitted-graph-final-20260807
+      FOCUSED_LOG: /tmp/increment5b4-nine-focused.log
+      FULL_LOG: /tmp/increment5b4-nine-full.log
+      RECEIPT_PATH: /tmp/increment5b4-nine-receipt.txt
     steps:
       - name: Install exact locked environment
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
 
-      - name: Execute the reviewed materializer with only its path bookkeeping corrected
+      - name: Reconstruct, verify, test and publish exact product bytes
         shell: bash
         run: |
           set -euo pipefail
           auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
 
-          git init -q carrier
-          git -C carrier remote add origin "https://github.com/$REPOSITORY.git"
-          git -C carrier fetch --no-tags --depth=10 origin \
-            "refs/heads/$CARRIER_BRANCH:refs/remotes/origin/carrier"
-          git -C carrier cat-file -e "$CARRIER_COMMIT^{commit}"
-          git -C carrier show "$CARRIER_COMMIT:$CARRIER_PATH" > /tmp/increment5b4-carrier.yml
+          git init -q payload
+          git -C payload remote add origin "https://github.com/$REPOSITORY.git"
+          git -C payload fetch --no-tags --depth=1 origin \
+            "refs/heads/$SUPPORT_BRANCH:refs/remotes/origin/support"
+          actual_support="$(git -C payload rev-parse refs/remotes/origin/support)"
+          if [[ "$actual_support" != "$SUPPORT_BASE" ]]; then
+            echo "support base moved: expected=$SUPPORT_BASE actual=$actual_support" >&2
+            exit 1
+          fi
 
-          python3 - <<'PY'
-          from __future__ import annotations
+          : > /tmp/increment5b4-nine-files.b64
+          for part in 00 01 02 03 04 05; do
+            git -C payload show \
+              "$SUPPORT_BASE:scripts/support/increment5b4-nine/part-$part.b64" \
+              >> /tmp/increment5b4-nine-files.b64
+          done
+          base64 -d /tmp/increment5b4-nine-files.b64 \
+            > /tmp/increment5b4-nine-files.tgz
+          actual_payload="$(sha256sum /tmp/increment5b4-nine-files.tgz | cut -d' ' -f1)"
+          if [[ "$actual_payload" != "$PAYLOAD_SHA256" ]]; then
+            echo "payload digest mismatch: expected=$PAYLOAD_SHA256 actual=$actual_payload" >&2
+            exit 1
+          fi
 
-          import base64
-          import gzip
-          from pathlib import Path
+          git init -q product
+          git -C product remote add origin "https://github.com/$REPOSITORY.git"
+          git -C product fetch --no-tags --depth=1 origin \
+            "refs/heads/main:refs/remotes/origin/main"
+          git -C product checkout -q --detach "$EXPECTED_BASE"
+          remote_main="$(git -C product ls-remote origin refs/heads/main | cut -f1)"
+          if [[ "$remote_main" != "$EXPECTED_BASE" ]]; then
+            echo "main moved: expected=$EXPECTED_BASE actual=$remote_main" >&2
+            exit 1
+          fi
 
-          carrier = Path("/tmp/increment5b4-carrier.yml").read_text(encoding="utf-8")
-          start_marker = "          cat > /tmp/finalize-increment5b4.sh.gz.b64 <<'PAYLOAD'\n"
-          end_marker = "          PAYLOAD\n"
-          if carrier.count(start_marker) != 1:
-              raise SystemExit("reviewed payload start marker drifted")
-          _prefix, remainder = carrier.split(start_marker, 1)
-          if remainder.count(end_marker) != 1:
-              raise SystemExit("reviewed payload end marker drifted")
-          payload_block, _suffix = remainder.split(end_marker, 1)
-          payload = "".join(
-              line[10:] if line.startswith("          ") else line
-              for line in payload_block.splitlines()
-          )
-          script = gzip.decompress(base64.b64decode(payload)).decode("utf-8")
-          old = "cd product\nuv run pytest -q | tee \"$FULL_LOG\"\n\ncd product\ngit config user.name \"James To\"\n"
-          new = "uv run pytest -q | tee \"$FULL_LOG\"\n\ngit config user.name \"James To\"\n"
-          if script.count(old) != 1:
-              raise SystemExit("reviewed path-bookkeeping boundary drifted")
-          corrected = script.replace(old, new, 1)
-          if corrected.count("cd product") != 1:
-              raise SystemExit("unexpected product-directory transition remains")
-          destination = Path("/tmp/finalize-increment5b4-corrected.sh")
-          destination.write_text(corrected, encoding="utf-8")
-          destination.chmod(0o755)
-          PY
+          tar -xzf /tmp/increment5b4-nine-files.tgz -C product
+          mapfile -t paths <<'PATHS'
+          docs/operations/increment-5b4-admitted-graph-retriever.md
+          docs/traceability/increment-5b4-admitted-graph-retriever.md
+          newsroom/authority/neo4j_admitted_graph_reader.py
+          newsroom/increment5/admitted_graph_retriever.py
+          newsroom/tests/test_increment5b4_admitted_graph_retriever.py
+          newsroom/tests/test_increment5b4_neo4j_authority_port.py
+          newsroom/tests/test_increment5b4_neo4j_service.py
+          newsroom/tests/test_integrated_c1_sdlc_contract.py
+          newsroom/tests/test_sdlc_classifier.py
+          PATHS
 
-          bash -n /tmp/finalize-increment5b4-corrected.sh
-          /tmp/finalize-increment5b4-corrected.sh
+          cd product
+          uv sync --frozen
+          python -m compileall -q \
+            newsroom/authority/neo4j_admitted_graph_reader.py \
+            newsroom/increment5/admitted_graph_retriever.py \
+            newsroom/tests/test_increment5b4_admitted_graph_retriever.py \
+            newsroom/tests/test_increment5b4_neo4j_authority_port.py \
+            newsroom/tests/test_increment5b4_neo4j_service.py \
+            newsroom/tests/test_integrated_c1_sdlc_contract.py \
+            newsroom/tests/test_sdlc_classifier.py
 
-      - name: Upload final materialization evidence
+          uv run pytest -q \
+            newsroom/tests/test_increment5b4_admitted_graph_retriever.py \
+            newsroom/tests/test_increment5b4_neo4j_authority_port.py \
+            newsroom/tests/test_increment5b4_neo4j_service.py \
+            newsroom/tests/test_integrated_c1_sdlc_contract.py \
+            newsroom/tests/test_sdlc_classifier.py \
+            | tee "$FOCUSED_LOG"
+          uv run pytest -q | tee "$FULL_LOG"
+
+          git config user.name "James To"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          git add -- "${paths[@]}"
+          git diff --cached --check
+          git commit -q -m "Increment 5B4: bounded admitted graph retriever"
+
+          count="$(git rev-list --count "$EXPECTED_BASE..HEAD")"
+          mapfile -t actual_paths < <(git diff --name-only "$EXPECTED_BASE..HEAD")
+          if [[ "$count" != "1" ]]; then
+            echo "expected one product commit, got $count" >&2
+            exit 1
+          fi
+          printf '%s\n' "${paths[@]}" | sort > /tmp/increment5b4-nine-expected.txt
+          printf '%s\n' "${actual_paths[@]}" | sort > /tmp/increment5b4-nine-actual.txt
+          diff -u /tmp/increment5b4-nine-expected.txt /tmp/increment5b4-nine-actual.txt
+
+          head_sha="$(git rev-parse HEAD)"
+          tree_sha="$(git rev-parse 'HEAD^{tree}')"
+          parent_sha="$(git rev-parse HEAD^)"
+          focused_summary="$(tail -n 1 "$FOCUSED_LOG")"
+          full_summary="$(tail -n 1 "$FULL_LOG")"
+          {
+            echo "schema=newsroom.increment5b4.nine-file-materialization.v1"
+            echo "payload_sha256=$PAYLOAD_SHA256"
+            echo "support_base=$SUPPORT_BASE"
+            echo "head=$head_sha"
+            echo "tree=$tree_sha"
+            echo "parent=$parent_sha"
+            echo "focused=$focused_summary"
+            echo "full=$full_summary"
+            echo "files=9"
+          } > "$RECEIPT_PATH"
+
+          tar --exclude=.git --exclude=.venv --exclude=.pytest_cache --exclude='**/__pycache__' -czf /tmp/increment5b4-nine-worktree.tgz .
+          for branch in "$CANONICAL_BRANCH" "$STAGING_BRANCH" "$CHECKPOINT_BRANCH"; do
+            git push --force origin "HEAD:refs/heads/$branch"
+          done
+          cat "$RECEIPT_PATH"
+
+      - name: Upload exact materialization evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: increment5b4-corrected-final-${{ github.run_id }}
+          name: increment5b4-nine-file-materialization-${{ github.run_id }}
           retention-days: 14
           if-no-files-found: warn
           path: |
-            /tmp/increment5b4-final-worktree.tgz
-            /tmp/increment5b4-final-diagnostics.txt
-            /tmp/increment5b4-final-receipt.txt
-            /tmp/increment5b4-final-files.txt
-            /tmp/increment5b4-final-focused.log
-            /tmp/increment5b4-final-full.log
+            /tmp/increment5b4-nine-files.tgz
+            /tmp/increment5b4-nine-worktree.tgz
+            /tmp/increment5b4-nine-focused.log
+            /tmp/increment5b4-nine-full.log
+            /tmp/increment5b4-nine-receipt.txt
+            /tmp/increment5b4-nine-expected.txt
+            /tmp/increment5b4-nine-actual.txt
