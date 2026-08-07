@@ -231,7 +231,7 @@ def test_actual_service_private_adapter_exact_duplicate_and_digest_conflict() ->
                     "document_digest: $document_digest, "
                     "language: 'en-GB', "
                     "retrieval_text: 'bounded source scope probe'"
-                    "}})",
+                    "})",
                     generation_id=probe_generation,
                     document_digest="sha256:" + "1" * 64,
                 ).consume()
