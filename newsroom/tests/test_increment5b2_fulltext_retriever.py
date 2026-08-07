@@ -1328,6 +1328,102 @@ def test_out_of_scope_projection_result_is_filtered_by_authority_binding(
     assert receipt.hits == ()
 
 
+def test_source_scope_keeps_lower_ranked_in_scope_match_after_bounded_scan(
+    tmp_path: Path,
+) -> None:
+    scoped_source_id = "source-in-scope"
+    custom_bindings = tuple(
+        replace(
+            bindings()[1],
+            passage_id=f"p-source-scan-{index:02d}",
+            dependency_root_id=f"root-source-scan-{index:02d}",
+            source_id=(
+                scoped_source_id if index == 9 else f"source-out-{index:02d}"
+            ),
+            source_identity=f"source-scan:{index:02d}:revision-1",
+            provenance_digest=digest(f"source-scan-document-{index:02d}"),
+        )
+        for index in range(10)
+    )
+    rows = [
+        {
+            "generation_id": str(GENERATION_ID),
+            "passage_id": binding.passage_id,
+            "document_digest": binding.provenance_digest,
+            "language": binding.language,
+            "score": float(20 - index),
+        }
+        for index, binding in enumerate(custom_bindings)
+    ]
+    driver, _factory, retriever = system(
+        tmp_path,
+        view=authority_view(document_bindings=custom_bindings),
+        scenario=default_scenario(rows=rows),
+    )
+
+    receipt = retriever.retrieve(
+        request(
+            idempotency_key="source-scope-lower-ranked-match",
+            source_ids=(scoped_source_id,),
+        )
+    ).receipt
+
+    assert receipt.outcome is BranchOutcome.COMPLETE
+    assert receipt.reason_code == "OK"
+    assert [item.passage_id for item in receipt.hits] == ["p-source-scan-09"]
+    assert [item.rank for item in receipt.hits] == [1]
+    assert len(driver.read_requests[-1].source_ids) == 1
+    statement, parameters = driver.calls[-1]
+    assert "[0..$candidate_limit]" in statement
+    assert "[0..$limit]" not in statement
+    assert parameters["candidate_limit"] == 65
+
+
+def test_source_scope_counts_only_authoritatively_in_scope_candidates_for_bound(
+    tmp_path: Path,
+) -> None:
+    scoped_source_id = "source-in-scope"
+    custom_bindings = tuple(
+        replace(
+            bindings()[1],
+            passage_id=f"p-source-bound-{index:02d}",
+            dependency_root_id=f"root-source-bound-{index:02d}",
+            source_id=(
+                "source-out" if index == 0 else scoped_source_id
+            ),
+            source_identity=f"source-bound:{index:02d}:revision-1",
+            provenance_digest=digest(f"source-bound-document-{index:02d}"),
+        )
+        for index in range(10)
+    )
+    rows = [
+        {
+            "generation_id": str(GENERATION_ID),
+            "passage_id": binding.passage_id,
+            "document_digest": binding.provenance_digest,
+            "language": binding.language,
+            "score": float(20 - index),
+        }
+        for index, binding in enumerate(custom_bindings)
+    ]
+    _driver, _factory, retriever = system(
+        tmp_path,
+        view=authority_view(document_bindings=custom_bindings),
+        scenario=default_scenario(rows=rows),
+    )
+
+    receipt = retriever.retrieve(
+        request(
+            idempotency_key="source-scope-result-bound",
+            source_ids=(scoped_source_id,),
+        )
+    ).receipt
+
+    assert receipt.outcome is BranchOutcome.INCOMPLETE
+    assert receipt.reason_code == "RESULT_BOUND_EXCEEDED"
+    assert receipt.hits == ()
+
+
 def test_source_scope_candidate_scan_overflow_is_not_false_no_match(
     tmp_path: Path,
 ) -> None:

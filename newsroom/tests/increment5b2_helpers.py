@@ -6,6 +6,7 @@ from typing import Any
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.authority.neo4j_fulltext_reader import (
+    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
     Neo4jFullTextReadError,
     Neo4jFullTextReadPhase,
     Neo4jFullTextReadRequest,
@@ -41,7 +42,6 @@ from newsroom.projection.neo4j._adapter import (
     _COMPONENT_QUERY,
     _FULLTEXT_INDEX_INVENTORY_QUERY,
     _FULLTEXT_READ_QUERY,
-    _FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
 )
 from newsroom.projection.neo4j.models import Neo4jProjectorConfig
 
@@ -380,7 +380,7 @@ class FakeDriver:
                     "query": request.lucene_expression,
                     "generation_id": str(request.generation_id),
                     "candidate_limit": (
-                        _FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+                        FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
                         if request.source_ids
                         else request.limit
                     ),

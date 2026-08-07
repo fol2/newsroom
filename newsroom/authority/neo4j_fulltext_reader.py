@@ -27,6 +27,8 @@ class Neo4jFullTextReadPhase(StrEnum):
 
 _NEO4J_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,127}$")
 
+FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT = 65
+
 
 def _bounded_text(value: str, *, field: str, maximum_bytes: int) -> str:
     if (
@@ -235,7 +237,7 @@ class Neo4jFullTextReadResult:
         rows = _copy_records(
             self.rows,
             field="fulltext_rows",
-            maximum=9,
+            maximum=FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
         )
         if type(self.candidate_overflow) is not bool:
             raise Neo4jFullTextReadError(
@@ -322,6 +324,7 @@ class Neo4jFullTextReader:
 
 
 __all__ = [
+    "FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT",
     "Neo4jFullTextReadError",
     "Neo4jFullTextReadPhase",
     "Neo4jFullTextReadRequest",

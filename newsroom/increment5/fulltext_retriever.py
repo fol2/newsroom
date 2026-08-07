@@ -314,21 +314,8 @@ class FullTextRetriever:
                 authority_read_count=1,
                 neo4j_read_count=neo4j_reads,
             )
-        if len(rows) > request.result_limit:
-            return self._receipt(
-                request,
-                start_ns=start_ns,
-                outcome=BranchOutcome.INCOMPLETE,
-                reason_code="RESULT_BOUND_EXCEEDED",
-                snapshot=snapshot,
-                authority_view_digest=view_digest,
-                normalized_query=normalized,
-                authority_read_count=1,
-                neo4j_read_count=neo4j_reads,
-            )
-
         try:
-            hits, exclusions = self._parse_hits(
+            hits, exclusions, scoped_candidate_count = self._parse_hits(
                 rows,
                 request=request,
                 view=view,
@@ -340,6 +327,19 @@ class FullTextRetriever:
                 start_ns=start_ns,
                 outcome=BranchOutcome.UNAVAILABLE,
                 reason_code="PROJECTION_INTEGRITY_ERROR",
+                snapshot=snapshot,
+                authority_view_digest=view_digest,
+                normalized_query=normalized,
+                authority_read_count=1,
+                neo4j_read_count=neo4j_reads,
+            )
+
+        if scoped_candidate_count > request.result_limit:
+            return self._receipt(
+                request,
+                start_ns=start_ns,
+                outcome=BranchOutcome.INCOMPLETE,
+                reason_code="RESULT_BOUND_EXCEEDED",
                 snapshot=snapshot,
                 authority_view_digest=view_digest,
                 normalized_query=normalized,
@@ -501,6 +501,7 @@ class FullTextRetriever:
     ) -> tuple[
         tuple[RetrievalBranchHit, ...],
         tuple[BranchExclusion, ...],
+        int,
     ]:
         parsed: list[
             tuple[str, str, str, float]
@@ -581,6 +582,7 @@ class FullTextRetriever:
         bindings = view.binding_by_passage_id
         hits: list[RetrievalBranchHit] = []
         exclusions: list[BranchExclusion] = []
+        scoped_candidate_count = 0
         for passage_id, document_digest, language, score in parsed:
             binding = bindings.get(passage_id)
             if binding is None:
@@ -595,6 +597,12 @@ class FullTextRetriever:
                     "full-text projection result differs from authority binding"
                 )
             if request.source_ids and binding.source_id not in request.source_ids:
+                continue
+            scoped_candidate_count += 1
+            if scoped_candidate_count > request.result_limit:
+                # Continue validating every returned row's authority binding, but
+                # do not construct an out-of-contract rank. The caller emits one
+                # explicit incomplete receipt and retains no silently truncated hits.
                 continue
             exclusion = binding.exclusion_at(request.query_valid_time)
             if exclusion is not None:
@@ -621,7 +629,7 @@ class FullTextRetriever:
                     source_identity=binding.source_identity,
                 )
             )
-        return tuple(hits), tuple(exclusions)
+        return tuple(hits), tuple(exclusions), scoped_candidate_count
 
     def _receipt(
         self,

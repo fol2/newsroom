@@ -5,6 +5,9 @@ import time
 from threading import RLock
 from typing import Any
 
+from newsroom.authority.neo4j_fulltext_reader import (
+    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
+)
 from newsroom.authority.types import TrustScope, UtcTimestamp
 from newsroom.projection.ontology import ProjectionNodeType, ProjectionRelationType
 
@@ -72,12 +75,11 @@ WITH [candidate IN candidates
           document_digest: candidate.node.document_digest,
           language: candidate.node.language,
           score: candidate.score
-        }][0..$limit] AS rows,
+        }][0..$candidate_limit] AS rows,
      candidate_overflow
 RETURN candidate_overflow, rows
 """
 
-_FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT = 65
 
 _SCHEMA_QUERIES = (
     """
@@ -485,7 +487,7 @@ class _Neo4jAdapter:
                         "Neo4j Increment 5 full-text overflow limit must equal nine"
                     )
                 candidate_limit = (
-                    _FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+                    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
                     if source_ids
                     else limit
                 )

@@ -6,6 +6,7 @@ from newsroom.authority._neo4j_projection_system import (
     _open_neo4j_fulltext_reader_with_adapter,
 )
 from newsroom.authority.neo4j_fulltext_reader import (
+    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
     Neo4jFullTextReadError,
     Neo4jFullTextReadPhase,
     Neo4jFullTextReadRequest,
@@ -16,7 +17,6 @@ from newsroom.projection.neo4j._adapter import (
     _COMPONENT_QUERY,
     _FULLTEXT_INDEX_INVENTORY_QUERY,
     _FULLTEXT_READ_QUERY,
-    _FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
     _Neo4jAdapter,
 )
 
@@ -364,7 +364,9 @@ def test_authority_port_uses_source_scope_only_for_bounded_candidate_scan() -> N
     assert source_ids[0] not in statement
     assert source_ids[1] not in statement
     assert "source_ids" not in parameters
-    assert parameters["candidate_limit"] == _FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+    assert parameters["candidate_limit"] == FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+    assert "[0..$candidate_limit]" in statement
+    assert "[0..$limit]" not in statement
     assert set(parameters) == {
         "index_name",
         "query",
@@ -396,6 +398,28 @@ def test_authority_read_request_rejects_malformed_source_scope() -> None:
         Neo4jFullTextReadRequest.query(
             source_ids=(" source:a",),
             **kwargs,
+        )
+
+
+def test_query_envelope_retains_bounded_source_scan_rows() -> None:
+    rows = tuple(
+        {"passage_id": f"p-{index:02d}"}
+        for index in range(FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT)
+    )
+    result = Neo4jFullTextReadResult(
+        phase=Neo4jFullTextReadPhase.QUERY,
+        rows=rows,
+        candidate_overflow=True,
+        driver_version="6.2.0",
+    )
+    assert len(result.rows) == FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+
+    with pytest.raises(Neo4jFullTextReadError, match="fixed bound"):
+        Neo4jFullTextReadResult(
+            phase=Neo4jFullTextReadPhase.QUERY,
+            rows=rows + ({"passage_id": "p-overflow"},),
+            candidate_overflow=True,
+            driver_version="6.2.0",
         )
 
 
