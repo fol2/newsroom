@@ -1,0 +1,47 @@
+name: Fix exact Increment 5C2 Evidence projector identity
+
+on:
+  push:
+    branches: [support/fix-increment5c2-evidence-projector-20260807]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fix-exact-increment5c2-evidence-projector
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/fix-increment5c2-evidence-projector-20260807
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.0'
+          enable-cache: true
+      - name: Verify and publish exact projector-only Evidence repair
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/support/fix_increment5c2_evidence_projector.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5c2-evidence-projector-repair-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5c2-evidence-projector-service.log
+            /tmp/increment5c2-evidence-projector-service.xml
+            /tmp/increment5c2-evidence-projector-full.log
+            /tmp/increment5c2-evidence-projector-clustering.log
+            /tmp/increment5c2-evidence-projector-receipt.json
