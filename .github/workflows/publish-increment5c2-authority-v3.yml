@@ -1,0 +1,72 @@
+name: Publish idempotent Increment 5C2 authority tools
+
+on:
+  push:
+    branches: [support/publish-increment5c2-authority-tools-20260807]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: publish-idempotent-increment5c2-authority-tools
+  cancel-in-progress: false
+
+jobs:
+  verify-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/publish-increment5c2-authority-tools-20260807
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.0'
+          enable-cache: true
+      - name: Recover, verify and publish exact authority atom
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/support/publish_increment5c2_authority_v3.py
+      - name: Record verified publication on PR 347
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY' > /tmp/increment5c2-authority-comment.md
+          import json
+          from pathlib import Path
+          receipt = json.loads(Path('/tmp/increment5c2-authority-publication.json').read_text())
+          print('## Verified 5C2 authority-tool checkpoint')
+          print()
+          print(f"- parent: `{receipt['parent']}`")
+          print(f"- head: `{receipt['head']}`")
+          print(f"- tree: `{receipt['tree']}`")
+          print(f"- focused: `{receipt['focused']}`")
+          print(f"- complete suite: `{receipt['full']}`")
+          print(f"- dedicated checkpoint: `{receipt['authority_checkpoint']}`")
+          print()
+          print('This checkpoint implements the current collision/authority metadata lookup and bounded source/revision impact lookup through fixed read-only authority ports. It remains non-authoritative, returns no factual hydration bytes, and does not complete 5C2 by itself.')
+          PY
+          gh api repos/fol2/newsroom/issues/347/comments \
+            --method POST \
+            --raw-field body="$(cat /tmp/increment5c2-authority-comment.md)"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5c2-authority-publication-v3-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5c2-authority-focused.log
+            /tmp/increment5c2-authority-full.log
+            /tmp/increment5c2-authority-publication.json
+            /tmp/increment5c2-authority.patch
+            /tmp/increment5c2-authority-comment.md
