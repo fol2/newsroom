@@ -19,15 +19,16 @@ jobs:
           fetch-depth: 1
           path: source
           persist-credentials: false
-      - name: Verify and archive exact base
+      - name: Verify and archive exact Git tree
         shell: bash
         run: |
           set -euo pipefail
           test "$(git -C source rev-parse HEAD)" = "88d1b14b41354f56f325d173d0021ad0fd20abc2"
-          tar -C source --exclude=.git -czf /tmp/newsroom-88d1b14-source.tgz .
+          test "$(git -C source rev-parse 'HEAD^{tree}')" = "51720620a62cb0a9bd91af407bfa6c9a43c46b30"
+          git -C source archive --format=tar.gz --output=/tmp/newsroom-88d1b14-source.tgz HEAD
       - uses: actions/upload-artifact@v4
         with:
-          name: newsroom-source-88d1b14b41354f56f325d173d0021ad0fd20abc2
+          name: newsroom-git-archive-88d1b14b41354f56f325d173d0021ad0fd20abc2
           path: /tmp/newsroom-88d1b14-source.tgz
           retention-days: 1
           if-no-files-found: error
