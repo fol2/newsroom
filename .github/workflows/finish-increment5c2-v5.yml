@@ -1,0 +1,57 @@
+name: Finish exact Increment 5C2 v5
+
+on:
+  push:
+    branches: [support/publish-increment5c2-final-review-20260807]
+    paths:
+      - '.github/workflows/finish-increment5c2-v5.yml'
+      - 'scripts/support/finish_increment5c2_v5.py'
+      - 'scripts/support/publish_increment5c2_final_review_v5.py'
+      - 'scripts/support/publish_increment5c2_final_review_v4.py'
+      - 'scripts/support/finalize_increment5c2.py'
+      - 'scripts/support/patches/increment5c2_final_review.patch.b64.part*'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: finish-exact-increment5c2-v5
+  cancel-in-progress: false
+
+jobs:
+  finish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/publish-increment5c2-final-review-20260807
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.0'
+          enable-cache: true
+      - name: Select exact bytes, publish, qualify and merge 5C2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m scripts.support.finish_increment5c2_v5
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finish-increment5c2-v5-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5c2-final-review-corrections.patch
+            /tmp/increment5c2-final-review-v4-focused.log
+            /tmp/increment5c2-final-review-v4-full.log
+            /tmp/increment5c2-final-review-v4-clustering.log
+            /tmp/increment5c2-final-review-v4-receipt.json
