@@ -1,0 +1,36 @@
+name: Export exact Increment 5C2 head source
+
+on:
+  push:
+    branches: [support/export-increment5c2-head-20260807]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 6c528755e2103c033244d2a0a4b58a0b4a62dfb7
+          fetch-depth: 1
+          path: source
+          persist-credentials: false
+      - name: Verify and archive exact source
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "6c528755e2103c033244d2a0a4b58a0b4a62dfb7"
+          test "$(git -C source rev-parse HEAD^{tree})" = "fade99c8184adaadc0921b517f1c90da8cc8b5fc"
+          git -C source archive --format=tar.gz --output=/tmp/newsroom-increment5c2-head.tar.gz HEAD
+          sha256sum /tmp/newsroom-increment5c2-head.tar.gz > /tmp/newsroom-increment5c2-head.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: newsroom-increment5c2-head-6c528755e2103c033244d2a0a4b58a0b4a62dfb7
+          path: |
+            /tmp/newsroom-increment5c2-head.tar.gz
+            /tmp/newsroom-increment5c2-head.sha256
+          retention-days: 7
+          if-no-files-found: error
