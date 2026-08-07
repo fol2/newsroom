@@ -108,6 +108,19 @@ def checkout() -> Path:
         f"https://github.com/{REPOSITORY}.git",
         cwd=root,
     )
+    # Verify all three mutable authorities before fetching any product object.
+    # The checkpoint ref is intentionally inspected with ls-remote rather than
+    # mapped below `refs/remotes/origin/checkpoint`, which conflicts with the
+    # real `checkpoint/...` remote namespace.
+    actual_head = remote_sha(root, PRODUCT_BRANCH)
+    actual_checkpoint = remote_sha(root, CHECKPOINT_BRANCH)
+    actual_main = remote_sha(root, "main")
+    if actual_head != EXPECTED_HEAD:
+        raise SystemExit(f"canonical 5C2 head moved: {actual_head}")
+    if actual_checkpoint != EXPECTED_HEAD:
+        raise SystemExit(f"5C2 checkpoint moved independently: {actual_checkpoint}")
+    if actual_main != EXPECTED_MAIN:
+        raise SystemExit(f"main moved before scoped full-text repair: {actual_main}")
     run(
         "git",
         "fetch",
@@ -115,29 +128,17 @@ def checkout() -> Path:
         "--depth=8",
         "origin",
         f"refs/heads/{PRODUCT_BRANCH}:refs/remotes/origin/product",
-        f"refs/heads/{CHECKPOINT_BRANCH}:refs/remotes/origin/checkpoint",
         "refs/heads/main:refs/remotes/origin/main",
         cwd=root,
     )
-    actual_head = run(
+    fetched_head = run(
         "git", "rev-parse", "refs/remotes/origin/product", cwd=root, capture=True
     )
-    actual_checkpoint = run(
-        "git",
-        "rev-parse",
-        "refs/remotes/origin/checkpoint",
-        cwd=root,
-        capture=True,
-    )
-    actual_main = run(
+    fetched_main = run(
         "git", "rev-parse", "refs/remotes/origin/main", cwd=root, capture=True
     )
-    if actual_head != EXPECTED_HEAD:
-        raise SystemExit(f"canonical 5C2 head moved: {actual_head}")
-    if actual_checkpoint != EXPECTED_HEAD:
-        raise SystemExit(f"5C2 checkpoint moved independently: {actual_checkpoint}")
-    if actual_main != EXPECTED_MAIN:
-        raise SystemExit(f"main moved before scoped full-text repair: {actual_main}")
+    if fetched_head != EXPECTED_HEAD or fetched_main != EXPECTED_MAIN:
+        raise SystemExit("fetched product or main identity changed after preflight")
     run("git", "checkout", "-q", "--detach", EXPECTED_HEAD, cwd=root)
     return root
 
