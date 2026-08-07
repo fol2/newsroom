@@ -133,7 +133,7 @@ LIMIT 2
 _SOURCE_QUERY = """
 SELECT definition_id,name,editorial_purpose,canonical_digest,recorded_at
 FROM source_definitions
-WHERE definition_id=?
+WHERE definition_id=? AND recorded_at<=?
 LIMIT 2
 """
 
@@ -148,9 +148,11 @@ JOIN source_items AS i ON i.item_id=r.item_id AND i.definition_id=r.definition_i
 WHERE r.definition_id=?
   AND (? IS NULL OR r.revision_id=?)
   AND r.observed_at>=? AND r.observed_at<?
+  AND r.observed_at<=? AND r.recorded_at<=?
   AND (?=1 OR NOT EXISTS(
       SELECT 1 FROM source_revisions AS successor
       WHERE successor.prior_revision_id=r.revision_id
+        AND successor.observed_at<=? AND successor.recorded_at<=?
   ))
 ORDER BY r.observed_at,r.revision_id
 LIMIT ?
@@ -164,6 +166,7 @@ SELECT representation_id,revision_id,definition_id,definition_version_id,
        representation_identity_digest,produced_at,recorded_at,canonical_digest
 FROM discovery_representations
 WHERE revision_id=? AND produced_at>=? AND produced_at<?
+  AND produced_at<=? AND recorded_at<=?
 ORDER BY produced_at,representation_id
 LIMIT ?
 """
@@ -174,6 +177,7 @@ SELECT occurrence_id,check_outcome_id,revision_id,representation_id,
        receipt_digest,semantic_digest,recorded_at,canonical_digest
 FROM discovery_occurrences
 WHERE revision_id=? AND observed_at>=? AND observed_at<?
+  AND observed_at<=? AND recorded_at<=?
 ORDER BY observed_at,occurrence_id
 LIMIT ?
 """
@@ -657,6 +661,131 @@ class SourceRevisionImpactAuthorityReceipt:
     query_valid_time: str
     serving_time: str
     authority_effect: str = "NONE"
+
+    def __post_init__(self) -> None:
+        query_valid = _parse_utc(
+            self.query_valid_time, field="impact_receipt_query_valid_time"
+        )
+        serving = _parse_utc(
+            self.serving_time, field="impact_receipt_serving_time"
+        )
+        if query_valid > serving:
+            raise AuthorityAdapterIntegrityError(
+                "impact receipt query-valid time is after serving time"
+            )
+        window_start = _parse_utc(
+            self.window_start, field="impact_receipt_window_start"
+        )
+        window_end = _parse_utc(
+            self.window_end, field="impact_receipt_window_end"
+        )
+        if window_start >= window_end:
+            raise AuthorityAdapterIntegrityError(
+                "impact receipt window is not increasing"
+            )
+        if type(self.include_superseded) is not bool:
+            raise AuthorityAdapterIntegrityError(
+                "impact receipt supersession flag is not boolean"
+            )
+        if self.lineage_depth not in (1, 2):
+            raise AuthorityAdapterIntegrityError(
+                "impact receipt lineage depth is outside the fixed bound"
+            )
+        if not all(
+            isinstance(item, RevisionImpactRecord) for item in self.revisions
+        ):
+            raise AuthorityAdapterIntegrityError(
+                "impact receipt revisions are not typed"
+            )
+        if not all(
+            isinstance(item, RepresentationImpactRecord)
+            for item in self.representations
+        ):
+            raise AuthorityAdapterIntegrityError(
+                "impact receipt representations are not typed"
+            )
+        if not all(
+            isinstance(item, OccurrenceImpactRecord) for item in self.occurrences
+        ):
+            raise AuthorityAdapterIntegrityError(
+                "impact receipt occurrences are not typed"
+            )
+        if self.lineage_depth == 1 and (self.representations or self.occurrences):
+            raise AuthorityAdapterIntegrityError(
+                "depth-one impact receipt cannot retain dependent lineage"
+            )
+        revision_ids = {item.revision_id for item in self.revisions}
+        if len(revision_ids) != len(self.revisions):
+            raise AuthorityAdapterIntegrityError(
+                "impact receipt revision identities are not unique"
+            )
+        for revision in self.revisions:
+            observed = _parse_utc(
+                revision.observed_at, field="impact_revision_observed_at"
+            )
+            recorded = _parse_utc(
+                revision.recorded_at, field="impact_revision_recorded_at"
+            )
+            if not window_start <= observed < window_end:
+                raise AuthorityAdapterIntegrityError(
+                    "impact revision is outside the requested window"
+                )
+            if observed > query_valid or recorded > query_valid:
+                raise AuthorityAdapterIntegrityError(
+                    "impact revision is after the query-valid cutoff"
+                )
+            if self.revision_id is not None and revision.revision_id != self.revision_id:
+                raise AuthorityAdapterIntegrityError(
+                    "impact revision does not match the requested identity"
+                )
+        for representation in self.representations:
+            produced = _parse_utc(
+                representation.produced_at,
+                field="impact_representation_produced_at",
+            )
+            recorded = _parse_utc(
+                representation.recorded_at,
+                field="impact_representation_recorded_at",
+            )
+            if representation.revision_id not in revision_ids:
+                raise AuthorityAdapterIntegrityError(
+                    "impact representation lacks its retained revision"
+                )
+            if not window_start <= produced < window_end:
+                raise AuthorityAdapterIntegrityError(
+                    "impact representation is outside the requested window"
+                )
+            if produced > query_valid or recorded > query_valid:
+                raise AuthorityAdapterIntegrityError(
+                    "impact representation is after the query-valid cutoff"
+                )
+        for occurrence in self.occurrences:
+            observed = _parse_utc(
+                occurrence.observed_at, field="impact_occurrence_observed_at"
+            )
+            recorded = _parse_utc(
+                occurrence.recorded_at, field="impact_occurrence_recorded_at"
+            )
+            if occurrence.revision_id not in revision_ids:
+                raise AuthorityAdapterIntegrityError(
+                    "impact occurrence lacks its retained revision"
+                )
+            if not window_start <= observed < window_end:
+                raise AuthorityAdapterIntegrityError(
+                    "impact occurrence is outside the requested window"
+                )
+            if observed > query_valid or recorded > query_valid:
+                raise AuthorityAdapterIntegrityError(
+                    "impact occurrence is after the query-valid cutoff"
+                )
+        if self.source_definition_digest is not None:
+            validate_sha256_digest(
+                self.source_definition_digest, field="source_definition_digest"
+            )
+        if self.authority_effect != "NONE":
+            raise AuthorityAdapterIntegrityError(
+                "impact receipt cannot claim an authority effect"
+            )
 
     @property
     def canonical_bytes(self) -> bytes:
@@ -1276,7 +1405,10 @@ class SourceRevisionImpactNamedToolPort(_SQLiteAuthorityPort):
                 return self._receipt(request, authority_request_digest, watermark, NamedAuthorityOutcome.STALE, "AUTHORITY_WATERMARK_STALE")
             deadline = self._deadline(request)
             connection.set_progress_handler(self._progress(deadline), 250)
-            source_rows = connection.execute(_SOURCE_QUERY, (request.source_id,)).fetchall()
+            source_rows = connection.execute(
+                _SOURCE_QUERY,
+                (request.source_id, request.envelope.query_valid_time),
+            ).fetchall()
             if len(source_rows) > 1:
                 raise AuthorityAdapterIntegrityError("source identity is ambiguous")
             source_digest = None if not source_rows else validate_sha256_digest(
@@ -1309,7 +1441,11 @@ class SourceRevisionImpactNamedToolPort(_SQLiteAuthorityPort):
                     request.revision_id,
                     request.window_start,
                     request.window_end,
+                    request.envelope.query_valid_time,
+                    request.envelope.query_valid_time,
                     1 if request.include_superseded else 0,
+                    request.envelope.query_valid_time,
+                    request.envelope.query_valid_time,
                     limit,
                 ),
             ).fetchall()
@@ -1326,6 +1462,8 @@ class SourceRevisionImpactNamedToolPort(_SQLiteAuthorityPort):
                                 revision.revision_id,
                                 request.window_start,
                                 request.window_end,
+                                request.envelope.query_valid_time,
+                                request.envelope.query_valid_time,
                                 limit,
                             ),
                         ).fetchall()
@@ -1338,6 +1476,8 @@ class SourceRevisionImpactNamedToolPort(_SQLiteAuthorityPort):
                                 revision.revision_id,
                                 request.window_start,
                                 request.window_end,
+                                request.envelope.query_valid_time,
+                                request.envelope.query_valid_time,
                                 limit,
                             ),
                         ).fetchall()

@@ -1,14 +1,14 @@
-"""Branch-neutral execution kernel for the first four Increment 5C tools.
+"""Execution kernel for the four branch-backed Increment 5C tools.
 
 The kernel requires one exact 5C1 authorization receipt, dispatches to exactly
-one registered branch port, validates an independently attributable branch
-receipt, retains the raw canonical branch bytes in an immutable audit journal,
-and emits one bounded named-tool execution receipt.
+one registered typed branch port, validates an independently attributable 5B
+receipt, retains the raw canonical upstream bytes in an immutable audit journal,
+and emits one bounded named-tool execution receipt. The two authority-backed
+tools use the parallel authority execution kernel.
 
-Concrete adapters and the two authority-backed tools remain later commits in
-the same 5C2 canonical PR. This kernel performs no retrieval, graph access,
-hydration, collision decision, Candidate mutation or external service
-call, publication or production activation by itself.
+This module selects no concrete backend from request content and performs no
+cross-tool composition, factual hydration, Candidate mutation, provider work,
+publication or production activation by itself.
 """
 
 from __future__ import annotations

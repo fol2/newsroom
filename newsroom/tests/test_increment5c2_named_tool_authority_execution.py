@@ -680,6 +680,135 @@ def test_exact_superseded_revision_is_no_match_unless_history_requested(tmp_path
     assert raw_payload(second)["revisions"][0]["revision_id"] == "revision:001"
 
 
+def test_source_impact_closes_query_valid_observation_and_recording_cutoff(
+    tmp_path: Path,
+) -> None:
+    path = authority_database(tmp_path)
+    with sqlite3.connect(path) as connection:
+        for revision_id, observed_at, recorded_at in (
+            (
+                "revision:future-observed",
+                "2026-08-06T12:00:00Z",
+                "2026-08-06T12:00:00Z",
+            ),
+            (
+                "revision:late-recorded",
+                "2026-08-06T08:30:00Z",
+                "2026-08-06T12:00:00Z",
+            ),
+        ):
+            connection.execute(
+                "INSERT INTO source_revisions VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    revision_id,
+                    "item:001",
+                    "source:registry",
+                    "version:001",
+                    "revision:002",
+                    revision_id,
+                    digest(f"state:{revision_id}"),
+                    digest(f"revision:{revision_id}"),
+                    observed_at,
+                    recorded_at,
+                ),
+            )
+        future_time = "2026-08-06T12:00:00Z"
+        connection.execute(
+            "INSERT INTO discovery_representations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "representation:future-current",
+                "revision:002",
+                "source:registry",
+                "version:001",
+                "adapter-v1",
+                "parser-v1",
+                "normalizer-v1",
+                "scope-v1",
+                digest("fields"),
+                digest("representation:future-current"),
+                digest("slot"),
+                digest("representation-identity:future-current"),
+                future_time,
+                future_time,
+                digest("representation-canonical:future-current"),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO discovery_occurrences VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "occurrence:future-current",
+                "check:future-current",
+                "revision:002",
+                "representation:future-current",
+                "source:registry",
+                "version:001",
+                "FIRST_OBSERVED",
+                future_time,
+                digest("occurrence-receipt:future-current"),
+                digest("occurrence-semantic:future-current"),
+                future_time,
+                digest("occurrence-canonical:future-current"),
+            ),
+        )
+
+    current = impact_request(idempotency_key="impact:query-valid-cutoff")
+    result = executor(tmp_path, path).execute(
+        current, authorize(tmp_path, current, name="auth-query-valid-cutoff.sqlite")
+    )
+    assert result.receipt.outcome is NamedAuthorityExecutionOutcome.COMPLETE
+    payload = raw_payload(result)
+    assert [item["revision_id"] for item in payload["revisions"]] == [
+        "revision:002"
+    ]
+    assert [item["representation_id"] for item in payload["representations"]] == [
+        "representation:revision:002"
+    ]
+    assert [item["occurrence_id"] for item in payload["occurrences"]] == [
+        "occurrence:revision:002"
+    ]
+
+    historical = impact_request(
+        include_superseded=True,
+        lineage_depth=1,
+        idempotency_key="impact:query-valid-history",
+    )
+    history_root = tmp_path / "history"
+    history = executor(history_root, path).execute(
+        historical,
+        authorize(
+            history_root,
+            historical,
+            name="auth-query-valid-history.sqlite",
+        ),
+    )
+    assert [
+        item["revision_id"] for item in raw_payload(history)["revisions"]
+    ] == ["revision:001", "revision:002"]
+
+
+def test_source_definition_recorded_after_query_valid_is_not_visible(
+    tmp_path: Path,
+) -> None:
+    path = authority_database(tmp_path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE source_definitions SET recorded_at=? WHERE definition_id=?",
+            ("2026-08-06T12:00:00Z", "source:registry"),
+        )
+    request = impact_request(idempotency_key="impact:future-source-definition")
+    result = executor(tmp_path, path).execute(
+        request,
+        authorize(tmp_path, request, name="auth-future-source-definition.sqlite"),
+    )
+    assert result.receipt.outcome is NamedAuthorityExecutionOutcome.COMPLETE
+    assert result.receipt.reason is NamedAuthorityExecutionReason.NO_MATCH
+    payload = raw_payload(result)
+    assert payload["source_definition_digest"] is None
+    assert payload["revisions"] == []
+    assert payload["representations"] == []
+    assert payload["occurrences"] == []
+
+
 def test_impact_result_bound_retains_raw_audit_rows(tmp_path: Path) -> None:
     path = authority_database(tmp_path)
     request = impact_request(result_limit=1)
