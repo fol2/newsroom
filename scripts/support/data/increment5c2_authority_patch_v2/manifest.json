@@ -1,0 +1,28 @@
+{
+  "schema_version": "newsroom.increment5c2.authority-tools-transfer.v2",
+  "canonical_branch": "agent/increment-5c2-six-named-tools",
+  "checkpoint_branch": "checkpoint/increment-5c2-six-named-tools-20260807",
+  "expected_parent": "172548babaee7f7ea1a28c38878b6ac90e949077",
+  "expected_parent_tree": "c09b2688782bdf1693eadefd25a0cd72254714f5",
+  "expected_main": "72e0ade55ec05ff6de907319cb9baeeefe30d1ca",
+  "expected_product_tree": "fb5395de27e0ff6308e6ff12ce12684a697c0381",
+  "local_source_commit": "1523eed0964e8779b87995f0f6b1ee2a9039a6c6",
+  "patch_bytes": 158607,
+  "patch_sha256": "817c9fab67b2443f7b9d460713c6359a2f4544500c75cb84a8811731b115d9b4",
+  "gzip_bytes": 25177,
+  "gzip_sha256": "cce47bec69647e168d3e4d50b55bffff6c437e3ad6a61788125769278e6b8dfd",
+  "base64_chars": 33572,
+  "base64_sha256": "9dbb41d7aba5d037c01bc3b0ad23d70ccfe32ceed9008b03871b37cf8648bd3e",
+  "parts": [
+    {"name": "part000.b64", "chars": 8000},
+    {"name": "part001.b64", "chars": 8000},
+    {"name": "part002.b64", "chars": 8000},
+    {"name": "part003.b64", "chars": 8000},
+    {"name": "part004.b64", "chars": 1572}
+  ],
+  "product_files": [
+    "newsroom/increment5/named_tool_authority_adapters.py",
+    "newsroom/increment5/named_tool_authority_execution.py",
+    "newsroom/tests/test_increment5c2_named_tool_authority_execution.py"
+  ]
+}
