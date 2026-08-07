@@ -1,4 +1,4 @@
-"""Publish the exact reviewed nine-file Increment 5B4 atom from immutable support chunks."""
+"""Verify and publish the exact reviewed Increment 5B4 nine-file atom."""
 from __future__ import annotations
 
 import base64
@@ -9,18 +9,12 @@ import subprocess
 import tarfile
 from pathlib import Path
 
-REPOSITORY = "fol2/newsroom"
+REPO = "fol2/newsroom"
 SUPPORT_BRANCH = "support/run-increment-5b4-reviewed-hardening-v2-20260806"
 PAYLOAD_COMMIT = "9546b1a7e22376110578a5140087b6a6e9d96622"
-EXPECTED_BASE = "7976909e58a47749ac39fa212f5ecac325294ace"
-PAYLOAD_SHA256 = "02049f9d5b446a77344bc52f167ab98bc2c42170b3d2356fc299308f90e09a13"
+BASE = "7976909e58a47749ac39fa212f5ecac325294ace"
+PAYLOAD_SHA = "02049f9d5b446a77344bc52f167ab98bc2c42170b3d2356fc299308f90e09a13"
 CORRUPTED_OFFSET = 14_936
-CORRUPTED_VALUE = "s"
-CORRECT_VALUE = "k"
-CANONICAL_BRANCH = "agent/increment-5b4-admitted-graph"
-STAGING_BRANCH = "staging/increment-5b4-admitted-graph-final-20260807"
-CHECKPOINT_BRANCH = "checkpoint/increment-5b4-admitted-graph-final-20260807"
-
 PATHS = (
     "docs/operations/increment-5b4-admitted-graph-retriever.md",
     "docs/traceability/increment-5b4-admitted-graph-retriever.md",
@@ -32,52 +26,51 @@ PATHS = (
     "newsroom/tests/test_integrated_c1_sdlc_contract.py",
     "newsroom/tests/test_sdlc_classifier.py",
 )
-FOCUSED = (
-    "newsroom/tests/test_increment5b4_admitted_graph_retriever.py",
-    "newsroom/tests/test_increment5b4_neo4j_authority_port.py",
-    "newsroom/tests/test_increment5b4_neo4j_service.py",
-    "newsroom/tests/test_integrated_c1_sdlc_contract.py",
-    "newsroom/tests/test_sdlc_classifier.py",
+FOCUSED = tuple(path for path in PATHS if path.startswith("newsroom/tests/"))
+BRANCHES = (
+    "agent/increment-5b4-admitted-graph",
+    "staging/increment-5b4-admitted-graph-final-20260807",
+    "checkpoint/increment-5b4-admitted-graph-final-20260807",
 )
+ARCHIVE = Path("/tmp/increment5b4-nine-files.tgz")
+WORKTREE = Path("/tmp/increment5b4-nine-worktree.tgz")
 FOCUSED_LOG = Path("/tmp/increment5b4-nine-focused.log")
 FULL_LOG = Path("/tmp/increment5b4-nine-full.log")
 RECEIPT = Path("/tmp/increment5b4-nine-receipt.txt")
-ARCHIVE = Path("/tmp/increment5b4-nine-files.tgz")
-WORKTREE = Path("/tmp/increment5b4-nine-worktree.tgz")
 
 
-def run(*args: str, cwd: Path | None = None, capture: bool = False) -> str:
-    completed = subprocess.run(
+def command(*args: str, cwd: Path | None = None, capture: bool = False) -> str:
+    result = subprocess.run(
         args,
         cwd=cwd,
-        check=True,
         text=True,
+        check=True,
         stdout=subprocess.PIPE if capture else None,
     )
-    return completed.stdout.strip() if capture else ""
+    return result.stdout.strip() if capture else ""
 
 
-def run_logged(args: tuple[str, ...], *, cwd: Path, log: Path) -> str:
-    completed = subprocess.run(
+def tested(args: tuple[str, ...], *, cwd: Path, log: Path) -> str:
+    result = subprocess.run(
         args,
         cwd=cwd,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
-    output = completed.stdout or ""
+    output = result.stdout or ""
     log.write_text(output, encoding="utf-8")
     print(output, end="")
-    if completed.returncode:
-        raise subprocess.CalledProcessError(completed.returncode, args, output=output)
+    if result.returncode:
+        raise subprocess.CalledProcessError(result.returncode, args, output=output)
     lines = output.splitlines()
     return lines[-1] if lines else ""
 
 
-def configure_auth() -> None:
+def authenticate() -> None:
     token = os.environ["GH_TOKEN"]
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    run(
+    command(
         "git",
         "config",
         "--global",
@@ -86,38 +79,30 @@ def configure_auth() -> None:
     )
 
 
-def reconstruct_payload(payload_repo: Path) -> None:
-    encoded_parts: list[str] = []
-    for part in range(6):
-        content = run(
-            "git",
-            "show",
-            f"{PAYLOAD_COMMIT}:scripts/support/increment5b4-nine/part-{part:02d}.b64",
-            cwd=payload_repo,
-            capture=True,
+def materialize_payload(payload_repo: Path) -> None:
+    encoded = "".join(
+        "".join(
+            command(
+                "git",
+                "show",
+                f"{PAYLOAD_COMMIT}:scripts/support/increment5b4-nine/part-{part:02d}.b64",
+                cwd=payload_repo,
+                capture=True,
+            ).split()
         )
-        encoded_parts.append("".join(content.split()))
-    encoded = "".join(encoded_parts)
-    if len(encoded) != 47_832:
-        raise SystemExit(f"payload base64 length drifted: {len(encoded)}")
-    if encoded[CORRUPTED_OFFSET] != CORRUPTED_VALUE:
-        raise SystemExit(
-            "known support-carrier byte drifted: "
-            f"offset={CORRUPTED_OFFSET} actual={encoded[CORRUPTED_OFFSET]!r}"
-        )
-    encoded = (
-        encoded[:CORRUPTED_OFFSET]
-        + CORRECT_VALUE
-        + encoded[CORRUPTED_OFFSET + 1 :]
+        for part in range(6)
     )
+    if len(encoded) != 47_832 or encoded[CORRUPTED_OFFSET] != "s":
+        raise SystemExit("known support payload shape drifted")
+    encoded = encoded[:CORRUPTED_OFFSET] + "k" + encoded[CORRUPTED_OFFSET + 1 :]
     raw = base64.b64decode(encoded, validate=True)
-    digest = hashlib.sha256(raw).hexdigest()
-    if digest != PAYLOAD_SHA256:
-        raise SystemExit(f"payload digest mismatch: expected={PAYLOAD_SHA256} actual={digest}")
+    actual = hashlib.sha256(raw).hexdigest()
+    if actual != PAYLOAD_SHA:
+        raise SystemExit(f"payload digest mismatch: expected={PAYLOAD_SHA} actual={actual}")
     ARCHIVE.write_bytes(raw)
 
 
-def extract_product(product: Path) -> None:
+def extract_exact(product: Path) -> None:
     with tarfile.open(ARCHIVE, "r:gz") as archive:
         members = archive.getmembers()
         names = tuple(member.name.removeprefix("./") for member in members if member.isfile())
@@ -131,48 +116,51 @@ def extract_product(product: Path) -> None:
         archive.extractall(product, filter="data")
 
 
+def prepare_repo(path: Path, refspec: str) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir()
+    command("git", "init", "-q", cwd=path)
+    command("git", "remote", "add", "origin", f"https://github.com/{REPO}.git", cwd=path)
+    command("git", "fetch", "--no-tags", "--depth=30", "origin", refspec, cwd=path)
+
+
 def main() -> None:
-    configure_auth()
-    payload_repo = Path("payload")
+    authenticate()
+    payload = Path("payload")
     product = Path("product")
-    for path in (payload_repo, product):
-        if path.exists():
-            shutil.rmtree(path)
-        path.mkdir()
+    prepare_repo(payload, f"refs/heads/{SUPPORT_BRANCH}:refs/heads/publisher-base")
+    command("git", "cat-file", "-e", f"{PAYLOAD_COMMIT}^{{commit}}", cwd=payload)
+    materialize_payload(payload)
 
-    run("git", "init", "-q", cwd=payload_repo)
-    run("git", "remote", "add", "origin", f"https://github.com/{REPOSITORY}.git", cwd=payload_repo)
-    run(
-        "git",
-        "fetch",
-        "--no-tags",
-        "--depth=30",
-        "origin",
-        f"refs/heads/{SUPPORT_BRANCH}:refs/heads/publisher-base",
-        cwd=payload_repo,
+    prepare_repo(product, "refs/heads/main:refs/remotes/origin/main")
+    command("git", "checkout", "-q", "--detach", BASE, cwd=product)
+    remote_main = command("git", "ls-remote", "origin", "refs/heads/main", cwd=product, capture=True).split()[0]
+    if remote_main != BASE:
+        raise SystemExit(f"main moved: expected={BASE} actual={remote_main}")
+    extract_exact(product)
+
+    # The complete suite contains code/tree binding tests. Commit the exact atom
+    # locally before testing, but publish nothing until every gate below passes.
+    command("git", "config", "user.name", "James To", cwd=product)
+    command("git", "config", "user.email", "105634418+fol2@users.noreply.github.com", cwd=product)
+    command("git", "add", "--", *PATHS, cwd=product)
+    command("git", "diff", "--cached", "--check", cwd=product)
+    command("git", "commit", "-q", "-m", "Increment 5B4: bounded admitted graph retriever", cwd=product)
+
+    count = command("git", "rev-list", "--count", f"{BASE}..HEAD", cwd=product, capture=True)
+    actual_paths = tuple(
+        line
+        for line in command("git", "diff", "--name-only", f"{BASE}..HEAD", cwd=product, capture=True).splitlines()
+        if line
     )
-    run("git", "cat-file", "-e", f"{PAYLOAD_COMMIT}^{{commit}}", cwd=payload_repo)
-    reconstruct_payload(payload_repo)
+    if count != "1" or tuple(sorted(actual_paths)) != tuple(sorted(PATHS)):
+        raise SystemExit(f"invalid product atom: count={count} paths={actual_paths}")
+    if command("git", "diff", "--name-only", cwd=product, capture=True):
+        raise SystemExit("tracked product tree is not clean before verification")
 
-    run("git", "init", "-q", cwd=product)
-    run("git", "remote", "add", "origin", f"https://github.com/{REPOSITORY}.git", cwd=product)
-    run(
-        "git",
-        "fetch",
-        "--no-tags",
-        "--depth=1",
-        "origin",
-        "refs/heads/main:refs/remotes/origin/main",
-        cwd=product,
-    )
-    run("git", "checkout", "-q", "--detach", EXPECTED_BASE, cwd=product)
-    remote_main = run("git", "ls-remote", "origin", "refs/heads/main", cwd=product, capture=True).split()[0]
-    if remote_main != EXPECTED_BASE:
-        raise SystemExit(f"main moved: expected={EXPECTED_BASE} actual={remote_main}")
-    extract_product(product)
-
-    run("uv", "sync", "--frozen", cwd=product)
-    run(
+    command("uv", "sync", "--frozen", cwd=product)
+    command(
         "python",
         "-m",
         "compileall",
@@ -180,38 +168,25 @@ def main() -> None:
         *(path for path in PATHS if path.endswith(".py")),
         cwd=product,
     )
-    focused_summary = run_logged(("uv", "run", "pytest", "-q", *FOCUSED), cwd=product, log=FOCUSED_LOG)
-    full_summary = run_logged(("uv", "run", "pytest", "-q"), cwd=product, log=FULL_LOG)
+    focused = tested(("uv", "run", "pytest", "-q", *FOCUSED), cwd=product, log=FOCUSED_LOG)
+    full = tested(("uv", "run", "pytest", "-q"), cwd=product, log=FULL_LOG)
+    if command("git", "diff", "--name-only", cwd=product, capture=True):
+        raise SystemExit("verification mutated tracked product bytes")
 
-    run("git", "config", "user.name", "James To", cwd=product)
-    run("git", "config", "user.email", "105634418+fol2@users.noreply.github.com", cwd=product)
-    run("git", "add", "--", *PATHS, cwd=product)
-    run("git", "diff", "--cached", "--check", cwd=product)
-    run("git", "commit", "-q", "-m", "Increment 5B4: bounded admitted graph retriever", cwd=product)
-
-    count = run("git", "rev-list", "--count", f"{EXPECTED_BASE}..HEAD", cwd=product, capture=True)
-    actual_paths = tuple(
-        line
-        for line in run("git", "diff", "--name-only", f"{EXPECTED_BASE}..HEAD", cwd=product, capture=True).splitlines()
-        if line
-    )
-    if count != "1" or tuple(sorted(actual_paths)) != tuple(sorted(PATHS)):
-        raise SystemExit(f"invalid product atom: count={count} paths={actual_paths}")
-
-    head = run("git", "rev-parse", "HEAD", cwd=product, capture=True)
-    tree = run("git", "rev-parse", "HEAD^{tree}", cwd=product, capture=True)
-    parent = run("git", "rev-parse", "HEAD^", cwd=product, capture=True)
+    head = command("git", "rev-parse", "HEAD", cwd=product, capture=True)
+    tree = command("git", "rev-parse", "HEAD^{tree}", cwd=product, capture=True)
+    parent = command("git", "rev-parse", "HEAD^", cwd=product, capture=True)
     RECEIPT.write_text(
         "\n".join(
             (
-                "schema=newsroom.increment5b4.nine-file-materialization.v2",
-                f"payload_sha256={PAYLOAD_SHA256}",
+                "schema=newsroom.increment5b4.nine-file-materialization.v3",
+                f"payload_sha256={PAYLOAD_SHA}",
                 f"payload_commit={PAYLOAD_COMMIT}",
                 f"head={head}",
                 f"tree={tree}",
                 f"parent={parent}",
-                f"focused={focused_summary}",
-                f"full={full_summary}",
+                f"focused={focused}",
+                f"full={full}",
                 "files=9",
             )
         )
@@ -232,8 +207,8 @@ def main() -> None:
         cwd=product,
         check=True,
     )
-    for branch in (CANONICAL_BRANCH, STAGING_BRANCH, CHECKPOINT_BRANCH):
-        run("git", "push", "--force", "origin", f"HEAD:refs/heads/{branch}", cwd=product)
+    for branch in BRANCHES:
+        command("git", "push", "--force", "origin", f"HEAD:refs/heads/{branch}", cwd=product)
     print(RECEIPT.read_text(encoding="utf-8"), end="")
 
 
