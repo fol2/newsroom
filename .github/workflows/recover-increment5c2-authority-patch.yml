@@ -26,59 +26,77 @@ jobs:
           python3 - <<'PY'
           from __future__ import annotations
           import base64
-          import gzip
           import hashlib
+          import itertools
           import re
+          import zlib
           from pathlib import Path
 
           root = Path('/tmp/increment5c2-authority-recovery')
           parts = sorted(Path('scripts/support/data/increment5c2_authority_patch').glob('part*.b64'))
-          report: list[str] = [f'parts={len(parts)}']
-          texts: list[str] = []
-          for part in parts:
-              raw = part.read_bytes()
-              text = re.sub(rb'\s+', b'', raw).decode('ascii')
-              texts.append(text)
-              report.extend([
-                  f'{part.name}: raw_bytes={len(raw)} chars={len(text)} mod4={len(text) % 4}',
-                  f'{part.name}: head={text[:32]!r}',
-                  f'{part.name}: tail={text[-32:]!r}',
-                  f'{part.name}: padding={len(text) - len(text.rstrip("="))}',
-              ])
+          texts = [re.sub(rb'\s+', b'', part.read_bytes()).decode('ascii') for part in parts]
+          boundary = len(texts[0])
           stream = ''.join(texts)
-          report.extend([
-              f'joined_chars={len(stream)} mod4={len(stream) % 4}',
-              f'joined_head={stream[:32]!r}',
-              f'joined_tail={stream[-32:]!r}',
-              f'joined_padding={len(stream) - len(stream.rstrip("="))}',
-          ])
-          padded = stream + '=' * ((-len(stream)) % 4)
-          try:
-              compressed = base64.b64decode(padded, validate=True)
-              (root / 'patch.gz').write_bytes(compressed)
-              report.extend([
-                  f'decoded_bytes={len(compressed)}',
-                  f'decoded_sha256={hashlib.sha256(compressed).hexdigest()}',
-                  f'decoded_head={compressed[:24].hex()}',
-                  f'decoded_tail={compressed[-24:].hex()}',
-              ])
+          alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+          def decode(candidate: str) -> bytes:
+              return base64.b64decode(candidate + '=' * ((-len(candidate)) % 4), validate=True)
+
+          def inflate(candidate: str) -> tuple[bytes, bool] | None:
               try:
-                  patch = gzip.decompress(compressed)
-              except Exception as exc:
-                  report.append(f'gzip_error={type(exc).__name__}: {exc}')
-              else:
-                  (root / 'patch.recovered').write_bytes(patch)
-                  report.extend([
-                      f'patch_bytes={len(patch)}',
-                      f'patch_sha256={hashlib.sha256(patch).hexdigest()}',
-                      '--- patch head ---',
-                      patch[:4000].decode('utf-8', errors='replace'),
-                      '--- patch tail ---',
-                      patch[-4000:].decode('utf-8', errors='replace'),
-                  ])
-          except Exception as exc:
-              report.append(f'base64_error={type(exc).__name__}: {exc}')
-          (root / 'parts.txt').write_text('\n'.join(str(p) for p in parts) + '\n', encoding='utf-8')
+                  raw = decode(candidate)
+                  obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                  out = obj.decompress(raw)
+                  return out, obj.eof
+              except (ValueError, zlib.error):
+                  return None
+
+          candidates: list[tuple[int, bool, str, bytes]] = []
+          baseline = inflate(stream)
+          if baseline is not None:
+              candidates.append((len(baseline[0]), baseline[1], 'baseline', baseline[0]))
+
+          # Most likely corruption: one or two characters dropped where the tool
+          # payload was split. Search a narrow boundary window deterministically.
+          for position in range(boundary - 3, boundary + 4):
+              for char in alphabet:
+                  label = f'insert1@{position}:{char}'
+                  result = inflate(stream[:position] + char + stream[position:])
+                  if result is not None:
+                      candidates.append((len(result[0]), result[1], label, result[0]))
+              for char in alphabet:
+                  label = f'replace1@{position}:{char}'
+                  result = inflate(stream[:position] + char + stream[position + 1:])
+                  if result is not None:
+                      candidates.append((len(result[0]), result[1], label, result[0]))
+              label = f'delete1@{position}'
+              result = inflate(stream[:position] + stream[position + 1:])
+              if result is not None:
+                  candidates.append((len(result[0]), result[1], label, result[0]))
+
+          for chars in itertools.product(alphabet, repeat=2):
+              insertion = ''.join(chars)
+              label = f'insert2@{boundary}:{insertion}'
+              result = inflate(stream[:boundary] + insertion + stream[boundary:])
+              if result is not None:
+                  candidates.append((len(result[0]), result[1], label, result[0]))
+
+          candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+          report = [
+              f'parts={len(parts)}',
+              f'part_lengths={[len(text) for text in texts]}',
+              f'boundary={boundary}',
+              f'joined_chars={len(stream)}',
+              f'joined_sha256={hashlib.sha256(stream.encode()).hexdigest()}',
+              f'valid_candidates={len(candidates)}',
+          ]
+          for index, (size, eof, label, output) in enumerate(candidates[:10]):
+              report.append(f'candidate[{index}]={label} bytes={size} eof={eof}')
+              path = root / f'candidate-{index:02d}.patch.partial'
+              path.write_bytes(output)
+              report.append(f'candidate[{index}]_sha256={hashlib.sha256(output).hexdigest()}')
+              report.append(f'candidate[{index}]_head={output[:120]!r}')
+              report.append(f'candidate[{index}]_tail={output[-120:]!r}')
           (root / 'report.txt').write_text('\n'.join(report) + '\n', encoding='utf-8')
           print('\n'.join(report))
           PY
