@@ -171,19 +171,19 @@ def main() -> None:
         "fetch",
         "--no-tags",
         "origin",
-        f"refs/heads/{canonical_branch}:refs/remotes/origin/canonical",
-        "refs/heads/main:refs/remotes/origin/main",
-        f"refs/heads/{checkpoint_branch}:refs/remotes/origin/checkpoint",
+        f"refs/heads/{canonical_branch}:refs/newsroom/canonical",
+        "refs/heads/main:refs/newsroom/main",
+        f"refs/heads/{checkpoint_branch}:refs/newsroom/checkpoint",
         cwd=PRODUCT_ROOT,
     )
     canonical_sha = run(
-        "git", "rev-parse", "refs/remotes/origin/canonical", cwd=PRODUCT_ROOT, capture=True
+        "git", "rev-parse", "refs/newsroom/canonical", cwd=PRODUCT_ROOT, capture=True
     )
     fetched_main = run(
-        "git", "rev-parse", "refs/remotes/origin/main", cwd=PRODUCT_ROOT, capture=True
+        "git", "rev-parse", "refs/newsroom/main", cwd=PRODUCT_ROOT, capture=True
     )
     checkpoint_sha = run(
-        "git", "rev-parse", "refs/remotes/origin/checkpoint", cwd=PRODUCT_ROOT, capture=True
+        "git", "rev-parse", "refs/newsroom/checkpoint", cwd=PRODUCT_ROOT, capture=True
     )
     if canonical_sha != parent:
         raise SystemExit(f"canonical 5C2 head moved: {canonical_sha}")
