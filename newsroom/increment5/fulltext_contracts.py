@@ -447,6 +447,7 @@ class FullTextProjectionSnapshot:
 class FullTextDocumentBinding:
     passage_id: str
     dependency_root_id: str
+    source_id: str
     source_identity: str
     provenance_digest: str
     language: str
@@ -460,6 +461,7 @@ class FullTextDocumentBinding:
         require_token(self.passage_id, field="fulltext_passage_id")
         for field_name in (
             "dependency_root_id",
+            "source_id",
             "source_identity",
         ):
             _bounded_text(
@@ -532,6 +534,7 @@ class FullTextDocumentBinding:
         return {
             "passage_id": self.passage_id,
             "dependency_root_id": self.dependency_root_id,
+            "source_id": self.source_id,
             "source_identity": self.source_identity,
             "provenance_digest": self.provenance_digest,
             "language": self.language,
@@ -624,6 +627,7 @@ class FullTextBranchRequest:
     expected_rights_manifest_digest: str
     query_text: str
     language_mode: FullTextLanguageMode
+    source_ids: tuple[str, ...]
     query_valid_time: UtcTimestamp
     serving_time: UtcTimestamp
     minimum_watermark: int
@@ -670,6 +674,16 @@ class FullTextBranchRequest:
         )
         if not isinstance(self.language_mode, FullTextLanguageMode):
             raise FullTextContractError("full-text language mode must be typed")
+        object.__setattr__(
+            self,
+            "source_ids",
+            _sorted_unique(
+                self.source_ids,
+                field="fulltext_source_ids",
+                maximum_items=BRANCH_RESULT_LIMIT,
+                maximum_item_bytes=256,
+            ),
+        )
         if not isinstance(self.query_valid_time, UtcTimestamp) or not isinstance(
             self.serving_time, UtcTimestamp
         ):
@@ -697,7 +711,7 @@ class FullTextBranchRequest:
 
     def canonical_value(self) -> dict[str, object]:
         return {
-            "schema_version": "newsroom.increment5.fulltext-branch-request.v1",
+            "schema_version": "newsroom.increment5.fulltext-branch-request.v2",
             "request_id": str(self.request_id),
             "idempotency_key": self.idempotency_key,
             "actor_id": self.actor_id,
@@ -717,6 +731,7 @@ class FullTextBranchRequest:
             ),
             "query_text": self.query_text,
             "language_mode": self.language_mode.value,
+            "source_ids": list(self.source_ids),
             "query_valid_time": self.query_valid_time.to_text(),
             "serving_time": self.serving_time.to_text(),
             "minimum_watermark": self.minimum_watermark,

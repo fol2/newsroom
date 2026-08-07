@@ -246,6 +246,7 @@ class FullTextRetriever:
                     index_name=snapshot.index_name,
                     lucene_expression=normalized.lucene_query,
                     generation_id=snapshot.generation_id,
+                    source_ids=request.source_ids,
                     limit=request.result_limit + 1,
                     timeout_ns=self._remaining_timeout_ns(
                         start_ns=start_ns,
@@ -296,6 +297,22 @@ class FullTextRetriever:
                 snapshot=snapshot,
                 authority_view_digest=view_digest,
                 normalized_query=normalized,
+            )
+        if query_result.candidate_overflow:
+            return self._receipt(
+                request,
+                start_ns=start_ns,
+                outcome=BranchOutcome.INCOMPLETE,
+                reason_code=(
+                    "SOURCE_SCOPE_SCAN_BOUND_EXCEEDED"
+                    if request.source_ids
+                    else "RESULT_BOUND_EXCEEDED"
+                ),
+                snapshot=snapshot,
+                authority_view_digest=view_digest,
+                normalized_query=normalized,
+                authority_read_count=1,
+                neo4j_read_count=neo4j_reads,
             )
         if len(rows) > request.result_limit:
             return self._receipt(
@@ -577,6 +594,8 @@ class FullTextRetriever:
                 raise FullTextContractError(
                     "full-text projection result differs from authority binding"
                 )
+            if request.source_ids and binding.source_id not in request.source_ids:
+                continue
             exclusion = binding.exclusion_at(request.query_valid_time)
             if exclusion is not None:
                 exclusions.append(

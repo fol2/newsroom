@@ -149,6 +149,7 @@ class _StructuralGraphAdapter(Protocol):
         index_name: str | None,
         lucene_expression: str | None,
         generation_id: str | None,
+        source_ids: tuple[str, ...],
         limit: int,
         timeout_ns: int,
     ) -> Any:
@@ -203,6 +204,7 @@ def _open_neo4j_fulltext_reader_with_adapter(
                     if request.generation_id is None
                     else str(request.generation_id)
                 ),
+                source_ids=request.source_ids,
                 limit=request.limit,
                 timeout_ns=request.timeout_ns,
             )
@@ -232,13 +234,52 @@ def _open_neo4j_fulltext_reader_with_adapter(
                 component=component,
                 driver_version=adapter.driver_version,
             )
+        if request.phase is Neo4jFullTextReadPhase.INDEX:
+            try:
+                records = tuple(
+                    _increment5_fulltext_record_mapping(
+                        item,
+                        identity="row",
+                    )
+                    for item in value
+                )
+            except Neo4jFullTextReadError:
+                raise
+            except Exception:
+                raise Neo4jFullTextReadError(
+                    "Neo4j full-text authority read returned malformed rows"
+                ) from None
+            return Neo4jFullTextReadResult(
+                phase=request.phase,
+                indexes=records,
+                driver_version=adapter.driver_version,
+            )
+
+        envelope = _increment5_fulltext_record_mapping(
+            value,
+            identity="query envelope",
+        )
+        if set(envelope) != {"candidate_overflow", "rows"}:
+            raise Neo4jFullTextReadError(
+                "Neo4j full-text query envelope keys are not exact"
+            )
+        candidate_overflow = envelope["candidate_overflow"]
+        raw_rows = envelope["rows"]
+        if type(candidate_overflow) is not bool:
+            raise Neo4jFullTextReadError(
+                "Neo4j full-text candidate overflow flag is malformed"
+            )
+        if not isinstance(raw_rows, (list, tuple)):
+            raise Neo4jFullTextReadError(
+                "Neo4j full-text query rows are malformed"
+            )
         try:
             records = tuple(
                 _increment5_fulltext_record_mapping(
                     item,
                     identity="row",
                 )
-                for item in value
+                for item in raw_rows
             )
         except Neo4jFullTextReadError:
             raise
@@ -246,15 +287,10 @@ def _open_neo4j_fulltext_reader_with_adapter(
             raise Neo4jFullTextReadError(
                 "Neo4j full-text authority read returned malformed rows"
             ) from None
-        if request.phase is Neo4jFullTextReadPhase.INDEX:
-            return Neo4jFullTextReadResult(
-                phase=request.phase,
-                indexes=records,
-                driver_version=adapter.driver_version,
-            )
         return Neo4jFullTextReadResult(
             phase=request.phase,
             rows=records,
+            candidate_overflow=candidate_overflow,
             driver_version=adapter.driver_version,
         )
 

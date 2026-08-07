@@ -735,6 +735,7 @@ def test_caller_lucene_syntax_is_only_a_bound_escaped_value(
         "index_name",
         "query",
         "generation_id",
+        "candidate_limit",
         "limit",
     }
 
@@ -1281,3 +1282,81 @@ def test_neo4j_read_failure_is_explicit_unavailable(
         "QUERY_TIMEOUT",
     }
     assert not receipt.hits
+
+def test_source_scope_is_bound_to_authority_and_bounded_candidate_scan(
+    tmp_path: Path,
+) -> None:
+    source_id = "source-en"
+    driver, _factory, retriever = system(
+        tmp_path,
+        scenario=default_scenario(rows=[result_row("p-en", 1.0)]),
+    )
+    scoped = request(
+        idempotency_key="source-scope",
+        source_ids=(source_id,),
+    )
+
+    receipt = retriever.retrieve(scoped).receipt
+
+    assert receipt.outcome is BranchOutcome.COMPLETE
+    assert [item.passage_id for item in receipt.hits] == ["p-en"]
+    statement, parameters = driver.calls[-1]
+    assert source_id not in statement
+    assert "source_ids" not in parameters
+    assert parameters["candidate_limit"] == 65
+    assert driver.read_requests[-1].source_ids == (source_id,)
+    assert scoped.request_digest != request().request_digest
+
+
+def test_out_of_scope_projection_result_is_filtered_by_authority_binding(
+    tmp_path: Path,
+) -> None:
+    _driver, _factory, retriever = system(
+        tmp_path,
+        scenario=default_scenario(rows=[result_row("p-zh", 1.0)]),
+    )
+
+    receipt = retriever.retrieve(
+        request(
+            idempotency_key="source-scope-filter",
+            source_ids=("source-en",),
+        )
+    ).receipt
+
+    assert receipt.outcome is BranchOutcome.COMPLETE
+    assert receipt.reason_code == "NO_MATCH"
+    assert receipt.hits == ()
+
+
+def test_source_scope_candidate_scan_overflow_is_not_false_no_match(
+    tmp_path: Path,
+) -> None:
+    driver, _factory, retriever = system(
+        tmp_path,
+        scenario=default_scenario(
+            rows=[],
+            candidate_overflow=True,
+        ),
+    )
+
+    receipt = retriever.retrieve(
+        request(
+            idempotency_key="source-scan-overflow",
+            source_ids=("source-en",),
+        )
+    ).receipt
+
+    assert receipt.outcome is BranchOutcome.INCOMPLETE
+    assert receipt.reason_code == "SOURCE_SCOPE_SCAN_BOUND_EXCEEDED"
+    assert receipt.hits == ()
+    assert receipt.neo4j_read_count == 3
+    assert driver.read_requests[-1].source_ids == ("source-en",)
+
+
+def test_fulltext_source_scope_rejects_unsorted_excessive_or_malformed_values() -> None:
+    with pytest.raises(FullTextContractError, match="sorted and unique"):
+        request(source_ids=("source:b", "source:a"))
+    with pytest.raises(FullTextContractError, match="item bound"):
+        request(source_ids=tuple(f"source:{index}" for index in range(9)))
+    with pytest.raises(FullTextContractError, match="bounded canonical text"):
+        request(source_ids=(" source:a",))
