@@ -23,8 +23,16 @@
       "name": "part001.b64"
     },
     {
-      "chars": 2704,
+      "chars": 1000,
       "name": "part002.b64"
+    },
+    {
+      "chars": 1000,
+      "name": "part003.b64"
+    },
+    {
+      "chars": 704,
+      "name": "part004.b64"
     }
   ],
   "patch_bytes": 87326,
