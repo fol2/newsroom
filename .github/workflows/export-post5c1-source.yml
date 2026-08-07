@@ -1,4 +1,4 @@
-name: Export exact post-5C1 source
+name: Export exact Increment 5C2 kernel candidate
 
 on:
   push:
@@ -15,18 +15,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 72e0ade55ec05ff6de907319cb9baeeefe30d1ca
+          ref: 76c9a2f8ec48c110ef147084443be97c8c186bbf
           fetch-depth: 1
           path: source
           persist-credentials: false
       - name: Verify and archive exact source
         run: |
           set -euo pipefail
-          test "$(git -C source rev-parse HEAD)" = "72e0ade55ec05ff6de907319cb9baeeefe30d1ca"
-          git -C source archive --format=tar.gz --output=/tmp/newsroom-post5c1.tar.gz HEAD
+          test "$(git -C source rev-parse HEAD)" = "76c9a2f8ec48c110ef147084443be97c8c186bbf"
+          git -C source archive --format=tar.gz --output=/tmp/newsroom-5c2-kernel.tar.gz HEAD
       - uses: actions/upload-artifact@v4
         with:
-          name: newsroom-post5c1-source-72e0ade55ec05ff6de907319cb9baeeefe30d1ca
-          path: /tmp/newsroom-post5c1.tar.gz
+          name: newsroom-5c2-kernel-source-76c9a2f8ec48c110ef147084443be97c8c186bbf
+          path: /tmp/newsroom-5c2-kernel.tar.gz
           retention-days: 1
           if-no-files-found: error
