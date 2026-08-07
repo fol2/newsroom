@@ -32,7 +32,7 @@ jobs:
       - name: Reassemble, verify and publish exact correction
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 -m scripts.support.publish_increment5c2_final_review_v2
+        run: python3 -m scripts.support.run_increment5c2_final_review
       - if: always()
         uses: actions/upload-artifact@v4
         with:
