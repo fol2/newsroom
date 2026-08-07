@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 172548babaee7f7ea1a28c38878b6ac90e949077
+          ref: 8a2532cf5255aeb18dd27e7333dc37c2f5f5c98a
           fetch-depth: 1
           path: source
           persist-credentials: false
@@ -23,12 +23,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git -C source rev-parse HEAD)" = "172548babaee7f7ea1a28c38878b6ac90e949077"
+          test "$(git -C source rev-parse HEAD)" = "8a2532cf5255aeb18dd27e7333dc37c2f5f5c98a"
           git -C source archive --format=tar.gz --output=/tmp/newsroom-increment5c2-current.tar.gz HEAD
           sha256sum /tmp/newsroom-increment5c2-current.tar.gz | tee /tmp/newsroom-increment5c2-current.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: newsroom-increment5c2-current-172548babaee7f7ea1a28c38878b6ac90e949077
+          name: newsroom-increment5c2-current-8a2532cf5255aeb18dd27e7333dc37c2f5f5c98a
           retention-days: 14
           if-no-files-found: error
           path: |
