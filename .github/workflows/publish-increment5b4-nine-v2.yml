@@ -1,0 +1,49 @@
+name: Publish corrected exact nine-file Increment 5B4 product
+
+on:
+  pull_request:
+    branches:
+      - support/run-increment-5b4-reviewed-hardening-v2-20260806
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-corrected-exact-nine-file-increment-5b4
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Check out current support publisher
+        uses: actions/checkout@v4
+        with:
+          ref: support/run-increment-5b4-reviewed-hardening-v2-20260806
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install exact locked environment
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Verify and publish exact product bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/support/publish_increment5b4_nine.py
+      - name: Upload exact materialization evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5b4-nine-file-materialization-v2-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5b4-nine-files.tgz
+            /tmp/increment5b4-nine-worktree.tgz
+            /tmp/increment5b4-nine-focused.log
+            /tmp/increment5b4-nine-full.log
+            /tmp/increment5b4-nine-receipt.txt
