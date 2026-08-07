@@ -593,11 +593,6 @@ def test_non_attributed_port_result_is_invalid_not_complete(tmp_path: Path) -> N
         ),
         lambda request: branch_result(
             request,
-            generation_id="other-generation",
-            generation_digest=digest_text("other-generation"),
-        ),
-        lambda request: branch_result(
-            request,
             query_valid_time="2026-08-06T08:58:59Z",
         ),
         lambda request: branch_result(
@@ -629,6 +624,41 @@ def test_mismatched_branch_attribution_fails_closed(
     assert result.receipt.reason is NamedToolExecutionReason.BRANCH_RECEIPT_INVALID
     assert result.receipt.branch_attribution is None
     assert result.branch_receipt_bytes is None
+
+
+def test_generation_mismatch_is_stale_and_retains_audit_bytes(tmp_path: Path) -> None:
+    request = fulltext_request()
+    stale = FakePort(
+        port_id="port:fulltext-stale-generation",
+        tool_id=NamedToolId.BOUNDED_FULL_TEXT_RETRIEVAL,
+        branch_mode=NamedBranchMode.FULL_TEXT,
+        producer=lambda item: branch_result(
+            item,
+            generation_id="other-generation",
+            generation_digest=digest_text("other-generation"),
+        ),
+    )
+    gate, _ = executor(
+        tmp_path,
+        selected_ports=ports(
+            override={NamedToolId.BOUNDED_FULL_TEXT_RETRIEVAL: stale}
+        ),
+        journal_name="stale-generation.sqlite",
+    )
+    result = gate.execute(
+        request,
+        authorization(tmp_path, request, journal_name="auth-stale-generation.sqlite"),
+    )
+    assert result.receipt.outcome is NamedToolExecutionOutcome.STALE
+    assert (
+        result.receipt.reason
+        is NamedToolExecutionReason.BRANCH_GENERATION_MISMATCH
+    )
+    assert result.receipt.result_count == 0
+    assert result.receipt.no_match is False
+    assert result.receipt.branch_attribution is not None
+    assert result.receipt.branch_attribution.branch_generation_id == "other-generation"
+    assert result.branch_receipt_bytes is not None
 
 
 def test_complete_no_match_is_truthful_and_retains_branch_receipt(tmp_path: Path) -> None:

@@ -48,6 +48,10 @@ class NamedToolBranchExecutionError(RuntimeError):
     """The branch registry, port result or immutable execution journal failed."""
 
 
+class NamedBranchPolicyBlockedError(RuntimeError):
+    """A concrete typed adapter rejected an unsupported or widened request."""
+
+
 class NamedBranchMode(StrEnum):
     EXACT = "EXACT"
     FULL_TEXT = "FULL_TEXT"
@@ -76,7 +80,9 @@ class NamedToolExecutionReason(StrEnum):
     LOCAL_AUTHORIZATION_BLOCKED = "LOCAL_AUTHORIZATION_BLOCKED"
     AUTHORIZATION_BINDING_MISMATCH = "AUTHORIZATION_BINDING_MISMATCH"
     BRANCH_PORT_UNAVAILABLE = "BRANCH_PORT_UNAVAILABLE"
+    ADAPTER_POLICY_BLOCKED = "ADAPTER_POLICY_BLOCKED"
     BRANCH_RECEIPT_INVALID = "BRANCH_RECEIPT_INVALID"
+    BRANCH_GENERATION_MISMATCH = "BRANCH_GENERATION_MISMATCH"
     BRANCH_NON_COMPLETE = "BRANCH_NON_COMPLETE"
     RESULT_LIMIT_EXCEEDED = "RESULT_LIMIT_EXCEEDED"
     RESPONSE_LIMIT_EXCEEDED = "RESPONSE_LIMIT_EXCEEDED"
@@ -1139,6 +1145,16 @@ class NamedToolBranchExecutor:
         port = self.registry.get(request.envelope.tool_id)
         try:
             branch_result = port.execute(request)
+        except NamedBranchPolicyBlockedError:
+            return self._result(
+                request,
+                authorization,
+                execution_request_digest,
+                port_id=port.port_id,
+                outcome=NamedToolExecutionOutcome.POLICY_BLOCKED,
+                reason=NamedToolExecutionReason.ADAPTER_POLICY_BLOCKED,
+                branch_result=None,
+            )
         except Exception:
             return self._result(
                 request,
@@ -1162,6 +1178,20 @@ class NamedToolBranchExecutor:
                 branch_result=None,
             )
         attribution = branch_result.attribution
+        if (
+            attribution.branch_generation_id is not None
+            and attribution.branch_generation_id != request.envelope.generation_id
+        ):
+            return self._result(
+                request,
+                authorization,
+                execution_request_digest,
+                port_id=port.port_id,
+                outcome=NamedToolExecutionOutcome.STALE,
+                reason=NamedToolExecutionReason.BRANCH_GENERATION_MISMATCH,
+                branch_result=branch_result,
+                force_zero_results=True,
+            )
         if attribution.result_count > request.envelope.result_limit:
             return self._result(
                 request,
@@ -1262,13 +1292,6 @@ class NamedToolBranchExecutor:
             raise NamedToolBranchExecutionError(
                 "registered port tool does not match request"
             )
-        if (
-            attribution.branch_generation_id is not None
-            and attribution.branch_generation_id != envelope.generation_id
-        ):
-            raise NamedToolBranchExecutionError(
-                "branch generation does not match named-tool envelope"
-            )
         if attribution.query_valid_time != envelope.query_valid_time:
             raise NamedToolBranchExecutionError(
                 "branch query-valid time does not match named-tool request"
@@ -1351,6 +1374,7 @@ __all__ = [
     "NamedBranchPort",
     "NamedBranchPortRegistry",
     "NamedToolBranchExecutionError",
+    "NamedBranchPolicyBlockedError",
     "NamedToolBranchExecutor",
     "NamedToolExecutionJournal",
     "NamedToolExecutionOutcome",
