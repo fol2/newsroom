@@ -208,10 +208,7 @@ def test_actual_service_private_adapter_exact_duplicate_and_digest_conflict() ->
         probe_generation = f"scope-probe-{generation_id}"
         admin = GraphDatabase.driver(
             config.uri,
-            auth=(
-                os.environ["NEO4J_ADMIN_USERNAME"],
-                os.environ["NEO4J_ADMIN_PASSWORD"],
-            ),
+            auth=(config.username, config.password),
         )
         try:
             with admin.session(database=config.database) as session:
