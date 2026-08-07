@@ -52,8 +52,8 @@ jobs:
           git init -q payload
           git -C payload remote add origin "https://github.com/$REPOSITORY.git"
           git -C payload fetch --no-tags --depth=1 origin \
-            "refs/heads/$SUPPORT_BRANCH:refs/remotes/origin/support"
-          actual_support="$(git -C payload rev-parse refs/remotes/origin/support)"
+            "refs/heads/$SUPPORT_BRANCH:refs/heads/publisher-base"
+          actual_support="$(git -C payload rev-parse refs/heads/publisher-base)"
           if [[ "$actual_support" != "$SUPPORT_BASE" ]]; then
             echo "support base moved: expected=$SUPPORT_BASE actual=$actual_support" >&2
             exit 1
