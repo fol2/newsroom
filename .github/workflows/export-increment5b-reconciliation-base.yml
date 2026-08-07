@@ -1,0 +1,33 @@
+name: Export exact Increment 5B reconciliation base
+
+on:
+  push:
+    branches: [support/export-increment5b-reconciliation-base-20260807]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 88d1b14b41354f56f325d173d0021ad0fd20abc2
+          fetch-depth: 1
+          path: source
+          persist-credentials: false
+      - name: Verify and archive exact base
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "88d1b14b41354f56f325d173d0021ad0fd20abc2"
+          tar -C source --exclude=.git -czf /tmp/newsroom-88d1b14-source.tgz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: newsroom-source-88d1b14b41354f56f325d173d0021ad0fd20abc2
+          path: /tmp/newsroom-88d1b14-source.tgz
+          retention-days: 1
+          if-no-files-found: error
