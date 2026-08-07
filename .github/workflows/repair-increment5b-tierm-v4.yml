@@ -1,4 +1,4 @@
-name: Repair exact Increment 5B Tier-M reconciliation v4
+name: Repair exact Increment 5B Tier-M reconciliation v5
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: repair-exact-increment5b-tierm-v4
+  group: repair-exact-increment5b-tierm-v5
   cancel-in-progress: false
 
 jobs:
@@ -28,11 +28,11 @@ jobs:
       - name: Build, verify and publish reconciliation atom
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/support/repair_increment5b_tierm_v4.py
+        run: python3 scripts/support/repair_increment5b_tierm_v5.py
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: increment5b-tierm-service-reconciliation-v4-${{ github.run_id }}
+          name: increment5b-tierm-service-reconciliation-v5-${{ github.run_id }}
           retention-days: 14
           if-no-files-found: warn
           path: |
