@@ -1,11 +1,12 @@
-Emit one same-repository pull_request event for the code-tree-clean Increment 5B4 publisher.
+Emit one same-repository pull_request event for the clean-tree Increment 5B4 publisher.
 
-publisher_script=b019b45810e6cbd1ab59480c29812f23674b6cc8
+publisher_script=e23dc6fa8485bad5a6e1ab7327b56ab15b8a4c3c
 publisher_workflow=345da63f603e7ac0bbf25ecc4e2fd7ac4e3363ec
 payload_commit=9546b1a7e22376110578a5140087b6a6e9d96622
 product_base=7976909e58a47749ac39fa212f5ecac325294ace
 payload_sha256=02049f9d5b446a77344bc52f167ab98bc2c42170b3d2356fc299308f90e09a13
 carrier_correction=offset 14936 s-to-k before digest verification
+format_correction=assert and remove one extra EOF newline from two reviewed test files
 verification_order=commit local atom, verify clean tree, run focused and full suites, then push
 product_files=9
 canonical_branch=agent/increment-5b4-admitted-graph
