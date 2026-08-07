@@ -1,0 +1,37 @@
+{
+  "base64_chars": 18704,
+  "base64_sha256": "9f526892f569c1b29e7fccad37973eec546c2bd07187f9e7d2853129e4497820",
+  "canonical_branch": "agent/increment-5c2-six-named-tools",
+  "checkpoint_branch": "checkpoint/increment-5c2-six-named-tools-20260807",
+  "commit_timestamp": "2026-08-07T16:48:00Z",
+  "expected_blob_shas": {
+    "newsroom/increment5/named_tool_dispatch.py": "10c2122c2820a4878452a5cb4b419fe777f801b5",
+    "newsroom/tests/test_increment5c2_named_tool_dispatch.py": "63a5d5427cd7e301b7ab091b1b65a4786f8e28ae"
+  },
+  "expected_main": "72e0ade55ec05ff6de907319cb9baeeefe30d1ca",
+  "expected_parent": "8a2532cf5255aeb18dd27e7333dc37c2f5f5c98a",
+  "expected_parent_tree": "b4bb9728c3065ca4a7c82105684e4d16f7f2d885",
+  "gzip_bytes": 14027,
+  "gzip_sha256": "02d4a12a30901a53e0e1877c7f7ad069036136a3ad3a28cca91b1e742e414485",
+  "parts": [
+    {
+      "chars": 8000,
+      "name": "part000.b64"
+    },
+    {
+      "chars": 8000,
+      "name": "part001.b64"
+    },
+    {
+      "chars": 2704,
+      "name": "part002.b64"
+    }
+  ],
+  "patch_bytes": 87326,
+  "patch_sha256": "649c4317010eb0dec2824ddd8c845b2375144cfed915f5bd14f5978d2bb2710b",
+  "product_files": [
+    "newsroom/increment5/named_tool_dispatch.py",
+    "newsroom/tests/test_increment5c2_named_tool_dispatch.py"
+  ],
+  "schema_version": "newsroom.increment5c2.dispatch-transfer.v1"
+}
