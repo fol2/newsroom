@@ -6,6 +6,7 @@ from typing import Any
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.authority.neo4j_fulltext_reader import (
+    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
     Neo4jFullTextReadError,
     Neo4jFullTextReadPhase,
     Neo4jFullTextReadRequest,
@@ -107,6 +108,7 @@ def bindings() -> tuple[FullTextDocumentBinding, ...]:
         FullTextDocumentBinding(
             passage_id="p-blocked",
             dependency_root_id="root-blocked",
+            source_id="source-blocked",
             source_identity="source-blocked:revision-1",
             provenance_digest=digest("document-blocked"),
             language="en-GB",
@@ -116,6 +118,7 @@ def bindings() -> tuple[FullTextDocumentBinding, ...]:
         FullTextDocumentBinding(
             passage_id="p-en",
             dependency_root_id="root-en",
+            source_id="source-en",
             source_identity="source-en:revision-1",
             provenance_digest=digest("document-en"),
             language="en-GB",
@@ -127,6 +130,7 @@ def bindings() -> tuple[FullTextDocumentBinding, ...]:
         FullTextDocumentBinding(
             passage_id="p-tomb",
             dependency_root_id="root-tomb",
+            source_id="source-tomb",
             source_identity="source-tomb:revision-1",
             provenance_digest=digest("document-tomb"),
             language="en-GB",
@@ -136,6 +140,7 @@ def bindings() -> tuple[FullTextDocumentBinding, ...]:
         FullTextDocumentBinding(
             passage_id="p-zh",
             dependency_root_id="root-zh",
+            source_id="source-zh",
             source_identity="source-zh:revision-1",
             provenance_digest=digest("document-zh"),
             language="zh-HK",
@@ -177,6 +182,7 @@ def request(**changes: object) -> FullTextBranchRequest:
         expected_rights_manifest_digest=digest("rights-manifest"),
         query_text="Synthetic Authority deadline 27 March 2042 合成網上平台",
         language_mode=FullTextLanguageMode.MIXED_EN_GB_ZH_HANT_HK,
+        source_ids=(),
         query_valid_time=NOW,
         serving_time=NOW,
         minimum_watermark=42,
@@ -250,6 +256,7 @@ class FakeScenario:
     component: dict[str, object] | None
     indexes: list[dict[str, object]]
     rows: list[dict[str, object]]
+    candidate_overflow: bool = False
     failure_on: str | None = None
 
 
@@ -282,7 +289,14 @@ class FakeTransaction:
         if statement == _FULLTEXT_READ_QUERY:
             if self._scenario.failure_on == "query":
                 raise RuntimeError("query timed out")
-            return FakeResult(self._scenario.rows)
+            return FakeResult(
+                [
+                    {
+                        "candidate_overflow": self._scenario.candidate_overflow,
+                        "rows": self._scenario.rows,
+                    }
+                ]
+            )
         raise AssertionError(f"unexpected Neo4j statement: {statement}")
 
 
@@ -359,19 +373,25 @@ class FakeDriver:
                     ),
                     driver_version=driver_version,
                 )
+            query_envelope = transaction.run(
+                _FULLTEXT_READ_QUERY,
+                {
+                    "index_name": request.index_name,
+                    "query": request.lucene_expression,
+                    "generation_id": str(request.generation_id),
+                    "candidate_limit": (
+                        FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+                        if request.source_ids
+                        else request.limit
+                    ),
+                    "limit": request.limit,
+                },
+            ).single()
+            assert query_envelope is not None
             return Neo4jFullTextReadResult(
                 phase=request.phase,
-                rows=tuple(
-                    transaction.run(
-                        _FULLTEXT_READ_QUERY,
-                        {
-                            "index_name": request.index_name,
-                            "query": request.lucene_expression,
-                            "generation_id": str(request.generation_id),
-                            "limit": request.limit,
-                        },
-                    )
-                ),
+                rows=tuple(query_envelope["rows"]),
+                candidate_overflow=query_envelope["candidate_overflow"],
                 driver_version=driver_version,
             )
         except Exception as exc:
@@ -426,6 +446,7 @@ def default_scenario(
     *,
     projection_snapshot: FullTextProjectionSnapshot | None = None,
     rows: list[dict[str, object]] | None = None,
+    candidate_overflow: bool = False,
 ) -> FakeScenario:
     current = projection_snapshot or snapshot()
     return FakeScenario(
@@ -439,6 +460,7 @@ def default_scenario(
             if rows is None
             else rows
         ),
+        candidate_overflow=candidate_overflow,
     )
 
 

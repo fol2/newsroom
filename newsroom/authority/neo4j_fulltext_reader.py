@@ -27,6 +27,8 @@ class Neo4jFullTextReadPhase(StrEnum):
 
 _NEO4J_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,127}$")
 
+FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT = 65
+
 
 def _bounded_text(value: str, *, field: str, maximum_bytes: int) -> str:
     if (
@@ -96,6 +98,7 @@ class Neo4jFullTextReadRequest:
     index_name: str | None = None
     lucene_expression: str | None = None
     generation_id: ProjectionGenerationId | None = None
+    source_ids: tuple[str, ...] = ()
     limit: int = 0
 
     def __post_init__(self) -> None:
@@ -110,7 +113,7 @@ class Neo4jFullTextReadRequest:
                     self.lucene_expression,
                     self.generation_id,
                 )
-            ) or self.limit != 0:
+            ) or self.source_ids or self.limit != 0:
                 raise Neo4jFullTextReadError(
                     "component read cannot carry index or query controls"
                 )
@@ -122,6 +125,7 @@ class Neo4jFullTextReadRequest:
             if (
                 self.lucene_expression is not None
                 or self.generation_id is not None
+                or self.source_ids
                 or self.limit != 0
             ):
                 raise Neo4jFullTextReadError(
@@ -140,6 +144,20 @@ class Neo4jFullTextReadRequest:
         if not isinstance(self.generation_id, ProjectionGenerationId):
             raise Neo4jFullTextReadError(
                 "full-text generation identity must be typed"
+            )
+        if not isinstance(self.source_ids, tuple) or len(self.source_ids) > 8:
+            raise Neo4jFullTextReadError(
+                "full-text source scope exceeds its fixed bound"
+            )
+        for source_id in self.source_ids:
+            _bounded_text(
+                source_id,
+                field="fulltext_source_id",
+                maximum_bytes=256,
+            )
+        if self.source_ids != tuple(sorted(set(self.source_ids))):
+            raise Neo4jFullTextReadError(
+                "full-text source scope must be sorted and unique"
             )
         if isinstance(self.limit, bool) or self.limit != 9:
             raise Neo4jFullTextReadError(
@@ -173,6 +191,7 @@ class Neo4jFullTextReadRequest:
         index_name: str,
         lucene_expression: str,
         generation_id: ProjectionGenerationId,
+        source_ids: tuple[str, ...],
         limit: int,
         timeout_ns: int,
     ) -> "Neo4jFullTextReadRequest":
@@ -182,6 +201,7 @@ class Neo4jFullTextReadRequest:
             index_name=index_name,
             lucene_expression=lucene_expression,
             generation_id=generation_id,
+            source_ids=source_ids,
             limit=limit,
         )
 
@@ -193,6 +213,7 @@ class Neo4jFullTextReadResult:
     component: Mapping[str, object] | None = None
     indexes: tuple[Mapping[str, object], ...] = ()
     rows: tuple[Mapping[str, object], ...] = ()
+    candidate_overflow: bool = False
     read_count: int = 1
 
     def __post_init__(self) -> None:
@@ -216,15 +237,19 @@ class Neo4jFullTextReadResult:
         rows = _copy_records(
             self.rows,
             field="fulltext_rows",
-            maximum=9,
+            maximum=FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
         )
+        if type(self.candidate_overflow) is not bool:
+            raise Neo4jFullTextReadError(
+                "full-text candidate overflow flag must be boolean"
+            )
         if self.phase is Neo4jFullTextReadPhase.COMPONENT:
-            if indexes or rows:
+            if indexes or rows or self.candidate_overflow:
                 raise Neo4jFullTextReadError(
                     "component result cannot carry index or query rows"
                 )
         elif self.phase is Neo4jFullTextReadPhase.INDEX:
-            if component is not None or rows:
+            if component is not None or rows or self.candidate_overflow:
                 raise Neo4jFullTextReadError(
                     "index result cannot carry component or query rows"
                 )
@@ -299,6 +324,7 @@ class Neo4jFullTextReader:
 
 
 __all__ = [
+    "FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT",
     "Neo4jFullTextReadError",
     "Neo4jFullTextReadPhase",
     "Neo4jFullTextReadRequest",

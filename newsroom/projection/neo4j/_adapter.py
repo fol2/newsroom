@@ -5,6 +5,9 @@ import time
 from threading import RLock
 from typing import Any
 
+from newsroom.authority.neo4j_fulltext_reader import (
+    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
+)
 from newsroom.authority.types import TrustScope, UtcTimestamp
 from newsroom.projection.ontology import ProjectionNodeType, ProjectionRelationType
 
@@ -53,17 +56,30 @@ ORDER BY name
 """
 
 _FULLTEXT_READ_QUERY = """
-CALL db.index.fulltext.queryNodes($index_name, $query, {limit: $limit})
+CALL db.index.fulltext.queryNodes(
+  $index_name,
+  $query,
+  {limit: $candidate_limit}
+)
 YIELD node, score
-WHERE node.generation_id = $generation_id
-RETURN node.generation_id AS generation_id,
-       node.passage_id AS passage_id,
-       node.document_digest AS document_digest,
-       node.language AS language,
-       score
-ORDER BY score DESC, passage_id
-LIMIT $limit
+WITH node, score
+ORDER BY score DESC, node.passage_id
+WITH collect({node: node, score: score}) AS candidates
+WITH candidates,
+     size(candidates) = $candidate_limit AS candidate_overflow
+WITH [candidate IN candidates
+      WHERE candidate.node.generation_id = $generation_id
+      | {
+          generation_id: candidate.node.generation_id,
+          passage_id: candidate.node.passage_id,
+          document_digest: candidate.node.document_digest,
+          language: candidate.node.language,
+          score: candidate.score
+        }][0..$candidate_limit] AS rows,
+     candidate_overflow
+RETURN candidate_overflow, rows
 """
+
 
 _SCHEMA_QUERIES = (
     """
@@ -360,6 +376,7 @@ class _Neo4jAdapter:
         index_name: str | None,
         lucene_expression: str | None,
         generation_id: str | None,
+        source_ids: tuple[str, ...],
         limit: int,
         timeout_ns: int,
     ) -> Any:
@@ -446,21 +463,44 @@ class _Neo4jAdapter:
                     raise Neo4jReadError(
                         "Neo4j Increment 5 generation identity is invalid"
                     )
+                if not isinstance(source_ids, tuple) or len(source_ids) > 8:
+                    raise Neo4jReadError(
+                        "Neo4j Increment 5 full-text source scope is invalid"
+                    )
+                for source_id in source_ids:
+                    if (
+                        not isinstance(source_id, str)
+                        or not source_id
+                        or source_id != source_id.strip()
+                        or len(source_id.encode("utf-8")) > 256
+                        or any(ord(character) < 0x20 for character in source_id)
+                    ):
+                        raise Neo4jReadError(
+                            "Neo4j Increment 5 full-text source scope is invalid"
+                        )
+                if source_ids != tuple(sorted(set(source_ids))):
+                    raise Neo4jReadError(
+                        "Neo4j Increment 5 full-text source scope is invalid"
+                    )
                 if isinstance(limit, bool) or limit != 9:
                     raise Neo4jReadError(
                         "Neo4j Increment 5 full-text overflow limit must equal nine"
                     )
-                callback = lambda transaction: tuple(
-                    transaction.run(
-                        _FULLTEXT_READ_QUERY,
-                        {
-                            "index_name": index_name,
-                            "query": lucene_expression,
-                            "generation_id": generation_id,
-                            "limit": limit,
-                        },
-                    )
+                candidate_limit = (
+                    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+                    if source_ids
+                    else limit
                 )
+                callback = lambda transaction: transaction.run(
+                    _FULLTEXT_READ_QUERY,
+                    {
+                        "index_name": index_name,
+                        "query": lucene_expression,
+                        "generation_id": generation_id,
+                        "candidate_limit": candidate_limit,
+                        "limit": limit,
+                    },
+                ).single()
                 operation = "increment5.fulltext.query"
 
         started_ns = self._monotonic_ns()

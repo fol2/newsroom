@@ -6,9 +6,11 @@ from newsroom.authority._neo4j_projection_system import (
     _open_neo4j_fulltext_reader_with_adapter,
 )
 from newsroom.authority.neo4j_fulltext_reader import (
+    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
     Neo4jFullTextReadError,
     Neo4jFullTextReadPhase,
     Neo4jFullTextReadRequest,
+    Neo4jFullTextReadResult,
     Neo4jFullTextReadTimeout,
 )
 from newsroom.projection.neo4j._adapter import (
@@ -74,6 +76,7 @@ def test_authority_port_owns_three_fixed_server_timed_phases() -> None:
                 "retrieval_text:(synthetic)"
             ),
             generation_id=GENERATION_ID,
+            source_ids=(),
             limit=9,
             timeout_ns=4_600_000_000,
         )
@@ -136,6 +139,7 @@ class _RecordReturningAdapter:
         index_name: str | None,
         lucene_expression: str | None,
         generation_id: str | None,
+        source_ids: tuple[str, ...],
         limit: int,
         timeout_ns: int,
     ):
@@ -158,15 +162,21 @@ class _RecordReturningAdapter:
             )
         assert lucene_expression
         assert generation_id
+        assert source_ids == ()
         assert limit == 9
-        return (
-            _Neo4jRecordLike(
-                {
-                    "generation_id": generation_id,
-                    "passage_id": "p-en",
-                    "score": 1.0,
-                }
-            ),
+        return _Neo4jRecordLike(
+            {
+                "candidate_overflow": False,
+                "rows": [
+                    _Neo4jRecordLike(
+                        {
+                            "generation_id": generation_id,
+                            "passage_id": "p-en",
+                            "score": 1.0,
+                        }
+                    )
+                ],
+            }
         )
 
     def close(self) -> None:
@@ -191,6 +201,7 @@ def test_authority_port_copies_neo4j_records_to_plain_mappings() -> None:
             index_name=snapshot().index_name,
             lucene_expression="retrieval_text:(synthetic)",
             generation_id=GENERATION_ID,
+            source_ids=(),
             limit=9,
             timeout_ns=4_800_000_000,
         )
@@ -229,6 +240,7 @@ def test_authority_port_rejects_generic_or_unbounded_read_controls() -> None:
             index_name=snapshot().index_name,
             lucene_expression="retrieval_text:(synthetic)",
             generation_id=GENERATION_ID,
+            source_ids=(),
             limit=10,
             timeout_ns=5_000_000_000,
         )
@@ -295,6 +307,7 @@ def test_authority_port_maps_server_timeout_to_typed_failure() -> None:
                 index_name=snapshot().index_name,
                 lucene_expression="retrieval_text:(synthetic)",
                 generation_id=GENERATION_ID,
+                source_ids=(),
                 limit=9,
                 timeout_ns=5_000_000_000,
             )
@@ -321,3 +334,100 @@ def test_authority_port_redacts_unavailable_adapter_failure() -> None:
             )
         )
     assert "component read failed" not in str(failure.value)
+
+def test_authority_port_uses_source_scope_only_for_bounded_candidate_scan() -> None:
+    source_ids = ("source:a", "source:b")
+    clock = SequenceClock((0, 100_000_000, 200_000_000))
+    driver = FakeDriver(default_scenario())
+    adapter = _Neo4jAdapter(
+        driver=driver,
+        config=config(),
+        driver_version="6.2.0",
+        monotonic_ns=clock,
+        unit_of_work_factory=RecordingUnitOfWorkFactory(),
+    )
+    reader = _open_neo4j_fulltext_reader_with_adapter(adapter)
+
+    result = reader.read(
+        Neo4jFullTextReadRequest.query(
+            index_name=snapshot().index_name,
+            lucene_expression="retrieval_text:(synthetic)",
+            generation_id=GENERATION_ID,
+            source_ids=source_ids,
+            limit=9,
+            timeout_ns=5_000_000_000,
+        )
+    )
+
+    assert result.candidate_overflow is False
+    statement, parameters = driver.calls[-1]
+    assert source_ids[0] not in statement
+    assert source_ids[1] not in statement
+    assert "source_ids" not in parameters
+    assert parameters["candidate_limit"] == FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+    assert "[0..$candidate_limit]" in statement
+    assert "[0..$limit]" not in statement
+    assert set(parameters) == {
+        "index_name",
+        "query",
+        "generation_id",
+        "candidate_limit",
+        "limit",
+    }
+
+
+def test_authority_read_request_rejects_malformed_source_scope() -> None:
+    kwargs = {
+        "index_name": snapshot().index_name,
+        "lucene_expression": "retrieval_text:(synthetic)",
+        "generation_id": GENERATION_ID,
+        "limit": 9,
+        "timeout_ns": 5_000_000_000,
+    }
+    with pytest.raises(Neo4jFullTextReadError, match="sorted and unique"):
+        Neo4jFullTextReadRequest.query(
+            source_ids=("source:b", "source:a"),
+            **kwargs,
+        )
+    with pytest.raises(Neo4jFullTextReadError, match="fixed bound"):
+        Neo4jFullTextReadRequest.query(
+            source_ids=tuple(f"source:{index}" for index in range(9)),
+            **kwargs,
+        )
+    with pytest.raises(Neo4jFullTextReadError, match="bounded canonical text"):
+        Neo4jFullTextReadRequest.query(
+            source_ids=(" source:a",),
+            **kwargs,
+        )
+
+
+def test_query_envelope_retains_bounded_source_scan_rows() -> None:
+    rows = tuple(
+        {"passage_id": f"p-{index:02d}"}
+        for index in range(FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT)
+    )
+    result = Neo4jFullTextReadResult(
+        phase=Neo4jFullTextReadPhase.QUERY,
+        rows=rows,
+        candidate_overflow=True,
+        driver_version="6.2.0",
+    )
+    assert len(result.rows) == FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+
+    with pytest.raises(Neo4jFullTextReadError, match="fixed bound"):
+        Neo4jFullTextReadResult(
+            phase=Neo4jFullTextReadPhase.QUERY,
+            rows=rows + ({"passage_id": "p-overflow"},),
+            candidate_overflow=True,
+            driver_version="6.2.0",
+        )
+
+
+def test_query_envelope_requires_exact_boolean_overflow_and_rows_shape() -> None:
+    with pytest.raises(Neo4jFullTextReadError, match="overflow flag"):
+        Neo4jFullTextReadResult(
+            phase=Neo4jFullTextReadPhase.QUERY,
+            rows=(),
+            candidate_overflow=0,
+            driver_version="6.2.0",
+        )

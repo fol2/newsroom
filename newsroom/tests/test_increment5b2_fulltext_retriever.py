@@ -735,6 +735,7 @@ def test_caller_lucene_syntax_is_only_a_bound_escaped_value(
         "index_name",
         "query",
         "generation_id",
+        "candidate_limit",
         "limit",
     }
 
@@ -1281,3 +1282,177 @@ def test_neo4j_read_failure_is_explicit_unavailable(
         "QUERY_TIMEOUT",
     }
     assert not receipt.hits
+
+def test_source_scope_is_bound_to_authority_and_bounded_candidate_scan(
+    tmp_path: Path,
+) -> None:
+    source_id = "source-en"
+    driver, _factory, retriever = system(
+        tmp_path,
+        scenario=default_scenario(rows=[result_row("p-en", 1.0)]),
+    )
+    scoped = request(
+        idempotency_key="source-scope",
+        source_ids=(source_id,),
+    )
+
+    receipt = retriever.retrieve(scoped).receipt
+
+    assert receipt.outcome is BranchOutcome.COMPLETE
+    assert [item.passage_id for item in receipt.hits] == ["p-en"]
+    statement, parameters = driver.calls[-1]
+    assert source_id not in statement
+    assert "source_ids" not in parameters
+    assert parameters["candidate_limit"] == 65
+    assert driver.read_requests[-1].source_ids == (source_id,)
+    assert scoped.request_digest != request().request_digest
+
+
+def test_out_of_scope_projection_result_is_filtered_by_authority_binding(
+    tmp_path: Path,
+) -> None:
+    _driver, _factory, retriever = system(
+        tmp_path,
+        scenario=default_scenario(rows=[result_row("p-zh", 1.0)]),
+    )
+
+    receipt = retriever.retrieve(
+        request(
+            idempotency_key="source-scope-filter",
+            source_ids=("source-en",),
+        )
+    ).receipt
+
+    assert receipt.outcome is BranchOutcome.COMPLETE
+    assert receipt.reason_code == "NO_MATCH"
+    assert receipt.hits == ()
+
+
+def test_source_scope_keeps_lower_ranked_in_scope_match_after_bounded_scan(
+    tmp_path: Path,
+) -> None:
+    scoped_source_id = "source-in-scope"
+    custom_bindings = tuple(
+        replace(
+            bindings()[1],
+            passage_id=f"p-source-scan-{index:02d}",
+            dependency_root_id=f"root-source-scan-{index:02d}",
+            source_id=(
+                scoped_source_id if index == 9 else f"source-out-{index:02d}"
+            ),
+            source_identity=f"source-scan:{index:02d}:revision-1",
+            provenance_digest=digest(f"source-scan-document-{index:02d}"),
+        )
+        for index in range(10)
+    )
+    rows = [
+        {
+            "generation_id": str(GENERATION_ID),
+            "passage_id": binding.passage_id,
+            "document_digest": binding.provenance_digest,
+            "language": binding.language,
+            "score": float(20 - index),
+        }
+        for index, binding in enumerate(custom_bindings)
+    ]
+    driver, _factory, retriever = system(
+        tmp_path,
+        view=authority_view(document_bindings=custom_bindings),
+        scenario=default_scenario(rows=rows),
+    )
+
+    receipt = retriever.retrieve(
+        request(
+            idempotency_key="source-scope-lower-ranked-match",
+            source_ids=(scoped_source_id,),
+        )
+    ).receipt
+
+    assert receipt.outcome is BranchOutcome.COMPLETE
+    assert receipt.reason_code == "OK"
+    assert [item.passage_id for item in receipt.hits] == ["p-source-scan-09"]
+    assert [item.rank for item in receipt.hits] == [1]
+    assert len(driver.read_requests[-1].source_ids) == 1
+    statement, parameters = driver.calls[-1]
+    assert "[0..$candidate_limit]" in statement
+    assert "[0..$limit]" not in statement
+    assert parameters["candidate_limit"] == 65
+
+
+def test_source_scope_counts_only_authoritatively_in_scope_candidates_for_bound(
+    tmp_path: Path,
+) -> None:
+    scoped_source_id = "source-in-scope"
+    custom_bindings = tuple(
+        replace(
+            bindings()[1],
+            passage_id=f"p-source-bound-{index:02d}",
+            dependency_root_id=f"root-source-bound-{index:02d}",
+            source_id=(
+                "source-out" if index == 0 else scoped_source_id
+            ),
+            source_identity=f"source-bound:{index:02d}:revision-1",
+            provenance_digest=digest(f"source-bound-document-{index:02d}"),
+        )
+        for index in range(10)
+    )
+    rows = [
+        {
+            "generation_id": str(GENERATION_ID),
+            "passage_id": binding.passage_id,
+            "document_digest": binding.provenance_digest,
+            "language": binding.language,
+            "score": float(20 - index),
+        }
+        for index, binding in enumerate(custom_bindings)
+    ]
+    _driver, _factory, retriever = system(
+        tmp_path,
+        view=authority_view(document_bindings=custom_bindings),
+        scenario=default_scenario(rows=rows),
+    )
+
+    receipt = retriever.retrieve(
+        request(
+            idempotency_key="source-scope-result-bound",
+            source_ids=(scoped_source_id,),
+        )
+    ).receipt
+
+    assert receipt.outcome is BranchOutcome.INCOMPLETE
+    assert receipt.reason_code == "RESULT_BOUND_EXCEEDED"
+    assert receipt.hits == ()
+
+
+def test_source_scope_candidate_scan_overflow_is_not_false_no_match(
+    tmp_path: Path,
+) -> None:
+    driver, _factory, retriever = system(
+        tmp_path,
+        scenario=default_scenario(
+            rows=[],
+            candidate_overflow=True,
+        ),
+    )
+
+    receipt = retriever.retrieve(
+        request(
+            idempotency_key="source-scan-overflow",
+            source_ids=("source-en",),
+        )
+    ).receipt
+
+    assert receipt.outcome is BranchOutcome.INCOMPLETE
+    assert receipt.reason_code == "SOURCE_SCOPE_SCAN_BOUND_EXCEEDED"
+    assert receipt.hits == ()
+    assert receipt.neo4j_read_count == 3
+    assert driver.read_requests[-1].source_ids == ("source-en",)
+
+
+def test_fulltext_source_scope_rejects_unsorted_excessive_or_malformed_values() -> None:
+    with pytest.raises(FullTextContractError, match="sorted and unique"):
+        request(source_ids=("source:b", "source:a"))
+    with pytest.raises(FullTextContractError, match="item bound"):
+        request(source_ids=tuple(f"source:{index}" for index in range(9)))
+    with pytest.raises(FullTextContractError, match="bounded canonical text"):
+        request(source_ids=(" source:a",))

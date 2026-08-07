@@ -195,6 +195,66 @@ def test_actual_service_private_adapter_exact_duplicate_and_digest_conflict() ->
         )
         with pytest.raises(Neo4jIdentityConflict):
             adapter.apply(batch)
+
+        # Exercise the Increment 5 source-scoped full-text read against the
+        # actual Neo4j service. The bounded scan must return all ten candidates
+        # to the authority layer; slicing to the branch's nine-row overflow
+        # sentinel before source filtering would lose the lower-ranked match.
+        from neo4j import GraphDatabase
+
+        suffix = str(generation_id).replace("-", "")
+        label = f"NewsroomIncrement5ScopeProbe_{suffix}"
+        index_name = f"newsroom_increment5_scope_probe_{suffix}"
+        probe_generation = f"scope-probe-{generation_id}"
+        admin = GraphDatabase.driver(
+            config.uri,
+            auth=(config.username, config.password),
+        )
+        try:
+            with admin.session(database=config.database) as session:
+                session.run(
+                    f"CREATE FULLTEXT INDEX `{index_name}` "
+                    f"FOR (node:`{label}`) ON EACH [node.retrieval_text] "
+                    "OPTIONS {indexConfig: {"
+                    "`fulltext.analyzer`: 'standard-no-stop-words', "
+                    "`fulltext.eventually_consistent`: false}}"
+                ).consume()
+                session.run("CALL db.awaitIndexes(120)").consume()
+                session.run(
+                    f"UNWIND range(0, 9) AS ordinal "
+                    f"CREATE (node:`{label}` {{"
+                    "generation_id: $generation_id, "
+                    "passage_id: 'p-scope-' + right('0' + toString(ordinal), 2), "
+                    "document_digest: $document_digest, "
+                    "language: 'en-GB', "
+                    "retrieval_text: 'bounded source scope probe'"
+                    "})",
+                    generation_id=probe_generation,
+                    document_digest="sha256:" + "1" * 64,
+                ).consume()
+
+            envelope = adapter.read_increment5_fulltext(
+                phase="QUERY",
+                index_name=index_name,
+                lucene_expression="retrieval_text:(bounded source scope probe)",
+                generation_id=probe_generation,
+                source_ids=("source:scope-probe",),
+                limit=9,
+                timeout_ns=5_000_000_000,
+            )
+            assert envelope["candidate_overflow"] is False
+            assert [row["passage_id"] for row in envelope["rows"]] == [
+                f"p-scope-{ordinal:02d}" for ordinal in range(10)
+            ]
+        finally:
+            with admin.session(database=config.database) as session:
+                session.run(f"DROP INDEX `{index_name}` IF EXISTS").consume()
+                session.run(
+                    f"MATCH (node:`{label}` {{generation_id: $generation_id}}) "
+                    "DETACH DELETE node",
+                    generation_id=probe_generation,
+                ).consume()
+            admin.close()
     finally:
         try:
             adapter.cleanup_generation(str(generation_id))
