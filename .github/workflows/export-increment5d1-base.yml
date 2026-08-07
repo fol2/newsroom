@@ -1,0 +1,71 @@
+name: Export exact Increment 5D1 base
+
+on:
+  push:
+    branches: [support/publish-increment5c2-final-review-20260807]
+    paths:
+      - '.github/workflows/export-increment5d1-base.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - name: Wait for truthful Increment 5C parent closeout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 5400))
+          while (( SECONDS < deadline )); do
+            state="$(curl -fsSL \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              https://api.github.com/repos/fol2/newsroom/issues/252 | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')"
+            if [[ "$state" == closed ]]; then
+              exit 0
+            fi
+            sleep 20
+          done
+          echo 'Increment 5C parent did not close within the bounded wait' >&2
+          exit 1
+      - name: Fetch and archive exact post-5C main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q source
+          git -C source remote add origin https://github.com/fol2/newsroom.git
+          git -C source fetch --no-tags --depth=1 origin main
+          head="$(git -C source rev-parse FETCH_HEAD)"
+          tree="$(git -C source rev-parse FETCH_HEAD^{tree})"
+          git -C source archive --format=tar.gz --output=/tmp/newsroom-increment5d1-base.tar.gz FETCH_HEAD
+          sha256sum /tmp/newsroom-increment5d1-base.tar.gz > /tmp/newsroom-increment5d1-base.sha256
+          python3 - "$head" "$tree" <<'PY'
+          import json, sys
+          from pathlib import Path
+          Path('/tmp/newsroom-increment5d1-base.json').write_text(
+              json.dumps({
+                  'schema_version': 'newsroom.increment5d1.base-export.v1',
+                  'main': sys.argv[1],
+                  'tree': sys.argv[2],
+                  'predecessor_issue': 252,
+              }, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: newsroom-increment5d1-base-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            /tmp/newsroom-increment5d1-base.tar.gz
+            /tmp/newsroom-increment5d1-base.sha256
+            /tmp/newsroom-increment5d1-base.json
