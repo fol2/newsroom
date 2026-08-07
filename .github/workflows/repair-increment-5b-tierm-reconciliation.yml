@@ -57,12 +57,15 @@ jobs:
           evidence = root / ".github/workflows/evidence.yml"
           regression = root / "newsroom/tests/test_increment5b_tierm_service_reconciliation.py"
 
+          first = "newsroom/tests/test_increment5b4_neo4j_service.py::test_increment5b4_fixed_port_reads_only_exact_generation_and_allowed_state"
+          second = "newsroom/tests/test_increment5b4_neo4j_service.py::test_increment5b4_fixed_port_excludes_future_observations"
           lane_text = lane.read_text(encoding="utf-8")
-          anchor = '''    "newsroom/tests/test_retrieval_2c_neo4j_service.py::test_actual_service_missing_vector_index_is_unavailable_not_no_match",\n)\n_SERVICE_CONFIGURATION'''
-          replacement = '''    "newsroom/tests/test_retrieval_2c_neo4j_service.py::test_actual_service_missing_vector_index_is_unavailable_not_no_match",\n    "newsroom/tests/test_increment5b4_neo4j_service.py::test_increment5b4_fixed_port_reads_only_exact_generation_and_allowed_state",\n    "newsroom/tests/test_increment5b4_neo4j_service.py::test_increment5b4_fixed_port_excludes_future_observations",\n)\n_SERVICE_CONFIGURATION'''
-          if lane_text.count(anchor) != 1:
-              raise SystemExit("optional-core service manifest anchor drifted")
-          lane.write_text(lane_text.replace(anchor, replacement, 1), encoding="utf-8")
+          if first in lane_text or second in lane_text:
+              raise SystemExit("5B4 optional-core identities already exist")
+          start = lane_text.index("_OPTIONAL_CORE_TEST_IDS: tuple[str, ...] = (")
+          end = lane_text.index("\n)\n_SERVICE_CONFIGURATION", start)
+          insertion = f'\n    "{first}",\n    "{second}",'
+          lane.write_text(lane_text[:end] + insertion + lane_text[end:], encoding="utf-8")
 
           evidence_text = evidence.read_text(encoding="utf-8")
           anchor = '''          set -a\n          source "${projector_file}"\n          set +a\n          uv run --no-sync python -m scripts.sdlc.workflow_lane execute \\\n'''
@@ -72,23 +75,12 @@ jobs:
           evidence.write_text(evidence_text.replace(anchor, replacement, 1), encoding="utf-8")
 
           regression.write_text(
-              '''from __future__ import annotations\n\nfrom pathlib import Path\n\nfrom scripts.sdlc.workflow_lane import _OPTIONAL_CORE_TEST_IDS\n\n\n_EXPECTED_5B4_SERVICE_TESTS = {\n    "newsroom/tests/test_increment5b4_neo4j_service.py::test_increment5b4_fixed_port_reads_only_exact_generation_and_allowed_state",\n    "newsroom/tests/test_increment5b4_neo4j_service.py::test_increment5b4_fixed_port_excludes_future_observations",\n}\n\n\ndef test_increment5b4_authenticated_tests_are_core_optional_service_required() -> None:\n    assert _EXPECTED_5B4_SERVICE_TESTS <= set(_OPTIONAL_CORE_TEST_IDS)\n\n\ndef test_permanent_service_lane_aliases_projector_credentials() -> None:\n    workflow = (\n        Path(__file__).resolve().parents[2]\n        / ".github"\n        / "workflows"\n        / "evidence.yml"\n    ).read_text(encoding="utf-8")\n    assert (\n        'export NEWSROOM_NEO4J_USER="${NEWSROOM_NEO4J_PROJECTOR_USERNAME}"'\n        in workflow\n    )\n    assert (\n        'export NEWSROOM_NEO4J_PASSWORD="${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"'\n        in workflow\n    )\n    assert workflow.index("export NEWSROOM_NEO4J_PASSWORD") < workflow.index(\n        "--lane service"\n    )\n''',
+              '''from __future__ import annotations\n\nfrom pathlib import Path\n\nfrom scripts.sdlc.workflow_lane import _OPTIONAL_CORE_TEST_IDS\n\n\n_EXPECTED_5B4_SERVICE_TESTS = {\n    "newsroom/tests/test_increment5b4_neo4j_service.py::test_increment5b4_fixed_port_reads_only_exact_generation_and_allowed_state",\n    "newsroom/tests/test_increment5b4_neo4j_service.py::test_increment5b4_fixed_port_excludes_future_observations",\n}\n\n\ndef test_increment5b4_authenticated_tests_are_core_optional_service_required() -> None:\n    assert _EXPECTED_5B4_SERVICE_TESTS <= set(_OPTIONAL_CORE_TEST_IDS)\n\n\ndef test_permanent_service_lane_aliases_projector_credentials() -> None:\n    workflow = (\n        Path(__file__).resolve().parents[2]\n        / ".github"\n        / "workflows"\n        / "evidence.yml"\n    ).read_text(encoding="utf-8")\n    user_alias = 'export NEWSROOM_NEO4J_USER="${NEWSROOM_NEO4J_PROJECTOR_USERNAME}"'\n    password_alias = (\n        'export NEWSROOM_NEO4J_PASSWORD="${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"'\n    )\n    assert user_alias in workflow\n    assert password_alias in workflow\n    service_job = workflow.index("  service:")\n    execute = workflow.index("--lane service", service_job)\n    assert service_job < workflow.index(user_alias, service_job) < execute\n    assert service_job < workflow.index(password_alias, service_job) < execute\n''',
               encoding="utf-8",
           )
           PY
 
           cd product
-          uv sync --frozen
-          python -m compileall -q \
-            scripts/sdlc/workflow_lane.py \
-            newsroom/tests/test_increment5b_tierm_service_reconciliation.py
-          uv run pytest -q \
-            newsroom/tests/test_increment5b_tierm_service_reconciliation.py \
-            newsroom/tests/test_sdlc_workflow_lane.py \
-            newsroom/tests/test_integrated_c1_sdlc_contract.py \
-            | tee "$FOCUSED_LOG"
-          uv run pytest -q | tee "$FULL_LOG"
-
           git config user.name "James To"
           git config user.email "105634418+fol2@users.noreply.github.com"
           git add \
@@ -110,6 +102,25 @@ jobs:
           printf '%s\n' "${actual[@]}" | sort > /tmp/actual.txt
           printf '%s\n' "${expected[@]}" | sort > /tmp/expected.txt
           diff -u /tmp/expected.txt /tmp/actual.txt
+          if [[ -n "$(git diff --name-only)" ]]; then
+            echo "tracked product tree is not clean before verification" >&2
+            exit 1
+          fi
+
+          uv sync --frozen
+          python -m compileall -q \
+            scripts/sdlc/workflow_lane.py \
+            newsroom/tests/test_increment5b_tierm_service_reconciliation.py
+          uv run pytest -q \
+            newsroom/tests/test_increment5b_tierm_service_reconciliation.py \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            newsroom/tests/test_integrated_c1_sdlc_contract.py \
+            | tee "$FOCUSED_LOG"
+          uv run pytest -q | tee "$FULL_LOG"
+          if [[ -n "$(git diff --name-only)" ]]; then
+            echo "verification mutated tracked product bytes" >&2
+            exit 1
+          fi
 
           head_sha="$(git rev-parse HEAD)"
           tree_sha="$(git rev-parse 'HEAD^{tree}')"
