@@ -668,6 +668,8 @@ def test_optional_core_skips_are_exact_actual_service_cases() -> None:
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_graph_loss_requires_isolated_replacement',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_replacement_generation_is_only_serving_state',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_tombstone_purges_and_never_resurrects',
+        'newsroom.tests.test_increment5b4_neo4j_service::test_increment5b4_fixed_port_excludes_future_observations',
+        'newsroom.tests.test_increment5b4_neo4j_service::test_increment5b4_fixed_port_reads_only_exact_generation_and_allowed_state',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_increment_2_proof_admits_replays_and_restarts',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[fulltext]',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[relation]',

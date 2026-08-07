@@ -367,6 +367,8 @@ jobs:
           set -a
           source "${projector_file}"
           set +a
+          export NEWSROOM_NEO4J_USER="${NEWSROOM_NEO4J_PROJECTOR_USERNAME}"
+          export NEWSROOM_NEO4J_PASSWORD="${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
           uv run --no-sync python -m scripts.sdlc.workflow_lane execute \
             --route .sdlc-run/route/route.json \
             --lane service \
