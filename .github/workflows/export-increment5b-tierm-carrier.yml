@@ -1,0 +1,35 @@
+name: Export exact tested Increment 5B Tier-M blob carrier
+
+on:
+  push:
+    branches: [support/repair-increment-5b-tierm-reconciliation-20260807]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: export-increment5b-tierm-carrier
+  cancel-in-progress: true
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/repair-increment-5b-tierm-reconciliation-20260807
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Export exact tested blobs without a workflow-path push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/support/export_increment5b_tierm_carrier.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5b-tierm-carrier-${{ github.run_id }}
+          path: /tmp/increment5b-tierm-carrier-receipt.txt
+          retention-days: 14
+          if-no-files-found: warn
