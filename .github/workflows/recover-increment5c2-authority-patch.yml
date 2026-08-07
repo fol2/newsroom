@@ -23,31 +23,67 @@ jobs:
         run: |
           set -u
           mkdir -p /tmp/increment5c2-authority-recovery
-          parts=(scripts/support/data/increment5c2_authority_patch/part*.b64)
-          printf '%s\n' "${parts[@]}" > /tmp/increment5c2-authority-recovery/parts.txt
-          : > /tmp/increment5c2-authority-recovery/patch.gz
-          for part in "${parts[@]}"; do
-            base64 --decode "$part" >> /tmp/increment5c2-authority-recovery/patch.gz
-          done
-          set +e
-          gzip -dc /tmp/increment5c2-authority-recovery/patch.gz > /tmp/increment5c2-authority-recovery/patch.partial 2> /tmp/increment5c2-authority-recovery/gzip.stderr
-          status=$?
-          set -e
-          {
-            echo "parts=${#parts[@]}"
-            wc -c /tmp/increment5c2-authority-recovery/patch.gz
-            wc -c /tmp/increment5c2-authority-recovery/patch.partial
-            echo "gzip_status=$status"
-            sha256sum /tmp/increment5c2-authority-recovery/patch.gz
-            sha256sum /tmp/increment5c2-authority-recovery/patch.partial
-            echo '--- gzip stderr ---'
-            cat /tmp/increment5c2-authority-recovery/gzip.stderr
-            echo '--- patch head ---'
-            head -80 /tmp/increment5c2-authority-recovery/patch.partial
-            echo '--- patch tail ---'
-            tail -80 /tmp/increment5c2-authority-recovery/patch.partial
-          } | tee /tmp/increment5c2-authority-recovery/report.txt
+          python3 - <<'PY'
+          from __future__ import annotations
+          import base64
+          import gzip
+          import hashlib
+          import re
+          from pathlib import Path
+
+          root = Path('/tmp/increment5c2-authority-recovery')
+          parts = sorted(Path('scripts/support/data/increment5c2_authority_patch').glob('part*.b64'))
+          report: list[str] = [f'parts={len(parts)}']
+          texts: list[str] = []
+          for part in parts:
+              raw = part.read_bytes()
+              text = re.sub(rb'\s+', b'', raw).decode('ascii')
+              texts.append(text)
+              report.extend([
+                  f'{part.name}: raw_bytes={len(raw)} chars={len(text)} mod4={len(text) % 4}',
+                  f'{part.name}: head={text[:32]!r}',
+                  f'{part.name}: tail={text[-32:]!r}',
+                  f'{part.name}: padding={len(text) - len(text.rstrip("="))}',
+              ])
+          stream = ''.join(texts)
+          report.extend([
+              f'joined_chars={len(stream)} mod4={len(stream) % 4}',
+              f'joined_head={stream[:32]!r}',
+              f'joined_tail={stream[-32:]!r}',
+              f'joined_padding={len(stream) - len(stream.rstrip("="))}',
+          ])
+          padded = stream + '=' * ((-len(stream)) % 4)
+          try:
+              compressed = base64.b64decode(padded, validate=True)
+              (root / 'patch.gz').write_bytes(compressed)
+              report.extend([
+                  f'decoded_bytes={len(compressed)}',
+                  f'decoded_sha256={hashlib.sha256(compressed).hexdigest()}',
+                  f'decoded_head={compressed[:24].hex()}',
+                  f'decoded_tail={compressed[-24:].hex()}',
+              ])
+              try:
+                  patch = gzip.decompress(compressed)
+              except Exception as exc:
+                  report.append(f'gzip_error={type(exc).__name__}: {exc}')
+              else:
+                  (root / 'patch.recovered').write_bytes(patch)
+                  report.extend([
+                      f'patch_bytes={len(patch)}',
+                      f'patch_sha256={hashlib.sha256(patch).hexdigest()}',
+                      '--- patch head ---',
+                      patch[:4000].decode('utf-8', errors='replace'),
+                      '--- patch tail ---',
+                      patch[-4000:].decode('utf-8', errors='replace'),
+                  ])
+          except Exception as exc:
+              report.append(f'base64_error={type(exc).__name__}: {exc}')
+          (root / 'parts.txt').write_text('\n'.join(str(p) for p in parts) + '\n', encoding='utf-8')
+          (root / 'report.txt').write_text('\n'.join(report) + '\n', encoding='utf-8')
+          print('\n'.join(report))
+          PY
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: increment5c2-authority-patch-recovery-${{ github.run_id }}
           retention-days: 14
