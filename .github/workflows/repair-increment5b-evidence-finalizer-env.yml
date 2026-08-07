@@ -1,0 +1,42 @@
+name: Repair exact Increment 5B Evidence finalizer environment
+
+on:
+  push:
+    branches: [support/repair-increment5b-evidence-finalizer-env-20260807]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repair-exact-increment5b-evidence-finalizer-env
+  cancel-in-progress: false
+
+jobs:
+  build-verify-export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/repair-increment5b-evidence-finalizer-env-20260807
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.0'
+          enable-cache: true
+      - name: Build, commit locally, verify and export exact blobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/support/repair_increment5b_evidence_finalizer_env.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5b-tierm-finalizer-repair-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5b-tierm-finalizer-focused.log
+            /tmp/increment5b-tierm-finalizer-full.log
+            /tmp/increment5b-tierm-finalizer-receipt.json
