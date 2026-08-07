@@ -37,6 +37,7 @@ def test_increment_1c_native_graph_paths_require_actual_service_evidence() -> No
     expected_tests = [
         "newsroom/tests/test_complete_projection_2b_neo4j_service.py",
         "newsroom/tests/test_increment4e_neo4j_service.py",
+        "newsroom/tests/test_increment5b4_neo4j_service.py",
         "newsroom/tests/test_increment_2d_neo4j_service.py",
         _INTEGRATED_SERVICE_TEST,
         "newsroom/tests/test_projection_b2_neo4j_service.py",
