@@ -6,6 +6,7 @@ import json
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -478,6 +479,26 @@ def test_request_digest_binds_envelope_and_payload() -> None:
     changed_root = graph_request()
     assert request.request_digest != changed_time.request_digest
     assert request.request_digest != changed_root.request_digest
+
+
+def test_traceability_retains_exact_closed_world_5c_ownership() -> None:
+    root = Path(__file__).resolve().parents[2]
+    local = (
+        root / "docs/traceability/increment-5c1-named-tool-authorization.md"
+    ).read_text(encoding="utf-8")
+    accepted = (
+        root / "docs/traceability/increment-5-production-retrieval.md"
+    ).read_text(encoding="utf-8")
+    assert "The exact 5C set is:\n\n`GRAG-033`, `GRAG-034`." in accepted
+    assert (
+        "Parent delivery of\n`GRAG-033` and `GRAG-034` remains incomplete "
+        "until 5C2"
+    ) in local
+    assert (
+        "`GRAG-035` and\n`TRI-022` remain owned by the composed Retrieval "
+        "Context boundary in 5D/#253."
+    ) in local
+    assert "`GRAG-033`, `GRAG-034`, `GRAG-035`" not in local
 
 
 def test_contract_module_is_branch_neutral_and_network_free() -> None:

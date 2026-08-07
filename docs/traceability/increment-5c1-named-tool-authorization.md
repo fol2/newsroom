@@ -51,8 +51,9 @@ policy, contract, profile and generation;
 5C1 provides common mechanics needed by parent #252 for named read-only tools,
 including strict request shape, local authenticated actor/purpose/scope checks,
 hard bounds and inspectable authorization receipts. Parent delivery of
-`GRAG-033`, `GRAG-034`, `GRAG-035` and `TRI-022` remains incomplete until 5C2
-executes all six named tools through their reviewed branch or authority ports.
+`GRAG-033` and `GRAG-034` remains incomplete until 5C2 executes all six named
+tools through their reviewed branch or authority ports. `GRAG-035` and
+`TRI-022` remain owned by the composed Retrieval Context boundary in 5D/#253.
 
 5C1 claims no `DOPS-*` row. In particular, local request validation does not
 satisfy the complete `DOPS-026` policy/tool/egress/budget/authority boundary or
