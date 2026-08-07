@@ -1,9 +1,10 @@
-Emit one same-repository pull_request event against the immutable nine-file Increment 5B4 publisher base.
+Emit one same-repository pull_request event for the checked-in corrected Increment 5B4 publisher.
 
-publisher_workflow=b7bf7e54b9fd298672a671c3a31df11b33e7d519
+publisher_script=b504d867582931048f2980e4a9ad7000d95313d7
+publisher_workflow=345da63f603e7ac0bbf25ecc4e2fd7ac4e3363ec
 payload_commit=9546b1a7e22376110578a5140087b6a6e9d96622
 product_base=7976909e58a47749ac39fa212f5ecac325294ace
 payload_sha256=02049f9d5b446a77344bc52f167ab98bc2c42170b3d2356fc299308f90e09a13
+carrier_correction=offset 14936 s-to-k before digest verification
 product_files=9
 canonical_branch=agent/increment-5b4-admitted-graph
-correction=payload identity is pinned independently of pull-request base metadata
