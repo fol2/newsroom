@@ -1,0 +1,67 @@
+name: Dispatch Increment 5C Tier-M signed evidence
+
+on:
+  push:
+    branches: [support/dispatch-increment-5c-tierm-20260807]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: dispatch-increment-5c-tierm-evidence
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Verify exact merged main and dispatch aggregate Evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_MAIN: 67ec62e4fca8b16d87af401674ffaef445feb7c4
+          ACCEPTED_POST_5B_BASE: c77624dba9b9bee87278eb9be5621ef35ee3df85
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          actual_main="$(
+            curl --fail-with-body --silent --show-error \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "${api}/git/ref/heads/main" | jq -r '.object.sha'
+          )"
+          test "${actual_main}" = "${EXPECTED_MAIN}"
+          payload="$(jq -nc \
+            --arg ref main \
+            --arg base_sha "${ACCEPTED_POST_5B_BASE}" \
+            '{ref:$ref,inputs:{base_sha:$base_sha}}'
+          )"
+          status="$(
+            curl --silent --show-error \
+              --output "${RUNNER_TEMP}/dispatch-response.json" \
+              --write-out '%{http_code}' \
+              --request POST \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "${api}/actions/workflows/evidence.yml/dispatches" \
+              --data "${payload}"
+          )"
+          cat "${RUNNER_TEMP}/dispatch-response.json" || true
+          test "${status}" = '204'
+          jq -nc \
+            --arg schema_version newsroom.increment5c.tierm-dispatch.v1 \
+            --arg main "${EXPECTED_MAIN}" \
+            --arg base "${ACCEPTED_POST_5B_BASE}" \
+            --arg workflow evidence.yml \
+            '{schema_version:$schema_version,main:$main,base:$base,workflow:$workflow}' \
+            | tee "${RUNNER_TEMP}/increment5c-tierm-dispatch.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: increment5c-tierm-dispatch-${{ github.run_id }}
+          path: ${{ runner.temp }}/increment5c-tierm-dispatch.json
+          if-no-files-found: error
+          retention-days: 14
