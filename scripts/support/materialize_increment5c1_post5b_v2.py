@@ -35,6 +35,18 @@ def correct_product_wording(root: Path) -> None:
         '''"""Strict branch-neutral contracts for the six Increment 5C named tools.\n\nThis module defines request shape only. It invokes no runtime branch,\nauthoritative-data store, hydration operation, model service or network client.\nA valid request still has no authority and cannot claim a completed tool\nexecution until a later 5C atom retains the appropriate branch or authority-read\nreceipt.\n"""\n''',
         field="contract module boundary",
     )
+    old_constant = "NAMED_TOOL_PROVIDER_SPEND_LIMIT_MICROS"
+    if text.count(old_constant) != 3:
+        raise SystemExit("provider-specific spend constant anchor drifted")
+    text = text.replace(old_constant, "NAMED_TOOL_EXTERNAL_SPEND_LIMIT_MICROS")
+    text = _replace_once(
+        text,
+        '"provider_spend_limit_micros": NAMED_TOOL_EXTERNAL_SPEND_LIMIT_MICROS,',
+        '"external_spend_limit_micros": NAMED_TOOL_EXTERNAL_SPEND_LIMIT_MICROS,',
+        field="provider-neutral contract digest key",
+    )
+    if "provider" in text.lower():
+        raise SystemExit("provider-specific contract surface remains")
     contracts.write_text(text, encoding="utf-8")
 
 
