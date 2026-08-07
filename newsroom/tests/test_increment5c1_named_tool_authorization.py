@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -477,6 +478,85 @@ def test_journal_schema_contains_no_branch_authority_or_content_columns(tmp_path
         "receipt_bytes",
         "receipt_digest",
     }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("local_tool_call_authorized", 1),
+        ("branch_executed", 0),
+        ("authority_read_executed", 0.0),
+        ("qualification_authority_granted", 0),
+        ("production_activation_authorized", None),
+    ),
+)
+def test_receipt_rejects_type_confused_boolean_fields(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    request = exact_request()
+    receipt = authorizer(tmp_path, request).authorize(request)
+    with pytest.raises(NamedToolContractError, match=f"{field} must be boolean"):
+        replace(receipt, **{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("external_call_count", False),
+        ("provider_call_count", 0.0),
+        ("model_call_count", None),
+        ("embedding_call_count", "0"),
+        ("provider_spend_micros", False),
+    ),
+)
+def test_receipt_rejects_type_confused_integer_fields(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    request = exact_request()
+    receipt = authorizer(tmp_path, request).authorize(request)
+    with pytest.raises(NamedToolContractError, match=f"{field} must be an integer"):
+        replace(receipt, **{field: value})
+
+
+def test_journal_rejects_canonical_type_confusion_with_recomputed_digest(
+    tmp_path: Path,
+) -> None:
+    request = fulltext_request(idempotency_key="tool:type-confusion")
+    gate = authorizer(tmp_path, request)
+    gate.authorize(request)
+    path = tmp_path / "tool-authorization.sqlite"
+    with sqlite3.connect(path) as connection:
+        raw = bytes(
+            connection.execute(
+                "SELECT receipt_bytes FROM increment5_named_tool_authorization_receipts "
+                "WHERE idempotency_key = ?",
+                (request.envelope.idempotency_key,),
+            ).fetchone()[0]
+        )
+        payload = json.loads(raw.decode("utf-8"))
+        payload["branch_executed"] = 0
+        tampered = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        connection.execute(
+            "UPDATE increment5_named_tool_authorization_receipts "
+            "SET receipt_bytes = ?, receipt_digest = ? WHERE idempotency_key = ?",
+            (
+                tampered,
+                "sha256:" + hashlib.sha256(tampered).hexdigest(),
+                request.envelope.idempotency_key,
+            ),
+        )
+    with pytest.raises(NamedToolAuthorizationError, match="malformed"):
+        gate.authorize(request)
 
 
 def test_receipt_rejects_branch_execution_external_work_and_authority_claims(tmp_path: Path) -> None:

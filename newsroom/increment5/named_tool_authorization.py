@@ -320,6 +320,24 @@ class NamedToolAuthorizationReceipt:
             raise NamedToolContractError("authorization outcome must be typed")
         if self.reason is not None and not isinstance(self.reason, NamedToolGateReason):
             raise NamedToolContractError("authorization reason must be typed")
+        for name in (
+            "local_tool_call_authorized",
+            "branch_executed",
+            "authority_read_executed",
+            "qualification_authority_granted",
+            "production_activation_authorized",
+        ):
+            if type(getattr(self, name)) is not bool:
+                raise NamedToolContractError(f"{name} must be boolean")
+        for name in (
+            "external_call_count",
+            "provider_call_count",
+            "model_call_count",
+            "embedding_call_count",
+            "provider_spend_micros",
+        ):
+            if type(getattr(self, name)) is not int:
+                raise NamedToolContractError(f"{name} must be an integer")
         if self.outcome is NamedToolGateOutcome.AUTHORIZED:
             if self.reason is not None or not self.local_tool_call_authorized:
                 raise NamedToolContractError(
