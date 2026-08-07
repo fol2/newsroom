@@ -1,0 +1,37 @@
+name: Close exact Increment 5C
+
+on:
+  push:
+    branches: [support/publish-increment5c2-final-review-20260807]
+    paths:
+      - '.github/workflows/close-increment5c.yml'
+      - 'scripts/support/close_increment5c.py'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: close-exact-increment5c
+  cancel-in-progress: false
+
+jobs:
+  closeout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/publish-increment5c2-final-review-20260807
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Wait for 5C2 merge and run exact-main Tier-M closeout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m scripts.support.close_increment5c
