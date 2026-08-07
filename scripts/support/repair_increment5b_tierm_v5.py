@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 from scripts.support import repair_increment5b_tierm_v4 as base
 
