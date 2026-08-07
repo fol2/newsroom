@@ -32,7 +32,7 @@ jobs:
       - name: Apply, verify and publish exact repair
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/support/publish_increment5c2_scoped_fulltext.py
+        run: python3 -m scripts.support.publish_increment5c2_scoped_fulltext_v2
       - if: always()
         uses: actions/upload-artifact@v4
         with:
