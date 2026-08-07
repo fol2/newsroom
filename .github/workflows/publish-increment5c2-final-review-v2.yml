@@ -1,0 +1,58 @@
+name: Publish final Increment 5C2 review correction v2
+
+on:
+  push:
+    branches: [support/publish-increment5c2-final-review-20260807]
+    paths:
+      - '.github/workflows/publish-increment5c2-final-review-v2.yml'
+      - 'scripts/support/publish_increment5c2_final_review_v2.py'
+      - 'scripts/support/publish_increment5c2_final_review.py'
+      - 'scripts/support/patches/increment5c2_final_review.patch.b64.part00'
+      - 'scripts/support/patches/increment5c2_final_review.patch.b64.part01'
+      - 'scripts/support/patches/increment5c2_final_review.patch.b64.part02'
+      - 'scripts/support/patches/increment5c2_final_review.patch.b64.part03'
+      - 'scripts/support/patches/increment5c2_final_review.patch.b64.part04'
+      - 'scripts/support/patches/increment5c2_final_review.patch.b64.part05'
+      - 'scripts/support/patches/increment5c2_final_review.patch.b64.part06'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-final-increment5c2-review-v2
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/publish-increment5c2-final-review-20260807
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.0'
+          enable-cache: true
+      - name: Verify and publish exact correction
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m scripts.support.publish_increment5c2_final_review_v2
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5c2-final-review-v2-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5c2-final-review-corrections.patch
+            /tmp/increment5c2-final-review-focused.log
+            /tmp/increment5c2-final-review-full.log
+            /tmp/increment5c2-final-review-clustering.log
+            /tmp/increment5c2-final-review-receipt.json
