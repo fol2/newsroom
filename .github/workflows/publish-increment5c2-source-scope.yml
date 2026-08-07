@@ -32,11 +32,11 @@ jobs:
       - name: Apply, verify and publish exact source-scope commit
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/support/publish_increment5c2_source_scope.py
+        run: python3 -m scripts.support.publish_increment5c2_source_scope_v2
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: increment5c2-source-scope-${{ github.run_id }}
+          name: increment5c2-source-scope-v2-${{ github.run_id }}
           retention-days: 14
           if-no-files-found: warn
           path: |
