@@ -29,6 +29,11 @@ jobs:
         with:
           version: '0.8.0'
           enable-cache: true
+      - name: Inspect exact patch parts
+        run: |
+          set -euo pipefail
+          wc -c scripts/support/patches/increment5c2_final_review.patch.b64.part*
+          sha256sum scripts/support/patches/increment5c2_final_review.patch.b64.part*
       - name: Reassemble, verify and publish exact correction
         env:
           GH_TOKEN: ${{ github.token }}
