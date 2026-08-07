@@ -1,0 +1,137 @@
+name: Repair Increment 5B Tier-M service reconciliation
+
+on:
+  push:
+    branches:
+      - support/repair-increment-5b-tierm-reconciliation-20260807
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repair-increment-5b-tierm-reconciliation
+  cancel-in-progress: false
+
+jobs:
+  repair-test-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: fol2/newsroom
+      EXPECTED_BASE: 88d1b14b41354f56f325d173d0021ad0fd20abc2
+      PRODUCT_BRANCH: agent/increment-5b-tierm-service-reconciliation
+      CHECKPOINT_BRANCH: checkpoint/increment-5b-tierm-service-reconciliation-20260807
+      FOCUSED_LOG: /tmp/increment5b-tierm-reconciliation-focused.log
+      FULL_LOG: /tmp/increment5b-tierm-reconciliation-full.log
+    steps:
+      - name: Install exact locked environment
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Apply coherent service-lane reconciliation and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
+
+          git init -q product
+          git -C product remote add origin "https://github.com/$REPOSITORY.git"
+          git -C product fetch --no-tags --depth=1 origin \
+            "refs/heads/main:refs/remotes/origin/main"
+          git -C product checkout -q --detach "$EXPECTED_BASE"
+          actual_main="$(git -C product ls-remote origin refs/heads/main | cut -f1)"
+          if [[ "$actual_main" != "$EXPECTED_BASE" ]]; then
+            echo "main moved: expected=$EXPECTED_BASE actual=$actual_main" >&2
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("product")
+          lane = root / "scripts/sdlc/workflow_lane.py"
+          evidence = root / ".github/workflows/evidence.yml"
+          regression = root / "newsroom/tests/test_increment5b_tierm_service_reconciliation.py"
+
+          lane_text = lane.read_text(encoding="utf-8")
+          anchor = '''    "newsroom/tests/test_retrieval_2c_neo4j_service.py::test_actual_service_missing_vector_index_is_unavailable_not_no_match",\n)\n_SERVICE_CONFIGURATION'''
+          replacement = '''    "newsroom/tests/test_retrieval_2c_neo4j_service.py::test_actual_service_missing_vector_index_is_unavailable_not_no_match",\n    "newsroom/tests/test_increment5b4_neo4j_service.py::test_increment5b4_fixed_port_reads_only_exact_generation_and_allowed_state",\n    "newsroom/tests/test_increment5b4_neo4j_service.py::test_increment5b4_fixed_port_excludes_future_observations",\n)\n_SERVICE_CONFIGURATION'''
+          if lane_text.count(anchor) != 1:
+              raise SystemExit("optional-core service manifest anchor drifted")
+          lane.write_text(lane_text.replace(anchor, replacement, 1), encoding="utf-8")
+
+          evidence_text = evidence.read_text(encoding="utf-8")
+          anchor = '''          set -a\n          source "${projector_file}"\n          set +a\n          uv run --no-sync python -m scripts.sdlc.workflow_lane execute \\\n'''
+          replacement = '''          set -a\n          source "${projector_file}"\n          set +a\n          export NEWSROOM_NEO4J_USER="${NEWSROOM_NEO4J_PROJECTOR_USERNAME}"\n          export NEWSROOM_NEO4J_PASSWORD="${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"\n          uv run --no-sync python -m scripts.sdlc.workflow_lane execute \\\n'''
+          if evidence_text.count(anchor) != 1:
+              raise SystemExit("service credential alias anchor drifted")
+          evidence.write_text(evidence_text.replace(anchor, replacement, 1), encoding="utf-8")
+
+          regression.write_text(
+              '''from __future__ import annotations\n\nfrom pathlib import Path\n\nfrom scripts.sdlc.workflow_lane import _OPTIONAL_CORE_TEST_IDS\n\n\n_EXPECTED_5B4_SERVICE_TESTS = {\n    "newsroom/tests/test_increment5b4_neo4j_service.py::test_increment5b4_fixed_port_reads_only_exact_generation_and_allowed_state",\n    "newsroom/tests/test_increment5b4_neo4j_service.py::test_increment5b4_fixed_port_excludes_future_observations",\n}\n\n\ndef test_increment5b4_authenticated_tests_are_core_optional_service_required() -> None:\n    assert _EXPECTED_5B4_SERVICE_TESTS <= set(_OPTIONAL_CORE_TEST_IDS)\n\n\ndef test_permanent_service_lane_aliases_projector_credentials() -> None:\n    workflow = (\n        Path(__file__).resolve().parents[2]\n        / ".github"\n        / "workflows"\n        / "evidence.yml"\n    ).read_text(encoding="utf-8")\n    assert (\n        'export NEWSROOM_NEO4J_USER="${NEWSROOM_NEO4J_PROJECTOR_USERNAME}"'\n        in workflow\n    )\n    assert (\n        'export NEWSROOM_NEO4J_PASSWORD="${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"'\n        in workflow\n    )\n    assert workflow.index("export NEWSROOM_NEO4J_PASSWORD") < workflow.index(\n        "--lane service"\n    )\n''',
+              encoding="utf-8",
+          )
+          PY
+
+          cd product
+          uv sync --frozen
+          python -m compileall -q \
+            scripts/sdlc/workflow_lane.py \
+            newsroom/tests/test_increment5b_tierm_service_reconciliation.py
+          uv run pytest -q \
+            newsroom/tests/test_increment5b_tierm_service_reconciliation.py \
+            newsroom/tests/test_sdlc_workflow_lane.py \
+            newsroom/tests/test_integrated_c1_sdlc_contract.py \
+            | tee "$FOCUSED_LOG"
+          uv run pytest -q | tee "$FULL_LOG"
+
+          git config user.name "James To"
+          git config user.email "105634418+fol2@users.noreply.github.com"
+          git add \
+            .github/workflows/evidence.yml \
+            scripts/sdlc/workflow_lane.py \
+            newsroom/tests/test_increment5b_tierm_service_reconciliation.py
+          git diff --cached --check
+          git commit -q -m "SDLC: reconcile Increment 5B authenticated service tests"
+          if [[ "$(git rev-list --count "$EXPECTED_BASE..HEAD")" != "1" ]]; then
+            echo "expected one reconciliation commit" >&2
+            exit 1
+          fi
+          mapfile -t actual < <(git diff --name-only "$EXPECTED_BASE..HEAD")
+          expected=(
+            .github/workflows/evidence.yml
+            newsroom/tests/test_increment5b_tierm_service_reconciliation.py
+            scripts/sdlc/workflow_lane.py
+          )
+          printf '%s\n' "${actual[@]}" | sort > /tmp/actual.txt
+          printf '%s\n' "${expected[@]}" | sort > /tmp/expected.txt
+          diff -u /tmp/expected.txt /tmp/actual.txt
+
+          head_sha="$(git rev-parse HEAD)"
+          tree_sha="$(git rev-parse 'HEAD^{tree}')"
+          {
+            echo "head=$head_sha"
+            echo "tree=$tree_sha"
+            echo "parent=$EXPECTED_BASE"
+            echo "focused=$(tail -n 1 "$FOCUSED_LOG")"
+            echo "full=$(tail -n 1 "$FULL_LOG")"
+          } > /tmp/increment5b-tierm-reconciliation-receipt.txt
+          git push --force origin "HEAD:refs/heads/$PRODUCT_BRANCH"
+          git push --force origin "HEAD:refs/heads/$CHECKPOINT_BRANCH"
+          cat /tmp/increment5b-tierm-reconciliation-receipt.txt
+
+      - name: Upload reconciliation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5b-tierm-service-reconciliation-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5b-tierm-reconciliation-focused.log
+            /tmp/increment5b-tierm-reconciliation-full.log
+            /tmp/increment5b-tierm-reconciliation-receipt.txt
