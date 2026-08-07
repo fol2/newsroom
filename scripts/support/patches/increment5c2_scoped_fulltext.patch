@@ -1,0 +1,442 @@
+From 2bc6443646c0458d8748cd487b92a37b74098d8d Mon Sep 17 00:00:00 2001
+From: James To <105634418+fol2@users.noreply.github.com>
+Date: Fri, 7 Aug 2026 19:40:28 +0000
+Subject: [PATCH] Increment 5C2: preserve scoped full-text candidates
+
+---
+ newsroom/authority/neo4j_fulltext_reader.py   |  5 +-
+ newsroom/increment5/fulltext_retriever.py     | 36 ++++---
+ newsroom/projection/neo4j/_adapter.py         |  8 +-
+ newsroom/tests/increment5b2_helpers.py        |  4 +-
+ .../test_increment5b2_fulltext_retriever.py   | 96 +++++++++++++++++++
+ .../test_increment5b2_neo4j_authority_port.py | 28 +++++-
+ .../tests/test_projection_b2_neo4j_service.py | 63 ++++++++++++
+ 7 files changed, 218 insertions(+), 22 deletions(-)
+
+diff --git a/newsroom/authority/neo4j_fulltext_reader.py b/newsroom/authority/neo4j_fulltext_reader.py
+index 8de2a7e..d3149ce 100644
+--- a/newsroom/authority/neo4j_fulltext_reader.py
++++ b/newsroom/authority/neo4j_fulltext_reader.py
+@@ -27,6 +27,8 @@ class Neo4jFullTextReadPhase(StrEnum):
+ 
+ _NEO4J_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,127}$")
+ 
++FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT = 65
++
+ 
+ def _bounded_text(value: str, *, field: str, maximum_bytes: int) -> str:
+     if (
+@@ -235,7 +237,7 @@ class Neo4jFullTextReadResult:
+         rows = _copy_records(
+             self.rows,
+             field="fulltext_rows",
+-            maximum=9,
++            maximum=FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
+         )
+         if type(self.candidate_overflow) is not bool:
+             raise Neo4jFullTextReadError(
+@@ -322,6 +324,7 @@ class Neo4jFullTextReader:
+ 
+ 
+ __all__ = [
++    "FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT",
+     "Neo4jFullTextReadError",
+     "Neo4jFullTextReadPhase",
+     "Neo4jFullTextReadRequest",
+diff --git a/newsroom/increment5/fulltext_retriever.py b/newsroom/increment5/fulltext_retriever.py
+index 338e044..aee056d 100644
+--- a/newsroom/increment5/fulltext_retriever.py
++++ b/newsroom/increment5/fulltext_retriever.py
+@@ -314,12 +314,19 @@ class FullTextRetriever:
+                 authority_read_count=1,
+                 neo4j_read_count=neo4j_reads,
+             )
+-        if len(rows) > request.result_limit:
++        try:
++            hits, exclusions, scoped_candidate_count = self._parse_hits(
++                rows,
++                request=request,
++                view=view,
++                normalized=normalized,
++            )
++        except FullTextContractError:
+             return self._receipt(
+                 request,
+                 start_ns=start_ns,
+-                outcome=BranchOutcome.INCOMPLETE,
+-                reason_code="RESULT_BOUND_EXCEEDED",
++                outcome=BranchOutcome.UNAVAILABLE,
++                reason_code="PROJECTION_INTEGRITY_ERROR",
+                 snapshot=snapshot,
+                 authority_view_digest=view_digest,
+                 normalized_query=normalized,
+@@ -327,19 +334,12 @@ class FullTextRetriever:
+                 neo4j_read_count=neo4j_reads,
+             )
+ 
+-        try:
+-            hits, exclusions = self._parse_hits(
+-                rows,
+-                request=request,
+-                view=view,
+-                normalized=normalized,
+-            )
+-        except FullTextContractError:
++        if scoped_candidate_count > request.result_limit:
+             return self._receipt(
+                 request,
+                 start_ns=start_ns,
+-                outcome=BranchOutcome.UNAVAILABLE,
+-                reason_code="PROJECTION_INTEGRITY_ERROR",
++                outcome=BranchOutcome.INCOMPLETE,
++                reason_code="RESULT_BOUND_EXCEEDED",
+                 snapshot=snapshot,
+                 authority_view_digest=view_digest,
+                 normalized_query=normalized,
+@@ -501,6 +501,7 @@ class FullTextRetriever:
+     ) -> tuple[
+         tuple[RetrievalBranchHit, ...],
+         tuple[BranchExclusion, ...],
++        int,
+     ]:
+         parsed: list[
+             tuple[str, str, str, float]
+@@ -581,6 +582,7 @@ class FullTextRetriever:
+         bindings = view.binding_by_passage_id
+         hits: list[RetrievalBranchHit] = []
+         exclusions: list[BranchExclusion] = []
++        scoped_candidate_count = 0
+         for passage_id, document_digest, language, score in parsed:
+             binding = bindings.get(passage_id)
+             if binding is None:
+@@ -596,6 +598,12 @@ class FullTextRetriever:
+                 )
+             if request.source_ids and binding.source_id not in request.source_ids:
+                 continue
++            scoped_candidate_count += 1
++            if scoped_candidate_count > request.result_limit:
++                # Continue validating every returned row's authority binding, but
++                # do not construct an out-of-contract rank. The caller emits one
++                # explicit incomplete receipt and retains no silently truncated hits.
++                continue
+             exclusion = binding.exclusion_at(request.query_valid_time)
+             if exclusion is not None:
+                 exclusions.append(
+@@ -621,7 +629,7 @@ class FullTextRetriever:
+                     source_identity=binding.source_identity,
+                 )
+             )
+-        return tuple(hits), tuple(exclusions)
++        return tuple(hits), tuple(exclusions), scoped_candidate_count
+ 
+     def _receipt(
+         self,
+diff --git a/newsroom/projection/neo4j/_adapter.py b/newsroom/projection/neo4j/_adapter.py
+index 85ba4c5..33fed26 100644
+--- a/newsroom/projection/neo4j/_adapter.py
++++ b/newsroom/projection/neo4j/_adapter.py
+@@ -5,6 +5,9 @@ import time
+ from threading import RLock
+ from typing import Any
+ 
++from newsroom.authority.neo4j_fulltext_reader import (
++    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
++)
+ from newsroom.authority.types import TrustScope, UtcTimestamp
+ from newsroom.projection.ontology import ProjectionNodeType, ProjectionRelationType
+ 
+@@ -72,12 +75,11 @@ WITH [candidate IN candidates
+           document_digest: candidate.node.document_digest,
+           language: candidate.node.language,
+           score: candidate.score
+-        }][0..$limit] AS rows,
++        }][0..$candidate_limit] AS rows,
+      candidate_overflow
+ RETURN candidate_overflow, rows
+ """
+ 
+-_FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT = 65
+ 
+ _SCHEMA_QUERIES = (
+     """
+@@ -485,7 +487,7 @@ class _Neo4jAdapter:
+                         "Neo4j Increment 5 full-text overflow limit must equal nine"
+                     )
+                 candidate_limit = (
+-                    _FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
++                    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+                     if source_ids
+                     else limit
+                 )
+diff --git a/newsroom/tests/increment5b2_helpers.py b/newsroom/tests/increment5b2_helpers.py
+index 325ed3f..53ce91a 100644
+--- a/newsroom/tests/increment5b2_helpers.py
++++ b/newsroom/tests/increment5b2_helpers.py
+@@ -6,6 +6,7 @@ from typing import Any
+ 
+ from newsroom.authority.canonical import digest_canonical
+ from newsroom.authority.neo4j_fulltext_reader import (
++    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
+     Neo4jFullTextReadError,
+     Neo4jFullTextReadPhase,
+     Neo4jFullTextReadRequest,
+@@ -41,7 +42,6 @@ from newsroom.projection.neo4j._adapter import (
+     _COMPONENT_QUERY,
+     _FULLTEXT_INDEX_INVENTORY_QUERY,
+     _FULLTEXT_READ_QUERY,
+-    _FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
+ )
+ from newsroom.projection.neo4j.models import Neo4jProjectorConfig
+ 
+@@ -380,7 +380,7 @@ class FakeDriver:
+                     "query": request.lucene_expression,
+                     "generation_id": str(request.generation_id),
+                     "candidate_limit": (
+-                        _FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
++                        FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+                         if request.source_ids
+                         else request.limit
+                     ),
+diff --git a/newsroom/tests/test_increment5b2_fulltext_retriever.py b/newsroom/tests/test_increment5b2_fulltext_retriever.py
+index 6bb6623..c4b1c94 100644
+--- a/newsroom/tests/test_increment5b2_fulltext_retriever.py
++++ b/newsroom/tests/test_increment5b2_fulltext_retriever.py
+@@ -1328,6 +1328,102 @@ def test_out_of_scope_projection_result_is_filtered_by_authority_binding(
+     assert receipt.hits == ()
+ 
+ 
++def test_source_scope_keeps_lower_ranked_in_scope_match_after_bounded_scan(
++    tmp_path: Path,
++) -> None:
++    scoped_source_id = "source-in-scope"
++    custom_bindings = tuple(
++        replace(
++            bindings()[1],
++            passage_id=f"p-source-scan-{index:02d}",
++            dependency_root_id=f"root-source-scan-{index:02d}",
++            source_id=(
++                scoped_source_id if index == 9 else f"source-out-{index:02d}"
++            ),
++            source_identity=f"source-scan:{index:02d}:revision-1",
++            provenance_digest=digest(f"source-scan-document-{index:02d}"),
++        )
++        for index in range(10)
++    )
++    rows = [
++        {
++            "generation_id": str(GENERATION_ID),
++            "passage_id": binding.passage_id,
++            "document_digest": binding.provenance_digest,
++            "language": binding.language,
++            "score": float(20 - index),
++        }
++        for index, binding in enumerate(custom_bindings)
++    ]
++    driver, _factory, retriever = system(
++        tmp_path,
++        view=authority_view(document_bindings=custom_bindings),
++        scenario=default_scenario(rows=rows),
++    )
++
++    receipt = retriever.retrieve(
++        request(
++            idempotency_key="source-scope-lower-ranked-match",
++            source_ids=(scoped_source_id,),
++        )
++    ).receipt
++
++    assert receipt.outcome is BranchOutcome.COMPLETE
++    assert receipt.reason_code == "OK"
++    assert [item.passage_id for item in receipt.hits] == ["p-source-scan-09"]
++    assert [item.rank for item in receipt.hits] == [1]
++    assert len(driver.read_requests[-1].source_ids) == 1
++    statement, parameters = driver.calls[-1]
++    assert "[0..$candidate_limit]" in statement
++    assert "[0..$limit]" not in statement
++    assert parameters["candidate_limit"] == 65
++
++
++def test_source_scope_counts_only_authoritatively_in_scope_candidates_for_bound(
++    tmp_path: Path,
++) -> None:
++    scoped_source_id = "source-in-scope"
++    custom_bindings = tuple(
++        replace(
++            bindings()[1],
++            passage_id=f"p-source-bound-{index:02d}",
++            dependency_root_id=f"root-source-bound-{index:02d}",
++            source_id=(
++                "source-out" if index == 0 else scoped_source_id
++            ),
++            source_identity=f"source-bound:{index:02d}:revision-1",
++            provenance_digest=digest(f"source-bound-document-{index:02d}"),
++        )
++        for index in range(10)
++    )
++    rows = [
++        {
++            "generation_id": str(GENERATION_ID),
++            "passage_id": binding.passage_id,
++            "document_digest": binding.provenance_digest,
++            "language": binding.language,
++            "score": float(20 - index),
++        }
++        for index, binding in enumerate(custom_bindings)
++    ]
++    _driver, _factory, retriever = system(
++        tmp_path,
++        view=authority_view(document_bindings=custom_bindings),
++        scenario=default_scenario(rows=rows),
++    )
++
++    receipt = retriever.retrieve(
++        request(
++            idempotency_key="source-scope-result-bound",
++            source_ids=(scoped_source_id,),
++        )
++    ).receipt
++
++    assert receipt.outcome is BranchOutcome.INCOMPLETE
++    assert receipt.reason_code == "RESULT_BOUND_EXCEEDED"
++    assert receipt.hits == ()
++
++
+ def test_source_scope_candidate_scan_overflow_is_not_false_no_match(
+     tmp_path: Path,
+ ) -> None:
+diff --git a/newsroom/tests/test_increment5b2_neo4j_authority_port.py b/newsroom/tests/test_increment5b2_neo4j_authority_port.py
+index 511e33e..c2d5e36 100644
+--- a/newsroom/tests/test_increment5b2_neo4j_authority_port.py
++++ b/newsroom/tests/test_increment5b2_neo4j_authority_port.py
+@@ -6,6 +6,7 @@ from newsroom.authority._neo4j_projection_system import (
+     _open_neo4j_fulltext_reader_with_adapter,
+ )
+ from newsroom.authority.neo4j_fulltext_reader import (
++    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
+     Neo4jFullTextReadError,
+     Neo4jFullTextReadPhase,
+     Neo4jFullTextReadRequest,
+@@ -16,7 +17,6 @@ from newsroom.projection.neo4j._adapter import (
+     _COMPONENT_QUERY,
+     _FULLTEXT_INDEX_INVENTORY_QUERY,
+     _FULLTEXT_READ_QUERY,
+-    _FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT,
+     _Neo4jAdapter,
+ )
+ 
+@@ -364,7 +364,9 @@ def test_authority_port_uses_source_scope_only_for_bounded_candidate_scan() -> N
+     assert source_ids[0] not in statement
+     assert source_ids[1] not in statement
+     assert "source_ids" not in parameters
+-    assert parameters["candidate_limit"] == _FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
++    assert parameters["candidate_limit"] == FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
++    assert "[0..$candidate_limit]" in statement
++    assert "[0..$limit]" not in statement
+     assert set(parameters) == {
+         "index_name",
+         "query",
+@@ -399,6 +401,28 @@ def test_authority_read_request_rejects_malformed_source_scope() -> None:
+         )
+ 
+ 
++def test_query_envelope_retains_bounded_source_scan_rows() -> None:
++    rows = tuple(
++        {"passage_id": f"p-{index:02d}"}
++        for index in range(FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT)
++    )
++    result = Neo4jFullTextReadResult(
++        phase=Neo4jFullTextReadPhase.QUERY,
++        rows=rows,
++        candidate_overflow=True,
++        driver_version="6.2.0",
++    )
++    assert len(result.rows) == FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
++
++    with pytest.raises(Neo4jFullTextReadError, match="fixed bound"):
++        Neo4jFullTextReadResult(
++            phase=Neo4jFullTextReadPhase.QUERY,
++            rows=rows + ({"passage_id": "p-overflow"},),
++            candidate_overflow=True,
++            driver_version="6.2.0",
++        )
++
++
+ def test_query_envelope_requires_exact_boolean_overflow_and_rows_shape() -> None:
+     with pytest.raises(Neo4jFullTextReadError, match="overflow flag"):
+         Neo4jFullTextReadResult(
+diff --git a/newsroom/tests/test_projection_b2_neo4j_service.py b/newsroom/tests/test_projection_b2_neo4j_service.py
+index 4ceec21..b0c1ead 100644
+--- a/newsroom/tests/test_projection_b2_neo4j_service.py
++++ b/newsroom/tests/test_projection_b2_neo4j_service.py
+@@ -195,6 +195,69 @@ def test_actual_service_private_adapter_exact_duplicate_and_digest_conflict() ->
+         )
+         with pytest.raises(Neo4jIdentityConflict):
+             adapter.apply(batch)
++
++        # Exercise the Increment 5 source-scoped full-text read against the
++        # actual Neo4j service. The bounded scan must return all ten candidates
++        # to the authority layer; slicing to the branch's nine-row overflow
++        # sentinel before source filtering would lose the lower-ranked match.
++        from neo4j import GraphDatabase
++
++        suffix = str(generation_id).replace("-", "")
++        label = f"NewsroomIncrement5ScopeProbe_{suffix}"
++        index_name = f"newsroom_increment5_scope_probe_{suffix}"
++        probe_generation = f"scope-probe-{generation_id}"
++        admin = GraphDatabase.driver(
++            config.uri,
++            auth=(
++                os.environ["NEO4J_ADMIN_USERNAME"],
++                os.environ["NEO4J_ADMIN_PASSWORD"],
++            ),
++        )
++        try:
++            with admin.session(database=config.database) as session:
++                session.run(
++                    f"CREATE FULLTEXT INDEX `{index_name}` "
++                    f"FOR (node:`{label}`) ON EACH [node.retrieval_text] "
++                    "OPTIONS {indexConfig: {"
++                    "`fulltext.analyzer`: 'standard-no-stop-words', "
++                    "`fulltext.eventually_consistent`: false}}"
++                ).consume()
++                session.run("CALL db.awaitIndexes(120)").consume()
++                session.run(
++                    f"UNWIND range(0, 9) AS ordinal "
++                    f"CREATE (node:`{label}` {{"
++                    "generation_id: $generation_id, "
++                    "passage_id: 'p-scope-' + right('0' + toString(ordinal), 2), "
++                    "document_digest: $document_digest, "
++                    "language: 'en-GB', "
++                    "retrieval_text: 'bounded source scope probe'"
++                    "}})",
++                    generation_id=probe_generation,
++                    document_digest="sha256:" + "1" * 64,
++                ).consume()
++
++            envelope = adapter.read_increment5_fulltext(
++                phase="QUERY",
++                index_name=index_name,
++                lucene_expression="retrieval_text:(bounded source scope probe)",
++                generation_id=probe_generation,
++                source_ids=("source:scope-probe",),
++                limit=9,
++                timeout_ns=5_000_000_000,
++            )
++            assert envelope["candidate_overflow"] is False
++            assert [row["passage_id"] for row in envelope["rows"]] == [
++                f"p-scope-{ordinal:02d}" for ordinal in range(10)
++            ]
++        finally:
++            with admin.session(database=config.database) as session:
++                session.run(f"DROP INDEX `{index_name}` IF EXISTS").consume()
++                session.run(
++                    f"MATCH (node:`{label}` {{generation_id: $generation_id}}) "
++                    "DETACH DELETE node",
++                    generation_id=probe_generation,
++                ).consume()
++            admin.close()
+     finally:
+         try:
+             adapter.cleanup_generation(str(generation_id))
+--
+2.39.5
