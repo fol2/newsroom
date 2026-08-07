@@ -200,6 +200,7 @@ jobs:
       NEWSROOM_NEO4J_DATABASE: neo4j
       NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED: '1'
       NEWSROOM_NEO4J_PROJECTOR_USERNAME: newsroom_projector
+      NEWSROOM_NEO4J_USER: newsroom_projector
       NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED: '1'
       NEWSROOM_NEO4J_SERVICE_REQUIRED: '1'
       NEWSROOM_NEO4J_URI: bolt://localhost:7687
@@ -367,6 +368,8 @@ jobs:
           set -a
           source "${projector_file}"
           set +a
+          export NEWSROOM_NEO4J_USER="${NEWSROOM_NEO4J_PROJECTOR_USERNAME}"
+          export NEWSROOM_NEO4J_PASSWORD="${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
           uv run --no-sync python -m scripts.sdlc.workflow_lane execute \
             --route .sdlc-run/route/route.json \
             --lane service \

@@ -206,8 +206,9 @@ class Neo4jAdmittedGraphReadPort:
                 )
                 return tuple(result)
 
+            setattr(work, "timeout", timeout_seconds)
             with self._session() as session:
-                rows = session.execute_read(work, timeout=timeout_seconds)
+                rows = session.execute_read(work)
             if not isinstance(rows, tuple):
                 raise AdmittedGraphPortError("Neo4j root read returned an invalid shape")
             if not rows:
@@ -260,8 +261,9 @@ class Neo4jAdmittedGraphReadPort:
                 )
                 return tuple(result)
 
+            setattr(work, "timeout", timeout_seconds)
             with self._session() as session:
-                rows = session.execute_read(work, timeout=timeout_seconds)
+                rows = session.execute_read(work)
             if not isinstance(rows, tuple):
                 raise AdmittedGraphPortError("Neo4j expansion returned an invalid shape")
             return tuple(

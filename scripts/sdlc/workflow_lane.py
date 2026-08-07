@@ -64,6 +64,8 @@ _OPTIONAL_CORE_TEST_IDS = (
     'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_graph_loss_requires_isolated_replacement',
     'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_replacement_generation_is_only_serving_state',
     'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_tombstone_purges_and_never_resurrects',
+    'newsroom.tests.test_increment5b4_neo4j_service::test_increment5b4_fixed_port_excludes_future_observations',
+    'newsroom.tests.test_increment5b4_neo4j_service::test_increment5b4_fixed_port_reads_only_exact_generation_and_allowed_state',
     'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_increment_2_proof_admits_replays_and_restarts',
     'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[fulltext]',
     'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[relation]',
@@ -96,6 +98,7 @@ _SERVICE_CONFIGURATION = {
     "NEWSROOM_NEO4J_DATABASE": "neo4j",
     "NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_PROJECTOR_USERNAME": "newsroom_projector",
+    "NEWSROOM_NEO4J_USER": "newsroom_projector",
     "NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_SERVICE_REQUIRED": "1",
     "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
@@ -439,7 +442,10 @@ def _expected_spec(
         )
         environment.update(_service_environment())
         environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
-        pass_env = ("NEWSROOM_NEO4J_PROJECTOR_PASSWORD",)
+        pass_env = (
+            "NEWSROOM_NEO4J_PASSWORD",
+            "NEWSROOM_NEO4J_PROJECTOR_PASSWORD",
+        )
         argv = _uv_command(
             "-m",
             "scripts.sdlc.workflow_lane",

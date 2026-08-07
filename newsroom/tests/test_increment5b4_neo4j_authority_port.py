@@ -144,10 +144,10 @@ def test_root_read_uses_only_repository_owned_allowlist_and_read_session() -> No
         "canonical_id": ROOT,
         "allowed_labels": list(ALLOWED_NODE_LABELS),
     }
-    assert getattr(query, "timeout", 5.0) is not None
-    assert driver.session_instance.execute_calls[0][2] == {
-        "timeout": pytest.approx(5.0)
-    }
+    work, args, kwargs = driver.session_instance.execute_calls[0]
+    assert args == ()
+    assert kwargs == {}
+    assert getattr(work, "timeout") == pytest.approx(5.0)
 
 
 def test_root_missing_returns_none() -> None:
@@ -212,6 +212,10 @@ def test_frontier_expansion_uses_fixed_predicates_labels_order_and_limit() -> No
     assert params["query_valid_time"] == VALID
     assert params["temporal_lower_bound"] == LOWER
     assert params["absolute_row_limit"] == GRAPH_MAX_FANOUT + 1
+    work, args, kwargs = driver.session_instance.execute_calls[0]
+    assert args == ()
+    assert kwargs == {}
+    assert getattr(work, "timeout") == pytest.approx(5.0)
 
 
 def test_empty_frontier_returns_without_opening_session() -> None:
@@ -302,10 +306,10 @@ def test_elapsed_lock_time_reduces_query_timeout() -> None:
         canonical_id=ROOT,
         timeout_ms=5,
     )
-    query = driver.transaction.calls[0][2]
-    timeout = getattr(query, "timeout", None)
-    if timeout is not None:
-        assert timeout == pytest.approx(0.003)
+    work, args, kwargs = driver.session_instance.execute_calls[0]
+    assert args == ()
+    assert kwargs == {}
+    assert getattr(work, "timeout") == pytest.approx(0.003)
 
 
 def test_non_positive_timeout_is_rejected() -> None:

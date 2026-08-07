@@ -282,16 +282,18 @@ def test_static_environment_excludes_ambient_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "must-not-pass")
+    monkeypatch.setenv("NEWSROOM_NEO4J_PASSWORD", "must-not-pass")
     monkeypatch.setenv("NEWSROOM_NEO4J_PROJECTOR_PASSWORD", "must-not-pass")
     environment = _static_environment()
 
     assert "GITHUB_TOKEN" not in environment
+    assert "NEWSROOM_NEO4J_PASSWORD" not in environment
     assert "NEWSROOM_NEO4J_PROJECTOR_PASSWORD" not in environment
     assert environment["PYTHONHASHSEED"] == "0"
     assert environment["CI"] == "true"
 
 
-def test_service_lane_requires_route_and_passes_only_projector_secret(
+def test_service_lane_requires_route_and_passes_only_explicit_projector_secrets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -309,7 +311,8 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
     artifact = tmp_path / "service"
     artifact.mkdir()
     captured = {}
-    monkeypatch.setenv("NEWSROOM_NEO4J_PROJECTOR_PASSWORD", "secret")
+    monkeypatch.setenv("NEWSROOM_NEO4J_PASSWORD", "generic-secret")
+    monkeypatch.setenv("NEWSROOM_NEO4J_PROJECTOR_PASSWORD", "projector-secret")
     monkeypatch.setenv("NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED", "1")
     monkeypatch.setenv("NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED", "1")
@@ -319,6 +322,7 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
     monkeypatch.setenv(
         "NEWSROOM_NEO4J_PROJECTOR_USERNAME", "newsroom_projector"
     )
+    monkeypatch.setenv("NEWSROOM_NEO4J_USER", "newsroom_projector")
     monkeypatch.setattr(
         lane_module,
         "_spec",
@@ -343,6 +347,7 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
 
     assert records[0][0:2] == ("service-neo4j", "tests")
     assert captured["spec"]["pass_env"] == (
+        "NEWSROOM_NEO4J_PASSWORD",
         "NEWSROOM_NEO4J_PROJECTOR_PASSWORD",
     )
     static = captured["spec"]["static_env"]
@@ -350,7 +355,9 @@ def test_service_lane_requires_route_and_passes_only_projector_secret(
     assert static["NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED"] == "1"
     assert static["NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED"] == "1"
     assert static["NEWSROOM_NEO4J_SERVICE_REQUIRED"] == "1"
+    assert static["NEWSROOM_NEO4J_USER"] == "newsroom_projector"
     assert static["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+    assert "NEWSROOM_NEO4J_PASSWORD" not in static
     assert "NEWSROOM_NEO4J_PROJECTOR_PASSWORD" not in static
     argv = captured["spec"]["argv"]
     assert argv[:6] == [
@@ -668,6 +675,8 @@ def test_optional_core_skips_are_exact_actual_service_cases() -> None:
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_graph_loss_requires_isolated_replacement',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_replacement_generation_is_only_serving_state',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_tombstone_purges_and_never_resurrects',
+        'newsroom.tests.test_increment5b4_neo4j_service::test_increment5b4_fixed_port_excludes_future_observations',
+        'newsroom.tests.test_increment5b4_neo4j_service::test_increment5b4_fixed_port_reads_only_exact_generation_and_allowed_state',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_increment_2_proof_admits_replays_and_restarts',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[fulltext]',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_complete_proof_fails_closed_when_required_surface_is_lost[relation]',
