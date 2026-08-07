@@ -116,6 +116,18 @@ def extract_exact(product: Path) -> None:
         archive.extractall(product, filter="data")
 
 
+def normalize_reviewed_eof(product: Path) -> None:
+    for relative in (
+        "newsroom/tests/test_increment5b4_admitted_graph_retriever.py",
+        "newsroom/tests/test_increment5b4_neo4j_authority_port.py",
+    ):
+        path = product / relative
+        text = path.read_text(encoding="utf-8")
+        if not text.endswith("\n\n") or text.endswith("\n\n\n"):
+            raise SystemExit(f"reviewed EOF boundary drifted: {relative}")
+        path.write_text(text[:-1], encoding="utf-8")
+
+
 def prepare_repo(path: Path, refspec: str) -> None:
     if path.exists():
         shutil.rmtree(path)
@@ -139,6 +151,7 @@ def main() -> None:
     if remote_main != BASE:
         raise SystemExit(f"main moved: expected={BASE} actual={remote_main}")
     extract_exact(product)
+    normalize_reviewed_eof(product)
 
     # The complete suite contains code/tree binding tests. Commit the exact atom
     # locally before testing, but publish nothing until every gate below passes.
