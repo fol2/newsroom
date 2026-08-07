@@ -1,0 +1,52 @@
+name: Recover Increment 5C2 authority patch chunks
+
+on:
+  push:
+    branches: [support/publish-increment5c2-authority-tools-20260807]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/publish-increment5c2-authority-tools-20260807
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Recover available bytes
+        shell: bash
+        run: |
+          set -u
+          mkdir -p /tmp/increment5c2-authority-recovery
+          parts=(scripts/support/data/increment5c2_authority_patch/part*.b64)
+          printf '%s\n' "${parts[@]}" > /tmp/increment5c2-authority-recovery/parts.txt
+          cat "${parts[@]}" | base64 --decode > /tmp/increment5c2-authority-recovery/patch.gz
+          set +e
+          gzip -dc /tmp/increment5c2-authority-recovery/patch.gz > /tmp/increment5c2-authority-recovery/patch.partial 2> /tmp/increment5c2-authority-recovery/gzip.stderr
+          status=$?
+          set -e
+          {
+            echo "parts=${#parts[@]}"
+            wc -c /tmp/increment5c2-authority-recovery/patch.gz
+            wc -c /tmp/increment5c2-authority-recovery/patch.partial
+            echo "gzip_status=$status"
+            sha256sum /tmp/increment5c2-authority-recovery/patch.gz
+            sha256sum /tmp/increment5c2-authority-recovery/patch.partial
+            echo '--- gzip stderr ---'
+            cat /tmp/increment5c2-authority-recovery/gzip.stderr
+            echo '--- patch head ---'
+            head -80 /tmp/increment5c2-authority-recovery/patch.partial
+            echo '--- patch tail ---'
+            tail -80 /tmp/increment5c2-authority-recovery/patch.partial
+          } | tee /tmp/increment5c2-authority-recovery/report.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: increment5c2-authority-patch-recovery-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: error
+          path: /tmp/increment5c2-authority-recovery/
