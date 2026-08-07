@@ -27,7 +27,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPOSITORY: fol2/newsroom
       SUPPORT_BRANCH: support/run-increment-5b4-reviewed-hardening-v2-20260806
-      SUPPORT_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
+      PAYLOAD_COMMIT: 9546b1a7e22376110578a5140087b6a6e9d96622
       EXPECTED_BASE: 7976909e58a47749ac39fa212f5ecac325294ace
       PAYLOAD_SHA256: 02049f9d5b446a77344bc52f167ab98bc2c42170b3d2356fc299308f90e09a13
       CANONICAL_BRANCH: agent/increment-5b4-admitted-graph
@@ -51,18 +51,14 @@ jobs:
 
           git init -q payload
           git -C payload remote add origin "https://github.com/$REPOSITORY.git"
-          git -C payload fetch --no-tags --depth=1 origin \
+          git -C payload fetch --no-tags --depth=10 origin \
             "refs/heads/$SUPPORT_BRANCH:refs/heads/publisher-base"
-          actual_support="$(git -C payload rev-parse refs/heads/publisher-base)"
-          if [[ "$actual_support" != "$SUPPORT_BASE" ]]; then
-            echo "support base moved: expected=$SUPPORT_BASE actual=$actual_support" >&2
-            exit 1
-          fi
+          git -C payload cat-file -e "$PAYLOAD_COMMIT^{commit}"
 
           : > /tmp/increment5b4-nine-files.b64
           for part in 00 01 02 03 04 05; do
             git -C payload show \
-              "$SUPPORT_BASE:scripts/support/increment5b4-nine/part-$part.b64" \
+              "$PAYLOAD_COMMIT:scripts/support/increment5b4-nine/part-$part.b64" \
               >> /tmp/increment5b4-nine-files.b64
           done
           base64 -d /tmp/increment5b4-nine-files.b64 \
@@ -141,7 +137,7 @@ jobs:
           {
             echo "schema=newsroom.increment5b4.nine-file-materialization.v1"
             echo "payload_sha256=$PAYLOAD_SHA256"
-            echo "support_base=$SUPPORT_BASE"
+            echo "payload_commit=$PAYLOAD_COMMIT"
             echo "head=$head_sha"
             echo "tree=$tree_sha"
             echo "parent=$parent_sha"
