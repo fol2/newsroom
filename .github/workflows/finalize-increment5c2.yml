@@ -1,0 +1,37 @@
+name: Finalize exact Increment 5C2
+
+on:
+  push:
+    branches: [support/publish-increment5c2-final-review-20260807]
+    paths:
+      - '.github/workflows/finalize-increment5c2.yml'
+      - 'scripts/support/finalize_increment5c2.py'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: finalize-exact-increment5c2
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/publish-increment5c2-final-review-20260807
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Wait, qualify and merge exact 5C2 product
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m scripts.support.finalize_increment5c2
