@@ -1,0 +1,45 @@
+name: Materialize exact post-5B Increment 5C1
+
+on:
+  push:
+    branches: [support/materialize-increment-5c1-post5b-20260807]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-exact-post5b-increment5c1
+  cancel-in-progress: false
+
+jobs:
+  build-verify-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/materialize-increment-5c1-post5b-20260807
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.0'
+          enable-cache: true
+      - name: Build, commit locally, verify and publish exact 5C1 atom
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/support/materialize_increment5c1_post5b.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5c1-post5b-materialization-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5c1-post5b-focused.log
+            /tmp/increment5c1-post5b-full.log
+            /tmp/increment5c1-post5b-receipt.json
