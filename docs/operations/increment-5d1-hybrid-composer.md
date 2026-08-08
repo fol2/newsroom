@@ -86,6 +86,12 @@ Before fusion, the composer revalidates every retained layer:
   source/revision-impact receipt, including coverage, current rights/lifecycle,
   bounded temporal lineage and canonical ordering.
 
+Fixed bounds, ranks and zero-effect counters require exact non-boolean integer
+types; numerically equal floating-point or boolean substitutions fail closed.
+Retained origins also preserve mode-specific passage/trust semantics. Graph
+paths accept only the closed admitted predicate set, typed incoming/outgoing
+directions and non-self-loop hops.
+
 Every supplied independently attributable raw receipt is revalidated before
 blocker precedence is interpreted. A recomputed malformed receipt therefore
 cannot hide behind a genuine missing, stale, policy-blocked, unavailable or

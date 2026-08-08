@@ -31,7 +31,11 @@ from typing import Callable, Iterable, Mapping, Sequence
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.types import TrustScope
 
-from .admitted_graph_retriever import AdmittedGraphReceipt
+from .admitted_graph_retriever import (
+    ALLOWED_PREDICATES,
+    AdmittedGraphReceipt,
+    GraphDirection,
+)
 from .branch_receipts import ExactBranchReceipt
 from .fulltext_receipts import FullTextBranchReceipt
 from .named_tool_authority_execution import NamedAuthorityExecutionReceipt
@@ -217,7 +221,7 @@ _ALLOWED_NAMED_PURPOSES_BY_COMPOSITION: Mapping[
 HYBRID_COMPOSER_CONTRACT_DIGEST = digest_bytes(
     canonical_json_bytes(
         {
-            "schema_version": "newsroom.increment5.hybrid-composer-contract.v3",
+            "schema_version": "newsroom.increment5.hybrid-composer-contract.v4",
             "required_branch_tools": [item.value for item in _BRANCH_TOOLS],
             "request_plan": {
                 "retain_named_tool_request_bytes": True,
@@ -260,6 +264,12 @@ HYBRID_COMPOSER_CONTRACT_DIGEST = digest_bytes(
                 "best_hit_per_mode_for_score": True,
                 "retain_every_origin": True,
                 "similarity_can_merge_roots": False,
+            },
+            "retained_evidence_validation": {
+                "exact_scalar_types": True,
+                "graph_direction": [item.value for item in GraphDirection],
+                "graph_predicates": sorted(ALLOWED_PREDICATES),
+                "mode_specific_passage_and_trust_scope": True,
             },
             "candidate_limit": _CANDIDATE_LIMIT,
             "response_limit_bytes": _RESPONSE_LIMIT_BYTES,
@@ -833,10 +843,22 @@ class HybridCompositionRequest:
                 raise HybridCompositionError(
                     "upstream named-tool purpose is not compatible with composition purpose"
                 )
+        if type(self.reciprocal_rank_k) is not int:
+            raise HybridCompositionError(
+                "reciprocal-rank constant must be an exact integer"
+            )
         if self.reciprocal_rank_k != _RRF_K:
             raise HybridCompositionError("reciprocal-rank constant is fixed at 60")
+        if type(self.candidate_limit) is not int:
+            raise HybridCompositionError(
+                "retained candidate limit must be an exact integer"
+            )
         if self.candidate_limit != _CANDIDATE_LIMIT:
             raise HybridCompositionError("retained candidate limit is fixed at 12")
+        if type(self.response_limit_bytes) is not int:
+            raise HybridCompositionError(
+                "composition response limit must be an exact integer"
+            )
         if self.response_limit_bytes != _RESPONSE_LIMIT_BYTES:
             raise HybridCompositionError("composition response limit is fixed")
 
@@ -1106,7 +1128,7 @@ class HybridPathHop:
     predicate: str
     source_id: str
     target_id: str
-    direction: str
+    direction: GraphDirection
     relation_decision_digest: str
     relation_provenance_digest: str
 
@@ -1117,8 +1139,13 @@ class HybridPathHop:
             "target_id",
         ):
             _require_text(getattr(self, name), field=f"hybrid_path_{name}")
+        if self.source_id == self.target_id:
+            raise HybridCompositionError("hybrid path self-loop is prohibited")
         _require_token(self.predicate, field="hybrid_path_predicate")
-        _require_token(self.direction, field="hybrid_path_direction")
+        if self.predicate not in ALLOWED_PREDICATES:
+            raise HybridCompositionError("hybrid path predicate is not admitted")
+        if not isinstance(self.direction, GraphDirection):
+            raise HybridCompositionError("hybrid path direction must be typed")
         for name in (
             "relation_decision_digest",
             "relation_provenance_digest",
@@ -1131,7 +1158,7 @@ class HybridPathHop:
             "predicate": self.predicate,
             "source_id": self.source_id,
             "target_id": self.target_id,
-            "direction": self.direction,
+            "direction": self.direction.value,
             "relation_decision_digest": self.relation_decision_digest,
             "relation_provenance_digest": self.relation_provenance_digest,
         }
@@ -1151,7 +1178,15 @@ class HybridPathHop:
             isinstance(value[item], str) for item in required
         ):
             raise HybridCompositionError("hybrid path hop keys are not exact")
-        return cls(**{item: value[item] for item in required})
+        return cls(
+            relation_id=value["relation_id"],
+            predicate=value["predicate"],
+            source_id=value["source_id"],
+            target_id=value["target_id"],
+            direction=GraphDirection(value["direction"]),
+            relation_decision_digest=value["relation_decision_digest"],
+            relation_provenance_digest=value["relation_provenance_digest"],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1199,6 +1234,17 @@ class HybridOrigin:
                 self.exact_match_signal,
                 field="hybrid_origin_exact_match_signal",
             )
+            if self.passage_id is not None:
+                raise HybridCompositionError(
+                    "exact origin cannot retain a passage identity"
+                )
+            if self.trust_scope not in {
+                TrustScope.OBSERVED.value,
+                TrustScope.ADMITTED.value,
+            }:
+                raise HybridCompositionError(
+                    "exact origin trust scope is not permitted"
+                )
         elif self.exact_match_signal is not None:
             raise HybridCompositionError(
                 "non-exact origin cannot retain an exact match signal"
@@ -1207,7 +1253,33 @@ class HybridOrigin:
             isinstance(item, HybridPathHop) for item in self.path
         ):
             raise HybridCompositionError("hybrid origin path must be typed")
-        if self.mode is HybridMode.ADMITTED_GRAPH:
+        if self.mode is HybridMode.FULL_TEXT:
+            if self.passage_id is None:
+                raise HybridCompositionError(
+                    "full-text origin must retain a passage identity"
+                )
+            if self.trust_scope != TrustScope.OBSERVED.value:
+                raise HybridCompositionError(
+                    "full-text origin must remain OBSERVED"
+                )
+        elif self.mode is HybridMode.VECTOR:
+            if self.passage_id is None or self.result_id != self.passage_id:
+                raise HybridCompositionError(
+                    "vector origin must retain its exact passage result"
+                )
+            if self.trust_scope is not None:
+                raise HybridCompositionError(
+                    "vector origin cannot manufacture a trust scope"
+                )
+        elif self.mode is HybridMode.ADMITTED_GRAPH:
+            if self.passage_id is not None:
+                raise HybridCompositionError(
+                    "graph origin cannot retain a passage identity"
+                )
+            if self.trust_scope != TrustScope.ADMITTED.value:
+                raise HybridCompositionError(
+                    "graph origin must remain ADMITTED"
+                )
             if not self.path or len(self.path) > 2:
                 raise HybridCompositionError(
                     "graph origin must retain its bounded path"
@@ -1335,7 +1407,11 @@ class HybridCandidate:
             raise HybridCompositionError("hybrid candidate precedence must be typed")
         if not isinstance(self.score, HybridReciprocalRankScore):
             raise HybridCompositionError("hybrid candidate score must be typed")
-        if isinstance(self.best_branch_rank, bool) or not 1 <= self.best_branch_rank <= 8:
+        if (
+            isinstance(self.best_branch_rank, bool)
+            or not isinstance(self.best_branch_rank, int)
+            or not 1 <= self.best_branch_rank <= 8
+        ):
             raise HybridCompositionError("hybrid candidate best rank is outside bounds")
         if not isinstance(self.contributing_modes, tuple):
             raise HybridCompositionError("candidate modes must be an immutable tuple")
@@ -1452,7 +1528,11 @@ class HybridExclusion:
         )
         if not isinstance(self.reason, HybridExclusionReason):
             raise HybridCompositionError("hybrid exclusion reason must be typed")
-        if self.would_be_rank <= _CANDIDATE_LIMIT:
+        if (
+            isinstance(self.would_be_rank, bool)
+            or not isinstance(self.would_be_rank, int)
+            or self.would_be_rank <= _CANDIDATE_LIMIT
+        ):
             raise HybridCompositionError("result-bound exclusion rank is not excluded")
         if not isinstance(self.score, HybridReciprocalRankScore):
             raise HybridCompositionError("hybrid exclusion score must be typed")
@@ -1768,10 +1848,22 @@ class HybridCompositionReceipt:
                 raise HybridCompositionError("degraded composition cannot claim no-match")
         elif not blockers:
             raise HybridCompositionError("non-complete outcome requires a blocker")
+        if type(self.reciprocal_rank_k) is not int:
+            raise HybridCompositionError(
+                "receipt reciprocal-rank constant must be an exact integer"
+            )
         if self.reciprocal_rank_k != _RRF_K:
             raise HybridCompositionError("receipt reciprocal-rank constant drifted")
+        if type(self.candidate_limit) is not int:
+            raise HybridCompositionError(
+                "receipt candidate limit must be an exact integer"
+            )
         if self.candidate_limit != _CANDIDATE_LIMIT:
             raise HybridCompositionError("receipt candidate limit drifted")
+        if type(self.response_limit_bytes) is not int:
+            raise HybridCompositionError(
+                "receipt response limit must be an exact integer"
+            )
         if self.response_limit_bytes != _RESPONSE_LIMIT_BYTES:
             raise HybridCompositionError("receipt response limit drifted")
         for name in ("raw_scores_compared", "fusion_is_authority"):
@@ -1784,7 +1876,8 @@ class HybridCompositionReceipt:
             "embedding_call_count",
             "provider_spend_micros",
         ):
-            if getattr(self, name) != 0:
+            value = getattr(self, name)
+            if type(value) is not int or value != 0:
                 raise HybridCompositionError(
                     "composition cannot report external work or spend"
                 )
@@ -2511,7 +2604,7 @@ def _branch_origins(
                         predicate=hop.predicate,
                         source_id=hop.source_id,
                         target_id=hop.target_id,
-                        direction=hop.direction.value,
+                        direction=hop.direction,
                         relation_decision_digest=hop.relation_decision_digest,
                         relation_provenance_digest=hop.relation_provenance_digest,
                     )

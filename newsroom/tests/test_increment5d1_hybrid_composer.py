@@ -16,6 +16,7 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.types import UtcTimestamp
 from newsroom.increment5.admitted_graph_retriever import (
     AdmittedGraphReceipt,
+    GraphDirection,
     GraphFailureReason,
 )
 from newsroom.increment5.branch_receipts import ExactBranchReceipt
@@ -1108,6 +1109,127 @@ def test_receipt_rejects_duplicate_keys_and_scalar_type_confusion(
         HybridCompositionReceipt.from_canonical_bytes(confused)
 
 
+def test_request_and_receipt_reject_all_fixed_numeric_scalar_confusion(
+    tmp_path: Path,
+    branch_inputs: tuple[HybridCompositionInput, ...],
+) -> None:
+    request = _request(branch_inputs, key="hybrid:fixed-scalars")
+    for field, value in (
+        ("reciprocal_rank_k", 60.0),
+        ("candidate_limit", 12.0),
+        ("response_limit_bytes", 262_144.0),
+    ):
+        with pytest.raises(HybridCompositionError, match="exact integer"):
+            replace(request, **{field: value})
+
+    receipt = HybridComposer(
+        journal=HybridCompositionJournal(tmp_path / "fixed-scalars.sqlite")
+    ).execute(request)
+    raw_value = json.loads(receipt.canonical_bytes)
+    for field, value in (
+        ("reciprocal_rank_k", 60.0),
+        ("candidate_limit", 12.0),
+        ("response_limit_bytes", 262_144.0),
+        ("external_call_count", False),
+        ("provider_call_count", 0.0),
+        ("model_call_count", False),
+        ("embedding_call_count", 0.0),
+        ("provider_spend_micros", False),
+    ):
+        confused = dict(raw_value)
+        confused[field] = value
+        raw = json.dumps(
+            confused,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        with pytest.raises(HybridCompositionError):
+            HybridCompositionReceipt.from_canonical_bytes(raw)
+
+
+def test_candidate_and_exclusion_ranks_require_exact_integers() -> None:
+    candidates, _ = hybrid_module._fuse(
+        (
+            _synthetic_origin(
+                mode=HybridMode.FULL_TEXT,
+                rank=1,
+                root="root:rank-type",
+                suffix="rank-type",
+            ),
+        )
+    )
+    with pytest.raises(HybridCompositionError, match="best rank"):
+        replace(candidates[0], best_branch_rank=1.0)
+
+    _retained, exclusions = hybrid_module._fuse(
+        tuple(
+            _synthetic_origin(
+                mode=HybridMode.FULL_TEXT,
+                rank=(index % 8) + 1,
+                root=f"root:rank-exclusion:{index:02d}",
+                suffix=f"rank-exclusion:{index:02d}",
+            )
+            for index in range(13)
+        )
+    )
+    with pytest.raises(HybridCompositionError, match="exclusion rank"):
+        replace(exclusions[0], would_be_rank=13.0)
+
+
+def test_retained_origin_and_graph_path_semantics_fail_closed() -> None:
+    graph = _synthetic_origin(
+        mode=HybridMode.ADMITTED_GRAPH,
+        rank=1,
+        root="root:path-semantics",
+        suffix="path-semantics",
+    )
+    hop = graph.path[0]
+    with pytest.raises(HybridCompositionError, match="direction must be typed"):
+        replace(hop, direction="OUTGOING")
+    with pytest.raises(HybridCompositionError, match="predicate is not admitted"):
+        replace(hop, predicate="UNREVIEWED_RELATION")
+    with pytest.raises(HybridCompositionError, match="self-loop"):
+        replace(hop, target_id=hop.source_id)
+    with pytest.raises(HybridCompositionError, match="must remain ADMITTED"):
+        replace(graph, trust_scope="OBSERVED")
+    with pytest.raises(HybridCompositionError, match="cannot retain a passage"):
+        replace(graph, passage_id="passage:forged")
+
+    exact = _synthetic_origin(
+        mode=HybridMode.EXACT,
+        rank=1,
+        root="root:exact-semantics",
+        suffix="exact-semantics",
+    )
+    with pytest.raises(HybridCompositionError, match="cannot retain a passage"):
+        replace(exact, passage_id="passage:forged")
+    with pytest.raises(HybridCompositionError, match="trust scope is not permitted"):
+        replace(exact, trust_scope=None)
+
+    full_text = _synthetic_origin(
+        mode=HybridMode.FULL_TEXT,
+        rank=1,
+        root="root:fulltext-semantics",
+        suffix="fulltext-semantics",
+    )
+    with pytest.raises(HybridCompositionError, match="must remain OBSERVED"):
+        replace(full_text, trust_scope="ADMITTED")
+    with pytest.raises(HybridCompositionError, match="retain a passage"):
+        replace(full_text, passage_id=None)
+
+    vector = _synthetic_origin(
+        mode=HybridMode.VECTOR,
+        rank=1,
+        root="root:vector-semantics",
+        suffix="vector-semantics",
+    )
+    with pytest.raises(HybridCompositionError, match="cannot manufacture"):
+        replace(vector, trust_scope="OBSERVED")
+    with pytest.raises(HybridCompositionError, match="exact passage result"):
+        replace(vector, result_id="result:forged")
+
+
 def test_result_bound_retains_twelve_and_records_exclusions() -> None:
     origins = tuple(
         hybrid_module.HybridOrigin(
@@ -1220,7 +1342,7 @@ def _synthetic_origin(
                 predicate="DEVELOPMENT_OF",
                 source_id="root:synthetic",
                 target_id=f"result:{suffix}",
-                direction="OUTGOING",
+                direction=GraphDirection.OUTGOING,
                 relation_decision_digest=_digest_text(f"decision:{suffix}"),
                 relation_provenance_digest=_digest_text(f"relation-prov:{suffix}"),
             ),
@@ -1229,7 +1351,11 @@ def _synthetic_origin(
         mode=mode,
         tool_id=tool_by_mode[mode],
         rank=rank,
-        result_id=f"result:{suffix}",
+        result_id=(
+            f"passage:{suffix}"
+            if mode is HybridMode.VECTOR
+            else f"result:{suffix}"
+        ),
         dependency_root_id=root,
         source_identity=f"source:{suffix}",
         passage_id=(
@@ -1237,7 +1363,11 @@ def _synthetic_origin(
             if mode in {HybridMode.EXACT, HybridMode.ADMITTED_GRAPH}
             else f"passage:{suffix}"
         ),
-        trust_scope="ADMITTED" if mode is HybridMode.ADMITTED_GRAPH else "OBSERVED",
+        trust_scope=(
+            "ADMITTED"
+            if mode is HybridMode.ADMITTED_GRAPH
+            else (None if mode is HybridMode.VECTOR else "OBSERVED")
+        ),
         provenance_digest=_digest_text(f"provenance:{suffix}"),
         branch_hit_digest=_digest_text(f"hit:{suffix}"),
         dispatch_receipt_digest=_digest_text(f"dispatch:{mode.value}"),
