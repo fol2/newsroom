@@ -1,0 +1,55 @@
+name: Publish Increment 5D1 authority-evidence correction
+
+on:
+  push:
+    branches: [support/publish-increment5d1-authority-validation-20260808]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-increment5d1-authority-validation
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: support/publish-increment5d1-authority-validation-20260808
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Expand immutable publisher bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat scripts/support/bundles/increment5d1-authority-validation.part* > "${RUNNER_TEMP}/publisher-bundle.b64"
+          base64 --decode "${RUNNER_TEMP}/publisher-bundle.b64" > "${RUNNER_TEMP}/publisher-bundle.tar.gz"
+          echo '4653fdaa02b175c35cec16d6c6069faa25544d51243120739394619060d56598  '"${RUNNER_TEMP}/publisher-bundle.tar.gz" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/publisher-bundle.tar.gz" -C .
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.0'
+          enable-cache: true
+      - name: Reassemble, verify and publish exact correction
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/support/publish_increment5d1_authority_validation.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment5d1-authority-validation-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            /tmp/increment5d1-authority-validation.patch
+            /tmp/increment5d1-authority-validation-focused.log
+            /tmp/increment5d1-authority-validation-full.log
+            /tmp/increment5d1-authority-validation-clustering.log
+            /tmp/increment5d1-authority-validation-receipt.json
