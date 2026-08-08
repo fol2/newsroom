@@ -5,7 +5,6 @@ import json
 import sqlite3
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
 
@@ -13,8 +12,8 @@ import pytest
 
 import newsroom.increment5.hybrid_composer as hybrid_module
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.types import UtcTimestamp
 from newsroom.increment5.admitted_graph_retriever import (
-    GRAPH_TEMPORAL_WINDOW_SECONDS,
     AdmittedGraphReceipt,
     GraphFailureReason,
 )
@@ -35,29 +34,55 @@ from newsroom.increment5.hybrid_composer import (
     HybridMode,
     HybridPrecedence,
 )
+from newsroom.increment5.named_tool_authority_execution import (
+    NamedAuthorityExecutionJournal,
+    NamedAuthorityPortRegistry,
+    NamedToolAuthorityExecutor,
+)
 from newsroom.increment5.named_tool_branch_execution import (
     NamedBranchOutcome,
+    NamedBranchPortRegistry,
+    NamedToolBranchExecutor,
+    NamedToolExecutionJournal,
     NamedToolExecutionOutcome,
     NamedToolExecutionReason,
     NamedToolExecutionReceipt,
 )
-from newsroom.increment5.named_tool_contracts import NamedToolId
+from newsroom.increment5.named_tool_contracts import (
+    NAMED_TOOL_CONTRACT_DIGEST,
+    NAMED_TOOL_POLICY_ID,
+    NAMED_TOOL_PROFILE_ID,
+    NamedToolId,
+    NamedToolPurpose,
+)
 from newsroom.increment5.named_tool_dispatch import (
+    NamedToolDispatchJournal,
     NamedToolDispatchOutcome,
     NamedToolDispatchReason,
+    NamedToolDispatchRegistry,
+    NamedToolDispatcher,
 )
 from newsroom.increment5.vector_retriever import (
     VectorBranchReceipt,
     VectorFailureReason,
 )
+from newsroom.tests import increment5b2_helpers as fulltext_helpers
+from newsroom.tests import (
+    test_increment5c2_named_tool_authority_execution as authority_helpers,
+)
+from newsroom.tests import (
+    test_increment5c2_named_tool_branch_adapters as branch_helpers,
+)
 from newsroom.tests.test_increment5c2_named_tool_dispatch import (
     authorize,
     denied_authorization,
-    system,
 )
 
-QUERY_VALID_TIME = "2042-03-12T12:00:00Z"
-SERVING_TIME = "2042-03-12T12:00:00Z"
+QUERY_VALID_TIME = "2026-08-06T08:59:00Z"
+SERVING_TIME = "2026-08-06T09:00:00Z"
+ACTOR_ID = branch_helpers.exact_request().envelope.actor_id
+PRINCIPAL_DIGEST = branch_helpers.PRINCIPAL_DIGEST
+POLICY_DIGEST = branch_helpers.POLICY_DIGEST
 BRANCH_TOOLS = (
     NamedToolId.EXACT_AUTHORITY_LOOKUP,
     NamedToolId.BOUNDED_FULL_TEXT_RETRIEVAL,
@@ -84,32 +109,6 @@ def _graph_receipt_id(receipt: AdmittedGraphReceipt) -> str:
             ),
         )
     )
-
-
-def _retime_receipt(
-    receipt: ExactBranchReceipt
-    | FullTextBranchReceipt
-    | VectorBranchReceipt
-    | AdmittedGraphReceipt,
-):
-    if isinstance(receipt, VectorBranchReceipt):
-        return replace(
-            receipt,
-            query_valid_time=QUERY_VALID_TIME,
-            serving_time=SERVING_TIME,
-        )
-    if isinstance(receipt, AdmittedGraphReceipt):
-        lower = (
-            datetime(2042, 3, 12, 12, tzinfo=UTC)
-            - timedelta(seconds=GRAPH_TEMPORAL_WINDOW_SECONDS)
-        ).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return replace(
-            receipt,
-            query_valid_time=QUERY_VALID_TIME,
-            serving_time=SERVING_TIME,
-            temporal_lower_bound=lower,
-        )
-    return receipt
 
 
 def _parse_receipt(tool_id: NamedToolId, raw: bytes):
@@ -168,7 +167,102 @@ def _without_hits(receipt):
     raise AssertionError(type(receipt))
 
 
+def _coherent_system(tmp_path: Path):
+    ports, _driver, _graph_port, catalog, vector_view, graph_view, _snapshot = (
+        branch_helpers.real_ports(tmp_path)
+    )
+    validation_recorded_at = UtcTimestamp.parse(
+        "2026-08-06T08:30:00.000000Z"
+    )
+    freshness_deadline = UtcTimestamp.parse(
+        "2026-08-06T09:30:00.000000Z"
+    )
+    snapshot = fulltext_helpers.snapshot(
+        validation_recorded_at=validation_recorded_at,
+        freshness_deadline=freshness_deadline,
+    )
+    bindings = tuple(
+        replace(
+            binding,
+            valid_from=validation_recorded_at,
+            valid_until=freshness_deadline,
+        )
+        if binding.lifecycle == "ACTIVE" and binding.rights_current
+        else binding
+        for binding in fulltext_helpers.bindings()
+    )
+    aliases = tuple(
+        replace(
+            alias,
+            valid_from=validation_recorded_at,
+            valid_until=freshness_deadline,
+        )
+        for alias in fulltext_helpers.aliases()
+    )
+    view = fulltext_helpers.authority_view(
+        projection_snapshot=snapshot,
+        authority_aliases=aliases,
+        document_bindings=bindings,
+    )
+    _fulltext_driver, _factory, fulltext_retriever = fulltext_helpers.system(
+        tmp_path,
+        view=view,
+    )
+    fulltext_port = branch_helpers.FullTextNamedToolPort(
+        retriever=fulltext_retriever,
+        config=branch_helpers.FullTextNamedToolAdapterConfig(
+            expected_generation_id=str(snapshot.generation_id),
+            expected_generation_identity_digest=snapshot.generation_identity_digest,
+            expected_rights_manifest_digest=snapshot.rights_manifest_digest,
+            minimum_watermark=snapshot.contiguous_ledger_seq,
+        ),
+    )
+    branch_executor = NamedToolBranchExecutor(
+        registry=NamedBranchPortRegistry(
+            (ports[0], fulltext_port, ports[2], ports[3])
+        ),
+        journal=NamedToolExecutionJournal(tmp_path / "hybrid-branch-execution.sqlite"),
+    )
+    authority_path = authority_helpers.authority_database(tmp_path)
+    authority_executor = NamedToolAuthorityExecutor(
+        registry=NamedAuthorityPortRegistry(authority_helpers.ports(authority_path)),
+        journal=NamedAuthorityExecutionJournal(
+            tmp_path / "hybrid-authority-execution.sqlite"
+        ),
+    )
+    dispatcher = NamedToolDispatcher(
+        registry=NamedToolDispatchRegistry(
+            branch_executor=branch_executor,
+            authority_executor=authority_executor,
+        ),
+        journal=NamedToolDispatchJournal(tmp_path / "hybrid-dispatch.sqlite"),
+    )
+    requests = (
+        branch_helpers.exact_request(),
+        branch_helpers.fulltext_request(
+            generation_id=str(snapshot.generation_id)
+        ),
+        branch_helpers.vector_request(
+            catalog, generation_id=vector_view.generation_id
+        ),
+        branch_helpers.graph_request(generation_id=graph_view.generation_id),
+    )
+    requests = tuple(
+        replace(
+            request,
+            envelope=replace(
+                request.envelope,
+                query_valid_time=QUERY_VALID_TIME,
+                serving_time=SERVING_TIME,
+            ),
+        )
+        for request in requests
+    )
+    return dispatcher, requests
+
+
 def _branch_input(
+    request,
     result,
     *,
     transform=lambda value: value,
@@ -177,8 +271,7 @@ def _branch_input(
     tool_id = result.receipt.tool_id
     raw = result.upstream_raw_receipt_bytes
     assert raw is not None
-    parsed = _retime_receipt(_parse_receipt(tool_id, raw))
-    parsed = transform(parsed)
+    parsed = transform(_parse_receipt(tool_id, raw))
     raw = parsed.canonical_bytes
 
     execution = NamedToolExecutionReceipt.from_canonical_bytes(
@@ -197,8 +290,6 @@ def _branch_input(
             else parsed.request_digest
         ),
         branch_receipt_digest=digest_bytes(raw),
-        query_valid_time=QUERY_VALID_TIME,
-        serving_time=SERVING_TIME,
         outcome=NamedBranchOutcome(parsed.outcome.value),
         reason=branch_reason,
         result_count=result_count,
@@ -237,6 +328,7 @@ def _branch_input(
         no_match=no_match,
     )
     return HybridCompositionInput(
+        named_tool_request_bytes=hybrid_module._named_tool_request_bytes(request),
         dispatch_receipt=dispatch,
         execution_receipt_bytes=execution_bytes,
         raw_upstream_receipt_bytes=raw,
@@ -245,17 +337,19 @@ def _branch_input(
 
 @pytest.fixture
 def branch_inputs(tmp_path: Path) -> tuple[HybridCompositionInput, ...]:
-    dispatcher, _registry, _branches, _authorities, requests, _driver, _graph = system(
-        tmp_path
-    )
+    dispatcher, requests = _coherent_system(tmp_path)
     results = tuple(
         dispatcher.execute(
             request,
             authorize(tmp_path, request, name=f"hybrid-{index}"),
         )
-        for index, request in enumerate(requests[:4])
+        for index, request in enumerate(requests)
     )
-    return tuple(_branch_input(result) for result in results)
+    return tuple(
+        _branch_input(request, result)
+        for request, result in zip(requests, results, strict=True)
+    )
+
 
 
 def _request(
@@ -268,7 +362,13 @@ def _request(
     return HybridCompositionRequest(
         request_id=request_id,
         idempotency_key=key,
+        actor_id=ACTOR_ID,
+        authenticated_principal_digest=PRINCIPAL_DIGEST,
         purpose=purpose,
+        policy_id=NAMED_TOOL_POLICY_ID,
+        policy_digest=POLICY_DIGEST,
+        named_tool_contract_digest=NAMED_TOOL_CONTRACT_DIGEST,
+        profile_id=NAMED_TOOL_PROFILE_ID,
         query_valid_time=QUERY_VALID_TIME,
         serving_time=SERVING_TIME,
         inputs=inputs,
@@ -285,6 +385,105 @@ def test_contract_is_content_addressed_and_fixed() -> None:
     assert request.required_tools == BRANCH_TOOLS
     with pytest.raises(HybridCompositionError, match="fixed at 60"):
         replace(request, reciprocal_rank_k=61)
+
+
+def test_input_binds_exact_named_request_bytes_and_envelope(
+    branch_inputs: tuple[HybridCompositionInput, ...],
+) -> None:
+    original = branch_inputs[0]
+    value = json.loads(original.named_tool_request_bytes)
+    value["envelope"]["actor_id"] = "other_worker"
+    tampered = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    with pytest.raises(
+        HybridCompositionError,
+        match="named-tool request digest differs from dispatch",
+    ):
+        replace(original, named_tool_request_bytes=tampered)
+
+
+def test_composition_rejects_cross_principal_receipt_mixing(
+    tmp_path: Path,
+    branch_inputs: tuple[HybridCompositionInput, ...],
+) -> None:
+    other = tmp_path / "other-principal"
+    other.mkdir()
+    dispatcher, requests = _coherent_system(other)
+    request = replace(
+        requests[0],
+        envelope=replace(
+            requests[0].envelope,
+            authenticated_principal_digest=_digest_text("other-principal"),
+        ),
+    )
+    result = dispatcher.execute(
+        request,
+        authorize(other, request, name="other-principal"),
+    )
+    mixed = (
+        HybridCompositionInput.from_dispatch_result(request, result),
+        *branch_inputs[1:],
+    )
+    with pytest.raises(
+        HybridCompositionError,
+        match="upstream principal differs from composition request",
+    ):
+        _request(mixed, key="hybrid:mixed-principal")
+
+
+def test_composition_rejects_incompatible_named_tool_purpose(
+    tmp_path: Path,
+    branch_inputs: tuple[HybridCompositionInput, ...],
+) -> None:
+    other = tmp_path / "other-purpose"
+    other.mkdir()
+    dispatcher, requests = _coherent_system(other)
+    request = replace(
+        requests[0],
+        envelope=replace(
+            requests[0].envelope,
+            purpose=NamedToolPurpose.REPLAY_AUDIT,
+        ),
+    )
+    result = dispatcher.execute(
+        request,
+        authorize(other, request, name="other-purpose"),
+    )
+    mixed = (
+        HybridCompositionInput.from_dispatch_result(request, result),
+        *branch_inputs[1:],
+    )
+    with pytest.raises(
+        HybridCompositionError,
+        match="named-tool purpose is not compatible",
+    ):
+        _request(mixed, key="hybrid:mixed-purpose")
+
+
+def test_receipt_retains_one_request_plan_context(
+    tmp_path: Path,
+    branch_inputs: tuple[HybridCompositionInput, ...],
+) -> None:
+    request = _request(branch_inputs, key="hybrid:plan-context")
+    receipt = HybridComposer(
+        journal=HybridCompositionJournal(tmp_path / "plan-context.sqlite")
+    ).execute(request)
+    assert receipt.actor_id == ACTOR_ID
+    assert receipt.authenticated_principal_digest == PRINCIPAL_DIGEST
+    assert receipt.policy_id == NAMED_TOOL_POLICY_ID
+    assert receipt.policy_digest == POLICY_DIGEST
+    assert receipt.named_tool_contract_digest == NAMED_TOOL_CONTRACT_DIGEST
+    assert receipt.profile_id == NAMED_TOOL_PROFILE_ID
+    assert receipt.plan_context_digest == request.plan_context_digest
+    for manifest, input_value in zip(
+        receipt.manifest[:4], branch_inputs, strict=True
+    ):
+        assert manifest.tool_request_digest == input_value.tool_request_digest
+        assert manifest.tool_envelope_digest == input_value.tool_envelope_digest
+        assert manifest.named_tool_purpose is NamedToolPurpose.TRIAGE_PRIOR_MATCH
 
 
 def test_complete_composition_is_exact_first_and_input_order_independent(
@@ -322,6 +521,7 @@ def test_authoritative_dependency_root_dedup_retains_all_origins(
     root_id = "authority:shared-root"
     changed = tuple(
         _branch_input(
+            item.named_tool_request,
             type("Result", (), {
                 "receipt": item.dispatch_receipt,
                 "upstream_execution_receipt_bytes": item.execution_receipt_bytes,
@@ -397,6 +597,7 @@ def test_no_match_requires_all_four_complete_zero_result_receipts(
 ) -> None:
     empty = tuple(
         _branch_input(
+            item.named_tool_request,
             type("Result", (), {
                 "receipt": item.dispatch_receipt,
                 "upstream_execution_receipt_bytes": item.execution_receipt_bytes,
@@ -430,6 +631,7 @@ def test_raw_receipt_semantic_mismatch_is_typed_incomplete(
         "upstream_raw_receipt_bytes": exact.raw_upstream_receipt_bytes,
     })()
     invalid = _branch_input(
+        exact.named_tool_request,
         fake,
         transform=lambda receipt: replace(
             receipt,
@@ -493,8 +695,8 @@ def test_receipt_rejects_duplicate_keys_and_scalar_type_confusion(
     ).execute(_request(branch_inputs, key="hybrid:decode"))
     raw = receipt.canonical_bytes
     duplicate = raw.replace(
-        b'{"authority_effect":"NONE",',
-        b'{"authority_effect":"NONE","authority_effect":"NONE",',
+        b'"authority_effect":"NONE",',
+        b'"authority_effect":"NONE","authority_effect":"NONE",',
         1,
     )
     with pytest.raises(HybridCompositionError, match="duplicate keys"):
@@ -692,13 +894,27 @@ def test_supplied_optional_block_is_degraded_but_required_block_is_policy_blocke
 ) -> None:
     other = tmp_path / "optional"
     other.mkdir()
-    dispatcher, _registry, _branches, _authorities, requests, _driver, _graph = system(other)
-    collision = requests[4]
+    dispatcher, _requests = _coherent_system(other)
+    collision = authority_helpers.collision_request()
+    collision = replace(
+        collision,
+        envelope=replace(
+            collision.envelope,
+            actor_id=ACTOR_ID,
+            authenticated_principal_digest=PRINCIPAL_DIGEST,
+            policy_id=NAMED_TOOL_POLICY_ID,
+            policy_digest=POLICY_DIGEST,
+            contract_digest=NAMED_TOOL_CONTRACT_DIGEST,
+            profile_id=NAMED_TOOL_PROFILE_ID,
+            query_valid_time=QUERY_VALID_TIME,
+            serving_time=SERVING_TIME,
+        ),
+    )
     blocked = dispatcher.execute(
         collision,
         denied_authorization(other, collision, name="optional-collision"),
     )
-    blocked_input = HybridCompositionInput.from_dispatch_result(blocked)
+    blocked_input = HybridCompositionInput.from_dispatch_result(collision, blocked)
 
     degraded = HybridComposer(
         journal=HybridCompositionJournal(tmp_path / "degraded.sqlite")

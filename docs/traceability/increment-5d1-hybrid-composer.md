@@ -16,7 +16,8 @@ rights/freshness revalidation and final truthful context outcomes remain
 
 | Requirement | Delivery evidence | Verification evidence |
 |---|---|---|
-| `GRAG-035` independently attributable hybrid response | exact six-entry manifest and retained dispatch/upstream receipt identities | accepted-receipt round trip, input-order replay and tamper tests |
+| `GRAG-035` independently attributable hybrid response | exact six-entry manifest and retained named request, dispatch, execution and upstream receipt identities | accepted-request/receipt round trip, input-order replay and tamper tests |
+| `GRAG-035` one-request coherence | one actor/principal/policy/contract/profile/time context plus fixed compatible named-tool purposes | cross-principal, request-byte, purpose and request-digest mismatch regressions |
 | `GRAG-035` exact/source-native precedence | exact-supported dependency roots sort before approximate-only roots | exact-first ordering and adversarial high-score approximate-root tests |
 | `GRAG-035` deterministic fusion | equal-weight RRF with fixed `k=60` and reduced rational scores | exact fraction, tie order, branch-order and scalar-type tests |
 | `GRAG-035` no pooled raw score comparison | only branch rank contributes; raw proof/score remains behind branch-hit digest | vector large-integer proof, source inspection and score invariance tests |
@@ -42,10 +43,11 @@ rights/freshness revalidation and final truthful context outcomes remain
 
 Every composition binds:
 
-- composition request, purpose, query-valid time and serving time;
+- composition request, actor, authenticated principal, purpose, policy, accepted named-tool contract/profile, query-valid time and serving time;
+- one plan-context digest over the exact supplied named-tool request and envelope identities;
 - accepted composer contract digest;
 - six-tool manifest in fixed order;
-- exact dispatch, execution and raw upstream receipt digests;
+- exact named-tool purpose, request/envelope, dispatch, execution and raw upstream receipt digests;
 - branch profile, generation and authority watermark where supplied;
 - every dependency root and retained origin path;
 - selected per-mode rank contribution and exact rational score;

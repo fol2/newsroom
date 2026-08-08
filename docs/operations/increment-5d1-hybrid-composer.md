@@ -36,12 +36,37 @@ Request text or source content cannot alter this map. Each entry is explicitly
 `COMPLETE_RESULTS`, `COMPLETE_NO_MATCH`, `INCOMPLETE`, `POLICY_BLOCKED`,
 `STALE`, `UNAVAILABLE`, `MISSING`, or `NOT_REQUIRED`.
 
+## One-request plan coherence
+
+Each supplied input retains the exact canonical 5C named-tool request bytes in
+addition to its dispatch, child execution and raw upstream receipt bytes. The
+composer decodes those request bytes and verifies the request digest and
+envelope digest against both retained receipt layers. It also recomputes the
+child execution-request digest and dispatch-request digest from their exact
+request, authorization and registry identities.
+
+One composition request explicitly binds one actor, authenticated principal,
+policy id/digest, accepted named-tool contract, profile, query-valid time and
+serving time. Every supplied tool request must match that context. Tool-specific
+grant, generation, scope, request id and payload may differ, but the request
+purpose must be compatible with the fixed composition-purpose map. A receipt
+from another caller, principal, policy, profile, time window or incompatible
+purpose is rejected before manifest evaluation and cannot be mixed into one
+hybrid result.
+
+The immutable composition receipt retains the resulting plan-context digest
+and, for every present manifest entry, the exact named-tool purpose, request
+digest and envelope digest. Missing and not-required entries retain none of
+those identities.
+
 ## Receipt validation
 
 Before fusion, the composer revalidates every retained layer:
 
+- exact canonical named-tool request bytes, request digest and envelope digest;
 - typed 5C dispatch receipt and exact canonical round trip;
-- exact child execution receipt digest and semantic request binding;
+- recomputed dispatch-request digest;
+- exact child execution receipt digest, authorization identity and recomputed execution-request digest;
 - independently attributable raw upstream bytes, byte count and digest;
 - branch request digest, profile, generation and outcome binding;
 - query-valid and serving-time binding;
@@ -135,8 +160,9 @@ digest. It stores canonical receipt bytes and digest, returns byte-identical
 results after restart, rejects semantic idempotency conflicts, duplicate JSON
 keys, scalar type confusion, and retained-byte tamper.
 
-Monitor the six manifest states, known omissions, exact-first/approximate
-precedence, contributing modes, score-bearing origins, dependency-root count,
+Monitor the plan-context digest, actor/principal/policy binding, six manifest
+states, named-tool purposes and request/envelope digests, known omissions,
+exact-first/approximate precedence, contributing modes, score-bearing origins, dependency-root count,
 result-bound exclusions, receipt validation failures and response-bound
 failures separately. Do not infer absence from any non-complete outcome.
 

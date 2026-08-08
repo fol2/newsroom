@@ -36,7 +36,15 @@ from .branch_receipts import ExactBranchReceipt
 from .fulltext_receipts import FullTextBranchReceipt
 from .named_tool_authority_execution import NamedAuthorityExecutionReceipt
 from .named_tool_branch_execution import NamedToolExecutionReceipt
-from .named_tool_contracts import NamedToolId
+from .named_tool_contracts import (
+    NAMED_TOOL_CONTRACT_DIGEST,
+    NAMED_TOOL_POLICY_ID,
+    NAMED_TOOL_PROFILE_ID,
+    NamedToolId,
+    NamedToolPurpose,
+    NamedToolRequest,
+    decode_named_tool_json,
+)
 from .named_tool_dispatch import (
     NamedToolDispatchOutcome,
     NamedToolDispatchReceipt,
@@ -153,12 +161,76 @@ _REQUIRED_AUXILIARY_BY_PURPOSE = {
     HybridCompositionPurpose.REPLAY_AUDIT: _AUXILIARY_TOOLS,
 }
 
+_ALLOWED_NAMED_PURPOSES_BY_COMPOSITION: Mapping[
+    HybridCompositionPurpose,
+    Mapping[NamedToolId, frozenset[NamedToolPurpose]],
+] = {
+    HybridCompositionPurpose.TRIAGE_PRIOR_MATCH: {
+        NamedToolId.EXACT_AUTHORITY_LOOKUP: frozenset({NamedToolPurpose.TRIAGE_PRIOR_MATCH}),
+        NamedToolId.BOUNDED_FULL_TEXT_RETRIEVAL: frozenset({NamedToolPurpose.TRIAGE_PRIOR_MATCH}),
+        NamedToolId.BOUNDED_FIXED_POINT_VECTOR_RETRIEVAL: frozenset({NamedToolPurpose.TRIAGE_PRIOR_MATCH}),
+        NamedToolId.BOUNDED_ADMITTED_GRAPH_TRAVERSAL: frozenset({NamedToolPurpose.TRIAGE_PRIOR_MATCH}),
+        NamedToolId.CURRENT_COLLISION_AND_AUTHORITY_HYDRATION_LOOKUP: frozenset(
+            {NamedToolPurpose.COLLISION_CHECK, NamedToolPurpose.AUTHORITY_HYDRATION}
+        ),
+        NamedToolId.BOUNDED_SOURCE_REVISION_IMPACT_LOOKUP: frozenset(
+            {NamedToolPurpose.SOURCE_IMPACT}
+        ),
+    },
+    HybridCompositionPurpose.CORRECTION_REVIEW: {
+        NamedToolId.EXACT_AUTHORITY_LOOKUP: frozenset({NamedToolPurpose.TRIAGE_PRIOR_MATCH}),
+        NamedToolId.BOUNDED_FULL_TEXT_RETRIEVAL: frozenset({NamedToolPurpose.CORRECTION_REVIEW}),
+        NamedToolId.BOUNDED_FIXED_POINT_VECTOR_RETRIEVAL: frozenset({NamedToolPurpose.CORRECTION_REVIEW}),
+        NamedToolId.BOUNDED_ADMITTED_GRAPH_TRAVERSAL: frozenset({NamedToolPurpose.CORRECTION_REVIEW}),
+        NamedToolId.CURRENT_COLLISION_AND_AUTHORITY_HYDRATION_LOOKUP: frozenset(
+            {NamedToolPurpose.COLLISION_CHECK, NamedToolPurpose.AUTHORITY_HYDRATION}
+        ),
+        NamedToolId.BOUNDED_SOURCE_REVISION_IMPACT_LOOKUP: frozenset(
+            {NamedToolPurpose.CORRECTION_REVIEW, NamedToolPurpose.SOURCE_IMPACT}
+        ),
+    },
+    HybridCompositionPurpose.COLLISION_REVIEW: {
+        NamedToolId.EXACT_AUTHORITY_LOOKUP: frozenset(
+            {NamedToolPurpose.TRIAGE_PRIOR_MATCH, NamedToolPurpose.COLLISION_CHECK}
+        ),
+        NamedToolId.BOUNDED_FULL_TEXT_RETRIEVAL: frozenset({NamedToolPurpose.TRIAGE_PRIOR_MATCH}),
+        NamedToolId.BOUNDED_FIXED_POINT_VECTOR_RETRIEVAL: frozenset({NamedToolPurpose.TRIAGE_PRIOR_MATCH}),
+        NamedToolId.BOUNDED_ADMITTED_GRAPH_TRAVERSAL: frozenset({NamedToolPurpose.TRIAGE_PRIOR_MATCH}),
+        NamedToolId.CURRENT_COLLISION_AND_AUTHORITY_HYDRATION_LOOKUP: frozenset(
+            {NamedToolPurpose.COLLISION_CHECK}
+        ),
+        NamedToolId.BOUNDED_SOURCE_REVISION_IMPACT_LOOKUP: frozenset(
+            {NamedToolPurpose.SOURCE_IMPACT}
+        ),
+    },
+    HybridCompositionPurpose.REPLAY_AUDIT: {
+        tool_id: frozenset({NamedToolPurpose.REPLAY_AUDIT}) for tool_id in _ALL_TOOLS
+    },
+}
+
 
 HYBRID_COMPOSER_CONTRACT_DIGEST = digest_bytes(
     canonical_json_bytes(
         {
-            "schema_version": "newsroom.increment5.hybrid-composer-contract.v1",
+            "schema_version": "newsroom.increment5.hybrid-composer-contract.v2",
             "required_branch_tools": [item.value for item in _BRANCH_TOOLS],
+            "request_plan": {
+                "retain_named_tool_request_bytes": True,
+                "same_actor": True,
+                "same_authenticated_principal": True,
+                "same_policy": True,
+                "same_named_tool_contract": True,
+                "same_profile": True,
+                "same_query_valid_time": True,
+                "same_serving_time": True,
+                "allowed_named_tool_purposes": {
+                    purpose.value: {
+                        tool_id.value: sorted(item.value for item in allowed)
+                        for tool_id, allowed in tools.items()
+                    }
+                    for purpose, tools in _ALLOWED_NAMED_PURPOSES_BY_COMPOSITION.items()
+                },
+            },
             "purpose_auxiliary_tools": {
                 purpose.value: [item.value for item in tools]
                 for purpose, tools in _REQUIRED_AUXILIARY_BY_PURPOSE.items()
@@ -330,15 +402,51 @@ def _execution_receipt(
     )
 
 
+def _named_tool_request_bytes(request: NamedToolRequest) -> bytes:
+    try:
+        value = {
+            "schema_version": request.SCHEMA_VERSION,
+            "envelope": request.envelope.canonical_value(),
+            **request.payload_value(),
+        }
+    except AttributeError as exc:
+        raise HybridCompositionError("named-tool request is not a typed request") from exc
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    try:
+        decoded = decode_named_tool_json(raw)
+    except Exception as exc:
+        raise HybridCompositionError("named-tool request cannot be retained") from exc
+    if decoded != request:
+        raise HybridCompositionError("named-tool request canonical round trip failed")
+    return raw
+
+
 @dataclass(frozen=True, slots=True)
 class HybridCompositionInput:
     """Exact retained bytes for one independently attributable 5C dispatch."""
 
+    named_tool_request_bytes: bytes
     dispatch_receipt: NamedToolDispatchReceipt
     execution_receipt_bytes: bytes
     raw_upstream_receipt_bytes: bytes | None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.named_tool_request_bytes, bytes):
+            raise HybridCompositionError(
+                "composition input named-tool request must be bytes"
+            )
+        try:
+            named_request = decode_named_tool_json(self.named_tool_request_bytes)
+        except Exception as exc:
+            raise HybridCompositionError(
+                "composition input named-tool request is invalid"
+            ) from exc
         if not isinstance(self.dispatch_receipt, NamedToolDispatchReceipt):
             raise HybridCompositionError("composition input dispatch receipt is not typed")
         if (
@@ -348,6 +456,21 @@ class HybridCompositionInput:
             != self.dispatch_receipt
         ):
             raise HybridCompositionError("dispatch receipt canonical round trip failed")
+        if named_request.request_digest != self.dispatch_receipt.tool_request_digest:
+            raise HybridCompositionError(
+                "named-tool request digest differs from dispatch"
+            )
+        if (
+            named_request.envelope.envelope_digest
+            != self.dispatch_receipt.tool_envelope_digest
+        ):
+            raise HybridCompositionError(
+                "named-tool envelope digest differs from dispatch"
+            )
+        if named_request.envelope.tool_id is not self.dispatch_receipt.tool_id:
+            raise HybridCompositionError(
+                "named-tool request identity differs from dispatch"
+            )
         if not isinstance(self.execution_receipt_bytes, bytes):
             raise HybridCompositionError("composition input execution receipt must be bytes")
         execution = _execution_receipt(self)
@@ -356,8 +479,52 @@ class HybridCompositionInput:
             raise HybridCompositionError("execution receipt digest differs from dispatch")
         if execution.execution_request_digest != upstream.execution_request_digest:
             raise HybridCompositionError("execution request digest differs from dispatch")
-        if execution.tool_request_digest != self.dispatch_receipt.tool_request_digest:
-            raise HybridCompositionError("execution request binding differs from dispatch")
+        if execution.tool_request_digest != named_request.request_digest:
+            raise HybridCompositionError("execution request binding differs from named request")
+        if execution.tool_envelope_digest != named_request.envelope.envelope_digest:
+            raise HybridCompositionError("execution envelope binding differs from named request")
+        if (
+            execution.authorization_receipt_digest
+            != self.dispatch_receipt.authorization_receipt_digest
+            or execution.authorization_decision_id
+            != self.dispatch_receipt.authorization_decision_id
+        ):
+            raise HybridCompositionError(
+                "execution authorization identity differs from dispatch"
+            )
+        expected_execution_schema = (
+            "newsroom.increment5.named-tool-execution-request.v1"
+            if self.dispatch_receipt.route is NamedToolExecutionRoute.BRANCH
+            else "newsroom.increment5.named-authority-execution-request.v1"
+        )
+        expected_execution_digest = _digest(
+            _canonical(
+                {
+                    "schema_version": expected_execution_schema,
+                    "tool_request_digest": named_request.request_digest,
+                    "authorization_receipt_digest": execution.authorization_receipt_digest,
+                    "port_registry_digest": execution.port_registry_digest,
+                }
+            )
+        )
+        if execution.execution_request_digest != expected_execution_digest:
+            raise HybridCompositionError(
+                "execution request digest is not self-consistent"
+            )
+        expected_dispatch_digest = _digest(
+            _canonical(
+                {
+                    "schema_version": "newsroom.increment5.named-tool-dispatch-request.v1",
+                    "tool_request_digest": named_request.request_digest,
+                    "authorization_receipt_digest": self.dispatch_receipt.authorization_receipt_digest,
+                    "dispatcher_registry_digest": self.dispatch_receipt.dispatcher_registry_digest,
+                }
+            )
+        )
+        if self.dispatch_receipt.dispatch_request_digest != expected_dispatch_digest:
+            raise HybridCompositionError(
+                "dispatch request digest is not self-consistent"
+            )
         if execution.tool_id is not self.dispatch_receipt.tool_id:
             raise HybridCompositionError("execution tool identity differs from dispatch")
         if execution.outcome.value != self.dispatch_receipt.outcome.value:
@@ -366,6 +533,10 @@ class HybridCompositionInput:
             raise HybridCompositionError("execution result count differs from dispatch")
         if execution.no_match != self.dispatch_receipt.no_match:
             raise HybridCompositionError("execution no-match differs from dispatch")
+        if execution.response_limit_bytes != self.dispatch_receipt.response_limit_bytes:
+            raise HybridCompositionError(
+                "execution response limit differs from dispatch"
+            )
         if upstream.independently_attributable:
             if not isinstance(self.raw_upstream_receipt_bytes, bytes):
                 raise HybridCompositionError(
@@ -383,19 +554,42 @@ class HybridCompositionInput:
     @classmethod
     def from_dispatch_result(
         cls,
+        request: NamedToolRequest,
         result: NamedToolDispatchResult,
     ) -> "HybridCompositionInput":
         if not isinstance(result, NamedToolDispatchResult):
             raise TypeError("composition input requires a typed dispatch result")
         return cls(
+            named_tool_request_bytes=_named_tool_request_bytes(request),
             dispatch_receipt=result.receipt,
             execution_receipt_bytes=result.upstream_execution_receipt_bytes,
             raw_upstream_receipt_bytes=result.upstream_raw_receipt_bytes,
         )
 
     @property
+    def named_tool_request(self) -> NamedToolRequest:
+        try:
+            return decode_named_tool_json(self.named_tool_request_bytes)
+        except Exception as exc:
+            raise HybridCompositionError(
+                "composition input named-tool request is invalid"
+            ) from exc
+
+    @property
+    def envelope(self):
+        return self.named_tool_request.envelope
+
+    @property
     def tool_id(self) -> NamedToolId:
         return self.dispatch_receipt.tool_id
+
+    @property
+    def tool_request_digest(self) -> str:
+        return self.named_tool_request.request_digest
+
+    @property
+    def tool_envelope_digest(self) -> str:
+        return self.envelope.envelope_digest
 
     @property
     def dispatch_receipt_digest(self) -> str:
@@ -406,28 +600,20 @@ class HybridCompositionInput:
         return _digest(self.execution_receipt_bytes)
 
     @property
-    def query_valid_time(self) -> str | None:
-        execution = _execution_receipt(self)
-        attribution = (
-            execution.branch_attribution
-            if isinstance(execution, NamedToolExecutionReceipt)
-            else execution.authority_attribution
-        )
-        return None if attribution is None else attribution.query_valid_time
+    def query_valid_time(self) -> str:
+        return self.envelope.query_valid_time
 
     @property
-    def serving_time(self) -> str | None:
-        execution = _execution_receipt(self)
-        attribution = (
-            execution.branch_attribution
-            if isinstance(execution, NamedToolExecutionReceipt)
-            else execution.authority_attribution
-        )
-        return None if attribution is None else attribution.serving_time
+    def serving_time(self) -> str:
+        return self.envelope.serving_time
 
     def canonical_value(self) -> dict[str, object]:
         return {
             "tool_id": self.tool_id.value,
+            "named_tool_purpose": self.envelope.purpose.value,
+            "tool_request_digest": self.tool_request_digest,
+            "tool_envelope_digest": self.tool_envelope_digest,
+            "named_tool_request_bytes": len(self.named_tool_request_bytes),
             "route": self.dispatch_receipt.route.value,
             "dispatch_receipt_digest": self.dispatch_receipt_digest,
             "dispatch_request_digest": self.dispatch_receipt.dispatch_request_digest,
@@ -460,7 +646,13 @@ class HybridCompositionInput:
 class HybridCompositionRequest:
     request_id: str
     idempotency_key: str
+    actor_id: str
+    authenticated_principal_digest: str
     purpose: HybridCompositionPurpose
+    policy_id: str
+    policy_digest: str
+    named_tool_contract_digest: str
+    profile_id: str
     query_valid_time: str
     serving_time: str
     inputs: tuple[HybridCompositionInput, ...]
@@ -471,8 +663,20 @@ class HybridCompositionRequest:
     def __post_init__(self) -> None:
         _uuid(self.request_id, field="hybrid_request_id")
         _require_token(self.idempotency_key, field="hybrid_idempotency_key")
+        _require_token(self.actor_id, field="hybrid_actor_id")
+        _require_digest(
+            self.authenticated_principal_digest,
+            field="hybrid_authenticated_principal_digest",
+        )
         if not isinstance(self.purpose, HybridCompositionPurpose):
             raise HybridCompositionError("hybrid composition purpose must be typed")
+        if self.policy_id != NAMED_TOOL_POLICY_ID:
+            raise HybridCompositionError("hybrid named-tool policy id is not accepted")
+        _require_digest(self.policy_digest, field="hybrid_policy_digest")
+        if self.named_tool_contract_digest != NAMED_TOOL_CONTRACT_DIGEST:
+            raise HybridCompositionError("hybrid named-tool contract is not accepted")
+        if self.profile_id != NAMED_TOOL_PROFILE_ID:
+            raise HybridCompositionError("hybrid named-tool profile is not accepted")
         query_valid = _parse_utc(
             self.query_valid_time,
             field="hybrid_query_valid_time",
@@ -493,16 +697,46 @@ class HybridCompositionRequest:
         if any(item not in _ALL_TOOLS for item in tool_ids):
             raise HybridCompositionError("hybrid input contains an unknown tool")
         object.__setattr__(self, "inputs", normalized)
+        allowed_purposes = _ALLOWED_NAMED_PURPOSES_BY_COMPOSITION[self.purpose]
         for item in normalized:
-            if item.query_valid_time is not None and item.query_valid_time != (
-                self.query_valid_time
+            envelope = item.envelope
+            if envelope.actor_id != self.actor_id:
+                raise HybridCompositionError(
+                    "upstream actor differs from composition request"
+                )
+            if (
+                envelope.authenticated_principal_digest
+                != self.authenticated_principal_digest
             ):
+                raise HybridCompositionError(
+                    "upstream principal differs from composition request"
+                )
+            if (
+                envelope.policy_id != self.policy_id
+                or envelope.policy_digest != self.policy_digest
+            ):
+                raise HybridCompositionError(
+                    "upstream policy differs from composition request"
+                )
+            if envelope.contract_digest != self.named_tool_contract_digest:
+                raise HybridCompositionError(
+                    "upstream named-tool contract differs from composition request"
+                )
+            if envelope.profile_id != self.profile_id:
+                raise HybridCompositionError(
+                    "upstream named-tool profile differs from composition request"
+                )
+            if envelope.query_valid_time != self.query_valid_time:
                 raise HybridCompositionError(
                     "upstream query-valid time differs from composition request"
                 )
-            if item.serving_time is not None and item.serving_time != self.serving_time:
+            if envelope.serving_time != self.serving_time:
                 raise HybridCompositionError(
                     "upstream serving time differs from composition request"
+                )
+            if envelope.purpose not in allowed_purposes[item.tool_id]:
+                raise HybridCompositionError(
+                    "upstream named-tool purpose is not compatible with composition purpose"
                 )
         if self.reciprocal_rank_k != _RRF_K:
             raise HybridCompositionError("reciprocal-rank constant is fixed at 60")
@@ -517,14 +751,48 @@ class HybridCompositionRequest:
             _BRANCH_TOOLS + _REQUIRED_AUXILIARY_BY_PURPOSE[self.purpose]
         )
 
+    @property
+    def plan_context_digest(self) -> str:
+        return _digest(
+            _canonical(
+                {
+                    "actor_id": self.actor_id,
+                    "authenticated_principal_digest": self.authenticated_principal_digest,
+                    "purpose": self.purpose.value,
+                    "policy_id": self.policy_id,
+                    "policy_digest": self.policy_digest,
+                    "named_tool_contract_digest": self.named_tool_contract_digest,
+                    "profile_id": self.profile_id,
+                    "query_valid_time": self.query_valid_time,
+                    "serving_time": self.serving_time,
+                    "tool_requests": [
+                        {
+                            "tool_id": item.tool_id.value,
+                            "named_tool_purpose": item.envelope.purpose.value,
+                            "tool_request_digest": item.tool_request_digest,
+                            "tool_envelope_digest": item.tool_envelope_digest,
+                        }
+                        for item in self.inputs
+                    ],
+                }
+            )
+        )
+
     def canonical_value(self) -> dict[str, object]:
         return {
-            "schema_version": "newsroom.increment5.hybrid-composition-request.v1",
+            "schema_version": "newsroom.increment5.hybrid-composition-request.v2",
             "request_id": self.request_id,
             "idempotency_key": self.idempotency_key,
+            "actor_id": self.actor_id,
+            "authenticated_principal_digest": self.authenticated_principal_digest,
             "purpose": self.purpose.value,
+            "policy_id": self.policy_id,
+            "policy_digest": self.policy_digest,
+            "named_tool_contract_digest": self.named_tool_contract_digest,
+            "profile_id": self.profile_id,
             "query_valid_time": self.query_valid_time,
             "serving_time": self.serving_time,
+            "plan_context_digest": self.plan_context_digest,
             "composer_contract_digest": HYBRID_COMPOSER_CONTRACT_DIGEST,
             "required_tools": [item.value for item in self.required_tools],
             "inputs": [item.canonical_value() for item in self.inputs],
@@ -548,6 +816,9 @@ class HybridManifestEntry:
     mandatory: bool
     state: HybridManifestState
     route: NamedToolExecutionRoute | None
+    named_tool_purpose: NamedToolPurpose | None
+    tool_request_digest: str | None
+    tool_envelope_digest: str | None
     dispatch_receipt_digest: str | None
     execution_receipt_digest: str | None
     raw_upstream_receipt_digest: str | None
@@ -569,7 +840,13 @@ class HybridManifestEntry:
             self.route, NamedToolExecutionRoute
         ):
             raise HybridCompositionError("manifest route must be typed")
+        if self.named_tool_purpose is not None and not isinstance(
+            self.named_tool_purpose, NamedToolPurpose
+        ):
+            raise HybridCompositionError("manifest named-tool purpose must be typed")
         for name in (
+            "tool_request_digest",
+            "tool_envelope_digest",
             "dispatch_receipt_digest",
             "execution_receipt_digest",
             "raw_upstream_receipt_digest",
@@ -597,6 +874,9 @@ class HybridManifestEntry:
                 value is not None
                 for value in (
                     self.route,
+                    self.named_tool_purpose,
+                    self.tool_request_digest,
+                    self.tool_envelope_digest,
                     self.dispatch_receipt_digest,
                     self.execution_receipt_digest,
                     self.raw_upstream_receipt_digest,
@@ -612,6 +892,9 @@ class HybridManifestEntry:
             value is None
             for value in (
                 self.route,
+                self.named_tool_purpose,
+                self.tool_request_digest,
+                self.tool_envelope_digest,
                 self.dispatch_receipt_digest,
                 self.execution_receipt_digest,
             )
@@ -646,6 +929,11 @@ class HybridManifestEntry:
             "mandatory": self.mandatory,
             "state": self.state.value,
             "route": None if self.route is None else self.route.value,
+            "named_tool_purpose": (
+                None if self.named_tool_purpose is None else self.named_tool_purpose.value
+            ),
+            "tool_request_digest": self.tool_request_digest,
+            "tool_envelope_digest": self.tool_envelope_digest,
             "dispatch_receipt_digest": self.dispatch_receipt_digest,
             "execution_receipt_digest": self.execution_receipt_digest,
             "raw_upstream_receipt_digest": self.raw_upstream_receipt_digest,
@@ -664,6 +952,9 @@ class HybridManifestEntry:
             "mandatory",
             "state",
             "route",
+            "named_tool_purpose",
+            "tool_request_digest",
+            "tool_envelope_digest",
             "dispatch_receipt_digest",
             "execution_receipt_digest",
             "raw_upstream_receipt_digest",
@@ -685,6 +976,13 @@ class HybridManifestEntry:
                 if value["route"] is None
                 else NamedToolExecutionRoute(value["route"])
             ),
+            named_tool_purpose=(
+                None
+                if value["named_tool_purpose"] is None
+                else NamedToolPurpose(value["named_tool_purpose"])
+            ),
+            tool_request_digest=value["tool_request_digest"],
+            tool_envelope_digest=value["tool_envelope_digest"],
             dispatch_receipt_digest=value["dispatch_receipt_digest"],
             execution_receipt_digest=value["execution_receipt_digest"],
             raw_upstream_receipt_digest=value["raw_upstream_receipt_digest"],
@@ -1122,7 +1420,14 @@ class HybridCompositionReceipt:
     composition_id: str
     request_digest: str
     request_id: str
+    actor_id: str
+    authenticated_principal_digest: str
     purpose: HybridCompositionPurpose
+    policy_id: str
+    policy_digest: str
+    named_tool_contract_digest: str
+    profile_id: str
+    plan_context_digest: str
     query_valid_time: str
     serving_time: str
     contract_digest: str
@@ -1153,8 +1458,21 @@ class HybridCompositionReceipt:
         _uuid(self.composition_id, field="hybrid_composition_id")
         _uuid(self.request_id, field="hybrid_receipt_request_id")
         _require_digest(self.request_digest, field="hybrid_request_digest")
+        _require_token(self.actor_id, field="hybrid_receipt_actor_id")
+        _require_digest(
+            self.authenticated_principal_digest,
+            field="hybrid_receipt_authenticated_principal_digest",
+        )
         if not isinstance(self.purpose, HybridCompositionPurpose):
             raise HybridCompositionError("receipt purpose must be typed")
+        if self.policy_id != NAMED_TOOL_POLICY_ID:
+            raise HybridCompositionError("receipt named-tool policy id is not accepted")
+        _require_digest(self.policy_digest, field="hybrid_receipt_policy_digest")
+        if self.named_tool_contract_digest != NAMED_TOOL_CONTRACT_DIGEST:
+            raise HybridCompositionError("receipt named-tool contract is not accepted")
+        if self.profile_id != NAMED_TOOL_PROFILE_ID:
+            raise HybridCompositionError("receipt named-tool profile is not accepted")
+        _require_digest(self.plan_context_digest, field="hybrid_plan_context_digest")
         query_valid = _parse_utc(
             self.query_valid_time,
             field="hybrid_receipt_query_valid_time",
@@ -1359,11 +1677,18 @@ class HybridCompositionReceipt:
 
     def canonical_value(self) -> dict[str, object]:
         return {
-            "schema_version": "newsroom.increment5.hybrid-composition-receipt.v1",
+            "schema_version": "newsroom.increment5.hybrid-composition-receipt.v2",
             "composition_id": self.composition_id,
             "request_digest": self.request_digest,
             "request_id": self.request_id,
+            "actor_id": self.actor_id,
+            "authenticated_principal_digest": self.authenticated_principal_digest,
             "purpose": self.purpose.value,
+            "policy_id": self.policy_id,
+            "policy_digest": self.policy_digest,
+            "named_tool_contract_digest": self.named_tool_contract_digest,
+            "profile_id": self.profile_id,
+            "plan_context_digest": self.plan_context_digest,
             "query_valid_time": self.query_valid_time,
             "serving_time": self.serving_time,
             "contract_digest": self.contract_digest,
@@ -1412,7 +1737,14 @@ class HybridCompositionReceipt:
             "composition_id",
             "request_digest",
             "request_id",
+            "actor_id",
+            "authenticated_principal_digest",
             "purpose",
+            "policy_id",
+            "policy_digest",
+            "named_tool_contract_digest",
+            "profile_id",
+            "plan_context_digest",
             "query_valid_time",
             "serving_time",
             "contract_digest",
@@ -1441,7 +1773,7 @@ class HybridCompositionReceipt:
         }
         if set(value) != required:
             raise HybridCompositionError("composition receipt keys are not exact")
-        if value["schema_version"] != "newsroom.increment5.hybrid-composition-receipt.v1":
+        if value["schema_version"] != "newsroom.increment5.hybrid-composition-receipt.v2":
             raise HybridCompositionError("composition receipt schema differs")
         for name in ("manifest", "candidates", "exclusions", "known_omission_tools"):
             if not isinstance(value[name], list):
@@ -1450,7 +1782,14 @@ class HybridCompositionReceipt:
             composition_id=value["composition_id"],
             request_digest=value["request_digest"],
             request_id=value["request_id"],
+            actor_id=value["actor_id"],
+            authenticated_principal_digest=value["authenticated_principal_digest"],
             purpose=HybridCompositionPurpose(value["purpose"]),
+            policy_id=value["policy_id"],
+            policy_digest=value["policy_digest"],
+            named_tool_contract_digest=value["named_tool_contract_digest"],
+            profile_id=value["profile_id"],
+            plan_context_digest=value["plan_context_digest"],
             query_valid_time=value["query_valid_time"],
             serving_time=value["serving_time"],
             contract_digest=value["contract_digest"],
@@ -1684,6 +2023,9 @@ def _manifest(request: HybridCompositionRequest) -> tuple[HybridManifestEntry, .
                     mandatory=mandatory,
                     state=state,
                     route=None,
+                    named_tool_purpose=None,
+                    tool_request_digest=None,
+                    tool_envelope_digest=None,
                     dispatch_receipt_digest=None,
                     execution_receipt_digest=None,
                     raw_upstream_receipt_digest=None,
@@ -1704,6 +2046,9 @@ def _manifest(request: HybridCompositionRequest) -> tuple[HybridManifestEntry, .
                 mandatory=mandatory,
                 state=_dispatch_state(receipt),
                 route=receipt.route,
+                named_tool_purpose=value.envelope.purpose,
+                tool_request_digest=value.tool_request_digest,
+                tool_envelope_digest=value.tool_envelope_digest,
                 dispatch_receipt_digest=value.dispatch_receipt_digest,
                 execution_receipt_digest=value.execution_receipt_digest,
                 raw_upstream_receipt_digest=(
@@ -2128,7 +2473,14 @@ def _receipt(
         composition_id=composition_id,
         request_digest=request.request_digest,
         request_id=request.request_id,
+        actor_id=request.actor_id,
+        authenticated_principal_digest=request.authenticated_principal_digest,
         purpose=request.purpose,
+        policy_id=request.policy_id,
+        policy_digest=request.policy_digest,
+        named_tool_contract_digest=request.named_tool_contract_digest,
+        profile_id=request.profile_id,
+        plan_context_digest=request.plan_context_digest,
         query_valid_time=request.query_valid_time,
         serving_time=request.serving_time,
         contract_digest=HYBRID_COMPOSER_CONTRACT_DIGEST,
