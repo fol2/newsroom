@@ -35,6 +35,10 @@ from .admitted_graph_retriever import AdmittedGraphReceipt
 from .branch_receipts import ExactBranchReceipt
 from .fulltext_receipts import FullTextBranchReceipt
 from .named_tool_authority_execution import NamedAuthorityExecutionReceipt
+from .named_tool_authority_receipt_validation import (
+    NamedAuthorityReceiptValidationError,
+    validate_named_authority_receipt,
+)
 from .named_tool_branch_execution import NamedToolExecutionReceipt
 from .named_tool_contracts import (
     NAMED_TOOL_CONTRACT_DIGEST,
@@ -116,6 +120,7 @@ class HybridCompositionReason(StrEnum):
 
 class HybridPrecedence(StrEnum):
     EXACT_FIRST = "EXACT_FIRST"
+    EXPLICIT_LINEAGE = "EXPLICIT_LINEAGE"
     APPROXIMATE = "APPROXIMATE"
 
 
@@ -212,7 +217,7 @@ _ALLOWED_NAMED_PURPOSES_BY_COMPOSITION: Mapping[
 HYBRID_COMPOSER_CONTRACT_DIGEST = digest_bytes(
     canonical_json_bytes(
         {
-            "schema_version": "newsroom.increment5.hybrid-composer-contract.v2",
+            "schema_version": "newsroom.increment5.hybrid-composer-contract.v3",
             "required_branch_tools": [item.value for item in _BRANCH_TOOLS],
             "request_plan": {
                 "retain_named_tool_request_bytes": True,
@@ -244,6 +249,8 @@ HYBRID_COMPOSER_CONTRACT_DIGEST = digest_bytes(
             },
             "precedence": [
                 "EXACT_DEPENDENCY_ROOTS_FIRST",
+                "EXPLICIT_LINEAGE_ROOTS_SECOND",
+                "APPROXIMATE_ROOTS_THIRD",
                 "RRF_SCORE_DESC",
                 "BEST_BRANCH_RANK_ASC",
                 "DEPENDENCY_ROOT_ID_ASC",
@@ -427,6 +434,85 @@ def _named_tool_request_bytes(request: NamedToolRequest) -> bytes:
     return raw
 
 
+def _plan_context_digest(
+    *,
+    actor_id: str,
+    authenticated_principal_digest: str,
+    purpose: HybridCompositionPurpose,
+    policy_id: str,
+    policy_digest: str,
+    named_tool_contract_digest: str,
+    profile_id: str,
+    query_valid_time: str,
+    serving_time: str,
+    tool_requests: Sequence[Mapping[str, object]],
+) -> str:
+    """Content-address one coherent composition plan.
+
+    The helper is shared by the live request and the retained receipt.  That
+    makes the receipt self-validating: its top-level caller/policy/time context
+    and every present manifest request identity must reproduce the same digest
+    that the request supplied before execution.
+    """
+
+    return _digest(
+        _canonical(
+            {
+                "actor_id": actor_id,
+                "authenticated_principal_digest": authenticated_principal_digest,
+                "purpose": purpose.value,
+                "policy_id": policy_id,
+                "policy_digest": policy_digest,
+                "named_tool_contract_digest": named_tool_contract_digest,
+                "profile_id": profile_id,
+                "query_valid_time": query_valid_time,
+                "serving_time": serving_time,
+                "tool_requests": [dict(item) for item in tool_requests],
+            }
+        )
+    )
+
+
+def _validate_retained_inputs(request: "HybridCompositionRequest") -> None:
+    """Revalidate every supplied raw 5C receipt before interpreting its state.
+
+    A non-complete manifest entry can still carry independently attributable raw
+    evidence.  Validate those bytes before blocker precedence so malformed or
+    recomputed evidence cannot hide behind a truthful-looking STALE, BLOCKED, or
+    UNAVAILABLE dispatch outcome.
+    """
+
+    for item in request.inputs:
+        raw = item.raw_upstream_receipt_bytes
+        if raw is None:
+            if item.dispatch_receipt.upstream.independently_attributable:
+                raise HybridCompositionError(
+                    "attributed composition input is missing raw receipt bytes"
+                )
+            continue
+        if item.tool_id in _BRANCH_TOOLS:
+            _validated_branch_receipt(item, raw)
+            continue
+        if item.tool_id in _AUXILIARY_TOOLS:
+            execution = _execution_receipt(item)
+            if not isinstance(execution, NamedAuthorityExecutionReceipt):
+                raise HybridCompositionError(
+                    "authority input retained a branch execution receipt"
+                )
+            try:
+                validate_named_authority_receipt(
+                    request=item.named_tool_request,
+                    execution_receipt=execution,
+                    raw_receipt_bytes=raw,
+                )
+            except NamedAuthorityReceiptValidationError as exc:
+                raise HybridCompositionError(
+                    "authority receipt validation failed"
+                ) from exc
+            continue
+        raise HybridCompositionError("composition input tool is not in inventory")
+
+
 @dataclass(frozen=True, slots=True)
 class HybridCompositionInput:
     """Exact retained bytes for one independently attributable 5C dispatch."""
@@ -447,6 +533,10 @@ class HybridCompositionInput:
             raise HybridCompositionError(
                 "composition input named-tool request is invalid"
             ) from exc
+        if _named_tool_request_bytes(named_request) != self.named_tool_request_bytes:
+            raise HybridCompositionError(
+                "composition input named-tool request bytes are not canonical"
+            )
         if not isinstance(self.dispatch_receipt, NamedToolDispatchReceipt):
             raise HybridCompositionError("composition input dispatch receipt is not typed")
         if (
@@ -588,6 +678,10 @@ class HybridCompositionInput:
         return self.named_tool_request.request_digest
 
     @property
+    def named_tool_request_bytes_digest(self) -> str:
+        return _digest(self.named_tool_request_bytes)
+
+    @property
     def tool_envelope_digest(self) -> str:
         return self.envelope.envelope_digest
 
@@ -613,6 +707,7 @@ class HybridCompositionInput:
             "named_tool_purpose": self.envelope.purpose.value,
             "tool_request_digest": self.tool_request_digest,
             "tool_envelope_digest": self.tool_envelope_digest,
+            "named_tool_request_bytes_digest": self.named_tool_request_bytes_digest,
             "named_tool_request_bytes": len(self.named_tool_request_bytes),
             "route": self.dispatch_receipt.route.value,
             "dispatch_receipt_digest": self.dispatch_receipt_digest,
@@ -753,34 +848,33 @@ class HybridCompositionRequest:
 
     @property
     def plan_context_digest(self) -> str:
-        return _digest(
-            _canonical(
+        return _plan_context_digest(
+            actor_id=self.actor_id,
+            authenticated_principal_digest=self.authenticated_principal_digest,
+            purpose=self.purpose,
+            policy_id=self.policy_id,
+            policy_digest=self.policy_digest,
+            named_tool_contract_digest=self.named_tool_contract_digest,
+            profile_id=self.profile_id,
+            query_valid_time=self.query_valid_time,
+            serving_time=self.serving_time,
+            tool_requests=tuple(
                 {
-                    "actor_id": self.actor_id,
-                    "authenticated_principal_digest": self.authenticated_principal_digest,
-                    "purpose": self.purpose.value,
-                    "policy_id": self.policy_id,
-                    "policy_digest": self.policy_digest,
-                    "named_tool_contract_digest": self.named_tool_contract_digest,
-                    "profile_id": self.profile_id,
-                    "query_valid_time": self.query_valid_time,
-                    "serving_time": self.serving_time,
-                    "tool_requests": [
-                        {
-                            "tool_id": item.tool_id.value,
-                            "named_tool_purpose": item.envelope.purpose.value,
-                            "tool_request_digest": item.tool_request_digest,
-                            "tool_envelope_digest": item.tool_envelope_digest,
-                        }
-                        for item in self.inputs
-                    ],
+                    "tool_id": item.tool_id.value,
+                    "named_tool_purpose": item.envelope.purpose.value,
+                    "tool_request_digest": item.tool_request_digest,
+                    "tool_envelope_digest": item.tool_envelope_digest,
+                    "named_tool_request_bytes_digest": (
+                        item.named_tool_request_bytes_digest
+                    ),
                 }
-            )
+                for item in self.inputs
+            ),
         )
 
     def canonical_value(self) -> dict[str, object]:
         return {
-            "schema_version": "newsroom.increment5.hybrid-composition-request.v2",
+            "schema_version": "newsroom.increment5.hybrid-composition-request.v3",
             "request_id": self.request_id,
             "idempotency_key": self.idempotency_key,
             "actor_id": self.actor_id,
@@ -819,6 +913,7 @@ class HybridManifestEntry:
     named_tool_purpose: NamedToolPurpose | None
     tool_request_digest: str | None
     tool_envelope_digest: str | None
+    named_tool_request_bytes_digest: str | None
     dispatch_receipt_digest: str | None
     execution_receipt_digest: str | None
     raw_upstream_receipt_digest: str | None
@@ -847,6 +942,7 @@ class HybridManifestEntry:
         for name in (
             "tool_request_digest",
             "tool_envelope_digest",
+            "named_tool_request_bytes_digest",
             "dispatch_receipt_digest",
             "execution_receipt_digest",
             "raw_upstream_receipt_digest",
@@ -877,6 +973,7 @@ class HybridManifestEntry:
                     self.named_tool_purpose,
                     self.tool_request_digest,
                     self.tool_envelope_digest,
+                    self.named_tool_request_bytes_digest,
                     self.dispatch_receipt_digest,
                     self.execution_receipt_digest,
                     self.raw_upstream_receipt_digest,
@@ -895,6 +992,7 @@ class HybridManifestEntry:
                 self.named_tool_purpose,
                 self.tool_request_digest,
                 self.tool_envelope_digest,
+                self.named_tool_request_bytes_digest,
                 self.dispatch_receipt_digest,
                 self.execution_receipt_digest,
             )
@@ -934,6 +1032,9 @@ class HybridManifestEntry:
             ),
             "tool_request_digest": self.tool_request_digest,
             "tool_envelope_digest": self.tool_envelope_digest,
+            "named_tool_request_bytes_digest": (
+                self.named_tool_request_bytes_digest
+            ),
             "dispatch_receipt_digest": self.dispatch_receipt_digest,
             "execution_receipt_digest": self.execution_receipt_digest,
             "raw_upstream_receipt_digest": self.raw_upstream_receipt_digest,
@@ -955,6 +1056,7 @@ class HybridManifestEntry:
             "named_tool_purpose",
             "tool_request_digest",
             "tool_envelope_digest",
+            "named_tool_request_bytes_digest",
             "dispatch_receipt_digest",
             "execution_receipt_digest",
             "raw_upstream_receipt_digest",
@@ -983,6 +1085,9 @@ class HybridManifestEntry:
             ),
             tool_request_digest=value["tool_request_digest"],
             tool_envelope_digest=value["tool_envelope_digest"],
+            named_tool_request_bytes_digest=value[
+                "named_tool_request_bytes_digest"
+            ],
             dispatch_receipt_digest=value["dispatch_receipt_digest"],
             execution_receipt_digest=value["execution_receipt_digest"],
             raw_upstream_receipt_digest=value["raw_upstream_receipt_digest"],
@@ -1271,10 +1376,17 @@ class HybridCandidate:
         if self.best_branch_rank != min(item.rank for item in self.origins):
             raise HybridCompositionError("candidate best rank differs from origins")
         has_exact = any(item.mode is HybridMode.EXACT for item in self.origins)
+        has_lineage = any(
+            item.mode is HybridMode.ADMITTED_GRAPH for item in self.origins
+        )
         expected_precedence = (
             HybridPrecedence.EXACT_FIRST
             if has_exact
-            else HybridPrecedence.APPROXIMATE
+            else (
+                HybridPrecedence.EXPLICIT_LINEAGE
+                if has_lineage
+                else HybridPrecedence.APPROXIMATE
+            )
         )
         if self.precedence is not expected_precedence:
             raise HybridCompositionError("candidate precedence differs from origins")
@@ -1497,6 +1609,46 @@ class HybridCompositionReceipt:
             raise HybridCompositionError("composition manifest must be typed")
         if tuple(item.tool_id for item in self.manifest) != _ALL_TOOLS:
             raise HybridCompositionError("composition manifest must cover six tools")
+        plan_entries: list[Mapping[str, object]] = []
+        for item in self.manifest:
+            if item.route is None:
+                continue
+            if (
+                item.named_tool_purpose is None
+                or item.tool_request_digest is None
+                or item.tool_envelope_digest is None
+                or item.named_tool_request_bytes_digest is None
+            ):
+                raise HybridCompositionError(
+                    "present manifest entry lacks plan-context identity"
+                )
+            plan_entries.append(
+                {
+                    "tool_id": item.tool_id.value,
+                    "named_tool_purpose": item.named_tool_purpose.value,
+                    "tool_request_digest": item.tool_request_digest,
+                    "tool_envelope_digest": item.tool_envelope_digest,
+                    "named_tool_request_bytes_digest": (
+                        item.named_tool_request_bytes_digest
+                    ),
+                }
+            )
+        expected_plan_context = _plan_context_digest(
+            actor_id=self.actor_id,
+            authenticated_principal_digest=self.authenticated_principal_digest,
+            purpose=self.purpose,
+            policy_id=self.policy_id,
+            policy_digest=self.policy_digest,
+            named_tool_contract_digest=self.named_tool_contract_digest,
+            profile_id=self.profile_id,
+            query_valid_time=self.query_valid_time,
+            serving_time=self.serving_time,
+            tool_requests=tuple(plan_entries),
+        )
+        if self.plan_context_digest != expected_plan_context:
+            raise HybridCompositionError(
+                "composition plan-context digest differs from the manifest"
+            )
         if not isinstance(self.candidates, tuple) or not all(
             isinstance(item, HybridCandidate) for item in self.candidates
         ):
@@ -1571,21 +1723,7 @@ class HybridCompositionReceipt:
             }
         )
         local_failure = self.reason in _COMPOSER_LOCAL_FAILURES
-        if blockers:
-            if self.candidates or self.exclusions or self.no_match or self.reason is None:
-                raise HybridCompositionError(
-                    "blocked composition cannot retain candidates or no-match"
-                )
-            if local_failure:
-                raise HybridCompositionError(
-                    "manifest-blocked composition cannot claim a local failure"
-                )
-            expected_outcome, expected_reason = _blocking_outcome(blockers)
-            if self.outcome is not expected_outcome or self.reason is not expected_reason:
-                raise HybridCompositionError(
-                    "blocked composition outcome differs from the manifest"
-                )
-        elif local_failure:
+        if local_failure:
             if (
                 self.outcome is not HybridCompositionOutcome.INCOMPLETE
                 or self.candidates
@@ -1594,6 +1732,16 @@ class HybridCompositionReceipt:
             ):
                 raise HybridCompositionError(
                     "local composition failure must be empty and incomplete"
+                )
+        elif blockers:
+            if self.candidates or self.exclusions or self.no_match or self.reason is None:
+                raise HybridCompositionError(
+                    "blocked composition cannot retain candidates or no-match"
+                )
+            expected_outcome, expected_reason = _blocking_outcome(blockers)
+            if self.outcome is not expected_outcome or self.reason is not expected_reason:
+                raise HybridCompositionError(
+                    "blocked composition outcome differs from the manifest"
                 )
         elif self.outcome is HybridCompositionOutcome.COMPLETE:
             if optional_noncomplete:
@@ -1677,7 +1825,7 @@ class HybridCompositionReceipt:
 
     def canonical_value(self) -> dict[str, object]:
         return {
-            "schema_version": "newsroom.increment5.hybrid-composition-receipt.v2",
+            "schema_version": "newsroom.increment5.hybrid-composition-receipt.v3",
             "composition_id": self.composition_id,
             "request_digest": self.request_digest,
             "request_id": self.request_id,
@@ -1773,7 +1921,7 @@ class HybridCompositionReceipt:
         }
         if set(value) != required:
             raise HybridCompositionError("composition receipt keys are not exact")
-        if value["schema_version"] != "newsroom.increment5.hybrid-composition-receipt.v2":
+        if value["schema_version"] != "newsroom.increment5.hybrid-composition-receipt.v3":
             raise HybridCompositionError("composition receipt schema differs")
         for name in ("manifest", "candidates", "exclusions", "known_omission_tools"):
             if not isinstance(value[name], list):
@@ -1889,7 +2037,25 @@ class HybridCompositionJournal:
                     raise HybridCompositionError(
                         "retained hybrid receipt digest is corrupt"
                     )
-                return HybridCompositionReceipt.from_canonical_bytes(raw)
+                retained = HybridCompositionReceipt.from_canonical_bytes(raw)
+                if retained.request_digest != request_digest:
+                    raise HybridCompositionError(
+                        "retained hybrid receipt request binding is corrupt"
+                    )
+                expected = producer()
+                if not isinstance(expected, HybridCompositionReceipt):
+                    raise HybridCompositionError(
+                        "hybrid producer returned wrong type"
+                    )
+                if expected.request_digest != request_digest:
+                    raise HybridCompositionError(
+                        "hybrid producer request digest differs"
+                    )
+                if expected.canonical_bytes != raw:
+                    raise HybridCompositionError(
+                        "retained hybrid receipt differs from deterministic replay"
+                    )
+                return retained
             receipt = producer()
             if not isinstance(receipt, HybridCompositionReceipt):
                 raise HybridCompositionError("hybrid producer returned wrong type")
@@ -1927,6 +2093,18 @@ class HybridComposer:
 
     def _produce(self, request: HybridCompositionRequest) -> HybridCompositionReceipt:
         manifest = _manifest(request)
+        try:
+            _validate_retained_inputs(request)
+        except (HybridCompositionError, ValueError, TypeError):
+            return _receipt(
+                request=request,
+                manifest=manifest,
+                outcome=HybridCompositionOutcome.INCOMPLETE,
+                reason=HybridCompositionReason.RECEIPT_INVALID,
+                candidates=(),
+                exclusions=(),
+                no_match=False,
+            )
         blockers = tuple(item for item in manifest if item.blocking)
         optional_noncomplete = tuple(
             item
@@ -2026,6 +2204,7 @@ def _manifest(request: HybridCompositionRequest) -> tuple[HybridManifestEntry, .
                     named_tool_purpose=None,
                     tool_request_digest=None,
                     tool_envelope_digest=None,
+                    named_tool_request_bytes_digest=None,
                     dispatch_receipt_digest=None,
                     execution_receipt_digest=None,
                     raw_upstream_receipt_digest=None,
@@ -2049,6 +2228,9 @@ def _manifest(request: HybridCompositionRequest) -> tuple[HybridManifestEntry, .
                 named_tool_purpose=value.envelope.purpose,
                 tool_request_digest=value.tool_request_digest,
                 tool_envelope_digest=value.tool_envelope_digest,
+                named_tool_request_bytes_digest=(
+                    value.named_tool_request_bytes_digest
+                ),
                 dispatch_receipt_digest=value.dispatch_receipt_digest,
                 execution_receipt_digest=value.execution_receipt_digest,
                 raw_upstream_receipt_digest=(
@@ -2258,6 +2440,10 @@ def _branch_origins(
     if tool_id is NamedToolId.BOUNDED_FULL_TEXT_RETRIEVAL:
         if not isinstance(receipt, FullTextBranchReceipt):
             raise HybridCompositionError("full-text receipt parser returned wrong type")
+        if receipt.authority_view_digest is None:
+            raise HybridCompositionError(
+                "complete full-text receipt lacks authority-view provenance"
+            )
         return tuple(
             HybridOrigin(
                 mode=HybridMode.FULL_TEXT,
@@ -2268,7 +2454,7 @@ def _branch_origins(
                 source_identity=hit.source_identity,
                 passage_id=hit.passage_id,
                 trust_scope=hit.trust_scope.value,
-                provenance_digest=_branch_hit_digest(hit.canonical_value()),
+                provenance_digest=receipt.authority_view_digest,
                 branch_hit_digest=_branch_hit_digest(hit.canonical_value()),
                 dispatch_receipt_digest=dispatch_digest,
                 upstream_receipt_digest=upstream_digest,
@@ -2348,8 +2534,13 @@ def _origin_sort_key(item: HybridOrigin) -> tuple[int, int, str, str]:
 
 
 def _candidate_sort_key(item: HybridCandidate) -> tuple[int, Fraction, int, str]:
+    precedence_order = {
+        HybridPrecedence.EXACT_FIRST: 0,
+        HybridPrecedence.EXPLICIT_LINEAGE: 1,
+        HybridPrecedence.APPROXIMATE: 2,
+    }
     return (
-        0 if item.precedence is HybridPrecedence.EXACT_FIRST else 1,
+        precedence_order[item.precedence],
         -item.score.fraction,
         item.best_branch_rank,
         item.dependency_root_id,
@@ -2394,7 +2585,14 @@ def _fuse(
                 precedence=(
                     HybridPrecedence.EXACT_FIRST
                     if any(item.mode is HybridMode.EXACT for item in root_origins)
-                    else HybridPrecedence.APPROXIMATE
+                    else (
+                        HybridPrecedence.EXPLICIT_LINEAGE
+                        if any(
+                            item.mode is HybridMode.ADMITTED_GRAPH
+                            for item in root_origins
+                        )
+                        else HybridPrecedence.APPROXIMATE
+                    )
                 ),
                 score=HybridReciprocalRankScore.from_fraction(score),
                 best_branch_rank=min(item.rank for item in root_origins),

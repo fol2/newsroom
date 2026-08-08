@@ -8,8 +8,15 @@ for the four retrieval branches and, when the declared purpose requires them,
 the current collision/authority and source/revision-impact tools. It produces
 one immutable composition receipt.
 
+Authority-backed receipt semantics are validated through the pure
+`named_tool_authority_receipt_validation` boundary. It checks retained bytes,
+component identities, rights and lifecycle state, temporal lineage and truthful
+outcomes without opening SQLite or another authority backend. The same closed
+validator can be reused by 5D2 hydration.
+
 The composer does not execute a retriever, read an authority store, hydrate
-factual bytes, construct the final Retrieval Context reserved for 5D2/#331, create or mutate a
+factual bytes, construct the final Retrieval Context reserved for 5D2/#331, create or
+mutate a
 Hypothesis or Candidate, call a provider or model, access a live source,
 publish, or activate production.
 
@@ -56,8 +63,11 @@ hybrid result.
 
 The immutable composition receipt retains the resulting plan-context digest
 and, for every present manifest entry, the exact named-tool purpose, request
-digest and envelope digest. Missing and not-required entries retain none of
-those identities.
+digest, envelope digest and canonical request-bytes digest. Receipt decoding
+recomputes that plan-context digest from the top-level caller/policy/time fields
+and the six-entry manifest; a substituted context cannot survive merely by
+recomputing the outer receipt digest. Missing and not-required entries retain
+none of those identities.
 
 ## Receipt validation
 
@@ -70,8 +80,16 @@ Before fusion, the composer revalidates every retained layer:
 - independently attributable raw upstream bytes, byte count and digest;
 - branch request digest, profile, generation and outcome binding;
 - query-valid and serving-time binding;
-- exact result count and no-match state; and
-- canonical branch receipt shape, including duplicate-key rejection.
+- exact result count and no-match state;
+- canonical branch receipt shape, including duplicate-key rejection; and
+- complete semantic validation of every supplied collision/authority and
+  source/revision-impact receipt, including coverage, current rights/lifecycle,
+  bounded temporal lineage and canonical ordering.
+
+Every supplied independently attributable raw receipt is revalidated before
+blocker precedence is interpreted. A recomputed malformed receipt therefore
+cannot hide behind a genuine missing, stale, policy-blocked, unavailable or
+incomplete manifest entry.
 
 The vector branch retains large exact integer proof values. Those mode-specific
 proof bytes are content-addressed with deterministic JSON but are never copied
@@ -93,10 +111,16 @@ point and pooled raw branch scores are not used.
 
 Candidates are ordered by:
 
-1. roots supported by the exact branch before approximate-only roots;
-2. reciprocal-rank score descending;
-3. best contributing branch rank ascending; and
-4. authoritative dependency-root identity ascending.
+1. roots supported by the exact branch;
+2. roots supported by explicit admitted-lineage graph evidence;
+3. approximate-only full-text/vector roots;
+4. reciprocal-rank score descending within each precedence class;
+5. best contributing branch rank ascending; and
+6. authoritative dependency-root identity ascending.
+
+This exact / explicit admitted-lineage / approximate ordering is independent of
+raw scores and can intentionally place a lower-RRF admitted lineage root before
+a higher-RRF similarity-only root.
 
 The caller cannot change `k=60`, weights, ordering, branch participation,
 result bound, or deduplication rule.
@@ -113,6 +137,11 @@ source identity, passage identity where applicable, trust/provenance digest,
 branch-hit digest, dispatch/upstream receipt digests, exact match signal, and
 complete admitted-graph path. The receipt marks the one score-bearing origin
 per represented mode.
+
+Full-text origins retain the branch receipt's authority-view digest as their
+provenance identity. The per-hit digest remains separate, so an audit can
+distinguish the authority snapshot that admitted the result from the individual
+ranked hit bytes.
 
 At most 12 roots are returned. Additional roots are retained as ordered
 `RESULT_BOUND` exclusions with their would-be rank, exact rational score and
@@ -156,13 +185,17 @@ unbounded copy of raw branch evidence.
 ## Replay and monitoring
 
 The local journal is first-writer-wins by idempotency key and semantic request
-digest. It stores canonical receipt bytes and digest, returns byte-identical
-results after restart, rejects semantic idempotency conflicts, duplicate JSON
-keys, scalar type confusion, and retained-byte tamper.
+digest. It stores canonical receipt bytes and digest. On restart it parses the
+retained receipt and independently re-derives the deterministic receipt from
+the current exact request before returning the retained bytes. It therefore
+rejects semantic idempotency conflicts, duplicate JSON keys, scalar type
+confusion, ordinary retained-byte tamper, and attacker-recomputed row digests
+whose receipt semantics differ from deterministic replay.
 
 Monitor the plan-context digest, actor/principal/policy binding, six manifest
 states, named-tool purposes and request/envelope digests, known omissions,
-exact-first/approximate precedence, contributing modes, score-bearing origins, dependency-root count,
+exact-first/explicit admitted-lineage/approximate precedence, contributing
+modes, score-bearing origins, dependency-root count,
 result-bound exclusions, receipt validation failures and response-bound
 failures separately. Do not infer absence from any non-complete outcome.
 

@@ -17,22 +17,26 @@ rights/freshness revalidation and final truthful context outcomes remain
 | Requirement | Delivery evidence | Verification evidence |
 |---|---|---|
 | `GRAG-035` independently attributable hybrid response | exact six-entry manifest and retained named request, dispatch, execution and upstream receipt identities | accepted-request/receipt round trip, input-order replay and tamper tests |
-| `GRAG-035` one-request coherence | one actor/principal/policy/contract/profile/time context plus fixed compatible named-tool purposes | cross-principal, request-byte, purpose and request-digest mismatch regressions |
-| `GRAG-035` exact/source-native precedence | exact-supported dependency roots sort before approximate-only roots | exact-first ordering and adversarial high-score approximate-root tests |
+| `GRAG-035` one-request coherence | one actor/principal/policy/contract/profile/time context plus fixed compatible named-tool purposes and a receipt-recomputed plan-context digest | cross-principal, request-byte, purpose, request-digest and plan-context substitution regressions |
+| `GRAG-035` retained authority-evidence integrity | supplied collision/authority and source-impact raw receipts are semantically revalidated before blocker precedence | positive compatibility plus recomputed rights and temporal-lineage tamper regressions |
+| `GRAG-035` exact/source-native precedence | exact-supported roots sort first, explicit admitted-lineage roots second, and similarity-only roots third | exact-first and admitted-lineage ordering against adversarial higher-RRF approximate roots |
 | `GRAG-035` deterministic fusion | equal-weight RRF with fixed `k=60` and reduced rational scores | exact fraction, tie order, branch-order and scalar-type tests |
 | `GRAG-035` no pooled raw score comparison | only branch rank contributes; raw proof/score remains behind branch-hit digest | vector large-integer proof, source inspection and score invariance tests |
-| `GRAG-035` authoritative deduplication | merge only identical upstream `dependency_root_id`; retain every origin and path | shared-root, similarity-only separate-root and duplicate-mode regressions |
+| `GRAG-035` authoritative deduplication | merge only identical upstream `dependency_root_id`; retain every origin and path, with full-text authority-view provenance separate from per-hit identity | shared-root, similarity-only separate-root, provenance and duplicate-mode regressions |
 | `GRAG-035` bounded ordering and exclusions | 12 retained roots plus explicit ordered `RESULT_BOUND` exclusions | thirteen-root truncation and would-be-rank tests |
 | `TRI-022` truthful request-level status contribution | fixed purpose-to-tool requirements, explicit manifest states and known omissions | missing, stale, blocked, unavailable, invalid-receipt and no-match matrix |
 | no false `NO_MATCH` | no-match only after all mandatory branch work and purpose-required checks complete | zero-result complete case and every non-complete blocker case |
 | no authority or external effect | zero call/spend counters, `authority_effect=NONE`, no qualification/activation authority | claim rejection and forbidden-surface inspection |
-| deterministic restart | first-writer-wins local receipt journal | restart byte replay, semantic conflict and retained-byte tamper tests |
+| deterministic restart | first-writer-wins local receipt journal with request-level deterministic re-derivation | restart byte replay, semantic conflict, retained-byte tamper and recomputed-digest semantic substitution tests |
 
 ## Core implementation evidence
 
 - `newsroom/increment5/hybrid_composer.py` — strict request/input/manifest,
-  receipt parser, exact-first RRF, dependency-root deduplication, explicit
-  exclusions and immutable replay journal;
+  exact-first RRF, dependency-root deduplication, explicit exclusions and
+  immutable replay journal;
+- `newsroom/increment5/named_tool_authority_receipt_validation.py` — pure,
+  reusable semantic validation of retained collision/authority and
+  source-impact receipt bytes without opening an authority store;
 - `newsroom/tests/test_increment5d1_hybrid_composer.py` — accepted 5C receipt
   compatibility, ordering, deduplication, no-match, invalid evidence, bounds,
   replay, tamper and source-boundary tests;
