@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import sqlite3
+import sys
+import zipfile
 
 import pytest
 
+import newsroom.authority.migrations as authority_migrations
+import newsroom.increment6.readiness as readiness_module
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.migrations import (
-    EXPECTED_MIGRATION_HISTORY,
-    EXPECTED_SCHEMA_FINGERPRINT,
-    SCHEMA_VERSION,
     apply_pending_migrations,
     schema_fingerprint,
 )
@@ -34,8 +36,8 @@ _CHILD_ISSUES = tuple(range(354, 369))
 _MIGRATION_SLOTS = {
     357: 17,
     358: 18,
-    361: 19,
-    362: 20,
+    362: 19,
+    361: 20,
     363: 21,
     364: 22,
     365: 23,
@@ -70,6 +72,9 @@ def test_readiness_is_bound_to_the_exact_final_increment5_head() -> None:
     assert readiness.accepted_base_tree == _BASE_TREE
     assert readiness.accepted_schema_version == 16
     assert readiness.accepted_schema_fingerprint == _BASE_FINGERPRINT
+    assert readiness.accepted_migration_history == (
+        authority_migrations.EXPECTED_MIGRATION_HISTORY[:16]
+    )
     assert readiness.effective_when == "PRESENT_ON_MAIN_AFTER_REVIEWED_6R_MERGE"
     assert readiness.production_activation_authorised is False
     assert readiness.contract_digest == INCREMENT_6_READINESS_DIGEST
@@ -83,6 +88,7 @@ def test_current_head_interface_inventory_resolves_exact_symbols_and_digests() -
         "increment5.retrieval-context",
         "increment5.current-collision-receipt",
         "integrated.fixture-identities",
+        "discovery.lead-disposition-and-watch",
         "authority.checked-schema",
     )
     assert validate_interface_inventory(INCREMENT_6_READINESS) == ()
@@ -97,6 +103,14 @@ def test_current_head_interface_inventory_resolves_exact_symbols_and_digests() -
             "sha256:9550a4fbad491fce4bf9b62be501cbdf8b7735beb56c038f65e346f1a3d9c3af"
         ),
     }
+    discovery = inventory[3]
+    assert {
+        "DecisionTerminality",
+        "NextAction",
+        "NextActionKind",
+        "ReasonBasisClass",
+        "StructuredReason",
+    } <= set(discovery.symbols)
 
 
 def test_every_increment6_atom_has_one_disjoint_public_and_schema_owner() -> None:
@@ -111,6 +125,9 @@ def test_every_increment6_atom_has_one_disjoint_public_and_schema_owner() -> Non
     modules = [name for item in allocations for name in item.public_modules]
     schema_ids = [name for item in allocations for name in item.schema_ids]
     tables = [name for item in allocations for name in item.table_names]
+    interfaces = [
+        name for item in allocations for name in item.interface_ownership
+    ]
     migration_modules = [
         item.migration_module
         for item in allocations
@@ -119,6 +136,7 @@ def test_every_increment6_atom_has_one_disjoint_public_and_schema_owner() -> Non
     assert len(modules) == len(set(modules))
     assert len(schema_ids) == len(set(schema_ids))
     assert len(tables) == len(set(tables))
+    assert len(interfaces) == len(set(interfaces))
     assert len(migration_modules) == len(set(migration_modules))
 
     assert readiness.allocation_by_issue[355].public_modules == (
@@ -129,6 +147,18 @@ def test_every_increment6_atom_has_one_disjoint_public_and_schema_owner() -> Non
     )
     assert readiness.allocation_by_issue[357].public_modules == (
         "newsroom.increment6.handoffs",
+    )
+    assert {
+        "CANONICAL_NEXT_ACTION",
+        "DECISION_TERMINALITY",
+        "WATCH_CONDITION_MAPPING",
+        "SUPPLEMENTAL_ACTION_MAPPING",
+    } <= set(readiness.allocation_by_issue[355].interface_ownership)
+    assert "SUPPLEMENTAL_DISCOVERY_REENTRY" in (
+        readiness.allocation_by_issue[358].interface_ownership
+    )
+    assert "SUPPLEMENTAL_DISCOVERY_REENTRY_PROOF" in (
+        readiness.allocation_by_issue[368].interface_ownership
     )
 
 
@@ -156,6 +186,11 @@ def test_dependency_graph_is_acyclic_and_matches_safe_parallel_waves() -> None:
     wave_by_issue = {
         issue: wave for wave, issues in readiness.parallel_waves.items() for issue in issues
     }
+    wave_issues = tuple(
+        issue for issues in readiness.parallel_waves.values() for issue in issues
+    )
+    assert len(wave_issues) == len(set(wave_issues))
+    assert tuple(sorted(wave_issues)) == _CHILD_ISSUES
     assert set(wave_by_issue) == set(_CHILD_ISSUES)
     for allocation in readiness.allocations:
         for dependency in allocation.dependencies:
@@ -200,6 +235,10 @@ def test_gate_tiers_and_effect_boundaries_are_explicit() -> None:
     assert "FOCUSED_TESTS" in readiness.gate_requirements[GateTier.L]
     assert "CHECKED_MIGRATION_UPGRADE_AND_ROLLBACK" in readiness.gate_requirements[GateTier.S]
     assert "SAME_EXACT_MAIN_SHA" in readiness.gate_requirements[GateTier.M]
+    assert (
+        "SUPPLEMENTAL_DISCOVERY_REENTRY_PATH"
+        in readiness.gate_requirements[GateTier.M]
+    )
     assert "ZERO_P1_OR_MATERIAL_P2" in readiness.gate_requirements[GateTier.M]
 
 
@@ -235,10 +274,81 @@ def test_readiness_contract_is_canonical_and_duplicate_or_changed_bytes_fail_clo
         load_increment6_readiness_contract(changed_path)
 
 
-def test_6r_reserves_future_slots_without_advancing_the_checked_schema() -> None:
-    assert SCHEMA_VERSION == 16
-    assert EXPECTED_MIGRATION_HISTORY[-1][0] == 16
-    assert EXPECTED_SCHEMA_FINGERPRINT == _BASE_FINGERPRINT
+def test_inherited_symbol_shape_drift_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        readiness_module._authority_execution,
+        "NamedAuthorityExecutionReceipt",
+        object,
+    )
+    for symbol in (
+        "DecisionTerminality",
+        "NextAction",
+        "NextActionKind",
+        "ReasonBasisClass",
+        "StructuredReason",
+    ):
+        monkeypatch.setattr(readiness_module._discovery, symbol, object)
+    monkeypatch.setattr(
+        readiness_module._receipt_validation_core,
+        "validate_named_authority_receipt",
+        lambda **_: None,
+    )
+
+    errors = validate_interface_inventory(INCREMENT_6_READINESS)
+    assert any("NamedAuthorityExecutionReceipt" in error for error in errors)
+    assert all(any(symbol in error for error in errors) for symbol in (
+        "DecisionTerminality",
+        "NextAction",
+        "NextActionKind",
+        "ReasonBasisClass",
+        "StructuredReason",
+    ))
+    assert any(
+        "_named_tool_authority_receipt_validation_core:"
+        "validate_named_authority_receipt" in error
+        for error in errors
+    )
+
+
+def test_accepted_v16_history_is_a_prefix_not_a_future_migration_freeze(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    future_history = INCREMENT_6_READINESS.accepted_migration_history + (
+        (17, "evaluation_handoff_authority_v17", "sha256:" + "f" * 64),
+    )
+    monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 17)
+    monkeypatch.setattr(
+        authority_migrations,
+        "EXPECTED_MIGRATION_HISTORY",
+        future_history,
+    )
+    monkeypatch.setattr(
+        authority_migrations,
+        "EXPECTED_SCHEMA_FINGERPRINT",
+        "sha256:" + "e" * 64,
+    )
+
+    assert validate_interface_inventory(INCREMENT_6_READINESS) == ()
+
+    monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 18)
+    monkeypatch.setattr(
+        authority_migrations,
+        "EXPECTED_MIGRATION_HISTORY",
+        INCREMENT_6_READINESS.accepted_migration_history
+        + ((18, "wrong_and_skipped_v17", "not-a-digest"),),
+    )
+    errors = validate_interface_inventory(INCREMENT_6_READINESS)
+    assert any("contiguous" in error for error in errors)
+
+
+def test_6r_preserves_the_accepted_history_and_validates_the_live_schema() -> None:
+    accepted = INCREMENT_6_READINESS.accepted_migration_history
+    assert authority_migrations.SCHEMA_VERSION >= 16
+    assert authority_migrations.EXPECTED_MIGRATION_HISTORY[: len(accepted)] == accepted
+    assert accepted[-1][0] == 16
+    assert accepted[-1][1] == "graphiti_proposal_adapter_v16"
 
     conn = sqlite3.connect(":memory:", isolation_level=None)
     try:
@@ -247,8 +357,12 @@ def test_6r_reserves_future_slots_without_advancing_the_checked_schema() -> None
             conn,
             applied_at="2042-08-09T12:00:00.000000Z",
         )
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
-        assert schema_fingerprint(conn) == _BASE_FINGERPRINT
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == (
+            authority_migrations.SCHEMA_VERSION
+        )
+        assert schema_fingerprint(conn) == (
+            authority_migrations.EXPECTED_SCHEMA_FINGERPRINT
+        )
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
     finally:
@@ -264,3 +378,50 @@ def test_readiness_views_are_deeply_immutable() -> None:
         INCREMENT_6_READINESS.interface_inventory[0].symbol_digests[
             "RETRIEVAL_CONTEXT_CONTRACT_DIGEST"
         ] = "sha256:00"  # type: ignore[index]
+
+
+def test_built_wheel_contains_and_loads_all_readiness_resources(
+    tmp_path: Path,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    wheel_dir = tmp_path / "wheel"
+    completed = subprocess.run(
+        ["uv", "build", "--out-dir", str(wheel_dir)],
+        cwd=repository_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    wheels = tuple(wheel_dir.glob("*.whl"))
+    assert len(wheels) == 1
+
+    install_root = tmp_path / "installed"
+    with zipfile.ZipFile(wheels[0]) as archive:
+        names = set(archive.namelist())
+        assert "newsroom/increment6/increment6_readiness_v1.json" in names
+        assert "newsroom/increment5/data/increment5a_retrieval_contract_v1.json" in names
+        archive.extractall(install_root)
+
+    smoke = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            (
+                "import sys; "
+                f"sys.path.insert(0, {str(install_root)!r}); "
+                "import newsroom.increment6 as value; "
+                "assert value.READINESS_CONTRACT_PATH.is_file(); "
+                "assert value.validate_interface_inventory("
+                "value.INCREMENT_6_READINESS) == ()"
+            ),
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=30,
+    )
+    assert smoke.returncode == 0, smoke.stderr.decode("utf-8")

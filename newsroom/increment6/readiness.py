@@ -9,12 +9,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+import inspect
 import json
 from pathlib import Path
 from types import MappingProxyType, ModuleType
 from typing import Any
 
 import newsroom.authority.migrations as _authority_migrations
+import newsroom.discovery as _discovery
+import newsroom.increment5._named_tool_authority_receipt_validation_core as _receipt_validation_core
 import newsroom.increment5.named_tool_authority_execution as _authority_execution
 import newsroom.increment5.named_tool_authority_receipt_validation as _receipt_validation
 import newsroom.increment5.named_tool_contracts as _named_tool_contracts
@@ -24,21 +27,24 @@ from newsroom.authority.canonical import (
     CanonicalizationError,
     canonical_json_bytes,
     digest_bytes,
+    validate_sha256_digest,
 )
 
 
 EXPECTED_READINESS_DIGEST = (
-    "sha256:c4bde5f66cc2a3293078434f2c331889a384d0622107a238718331bc064ba53c"
+    "sha256:13b43c927e4222c143b8691eaf179eb956096c19a72f4cc29cae13008d6e0590"
 )
-READINESS_CONTRACT_PATH = (
-    Path(__file__).with_name("data") / "increment6_readiness_v1.json"
-)
+READINESS_CONTRACT_PATH = Path(__file__).with_name("increment6_readiness_v1.json")
 _INTERFACE_MODULES: Mapping[str, ModuleType] = MappingProxyType(
     {
         "newsroom.authority.migrations": _authority_migrations,
+        "newsroom.discovery": _discovery,
         "newsroom.increment5.named_tool_authority_execution": _authority_execution,
         "newsroom.increment5.named_tool_authority_receipt_validation": (
             _receipt_validation
+        ),
+        "newsroom.increment5._named_tool_authority_receipt_validation_core": (
+            _receipt_validation_core
         ),
         "newsroom.increment5.named_tool_contracts": _named_tool_contracts,
         "newsroom.increment5.retrieval_context": _retrieval_context,
@@ -62,6 +68,9 @@ class InterfaceCompanion:
     module: str
     symbols: tuple[str, ...]
     symbol_values: Mapping[str, object]
+    source_digests: Mapping[str, str]
+    symbol_signatures: Mapping[str, str]
+    module_source_digest: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +80,9 @@ class InterfaceInventoryItem:
     symbols: tuple[str, ...]
     symbol_digests: Mapping[str, str]
     symbol_values: Mapping[str, object]
+    source_digests: Mapping[str, str]
+    symbol_signatures: Mapping[str, str]
+    module_source_digest: str | None
     companions: tuple[InterfaceCompanion, ...]
     boundary: str
 
@@ -103,6 +115,7 @@ class Increment6ReadinessContract:
     accepted_schema_version: int
     accepted_schema_fingerprint: str
     accepted_last_migration_name: str
+    accepted_migration_history: tuple[tuple[int, str, str], ...]
     effective_when: str
     production_activation_authorised: bool
     interface_inventory: tuple[InterfaceInventoryItem, ...]
@@ -161,6 +174,27 @@ def _integers(value: object, field: str) -> tuple[int, ...]:
     return tuple(_strict_int(item, field) for item in value)
 
 
+def _migration_history(
+    value: object, field: str
+) -> tuple[tuple[int, str, str], ...]:
+    if not isinstance(value, list):
+        raise Increment6ReadinessError(f"{field} must be an array")
+    history: list[tuple[int, str, str]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, list) or len(item) != 3:
+            raise Increment6ReadinessError(f"{field}[{index}] must be a triple")
+        version = _strict_int(item[0], f"{field}[{index}].version")
+        name, checksum = item[1], item[2]
+        if not isinstance(name, str) or not name:
+            raise Increment6ReadinessError(f"{field}[{index}].name must be text")
+        if not isinstance(checksum, str) or not checksum:
+            raise Increment6ReadinessError(
+                f"{field}[{index}].checksum must be text"
+            )
+        history.append((version, name, checksum))
+    return tuple(history)
+
+
 def _freeze(value: object) -> object:
     if isinstance(value, dict):
         return MappingProxyType({name: _freeze(item) for name, item in value.items()})
@@ -179,14 +213,38 @@ def _frozen_mapping(value: object, field: str) -> Mapping[str, object]:
 
 def _parse_companion(value: object, field: str) -> InterfaceCompanion:
     raw = _mapping(value, field)
-    allowed = {"module", "symbols", "symbol_values"}
+    allowed = {
+        "module",
+        "symbols",
+        "symbol_values",
+        "source_digests",
+        "symbol_signatures",
+        "module_source_digest",
+    }
     if not set(raw) <= allowed or not {"module", "symbols"} <= set(raw):
         raise Increment6ReadinessError(f"{field} fields differ")
     symbol_values = _mapping(raw.get("symbol_values", {}), f"{field}.symbol_values")
+    source_digests = _mapping(
+        raw.get("source_digests", {}), f"{field}.source_digests"
+    )
+    symbol_signatures = _mapping(
+        raw.get("symbol_signatures", {}), f"{field}.symbol_signatures"
+    )
     return InterfaceCompanion(
         module=str(raw["module"]),
         symbols=_strings(raw["symbols"], f"{field}.symbols"),
         symbol_values=MappingProxyType(dict(symbol_values)),
+        source_digests=MappingProxyType(
+            {str(name): str(item) for name, item in source_digests.items()}
+        ),
+        symbol_signatures=MappingProxyType(
+            {str(name): str(item) for name, item in symbol_signatures.items()}
+        ),
+        module_source_digest=(
+            str(raw["module_source_digest"])
+            if raw.get("module_source_digest") is not None
+            else None
+        ),
     )
 
 
@@ -201,6 +259,9 @@ def _parse_interface(value: object, index: int) -> InterfaceInventoryItem:
             "symbols",
             "symbol_digests",
             "symbol_values",
+            "source_digests",
+            "symbol_signatures",
+            "module_source_digest",
             "companions",
             "boundary",
         },
@@ -208,6 +269,10 @@ def _parse_interface(value: object, index: int) -> InterfaceInventoryItem:
     )
     digests = _mapping(raw["symbol_digests"], f"{field}.symbol_digests")
     values = _mapping(raw["symbol_values"], f"{field}.symbol_values")
+    source_digests = _mapping(raw["source_digests"], f"{field}.source_digests")
+    signatures = _mapping(
+        raw["symbol_signatures"], f"{field}.symbol_signatures"
+    )
     companions = raw["companions"]
     if not isinstance(companions, list):
         raise Increment6ReadinessError(f"{field}.companions must be an array")
@@ -219,6 +284,17 @@ def _parse_interface(value: object, index: int) -> InterfaceInventoryItem:
             {str(name): str(item) for name, item in digests.items()}
         ),
         symbol_values=MappingProxyType(dict(values)),
+        source_digests=MappingProxyType(
+            {str(name): str(item) for name, item in source_digests.items()}
+        ),
+        symbol_signatures=MappingProxyType(
+            {str(name): str(item) for name, item in signatures.items()}
+        ),
+        module_source_digest=(
+            str(raw["module_source_digest"])
+            if raw["module_source_digest"] is not None
+            else None
+        ),
         companions=tuple(
             _parse_companion(item, f"{field}.companions[{position}]")
             for position, item in enumerate(companions)
@@ -303,6 +379,14 @@ def _validate_allocation(contract: Increment6ReadinessContract) -> None:
         [name for item in contract.allocations for name in item.table_names],
         "table name",
     )
+    require_unique(
+        [
+            name
+            for item in contract.allocations
+            for name in item.interface_ownership
+        ],
+        "public interface",
+    )
 
     migration_allocations = [
         item for item in contract.allocations if item.migration_version is not None
@@ -334,19 +418,40 @@ def _validate_allocation(contract: Increment6ReadinessContract) -> None:
         ):
             raise Increment6ReadinessError("migration ownership is incomplete")
 
+    wave_issues = tuple(
+        issue
+        for issues in contract.parallel_waves.values()
+        for issue in issues
+    )
+    if tuple(sorted(wave_issues)) != expected_issues:
+        raise Increment6ReadinessError(
+            "parallel waves must allocate every child exactly once"
+        )
     wave_by_issue = {
         issue: wave
         for wave, issues in contract.parallel_waves.items()
         for issue in issues
     }
-    if set(wave_by_issue) != set(expected_issues):
-        raise Increment6ReadinessError("parallel waves do not cover every child")
     for item in contract.allocations:
+        if len(item.dependencies) != len(set(item.dependencies)):
+            raise Increment6ReadinessError("dependency is repeated")
         for dependency in item.dependencies:
             if dependency in wave_by_issue and (
                 wave_by_issue[dependency] >= wave_by_issue[item.issue_number]
             ):
                 raise Increment6ReadinessError("parallel wave precedes its dependency")
+
+    migration_merge_order = tuple(
+        item.migration_version
+        for item in sorted(
+            migration_allocations,
+            key=lambda item: (wave_by_issue[item.issue_number], item.issue_number),
+        )
+    )
+    if migration_merge_order != tuple(range(17, 26)):
+        raise Increment6ReadinessError(
+            "migration reservation conflicts with admitted merge waves"
+        )
 
 
 def load_increment6_readiness_contract(path: Path) -> Increment6ReadinessContract:
@@ -404,6 +509,7 @@ def load_increment6_readiness_contract(path: Path) -> Increment6ReadinessContrac
                 "schema_version",
                 "schema_fingerprint",
                 "last_migration_name",
+                "migration_history",
             },
             "accepted_base",
         )
@@ -453,6 +559,10 @@ def load_increment6_readiness_contract(path: Path) -> Increment6ReadinessContrac
             ),
             accepted_schema_fingerprint=str(accepted["schema_fingerprint"]),
             accepted_last_migration_name=str(accepted["last_migration_name"]),
+            accepted_migration_history=_migration_history(
+                accepted["migration_history"],
+                "accepted_base.migration_history",
+            ),
             effective_when=str(payload["effective_when"]),
             production_activation_authorised=production_activation_authorised,
             interface_inventory=tuple(
@@ -489,6 +599,10 @@ def load_increment6_readiness_contract(path: Path) -> Increment6ReadinessContrac
         or contract.accepted_base_tree
         != "069f19698f8bfe6d0f8453219ccd961c89be94c4"
         or contract.accepted_schema_version != 16
+        or tuple(item[0] for item in contract.accepted_migration_history)
+        != tuple(range(1, 17))
+        or contract.accepted_migration_history[-1][1]
+        != contract.accepted_last_migration_name
         or contract.effective_when != "PRESENT_ON_MAIN_AFTER_REVIEWED_6R_MERGE"
         or contract.production_activation_authorised
     ):
@@ -504,11 +618,23 @@ def _validate_module_anchor(
     module_name: str,
     symbols: tuple[str, ...],
     expected_values: Mapping[str, object],
+    source_digests: Mapping[str, str],
+    symbol_signatures: Mapping[str, str],
+    module_source_digest: str | None,
 ) -> list[str]:
     errors: list[str] = []
     module = _INTERFACE_MODULES.get(module_name)
     if module is None:
         return [f"{module_name}: module is outside the reviewed inventory"]
+    if module_source_digest is not None:
+        module_path = getattr(module, "__file__", None)
+        try:
+            raw_module = Path(module_path).read_bytes()
+        except (OSError, TypeError):
+            errors.append(f"{module_name}: module source is unavailable")
+        else:
+            if digest_bytes(raw_module) != module_source_digest:
+                errors.append(f"{module_name}: module source differs")
     for symbol in symbols:
         if not hasattr(module, symbol):
             errors.append(f"{module_name}:{symbol}: missing")
@@ -517,6 +643,85 @@ def _validate_module_anchor(
             errors.append(f"{module_name}:{symbol}: missing")
         elif getattr(module, symbol) != expected:
             errors.append(f"{module_name}:{symbol}: value differs")
+    for symbol, expected in source_digests.items():
+        if not hasattr(module, symbol):
+            continue
+        try:
+            source = inspect.getsource(getattr(module, symbol)).encode("utf-8")
+        except (OSError, TypeError):
+            errors.append(f"{module_name}:{symbol}: source is unavailable")
+        else:
+            if digest_bytes(source) != expected:
+                errors.append(f"{module_name}:{symbol}: source differs")
+    for symbol, expected in symbol_signatures.items():
+        if not hasattr(module, symbol):
+            continue
+        try:
+            actual = str(inspect.signature(getattr(module, symbol)))
+        except (TypeError, ValueError):
+            errors.append(f"{module_name}:{symbol}: signature is unavailable")
+        else:
+            if actual != expected:
+                errors.append(f"{module_name}:{symbol}: signature differs")
+    return errors
+
+
+def _validate_schema_prefix(
+    contract: Increment6ReadinessContract,
+) -> list[str]:
+    """Admit additive successors while retaining the exact accepted v16 prefix."""
+
+    errors: list[str] = []
+    history = _authority_migrations.EXPECTED_MIGRATION_HISTORY
+    accepted = contract.accepted_migration_history
+    if (
+        not isinstance(history, tuple)
+        or len(history) < len(accepted)
+        or history[: len(accepted)] != accepted
+    ):
+        errors.append("newsroom.authority.migrations: accepted history prefix differs")
+    suffix = history[len(accepted) :] if isinstance(history, tuple) else ()
+    expected_names = {
+        item.migration_version: item.migration_name
+        for item in contract.allocations
+        if item.migration_version is not None
+    }
+    for index, entry in enumerate(suffix, start=contract.accepted_schema_version + 1):
+        if not isinstance(entry, tuple) or len(entry) != 3:
+            errors.append("newsroom.authority.migrations: suffix entry is malformed")
+            continue
+        version, name, checksum = entry
+        if version != index:
+            errors.append("newsroom.authority.migrations: suffix is not contiguous")
+        expected_name = expected_names.get(index)
+        if expected_name is not None and name != expected_name:
+            errors.append(
+                f"newsroom.authority.migrations: reserved v{index} name differs"
+            )
+        try:
+            validate_sha256_digest(checksum, field="migration checksum")
+        except (TypeError, ValueError):
+            errors.append(
+                f"newsroom.authority.migrations: v{index} checksum is malformed"
+            )
+    if (
+        isinstance(_authority_migrations.SCHEMA_VERSION, bool)
+        or not isinstance(_authority_migrations.SCHEMA_VERSION, int)
+        or _authority_migrations.SCHEMA_VERSION < contract.accepted_schema_version
+    ):
+        errors.append("newsroom.authority.migrations: schema version regressed")
+    elif (
+        isinstance(history, tuple)
+        and history
+        and history[-1][0] != _authority_migrations.SCHEMA_VERSION
+    ):
+        errors.append("newsroom.authority.migrations: live history/version differ")
+    if (
+        _authority_migrations.SCHEMA_VERSION == contract.accepted_schema_version
+        and _authority_migrations.EXPECTED_SCHEMA_FINGERPRINT
+        != contract.accepted_schema_fingerprint
+    ):
+        errors.append("newsroom.authority.migrations: accepted fingerprint differs")
     return errors
 
 
@@ -536,6 +741,9 @@ def validate_interface_inventory(
                 module_name=item.module,
                 symbols=item.symbols,
                 expected_values=expected,
+                source_digests=item.source_digests,
+                symbol_signatures=item.symbol_signatures,
+                module_source_digest=item.module_source_digest,
             )
         )
         for companion in item.companions:
@@ -544,8 +752,12 @@ def validate_interface_inventory(
                     module_name=companion.module,
                     symbols=companion.symbols,
                     expected_values=companion.symbol_values,
+                    source_digests=companion.source_digests,
+                    symbol_signatures=companion.symbol_signatures,
+                    module_source_digest=companion.module_source_digest,
                 )
             )
+    errors.extend(_validate_schema_prefix(contract))
     return tuple(sorted(errors))
 
 

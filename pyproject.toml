@@ -54,5 +54,8 @@ rss-pool-update = "scripts._cli:rss_pool_update"
 [tool.hatch.build.targets.wheel]
 packages = ["newsroom", "scripts"]
 
+[tool.hatch.build.force-include]
+"newsroom/increment5/data" = "newsroom/increment5/data"
+
 [tool.pytest.ini_options]
 testpaths = ["newsroom/tests"]
