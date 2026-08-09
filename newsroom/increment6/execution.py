@@ -16,13 +16,26 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Self
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import (
+    MAX_SAFE_INTEGER,
+    CanonicalizationError,
+    canonical_json_bytes,
+    digest_bytes,
+)
 from newsroom.increment6.outcomes import (
     ContractAuthority,
     ContractEffect,
     PrioritySelection,
 )
 from newsroom.increment6.proposals import FixtureWorkerKind, WorkerAttemptBinding
+from newsroom.increment6.scheduling import (
+    CapacityAllocationDisposition,
+    CapacityItemAllocation,
+    ReservedCapacityDecision,
+)
+from newsroom.increment6.work_items import (
+    TriageWorkItemVersion,
+)
 
 EXECUTION_BATCH = "EXACT_NO_AUTHORITY_EXECUTION_BATCH"
 WORKER_ATTEMPT = "DETERMINISTIC_NO_AUTHORITY_WORKER_ATTEMPT"
@@ -32,10 +45,14 @@ EXECUTION_BATCH_SCHEMA = "newsroom.increment6.execution-batch.v1"
 WORKER_ATTEMPT_SCHEMA = "newsroom.increment6.worker-attempt.v1"
 WORK_ITEM_LEASE_SCHEMA = "newsroom.increment6.work-item-lease.v1"
 
-_MAX_BATCH_MEMBERS = 64
-_MAX_CANONICAL_BYTES = 262_144
-_MAX_CANONICAL_DEPTH = 24
-_MAX_CANONICAL_NODES = 16_384
+_MAX_BATCH_MEMBERS = 48
+_MAX_MEMBER_BYTES = 262_144
+_MAX_SCHEDULING_BYTES = 48 * 16_384 + 131_072
+_MAX_CANONICAL_BYTES = (
+    _MAX_BATCH_MEMBERS * _MAX_MEMBER_BYTES + _MAX_SCHEDULING_BYTES + 131_072
+)
+_MAX_CANONICAL_DEPTH = 68
+_MAX_CANONICAL_NODES = _MAX_CANONICAL_BYTES // 2 + 1
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,255}\Z")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
@@ -49,6 +66,13 @@ class LeaseLifecycle(StrEnum):
     CLAIMED = "CLAIMED"
     RELEASED = "RELEASED"
     EXPIRED = "EXPIRED"
+
+
+class LeaseProgress(StrEnum):
+    NOT_STARTED = "NOT_STARTED"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    INTERRUPTED = "INTERRUPTED"
 
 
 def _token(value: object, field: str) -> str:
@@ -80,8 +104,10 @@ def _digest(value: object, field: str) -> str:
 
 
 def _integer(value: object, field: str, *, minimum: int = 1) -> int:
-    if type(value) is not int or value < minimum:
-        raise ExecutionContractError(f"{field} must be an exact integer")
+    if type(value) is not int or not minimum <= value <= MAX_SAFE_INTEGER:
+        raise ExecutionContractError(
+            f"{field} must be an exact interoperable bounded integer"
+        )
     return value
 
 
@@ -98,11 +124,14 @@ def _utc(value: object, field: str) -> str:
 
 
 def _utc_value(value: str) -> datetime:
-    return datetime.fromisoformat(value)
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ExecutionContractError("UTC value is malformed") from exc
 
 
 def _exact(value: object, fields: set[str], name: str) -> dict[str, object]:
-    if not isinstance(value, dict) or set(value) != fields:
+    if type(value) is not dict or set(value) != fields:
         raise ExecutionContractError(f"{name} fields differ")
     return value
 
@@ -119,8 +148,25 @@ def _decode(raw: bytes) -> dict[str, object]:
             result[key] = value
         return result
 
+    def bounded_integer(text: str) -> int:
+        if len(text.lstrip("-")) > 16:
+            raise ExecutionContractError("canonical integer exceeds safe range")
+        value = int(text)
+        if not -MAX_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER:
+            raise ExecutionContractError("canonical integer exceeds safe range")
+        return value
+
+    def reject_float(_: str) -> float:
+        raise ExecutionContractError("floating-point values are unsupported")
+
     try:
-        value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique)
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=unique,
+            parse_int=bounded_integer,
+            parse_float=reject_float,
+            parse_constant=reject_float,
+        )
     except ExecutionContractError:
         raise
     except (
@@ -151,11 +197,39 @@ def _decode(raw: bytes) -> dict[str, object]:
     try:
         if canonical_json_bytes(value) != raw:
             raise ExecutionContractError("canonical input bytes differ")
-    except (UnicodeError, ValueError, TypeError, RecursionError, MemoryError) as exc:
+    except (
+        CanonicalizationError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        OverflowError,
+        RecursionError,
+        MemoryError,
+    ) as exc:
         if isinstance(exc, ExecutionContractError):
             raise
         raise ExecutionContractError("canonical input cannot be normalised") from exc
     return value
+
+
+def _canonical(value: object, field: str) -> bytes:
+    try:
+        result = canonical_json_bytes(value)
+    except (
+        CanonicalizationError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        OverflowError,
+        RecursionError,
+        MemoryError,
+    ) as exc:
+        raise ExecutionContractError(
+            f"{field} is not canonically representable"
+        ) from exc
+    if len(result) > _MAX_CANONICAL_BYTES:
+        raise ExecutionContractError(f"{field} exceeds the execution envelope")
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +240,45 @@ class ExecutionBatchMember:
     retrieval_context_id: str
     retrieval_context_digest: str
     priority: PrioritySelection
+    work_item_version_bytes: bytes
+    scheduling_allocation_digest: str
+
+    @classmethod
+    def from_producers(
+        cls,
+        version: TriageWorkItemVersion,
+        allocation: CapacityItemAllocation,
+    ) -> Self:
+        if (
+            type(version) is not TriageWorkItemVersion
+            or type(allocation) is not CapacityItemAllocation
+        ):
+            raise ExecutionContractError("batch member producers must be typed")
+        if (
+            allocation.disposition is not CapacityAllocationDisposition.GRANTED
+            or allocation.item.work_item_id != version.work_item_id
+            or allocation.item.work_item_version_id != version.version_id
+            or allocation.item.work_item_version_digest != version.canonical_digest
+            or allocation.item.priority_selection != version.priority
+        ):
+            raise ExecutionContractError(
+                "batch member differs from its exact scheduling grant"
+            )
+        retrieval = version.retrieval
+        retrieval_id = retrieval.context_id or retrieval.request_id
+        retrieval_digest = retrieval.context_digest or retrieval.request_digest
+        return cls(
+            version.work_item_id,
+            version.version_id,
+            version.canonical_digest,
+            retrieval_id,
+            retrieval_digest,
+            version.priority,
+            version.canonical_bytes,
+            digest_bytes(
+                _canonical(allocation.canonical_value(), "capacity allocation")
+            ),
+        )
 
     def __post_init__(self) -> None:
         _uuid(self.work_item_id, "member work_item_id")
@@ -173,10 +286,32 @@ class ExecutionBatchMember:
         _digest(self.work_item_version_digest, "member Work Item Version digest")
         _uuid(self.retrieval_context_id, "member retrieval_context_id")
         _digest(self.retrieval_context_digest, "member retrieval digest")
-        if not isinstance(self.priority, PrioritySelection):
+        _digest(self.scheduling_allocation_digest, "member allocation digest")
+        if type(self.priority) is not PrioritySelection:
             raise ExecutionContractError("member priority must be typed")
+        if not isinstance(self.work_item_version_bytes, bytes):
+            raise ExecutionContractError(
+                "member Work Item Version bytes must be immutable"
+            )
+        try:
+            version = TriageWorkItemVersion.from_canonical_bytes(
+                self.work_item_version_bytes
+            )
+        except Exception as exc:
+            raise ExecutionContractError(
+                "member Work Item Version binding differs"
+            ) from exc
+        retrieval = version.retrieval
+        retrieval_id = retrieval.context_id or retrieval.request_id
+        retrieval_digest = retrieval.context_digest or retrieval.request_digest
         if (
-            self.priority.work_identity != self.work_item_id
+            version.work_item_id != self.work_item_id
+            or version.version_id != self.work_item_version_id
+            or version.canonical_digest != self.work_item_version_digest
+            or retrieval_id != self.retrieval_context_id
+            or retrieval_digest != self.retrieval_context_digest
+            or version.priority != self.priority
+            or self.priority.work_identity != self.work_item_id
             or self.priority.work_version != self.work_item_version_id
             or self.priority.authority is not ContractAuthority.NONE
             or self.priority.effect is not ContractEffect.NONE
@@ -191,6 +326,8 @@ class ExecutionBatchMember:
             "retrieval_context_id": self.retrieval_context_id,
             "retrieval_context_digest": self.retrieval_context_digest,
             "priority": self.priority.canonical_value(),
+            "work_item_version": _decode(self.work_item_version_bytes),
+            "scheduling_allocation_digest": self.scheduling_allocation_digest,
         }
 
     @classmethod
@@ -204,9 +341,13 @@ class ExecutionBatchMember:
                 "retrieval_context_id",
                 "retrieval_context_digest",
                 "priority",
+                "work_item_version",
+                "scheduling_allocation_digest",
             },
             "batch member",
         )
+        if not isinstance(item["work_item_version"], dict):
+            raise ExecutionContractError("member Work Item Version must be an object")
         try:
             priority = PrioritySelection.from_mapping(item["priority"])  # type: ignore[arg-type]
         except Exception as exc:
@@ -218,6 +359,8 @@ class ExecutionBatchMember:
             _string(item["retrieval_context_id"], "member retrieval id"),
             _string(item["retrieval_context_digest"], "member retrieval digest"),
             priority,
+            _canonical(item["work_item_version"], "member Work Item Version"),
+            _string(item["scheduling_allocation_digest"], "allocation digest"),
         )
 
 
@@ -225,23 +368,104 @@ class ExecutionBatchMember:
 class ExecutionBatch:
     batch_id: str
     members: tuple[ExecutionBatchMember, ...]
+    scheduling_decision_digest: str
+    scheduling_decision_bytes: bytes
     schema_identity: str = EXECUTION_BATCH_SCHEMA
     authority: ContractAuthority = ContractAuthority.NONE
     effect: ContractEffect = ContractEffect.NONE
 
     @classmethod
-    def create(cls, members: tuple[ExecutionBatchMember, ...]) -> Self:
+    def create(
+        cls,
+        *,
+        scheduling_decision: ReservedCapacityDecision,
+        work_item_versions: tuple[TriageWorkItemVersion, ...],
+    ) -> Self:
+        if type(scheduling_decision) is not ReservedCapacityDecision:
+            raise ExecutionContractError(
+                "Execution Batch scheduling decision must be typed"
+            )
+        if (
+            type(work_item_versions) is not tuple
+            or not 1 <= len(work_item_versions) <= _MAX_BATCH_MEMBERS
+            or any(
+                type(version) is not TriageWorkItemVersion
+                for version in work_item_versions
+            )
+        ):
+            raise ExecutionContractError(
+                "Execution Batch Versions exceed the bounded typed envelope"
+            )
+        versions = {
+            (version.work_item_id, version.version_id): version
+            for version in work_item_versions
+        }
+        granted = tuple(
+            allocation
+            for allocation in scheduling_decision.allocations
+            if allocation.disposition is CapacityAllocationDisposition.GRANTED
+        )
+        try:
+            members = tuple(
+                ExecutionBatchMember.from_producers(
+                    versions[
+                        (
+                            allocation.item.work_item_id,
+                            allocation.item.work_item_version_id,
+                        )
+                    ],
+                    allocation,
+                )
+                for allocation in granted
+            )
+        except KeyError as exc:
+            raise ExecutionContractError(
+                "Execution Batch lacks an exact granted Work Item Version"
+            ) from exc
+        if len(versions) != len(work_item_versions) or len(versions) != len(members):
+            raise ExecutionContractError(
+                "Execution Batch Versions differ from exact scheduling grants"
+            )
+        if (
+            type(members) is not tuple
+            or not 1 <= len(members) <= _MAX_BATCH_MEMBERS
+            or any(type(member) is not ExecutionBatchMember for member in members)
+        ):
+            raise ExecutionContractError(
+                "Execution Batch members exceed the bounded typed envelope"
+            )
         ordered = tuple(sorted(members, key=lambda member: member.work_item_id))
+        decision_bytes = scheduling_decision.canonical_bytes
+        decision_digest = scheduling_decision.decision_digest
         identity = digest_bytes(
-            canonical_json_bytes([member.canonical_value() for member in ordered])
+            _canonical(
+                {
+                    "scheduling_decision_digest": decision_digest,
+                    "members": [member.canonical_value() for member in ordered],
+                },
+                "batch identity",
+            )
         )
         return cls(
             str(uuid.uuid5(uuid.NAMESPACE_URL, f"{EXECUTION_BATCH_SCHEMA}|{identity}")),
             ordered,
+            decision_digest,
+            decision_bytes,
         )
 
     def __post_init__(self) -> None:
         _uuid(self.batch_id, "batch_id")
+        _digest(self.scheduling_decision_digest, "scheduling decision digest")
+        if not isinstance(self.scheduling_decision_bytes, bytes):
+            raise ExecutionContractError("scheduling decision bytes must be immutable")
+        try:
+            decision = ReservedCapacityDecision.from_canonical_bytes(
+                self.scheduling_decision_bytes
+            )
+        except Exception as exc:
+            raise ExecutionContractError("scheduling decision binding differs") from exc
+        if decision.decision_digest != self.scheduling_decision_digest:
+            raise ExecutionContractError("scheduling decision digest differs")
         if (
             self.schema_identity != EXECUTION_BATCH_SCHEMA
             or self.authority is not ContractAuthority.NONE
@@ -249,11 +473,9 @@ class ExecutionBatch:
         ):
             raise ExecutionContractError("Execution Batch claims authority or effect")
         if (
-            not isinstance(self.members, tuple)
+            type(self.members) is not tuple
             or not 1 <= len(self.members) <= _MAX_BATCH_MEMBERS
-            or any(
-                not isinstance(member, ExecutionBatchMember) for member in self.members
-            )
+            or any(type(member) is not ExecutionBatchMember for member in self.members)
         ):
             raise ExecutionContractError(
                 "Execution Batch members exceed the bounded typed envelope"
@@ -264,8 +486,42 @@ class ExecutionBatch:
             raise ExecutionContractError(
                 "Execution Batch members must be sorted unique per Work Item"
             )
+        granted = tuple(
+            allocation
+            for allocation in decision.allocations
+            if allocation.disposition is CapacityAllocationDisposition.GRANTED
+        )
+        allocation_digests = {
+            (
+                allocation.item.work_item_id,
+                allocation.item.work_item_version_id,
+            ): digest_bytes(
+                _canonical(allocation.canonical_value(), "capacity allocation")
+            )
+            for allocation in granted
+        }
+        if (
+            len(allocation_digests) != len(granted)
+            or any(
+                allocation_digests.get(
+                    (member.work_item_id, member.work_item_version_id)
+                )
+                != member.scheduling_allocation_digest
+                for member in self.members
+            )
+            or len(self.members) != len(granted)
+        ):
+            raise ExecutionContractError(
+                "Execution Batch scheduling grant binding differs"
+            )
         identity = digest_bytes(
-            canonical_json_bytes([member.canonical_value() for member in self.members])
+            _canonical(
+                {
+                    "scheduling_decision_digest": self.scheduling_decision_digest,
+                    "members": [member.canonical_value() for member in self.members],
+                },
+                "batch identity",
+            )
         )
         expected = str(
             uuid.uuid5(uuid.NAMESPACE_URL, f"{EXECUTION_BATCH_SCHEMA}|{identity}")
@@ -282,12 +538,14 @@ class ExecutionBatch:
             "authority": self.authority.value,
             "effect": self.effect.value,
             "batch_id": self.batch_id,
+            "scheduling_decision_digest": self.scheduling_decision_digest,
+            "scheduling_decision": _decode(self.scheduling_decision_bytes),
             "members": [member.canonical_value() for member in self.members],
         }
 
     @property
     def canonical_bytes(self) -> bytes:
-        return canonical_json_bytes(self.canonical_value())
+        return _canonical(self.canonical_value(), "Execution Batch")
 
     @property
     def canonical_digest(self) -> str:
@@ -297,11 +555,21 @@ class ExecutionBatch:
     def from_canonical_bytes(cls, raw: bytes) -> Self:
         item = _exact(
             _decode(raw),
-            {"schema_identity", "authority", "effect", "batch_id", "members"},
+            {
+                "schema_identity",
+                "authority",
+                "effect",
+                "batch_id",
+                "members",
+                "scheduling_decision_digest",
+                "scheduling_decision",
+            },
             "Execution Batch",
         )
         if not isinstance(item["members"], list):
             raise ExecutionContractError("Execution Batch members must be an array")
+        if not isinstance(item["scheduling_decision"], dict):
+            raise ExecutionContractError("scheduling decision must be an object")
         try:
             authority = ContractAuthority(item["authority"])
             effect = ContractEffect(item["effect"])
@@ -314,6 +582,8 @@ class ExecutionBatch:
             tuple(
                 ExecutionBatchMember.from_value(member) for member in item["members"]
             ),
+            _string(item["scheduling_decision_digest"], "scheduling decision digest"),
+            _canonical(item["scheduling_decision"], "scheduling decision"),
             _string(item["schema_identity"], "batch schema_identity"),
             authority,
             effect,
@@ -330,8 +600,11 @@ class WorkerAttempt:
     work_item_version_id: str
     work_item_version_digest: str
     retrieval_context_digest: str
+    semantic_request_digest: str
+    semantic_request_key: str
     ordinal: int
     previous_attempt_id: str | None
+    previous_attempt_digest: str | None
     worker_kind: FixtureWorkerKind
     worker_version: str
     input_digest: str
@@ -345,31 +618,54 @@ class WorkerAttempt:
     def create(
         cls,
         *,
-        work_item_id: str,
-        work_item_version_id: str,
-        work_item_version_digest: str,
-        retrieval_context_digest: str,
+        member: ExecutionBatchMember,
         ordinal: int,
+        previous_attempt: WorkerAttempt | None = None,
         worker_kind: FixtureWorkerKind,
         worker_version: str,
         input_digest: str,
-        priority: PrioritySelection,
     ) -> Self:
+        if type(member) is not ExecutionBatchMember:
+            raise ExecutionContractError("Worker Attempt member must be typed")
+        work_item_id = member.work_item_id
+        work_item_version_id = member.work_item_version_id
+        work_item_version_digest = member.work_item_version_digest
+        retrieval_context_digest = member.retrieval_context_digest
+        priority = member.priority
         _integer(ordinal, "attempt ordinal")
+        if not isinstance(worker_kind, FixtureWorkerKind):
+            raise ExecutionContractError("worker kind must be typed")
+        _token(worker_version, "worker version")
+        _digest(input_digest, "attempt input digest")
+        if ordinal == 1 and previous_attempt is not None:
+            raise ExecutionContractError("first attempt cannot have a predecessor")
+        if ordinal > 1 and type(previous_attempt) is not WorkerAttempt:
+            raise ExecutionContractError("later attempt requires its exact predecessor")
+        request_value = {
+            "work_item_id": work_item_id,
+            "work_item_version_id": work_item_version_id,
+            "work_item_version_digest": work_item_version_digest,
+            "retrieval_context_digest": retrieval_context_digest,
+            "worker_kind": worker_kind.value,
+            "worker_version": worker_version,
+            "input_digest": input_digest,
+            "priority_digest": digest_bytes(priority.canonical_bytes),
+        }
+        request_digest = digest_bytes(_canonical(request_value, "semantic request"))
+        previous_id = None if previous_attempt is None else previous_attempt.attempt_id
+        previous_digest = (
+            None if previous_attempt is None else previous_attempt.canonical_digest
+        )
+        if previous_attempt is not None and (
+            previous_attempt.work_item_id != work_item_id
+            or previous_attempt.work_item_version_id != work_item_version_id
+            or previous_attempt.ordinal + 1 != ordinal
+        ):
+            raise ExecutionContractError("attempt predecessor binding differs")
         attempt_id = str(
             uuid.uuid5(
                 uuid.NAMESPACE_URL,
-                f"{WORKER_ATTEMPT_SCHEMA}|{work_item_id}|{work_item_version_id}|{ordinal}",
-            )
-        )
-        previous = (
-            None
-            if ordinal == 1
-            else str(
-                uuid.uuid5(
-                    uuid.NAMESPACE_URL,
-                    f"{WORKER_ATTEMPT_SCHEMA}|{work_item_id}|{work_item_version_id}|{ordinal - 1}",
-                )
+                f"{WORKER_ATTEMPT_SCHEMA}|{request_digest}|{ordinal}|{previous_id}",
             )
         )
         return cls(
@@ -378,12 +674,15 @@ class WorkerAttempt:
             work_item_version_id,
             work_item_version_digest,
             retrieval_context_digest,
+            request_digest,
+            f"worker-request:{request_digest}",
             ordinal,
-            previous,
+            previous_id,
+            previous_digest,
             worker_kind,
             worker_version,
             input_digest,
-            f"worker-attempt:{attempt_id}",
+            f"worker-request:{request_digest}",
             priority,
         )
 
@@ -397,37 +696,60 @@ class WorkerAttempt:
         _digest(self.work_item_version_digest, "Work Item Version digest")
         _digest(self.retrieval_context_digest, "retrieval context digest")
         _digest(self.input_digest, "attempt input digest")
+        _digest(self.semantic_request_digest, "semantic request digest")
         _integer(self.ordinal, "attempt ordinal")
+        if not isinstance(self.worker_kind, FixtureWorkerKind):
+            raise ExecutionContractError("worker kind must be typed")
+        if type(self.priority) is not PrioritySelection:
+            raise ExecutionContractError("Worker Attempt priority binding differs")
+        request_value = {
+            "work_item_id": self.work_item_id,
+            "work_item_version_id": self.work_item_version_id,
+            "work_item_version_digest": self.work_item_version_digest,
+            "retrieval_context_digest": self.retrieval_context_digest,
+            "worker_kind": self.worker_kind.value,
+            "worker_version": self.worker_version,
+            "input_digest": self.input_digest,
+            "priority_digest": digest_bytes(self.priority.canonical_bytes),
+        }
+        request_digest = digest_bytes(_canonical(request_value, "semantic request"))
         expected = str(
             uuid.uuid5(
                 uuid.NAMESPACE_URL,
-                f"{WORKER_ATTEMPT_SCHEMA}|{self.work_item_id}|{self.work_item_version_id}|{self.ordinal}",
-            )
-        )
-        previous = (
-            None
-            if self.ordinal == 1
-            else str(
-                uuid.uuid5(
-                    uuid.NAMESPACE_URL,
-                    f"{WORKER_ATTEMPT_SCHEMA}|{self.work_item_id}|{self.work_item_version_id}|{self.ordinal - 1}",
-                )
+                f"{WORKER_ATTEMPT_SCHEMA}|{request_digest}|{self.ordinal}|{self.previous_attempt_id}",
             )
         )
         if (
+            (self.ordinal == 1)
+            != (
+                self.previous_attempt_id is None
+                and self.previous_attempt_digest is None
+            )
+            or (
+                self.previous_attempt_id is not None
+                and self.previous_attempt_digest is None
+            )
+            or (
+                self.previous_attempt_id is None
+                and self.previous_attempt_digest is not None
+            )
+        ):
+            raise ExecutionContractError("Worker Attempt predecessor binding differs")
+        if self.previous_attempt_id is not None:
+            _uuid(self.previous_attempt_id, "previous_attempt_id")
+            _digest(self.previous_attempt_digest, "previous attempt digest")
+        if (
             self.attempt_id != expected
-            or self.previous_attempt_id != previous
-            or self.idempotency_key != f"worker-attempt:{expected}"
+            or self.semantic_request_digest != request_digest
+            or self.semantic_request_key != f"worker-request:{request_digest}"
+            or self.idempotency_key != self.semantic_request_key
         ):
             raise ExecutionContractError(
                 "Worker Attempt deterministic identity differs"
             )
-        if not isinstance(self.worker_kind, FixtureWorkerKind):
-            raise ExecutionContractError("worker kind must be typed")
         _token(self.worker_version, "worker version")
         if (
-            not isinstance(self.priority, PrioritySelection)
-            or self.priority.work_identity != self.work_item_id
+            self.priority.work_identity != self.work_item_id
             or self.priority.work_version != self.work_item_version_id
         ):
             raise ExecutionContractError("Worker Attempt priority binding differs")
@@ -451,8 +773,11 @@ class WorkerAttempt:
             "work_item_version_id": self.work_item_version_id,
             "work_item_version_digest": self.work_item_version_digest,
             "retrieval_context_digest": self.retrieval_context_digest,
+            "semantic_request_digest": self.semantic_request_digest,
+            "semantic_request_key": self.semantic_request_key,
             "ordinal": self.ordinal,
             "previous_attempt_id": self.previous_attempt_id,
+            "previous_attempt_digest": self.previous_attempt_digest,
             "worker_kind": self.worker_kind.value,
             "worker_version": self.worker_version,
             "input_digest": self.input_digest,
@@ -462,7 +787,7 @@ class WorkerAttempt:
 
     @property
     def canonical_bytes(self) -> bytes:
-        return canonical_json_bytes(self.canonical_value())
+        return _canonical(self.canonical_value(), "Worker Attempt")
 
     @property
     def canonical_digest(self) -> str:
@@ -493,8 +818,11 @@ class WorkerAttempt:
                 "work_item_version_id",
                 "work_item_version_digest",
                 "retrieval_context_digest",
+                "semantic_request_digest",
+                "semantic_request_key",
                 "ordinal",
                 "previous_attempt_id",
+                "previous_attempt_digest",
                 "worker_kind",
                 "worker_version",
                 "input_digest",
@@ -516,10 +844,15 @@ class WorkerAttempt:
             _string(item["work_item_version_id"], "attempt version_id"),
             _string(item["work_item_version_digest"], "attempt version digest"),
             _string(item["retrieval_context_digest"], "attempt retrieval digest"),
+            _string(item["semantic_request_digest"], "semantic request digest"),
+            _string(item["semantic_request_key"], "semantic request key"),
             _integer(item["ordinal"], "attempt ordinal"),
             None
             if item["previous_attempt_id"] is None
             else _string(item["previous_attempt_id"], "previous_attempt_id"),
+            None
+            if item["previous_attempt_digest"] is None
+            else _string(item["previous_attempt_digest"], "previous_attempt_digest"),
             worker_kind,
             _string(item["worker_version"], "worker_version"),
             _string(item["input_digest"], "input_digest"),
@@ -535,84 +868,397 @@ class WorkerAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class LeaseProgressEvidence:
+    progress: LeaseProgress
+    evidence_digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.progress, LeaseProgress):
+            raise ExecutionContractError("lease progress must be typed")
+        _digest(self.evidence_digest, "lease progress evidence digest")
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "progress": self.progress.value,
+            "evidence_digest": self.evidence_digest,
+        }
+
+    @classmethod
+    def from_value(cls, value: object) -> Self:
+        item = _exact(value, {"progress", "evidence_digest"}, "lease progress")
+        try:
+            progress = LeaseProgress(item["progress"])
+        except (TypeError, ValueError) as exc:
+            raise ExecutionContractError("lease progress must be typed") from exc
+        return cls(progress, _string(item["evidence_digest"], "lease progress digest"))
+
+
+@dataclass(frozen=True, slots=True)
+class LeaseTransitionReceipt:
+    transition_id: str
+    lease_id: str
+    predecessor_digest: str
+    from_lifecycle: LeaseLifecycle
+    to_lifecycle: LeaseLifecycle
+    observed_at: str
+    progress: tuple[LeaseProgressEvidence, ...]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        lease_id: str,
+        predecessor_digest: str,
+        from_lifecycle: LeaseLifecycle,
+        to_lifecycle: LeaseLifecycle,
+        observed_at: str,
+        progress: tuple[LeaseProgressEvidence, ...] = (),
+    ) -> Self:
+        identity = _canonical(
+            {
+                "lease_id": lease_id,
+                "predecessor_digest": predecessor_digest,
+                "from_lifecycle": from_lifecycle.value,
+                "to_lifecycle": to_lifecycle.value,
+                "observed_at": observed_at,
+                "progress": [item.canonical_value() for item in progress],
+            },
+            "lease transition",
+        )
+        return cls(
+            str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{WORK_ITEM_LEASE_SCHEMA}|transition|{digest_bytes(identity)}",
+                )
+            ),
+            lease_id,
+            predecessor_digest,
+            from_lifecycle,
+            to_lifecycle,
+            observed_at,
+            progress,
+        )
+
+    def __post_init__(self) -> None:
+        _uuid(self.transition_id, "lease transition_id")
+        _uuid(self.lease_id, "lease transition lease_id")
+        _digest(self.predecessor_digest, "lease predecessor digest")
+        if not isinstance(self.from_lifecycle, LeaseLifecycle) or not isinstance(
+            self.to_lifecycle, LeaseLifecycle
+        ):
+            raise ExecutionContractError("lease transition lifecycle must be typed")
+        _utc(self.observed_at, "lease transition observed_at")
+        if (
+            not isinstance(self.progress, tuple)
+            or len(self.progress) > 32
+            or any(type(item) is not LeaseProgressEvidence for item in self.progress)
+        ):
+            raise ExecutionContractError(
+                "lease progress evidence must be bounded and typed"
+            )
+        identity = _canonical(
+            {
+                "lease_id": self.lease_id,
+                "predecessor_digest": self.predecessor_digest,
+                "from_lifecycle": self.from_lifecycle.value,
+                "to_lifecycle": self.to_lifecycle.value,
+                "observed_at": self.observed_at,
+                "progress": [item.canonical_value() for item in self.progress],
+            },
+            "lease transition",
+        )
+        expected = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"{WORK_ITEM_LEASE_SCHEMA}|transition|{digest_bytes(identity)}",
+            )
+        )
+        if self.transition_id != expected:
+            raise ExecutionContractError("lease transition identity differs")
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "transition_id": self.transition_id,
+            "lease_id": self.lease_id,
+            "predecessor_digest": self.predecessor_digest,
+            "from_lifecycle": self.from_lifecycle.value,
+            "to_lifecycle": self.to_lifecycle.value,
+            "observed_at": self.observed_at,
+            "progress": [item.canonical_value() for item in self.progress],
+        }
+
+    @classmethod
+    def from_value(cls, value: object) -> Self:
+        item = _exact(
+            value,
+            {
+                "transition_id",
+                "lease_id",
+                "predecessor_digest",
+                "from_lifecycle",
+                "to_lifecycle",
+                "observed_at",
+                "progress",
+            },
+            "lease transition",
+        )
+        if not isinstance(item["progress"], list):
+            raise ExecutionContractError("lease progress must be an array")
+        try:
+            source = LeaseLifecycle(item["from_lifecycle"])
+            target = LeaseLifecycle(item["to_lifecycle"])
+        except (TypeError, ValueError) as exc:
+            raise ExecutionContractError(
+                "lease transition lifecycle must be typed"
+            ) from exc
+        return cls(
+            _string(item["transition_id"], "lease transition_id"),
+            _string(item["lease_id"], "lease transition lease_id"),
+            _string(item["predecessor_digest"], "lease predecessor digest"),
+            source,
+            target,
+            _string(item["observed_at"], "lease transition observed_at"),
+            tuple(
+                LeaseProgressEvidence.from_value(entry) for entry in item["progress"]
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class WorkItemLease:
     lease_id: str
+    attempt_id: str
     work_item_id: str
     work_item_version_id: str
-    owner_id: str | None
-    capability_digest: str | None
+    work_item_version_digest: str
+    owner_id: str
+    owner_profile_digest: str
+    capability_digest: str
     fence: int
     lifecycle: LeaseLifecycle
     issued_at: str | None
     expires_at: str | None
+    transition: LeaseTransitionReceipt | None
     schema_identity: str = WORK_ITEM_LEASE_SCHEMA
     authority: ContractAuthority = ContractAuthority.NONE
     effect: ContractEffect = ContractEffect.NONE
 
     @classmethod
-    def pending(cls, work_item_id: str, work_item_version_id: str, fence: int) -> Self:
-        lease_id = str(
+    def pending(
+        cls,
+        *,
+        attempt: WorkerAttempt,
+        owner_id: str,
+        owner_profile_digest: str,
+        capability_digest: str,
+        fence: int,
+    ) -> Self:
+        if type(attempt) is not WorkerAttempt:
+            raise ExecutionContractError("lease attempt must be typed")
+        _integer(fence, "lease fence")
+        values = (
+            attempt.attempt_id,
+            attempt.work_item_id,
+            attempt.work_item_version_id,
+            attempt.work_item_version_digest,
+            owner_id,
+            owner_profile_digest,
+            capability_digest,
+            fence,
+        )
+        lease_id = cls._identity(*values)
+        return cls(lease_id, *values, LeaseLifecycle.PENDING, None, None, None)
+
+    @staticmethod
+    def _identity(
+        attempt_id: str,
+        work_item_id: str,
+        work_item_version_id: str,
+        work_item_version_digest: str,
+        owner_id: str,
+        owner_profile_digest: str,
+        capability_digest: str,
+        fence: int,
+    ) -> str:
+        value = {
+            "attempt_id": attempt_id,
+            "work_item_id": work_item_id,
+            "work_item_version_id": work_item_version_id,
+            "work_item_version_digest": work_item_version_digest,
+            "owner_id": owner_id,
+            "owner_profile_digest": owner_profile_digest,
+            "capability_digest": capability_digest,
+            "fence": fence,
+        }
+        return str(
             uuid.uuid5(
                 uuid.NAMESPACE_URL,
-                f"{WORK_ITEM_LEASE_SCHEMA}|{work_item_id}|{work_item_version_id}|{fence}",
+                f"{WORK_ITEM_LEASE_SCHEMA}|{digest_bytes(_canonical(value, 'lease identity'))}",
             )
-        )
-        return cls(
-            lease_id,
-            work_item_id,
-            work_item_version_id,
-            None,
-            None,
-            fence,
-            LeaseLifecycle.PENDING,
-            None,
-            None,
         )
 
     def __post_init__(self) -> None:
         for value, field in (
             (self.lease_id, "lease_id"),
+            (self.attempt_id, "lease attempt_id"),
             (self.work_item_id, "lease work_item_id"),
             (self.work_item_version_id, "lease work_item_version_id"),
         ):
             _uuid(value, field)
+        _digest(self.work_item_version_digest, "lease Work Item Version digest")
+        _token(self.owner_id, "lease owner")
+        _digest(self.owner_profile_digest, "lease owner profile digest")
+        _digest(self.capability_digest, "lease capability")
         _integer(self.fence, "lease fence")
-        expected = str(
-            uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"{WORK_ITEM_LEASE_SCHEMA}|{self.work_item_id}|{self.work_item_version_id}|{self.fence}",
-            )
+        expected = self._identity(
+            self.attempt_id,
+            self.work_item_id,
+            self.work_item_version_id,
+            self.work_item_version_digest,
+            self.owner_id,
+            self.owner_profile_digest,
+            self.capability_digest,
+            self.fence,
         )
         if self.lease_id != expected or not isinstance(self.lifecycle, LeaseLifecycle):
             raise ExecutionContractError(
                 "Lease deterministic identity or lifecycle differs"
             )
-        claimed = self.lifecycle is LeaseLifecycle.CLAIMED
-        if claimed:
-            _token(self.owner_id, "lease owner")
-            _digest(self.capability_digest, "lease capability")
+        if self.lifecycle is LeaseLifecycle.PENDING:
+            if (
+                self.issued_at is not None
+                or self.expires_at is not None
+                or self.transition is not None
+            ):
+                raise ExecutionContractError(
+                    "pending Lease cannot contain acquisition or transition evidence"
+                )
+        else:
             issued = _utc(self.issued_at, "lease issued_at")
             expires = _utc(self.expires_at, "lease expires_at")
             if _utc_value(expires) <= _utc_value(issued):
                 raise ExecutionContractError("lease expiry must follow issue time")
-        elif any(
-            value is not None
-            for value in (
-                self.owner_id,
-                self.capability_digest,
-                self.issued_at,
-                self.expires_at,
+            if type(self.transition) is not LeaseTransitionReceipt:
+                raise ExecutionContractError(
+                    "Lease lifecycle requires a typed transition receipt"
+                )
+            source = (
+                LeaseLifecycle.PENDING
+                if self.lifecycle is LeaseLifecycle.CLAIMED
+                else LeaseLifecycle.CLAIMED
             )
-        ):
-            raise ExecutionContractError(
-                "non-claimed Lease cannot retain an owner capability"
-            )
+            if (
+                self.transition.lease_id != self.lease_id
+                or self.transition.from_lifecycle is not source
+                or self.transition.to_lifecycle is not self.lifecycle
+            ):
+                raise ExecutionContractError("Lease transition predecessor differs")
+            observed = _utc_value(self.transition.observed_at)
+            if self.lifecycle is LeaseLifecycle.CLAIMED and observed != _utc_value(
+                issued
+            ):
+                raise ExecutionContractError(
+                    "Lease acquisition transition time differs"
+                )
+            if self.lifecycle is LeaseLifecycle.RELEASED and not (
+                _utc_value(issued) <= observed < _utc_value(expires)
+            ):
+                raise ExecutionContractError("Lease release transition time differs")
+            if self.lifecycle is LeaseLifecycle.EXPIRED and observed < _utc_value(
+                expires
+            ):
+                raise ExecutionContractError("Lease expiry transition time differs")
         if (
             self.schema_identity != WORK_ITEM_LEASE_SCHEMA
             or self.authority is not ContractAuthority.NONE
             or self.effect is not ContractEffect.NONE
         ):
             raise ExecutionContractError("Lease contract claims authority or effect")
+        _ = self.canonical_bytes
+
+    def claim(self, *, issued_at: str, expires_at: str) -> Self:
+        if self.lifecycle is not LeaseLifecycle.PENDING:
+            raise ExecutionContractError("only a pending Lease can be claimed")
+        _utc(issued_at, "lease issued_at")
+        _utc(expires_at, "lease expires_at")
+        if _utc_value(expires_at) <= _utc_value(issued_at):
+            raise ExecutionContractError("lease expiry must follow issue time")
+        receipt = LeaseTransitionReceipt.create(
+            lease_id=self.lease_id,
+            predecessor_digest=self.canonical_digest,
+            from_lifecycle=LeaseLifecycle.PENDING,
+            to_lifecycle=LeaseLifecycle.CLAIMED,
+            observed_at=issued_at,
+        )
+        return self._with(LeaseLifecycle.CLAIMED, issued_at, expires_at, receipt)
+
+    def release(
+        self, *, observed_at: str, progress: tuple[LeaseProgressEvidence, ...] = ()
+    ) -> Self:
+        if self.is_expired_at(observed_at):
+            raise ExecutionContractError(
+                "Lease at or beyond expiry must use the expired transition"
+            )
+        return self._finish(LeaseLifecycle.RELEASED, observed_at, progress)
+
+    def expire(
+        self, *, observed_at: str, progress: tuple[LeaseProgressEvidence, ...] = ()
+    ) -> Self:
+        if not self.is_expired_at(observed_at):
+            raise ExecutionContractError("Lease has not reached its expiry boundary")
+        return self._finish(LeaseLifecycle.EXPIRED, observed_at, progress)
+
+    def _finish(
+        self,
+        lifecycle: LeaseLifecycle,
+        observed_at: str,
+        progress: tuple[LeaseProgressEvidence, ...],
+    ) -> Self:
+        if self.lifecycle is not LeaseLifecycle.CLAIMED:
+            raise ExecutionContractError("only a claimed Lease can become terminal")
+        _utc(observed_at, "lease transition observed_at")
+        if self.issued_at is None or _utc_value(observed_at) < _utc_value(
+            self.issued_at
+        ):
+            raise ExecutionContractError(
+                "Lease transition cannot precede acquisition time"
+            )
+        receipt = LeaseTransitionReceipt.create(
+            lease_id=self.lease_id,
+            predecessor_digest=self.canonical_digest,
+            from_lifecycle=LeaseLifecycle.CLAIMED,
+            to_lifecycle=lifecycle,
+            observed_at=observed_at,
+            progress=progress,
+        )
+        return self._with(lifecycle, self.issued_at, self.expires_at, receipt)
+
+    def _with(
+        self,
+        lifecycle: LeaseLifecycle,
+        issued_at: str | None,
+        expires_at: str | None,
+        transition: LeaseTransitionReceipt,
+    ) -> Self:
+        return WorkItemLease(
+            self.lease_id,
+            self.attempt_id,
+            self.work_item_id,
+            self.work_item_version_id,
+            self.work_item_version_digest,
+            self.owner_id,
+            self.owner_profile_digest,
+            self.capability_digest,
+            self.fence,
+            lifecycle,
+            issued_at,
+            expires_at,
+            transition,
+            self.schema_identity,
+            self.authority,
+            self.effect,
+        )
 
     def is_expired_at(self, observed_at: str) -> bool:
         _utc(observed_at, "lease observation time")
@@ -628,19 +1274,25 @@ class WorkItemLease:
             "authority": self.authority.value,
             "effect": self.effect.value,
             "lease_id": self.lease_id,
+            "attempt_id": self.attempt_id,
             "work_item_id": self.work_item_id,
             "work_item_version_id": self.work_item_version_id,
+            "work_item_version_digest": self.work_item_version_digest,
             "owner_id": self.owner_id,
+            "owner_profile_digest": self.owner_profile_digest,
             "capability_digest": self.capability_digest,
             "fence": self.fence,
             "lifecycle": self.lifecycle.value,
             "issued_at": self.issued_at,
             "expires_at": self.expires_at,
+            "transition": None
+            if self.transition is None
+            else self.transition.canonical_value(),
         }
 
     @property
     def canonical_bytes(self) -> bytes:
-        return canonical_json_bytes(self.canonical_value())
+        return _canonical(self.canonical_value(), "Work Item Lease")
 
     @property
     def canonical_digest(self) -> str:
@@ -648,24 +1300,25 @@ class WorkItemLease:
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
-        item = _exact(
-            _decode(raw),
-            {
-                "schema_identity",
-                "authority",
-                "effect",
-                "lease_id",
-                "work_item_id",
-                "work_item_version_id",
-                "owner_id",
-                "capability_digest",
-                "fence",
-                "lifecycle",
-                "issued_at",
-                "expires_at",
-            },
-            "Work Item Lease",
-        )
+        fields = {
+            "schema_identity",
+            "authority",
+            "effect",
+            "lease_id",
+            "attempt_id",
+            "work_item_id",
+            "work_item_version_id",
+            "work_item_version_digest",
+            "owner_id",
+            "owner_profile_digest",
+            "capability_digest",
+            "fence",
+            "lifecycle",
+            "issued_at",
+            "expires_at",
+            "transition",
+        }
+        item = _exact(_decode(raw), fields, "Work Item Lease")
         try:
             lifecycle = LeaseLifecycle(item["lifecycle"])
             authority = ContractAuthority(item["authority"])
@@ -674,12 +1327,13 @@ class WorkItemLease:
             raise ExecutionContractError("Lease typed fields differ") from exc
         value = cls(
             _string(item["lease_id"], "lease_id"),
+            _string(item["attempt_id"], "lease attempt_id"),
             _string(item["work_item_id"], "lease work_item_id"),
             _string(item["work_item_version_id"], "lease version_id"),
-            None if item["owner_id"] is None else _string(item["owner_id"], "owner_id"),
-            None
-            if item["capability_digest"] is None
-            else _string(item["capability_digest"], "capability_digest"),
+            _string(item["work_item_version_digest"], "lease version digest"),
+            _string(item["owner_id"], "owner_id"),
+            _string(item["owner_profile_digest"], "owner_profile_digest"),
+            _string(item["capability_digest"], "capability_digest"),
             _integer(item["fence"], "lease fence"),
             lifecycle,
             None
@@ -688,6 +1342,9 @@ class WorkItemLease:
             None
             if item["expires_at"] is None
             else _string(item["expires_at"], "expires_at"),
+            None
+            if item["transition"] is None
+            else LeaseTransitionReceipt.from_value(item["transition"]),
             _string(item["schema_identity"], "lease schema_identity"),
             authority,
             effect,
@@ -708,6 +1365,9 @@ __all__ = [
     "ExecutionBatchMember",
     "ExecutionContractError",
     "LeaseLifecycle",
+    "LeaseProgress",
+    "LeaseProgressEvidence",
+    "LeaseTransitionReceipt",
     "WorkItemLease",
     "WorkerAttempt",
 ]
