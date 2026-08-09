@@ -54,6 +54,7 @@ FINAL_SCHEMA_VERSION = "newsroom.increment5e2.final-closeout-receipt.v1"
 _MAX_REPORT_BYTES = 16 * 1024 * 1024
 _MAX_DECISION_BYTES = 8 * 1024 * 1024
 _MAX_TESTS = 100_000
+_MAX_TEST_NAME_CHARS = 64 * 1024
 _QUALIFICATION_STARTED_AT = "2026-08-08T20:00:00Z"
 _QUALIFICATION_COMPLETED_AT = "2026-08-08T20:01:00Z"
 _TARGET_TEST_ID = (
@@ -249,7 +250,11 @@ def _parse_junit(path: str | Path) -> _ParsedReport:
     for element in root.iter():
         if _local_name(element.tag) != "testcase":
             continue
-        name = _field(element.attrib.get("name"), "test_name", maximum=1024).strip()
+        name = _field(
+            element.attrib.get("name"),
+            "test_name",
+            maximum=_MAX_TEST_NAME_CHARS,
+        ).strip()
         owner = (element.attrib.get("classname") or "").strip() or (
             element.attrib.get("file") or ""
         ).strip()

@@ -327,6 +327,35 @@ def test_junit_parser_preserves_exact_parameter_node_ids(tmp_path: Path) -> None
     )
 
 
+def test_junit_parser_accepts_bounded_long_unselected_parameter_id(
+    tmp_path: Path,
+) -> None:
+    parameter = "x" * (16 * 1024)
+    path = tmp_path / "long-parameter.xml"
+    path.write_text(
+        '<testsuite><testcase classname="newsroom.tests.test_example" '
+        f'name="test_exact[{parameter}]"/></testsuite>',
+        encoding="utf-8",
+    )
+
+    parsed = _parse_junit(path)
+
+    assert parsed.cases[0].test_id.endswith(f"test_exact[{parameter}]")
+
+
+def test_junit_parser_rejects_unbounded_parameter_id(tmp_path: Path) -> None:
+    parameter = "x" * (64 * 1024)
+    path = tmp_path / "unbounded-parameter.xml"
+    path.write_text(
+        '<testsuite><testcase classname="newsroom.tests.test_example" '
+        f'name="test_exact[{parameter}]"/></testsuite>',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(Increment5E2CloseoutReceiptError, match="test_name"):
+        _parse_junit(path)
+
+
 def test_junit_parser_rejects_utf16_dtd_and_entity(tmp_path: Path) -> None:
     path = tmp_path / "utf16-entity.xml"
     path.write_bytes(
