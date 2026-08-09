@@ -75,8 +75,9 @@ def test_fresh_schema_v16_history_policies_tables_and_triggers_are_exact(
     state = seed_extraction_fixture(tmp_path)
     conn = sqlite3.connect(state.database)
     try:
-        assert GRAPHITI_ADAPTER_SCHEMA_VERSION == SCHEMA_VERSION == 16
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
+        assert GRAPHITI_ADAPTER_SCHEMA_VERSION == 16
+        assert SCHEMA_VERSION == 17
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(conn) == EXPECTED_SCHEMA_FINGERPRINT
         assert conn.execute(
             "SELECT name,checksum FROM authority_migrations WHERE version=?",
@@ -181,6 +182,10 @@ def test_checked_v15_to_v16_upgrade_preserves_retained_extraction_authority(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
             "AND name='graphiti_adapter_attempts'"
         ).fetchone()[0] == 0
+        assert downgraded.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name='evaluation_handoffs'"
+        ).fetchone()[0] == 0
     finally:
         downgraded.close()
 
@@ -189,7 +194,7 @@ def test_checked_v15_to_v16_upgrade_preserves_retained_extraction_authority(
 
     after = sqlite3.connect(state.database)
     try:
-        assert after.execute("PRAGMA user_version").fetchone()[0] == 16
+        assert after.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(after) == EXPECTED_SCHEMA_FINGERPRINT
         assert {
             table: after.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]

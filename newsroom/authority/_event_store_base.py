@@ -19,6 +19,7 @@ from .migrations import (
     EXPECTED_SCHEMA_FINGERPRINT,
     SCHEMA_VERSION,
     apply_pending_migrations,
+    prepare_pending_migration_backup,
     schema_fingerprint,
 )
 from .models import CommittedCommandIdentity
@@ -183,6 +184,7 @@ class _EventStoreBase:
                 "refusing to adopt a non-empty unversioned authority database"
             )
         if version < SCHEMA_VERSION:
+            prepare_pending_migration_backup(conn)
             apply_pending_migrations(
                 conn, applied_at=self._clock().to_text()
             )

@@ -46,7 +46,11 @@ class _ObjectStoreBase:
     def _migrate_or_validate(self) -> None:
         """Apply A2a/A2b migrations, retain exact object contracts, then validate."""
 
-        from .migrations import SCHEMA_VERSION, apply_pending_migrations
+        from .migrations import (
+            SCHEMA_VERSION,
+            apply_pending_migrations,
+            prepare_pending_migration_backup,
+        )
         from .persistence import AuthoritySchemaError
 
         conn = self._connection
@@ -61,6 +65,7 @@ class _ObjectStoreBase:
                 "refusing to adopt a non-empty unversioned authority database"
             )
         if version < SCHEMA_VERSION:
+            prepare_pending_migration_backup(conn)
             apply_pending_migrations(conn, applied_at=self._clock().to_text())
         try:
             conn.execute("BEGIN IMMEDIATE")

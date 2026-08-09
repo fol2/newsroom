@@ -47,6 +47,17 @@ from .graphiti_adapter_migrations import (
     GRAPHITI_ADAPTER_MIGRATION_STATEMENTS,
     GRAPHITI_ADAPTER_SCHEMA_VERSION,
 )
+from .evaluation_handoff_migrations import (
+    EvaluationHandoffBackupReceipt,
+    EVALUATION_HANDOFF_MIGRATION,
+    EVALUATION_HANDOFF_MIGRATION_CHECKSUM,
+    EVALUATION_HANDOFF_MIGRATION_NAME,
+    EVALUATION_HANDOFF_MIGRATION_STATEMENTS,
+    EVALUATION_HANDOFF_SCHEMA_VERSION,
+    evaluation_handoff_backup_paths,
+    prepare_evaluation_handoff_backup,
+    require_evaluation_handoff_backup,
+)
 from .extraction_migrations import (
     EXTRACTION_AUTHORITY_MIGRATION,
     EXTRACTION_AUTHORITY_MIGRATION_CHECKSUM,
@@ -113,7 +124,7 @@ from .source_registry_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = GRAPHITI_ADAPTER_SCHEMA_VERSION
+SCHEMA_VERSION = EVALUATION_HANDOFF_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -553,6 +564,25 @@ def schema_fingerprint(conn: sqlite3.Connection) -> str:
     )
 
 
+def prepare_pending_migration_backup(
+    conn: sqlite3.Connection,
+) -> EvaluationHandoffBackupReceipt | None:
+    """Prepare the exact retained backup required by an existing v16 store."""
+    if int(conn.execute("PRAGMA user_version").fetchone()[0]) != 16:
+        return None
+    database_path = next(
+        str(row[2])
+        for row in conn.execute("PRAGMA database_list").fetchall()
+        if row[1] == "main"
+    )
+    if not database_path:
+        raise sqlite3.DatabaseError(
+            "existing v16 upgrade requires a file-backed database"
+        )
+    backup_path, _ = evaluation_handoff_backup_paths(database_path)
+    return prepare_evaluation_handoff_backup(conn, backup_path)
+
+
 def apply_migration(
     conn: sqlite3.Connection,
     *,
@@ -583,11 +613,18 @@ def apply_pending_migrations(
 
     Fresh schema creation is all-or-nothing across every retained authority
     migration. Existing databases upgrade through checked extraction v13,
-    entity-resolution v14, editorial-relation v15 and isolated Graphiti
-    proposal-adapter v16.
+    entity-resolution v14, editorial-relation v15, isolated Graphiti
+    proposal-adapter v16 and evaluation-Handoff authority v17.
+
+    An exact retained v16 database must first call
+    ``evaluation_handoff_migrations.prepare_evaluation_handoff_backup`` with a
+    durable backup path.
+    The v17 transaction revalidates that backup, its digest sidecar, the exact
+    predecessor schema and migration history while holding its exclusive lock.
     """
 
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    starting_version = current
     if current > SCHEMA_VERSION:
         raise sqlite3.DatabaseError(
             f"database schema {current} is newer than supported {SCHEMA_VERSION}"
@@ -822,6 +859,43 @@ def apply_pending_migrations(
                 ),
             )
             current = GRAPHITI_ADAPTER_SCHEMA_VERSION
+        if current == GRAPHITI_ADAPTER_SCHEMA_VERSION:
+            if 0 < starting_version < GRAPHITI_ADAPTER_SCHEMA_VERSION:
+                conn.execute(
+                    f"PRAGMA user_version={GRAPHITI_ADAPTER_SCHEMA_VERSION}"
+                )
+                conn.execute("COMMIT")
+                database_path = next(
+                    str(row[2])
+                    for row in conn.execute("PRAGMA database_list").fetchall()
+                    if row[1] == "main"
+                )
+                if not database_path:
+                    raise sqlite3.DatabaseError(
+                        "existing multihop upgrade requires a file-backed database"
+                    )
+                backup_path, _ = evaluation_handoff_backup_paths(database_path)
+                prepare_evaluation_handoff_backup(conn, backup_path)
+                conn.execute("BEGIN EXCLUSIVE")
+            if starting_version != 0:
+                require_evaluation_handoff_backup(
+                    conn,
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-1],
+                )
+            for statement in EVALUATION_HANDOFF_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations("
+                "version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    EVALUATION_HANDOFF_SCHEMA_VERSION,
+                    EVALUATION_HANDOFF_MIGRATION_NAME,
+                    EVALUATION_HANDOFF_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = EVALUATION_HANDOFF_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -847,6 +921,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     ENTITY_AUTHORITY_MIGRATION,
     EDITORIAL_RELATION_MIGRATION,
     GRAPHITI_ADAPTER_MIGRATION,
+    EVALUATION_HANDOFF_MIGRATION,
 )
 
 def _expected_fingerprint() -> str:
@@ -934,5 +1009,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         GRAPHITI_ADAPTER_SCHEMA_VERSION,
         GRAPHITI_ADAPTER_MIGRATION_NAME,
         GRAPHITI_ADAPTER_MIGRATION_CHECKSUM,
+    ),
+    (
+        EVALUATION_HANDOFF_SCHEMA_VERSION,
+        EVALUATION_HANDOFF_MIGRATION_NAME,
+        EVALUATION_HANDOFF_MIGRATION_CHECKSUM,
     ),
 )
