@@ -547,6 +547,41 @@ def test_large_integer_json_errors_are_normalised_at_public_parse_boundaries() -
         )
 
 
+def test_constructed_nested_canonicalisation_errors_are_normalised() -> None:
+    raw = _proposal_bytes()
+    validation = validate_proposal(raw, _validator(raw))
+    head = LeadDispositionHeadBinding(LEAD_A, DIGEST_B, "head:a", DIGEST_A)
+    selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+    disposition = build_pending_dispositions(
+        validation, {LEAD_A: head}, {LEAD_A: selection}
+    )[0]
+
+    bad_recommendation = replace(
+        disposition.route_binding, likely_new_information=1.0
+    )
+    with pytest.raises(DispositionContractError, match="canonical JSON"):
+        replace(disposition, route_binding=bad_recommendation)
+
+    bad_proposal = replace(
+        validation.proposal, recommendations=(bad_recommendation,)
+    )
+    with pytest.raises(DispositionContractError, match="canonical JSON"):
+        replace(validation, proposal=bad_proposal)
+
+    cycle: list[object] = []
+    cycle.append(cycle)
+    assert selection.next_action is not None
+    object.__setattr__(selection.next_action, "instructions", cycle)
+    with pytest.raises(DispositionContractError, match="canonical JSON"):
+        build_pending_dispositions(
+            validation, {LEAD_A: head}, {LEAD_A: selection}
+        )
+
+
 def test_operational_action_selector_exhaustively_rejects_competing_seams() -> None:
     action_codes = {
         "RETRY_RETRIEVAL": (

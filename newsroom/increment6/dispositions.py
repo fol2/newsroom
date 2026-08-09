@@ -360,7 +360,9 @@ class ProposalValidationFinding(_NoEffect):
             )
         if self.authority is not DispositionAuthority.NONE:
             raise DispositionContractError("a pure finding has no authority")
-        if self.finding_id != digest_bytes(canonical_json_bytes(self._identity_value())):
+        if self.finding_id != digest_bytes(
+            _bounded_canonical(self._identity_value(), field="finding identity")
+        ):
             raise DispositionContractError("finding identity differs")
         _bounded_canonical(self.canonical_value(), field="finding")
 
@@ -385,7 +387,7 @@ class ProposalValidationFinding(_NoEffect):
 
     @property
     def canonical_bytes(self) -> bytes:
-        return canonical_json_bytes(self.canonical_value())
+        return _bounded_canonical(self.canonical_value(), field="finding")
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
@@ -446,7 +448,10 @@ class ProposalValidationResult(_NoEffect):
             )
         ):
             raise DispositionContractError("finding set must be complete and bounded")
-        proposal_digest = digest_bytes(self.proposal.canonical_bytes)
+        proposal_bytes = _bounded_canonical(
+            self.proposal.canonical_value(), field="proposal"
+        )
+        proposal_digest = digest_bytes(proposal_bytes)
         if any(
             item.proposal_id != self.proposal.proposal_id
             or item.proposal_content_identity != self.proposal.content_identity
@@ -475,13 +480,16 @@ class ProposalValidationResult(_NoEffect):
 
     @property
     def canonical_bytes(self) -> bytes:
-        return canonical_json_bytes({
-            "schema_version": _FINDING_SET_SCHEMA_VERSION,
-            "proposal_content_identity": self.proposal.content_identity,
-            "validator_input_binding": self.validator_input.canonical_value(),
-            "finding_ids": [item.finding_id for item in self.findings],
-            "authority": self.authority.value,
-        })
+        return _bounded_canonical(
+            {
+                "schema_version": _FINDING_SET_SCHEMA_VERSION,
+                "proposal_content_identity": self.proposal.content_identity,
+                "validator_input_binding": self.validator_input.canonical_value(),
+                "finding_ids": [item.finding_id for item in self.findings],
+                "authority": self.authority.value,
+            },
+            field="finding set",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,7 +699,9 @@ class ProposalDisposition(_NoEffect):
         ):
             raise DispositionContractError("route binding differs from the exact Lead route")
         expected_route_digest = digest_bytes(
-            canonical_json_bytes(self.route_binding.canonical_value())
+            _bounded_canonical(
+                self.route_binding.canonical_value(), field="route binding"
+            )
         )
         if self.route_binding_digest != expected_route_digest:
             raise DispositionContractError("route binding digest differs")
@@ -712,7 +722,9 @@ class ProposalDisposition(_NoEffect):
             raise DispositionContractError("judgement differs from route matrix")
         if self.authority is not DispositionAuthority.NONE:
             raise DispositionContractError("phase-one disposition has no authority")
-        if self.disposition_id != digest_bytes(canonical_json_bytes(self._identity_value())):
+        if self.disposition_id != digest_bytes(
+            _bounded_canonical(self._identity_value(), field="disposition identity")
+        ):
             raise DispositionContractError("disposition identity differs")
         _bounded_canonical(self.canonical_value(), field="disposition")
 
@@ -720,6 +732,7 @@ class ProposalDisposition(_NoEffect):
     def validate_route_selection(route: ProposalRoute, selection: OutcomeSelection) -> None:
         if not isinstance(route, ProposalRoute) or not isinstance(selection, OutcomeSelection):
             raise DispositionContractError("route selection must be typed")
+        _bounded_canonical(selection.canonical_value(), field="selection")
         rule = _ROUTE_RULES[route]
         action = selection.next_action
         reason_codes = {
@@ -756,7 +769,7 @@ class ProposalDisposition(_NoEffect):
 
     @property
     def canonical_bytes(self) -> bytes:
-        return canonical_json_bytes(self.canonical_value())
+        return _bounded_canonical(self.canonical_value(), field="disposition")
 
     @property
     def decision_lead_id(self) -> str:
@@ -849,13 +862,17 @@ def validate_proposal(raw: bytes, validator_input: ValidatorInputBinding) -> Pro
             "path": finding_path,
             "evidence_reference_type": "PROPOSAL_RECOMMENDATION",
             "evidence_reference_id": recommendation.decision_lead_id,
-            "evidence_reference_digest": digest_bytes(canonical_json_bytes(recommendation.canonical_value())),
+            "evidence_reference_digest": digest_bytes(
+                _bounded_canonical(
+                    recommendation.canonical_value(), field="recommendation"
+                )
+            ),
             "validator_input_binding": validator_input.canonical_value(),
             "authority": DispositionAuthority.NONE.value,
         }
-        findings.append(ProposalValidationFinding(finding_id=digest_bytes(canonical_json_bytes(seed)), proposal_id=proposal.proposal_id, proposal_content_identity=proposal.content_identity, proposal_canonical_digest=proposal_digest, code=finding_code, severity=finding_severity, path=finding_path, evidence_reference_type="PROPOSAL_RECOMMENDATION", evidence_reference_id=recommendation.decision_lead_id, evidence_reference_digest=seed["evidence_reference_digest"], validator_input=validator_input))  # type: ignore[arg-type]
+        findings.append(ProposalValidationFinding(finding_id=digest_bytes(_bounded_canonical(seed, field="finding identity")), proposal_id=proposal.proposal_id, proposal_content_identity=proposal.content_identity, proposal_canonical_digest=proposal_digest, code=finding_code, severity=finding_severity, path=finding_path, evidence_reference_type="PROPOSAL_RECOMMENDATION", evidence_reference_id=recommendation.decision_lead_id, evidence_reference_digest=seed["evidence_reference_digest"], validator_input=validator_input))  # type: ignore[arg-type]
     ordered = tuple(sorted(findings, key=lambda item: item.finding_id))
-    canonical = canonical_json_bytes({"schema_version": _FINDING_SET_SCHEMA_VERSION, "proposal_content_identity": proposal.content_identity, "validator_input_binding": validator_input.canonical_value(), "finding_ids": [item.finding_id for item in ordered], "authority": DispositionAuthority.NONE.value})
+    canonical = _bounded_canonical({"schema_version": _FINDING_SET_SCHEMA_VERSION, "proposal_content_identity": proposal.content_identity, "validator_input_binding": validator_input.canonical_value(), "finding_ids": [item.finding_id for item in ordered], "authority": DispositionAuthority.NONE.value}, field="finding set")
     return ProposalValidationResult(proposal, validator_input, ordered, digest_bytes(canonical))
 
 
@@ -890,7 +907,11 @@ def build_pending_dispositions(
         recommendation = recommendations[lead_id]
         selection = selections[lead_id]
         rule = _ROUTE_RULES[recommendation.route]
-        route_digest = digest_bytes(canonical_json_bytes(recommendation.canonical_value()))
+        route_digest = digest_bytes(
+            _bounded_canonical(
+                recommendation.canonical_value(), field="recommendation"
+            )
+        )
         citation_digests = {
             citation.source_digest
             for citation in recommendation.input_citations
@@ -905,7 +926,11 @@ def build_pending_dispositions(
         kwargs = dict(
             judgement=rule.judgement, proposal_id=validation.proposal.proposal_id,
             proposal_content_identity=validation.proposal.content_identity,
-            proposal_canonical_digest=digest_bytes(validation.proposal.canonical_bytes),
+            proposal_canonical_digest=digest_bytes(
+                _bounded_canonical(
+                    validation.proposal.canonical_value(), field="proposal"
+                )
+            ),
             work_item_id=validation.proposal.work_item.work_item_id,
             work_item_version_id=validation.proposal.work_item.work_item_version_id,
             work_item_version_digest=validation.proposal.work_item.work_item_version_digest,
@@ -920,7 +945,11 @@ def build_pending_dispositions(
             "judgement": rule.judgement.value,
             "proposal_id": validation.proposal.proposal_id,
             "proposal_content_identity": validation.proposal.content_identity,
-            "proposal_canonical_digest": digest_bytes(validation.proposal.canonical_bytes),
+            "proposal_canonical_digest": digest_bytes(
+                _bounded_canonical(
+                    validation.proposal.canonical_value(), field="proposal"
+                )
+            ),
             "work_item_id": validation.proposal.work_item.work_item_id,
             "work_item_version_id": validation.proposal.work_item.work_item_version_id,
             "work_item_version_digest": validation.proposal.work_item.work_item_version_digest,
@@ -935,7 +964,9 @@ def build_pending_dispositions(
             "selection": selection.canonical_value(),
             "authority": DispositionAuthority.NONE.value,
         }
-        disposition_id = digest_bytes(canonical_json_bytes(identity))
+        disposition_id = digest_bytes(
+            _bounded_canonical(identity, field="disposition identity")
+        )
         result.append(ProposalDisposition(disposition_id=disposition_id, **kwargs))  # type: ignore[arg-type]
     return tuple(result)
 
