@@ -53,6 +53,8 @@ from .evaluation_handoff_migrations import (
     EVALUATION_HANDOFF_MIGRATION_NAME,
     EVALUATION_HANDOFF_MIGRATION_STATEMENTS,
     EVALUATION_HANDOFF_SCHEMA_VERSION,
+    evaluation_handoff_backup_paths,
+    prepare_evaluation_handoff_backup,
     require_evaluation_handoff_backup,
 )
 from .extraction_migrations import (
@@ -838,7 +840,24 @@ def apply_pending_migrations(
             )
             current = GRAPHITI_ADAPTER_SCHEMA_VERSION
         if current == GRAPHITI_ADAPTER_SCHEMA_VERSION:
-            if starting_version == GRAPHITI_ADAPTER_SCHEMA_VERSION:
+            if 0 < starting_version < GRAPHITI_ADAPTER_SCHEMA_VERSION:
+                conn.execute(
+                    f"PRAGMA user_version={GRAPHITI_ADAPTER_SCHEMA_VERSION}"
+                )
+                conn.execute("COMMIT")
+                database_path = next(
+                    str(row[2])
+                    for row in conn.execute("PRAGMA database_list").fetchall()
+                    if row[1] == "main"
+                )
+                if not database_path:
+                    raise sqlite3.DatabaseError(
+                        "existing multihop upgrade requires a file-backed database"
+                    )
+                backup_path, _ = evaluation_handoff_backup_paths(database_path)
+                prepare_evaluation_handoff_backup(conn, backup_path)
+                conn.execute("BEGIN EXCLUSIVE")
+            if starting_version != 0:
                 require_evaluation_handoff_backup(
                     conn,
                     expected_history=EXPECTED_MIGRATION_HISTORY[:-1],

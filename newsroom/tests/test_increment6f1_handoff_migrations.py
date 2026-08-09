@@ -30,6 +30,10 @@ from newsroom.increment6.handoffs import (
     create_handoff,
 )
 
+from .graphiti_adapter_4d_migration_helpers import (
+    downgrade_empty_graphiti_adapter_schema_to_v15,
+)
+
 
 CANDIDATE_VERSION_ID = "candidate-version:01JZX7V7G8Q6XKNR4M8J5TH9WD"
 MANIFEST_DIGEST = "sha256:" + "a" * 64
@@ -158,6 +162,34 @@ def test_exact_v16_upgrade_requires_and_retains_exact_backup_digest(
             "WHERE version<=16 ORDER BY version"
         ).fetchall() == retained_v16_history
 
+    finally:
+        connection.close()
+
+
+def test_multihop_existing_upgrade_checkpoints_v16_backup_before_v17(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "multihop.sqlite3"
+    _fresh(database).close()
+    downgrade_empty_graphiti_adapter_schema_to_v15(database)
+
+    connection = _open(database)
+    try:
+        apply_pending_migrations(
+            connection, applied_at="2042-03-12T10:00:01.000000Z"
+        )
+        backup, digest_path = evaluation_handoff_backup_paths(database)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 17
+        assert backup.is_file()
+        assert digest_path.is_file()
+        backup_connection = _open(backup)
+        try:
+            assert backup_connection.execute("PRAGMA user_version").fetchone()[0] == 16
+            assert backup_connection.execute(
+                "SELECT MAX(version) FROM authority_migrations"
+            ).fetchone()[0] == 16
+        finally:
+            backup_connection.close()
     finally:
         connection.close()
 
