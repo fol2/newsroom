@@ -1,5 +1,5 @@
 Lifecycle: canonical
-Delivery-Atom: replace-me
+Delivery-Atom: REPLACE-ME
 Canonical-PR: self
 Checkpoint-Ref: NONE
 Close-When: merged

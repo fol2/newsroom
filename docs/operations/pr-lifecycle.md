@@ -78,9 +78,11 @@ Only that leading block is authoritative. Hidden comments, fenced examples and
 later repeated fields are documentation only and are never parsed as lifecycle
 metadata.
 
-`Delivery-Atom` is a bounded lowercase identifier. `Canonical-PR` is `self` or
-`#<number>`. `Checkpoint-Ref` is a safe branch ref or `NONE`. Every non-`NONE`
-checkpoint uses the dedicated `checkpoint/` namespace.
+`Delivery-Atom` is a bounded lowercase identifier. The reserved placeholder
+`replace-me` is invalid, and the repository template deliberately starts with the
+syntactically invalid `REPLACE-ME` so an untouched template fails validation.
+`Canonical-PR` is `self` or `#<number>`. `Checkpoint-Ref` is a safe branch ref or
+`NONE`. Every non-`NONE` checkpoint uses the dedicated `checkpoint/` namespace.
 
 Valid close conditions are:
 
@@ -117,14 +119,17 @@ surface. Weekly scheduled runs and `mode=plan` manual dispatches build a
 repository-wide inventory at one immutable `${{ github.sha }}`. Inventory resolves
 every declared checkpoint to its full commit SHA; the planner emits a checkpointed
 close action only when that SHA equals the inventoried PR head. A stale checkpoint
-is reported as a warning and cannot block later eligible actions.
+is reported as a warning and cannot block later eligible actions. Every close
+action also embeds that inventoried full PR head SHA; an action is withheld when an
+exact head is unavailable.
 
 The plan job has read-only permissions, writes the complete deterministic mutation
 plan to `pr-lifecycle-plan.json`, publishes it as an artifact and prints three
 review coordinates: the immutable revision, the exact RFC3339 evaluation time and
 the SHA-256 plan digest. The digest covers the repository, revision, evaluation
 time, every open PR surface and lifecycle, every independently verified merged
-canonical, every checkpoint SHA, every proposed close action and every warning.
+canonical, every checkpoint SHA, every proposed close action (including its exact
+PR head SHA) and every warning.
 
 Apply is a separate `mode=apply` dispatch; it is never launched automatically by
 the plan job. The operator must dispatch the exact reviewed revision and supply:
@@ -147,8 +152,9 @@ remain constrained by each job's permission block. The apply job has only the is
 and pull-request write permissions needed to comment and close an eligible
 disposable PR; repository contents remain read-only. It then re-reads the current
 target PR state, body, labels, head repository, head SHA, checkpoint and canonical
-binding before every effect. It never merges or closes a canonical PR and never
-deletes a branch.
+binding before every effect. The re-read head SHA must equal the exact SHA embedded
+in the reviewed close action; any drift fails closed before a comment or closure.
+It never merges or closes a canonical PR and never deletes a branch.
 
 ## Recovery
 

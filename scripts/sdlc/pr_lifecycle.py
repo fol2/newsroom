@@ -394,6 +394,7 @@ def _build_mutation_plan_document(
         "close_actions": [
             {
                 "pr_number": action.pr_number,
+                "head_sha": action.head_sha,
                 "reason": action.reason,
             }
             for action in plan.close_actions
@@ -670,6 +671,10 @@ def _apply_plan(
                 f"pull request #{action.pr_number} is no longer open and unmerged"
             )
         current = _open_pr_from_json(raw_current)
+        if current.head_sha != action.head_sha:
+            raise GithubApiError(
+                f"pull request #{action.pr_number} head SHA changed after planning"
+            )
         lifecycle = parse_pr_lifecycle(current.body)
         validate_pull_request_lifecycle(
             lifecycle,

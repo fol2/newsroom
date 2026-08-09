@@ -87,6 +87,21 @@ def test_parse_canonical_lifecycle() -> None:
     assert lifecycle.branch_retention is BranchRetention.KEEP
 
 
+def test_parser_rejects_reserved_delivery_atom_placeholder() -> None:
+    with pytest.raises(PrLifecycleError, match="placeholder"):
+        parse_pr_lifecycle(body(atom="replace-me"))
+
+
+def test_pull_request_template_requires_a_real_delivery_atom() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    template = (
+        repository_root / ".github/pull_request_template.md"
+    ).read_text(encoding="utf-8")
+
+    with pytest.raises(PrLifecycleError, match="Delivery-Atom"):
+        parse_pr_lifecycle(template)
+
+
 def test_parser_rejects_missing_misordered_and_unsafe_metadata() -> None:
     with pytest.raises(PrLifecycleError, match="visible leading six-line block"):
         parse_pr_lifecycle("Lifecycle: canonical")
@@ -402,6 +417,7 @@ def test_mutation_plan_digest_covers_state_actions_and_warnings() -> None:
     assert document["close_actions"] == [
         {
             "pr_number": 11,
+            "head_sha": "b" * 40,
             "reason": (
                 "declared checkpoint matches current head: "
                 "checkpoint/increment-5b2"
@@ -507,6 +523,129 @@ def test_inventory_rejects_digest_drift_before_any_effect(
     assert client.effects == []
 
 
+@pytest.mark.parametrize(
+    "close_when",
+    ("checkpointed", "canonical-merged"),
+)
+def test_inventory_apply_rejects_action_head_drift_after_digest_check(
+    close_when: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_lifecycle_cli(
+        f"test_pr_lifecycle_{close_when}_head_drift_cli"
+    )
+    canonical_is_merged = close_when == "canonical-merged"
+    canonical_json = {
+        "number": 10,
+        "state": "closed" if canonical_is_merged else "open",
+        "body": body(),
+        "draft": False,
+        "head": {
+            "ref": "agent/increment-5b2",
+            "sha": "a" * 40,
+            "repo": {"full_name": "fol2/newsroom"},
+        },
+        "labels": [],
+        "created_at": "2026-08-01T12:00:00Z",
+        "merged_at": (
+            "2026-08-04T12:00:00Z" if canonical_is_merged else None
+        ),
+    }
+    support_body = body(
+        lifecycle="support",
+        canonical="#10",
+        checkpoint=(
+            "NONE"
+            if canonical_is_merged
+            else "checkpoint/increment-5b2"
+        ),
+        close_when=close_when,
+    )
+    planned_support_json = {
+        "number": 11,
+        "state": "open",
+        "body": support_body,
+        "draft": True,
+        "head": {
+            "ref": "support/increment-5b2-correction",
+            "sha": "b" * 40,
+            "repo": {"full_name": "fol2/newsroom"},
+        },
+        "labels": [{"name": HOUSEKEEPING_LABEL}],
+        "created_at": "2026-08-05T12:00:00Z",
+        "merged_at": None,
+    }
+    current_support_json = {
+        **planned_support_json,
+        "head": {
+            **planned_support_json["head"],
+            "sha": "c" * 40,
+        },
+    }
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.effects: list[str] = []
+            self.checkpoint_reads = 0
+
+        def list_open_pull_requests(self):
+            if canonical_is_merged:
+                return [planned_support_json]
+            return [canonical_json, planned_support_json]
+
+        def get_pull_request(self, number: int):
+            if number == 10:
+                return canonical_json
+            assert number == 11
+            return current_support_json
+
+        def branch_sha(self, ref: str):
+            assert not canonical_is_merged
+            assert ref == "checkpoint/increment-5b2"
+            self.checkpoint_reads += 1
+            if self.checkpoint_reads <= 2:
+                return "b" * 40
+            return "c" * 40
+
+        def comment(self, *_args):
+            self.effects.append("comment")
+
+        def close_pull_request(self, *_args):
+            self.effects.append("close")
+
+    client = FakeClient()
+    monkeypatch.setattr(module, "GithubClient", lambda **_kwargs: client)
+    monkeypatch.setenv(
+        "PR_HOUSEKEEPING_APPLY",
+        "CLOSE_ELIGIBLE_DISPOSABLE_PRS",
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "fol2/newsroom")
+    monkeypatch.setenv("GITHUB_TOKEN", "fake")
+    plan_output = tmp_path / f"{close_when}-plan.json"
+
+    module.inventory(
+        apply=False,
+        revision="d" * 40,
+        evaluation_time="2026-08-05T12:00:00Z",
+        plan_output=plan_output,
+    )
+    plan_envelope = json.loads(plan_output.read_text(encoding="utf-8"))
+
+    with pytest.raises(
+        module.GithubApiError,
+        match="head SHA changed after planning",
+    ):
+        module.inventory(
+            apply=True,
+            revision="d" * 40,
+            evaluation_time="2026-08-05T12:00:00Z",
+            reviewed_revision="d" * 40,
+            reviewed_plan_digest=plan_envelope["digest"],
+        )
+    assert client.effects == []
+
+
 def test_plan_never_closes_canonical_and_closes_checkpointed_support() -> None:
     canonical = open_pr(
         10,
@@ -534,6 +673,7 @@ def test_plan_never_closes_canonical_and_closes_checkpointed_support() -> None:
     assert "checkpoint/increment-5b2" in plan.close_actions[0].reason
     assert set(plan.close_actions[0].__dataclass_fields__) == {
         "pr_number",
+        "head_sha",
         "reason",
     }
 
@@ -730,6 +870,32 @@ def test_plan_warns_for_unexplained_age_without_auto_closing() -> None:
     assert plan.warnings == ("#10 has remained open for 8 days",)
 
 
+def test_plan_requires_exact_head_sha_for_canonical_merged_action() -> None:
+    support = open_pr(
+        11,
+        pr_body=body(
+            lifecycle="support",
+            canonical="#10",
+            checkpoint="NONE",
+            close_when="canonical-merged",
+        ),
+        draft=True,
+        head_ref="support/increment-5b2-correction",
+        head_sha=None,
+    )
+
+    plan = plan_housekeeping(
+        (support,),
+        merged_canonical_prs=frozenset({10}),
+        now=NOW,
+    )
+
+    assert plan.close_actions == ()
+    assert plan.warnings == (
+        "#11 current head SHA is unavailable for exact close-plan binding",
+    )
+
+
 def test_checkpoint_ref_requires_dedicated_namespace() -> None:
     with pytest.raises(PrLifecycleError, match="checkpoint/ namespace"):
         parse_pr_lifecycle(
@@ -896,6 +1062,7 @@ def test_apply_requires_action_pr_to_remain_open_and_unmerged(
         close_actions=(
             CloseAction(
                 pr_number=11,
+                head_sha="a" * 40,
                 reason="declared checkpoint exists",
             ),
         ),
@@ -962,6 +1129,7 @@ def test_apply_revalidates_current_disposable_surface() -> None:
         close_actions=(
             CloseAction(
                 pr_number=11,
+                head_sha="a" * 40,
                 reason="declared checkpoint exists",
             ),
         ),
@@ -1035,6 +1203,7 @@ def test_checkpointed_keep_closure_requires_current_head_checkpoint() -> None:
         close_actions=(
             CloseAction(
                 pr_number=11,
+                head_sha="a" * 40,
                 reason="declared checkpoint exists",
             ),
         ),
@@ -1135,6 +1304,7 @@ def test_checkpointed_apply_revalidates_current_canonical(
         close_actions=(
             CloseAction(
                 pr_number=11,
+                head_sha="a" * 40,
                 reason="declared checkpoint exists",
             ),
         ),
@@ -1221,6 +1391,7 @@ def test_apply_revalidates_current_merged_canonical_binding() -> None:
         close_actions=(
             CloseAction(
                 pr_number=11,
+                head_sha="a" * 40,
                 reason="canonical PR #10 is merged",
             ),
         ),
@@ -1289,7 +1460,22 @@ def test_pull_request_head_sha_must_be_full_lowercase_commit() -> None:
 
 
 def test_close_action_has_no_branch_deletion_capability() -> None:
-    assert set(CloseAction.__dataclass_fields__) == {"pr_number", "reason"}
-    action = CloseAction(pr_number=11, reason="checkpoint verified")
+    assert set(CloseAction.__dataclass_fields__) == {
+        "pr_number",
+        "head_sha",
+        "reason",
+    }
+    action = CloseAction(
+        pr_number=11,
+        head_sha="a" * 40,
+        reason="checkpoint verified",
+    )
     assert action.pr_number == 11
+    assert action.head_sha == "a" * 40
     assert action.reason == "checkpoint verified"
+    with pytest.raises(PrLifecycleError, match="close-action head SHA"):
+        CloseAction(
+            pr_number=11,
+            head_sha="ABC",
+            reason="checkpoint verified",
+        )

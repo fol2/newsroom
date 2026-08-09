@@ -42,6 +42,7 @@ _METADATA_LINE = re.compile(
     r"^(Lifecycle|Delivery-Atom|Canonical-PR|Checkpoint-Ref|Close-When|Branch-Retention):[ \t]*(.*)$"
 )
 _ATOM = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_RESERVED_DELIVERY_ATOMS = frozenset({"replace-me"})
 _PR_REFERENCE = re.compile(r"^#([1-9][0-9]*)$")
 _REF_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 _REPOSITORY = re.compile(
@@ -111,7 +112,29 @@ class OpenPullRequest:
 @dataclass(frozen=True, slots=True)
 class CloseAction:
     pr_number: int
+    head_sha: str
     reason: str
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.pr_number, bool)
+            or not isinstance(self.pr_number, int)
+            or self.pr_number <= 0
+        ):
+            raise PrLifecycleError("close-action PR number must be positive")
+        if (
+            not isinstance(self.head_sha, str)
+            or _COMMIT_SHA.fullmatch(self.head_sha) is None
+        ):
+            raise PrLifecycleError(
+                "close-action head SHA must be lowercase full commit text"
+            )
+        if (
+            not isinstance(self.reason, str)
+            or not self.reason
+            or self.reason != self.reason.strip()
+        ):
+            raise PrLifecycleError("close-action reason must be non-empty text")
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +185,10 @@ def parse_pr_lifecycle(body: str) -> PrLifecycle:
         raise PrLifecycleError("unsupported lifecycle metadata value") from exc
 
     delivery_atom = values["Delivery-Atom"]
+    if delivery_atom in _RESERVED_DELIVERY_ATOMS:
+        raise PrLifecycleError(
+            "Delivery-Atom placeholder must be replaced"
+        )
     if _ATOM.fullmatch(delivery_atom) is None:
         raise PrLifecycleError(
             "Delivery-Atom must be a bounded lowercase identifier"
@@ -465,10 +492,17 @@ def plan_housekeeping(
             )
         if close_reason is None:
             continue
+        if pr.head_sha is None:
+            warnings.append(
+                f"#{pr.number} current head SHA is unavailable for exact "
+                "close-plan binding"
+            )
+            continue
 
         actions.append(
             CloseAction(
                 pr_number=pr.number,
+                head_sha=pr.head_sha,
                 reason=close_reason,
             )
         )
