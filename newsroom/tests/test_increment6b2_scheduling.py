@@ -7,14 +7,22 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from newsroom.increment6.outcomes import PriorityLane, PrioritySelection, ReasonReference
+from newsroom.increment6.outcomes import (
+    PriorityLane,
+    PrioritySelection,
+    ReasonReference,
+)
 from newsroom.increment6.scheduling import (
     RESERVED_CAPACITY_POLICY,
     STARVATION_OBSERVATION,
     URGENCY_DEADLINE_POLICY,
-    CapacityPathState,
+    CapacityAllocationDisposition,
     CapacityClass,
+    CapacityPathState,
+    CapacityPopulationItem,
+    CapacityRevalidationDisposition,
     CapacitySnapshot,
+    CapacityWorkState,
     DeadlineBoundary,
     DeadlineKind,
     LaneTimingRule,
@@ -23,13 +31,12 @@ from newsroom.increment6.scheduling import (
     SchedulingContractError,
     SchedulingEligibility,
     StarvationState,
-    UrgencyDeadlineInput,
     UrgencyDeadlineDecision,
+    UrgencyDeadlineInput,
     allocate_reserved_capacity,
-    capacity_class_for_lane,
     calculate_urgency_deadline,
+    capacity_class_for_lane,
 )
-
 
 SHA_A = "sha256:" + "a" * 64
 SHA_B = "sha256:" + "b" * 64
@@ -85,7 +92,9 @@ def _policy() -> URGENCY_DEADLINE_POLICY:
 
 def _input(
     *,
+    work_item_id: str = "work-item-a",
     version_id: str = "work-item-version-a",
+    version_digest: str = SHA_A,
     lane: PriorityLane = PriorityLane.TIME_SENSITIVE,
     enqueued_at: str = "2026-08-09T15:00:00Z",
     observed_at: str = "2026-08-09T15:10:00Z",
@@ -103,11 +112,11 @@ def _input(
     }:
         deadline = _deadline()
     return UrgencyDeadlineInput(
-        work_item_id="work-item-a",
+        work_item_id=work_item_id,
         work_item_version_id=version_id,
-        work_item_version_digest=SHA_A,
+        work_item_version_digest=version_digest,
         priority_selection=PrioritySelection(
-            work_identity="work-item-a",
+            work_identity=work_item_id,
             work_version=version_id,
             lane=lane,
             basis_references=(
@@ -205,9 +214,7 @@ def test_stale_or_blocked_work_never_becomes_schedulable_by_priority() -> None:
         )
         assert decision.schedulable is False
         assert decision.order_key is None
-        assert decision.revalidation_required is (
-            state is SchedulingEligibility.STALE
-        )
+        assert decision.revalidation_required is (state is SchedulingEligibility.STALE)
 
 
 def test_starvation_is_measurable_and_requires_current_revalidation() -> None:
@@ -235,9 +242,9 @@ def test_starvation_is_measurable_and_requires_current_revalidation() -> None:
     assert starved.starvation_state is StarvationState.STARVED
     assert starved.revalidation_required is True
     assert starved.starvation_overrun_seconds == 3_600
-    assert STARVATION_OBSERVATION.from_canonical_bytes(
-        starved.canonical_bytes
-    ) == starved
+    assert (
+        STARVATION_OBSERVATION.from_canonical_bytes(starved.canonical_bytes) == starved
+    )
 
 
 def test_overdue_exact_deadline_is_visible_and_requires_revalidation() -> None:
@@ -253,7 +260,9 @@ def test_overdue_exact_deadline_is_visible_and_requires_revalidation() -> None:
     assert decision.revalidation_required is True
 
 
-def test_within_lane_order_is_deadline_then_consequence_risk_age_and_tie_break() -> None:
+def test_within_lane_order_is_deadline_then_consequence_risk_age_and_tie_break() -> (
+    None
+):
     policy = _policy()
     early = calculate_urgency_deadline(
         policy=policy,
@@ -299,48 +308,106 @@ def _capacity_policy() -> RESERVED_CAPACITY_POLICY:
     )
 
 
-def _snapshot(
+def _capacity_item(
+    name: str,
     *,
-    active_urgent_slots: int = 0,
-    active_ordinary_slots: int = 0,
-    pending_urgent: int = 10,
-    pending_ordinary: int = 10,
+    lane: PriorityLane,
+    state: CapacityWorkState = CapacityWorkState.PENDING,
+    starved: bool = False,
+    revalidated: bool = False,
+    identity: str | None = None,
+) -> CapacityPopulationItem:
+    digest = (
+        "sha256:" + (name[-1].encode().hex()[0] if name[-1].isalnum() else "d") * 64
+    )
+    enqueued_at = (
+        "2026-08-09T12:00:00Z"
+        if starved
+        else "2026-08-09T15:09:30Z"
+        if lane in {PriorityLane.CONTAINMENT, PriorityLane.URGENT}
+        else "2026-08-09T15:05:00Z"
+    )
+    observation = calculate_urgency_deadline(
+        policy=_policy(),
+        item=_input(
+            work_item_id=identity or f"work-item-{name}",
+            version_id=f"work-item-version-{name}",
+            version_digest=digest,
+            lane=lane,
+            enqueued_at=enqueued_at,
+            observed_at="2026-08-09T15:10:00Z",
+            deadline=None
+            if lane in {PriorityLane.ROUTINE, PriorityLane.OPTIONAL_EVALUATION}
+            else _deadline(),
+        ),
+    )
+    return CapacityPopulationItem(
+        work_item_id=observation.item.work_item_id,
+        work_item_version_id=observation.item.work_item_version_id,
+        work_item_version_digest=observation.item.work_item_version_digest,
+        priority_selection=observation.item.priority_selection,
+        observation=observation,
+        state=state,
+        revalidation=(
+            CapacityRevalidationDisposition.REVALIDATED
+            if revalidated
+            else CapacityRevalidationDisposition.REVALIDATION_REQUIRED
+            if observation.revalidation_required
+            else CapacityRevalidationDisposition.NOT_REQUIRED
+        ),
+    )
+
+
+def _snapshot(
+    *items: CapacityPopulationItem,
     urgent_path_state: CapacityPathState = CapacityPathState.AVAILABLE,
 ) -> CapacitySnapshot:
     return CapacitySnapshot(
         observed_at="2026-08-09T15:10:00Z",
-        active_urgent_slots=active_urgent_slots,
-        active_ordinary_slots=active_ordinary_slots,
-        pending_urgent=pending_urgent,
-        pending_ordinary=pending_ordinary,
+        population=tuple(sorted(items, key=lambda item: item.identity_key)),
         urgent_path_state=urgent_path_state,
     )
 
 
-def test_reserved_capacity_admits_urgent_without_consuming_all_capacity() -> None:
-    decision = allocate_reserved_capacity(
-        policy=_capacity_policy(),
-        snapshot=_snapshot(),
+def test_capacity_population_derives_counts_and_exact_grants_from_canonical_lanes() -> (
+    None
+):
+    items = tuple(
+        _capacity_item(str(index), lane=lane, state=state)
+        for index, (lane, state) in enumerate(
+            (
+                (PriorityLane.URGENT, CapacityWorkState.ACTIVE),
+                (PriorityLane.TIME_SENSITIVE, CapacityWorkState.ACTIVE),
+                (PriorityLane.CONTAINMENT, CapacityWorkState.PENDING),
+                (PriorityLane.URGENT, CapacityWorkState.PENDING),
+                (PriorityLane.PLANNED_WINDOW, CapacityWorkState.PENDING),
+                (PriorityLane.ROUTINE, CapacityWorkState.PENDING),
+            )
+        )
     )
+    snapshot = _snapshot(*items)
+    decision = allocate_reserved_capacity(policy=_capacity_policy(), snapshot=snapshot)
 
-    assert decision.urgent_grants == 4
+    assert (snapshot.active_urgent_slots, snapshot.active_ordinary_slots) == (1, 1)
+    assert (snapshot.pending_urgent, snapshot.pending_ordinary) == (2, 2)
+    assert decision.urgent_grants == 2
     assert decision.ordinary_grants == 2
-    assert decision.urgent_grants <= decision.policy.max_urgent_slots
-    assert decision.ordinary_grants >= decision.policy.minimum_ordinary_slots
-    assert decision.urgent_disposition is ReservedCapacityDisposition.ADMITTED
-    assert decision.ordinary_disposition is ReservedCapacityDisposition.ADMITTED
-    assert ReservedCapacityDecision.from_canonical_bytes(
-        decision.canonical_bytes
-    ) == decision
+    assert {
+        (item.work_item_id, item.work_item_version_digest)
+        for item in decision.granted_items
+    } == {(item.work_item_id, item.work_item_version_digest) for item in items[2:]}
+    assert (
+        ReservedCapacityDecision.from_canonical_bytes(decision.canonical_bytes)
+        == decision
+    )
 
 
 def test_capacity_classes_are_closed_over_canonical_lanes() -> None:
-    assert capacity_class_for_lane(PriorityLane.CONTAINMENT) is (
-        CapacityClass.URGENT_RESERVED
+    assert (
+        capacity_class_for_lane(PriorityLane.CONTAINMENT)
+        is CapacityClass.URGENT_RESERVED
     )
-    assert capacity_class_for_lane(PriorityLane.URGENT) is (
-        CapacityClass.URGENT_RESERVED
-    )
+    assert capacity_class_for_lane(PriorityLane.URGENT) is CapacityClass.URGENT_RESERVED
     for lane in (
         PriorityLane.TIME_SENSITIVE,
         PriorityLane.PLANNED_WINDOW,
@@ -350,51 +417,154 @@ def test_capacity_classes_are_closed_over_canonical_lanes() -> None:
         assert capacity_class_for_lane(lane) is CapacityClass.ORDINARY
 
 
-def test_ordinary_work_cannot_consume_the_urgent_reserve() -> None:
+def test_duplicate_identity_version_or_conflicting_version_fails_closed() -> None:
+    item = _capacity_item("duplicate", lane=PriorityLane.ROUTINE)
+    with pytest.raises(SchedulingContractError):
+        _snapshot(item, item)
+    conflicting = _capacity_item(
+        "other", lane=PriorityLane.ROUTINE, identity=item.work_item_id
+    )
+    with pytest.raises(SchedulingContractError):
+        _snapshot(item, conflicting)
+
+
+def test_caller_cannot_tamper_with_derived_counts_lane_or_digest() -> None:
+    item = _capacity_item("tamper", lane=PriorityLane.URGENT)
     decision = allocate_reserved_capacity(
-        policy=_capacity_policy(),
-        snapshot=_snapshot(pending_urgent=0, pending_ordinary=99),
+        policy=_capacity_policy(), snapshot=_snapshot(item)
     )
+    value = json.loads(decision.canonical_bytes)
+    value["snapshot"]["pending_urgent"] = 99
+    with pytest.raises(SchedulingContractError):
+        ReservedCapacityDecision.from_canonical_bytes(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        )
+    value = json.loads(decision.canonical_bytes)
+    value["snapshot"]["population"][0]["lane"] = PriorityLane.ROUTINE.value
+    with pytest.raises(SchedulingContractError):
+        ReservedCapacityDecision.from_canonical_bytes(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        )
 
-    assert decision.urgent_grants == 0
-    assert decision.ordinary_grants == 4
-    assert decision.unallocated_slots == 2
 
-
-def test_degraded_urgent_path_is_visible_and_never_downgrades_to_ordinary() -> None:
+def test_revalidated_starved_routine_gets_next_ordinary_grant_before_fresh_inflow() -> (
+    None
+):
+    active = tuple(
+        _capacity_item(
+            f"active-{index}",
+            lane=PriorityLane.TIME_SENSITIVE,
+            state=CapacityWorkState.ACTIVE,
+        )
+        for index in range(3)
+    )
+    fresh = _capacity_item("fresh", lane=PriorityLane.TIME_SENSITIVE)
+    protected = _capacity_item(
+        "protected", lane=PriorityLane.ROUTINE, starved=True, revalidated=True
+    )
     decision = allocate_reserved_capacity(
-        policy=_capacity_policy(),
-        snapshot=_snapshot(urgent_path_state=CapacityPathState.DEGRADED),
+        policy=_capacity_policy(), snapshot=_snapshot(*active, fresh, protected)
     )
 
-    assert decision.urgent_grants == 0
-    assert decision.urgent_disposition is (
-        ReservedCapacityDisposition.URGENT_VISIBLE_OPERATIONAL_HOLD
+    assert decision.ordinary_grants == 1
+    assert decision.granted_items == (protected,)
+    protected_allocation = next(a for a in decision.allocations if a.item == protected)
+    fresh_allocation = next(a for a in decision.allocations if a.item == fresh)
+    assert protected_allocation.protected_routine_grant is True
+    assert protected_allocation.disposition is CapacityAllocationDisposition.GRANTED
+    assert (
+        fresh_allocation.disposition is CapacityAllocationDisposition.CAPACITY_DEFERRED
     )
-    assert decision.ordinary_grants == 4
-    assert decision.unallocated_slots == 2
-    assert decision.downgraded_urgent_to_ordinary is False
-    assert decision.effect == "NONE"
 
 
-def test_active_urgent_work_still_preserves_ordinary_headroom() -> None:
+def test_starved_routine_requires_visible_revalidation_before_protection() -> None:
+    fresh = _capacity_item("fresh2", lane=PriorityLane.TIME_SENSITIVE)
+    awaiting = _capacity_item("awaiting", lane=PriorityLane.ROUTINE, starved=True)
+    decision = allocate_reserved_capacity(
+        policy=_capacity_policy(), snapshot=_snapshot(fresh, awaiting)
+    )
+
+    assert decision.granted_items == (fresh,)
+    allocation = next(a for a in decision.allocations if a.item == awaiting)
+    assert allocation.disposition is CapacityAllocationDisposition.REVALIDATION_REQUIRED
+    assert allocation.protected_routine_grant is False
+
+
+def test_degraded_urgent_is_exact_visible_hold_and_never_downgraded() -> None:
+    urgent = _capacity_item("urgent", lane=PriorityLane.URGENT)
+    ordinary = _capacity_item("ordinary", lane=PriorityLane.ROUTINE)
     decision = allocate_reserved_capacity(
         policy=_capacity_policy(),
         snapshot=_snapshot(
-            active_urgent_slots=3,
-            active_ordinary_slots=0,
-            pending_urgent=10,
-            pending_ordinary=10,
+            urgent, ordinary, urgent_path_state=CapacityPathState.DEGRADED
         ),
     )
 
-    assert decision.urgent_grants == 1
-    assert decision.ordinary_grants == 2
-    assert decision.active_after_urgent == 4
-    assert decision.active_after_ordinary == 2
+    assert decision.urgent_grants == 0
+    assert decision.ordinary_grants == 1
+    assert (
+        decision.urgent_disposition
+        is ReservedCapacityDisposition.URGENT_VISIBLE_OPERATIONAL_HOLD
+    )
+    assert (
+        next(a for a in decision.allocations if a.item == urgent).disposition
+        is CapacityAllocationDisposition.URGENT_VISIBLE_OPERATIONAL_HOLD
+    )
+    assert decision.downgraded_urgent_to_ordinary is False
 
 
-def test_capacity_policy_rejects_configuration_that_lets_urgent_take_every_slot() -> None:
+@pytest.mark.parametrize("active_urgent", range(5))
+@pytest.mark.parametrize("active_ordinary", range(5))
+def test_capacity_invariants_hold_across_bounded_population_grid(
+    active_urgent: int, active_ordinary: int
+) -> None:
+    if active_urgent > 4 or active_ordinary > 4 or active_urgent + active_ordinary > 6:
+        return
+    items = [
+        *(
+            _capacity_item(
+                f"au-{index}", lane=PriorityLane.URGENT, state=CapacityWorkState.ACTIVE
+            )
+            for index in range(active_urgent)
+        ),
+        *(
+            _capacity_item(
+                f"ao-{index}", lane=PriorityLane.ROUTINE, state=CapacityWorkState.ACTIVE
+            )
+            for index in range(active_ordinary)
+        ),
+        *(
+            _capacity_item(f"pu-{index}", lane=PriorityLane.URGENT)
+            for index in range(8)
+        ),
+        *(
+            _capacity_item(f"po-{index}", lane=PriorityLane.TIME_SENSITIVE)
+            for index in range(8)
+        ),
+    ]
+    if active_urgent > 4 or active_ordinary > 4:
+        with pytest.raises(SchedulingContractError):
+            allocate_reserved_capacity(
+                policy=_capacity_policy(), snapshot=_snapshot(*items)
+            )
+        return
+    decision = allocate_reserved_capacity(
+        policy=_capacity_policy(), snapshot=_snapshot(*items)
+    )
+    assert decision.active_after_urgent <= decision.policy.max_urgent_slots
+    assert decision.active_after_ordinary <= decision.policy.ordinary_capacity_ceiling
+    assert (
+        len(decision.granted_items) + active_urgent + active_ordinary
+        <= decision.policy.total_slots
+    )
+    assert len({item.identity_key for item in decision.granted_items}) == len(
+        decision.granted_items
+    )
+
+
+def test_capacity_policy_rejects_configuration_that_lets_urgent_take_every_slot() -> (
+    None
+):
     with pytest.raises(SchedulingContractError):
         replace(_capacity_policy(), minimum_ordinary_slots=0)
     with pytest.raises(SchedulingContractError):
@@ -445,6 +615,48 @@ def test_decision_parsers_reject_unknown_duplicate_and_noncanonical_json() -> No
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode()
+        )
+
+
+def test_total_contract_boundaries_never_leak_raw_numeric_or_datetime_errors() -> None:
+    with pytest.raises(SchedulingContractError):
+        calculate_urgency_deadline(
+            policy=_policy(),
+            item=_input(
+                lane=PriorityLane.ROUTINE,
+                enqueued_at="9999-12-31T23:59:00Z",
+                observed_at="9999-12-31T23:59:30Z",
+                deadline=None,
+            ),
+        )
+    with pytest.raises(SchedulingContractError):
+        replace(_rules()[-1], starvation_limit_seconds=315_576_001)
+
+    decision = calculate_urgency_deadline(policy=_policy(), item=_input())
+    huge_integer = decision.canonical_bytes.replace(
+        b'"queue_age_seconds":600',
+        b'"queue_age_seconds":' + b"9" * 5_000,
+    )
+    with pytest.raises(SchedulingContractError):
+        UrgencyDeadlineDecision.from_canonical_bytes(huge_integer)
+    with pytest.raises(SchedulingContractError):
+        UrgencyDeadlineDecision.from_canonical_bytes(b"{" + b" " * 1_000_000)
+
+
+def test_canonical_parsers_reject_boolean_ordinals_as_type_confusion() -> None:
+    decision = calculate_urgency_deadline(policy=_policy(), item=_input())
+    value = json.loads(decision.canonical_bytes)
+    value["input"]["lane_ordinal"] = True
+    with pytest.raises(SchedulingContractError):
+        UrgencyDeadlineDecision.from_canonical_bytes(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        )
+
+    value = json.loads(decision.canonical_bytes)
+    value["policy"]["lane_rules"][0]["lane_ordinal"] = True
+    with pytest.raises(SchedulingContractError):
+        UrgencyDeadlineDecision.from_canonical_bytes(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         )
 
 

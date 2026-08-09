@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from newsroom.authority.canonical import (
@@ -23,10 +23,7 @@ from newsroom.authority.canonical import (
 )
 from newsroom.increment6.outcomes import PriorityLane, PrioritySelection
 
-
-SCHEDULING_POLICY_SCHEMA_VERSION = (
-    "newsroom.increment6.triage-scheduling-policy.v1"
-)
+SCHEDULING_POLICY_SCHEMA_VERSION = "newsroom.increment6.triage-scheduling-policy.v1"
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,255}\Z")
 _ZONE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+\-/]{0,255}\Z")
@@ -34,6 +31,11 @@ _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _LOCAL_TIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
 _UTC_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _TIE_BREAK = "WORK_ITEM_VERSION_ID_ASC"
+_MAX_CANONICAL_BYTES = 1_000_000
+_MAX_CAPACITY_ITEM_BYTES = 16_384
+_MAX_CAPACITY_POPULATION = 48
+_MAX_INTEGER = 2_147_483_647
+_MAX_DURATION_SECONDS = 315_576_000  # ten years, including leap-day headroom
 
 
 class SchedulingContractError(ValueError):
@@ -53,8 +55,13 @@ def _require_digest(value: object, *, field: str) -> str:
 
 
 def _require_non_negative_int(value: object, *, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise SchedulingContractError(f"{field} must be a non-negative integer")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > _MAX_INTEGER
+    ):
+        raise SchedulingContractError(f"{field} must be a bounded non-negative integer")
     return value
 
 
@@ -98,17 +105,17 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _decode_canonical_object(raw: bytes, *, field: str) -> dict[str, object]:
-    if not isinstance(raw, bytes) or not raw:
-        raise SchedulingContractError(f"{field} bytes are required")
+    if not isinstance(raw, bytes) or not raw or len(raw) > _MAX_CANONICAL_BYTES:
+        raise SchedulingContractError(f"{field} bounded bytes are required")
     try:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, MemoryError) as exc:
         raise SchedulingContractError(f"{field} is not JSON") from exc
     if not isinstance(value, dict):
         raise SchedulingContractError(f"{field} must be an object")
     try:
         canonical = canonical_json_bytes(value)
-    except CanonicalizationError as exc:
+    except (CanonicalizationError, ValueError, OverflowError, MemoryError) as exc:
         raise SchedulingContractError(f"{field} is not canonical JSON") from exc
     if canonical != raw:
         raise SchedulingContractError(f"{field} is not canonical JSON")
@@ -151,15 +158,15 @@ class DeadlineBoundary:
                 "deadline source time zone is not available"
             ) from exc
         try:
-            local = datetime.strptime(self.source_local_time, _LOCAL_TIME_FORMAT)
+            local = datetime.strptime(  # noqa: DTZ007 - local wall time by contract
+                self.source_local_time, _LOCAL_TIME_FORMAT
+            )
         except (TypeError, ValueError) as exc:
             raise SchedulingContractError(
                 "deadline source local time is not canonical"
             ) from exc
         if local.strftime(_LOCAL_TIME_FORMAT) != self.source_local_time:
-            raise SchedulingContractError(
-                "deadline source local time is not canonical"
-            )
+            raise SchedulingContractError("deadline source local time is not canonical")
         if self.source_fold not in (0, 1) or isinstance(self.source_fold, bool):
             raise SchedulingContractError("deadline fold must be zero or one")
         if (
@@ -168,15 +175,20 @@ class DeadlineBoundary:
             or not -24 * 60 < self.source_utc_offset_minutes < 24 * 60
         ):
             raise SchedulingContractError("deadline UTC offset is invalid")
-        aware = local.replace(tzinfo=zone, fold=self.source_fold)
-        offset = aware.utcoffset()
-        if offset is None or offset.total_seconds() % 60 != 0:
-            raise SchedulingContractError("deadline UTC offset cannot be resolved")
-        if int(offset.total_seconds() // 60) != self.source_utc_offset_minutes:
-            raise SchedulingContractError("deadline UTC offset differs")
-        if aware.astimezone(UTC) != due:
-            raise SchedulingContractError("deadline UTC and local boundary differ")
-        round_trip = due.astimezone(zone)
+        try:
+            aware = local.replace(tzinfo=zone, fold=self.source_fold)
+            offset = aware.utcoffset()
+            if offset is None or offset.total_seconds() % 60 != 0:
+                raise SchedulingContractError("deadline UTC offset cannot be resolved")
+            if int(offset.total_seconds() // 60) != self.source_utc_offset_minutes:
+                raise SchedulingContractError("deadline UTC offset differs")
+            if aware.astimezone(UTC) != due:
+                raise SchedulingContractError("deadline UTC and local boundary differ")
+            round_trip = due.astimezone(zone)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise SchedulingContractError(
+                "deadline boundary is not representable"
+            ) from exc
         if (
             round_trip.strftime(_LOCAL_TIME_FORMAT) != self.source_local_time
             or round_trip.fold != self.source_fold
@@ -196,7 +208,7 @@ class DeadlineBoundary:
         }
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> "DeadlineBoundary":
+    def from_mapping(cls, value: Mapping[str, object]) -> DeadlineBoundary:
         _strict_keys(
             value,
             required={
@@ -244,6 +256,10 @@ class LaneTimingRule:
             raise SchedulingContractError(
                 "starvation warning must precede the starvation limit"
             )
+        if limit > _MAX_DURATION_SECONDS:
+            raise SchedulingContractError(
+                "starvation duration exceeds the representable policy bound"
+            )
         if type(self.explicit_deadline_required) is not bool:
             raise SchedulingContractError(
                 "explicit deadline requirement must be boolean"
@@ -259,7 +275,7 @@ class LaneTimingRule:
         }
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> "LaneTimingRule":
+    def from_mapping(cls, value: Mapping[str, object]) -> LaneTimingRule:
         _strict_keys(
             value,
             required={
@@ -281,7 +297,11 @@ class LaneTimingRule:
             )
         except (TypeError, ValueError) as exc:
             raise SchedulingContractError("lane timing rule is malformed") from exc
-        if value["lane_ordinal"] != lane.ordinal:
+        if (
+            isinstance(value["lane_ordinal"], bool)
+            or not isinstance(value["lane_ordinal"], int)
+            or value["lane_ordinal"] != lane.ordinal
+        ):
             raise SchedulingContractError("lane timing ordinal differs")
         return result
 
@@ -345,9 +365,7 @@ class UrgencyDeadlinePolicy:
             "lane_rules": [item.canonical_value() for item in self.lane_rules],
             "authority": self.authority,
             "effect": self.effect,
-            "production_activation_authorised": (
-                self.production_activation_authorised
-            ),
+            "production_activation_authorised": (self.production_activation_authorised),
         }
 
     @property
@@ -359,7 +377,7 @@ class UrgencyDeadlinePolicy:
         return digest_bytes(self.canonical_bytes)
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> "UrgencyDeadlinePolicy":
+    def from_mapping(cls, value: Mapping[str, object]) -> UrgencyDeadlinePolicy:
         _strict_keys(
             value,
             required={
@@ -392,9 +410,7 @@ class UrgencyDeadlinePolicy:
             schema_version=value["schema_version"],  # type: ignore[arg-type]
             authority=value["authority"],  # type: ignore[arg-type]
             effect=value["effect"],  # type: ignore[arg-type]
-            production_activation_authorised=value[
-                "production_activation_authorised"
-            ],  # type: ignore[arg-type]
+            production_activation_authorised=value["production_activation_authorised"],  # type: ignore[arg-type]
         )
 
 
@@ -432,9 +448,7 @@ class UrgencyDeadlineInput:
             field="scheduling_work_item_version_digest",
         )
         if not isinstance(self.priority_selection, PrioritySelection):
-            raise SchedulingContractError(
-                "scheduling priority selection must be typed"
-            )
+            raise SchedulingContractError("scheduling priority selection must be typed")
         if not isinstance(self.lane, PriorityLane):
             raise SchedulingContractError("scheduling input lane must be typed")
         if (
@@ -482,7 +496,9 @@ class UrgencyDeadlineInput:
             "lane_ordinal": self.lane.ordinal,
             "enqueued_at": self.enqueued_at,
             "observed_at": self.observed_at,
-            "deadline": None if self.deadline is None else self.deadline.canonical_value(),
+            "deadline": None
+            if self.deadline is None
+            else self.deadline.canonical_value(),
             "eligibility": self.eligibility.value,
             "delay_consequence_ordinal": self.delay_consequence_ordinal,
             "staleness_risk_ordinal": self.staleness_risk_ordinal,
@@ -502,7 +518,7 @@ class UrgencyDeadlineInput:
         )
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> "UrgencyDeadlineInput":
+    def from_mapping(cls, value: Mapping[str, object]) -> UrgencyDeadlineInput:
         _strict_keys(
             value,
             required={
@@ -525,7 +541,9 @@ class UrgencyDeadlineInput:
         )
         raw_deadline = value["deadline"]
         if raw_deadline is not None and not isinstance(raw_deadline, dict):
-            raise SchedulingContractError("scheduling deadline must be an object or null")
+            raise SchedulingContractError(
+                "scheduling deadline must be an object or null"
+            )
         raw_priority = value["priority_selection"]
         if not isinstance(raw_priority, dict):
             raise SchedulingContractError(
@@ -553,12 +571,16 @@ class UrgencyDeadlineInput:
                 dependency_ready=value["dependency_ready"],  # type: ignore[arg-type]
             )
         except (TypeError, ValueError) as exc:
-            raise SchedulingContractError("urgency deadline input is malformed") from exc
-        if value["lane_ordinal"] != lane.ordinal:
-            raise SchedulingContractError("scheduling lane ordinal differs")
-        if value["priority_selection_digest"] != digest_bytes(
-            priority.canonical_bytes
+            raise SchedulingContractError(
+                "urgency deadline input is malformed"
+            ) from exc
+        if (
+            isinstance(value["lane_ordinal"], bool)
+            or not isinstance(value["lane_ordinal"], int)
+            or value["lane_ordinal"] != lane.ordinal
         ):
+            raise SchedulingContractError("scheduling lane ordinal differs")
+        if value["priority_selection_digest"] != digest_bytes(priority.canonical_bytes):
             raise SchedulingContractError("priority selection digest differs")
         return result
 
@@ -589,12 +611,20 @@ def _urgency_deadline_values(
     enqueued = _parse_utc(item.enqueued_at, field="scheduling_enqueued_at")
     observed = _parse_utc(item.observed_at, field="scheduling_observed_at")
     queue_age = int((observed - enqueued).total_seconds())
+    if queue_age > _MAX_INTEGER:
+        raise SchedulingContractError(
+            "queue age exceeds the representable policy bound"
+        )
     explicit = item.deadline is not None
-    effective = (
-        _parse_utc(item.deadline.due_at, field="deadline_due_at")
-        if item.deadline is not None
-        else enqueued + timedelta(seconds=rule.starvation_limit_seconds)
-    )
+    if item.deadline is not None:
+        effective = _parse_utc(item.deadline.due_at, field="deadline_due_at")
+    else:
+        try:
+            effective = enqueued + timedelta(seconds=rule.starvation_limit_seconds)
+        except (OverflowError, ValueError) as exc:
+            raise SchedulingContractError(
+                "derived starvation deadline is not representable"
+            ) from exc
     if item.eligibility is SchedulingEligibility.STALE:
         starvation = StarvationState.NOT_CURRENT
     elif item.eligibility in {
@@ -620,14 +650,21 @@ def _urgency_deadline_values(
     )
     order_key: tuple[int | str, ...] | None = None
     if schedulable:
+        try:
+            effective_epoch = int(effective.timestamp())
+            enqueued_epoch = int(enqueued.timestamp())
+        except (OverflowError, OSError, ValueError) as exc:
+            raise SchedulingContractError(
+                "scheduling timestamp is not representable"
+            ) from exc
         order_key = (
             item.lane.ordinal,
             0 if explicit else 1,
-            int(effective.timestamp()),
+            effective_epoch,
             -item.delay_consequence_ordinal,
             -item.staleness_risk_ordinal,
             _STARVATION_ORDER[starvation],
-            int(enqueued.timestamp()),
+            enqueued_epoch,
             0 if item.dependency_ready else 1,
             item.work_item_version_id,
         )
@@ -637,9 +674,7 @@ def _urgency_deadline_values(
         "queue_age_seconds": queue_age,
         "deadline_overdue": deadline_overdue,
         "starvation_state": starvation,
-        "starvation_overrun_seconds": max(
-            0, queue_age - rule.starvation_limit_seconds
-        ),
+        "starvation_overrun_seconds": max(0, queue_age - rule.starvation_limit_seconds),
         "revalidation_required": revalidation_required,
         "schedulable": schedulable,
         "order_key": order_key,
@@ -753,9 +788,7 @@ class StarvationObservation:
             "order_key": None if self.order_key is None else list(self.order_key),
             "authority": self.authority,
             "effect": self.effect,
-            "production_activation_authorised": (
-                self.production_activation_authorised
-            ),
+            "production_activation_authorised": (self.production_activation_authorised),
         }
 
     @property
@@ -767,7 +800,7 @@ class StarvationObservation:
         return digest_bytes(self.canonical_bytes)
 
     @classmethod
-    def from_canonical_bytes(cls, raw: bytes) -> "StarvationObservation":
+    def from_canonical_bytes(cls, raw: bytes) -> StarvationObservation:
         value = _decode_canonical_object(raw, field="starvation_observation")
         _strict_keys(
             value,
@@ -850,9 +883,9 @@ def calculate_urgency_deadline(
     """Calculate one pure observation using no ambient clock or queue state."""
 
     if not isinstance(policy, UrgencyDeadlinePolicy):
-        raise TypeError("urgency deadline policy must be typed")
+        raise SchedulingContractError("urgency deadline policy must be typed")
     if not isinstance(item, UrgencyDeadlineInput):
-        raise TypeError("urgency deadline input must be typed")
+        raise SchedulingContractError("urgency deadline input must be typed")
     values = _urgency_deadline_values(policy=policy, item=item)
     return StarvationObservation(policy=policy, item=item, **values)  # type: ignore[arg-type]
 
@@ -869,7 +902,7 @@ class CapacityClass(StrEnum):
 
 
 def capacity_class_for_lane(lane: PriorityLane) -> CapacityClass:
-    """Map only canonical lanes; this classification grants no admission."""
+    """Derive capacity only from the canonical Priority Selection lane."""
 
     if not isinstance(lane, PriorityLane):
         raise SchedulingContractError("capacity classification lane must be typed")
@@ -883,6 +916,25 @@ class ReservedCapacityDisposition(StrEnum):
     NO_PENDING_WORK = "NO_PENDING_WORK"
     CAPACITY_DEFERRED = "CAPACITY_DEFERRED"
     URGENT_VISIBLE_OPERATIONAL_HOLD = "URGENT_VISIBLE_OPERATIONAL_HOLD"
+    REVALIDATION_REQUIRED = "REVALIDATION_REQUIRED"
+
+
+class CapacityWorkState(StrEnum):
+    ACTIVE = "ACTIVE"
+    PENDING = "PENDING"
+
+
+class CapacityRevalidationDisposition(StrEnum):
+    NOT_REQUIRED = "NOT_REQUIRED"
+    REVALIDATED = "REVALIDATED"
+    REVALIDATION_REQUIRED = "REVALIDATION_REQUIRED"
+
+
+class CapacityAllocationDisposition(StrEnum):
+    GRANTED = "GRANTED"
+    CAPACITY_DEFERRED = "CAPACITY_DEFERRED"
+    URGENT_VISIBLE_OPERATIONAL_HOLD = "URGENT_VISIBLE_OPERATIONAL_HOLD"
+    REVALIDATION_REQUIRED = "REVALIDATION_REQUIRED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -903,12 +955,10 @@ class ReservedCapacityPolicy:
         _require_token(self.policy_version, field="capacity_policy_version")
         total = _require_positive_int(self.total_slots, field="capacity_total_slots")
         urgent = _require_positive_int(
-            self.urgent_reserved_slots,
-            field="urgent_reserved_slots",
+            self.urgent_reserved_slots, field="urgent_reserved_slots"
         )
         ordinary = _require_positive_int(
-            self.minimum_ordinary_slots,
-            field="minimum_ordinary_slots",
+            self.minimum_ordinary_slots, field="minimum_ordinary_slots"
         )
         if urgent + ordinary > total:
             raise SchedulingContractError(
@@ -954,9 +1004,7 @@ class ReservedCapacityPolicy:
             "degraded_urgent_disposition": self.degraded_urgent_disposition.value,
             "authority": self.authority,
             "effect": self.effect,
-            "production_activation_authorised": (
-                self.production_activation_authorised
-            ),
+            "production_activation_authorised": self.production_activation_authorised,
         }
 
     @property
@@ -968,7 +1016,7 @@ class ReservedCapacityPolicy:
         return digest_bytes(self.canonical_bytes)
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> "ReservedCapacityPolicy":
+    def from_mapping(cls, value: Mapping[str, object]) -> ReservedCapacityPolicy:
         _strict_keys(
             value,
             required={
@@ -992,185 +1040,423 @@ class ReservedCapacityPolicy:
             raise SchedulingContractError("reserved capacity record type differs")
         try:
             result = cls(
-                policy_id=value["policy_id"],  # type: ignore[arg-type]
-                policy_version=value["policy_version"],  # type: ignore[arg-type]
-                total_slots=value["total_slots"],  # type: ignore[arg-type]
-                urgent_reserved_slots=value["urgent_reserved_slots"],  # type: ignore[arg-type]
-                minimum_ordinary_slots=value["minimum_ordinary_slots"],  # type: ignore[arg-type]
+                policy_id=value["policy_id"],
+                policy_version=value["policy_version"],
+                total_slots=value["total_slots"],
+                urgent_reserved_slots=value["urgent_reserved_slots"],
+                minimum_ordinary_slots=value["minimum_ordinary_slots"],
                 degraded_urgent_disposition=ReservedCapacityDisposition(
                     value["degraded_urgent_disposition"]
                 ),
-                schema_version=value["schema_version"],  # type: ignore[arg-type]
-                authority=value["authority"],  # type: ignore[arg-type]
-                effect=value["effect"],  # type: ignore[arg-type]
+                schema_version=value["schema_version"],
+                authority=value["authority"],
+                effect=value["effect"],
                 production_activation_authorised=value[
                     "production_activation_authorised"
-                ],  # type: ignore[arg-type]
-            )
+                ],
+            )  # type: ignore[arg-type]
         except (TypeError, ValueError) as exc:
-            raise SchedulingContractError("reserved capacity policy is malformed") from exc
-        if (
-            value["max_urgent_slots"] != result.max_urgent_slots
-            or value["ordinary_capacity_ceiling"]
-            != result.ordinary_capacity_ceiling
+            raise SchedulingContractError(
+                "reserved capacity policy is malformed"
+            ) from exc
+        for field, expected in (
+            ("max_urgent_slots", result.max_urgent_slots),
+            ("ordinary_capacity_ceiling", result.ordinary_capacity_ceiling),
         ):
-            raise SchedulingContractError("reserved capacity derived bounds differ")
+            actual = value[field]
+            if (
+                isinstance(actual, bool)
+                or not isinstance(actual, int)
+                or actual != expected
+            ):
+                raise SchedulingContractError("reserved capacity derived bounds differ")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class CapacityPopulationItem:
+    """One immutable population member bound to its canonical priority observation."""
+
+    work_item_id: str
+    work_item_version_id: str
+    work_item_version_digest: str
+    priority_selection: PrioritySelection
+    observation: StarvationObservation
+    state: CapacityWorkState
+    revalidation: CapacityRevalidationDisposition
+
+    def __post_init__(self) -> None:
+        _require_token(self.work_item_id, field="capacity_work_item_id")
+        _require_token(self.work_item_version_id, field="capacity_work_item_version_id")
+        _require_digest(
+            self.work_item_version_digest, field="capacity_work_item_version_digest"
+        )
+        if not isinstance(self.priority_selection, PrioritySelection) or not isinstance(
+            self.observation, StarvationObservation
+        ):
+            raise SchedulingContractError(
+                "capacity item priority and observation must be typed"
+            )
+        try:
+            if (
+                len(self.priority_selection.canonical_bytes) > _MAX_CAPACITY_ITEM_BYTES
+                or len(self.observation.canonical_bytes) > _MAX_CAPACITY_ITEM_BYTES
+            ):
+                raise SchedulingContractError(
+                    "capacity item exceeds the canonical byte bound"
+                )
+        except (CanonicalizationError, ValueError, OverflowError, MemoryError) as exc:
+            raise SchedulingContractError(
+                "capacity item is not canonically representable"
+            ) from exc
+        source = self.observation.item
+        if (
+            self.work_item_id != source.work_item_id
+            or self.work_item_version_id != source.work_item_version_id
+            or self.work_item_version_digest != source.work_item_version_digest
+            or self.priority_selection != source.priority_selection
+        ):
+            raise SchedulingContractError(
+                "capacity item differs from its exact scheduling observation"
+            )
+        if not isinstance(self.state, CapacityWorkState) or not isinstance(
+            self.revalidation, CapacityRevalidationDisposition
+        ):
+            raise SchedulingContractError(
+                "capacity item state and revalidation must be typed"
+            )
+        if not self.observation.schedulable:
+            raise SchedulingContractError(
+                "capacity population may contain only canonical schedulable work"
+            )
+        required = self.observation.revalidation_required
+        if required and self.revalidation not in {
+            CapacityRevalidationDisposition.REVALIDATED,
+            CapacityRevalidationDisposition.REVALIDATION_REQUIRED,
+        }:
+            raise SchedulingContractError(
+                "capacity item must expose required revalidation"
+            )
+        if (
+            not required
+            and self.revalidation is not CapacityRevalidationDisposition.NOT_REQUIRED
+        ):
+            raise SchedulingContractError(
+                "capacity item has a conflicting revalidation state"
+            )
+        if (
+            self.state is CapacityWorkState.ACTIVE
+            and self.revalidation
+            is CapacityRevalidationDisposition.REVALIDATION_REQUIRED
+        ):
+            raise SchedulingContractError(
+                "active work cannot still require revalidation"
+            )
+
+    @property
+    def lane(self) -> PriorityLane:
+        return self.priority_selection.lane
+
+    @property
+    def capacity_class(self) -> CapacityClass:
+        return capacity_class_for_lane(self.lane)
+
+    @property
+    def identity_key(self) -> tuple[str, str]:
+        return (self.work_item_id, self.work_item_version_id)
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "work_item_id": self.work_item_id,
+            "work_item_version_id": self.work_item_version_id,
+            "work_item_version_digest": self.work_item_version_digest,
+            "priority_selection": self.priority_selection.canonical_value(),
+            "priority_selection_digest": digest_bytes(
+                self.priority_selection.canonical_bytes
+            ),
+            "observation": self.observation.canonical_value(),
+            "observation_digest": self.observation.decision_digest,
+            "state": self.state.value,
+            "revalidation": self.revalidation.value,
+            "lane": self.lane.value,
+            "capacity_class": self.capacity_class.value,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> CapacityPopulationItem:
+        _strict_keys(
+            value,
+            required={
+                "work_item_id",
+                "work_item_version_id",
+                "work_item_version_digest",
+                "priority_selection",
+                "priority_selection_digest",
+                "observation",
+                "observation_digest",
+                "state",
+                "revalidation",
+                "lane",
+                "capacity_class",
+            },
+            field="capacity_population_item",
+        )
+        raw_priority, raw_observation = (
+            value["priority_selection"],
+            value["observation"],
+        )
+        if not isinstance(raw_priority, dict) or not isinstance(raw_observation, dict):
+            raise SchedulingContractError(
+                "capacity item priority and observation must be objects"
+            )
+        try:
+            priority = PrioritySelection.from_mapping(raw_priority)
+            observation = StarvationObservation.from_canonical_bytes(
+                canonical_json_bytes(raw_observation)
+            )
+            result = cls(
+                work_item_id=value["work_item_id"],
+                work_item_version_id=value["work_item_version_id"],
+                work_item_version_digest=value["work_item_version_digest"],
+                priority_selection=priority,
+                observation=observation,
+                state=CapacityWorkState(value["state"]),
+                revalidation=CapacityRevalidationDisposition(value["revalidation"]),
+            )  # type: ignore[arg-type]
+        except (
+            TypeError,
+            ValueError,
+            CanonicalizationError,
+            MemoryError,
+            OverflowError,
+        ) as exc:
+            raise SchedulingContractError(
+                "capacity population item is malformed"
+            ) from exc
+        if (
+            value["priority_selection_digest"] != digest_bytes(priority.canonical_bytes)
+            or value["observation_digest"] != observation.decision_digest
+            or value["lane"] != result.lane.value
+            or value["capacity_class"] != result.capacity_class.value
+        ):
+            raise SchedulingContractError("capacity item derived binding differs")
         return result
 
 
 @dataclass(frozen=True, slots=True)
 class CapacitySnapshot:
     observed_at: str
-    active_urgent_slots: int
-    active_ordinary_slots: int
-    pending_urgent: int
-    pending_ordinary: int
+    population: tuple[CapacityPopulationItem, ...]
     urgent_path_state: CapacityPathState
 
     def __post_init__(self) -> None:
         _parse_utc(self.observed_at, field="capacity_observed_at")
+        if not isinstance(self.population, tuple) or any(
+            not isinstance(item, CapacityPopulationItem) for item in self.population
+        ):
+            raise SchedulingContractError(
+                "capacity population must be a typed immutable tuple"
+            )
+        if len(self.population) > _MAX_CAPACITY_POPULATION:
+            raise SchedulingContractError(
+                "capacity population exceeds the bounded size"
+            )
+        if not isinstance(self.urgent_path_state, CapacityPathState):
+            raise SchedulingContractError("Urgent capacity path state must be typed")
+        identities: set[str] = set()
+        versions: set[tuple[str, str]] = set()
+        for item in self.population:
+            if item.observation.item.observed_at != self.observed_at:
+                raise SchedulingContractError(
+                    "capacity item observation time differs from snapshot"
+                )
+            if item.work_item_id in identities or item.identity_key in versions:
+                raise SchedulingContractError(
+                    "duplicate or conflicting capacity population identity"
+                )
+            identities.add(item.work_item_id)
+            versions.add(item.identity_key)
+        if tuple(item.identity_key for item in self.population) != tuple(
+            sorted(item.identity_key for item in self.population)
+        ):
+            raise SchedulingContractError(
+                "capacity population must use canonical identity order"
+            )
+
+    def items(
+        self, *, state: CapacityWorkState, capacity_class: CapacityClass
+    ) -> tuple[CapacityPopulationItem, ...]:
+        return tuple(
+            item
+            for item in self.population
+            if item.state is state and item.capacity_class is capacity_class
+        )
+
+    @property
+    def active_urgent_slots(self) -> int:
+        return len(
+            self.items(
+                state=CapacityWorkState.ACTIVE,
+                capacity_class=CapacityClass.URGENT_RESERVED,
+            )
+        )
+
+    @property
+    def active_ordinary_slots(self) -> int:
+        return len(
+            self.items(
+                state=CapacityWorkState.ACTIVE, capacity_class=CapacityClass.ORDINARY
+            )
+        )
+
+    @property
+    def pending_urgent(self) -> int:
+        return len(
+            self.items(
+                state=CapacityWorkState.PENDING,
+                capacity_class=CapacityClass.URGENT_RESERVED,
+            )
+        )
+
+    @property
+    def pending_ordinary(self) -> int:
+        return len(
+            self.items(
+                state=CapacityWorkState.PENDING, capacity_class=CapacityClass.ORDINARY
+            )
+        )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "observed_at": self.observed_at,
+            "population": [item.canonical_value() for item in self.population],
+            "urgent_path_state": self.urgent_path_state.value,
+            "active_urgent_slots": self.active_urgent_slots,
+            "active_ordinary_slots": self.active_ordinary_slots,
+            "pending_urgent": self.pending_urgent,
+            "pending_ordinary": self.pending_ordinary,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> CapacitySnapshot:
+        _strict_keys(
+            value,
+            required={
+                "observed_at",
+                "population",
+                "urgent_path_state",
+                "active_urgent_slots",
+                "active_ordinary_slots",
+                "pending_urgent",
+                "pending_ordinary",
+            },
+            field="capacity_snapshot",
+        )
+        raw_population = value["population"]
+        if not isinstance(raw_population, list) or any(
+            not isinstance(item, dict) for item in raw_population
+        ):
+            raise SchedulingContractError(
+                "capacity population must be an array of objects"
+            )
+        try:
+            result = cls(
+                observed_at=value["observed_at"],
+                population=tuple(
+                    CapacityPopulationItem.from_mapping(item) for item in raw_population
+                ),
+                urgent_path_state=CapacityPathState(value["urgent_path_state"]),
+            )  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise SchedulingContractError("capacity snapshot is malformed") from exc
         for field in (
             "active_urgent_slots",
             "active_ordinary_slots",
             "pending_urgent",
             "pending_ordinary",
         ):
-            _require_non_negative_int(getattr(self, field), field=field)
-        if not isinstance(self.urgent_path_state, CapacityPathState):
-            raise SchedulingContractError("Urgent capacity path state must be typed")
+            actual = value[field]
+            if (
+                isinstance(actual, bool)
+                or not isinstance(actual, int)
+                or actual != getattr(result, field)
+            ):
+                raise SchedulingContractError("capacity snapshot derived count differs")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class CapacityItemAllocation:
+    item: CapacityPopulationItem
+    disposition: CapacityAllocationDisposition
+    protected_routine_grant: bool
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.item, CapacityPopulationItem)
+            or self.item.state is not CapacityWorkState.PENDING
+        ):
+            raise SchedulingContractError(
+                "capacity allocation must bind one pending item"
+            )
+        if (
+            not isinstance(self.disposition, CapacityAllocationDisposition)
+            or type(self.protected_routine_grant) is not bool
+        ):
+            raise SchedulingContractError(
+                "capacity allocation disposition must be typed"
+            )
+        if self.protected_routine_grant and (
+            self.disposition is not CapacityAllocationDisposition.GRANTED
+            or self.item.lane is not PriorityLane.ROUTINE
+            or self.item.observation.starvation_state is not StarvationState.STARVED
+            or self.item.revalidation is not CapacityRevalidationDisposition.REVALIDATED
+        ):
+            raise SchedulingContractError("protected Routine grant is not eligible")
 
     def canonical_value(self) -> dict[str, object]:
         return {
-            "observed_at": self.observed_at,
-            "active_urgent_slots": self.active_urgent_slots,
-            "active_ordinary_slots": self.active_ordinary_slots,
-            "pending_urgent": self.pending_urgent,
-            "pending_ordinary": self.pending_ordinary,
-            "urgent_path_state": self.urgent_path_state.value,
+            "work_item_id": self.item.work_item_id,
+            "work_item_version_id": self.item.work_item_version_id,
+            "work_item_version_digest": self.item.work_item_version_digest,
+            "priority_selection_digest": digest_bytes(
+                self.item.priority_selection.canonical_bytes
+            ),
+            "observation_digest": self.item.observation.decision_digest,
+            "lane": self.item.lane.value,
+            "capacity_class": self.item.capacity_class.value,
+            "disposition": self.disposition.value,
+            "protected_routine_grant": self.protected_routine_grant,
         }
-
-    @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> "CapacitySnapshot":
-        _strict_keys(
-            value,
-            required={
-                "observed_at",
-                "active_urgent_slots",
-                "active_ordinary_slots",
-                "pending_urgent",
-                "pending_ordinary",
-                "urgent_path_state",
-            },
-            field="capacity_snapshot",
-        )
-        try:
-            return cls(
-                observed_at=value["observed_at"],  # type: ignore[arg-type]
-                active_urgent_slots=value["active_urgent_slots"],  # type: ignore[arg-type]
-                active_ordinary_slots=value["active_ordinary_slots"],  # type: ignore[arg-type]
-                pending_urgent=value["pending_urgent"],  # type: ignore[arg-type]
-                pending_ordinary=value["pending_ordinary"],  # type: ignore[arg-type]
-                urgent_path_state=CapacityPathState(value["urgent_path_state"]),
-            )
-        except (TypeError, ValueError) as exc:
-            raise SchedulingContractError("capacity snapshot is malformed") from exc
-
-
-def _capacity_values(
-    *, policy: ReservedCapacityPolicy, snapshot: CapacitySnapshot
-) -> dict[str, object]:
-    active_total = snapshot.active_urgent_slots + snapshot.active_ordinary_slots
-    if active_total > policy.total_slots:
-        raise SchedulingContractError("active work exceeds total capacity")
-    if snapshot.active_urgent_slots > policy.max_urgent_slots:
-        raise SchedulingContractError("active Urgent work consumed ordinary reserve")
-    if snapshot.active_ordinary_slots > policy.ordinary_capacity_ceiling:
-        raise SchedulingContractError("active ordinary work consumed Urgent reserve")
-    available = policy.total_slots - active_total
-    if snapshot.pending_urgent == 0:
-        urgent_grants = 0
-        urgent_disposition = ReservedCapacityDisposition.NO_PENDING_WORK
-    elif snapshot.urgent_path_state is not CapacityPathState.AVAILABLE:
-        urgent_grants = 0
-        urgent_disposition = policy.degraded_urgent_disposition
-    else:
-        urgent_grants = min(
-            snapshot.pending_urgent,
-            available,
-            policy.max_urgent_slots - snapshot.active_urgent_slots,
-        )
-        urgent_disposition = (
-            ReservedCapacityDisposition.ADMITTED
-            if urgent_grants
-            else ReservedCapacityDisposition.CAPACITY_DEFERRED
-        )
-    remaining = available - urgent_grants
-    ordinary_grants = min(
-        snapshot.pending_ordinary,
-        remaining,
-        policy.ordinary_capacity_ceiling - snapshot.active_ordinary_slots,
-    )
-    if snapshot.pending_ordinary == 0:
-        ordinary_disposition = ReservedCapacityDisposition.NO_PENDING_WORK
-    elif ordinary_grants:
-        ordinary_disposition = ReservedCapacityDisposition.ADMITTED
-    else:
-        ordinary_disposition = ReservedCapacityDisposition.CAPACITY_DEFERRED
-    return {
-        "urgent_grants": urgent_grants,
-        "ordinary_grants": ordinary_grants,
-        "unallocated_slots": remaining - ordinary_grants,
-        "urgent_disposition": urgent_disposition,
-        "ordinary_disposition": ordinary_disposition,
-        "downgraded_urgent_to_ordinary": False,
-    }
 
 
 @dataclass(frozen=True, slots=True)
 class ReservedCapacityDecision:
     policy: ReservedCapacityPolicy
     snapshot: CapacitySnapshot
-    urgent_grants: int
-    ordinary_grants: int
+    allocations: tuple[CapacityItemAllocation, ...]
     unallocated_slots: int
-    urgent_disposition: ReservedCapacityDisposition
-    ordinary_disposition: ReservedCapacityDisposition
-    downgraded_urgent_to_ordinary: bool
     authority: str = "NONE"
     effect: str = "NONE"
     production_activation_authorised: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.policy, ReservedCapacityPolicy):
-            raise SchedulingContractError("capacity decision policy must be typed")
-        if not isinstance(self.snapshot, CapacitySnapshot):
-            raise SchedulingContractError("capacity decision snapshot must be typed")
-        for field in (
-            "urgent_grants",
-            "ordinary_grants",
-            "unallocated_slots",
+        if not isinstance(self.policy, ReservedCapacityPolicy) or not isinstance(
+            self.snapshot, CapacitySnapshot
         ):
-            _require_non_negative_int(getattr(self, field), field=field)
-        if not isinstance(
-            self.urgent_disposition, ReservedCapacityDisposition
-        ) or not isinstance(
-            self.ordinary_disposition, ReservedCapacityDisposition
+            raise SchedulingContractError("capacity decision inputs must be typed")
+        if not isinstance(self.allocations, tuple) or any(
+            not isinstance(item, CapacityItemAllocation) for item in self.allocations
         ):
-            raise SchedulingContractError("capacity dispositions must be typed")
-        if type(self.downgraded_urgent_to_ordinary) is not bool:
             raise SchedulingContractError(
-                "Urgent downgrade indicator must be boolean"
+                "capacity allocations must be a typed immutable tuple"
             )
+        _require_non_negative_int(self.unallocated_slots, field="unallocated_slots")
         expected = _capacity_values(policy=self.policy, snapshot=self.snapshot)
-        actual = {
-            "urgent_grants": self.urgent_grants,
-            "ordinary_grants": self.ordinary_grants,
-            "unallocated_slots": self.unallocated_slots,
-            "urgent_disposition": self.urgent_disposition,
-            "ordinary_disposition": self.ordinary_disposition,
-            "downgraded_urgent_to_ordinary": self.downgraded_urgent_to_ordinary,
-        }
-        if actual != expected:
+        if (
+            self.allocations != expected["allocations"]
+            or self.unallocated_slots != expected["unallocated_slots"]
+        ):
             raise SchedulingContractError(
                 "capacity decision differs from deterministic policy"
             )
@@ -1184,12 +1470,79 @@ class ReservedCapacityDecision:
             )
 
     @property
+    def granted_items(self) -> tuple[CapacityPopulationItem, ...]:
+        return tuple(
+            allocation.item
+            for allocation in self.allocations
+            if allocation.disposition is CapacityAllocationDisposition.GRANTED
+        )
+
+    @property
+    def urgent_grants(self) -> int:
+        return sum(
+            item.capacity_class is CapacityClass.URGENT_RESERVED
+            for item in self.granted_items
+        )
+
+    @property
+    def ordinary_grants(self) -> int:
+        return sum(
+            item.capacity_class is CapacityClass.ORDINARY for item in self.granted_items
+        )
+
+    @property
     def active_after_urgent(self) -> int:
         return self.snapshot.active_urgent_slots + self.urgent_grants
 
     @property
     def active_after_ordinary(self) -> int:
         return self.snapshot.active_ordinary_slots + self.ordinary_grants
+
+    @property
+    def urgent_disposition(self) -> ReservedCapacityDisposition:
+        pending = [
+            a
+            for a in self.allocations
+            if a.item.capacity_class is CapacityClass.URGENT_RESERVED
+        ]
+        if not pending:
+            return ReservedCapacityDisposition.NO_PENDING_WORK
+        if any(a.disposition is CapacityAllocationDisposition.GRANTED for a in pending):
+            return ReservedCapacityDisposition.ADMITTED
+        if any(
+            a.disposition
+            is CapacityAllocationDisposition.URGENT_VISIBLE_OPERATIONAL_HOLD
+            for a in pending
+        ):
+            return ReservedCapacityDisposition.URGENT_VISIBLE_OPERATIONAL_HOLD
+        if all(
+            a.disposition is CapacityAllocationDisposition.REVALIDATION_REQUIRED
+            for a in pending
+        ):
+            return ReservedCapacityDisposition.REVALIDATION_REQUIRED
+        return ReservedCapacityDisposition.CAPACITY_DEFERRED
+
+    @property
+    def ordinary_disposition(self) -> ReservedCapacityDisposition:
+        pending = [
+            a
+            for a in self.allocations
+            if a.item.capacity_class is CapacityClass.ORDINARY
+        ]
+        if not pending:
+            return ReservedCapacityDisposition.NO_PENDING_WORK
+        if any(a.disposition is CapacityAllocationDisposition.GRANTED for a in pending):
+            return ReservedCapacityDisposition.ADMITTED
+        if all(
+            a.disposition is CapacityAllocationDisposition.REVALIDATION_REQUIRED
+            for a in pending
+        ):
+            return ReservedCapacityDisposition.REVALIDATION_REQUIRED
+        return ReservedCapacityDisposition.CAPACITY_DEFERRED
+
+    @property
+    def downgraded_urgent_to_ordinary(self) -> bool:
+        return False
 
     @property
     def schema_version(self) -> str:
@@ -1202,6 +1555,15 @@ class ReservedCapacityDecision:
             "policy": self.policy.canonical_value(),
             "policy_digest": self.policy.policy_digest,
             "snapshot": self.snapshot.canonical_value(),
+            "allocations": [item.canonical_value() for item in self.allocations],
+            "granted_item_keys": [
+                [
+                    item.work_item_id,
+                    item.work_item_version_id,
+                    item.work_item_version_digest,
+                ]
+                for item in self.granted_items
+            ],
             "urgent_grants": self.urgent_grants,
             "ordinary_grants": self.ordinary_grants,
             "unallocated_slots": self.unallocated_slots,
@@ -1209,12 +1571,10 @@ class ReservedCapacityDecision:
             "active_after_ordinary": self.active_after_ordinary,
             "urgent_disposition": self.urgent_disposition.value,
             "ordinary_disposition": self.ordinary_disposition.value,
-            "downgraded_urgent_to_ordinary": self.downgraded_urgent_to_ordinary,
+            "downgraded_urgent_to_ordinary": False,
             "authority": self.authority,
             "effect": self.effect,
-            "production_activation_authorised": (
-                self.production_activation_authorised
-            ),
+            "production_activation_authorised": self.production_activation_authorised,
         }
 
     @property
@@ -1226,7 +1586,7 @@ class ReservedCapacityDecision:
         return digest_bytes(self.canonical_bytes)
 
     @classmethod
-    def from_canonical_bytes(cls, raw: bytes) -> "ReservedCapacityDecision":
+    def from_canonical_bytes(cls, raw: bytes) -> ReservedCapacityDecision:
         value = _decode_canonical_object(raw, field="reserved_capacity_decision")
         _strict_keys(
             value,
@@ -1236,6 +1596,8 @@ class ReservedCapacityDecision:
                 "policy",
                 "policy_digest",
                 "snapshot",
+                "allocations",
+                "granted_item_keys",
                 "urgent_grants",
                 "ordinary_grants",
                 "unallocated_slots",
@@ -1255,63 +1617,152 @@ class ReservedCapacityDecision:
             or value["record_type"] != "reserved_capacity_decision"
         ):
             raise SchedulingContractError("reserved capacity decision schema differs")
-        raw_policy = value["policy"]
-        raw_snapshot = value["snapshot"]
-        if not isinstance(raw_policy, dict) or not isinstance(raw_snapshot, dict):
+        raw_policy, raw_snapshot = value["policy"], value["snapshot"]
+        if (
+            not isinstance(raw_policy, dict)
+            or not isinstance(raw_snapshot, dict)
+            or not isinstance(value["allocations"], list)
+        ):
             raise SchedulingContractError(
-                "capacity decision policy and snapshot must be objects"
+                "capacity decision nested values are malformed"
             )
         policy = ReservedCapacityPolicy.from_mapping(raw_policy)
         snapshot = CapacitySnapshot.from_mapping(raw_snapshot)
         if value["policy_digest"] != policy.policy_digest:
             raise SchedulingContractError("capacity policy digest differs")
+        # Allocations are policy-derived, never trusted from the caller.
+        expected = _capacity_values(policy=policy, snapshot=snapshot)
         try:
             result = cls(
                 policy=policy,
                 snapshot=snapshot,
-                urgent_grants=value["urgent_grants"],  # type: ignore[arg-type]
-                ordinary_grants=value["ordinary_grants"],  # type: ignore[arg-type]
-                unallocated_slots=value["unallocated_slots"],  # type: ignore[arg-type]
-                urgent_disposition=ReservedCapacityDisposition(
-                    value["urgent_disposition"]
-                ),
-                ordinary_disposition=ReservedCapacityDisposition(
-                    value["ordinary_disposition"]
-                ),
-                downgraded_urgent_to_ordinary=value[
-                    "downgraded_urgent_to_ordinary"
-                ],  # type: ignore[arg-type]
-                authority=value["authority"],  # type: ignore[arg-type]
-                effect=value["effect"],  # type: ignore[arg-type]
+                allocations=expected["allocations"],
+                unallocated_slots=value["unallocated_slots"],
+                authority=value["authority"],
+                effect=value["effect"],
                 production_activation_authorised=value[
                     "production_activation_authorised"
-                ],  # type: ignore[arg-type]
-            )
+                ],
+            )  # type: ignore[arg-type]
         except (TypeError, ValueError) as exc:
             raise SchedulingContractError(
                 "reserved capacity decision is malformed"
             ) from exc
-        if (
-            value["active_after_urgent"] != result.active_after_urgent
-            or value["active_after_ordinary"] != result.active_after_ordinary
-        ):
-            raise SchedulingContractError("capacity active totals differ")
         if result.canonical_bytes != raw:
-            raise SchedulingContractError(
-                "reserved capacity decision is not canonical"
-            )
+            raise SchedulingContractError("reserved capacity decision is not canonical")
         return result
+
+
+def _canonical_pending(
+    items: tuple[CapacityPopulationItem, ...],
+) -> list[CapacityPopulationItem]:
+    return sorted(items, key=lambda item: item.observation.order_key or ())
+
+
+def _capacity_values(
+    *, policy: ReservedCapacityPolicy, snapshot: CapacitySnapshot
+) -> dict[str, object]:
+    active_total = snapshot.active_urgent_slots + snapshot.active_ordinary_slots
+    if active_total > policy.total_slots:
+        raise SchedulingContractError("active work exceeds total capacity")
+    if snapshot.active_urgent_slots > policy.max_urgent_slots:
+        raise SchedulingContractError("active Urgent work consumed ordinary reserve")
+    if snapshot.active_ordinary_slots > policy.ordinary_capacity_ceiling:
+        raise SchedulingContractError("active ordinary work consumed Urgent reserve")
+    available = policy.total_slots - active_total
+    urgent = _canonical_pending(
+        snapshot.items(
+            state=CapacityWorkState.PENDING,
+            capacity_class=CapacityClass.URGENT_RESERVED,
+        )
+    )
+    ordinary = _canonical_pending(
+        snapshot.items(
+            state=CapacityWorkState.PENDING, capacity_class=CapacityClass.ORDINARY
+        )
+    )
+    urgent_eligible = [
+        item
+        for item in urgent
+        if item.revalidation
+        is not CapacityRevalidationDisposition.REVALIDATION_REQUIRED
+    ]
+    urgent_limit = (
+        0
+        if snapshot.urgent_path_state is not CapacityPathState.AVAILABLE
+        else min(available, policy.max_urgent_slots - snapshot.active_urgent_slots)
+    )
+    urgent_selected = {item.identity_key for item in urgent_eligible[:urgent_limit]}
+    remaining = available - len(urgent_selected)
+    ordinary_limit = min(
+        remaining, policy.ordinary_capacity_ceiling - snapshot.active_ordinary_slots
+    )
+    ordinary_eligible = [
+        item
+        for item in ordinary
+        if item.revalidation
+        is not CapacityRevalidationDisposition.REVALIDATION_REQUIRED
+    ]
+    protected = next(
+        (
+            item
+            for item in ordinary_eligible
+            if item.lane is PriorityLane.ROUTINE
+            and item.observation.starvation_state is StarvationState.STARVED
+            and item.revalidation is CapacityRevalidationDisposition.REVALIDATED
+        ),
+        None,
+    )
+    selected_ordinary: list[CapacityPopulationItem] = []
+    if ordinary_limit and protected is not None:
+        selected_ordinary.append(protected)
+    selected_ordinary.extend(
+        item for item in ordinary_eligible if item is not protected
+    )
+    selected_ordinary = selected_ordinary[:ordinary_limit]
+    ordinary_selected = {item.identity_key for item in selected_ordinary}
+    allocations: list[CapacityItemAllocation] = []
+    for item in urgent + ordinary:
+        if item.revalidation is CapacityRevalidationDisposition.REVALIDATION_REQUIRED:
+            disposition = CapacityAllocationDisposition.REVALIDATION_REQUIRED
+        elif (
+            item.capacity_class is CapacityClass.URGENT_RESERVED
+            and snapshot.urgent_path_state is not CapacityPathState.AVAILABLE
+        ):
+            disposition = CapacityAllocationDisposition.URGENT_VISIBLE_OPERATIONAL_HOLD
+        elif (
+            item.identity_key in urgent_selected
+            or item.identity_key in ordinary_selected
+        ):
+            disposition = CapacityAllocationDisposition.GRANTED
+        else:
+            disposition = CapacityAllocationDisposition.CAPACITY_DEFERRED
+        allocations.append(
+            CapacityItemAllocation(
+                item=item,
+                disposition=disposition,
+                protected_routine_grant=(
+                    protected is item
+                    and disposition is CapacityAllocationDisposition.GRANTED
+                ),
+            )
+        )
+    grants = sum(
+        item.disposition is CapacityAllocationDisposition.GRANTED
+        for item in allocations
+    )
+    return {"allocations": tuple(allocations), "unallocated_slots": available - grants}
 
 
 def allocate_reserved_capacity(
     *, policy: ReservedCapacityPolicy, snapshot: CapacitySnapshot
 ) -> ReservedCapacityDecision:
-    """Return grants only; this pure function owns no queue admission effect."""
+    """Select exact population members; this pure function owns no queue effect."""
 
-    if not isinstance(policy, ReservedCapacityPolicy):
-        raise TypeError("reserved capacity policy must be typed")
-    if not isinstance(snapshot, CapacitySnapshot):
-        raise TypeError("capacity snapshot must be typed")
+    if not isinstance(policy, ReservedCapacityPolicy) or not isinstance(
+        snapshot, CapacitySnapshot
+    ):
+        raise SchedulingContractError("reserved capacity inputs must be typed")
     values = _capacity_values(policy=policy, snapshot=snapshot)
     return ReservedCapacityDecision(policy=policy, snapshot=snapshot, **values)  # type: ignore[arg-type]
 
@@ -1326,9 +1777,14 @@ __all__ = [
     "SCHEDULING_POLICY_SCHEMA_VERSION",
     "STARVATION_OBSERVATION",
     "URGENCY_DEADLINE_POLICY",
-    "CapacityPathState",
+    "CapacityAllocationDisposition",
     "CapacityClass",
+    "CapacityItemAllocation",
+    "CapacityPathState",
+    "CapacityPopulationItem",
+    "CapacityRevalidationDisposition",
     "CapacitySnapshot",
+    "CapacityWorkState",
     "DeadlineBoundary",
     "DeadlineKind",
     "LaneTimingRule",
@@ -1343,6 +1799,6 @@ __all__ = [
     "UrgencyDeadlineInput",
     "UrgencyDeadlinePolicy",
     "allocate_reserved_capacity",
-    "capacity_class_for_lane",
     "calculate_urgency_deadline",
+    "capacity_class_for_lane",
 ]
