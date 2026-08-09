@@ -236,5 +236,3 @@ def _branch_contributions(
             }
         )
     return results
-
-
