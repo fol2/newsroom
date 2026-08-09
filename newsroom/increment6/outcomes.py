@@ -65,6 +65,7 @@ class CanonicalOutcome(StrEnum):
     SIGNAL_OPERATIONAL_HOLD = "SIGNAL_OPERATIONAL_HOLD"
 
     LEAD_EDITORIAL_REJECT = "LEAD_EDITORIAL_REJECT"
+    LEAD_QUEUED_FOR_TRIAGE = "LEAD_QUEUED_FOR_TRIAGE"
     LEAD_WATCH_DEFER = "LEAD_WATCH_DEFER"
     LEAD_ASSOCIATE_WITHOUT_CANDIDATE = "LEAD_ASSOCIATE_WITHOUT_CANDIDATE"
     LEAD_SUPPLEMENTAL_DISCOVERY = "LEAD_SUPPLEMENTAL_DISCOVERY"
@@ -576,9 +577,9 @@ _PENDING_OUTCOMES = frozenset(
     {
         CanonicalOutcome.PREFLIGHT_BLOCKED,
         CanonicalOutcome.SIGNAL_OPERATIONAL_HOLD,
+        CanonicalOutcome.LEAD_QUEUED_FOR_TRIAGE,
         CanonicalOutcome.LEAD_WATCH_DEFER,
         CanonicalOutcome.LEAD_SUPPLEMENTAL_DISCOVERY,
-        CanonicalOutcome.LEAD_OPERATIONAL_HOLD,
         CanonicalOutcome.CANDIDATE_ADMISSION_BLOCKED,
         CanonicalOutcome.HANDOFF_PENDING,
         CanonicalOutcome.HANDOFF_OPERATIONAL_HOLD,
@@ -617,7 +618,12 @@ _OCCURRENCE_OUTCOMES = frozenset(
 def _validate_outcome_terminality(
     outcome: CanonicalOutcome, terminality: DecisionTerminality
 ) -> None:
-    if outcome in _PENDING_OUTCOMES:
+    if outcome is CanonicalOutcome.LEAD_OPERATIONAL_HOLD:
+        permitted = {
+            DecisionTerminality.PENDING_CONDITION,
+            DecisionTerminality.RETRYABLE_SAME_REQUEST,
+        }
+    elif outcome in _PENDING_OUTCOMES:
         permitted = {DecisionTerminality.PENDING_CONDITION}
     elif outcome in _RETRYABLE_OUTCOMES:
         permitted = {DecisionTerminality.RETRYABLE_SAME_REQUEST}
@@ -711,6 +717,97 @@ SUPPLEMENTAL_ACTION_MAPPING: Mapping[
     }
 )
 
+_DISCOVERY_LEAD_SEMANTIC_MATRIX: Mapping[
+    CanonicalOutcome,
+    frozenset[tuple[DecisionTerminality, CanonicalNextAction]],
+] = MappingProxyType(
+    {
+        CanonicalOutcome.LEAD_QUEUED_FOR_TRIAGE: frozenset(
+            {
+                (
+                    DecisionTerminality.PENDING_CONDITION,
+                    CanonicalNextAction.QUEUE_FOR_TRIAGE,
+                )
+            }
+        ),
+        CanonicalOutcome.LEAD_EDITORIAL_REJECT: frozenset(
+            {
+                (
+                    DecisionTerminality.TERMINAL_EXACT_VERSION,
+                    CanonicalNextAction.CLOSE_DECISION,
+                )
+            }
+        ),
+        CanonicalOutcome.LEAD_WATCH_DEFER: frozenset(
+            {
+                (
+                    WATCH_CONDITION_MAPPING[
+                        LeadDispositionOutcome.WATCH_DEFER
+                    ].terminality,
+                    WATCH_CONDITION_MAPPING[
+                        LeadDispositionOutcome.WATCH_DEFER
+                    ].next_action,
+                )
+            }
+        ),
+        CanonicalOutcome.LEAD_ASSOCIATE_WITHOUT_CANDIDATE: frozenset(
+            {
+                (
+                    DecisionTerminality.TERMINAL_EXACT_VERSION,
+                    CanonicalNextAction.CLOSE_DECISION,
+                )
+            }
+        ),
+        CanonicalOutcome.LEAD_SUPPLEMENTAL_DISCOVERY: frozenset(
+            {
+                (
+                    SUPPLEMENTAL_ACTION_MAPPING[
+                        LeadDispositionOutcome.SUPPLEMENTAL_DISCOVERY
+                    ].terminality,
+                    SUPPLEMENTAL_ACTION_MAPPING[
+                        LeadDispositionOutcome.SUPPLEMENTAL_DISCOVERY
+                    ].next_action,
+                )
+            }
+        ),
+        CanonicalOutcome.LEAD_OPERATIONAL_HOLD: frozenset(
+            {
+                (
+                    DecisionTerminality.PENDING_CONDITION,
+                    CanonicalNextAction.RETRY_SAME_REQUEST,
+                ),
+                (
+                    DecisionTerminality.PENDING_CONDITION,
+                    CanonicalNextAction.REQUEST_REVIEW,
+                ),
+                (
+                    DecisionTerminality.PENDING_CONDITION,
+                    CanonicalNextAction.WAIT_FOR_DEPENDENCY,
+                ),
+                (
+                    DecisionTerminality.RETRYABLE_SAME_REQUEST,
+                    CanonicalNextAction.RETRY_SAME_REQUEST,
+                ),
+            }
+        ),
+        **{
+            outcome: frozenset(
+                {
+                    (
+                        DecisionTerminality.TERMINAL_EXACT_VERSION,
+                        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+                    )
+                }
+            )
+            for outcome in (
+                CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+                CanonicalOutcome.LEAD_ADMIT_DEVELOPMENT_CANDIDATE,
+                CanonicalOutcome.LEAD_ADMIT_CORRECTION_CANDIDATE,
+            )
+        },
+    }
+)
+
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     value: dict[str, object] = {}
@@ -793,6 +890,7 @@ class OutcomeSelection(_NoAuthorityContract):
         _validate_outcome_terminality(self.outcome, self.terminality)
         if self.terminality is DecisionTerminality.PENDING_CONDITION:
             if self.next_action is None or self.next_action.kind not in {
+                NextActionKind.QUEUE_TRIAGE,
                 NextActionKind.RETRY,
                 NextActionKind.REVIEW,
                 NextActionKind.WAIT_DEPENDENCY,
@@ -809,6 +907,18 @@ class OutcomeSelection(_NoAuthorityContract):
             ):
                 raise OutcomeContractError(
                     "retryable outcome requires a retry next action"
+                )
+        if outcome_family(self.outcome) is OutcomeFamily.LEAD:
+            if self.next_action is None:
+                raise OutcomeContractError(
+                    "Lead outcome requires its canonical next action"
+                )
+            permitted = _DISCOVERY_LEAD_SEMANTIC_MATRIX[self.outcome]
+            if (self.terminality, self.next_action.action_code) not in permitted:
+                raise OutcomeContractError(
+                    f"{self.outcome.value} does not permit next action "
+                    f"{self.next_action.action_code.value} with terminality "
+                    f"{self.terminality.value}"
                 )
 
     def canonical_value(self) -> dict[str, object]:

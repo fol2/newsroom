@@ -52,6 +52,7 @@ EXPECTED_OUTCOMES = {
     "SIGNAL_PROMOTED_TO_LEAD",
     "SIGNAL_OPERATIONAL_HOLD",
     "LEAD_EDITORIAL_REJECT",
+    "LEAD_QUEUED_FOR_TRIAGE",
     "LEAD_WATCH_DEFER",
     "LEAD_ASSOCIATE_WITHOUT_CANDIDATE",
     "LEAD_SUPPLEMENTAL_DISCOVERY",
@@ -176,9 +177,7 @@ def test_existing_discovery_watch_and_supplemental_routes_map_one_to_one() -> No
         if outcome_family(item) is OutcomeFamily.LEAD
     }
     retained_triage_outcomes = {
-        item.value
-        for item in LeadDispositionOutcome
-        if item is not LeadDispositionOutcome.QUEUED_FOR_TRIAGE
+        item.value for item in LeadDispositionOutcome
     }
     assert retained_triage_outcomes == canonical_lead_outcomes
 
@@ -204,6 +203,145 @@ def test_existing_discovery_watch_and_supplemental_routes_map_one_to_one() -> No
     assert watch.authorises_persistence is False
     with pytest.raises(TypeError):
         WATCH_CONDITION_MAPPING[LeadDispositionOutcome.EDITORIAL_REJECT] = watch  # type: ignore[index]
+
+
+_DISCOVERY_LEAD_MATRIX = {
+    CanonicalOutcome.LEAD_QUEUED_FOR_TRIAGE: {
+        (
+            DecisionTerminality.PENDING_CONDITION,
+            CanonicalNextAction.QUEUE_FOR_TRIAGE,
+        ),
+    },
+    CanonicalOutcome.LEAD_EDITORIAL_REJECT: {
+        (
+            DecisionTerminality.TERMINAL_EXACT_VERSION,
+            CanonicalNextAction.CLOSE_DECISION,
+        ),
+    },
+    CanonicalOutcome.LEAD_WATCH_DEFER: {
+        (
+            DecisionTerminality.PENDING_CONDITION,
+            CanonicalNextAction.AWAIT_WATCH_CONDITION,
+        ),
+    },
+    CanonicalOutcome.LEAD_ASSOCIATE_WITHOUT_CANDIDATE: {
+        (
+            DecisionTerminality.TERMINAL_EXACT_VERSION,
+            CanonicalNextAction.CLOSE_DECISION,
+        ),
+    },
+    CanonicalOutcome.LEAD_SUPPLEMENTAL_DISCOVERY: {
+        (
+            DecisionTerminality.PENDING_CONDITION,
+            CanonicalNextAction.REQUEST_SUPPLEMENTAL_DISCOVERY,
+        ),
+    },
+    CanonicalOutcome.LEAD_OPERATIONAL_HOLD: {
+        (
+            DecisionTerminality.PENDING_CONDITION,
+            CanonicalNextAction.RETRY_SAME_REQUEST,
+        ),
+        (
+            DecisionTerminality.PENDING_CONDITION,
+            CanonicalNextAction.REQUEST_REVIEW,
+        ),
+        (
+            DecisionTerminality.PENDING_CONDITION,
+            CanonicalNextAction.WAIT_FOR_DEPENDENCY,
+        ),
+        (
+            DecisionTerminality.RETRYABLE_SAME_REQUEST,
+            CanonicalNextAction.RETRY_SAME_REQUEST,
+        ),
+    },
+    CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE: {
+        (
+            DecisionTerminality.TERMINAL_EXACT_VERSION,
+            CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ),
+    },
+    CanonicalOutcome.LEAD_ADMIT_DEVELOPMENT_CANDIDATE: {
+        (
+            DecisionTerminality.TERMINAL_EXACT_VERSION,
+            CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ),
+    },
+    CanonicalOutcome.LEAD_ADMIT_CORRECTION_CANDIDATE: {
+        (
+            DecisionTerminality.TERMINAL_EXACT_VERSION,
+            CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ),
+    },
+}
+
+
+def _action(action: CanonicalNextAction) -> NextAction:
+    condition = None
+    if action.kind in {
+        NextActionKind.RETRY,
+        NextActionKind.REVIEW,
+        NextActionKind.WAIT_DEPENDENCY,
+        NextActionKind.RESUME_ON_WATCH,
+        NextActionKind.REQUEST_SUPPLEMENTAL_DISCOVERY,
+    }:
+        condition = "condition-1"
+    return NextAction(
+        kind=action.kind,
+        action_code=action,
+        condition_reference=condition,
+    )
+
+
+def test_complete_retained_discovery_lead_semantic_matrix() -> None:
+    assert set(_DISCOVERY_LEAD_MATRIX) == {
+        CanonicalOutcome(item.value) for item in LeadDispositionOutcome
+    }
+
+    for outcome, permitted in _DISCOVERY_LEAD_MATRIX.items():
+        with pytest.raises(OutcomeContractError, match="next action"):
+            replace(
+                _selection(),
+                outcome=outcome,
+                terminality=next(iter(permitted))[0],
+                next_action=None,
+            )
+        for terminality, action in permitted:
+            selection = replace(
+                _selection(),
+                outcome=outcome,
+                terminality=terminality,
+                next_action=_action(action),
+            )
+            assert selection.outcome is outcome
+
+        for terminality in DecisionTerminality:
+            for action in CanonicalNextAction:
+                if (terminality, action) in permitted:
+                    continue
+                with pytest.raises(OutcomeContractError):
+                    replace(
+                        _selection(),
+                        outcome=outcome,
+                        terminality=terminality,
+                        next_action=_action(action),
+                    )
+
+
+def test_watch_and_supplemental_actions_cannot_be_swapped() -> None:
+    with pytest.raises(OutcomeContractError, match="next action"):
+        replace(
+            _selection(),
+            outcome=CanonicalOutcome.LEAD_WATCH_DEFER,
+            terminality=DecisionTerminality.PENDING_CONDITION,
+            next_action=_action(CanonicalNextAction.REQUEST_SUPPLEMENTAL_DISCOVERY),
+        )
+    with pytest.raises(OutcomeContractError, match="next action"):
+        replace(
+            _selection(),
+            outcome=CanonicalOutcome.LEAD_SUPPLEMENTAL_DISCOVERY,
+            terminality=DecisionTerminality.PENDING_CONDITION,
+            next_action=_action(CanonicalNextAction.AWAIT_WATCH_CONDITION),
+        )
 
 
 def test_priority_lanes_are_fixed_ordinal_values_not_floating_scores() -> None:
