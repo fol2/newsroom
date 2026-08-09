@@ -36,7 +36,12 @@ from newsroom.projection.neo4j import (
     NEO4J_B2_SERVER_VERSION,
 )
 from scripts.sdlc.contracts import ContractError, load_contract
-from scripts.sdlc.emit_evidence import canonical_json_bytes, sha256_identity
+from scripts.sdlc.emit_evidence import (
+    EvidenceError,
+    canonical_json_bytes,
+    sha256_identity,
+    verify_tracked_checkout,
+)
 from scripts.sdlc.shadow_decision import (
     ShadowDecisionError,
     validate_shadow_decision,
@@ -304,6 +309,12 @@ def _require_git_identity(root: Path, head: str, tree: str) -> None:
     _same_root, current_head, current_tree = _git_identity(root)
     if (current_head, current_tree) != (head, tree):
         raise Increment5E2CloseoutReceiptError("stale_checkout_identity")
+    try:
+        verify_tracked_checkout(root, head)
+    except EvidenceError as exc:
+        raise Increment5E2CloseoutReceiptError(
+            "tracked_checkout_dirty"
+        ) from exc
 
 
 def _selected_cases(
@@ -472,6 +483,7 @@ def build_actual_service_receipt(
     *, repo_root: str | Path, service_junit_report: str | Path
 ) -> dict[str, object]:
     _root, head, tree = _git_identity(repo_root)
+    _require_git_identity(_root, head, tree)
     report = _parse_junit(service_junit_report)
     _reject_unselected_failures((report,), FinalCloseoutLane.ACTUAL_NEO4J)
     selected, properties = _selected_cases((report,), FinalCloseoutLane.ACTUAL_NEO4J)
@@ -521,6 +533,7 @@ def build_final_receipt(
     decision_path: str | Path,
 ) -> dict[str, object]:
     root, head, tree = _git_identity(repo_root)
+    _require_git_identity(root, head, tree)
     try:
         contract = load_contract(root)
         decision = validate_shadow_decision(

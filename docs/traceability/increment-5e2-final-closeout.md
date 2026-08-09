@@ -113,6 +113,11 @@ receipts:
    selected-test manifest, envelope, transport and replay identities to one
    exact source HEAD and tree.
 
+Both builders verify the tracked checkout against that HEAD before consuming
+evidence and again immediately before receipt emission. A repository-controlled
+test or transport parser that changes tracked source bytes therefore suppresses
+the receipt even when the committed HEAD and tree identities remain unchanged.
+
 The final GitHub completion record must add the merged `main` commit and tree,
 permanent workflow run identities, signed SDLC decision and 5E2 receipt
 identities, substantive-review counts and unresolved-thread count. A

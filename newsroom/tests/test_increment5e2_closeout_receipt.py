@@ -41,18 +41,32 @@ from scripts.sdlc.workflow_lane import service_compatibility_digest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _tree() -> str:
+def _tree(root: Path) -> str:
     return subprocess.check_output(
-        ["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT, text=True
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=root, text=True
     ).strip()
+
+
+def _clean_clone(tmp_path: Path, name: str) -> Path:
+    clone = tmp_path / name
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-local", str(ROOT), str(clone)],
+        check=True,
+    )
+    return clone
 
 
 @pytest.fixture(scope="module")
-def target_properties() -> dict[str, str]:
+def clean_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return _clean_clone(tmp_path_factory.mktemp("clean-closeout-repo"), "repository")
+
+
+@pytest.fixture(scope="module")
+def target_properties(clean_repo: Path) -> dict[str, str]:
     head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ["git", "rev-parse", "HEAD"], cwd=clean_repo, text=True
     ).strip()
-    tree = _tree()
+    tree = _tree(clean_repo)
     epoch = build_qualification_epoch(
         target=QUALIFICATION_TARGET,
         corpus=QUALIFICATION_CORPUS,
@@ -120,7 +134,9 @@ def _junit(
 
 
 def test_actual_service_receipt_binds_exact_report_and_semantics(
-    tmp_path: Path, target_properties: dict[str, str]
+    tmp_path: Path,
+    target_properties: dict[str, str],
+    clean_repo: Path,
 ) -> None:
     report = _junit(
         tmp_path / "service.xml",
@@ -128,7 +144,10 @@ def test_actual_service_receipt_binds_exact_report_and_semantics(
         target_properties,
     )
 
-    receipt = build_actual_service_receipt(repo_root=ROOT, service_junit_report=report)
+    receipt = build_actual_service_receipt(
+        repo_root=clean_repo,
+        service_junit_report=report,
+    )
 
     expected_digest = "sha256:" + hashlib.sha256(report.read_bytes()).hexdigest()
     assert receipt["junit_report"]["digest"] == expected_digest
@@ -146,8 +165,98 @@ def test_actual_service_receipt_binds_exact_report_and_semantics(
     assert unsigned.pop("receipt_identity") == sha256_identity(unsigned)
 
 
+def test_actual_service_rejects_tracked_checkout_drift_before_emission(
+    tmp_path: Path,
+    target_properties: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clone = _clean_clone(tmp_path, "actual-service-dirty")
+    report = _junit(
+        tmp_path / "dirty-service.xml",
+        FinalCloseoutLane.ACTUAL_NEO4J,
+        target_properties,
+    )
+
+    def parse_then_dirty(path: Path) -> object:
+        parsed = _parse_junit(path)
+        tracked = clone / "README.md"
+        tracked.write_text(
+            tracked.read_text(encoding="utf-8") + "\ntracked receipt drift\n",
+            encoding="utf-8",
+        )
+        return parsed
+
+    monkeypatch.setattr(
+        "scripts.sdlc.increment5e2_closeout_receipt._parse_junit",
+        parse_then_dirty,
+    )
+
+    with pytest.raises(
+        Increment5E2CloseoutReceiptError,
+        match="tracked_checkout_dirty",
+    ):
+        build_actual_service_receipt(
+            repo_root=clone,
+            service_junit_report=report,
+        )
+
+
+@pytest.mark.parametrize("builder", ("actual-service", "final"))
+def test_receipt_builders_reject_initial_tracked_checkout_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    builder: str,
+) -> None:
+    clone = _clean_clone(tmp_path, f"initial-dirty-{builder}")
+    tracked = clone / "README.md"
+    tracked.write_text(
+        tracked.read_text(encoding="utf-8") + "\ninitial tracked drift\n",
+        encoding="utf-8",
+    )
+
+    if builder == "actual-service":
+        def must_not_parse(_path: Path) -> object:
+            raise AssertionError(
+                "dirty checkout must fail before JUnit parsing"
+            )
+
+        monkeypatch.setattr(
+            "scripts.sdlc.increment5e2_closeout_receipt._parse_junit",
+            must_not_parse,
+        )
+    else:
+        def must_not_load(_root: Path) -> object:
+            raise AssertionError(
+                "dirty checkout must fail before contract loading"
+            )
+
+        monkeypatch.setattr(
+            "scripts.sdlc.increment5e2_closeout_receipt.load_contract",
+            must_not_load,
+        )
+
+    with pytest.raises(
+        Increment5E2CloseoutReceiptError,
+        match="tracked_checkout_dirty",
+    ):
+        if builder == "actual-service":
+            build_actual_service_receipt(
+                repo_root=clone,
+                service_junit_report=tmp_path / "missing.xml",
+            )
+        else:
+            build_final_receipt(
+                repo_root=clone,
+                core_transport_bundle_root=tmp_path / "missing-core",
+                service_transport_bundle_root=tmp_path / "missing-service",
+                decision_path=tmp_path / "missing-decision.json",
+            )
+
+
 def test_actual_service_rejects_missing_skipped_and_tampered_properties(
-    tmp_path: Path, target_properties: dict[str, str]
+    tmp_path: Path,
+    target_properties: dict[str, str],
+    clean_repo: Path,
 ) -> None:
     cases = [
         case
@@ -161,7 +270,10 @@ def test_actual_service_rejects_missing_skipped_and_tampered_properties(
         omitted=cases[0].test_id,
     )
     with pytest.raises(Increment5E2CloseoutReceiptError, match="selected_test_missing"):
-        build_actual_service_receipt(repo_root=ROOT, service_junit_report=missing)
+        build_actual_service_receipt(
+            repo_root=clean_repo,
+            service_junit_report=missing,
+        )
 
     skipped = _junit(
         tmp_path / "skipped.xml",
@@ -170,7 +282,10 @@ def test_actual_service_rejects_missing_skipped_and_tampered_properties(
         skipped=cases[0].test_id,
     )
     with pytest.raises(Increment5E2CloseoutReceiptError, match="not_passed"):
-        build_actual_service_receipt(repo_root=ROOT, service_junit_report=skipped)
+        build_actual_service_receipt(
+            repo_root=clean_repo,
+            service_junit_report=skipped,
+        )
 
     changed = dict(target_properties)
     changed["increment5e2_epoch_digest"] = "sha256:" + "0" * 64
@@ -180,7 +295,10 @@ def test_actual_service_rejects_missing_skipped_and_tampered_properties(
         changed,
     )
     with pytest.raises(Increment5E2CloseoutReceiptError, match="epoch_identity"):
-        build_actual_service_receipt(repo_root=ROOT, service_junit_report=tampered)
+        build_actual_service_receipt(
+            repo_root=clean_repo,
+            service_junit_report=tampered,
+        )
 
     unexpected = dict(target_properties)
     unexpected["increment5e2_unreviewed_property"] = "unexpected"
@@ -190,13 +308,17 @@ def test_actual_service_rejects_missing_skipped_and_tampered_properties(
         unexpected,
     )
     with pytest.raises(Increment5E2CloseoutReceiptError, match="target_properties"):
-        build_actual_service_receipt(repo_root=ROOT, service_junit_report=extra)
+        build_actual_service_receipt(
+            repo_root=clean_repo,
+            service_junit_report=extra,
+        )
 
 
 @pytest.mark.parametrize("outcome", ("failure", "error"))
 def test_actual_service_rejects_unselected_failure_or_error(
     tmp_path: Path,
     target_properties: dict[str, str],
+    clean_repo: Path,
     outcome: str,
 ) -> None:
     report = _junit(
@@ -218,7 +340,10 @@ def test_actual_service_rejects_unselected_failure_or_error(
         Increment5E2CloseoutReceiptError,
         match="unselected_test_not_passed",
     ):
-        build_actual_service_receipt(repo_root=ROOT, service_junit_report=report)
+        build_actual_service_receipt(
+            repo_root=clean_repo,
+            service_junit_report=report,
+        )
 
 
 @pytest.mark.parametrize(
@@ -233,6 +358,7 @@ def test_actual_service_rejects_unselected_failure_or_error(
 def test_actual_service_rejects_changed_checkout_service_or_inventory_identity(
     tmp_path: Path,
     target_properties: dict[str, str],
+    clean_repo: Path,
     property_name: str,
     property_value: str,
     expected_error: str,
@@ -246,11 +372,16 @@ def test_actual_service_rejects_changed_checkout_service_or_inventory_identity(
     )
 
     with pytest.raises(Increment5E2CloseoutReceiptError, match=expected_error):
-        build_actual_service_receipt(repo_root=ROOT, service_junit_report=report)
+        build_actual_service_receipt(
+            repo_root=clean_repo,
+            service_junit_report=report,
+        )
 
 
 def test_actual_service_rejects_self_consistent_forged_qualification_report(
-    tmp_path: Path, target_properties: dict[str, str]
+    tmp_path: Path,
+    target_properties: dict[str, str],
+    clean_repo: Path,
 ) -> None:
     forged_value = json.loads(target_properties["increment5e2_report_json"])
     forged_value.update(
@@ -309,7 +440,10 @@ def test_actual_service_rejects_self_consistent_forged_qualification_report(
         Increment5E2CloseoutReceiptError,
         match="qualification_report_semantics",
     ):
-        build_actual_service_receipt(repo_root=ROOT, service_junit_report=report)
+        build_actual_service_receipt(
+            repo_root=clean_repo,
+            service_junit_report=report,
+        )
 
 
 def test_junit_parser_preserves_exact_parameter_node_ids(tmp_path: Path) -> None:
@@ -380,16 +514,17 @@ class _RawReport:
     digest: str
 
 
-def test_final_receipt_binds_validated_decision_transports_and_both_lanes(
+def _final_receipt_stubs(
     tmp_path: Path,
     target_properties: dict[str, str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    *,
+    repo_root: Path,
+) -> tuple[SimpleNamespace, dict[str, SimpleNamespace]]:
     head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ["git", "rev-parse", "HEAD"], cwd=repo_root, text=True
     ).strip()
-    tree = _tree()
-    lane_inputs = {}
+    tree = _tree(repo_root)
+    lane_inputs: dict[str, SimpleNamespace] = {}
     lanes = []
     for lane_id, inventory_lane in (
         ("core", FinalCloseoutLane.DETERMINISTIC),
@@ -436,6 +571,14 @@ def test_final_receipt_binds_validated_decision_transports_and_both_lanes(
         context=SimpleNamespace(evaluated_sha=head, evaluated_tree_sha=tree),
         decision_identity="sha256:" + "3" * 64,
     )
+    return decision, lane_inputs
+
+
+def _stub_final_receipt_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+    decision: SimpleNamespace,
+    lane_inputs: dict[str, SimpleNamespace],
+) -> None:
     monkeypatch.setattr(
         "scripts.sdlc.increment5e2_closeout_receipt.load_contract",
         lambda _root: object(),
@@ -448,11 +591,25 @@ def test_final_receipt_binds_validated_decision_transports_and_both_lanes(
         "scripts.sdlc.increment5e2_closeout_receipt.load_verified_transport",
         lambda path: lane_inputs[Path(path).name],
     )
+
+
+def test_final_receipt_binds_validated_decision_transports_and_both_lanes(
+    tmp_path: Path,
+    target_properties: dict[str, str],
+    clean_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decision, lane_inputs = _final_receipt_stubs(
+        tmp_path,
+        target_properties,
+        repo_root=clean_repo,
+    )
+    _stub_final_receipt_inputs(monkeypatch, decision, lane_inputs)
     decision_path = tmp_path / "decision.json"
     decision_path.write_text("{}", encoding="utf-8")
 
     receipt = build_final_receipt(
-        repo_root=ROOT,
+        repo_root=clean_repo,
         core_transport_bundle_root=tmp_path / "core",
         service_transport_bundle_root=tmp_path / "service",
         decision_path=decision_path,
@@ -464,3 +621,53 @@ def test_final_receipt_binds_validated_decision_transports_and_both_lanes(
     assert receipt["inventory"]["digest"] == (
         INCREMENT5E2_FINAL_CLOSEOUT_INVENTORY_DIGEST
     )
+
+
+def test_final_receipt_rejects_tracked_checkout_drift_before_emission(
+    tmp_path: Path,
+    target_properties: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clone = _clean_clone(tmp_path, "final-dirty")
+    decision, lane_inputs = _final_receipt_stubs(
+        tmp_path,
+        target_properties,
+        repo_root=clone,
+    )
+    monkeypatch.setattr(
+        "scripts.sdlc.increment5e2_closeout_receipt.load_contract",
+        lambda _root: object(),
+    )
+    monkeypatch.setattr(
+        "scripts.sdlc.increment5e2_closeout_receipt.validate_shadow_decision",
+        lambda _value, contract: decision,
+    )
+
+    def load_then_dirty(path: Path) -> SimpleNamespace:
+        selected = lane_inputs[Path(path).name]
+        if Path(path).name == "service":
+            tracked = clone / "README.md"
+            tracked.write_text(
+                tracked.read_text(encoding="utf-8")
+                + "\ntracked final receipt drift\n",
+                encoding="utf-8",
+            )
+        return selected
+
+    monkeypatch.setattr(
+        "scripts.sdlc.increment5e2_closeout_receipt.load_verified_transport",
+        load_then_dirty,
+    )
+    decision_path = tmp_path / "dirty-decision.json"
+    decision_path.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(
+        Increment5E2CloseoutReceiptError,
+        match="tracked_checkout_dirty",
+    ):
+        build_final_receipt(
+            repo_root=clone,
+            core_transport_bundle_root=tmp_path / "core",
+            service_transport_bundle_root=tmp_path / "service",
+            decision_path=decision_path,
+        )
