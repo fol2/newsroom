@@ -25,7 +25,6 @@ from newsroom.authority.canonical import (
 from newsroom.increment6.outcomes import (
     ContractAuthority,
     ContractEffect,
-    PrioritySelection,
 )
 from newsroom.increment6.proposals import FixtureWorkerKind, WorkerAttemptBinding
 from newsroom.increment6.scheduling import (
@@ -46,12 +45,14 @@ WORKER_ATTEMPT_SCHEMA = "newsroom.increment6.worker-attempt.v1"
 WORK_ITEM_LEASE_SCHEMA = "newsroom.increment6.work-item-lease.v1"
 
 _MAX_BATCH_MEMBERS = 48
-_MAX_MEMBER_BYTES = 262_144
-_MAX_SCHEDULING_BYTES = 48 * 16_384 + 131_072
+# Members retain only exact digests and identities.  They never duplicate the
+# potentially 31 MiB Work Item Version or the scheduling decision bytes.
+_MAX_COMPACT_MEMBER_BYTES = 768
+_MAX_CANONICAL_OVERHEAD_BYTES = 32_768
 _MAX_CANONICAL_BYTES = (
-    _MAX_BATCH_MEMBERS * _MAX_MEMBER_BYTES + _MAX_SCHEDULING_BYTES + 131_072
+    _MAX_BATCH_MEMBERS * _MAX_COMPACT_MEMBER_BYTES + _MAX_CANONICAL_OVERHEAD_BYTES
 )
-_MAX_CANONICAL_DEPTH = 68
+_MAX_CANONICAL_DEPTH = 24
 _MAX_CANONICAL_NODES = _MAX_CANONICAL_BYTES // 2 + 1
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,255}\Z")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -76,29 +77,31 @@ class LeaseProgress(StrEnum):
 
 
 def _token(value: object, field: str) -> str:
-    if not isinstance(value, str) or _TOKEN.fullmatch(value) is None:
+    if type(value) is not str or _TOKEN.fullmatch(value) is None:
         raise ExecutionContractError(f"{field} must be a bounded token")
     return value
 
 
 def _string(value: object, field: str) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise ExecutionContractError(f"{field} must be a string")
     return value
 
 
 def _uuid(value: object, field: str) -> str:
+    if type(value) is not str:
+        raise ExecutionContractError(f"{field} must be a canonical UUID")
     try:
-        parsed = uuid.UUID(value)  # type: ignore[arg-type]
+        parsed = uuid.UUID(value)
     except (TypeError, ValueError, AttributeError) as exc:
         raise ExecutionContractError(f"{field} must be a canonical UUID") from exc
-    if not isinstance(value, str) or str(parsed) != value:
+    if str(parsed) != value:
         raise ExecutionContractError(f"{field} must be a canonical UUID")
     return value
 
 
 def _digest(value: object, field: str) -> str:
-    if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+    if type(value) is not str or _DIGEST.fullmatch(value) is None:
         raise ExecutionContractError(f"{field} must be a canonical SHA-256 digest")
     return value
 
@@ -112,7 +115,7 @@ def _integer(value: object, field: str, *, minimum: int = 1) -> int:
 
 
 def _utc(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.endswith("Z"):
+    if type(value) is not str or not value.endswith("Z"):
         raise ExecutionContractError(f"{field} must be canonical UTC")
     try:
         parsed = datetime.fromisoformat(value)
@@ -137,7 +140,7 @@ def _exact(value: object, fields: set[str], name: str) -> dict[str, object]:
 
 
 def _decode(raw: bytes) -> dict[str, object]:
-    if not isinstance(raw, bytes) or not raw or len(raw) > _MAX_CANONICAL_BYTES:
+    if type(raw) is not bytes or not raw or len(raw) > _MAX_CANONICAL_BYTES:
         raise ExecutionContractError("canonical input exceeds the execution envelope")
 
     def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -215,15 +218,7 @@ def _decode(raw: bytes) -> dict[str, object]:
 def _canonical(value: object, field: str) -> bytes:
     try:
         result = canonical_json_bytes(value)
-    except (
-        CanonicalizationError,
-        UnicodeError,
-        ValueError,
-        TypeError,
-        OverflowError,
-        RecursionError,
-        MemoryError,
-    ) as exc:
+    except Exception as exc:
         raise ExecutionContractError(
             f"{field} is not canonically representable"
         ) from exc
@@ -239,9 +234,34 @@ class ExecutionBatchMember:
     work_item_version_digest: str
     retrieval_context_id: str
     retrieval_context_digest: str
-    priority: PrioritySelection
-    work_item_version_bytes: bytes
-    scheduling_allocation_digest: str
+    priority_digest: str
+    scheduling_grant_digest: str
+    producer_binding_digest: str
+
+    @staticmethod
+    def _binding_digest(
+        work_item_id: str,
+        work_item_version_id: str,
+        work_item_version_digest: str,
+        retrieval_context_id: str,
+        retrieval_context_digest: str,
+        priority_digest: str,
+        scheduling_grant_digest: str,
+    ) -> str:
+        return digest_bytes(
+            _canonical(
+                {
+                    "work_item_id": work_item_id,
+                    "work_item_version_id": work_item_version_id,
+                    "work_item_version_digest": work_item_version_digest,
+                    "retrieval_context_id": retrieval_context_id,
+                    "retrieval_context_digest": retrieval_context_digest,
+                    "priority_digest": priority_digest,
+                    "scheduling_grant_digest": scheduling_grant_digest,
+                },
+                "batch member producer binding",
+            )
+        )
 
     @classmethod
     def from_producers(
@@ -253,32 +273,44 @@ class ExecutionBatchMember:
             type(version) is not TriageWorkItemVersion
             or type(allocation) is not CapacityItemAllocation
         ):
-            raise ExecutionContractError("batch member producers must be typed")
-        if (
-            allocation.disposition is not CapacityAllocationDisposition.GRANTED
-            or allocation.item.work_item_id != version.work_item_id
-            or allocation.item.work_item_version_id != version.version_id
-            or allocation.item.work_item_version_digest != version.canonical_digest
-            or allocation.item.priority_selection != version.priority
-        ):
             raise ExecutionContractError(
-                "batch member differs from its exact scheduling grant"
+                "batch member producers must be exact typed values"
             )
-        retrieval = version.retrieval
-        retrieval_id = retrieval.context_id or retrieval.request_id
-        retrieval_digest = retrieval.context_digest or retrieval.request_digest
-        return cls(
-            version.work_item_id,
-            version.version_id,
-            version.canonical_digest,
-            retrieval_id,
-            retrieval_digest,
-            version.priority,
-            version.canonical_bytes,
-            digest_bytes(
-                _canonical(allocation.canonical_value(), "capacity allocation")
-            ),
-        )
+        try:
+            version_digest = version.canonical_digest
+            priority_digest = digest_bytes(version.priority.canonical_bytes)
+            grant_digest = digest_bytes(
+                _canonical(allocation.canonical_value(), "capacity grant")
+            )
+            retrieval = version.retrieval
+            retrieval_id = retrieval.context_id or retrieval.request_id
+            retrieval_digest = retrieval.context_digest or retrieval.request_digest
+            if (
+                allocation.disposition is not CapacityAllocationDisposition.GRANTED
+                or allocation.item.work_item_id != version.work_item_id
+                or allocation.item.work_item_version_id != version.version_id
+                or allocation.item.work_item_version_digest != version_digest
+                or allocation.item.priority_selection != version.priority
+            ):
+                raise ExecutionContractError(
+                    "batch member differs from its exact scheduling grant"
+                )
+            values = (
+                version.work_item_id,
+                version.version_id,
+                version_digest,
+                retrieval_id,
+                retrieval_digest,
+                priority_digest,
+                grant_digest,
+            )
+            return cls(*values, cls._binding_digest(*values))
+        except ExecutionContractError:
+            raise
+        except Exception as exc:
+            raise ExecutionContractError(
+                "batch member producer binding is invalid"
+            ) from exc
 
     def __post_init__(self) -> None:
         _uuid(self.work_item_id, "member work_item_id")
@@ -286,37 +318,20 @@ class ExecutionBatchMember:
         _digest(self.work_item_version_digest, "member Work Item Version digest")
         _uuid(self.retrieval_context_id, "member retrieval_context_id")
         _digest(self.retrieval_context_digest, "member retrieval digest")
-        _digest(self.scheduling_allocation_digest, "member allocation digest")
-        if type(self.priority) is not PrioritySelection:
-            raise ExecutionContractError("member priority must be typed")
-        if not isinstance(self.work_item_version_bytes, bytes):
-            raise ExecutionContractError(
-                "member Work Item Version bytes must be immutable"
-            )
-        try:
-            version = TriageWorkItemVersion.from_canonical_bytes(
-                self.work_item_version_bytes
-            )
-        except Exception as exc:
-            raise ExecutionContractError(
-                "member Work Item Version binding differs"
-            ) from exc
-        retrieval = version.retrieval
-        retrieval_id = retrieval.context_id or retrieval.request_id
-        retrieval_digest = retrieval.context_digest or retrieval.request_digest
-        if (
-            version.work_item_id != self.work_item_id
-            or version.version_id != self.work_item_version_id
-            or version.canonical_digest != self.work_item_version_digest
-            or retrieval_id != self.retrieval_context_id
-            or retrieval_digest != self.retrieval_context_digest
-            or version.priority != self.priority
-            or self.priority.work_identity != self.work_item_id
-            or self.priority.work_version != self.work_item_version_id
-            or self.priority.authority is not ContractAuthority.NONE
-            or self.priority.effect is not ContractEffect.NONE
-        ):
-            raise ExecutionContractError("member priority binding differs")
+        _digest(self.priority_digest, "member priority digest")
+        _digest(self.scheduling_grant_digest, "member scheduling grant digest")
+        _digest(self.producer_binding_digest, "member producer binding digest")
+        expected = self._binding_digest(
+            self.work_item_id,
+            self.work_item_version_id,
+            self.work_item_version_digest,
+            self.retrieval_context_id,
+            self.retrieval_context_digest,
+            self.priority_digest,
+            self.scheduling_grant_digest,
+        )
+        if self.producer_binding_digest != expected:
+            raise ExecutionContractError("batch member producer binding differs")
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -325,9 +340,9 @@ class ExecutionBatchMember:
             "work_item_version_digest": self.work_item_version_digest,
             "retrieval_context_id": self.retrieval_context_id,
             "retrieval_context_digest": self.retrieval_context_digest,
-            "priority": self.priority.canonical_value(),
-            "work_item_version": _decode(self.work_item_version_bytes),
-            "scheduling_allocation_digest": self.scheduling_allocation_digest,
+            "priority_digest": self.priority_digest,
+            "scheduling_grant_digest": self.scheduling_grant_digest,
+            "producer_binding_digest": self.producer_binding_digest,
         }
 
     @classmethod
@@ -340,27 +355,21 @@ class ExecutionBatchMember:
                 "work_item_version_digest",
                 "retrieval_context_id",
                 "retrieval_context_digest",
-                "priority",
-                "work_item_version",
-                "scheduling_allocation_digest",
+                "priority_digest",
+                "scheduling_grant_digest",
+                "producer_binding_digest",
             },
             "batch member",
         )
-        if not isinstance(item["work_item_version"], dict):
-            raise ExecutionContractError("member Work Item Version must be an object")
-        try:
-            priority = PrioritySelection.from_mapping(item["priority"])  # type: ignore[arg-type]
-        except Exception as exc:
-            raise ExecutionContractError("member priority differs") from exc
         return cls(
             _string(item["work_item_id"], "member work_item_id"),
             _string(item["work_item_version_id"], "member version_id"),
             _string(item["work_item_version_digest"], "member version digest"),
             _string(item["retrieval_context_id"], "member retrieval id"),
             _string(item["retrieval_context_digest"], "member retrieval digest"),
-            priority,
-            _canonical(item["work_item_version"], "member Work Item Version"),
-            _string(item["scheduling_allocation_digest"], "allocation digest"),
+            _string(item["priority_digest"], "member priority digest"),
+            _string(item["scheduling_grant_digest"], "member grant digest"),
+            _string(item["producer_binding_digest"], "member producer binding digest"),
         )
 
 
@@ -369,7 +378,7 @@ class ExecutionBatch:
     batch_id: str
     members: tuple[ExecutionBatchMember, ...]
     scheduling_decision_digest: str
-    scheduling_decision_bytes: bytes
+    scheduling_policy_digest: str
     schema_identity: str = EXECUTION_BATCH_SCHEMA
     authority: ContractAuthority = ContractAuthority.NONE
     effect: ContractEffect = ContractEffect.NONE
@@ -383,7 +392,7 @@ class ExecutionBatch:
     ) -> Self:
         if type(scheduling_decision) is not ReservedCapacityDecision:
             raise ExecutionContractError(
-                "Execution Batch scheduling decision must be typed"
+                "Execution Batch scheduling decision must be exact typed"
             )
         if (
             type(work_item_versions) is not tuple
@@ -396,16 +405,16 @@ class ExecutionBatch:
             raise ExecutionContractError(
                 "Execution Batch Versions exceed the bounded typed envelope"
             )
-        versions = {
-            (version.work_item_id, version.version_id): version
-            for version in work_item_versions
-        }
-        granted = tuple(
-            allocation
-            for allocation in scheduling_decision.allocations
-            if allocation.disposition is CapacityAllocationDisposition.GRANTED
-        )
         try:
+            versions = {
+                (version.work_item_id, version.version_id): version
+                for version in work_item_versions
+            }
+            granted = tuple(
+                allocation
+                for allocation in scheduling_decision.allocations
+                if allocation.disposition is CapacityAllocationDisposition.GRANTED
+            )
             members = tuple(
                 ExecutionBatchMember.from_producers(
                     versions[
@@ -418,14 +427,35 @@ class ExecutionBatch:
                 )
                 for allocation in granted
             )
+            if len(versions) != len(work_item_versions) or len(versions) != len(
+                members
+            ):
+                raise ExecutionContractError(
+                    "Execution Batch Versions differ from exact scheduling grants"
+                )
+            return cls._from_bindings(
+                members,
+                scheduling_decision.decision_digest,
+                scheduling_decision.policy.policy_digest,
+            )
         except KeyError as exc:
             raise ExecutionContractError(
                 "Execution Batch lacks an exact granted Work Item Version"
             ) from exc
-        if len(versions) != len(work_item_versions) or len(versions) != len(members):
+        except ExecutionContractError:
+            raise
+        except Exception as exc:
             raise ExecutionContractError(
-                "Execution Batch Versions differ from exact scheduling grants"
-            )
+                "Execution Batch producer binding is invalid"
+            ) from exc
+
+    @classmethod
+    def _from_bindings(
+        cls,
+        members: tuple[ExecutionBatchMember, ...],
+        scheduling_decision_digest: str,
+        scheduling_policy_digest: str,
+    ) -> Self:
         if (
             type(members) is not tuple
             or not 1 <= len(members) <= _MAX_BATCH_MEMBERS
@@ -435,12 +465,11 @@ class ExecutionBatch:
                 "Execution Batch members exceed the bounded typed envelope"
             )
         ordered = tuple(sorted(members, key=lambda member: member.work_item_id))
-        decision_bytes = scheduling_decision.canonical_bytes
-        decision_digest = scheduling_decision.decision_digest
         identity = digest_bytes(
             _canonical(
                 {
-                    "scheduling_decision_digest": decision_digest,
+                    "scheduling_decision_digest": scheduling_decision_digest,
+                    "scheduling_policy_digest": scheduling_policy_digest,
                     "members": [member.canonical_value() for member in ordered],
                 },
                 "batch identity",
@@ -449,26 +478,20 @@ class ExecutionBatch:
         return cls(
             str(uuid.uuid5(uuid.NAMESPACE_URL, f"{EXECUTION_BATCH_SCHEMA}|{identity}")),
             ordered,
-            decision_digest,
-            decision_bytes,
+            scheduling_decision_digest,
+            scheduling_policy_digest,
         )
 
     def __post_init__(self) -> None:
         _uuid(self.batch_id, "batch_id")
         _digest(self.scheduling_decision_digest, "scheduling decision digest")
-        if not isinstance(self.scheduling_decision_bytes, bytes):
-            raise ExecutionContractError("scheduling decision bytes must be immutable")
-        try:
-            decision = ReservedCapacityDecision.from_canonical_bytes(
-                self.scheduling_decision_bytes
-            )
-        except Exception as exc:
-            raise ExecutionContractError("scheduling decision binding differs") from exc
-        if decision.decision_digest != self.scheduling_decision_digest:
-            raise ExecutionContractError("scheduling decision digest differs")
+        _digest(self.scheduling_policy_digest, "scheduling policy digest")
         if (
-            self.schema_identity != EXECUTION_BATCH_SCHEMA
+            type(self.schema_identity) is not str
+            or self.schema_identity != EXECUTION_BATCH_SCHEMA
+            or type(self.authority) is not ContractAuthority
             or self.authority is not ContractAuthority.NONE
+            or type(self.effect) is not ContractEffect
             or self.effect is not ContractEffect.NONE
         ):
             raise ExecutionContractError("Execution Batch claims authority or effect")
@@ -482,42 +505,17 @@ class ExecutionBatch:
             )
         if self.members != tuple(
             sorted(self.members, key=lambda member: member.work_item_id)
-        ) or len({member.work_item_id for member in self.members}) != len(self.members):
-            raise ExecutionContractError(
-                "Execution Batch members must be sorted unique per Work Item"
-            )
-        granted = tuple(
-            allocation
-            for allocation in decision.allocations
-            if allocation.disposition is CapacityAllocationDisposition.GRANTED
-        )
-        allocation_digests = {
-            (
-                allocation.item.work_item_id,
-                allocation.item.work_item_version_id,
-            ): digest_bytes(
-                _canonical(allocation.canonical_value(), "capacity allocation")
-            )
-            for allocation in granted
-        }
-        if (
-            len(allocation_digests) != len(granted)
-            or any(
-                allocation_digests.get(
-                    (member.work_item_id, member.work_item_version_id)
-                )
-                != member.scheduling_allocation_digest
-                for member in self.members
-            )
-            or len(self.members) != len(granted)
         ):
+            raise ExecutionContractError("Execution Batch members must be sorted")
+        if len({member.work_item_id for member in self.members}) != len(self.members):
             raise ExecutionContractError(
-                "Execution Batch scheduling grant binding differs"
+                "Execution Batch members must be unique per Work Item"
             )
         identity = digest_bytes(
             _canonical(
                 {
                     "scheduling_decision_digest": self.scheduling_decision_digest,
+                    "scheduling_policy_digest": self.scheduling_policy_digest,
                     "members": [member.canonical_value() for member in self.members],
                 },
                 "batch identity",
@@ -526,11 +524,9 @@ class ExecutionBatch:
         expected = str(
             uuid.uuid5(uuid.NAMESPACE_URL, f"{EXECUTION_BATCH_SCHEMA}|{identity}")
         )
-        if (
-            self.batch_id != expected
-            or len(self.canonical_bytes) > _MAX_CANONICAL_BYTES
-        ):
-            raise ExecutionContractError("Execution Batch identity or envelope differs")
+        if self.batch_id != expected:
+            raise ExecutionContractError("Execution Batch identity differs")
+        _ = self.canonical_bytes
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -539,7 +535,7 @@ class ExecutionBatch:
             "effect": self.effect.value,
             "batch_id": self.batch_id,
             "scheduling_decision_digest": self.scheduling_decision_digest,
-            "scheduling_decision": _decode(self.scheduling_decision_bytes),
+            "scheduling_policy_digest": self.scheduling_policy_digest,
             "members": [member.canonical_value() for member in self.members],
         }
 
@@ -562,32 +558,33 @@ class ExecutionBatch:
                 "batch_id",
                 "members",
                 "scheduling_decision_digest",
-                "scheduling_decision",
+                "scheduling_policy_digest",
             },
             "Execution Batch",
         )
-        if not isinstance(item["members"], list):
+        if type(item["members"]) is not list:
             raise ExecutionContractError("Execution Batch members must be an array")
-        if not isinstance(item["scheduling_decision"], dict):
-            raise ExecutionContractError("scheduling decision must be an object")
         try:
             authority = ContractAuthority(item["authority"])
             effect = ContractEffect(item["effect"])
-        except (TypeError, ValueError) as exc:
-            raise ExecutionContractError(
-                "Execution Batch authority fields differ"
-            ) from exc
-        value = cls(
-            _string(item["batch_id"], "batch_id"),
-            tuple(
-                ExecutionBatchMember.from_value(member) for member in item["members"]
-            ),
-            _string(item["scheduling_decision_digest"], "scheduling decision digest"),
-            _canonical(item["scheduling_decision"], "scheduling decision"),
-            _string(item["schema_identity"], "batch schema_identity"),
-            authority,
-            effect,
-        )
+            value = cls(
+                _string(item["batch_id"], "batch_id"),
+                tuple(
+                    ExecutionBatchMember.from_value(member)
+                    for member in item["members"]
+                ),
+                _string(
+                    item["scheduling_decision_digest"], "scheduling decision digest"
+                ),
+                _string(item["scheduling_policy_digest"], "scheduling policy digest"),
+                _string(item["schema_identity"], "batch schema_identity"),
+                authority,
+                effect,
+            )
+        except ExecutionContractError:
+            raise
+        except Exception as exc:
+            raise ExecutionContractError("Execution Batch fields are invalid") from exc
         if value.canonical_bytes != raw:
             raise ExecutionContractError("Execution Batch bytes differ")
         return value
@@ -609,7 +606,7 @@ class WorkerAttempt:
     worker_version: str
     input_digest: str
     idempotency_key: str
-    priority: PrioritySelection
+    priority_digest: str
     schema_identity: str = WORKER_ATTEMPT_SCHEMA
     authority: ContractAuthority = ContractAuthority.NONE
     effect: ContractEffect = ContractEffect.NONE
@@ -631,9 +628,9 @@ class WorkerAttempt:
         work_item_version_id = member.work_item_version_id
         work_item_version_digest = member.work_item_version_digest
         retrieval_context_digest = member.retrieval_context_digest
-        priority = member.priority
+        priority_digest = member.priority_digest
         _integer(ordinal, "attempt ordinal")
-        if not isinstance(worker_kind, FixtureWorkerKind):
+        if type(worker_kind) is not FixtureWorkerKind:
             raise ExecutionContractError("worker kind must be typed")
         _token(worker_version, "worker version")
         _digest(input_digest, "attempt input digest")
@@ -649,7 +646,7 @@ class WorkerAttempt:
             "worker_kind": worker_kind.value,
             "worker_version": worker_version,
             "input_digest": input_digest,
-            "priority_digest": digest_bytes(priority.canonical_bytes),
+            "priority_digest": priority_digest,
         }
         request_digest = digest_bytes(_canonical(request_value, "semantic request"))
         previous_id = None if previous_attempt is None else previous_attempt.attempt_id
@@ -683,7 +680,7 @@ class WorkerAttempt:
             worker_version,
             input_digest,
             f"worker-request:{request_digest}",
-            priority,
+            priority_digest,
         )
 
     def __post_init__(self) -> None:
@@ -698,10 +695,9 @@ class WorkerAttempt:
         _digest(self.input_digest, "attempt input digest")
         _digest(self.semantic_request_digest, "semantic request digest")
         _integer(self.ordinal, "attempt ordinal")
-        if not isinstance(self.worker_kind, FixtureWorkerKind):
+        if type(self.worker_kind) is not FixtureWorkerKind:
             raise ExecutionContractError("worker kind must be typed")
-        if type(self.priority) is not PrioritySelection:
-            raise ExecutionContractError("Worker Attempt priority binding differs")
+        _digest(self.priority_digest, "attempt priority digest")
         request_value = {
             "work_item_id": self.work_item_id,
             "work_item_version_id": self.work_item_version_id,
@@ -710,7 +706,7 @@ class WorkerAttempt:
             "worker_kind": self.worker_kind.value,
             "worker_version": self.worker_version,
             "input_digest": self.input_digest,
-            "priority_digest": digest_bytes(self.priority.canonical_bytes),
+            "priority_digest": self.priority_digest,
         }
         request_digest = digest_bytes(_canonical(request_value, "semantic request"))
         expected = str(
@@ -749,13 +745,11 @@ class WorkerAttempt:
             )
         _token(self.worker_version, "worker version")
         if (
-            self.priority.work_identity != self.work_item_id
-            or self.priority.work_version != self.work_item_version_id
-        ):
-            raise ExecutionContractError("Worker Attempt priority binding differs")
-        if (
-            self.schema_identity != WORKER_ATTEMPT_SCHEMA
+            type(self.schema_identity) is not str
+            or self.schema_identity != WORKER_ATTEMPT_SCHEMA
+            or type(self.authority) is not ContractAuthority
             or self.authority is not ContractAuthority.NONE
+            or type(self.effect) is not ContractEffect
             or self.effect is not ContractEffect.NONE
             or len(self.canonical_bytes) > _MAX_CANONICAL_BYTES
         ):
@@ -782,7 +776,7 @@ class WorkerAttempt:
             "worker_version": self.worker_version,
             "input_digest": self.input_digest,
             "idempotency_key": self.idempotency_key,
-            "priority": self.priority.canonical_value(),
+            "priority_digest": self.priority_digest,
         }
 
     @property
@@ -827,12 +821,11 @@ class WorkerAttempt:
                 "worker_version",
                 "input_digest",
                 "idempotency_key",
-                "priority",
+                "priority_digest",
             },
             "Worker Attempt",
         )
         try:
-            priority = PrioritySelection.from_mapping(item["priority"])  # type: ignore[arg-type]
             worker_kind = FixtureWorkerKind(item["worker_kind"])
             authority = ContractAuthority(item["authority"])
             effect = ContractEffect(item["effect"])
@@ -857,7 +850,7 @@ class WorkerAttempt:
             _string(item["worker_version"], "worker_version"),
             _string(item["input_digest"], "input_digest"),
             _string(item["idempotency_key"], "idempotency_key"),
-            priority,
+            _string(item["priority_digest"], "attempt priority digest"),
             _string(item["schema_identity"], "attempt schema_identity"),
             authority,
             effect,
@@ -873,8 +866,8 @@ class LeaseProgressEvidence:
     evidence_digest: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.progress, LeaseProgress):
-            raise ExecutionContractError("lease progress must be typed")
+        if type(self.progress) is not LeaseProgress:
+            raise ExecutionContractError("lease progress must be exact typed")
         _digest(self.evidence_digest, "lease progress evidence digest")
 
     def canonical_value(self) -> dict[str, object]:
@@ -888,9 +881,60 @@ class LeaseProgressEvidence:
         item = _exact(value, {"progress", "evidence_digest"}, "lease progress")
         try:
             progress = LeaseProgress(item["progress"])
-        except (TypeError, ValueError) as exc:
-            raise ExecutionContractError("lease progress must be typed") from exc
-        return cls(progress, _string(item["evidence_digest"], "lease progress digest"))
+            return cls(
+                progress, _string(item["evidence_digest"], "lease progress digest")
+            )
+        except ExecutionContractError:
+            raise
+        except Exception as exc:
+            raise ExecutionContractError("lease progress fields are invalid") from exc
+
+
+_ALLOWED_LEASE_TRANSITIONS = frozenset(
+    {
+        (LeaseLifecycle.PENDING, LeaseLifecycle.CLAIMED),
+        (LeaseLifecycle.CLAIMED, LeaseLifecycle.RELEASED),
+        (LeaseLifecycle.CLAIMED, LeaseLifecycle.EXPIRED),
+    }
+)
+_PROGRESS_SUCCESSORS = {
+    LeaseProgress.NOT_STARTED: frozenset(
+        {
+            LeaseProgress.NOT_STARTED,
+            LeaseProgress.IN_PROGRESS,
+            LeaseProgress.COMPLETED,
+            LeaseProgress.INTERRUPTED,
+        }
+    ),
+    LeaseProgress.IN_PROGRESS: frozenset(
+        {LeaseProgress.IN_PROGRESS, LeaseProgress.COMPLETED, LeaseProgress.INTERRUPTED}
+    ),
+    LeaseProgress.COMPLETED: frozenset(),
+    LeaseProgress.INTERRUPTED: frozenset(),
+}
+
+
+def _progress_evidence(
+    value: object,
+    *,
+    previous: LeaseProgress | None = None,
+) -> tuple[LeaseProgressEvidence, ...]:
+    if (
+        type(value) is not tuple
+        or len(value) > 32
+        or any(type(item) is not LeaseProgressEvidence for item in value)
+    ):
+        raise ExecutionContractError(
+            "lease progress evidence must be bounded exact typed"
+        )
+    current = previous
+    for item in value:
+        if current is not None and item.progress not in _PROGRESS_SUCCESSORS[current]:
+            raise ExecutionContractError(
+                "lease progress cannot regress or follow a terminal state"
+            )
+        current = item.progress
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -914,6 +958,19 @@ class LeaseTransitionReceipt:
         observed_at: str,
         progress: tuple[LeaseProgressEvidence, ...] = (),
     ) -> Self:
+        _uuid(lease_id, "lease transition lease_id")
+        _digest(predecessor_digest, "lease predecessor digest")
+        if (
+            type(from_lifecycle) is not LeaseLifecycle
+            or type(to_lifecycle) is not LeaseLifecycle
+        ):
+            raise ExecutionContractError(
+                "lease transition lifecycle must be exact typed"
+            )
+        if (from_lifecycle, to_lifecycle) not in _ALLOWED_LEASE_TRANSITIONS:
+            raise ExecutionContractError("lease lifecycle transition is not allowed")
+        _utc(observed_at, "lease transition observed_at")
+        progress = _progress_evidence(progress)
         identity = _canonical(
             {
                 "lease_id": lease_id,
@@ -944,19 +1001,17 @@ class LeaseTransitionReceipt:
         _uuid(self.transition_id, "lease transition_id")
         _uuid(self.lease_id, "lease transition lease_id")
         _digest(self.predecessor_digest, "lease predecessor digest")
-        if not isinstance(self.from_lifecycle, LeaseLifecycle) or not isinstance(
-            self.to_lifecycle, LeaseLifecycle
-        ):
-            raise ExecutionContractError("lease transition lifecycle must be typed")
-        _utc(self.observed_at, "lease transition observed_at")
         if (
-            not isinstance(self.progress, tuple)
-            or len(self.progress) > 32
-            or any(type(item) is not LeaseProgressEvidence for item in self.progress)
+            type(self.from_lifecycle) is not LeaseLifecycle
+            or type(self.to_lifecycle) is not LeaseLifecycle
         ):
             raise ExecutionContractError(
-                "lease progress evidence must be bounded and typed"
+                "lease transition lifecycle must be exact typed"
             )
+        if (self.from_lifecycle, self.to_lifecycle) not in _ALLOWED_LEASE_TRANSITIONS:
+            raise ExecutionContractError("lease lifecycle transition is not allowed")
+        _utc(self.observed_at, "lease transition observed_at")
+        _progress_evidence(self.progress)
         identity = _canonical(
             {
                 "lease_id": self.lease_id,
@@ -1003,26 +1058,25 @@ class LeaseTransitionReceipt:
             },
             "lease transition",
         )
-        if not isinstance(item["progress"], list):
+        if type(item["progress"]) is not list:
             raise ExecutionContractError("lease progress must be an array")
         try:
-            source = LeaseLifecycle(item["from_lifecycle"])
-            target = LeaseLifecycle(item["to_lifecycle"])
-        except (TypeError, ValueError) as exc:
-            raise ExecutionContractError(
-                "lease transition lifecycle must be typed"
-            ) from exc
-        return cls(
-            _string(item["transition_id"], "lease transition_id"),
-            _string(item["lease_id"], "lease transition lease_id"),
-            _string(item["predecessor_digest"], "lease predecessor digest"),
-            source,
-            target,
-            _string(item["observed_at"], "lease transition observed_at"),
-            tuple(
-                LeaseProgressEvidence.from_value(entry) for entry in item["progress"]
-            ),
-        )
+            return cls(
+                _string(item["transition_id"], "lease transition_id"),
+                _string(item["lease_id"], "lease transition lease_id"),
+                _string(item["predecessor_digest"], "lease predecessor digest"),
+                LeaseLifecycle(item["from_lifecycle"]),
+                LeaseLifecycle(item["to_lifecycle"]),
+                _string(item["observed_at"], "lease transition observed_at"),
+                tuple(
+                    LeaseProgressEvidence.from_value(entry)
+                    for entry in item["progress"]
+                ),
+            )
+        except ExecutionContractError:
+            raise
+        except Exception as exc:
+            raise ExecutionContractError("lease transition fields are invalid") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -1039,7 +1093,7 @@ class WorkItemLease:
     lifecycle: LeaseLifecycle
     issued_at: str | None
     expires_at: str | None
-    transition: LeaseTransitionReceipt | None
+    transitions: tuple[LeaseTransitionReceipt, ...]
     schema_identity: str = WORK_ITEM_LEASE_SCHEMA
     authority: ContractAuthority = ContractAuthority.NONE
     effect: ContractEffect = ContractEffect.NONE
@@ -1055,20 +1109,29 @@ class WorkItemLease:
         fence: int,
     ) -> Self:
         if type(attempt) is not WorkerAttempt:
-            raise ExecutionContractError("lease attempt must be typed")
-        _integer(fence, "lease fence")
-        values = (
-            attempt.attempt_id,
-            attempt.work_item_id,
-            attempt.work_item_version_id,
-            attempt.work_item_version_digest,
-            owner_id,
-            owner_profile_digest,
-            capability_digest,
-            fence,
-        )
-        lease_id = cls._identity(*values)
-        return cls(lease_id, *values, LeaseLifecycle.PENDING, None, None, None)
+            raise ExecutionContractError("lease attempt must be exact typed")
+        try:
+            _integer(fence, "lease fence")
+            _token(owner_id, "lease owner")
+            _digest(owner_profile_digest, "lease owner profile digest")
+            _digest(capability_digest, "lease capability")
+            values = (
+                attempt.attempt_id,
+                attempt.work_item_id,
+                attempt.work_item_version_id,
+                attempt.work_item_version_digest,
+                owner_id,
+                owner_profile_digest,
+                capability_digest,
+                fence,
+            )
+            return cls(
+                cls._identity(*values), *values, LeaseLifecycle.PENDING, None, None, ()
+            )
+        except ExecutionContractError:
+            raise
+        except Exception as exc:
+            raise ExecutionContractError("pending Lease fields are invalid") from exc
 
     @staticmethod
     def _identity(
@@ -1111,6 +1174,28 @@ class WorkItemLease:
         _digest(self.owner_profile_digest, "lease owner profile digest")
         _digest(self.capability_digest, "lease capability")
         _integer(self.fence, "lease fence")
+        if type(self.lifecycle) is not LeaseLifecycle:
+            raise ExecutionContractError("Lease lifecycle must be exact typed")
+        if (
+            type(self.transitions) is not tuple
+            or len(self.transitions) > 2
+            or any(
+                type(receipt) is not LeaseTransitionReceipt
+                for receipt in self.transitions
+            )
+        ):
+            raise ExecutionContractError(
+                "Lease transition chain must be bounded exact typed"
+            )
+        if (
+            type(self.schema_identity) is not str
+            or self.schema_identity != WORK_ITEM_LEASE_SCHEMA
+            or type(self.authority) is not ContractAuthority
+            or self.authority is not ContractAuthority.NONE
+            or type(self.effect) is not ContractEffect
+            or self.effect is not ContractEffect.NONE
+        ):
+            raise ExecutionContractError("Lease contract claims authority or effect")
         expected = self._identity(
             self.attempt_id,
             self.work_item_id,
@@ -1121,65 +1206,87 @@ class WorkItemLease:
             self.capability_digest,
             self.fence,
         )
-        if self.lease_id != expected or not isinstance(self.lifecycle, LeaseLifecycle):
-            raise ExecutionContractError(
-                "Lease deterministic identity or lifecycle differs"
-            )
+        if self.lease_id != expected:
+            raise ExecutionContractError("Lease deterministic identity differs")
         if self.lifecycle is LeaseLifecycle.PENDING:
             if (
                 self.issued_at is not None
                 or self.expires_at is not None
-                or self.transition is not None
+                or self.transitions
             ):
                 raise ExecutionContractError(
-                    "pending Lease cannot contain acquisition or transition evidence"
+                    "pending Lease cannot contain acquisition evidence"
                 )
         else:
             issued = _utc(self.issued_at, "lease issued_at")
             expires = _utc(self.expires_at, "lease expires_at")
             if _utc_value(expires) <= _utc_value(issued):
                 raise ExecutionContractError("lease expiry must follow issue time")
-            if type(self.transition) is not LeaseTransitionReceipt:
-                raise ExecutionContractError(
-                    "Lease lifecycle requires a typed transition receipt"
+            expected_count = 1 if self.lifecycle is LeaseLifecycle.CLAIMED else 2
+            if len(self.transitions) != expected_count:
+                raise ExecutionContractError("Lease lifecycle transition chain differs")
+            state = LeaseLifecycle.PENDING
+            prior_progress: LeaseProgress | None = None
+            predecessor = digest_bytes(
+                _canonical(
+                    self._canonical_value_for(LeaseLifecycle.PENDING, None, None, ()),
+                    "Lease genesis",
                 )
-            source = (
-                LeaseLifecycle.PENDING
-                if self.lifecycle is LeaseLifecycle.CLAIMED
-                else LeaseLifecycle.CLAIMED
             )
-            if (
-                self.transition.lease_id != self.lease_id
-                or self.transition.from_lifecycle is not source
-                or self.transition.to_lifecycle is not self.lifecycle
-            ):
-                raise ExecutionContractError("Lease transition predecessor differs")
-            observed = _utc_value(self.transition.observed_at)
-            if self.lifecycle is LeaseLifecycle.CLAIMED and observed != _utc_value(
-                issued
-            ):
+            for index, receipt in enumerate(self.transitions):
+                if (
+                    receipt.lease_id != self.lease_id
+                    or receipt.from_lifecycle is not state
+                    or (receipt.from_lifecycle, receipt.to_lifecycle)
+                    not in _ALLOWED_LEASE_TRANSITIONS
+                    or receipt.predecessor_digest != predecessor
+                ):
+                    raise ExecutionContractError(
+                        "Lease transition predecessor chain differs"
+                    )
+                _progress_evidence(receipt.progress, previous=prior_progress)
+                if receipt.progress:
+                    prior_progress = receipt.progress[-1].progress
+                state = receipt.to_lifecycle
+                prefix = self.transitions[: index + 1]
+                predecessor = digest_bytes(
+                    _canonical(
+                        self._canonical_value_for(state, issued, expires, prefix),
+                        "Lease transition predecessor",
+                    )
+                )
+            if state is not self.lifecycle:
+                raise ExecutionContractError("Lease transition chain terminal differs")
+            acquisition = self.transitions[0]
+            if acquisition.observed_at != issued:
                 raise ExecutionContractError(
                     "Lease acquisition transition time differs"
                 )
-            if self.lifecycle is LeaseLifecycle.RELEASED and not (
-                _utc_value(issued) <= observed < _utc_value(expires)
-            ):
-                raise ExecutionContractError("Lease release transition time differs")
-            if self.lifecycle is LeaseLifecycle.EXPIRED and observed < _utc_value(
-                expires
-            ):
+            if self.lifecycle is LeaseLifecycle.RELEASED:
+                observed = _utc_value(self.transitions[-1].observed_at)
+                if not _utc_value(issued) <= observed < _utc_value(expires):
+                    raise ExecutionContractError(
+                        "Lease release transition time differs"
+                    )
+            if self.lifecycle is LeaseLifecycle.EXPIRED and _utc_value(
+                self.transitions[-1].observed_at
+            ) < _utc_value(expires):
                 raise ExecutionContractError("Lease expiry transition time differs")
-        if (
-            self.schema_identity != WORK_ITEM_LEASE_SCHEMA
-            or self.authority is not ContractAuthority.NONE
-            or self.effect is not ContractEffect.NONE
-        ):
-            raise ExecutionContractError("Lease contract claims authority or effect")
         _ = self.canonical_bytes
 
-    def claim(self, *, issued_at: str, expires_at: str) -> Self:
+    @property
+    def transition(self) -> LeaseTransitionReceipt | None:
+        return None if not self.transitions else self.transitions[-1]
+
+    def claim(
+        self,
+        *,
+        issued_at: str,
+        expires_at: str,
+        progress: tuple[LeaseProgressEvidence, ...] = (),
+    ) -> Self:
         if self.lifecycle is not LeaseLifecycle.PENDING:
-            raise ExecutionContractError("only a pending Lease can be claimed")
+            raise ExecutionContractError("Lease lifecycle transition is not allowed")
         _utc(issued_at, "lease issued_at")
         _utc(expires_at, "lease expires_at")
         if _utc_value(expires_at) <= _utc_value(issued_at):
@@ -1190,21 +1297,28 @@ class WorkItemLease:
             from_lifecycle=LeaseLifecycle.PENDING,
             to_lifecycle=LeaseLifecycle.CLAIMED,
             observed_at=issued_at,
+            progress=progress,
         )
-        return self._with(LeaseLifecycle.CLAIMED, issued_at, expires_at, receipt)
+        return self._with(
+            LeaseLifecycle.CLAIMED, issued_at, expires_at, self.transitions + (receipt,)
+        )
 
     def release(
         self, *, observed_at: str, progress: tuple[LeaseProgressEvidence, ...] = ()
     ) -> Self:
+        if self.lifecycle is not LeaseLifecycle.CLAIMED:
+            raise ExecutionContractError("Lease lifecycle transition is not allowed")
         if self.is_expired_at(observed_at):
             raise ExecutionContractError(
-                "Lease at or beyond expiry must use the expired transition"
+                "Lease at or beyond expiry must use expired transition"
             )
         return self._finish(LeaseLifecycle.RELEASED, observed_at, progress)
 
     def expire(
         self, *, observed_at: str, progress: tuple[LeaseProgressEvidence, ...] = ()
     ) -> Self:
+        if self.lifecycle is not LeaseLifecycle.CLAIMED:
+            raise ExecutionContractError("Lease lifecycle transition is not allowed")
         if not self.is_expired_at(observed_at):
             raise ExecutionContractError("Lease has not reached its expiry boundary")
         return self._finish(LeaseLifecycle.EXPIRED, observed_at, progress)
@@ -1215,8 +1329,6 @@ class WorkItemLease:
         observed_at: str,
         progress: tuple[LeaseProgressEvidence, ...],
     ) -> Self:
-        if self.lifecycle is not LeaseLifecycle.CLAIMED:
-            raise ExecutionContractError("only a claimed Lease can become terminal")
         _utc(observed_at, "lease transition observed_at")
         if self.issued_at is None or _utc_value(observed_at) < _utc_value(
             self.issued_at
@@ -1224,6 +1336,11 @@ class WorkItemLease:
             raise ExecutionContractError(
                 "Lease transition cannot precede acquisition time"
             )
+        prior = None
+        for receipt in self.transitions:
+            if receipt.progress:
+                prior = receipt.progress[-1].progress
+        _progress_evidence(progress, previous=prior)
         receipt = LeaseTransitionReceipt.create(
             lease_id=self.lease_id,
             predecessor_digest=self.canonical_digest,
@@ -1232,14 +1349,16 @@ class WorkItemLease:
             observed_at=observed_at,
             progress=progress,
         )
-        return self._with(lifecycle, self.issued_at, self.expires_at, receipt)
+        return self._with(
+            lifecycle, self.issued_at, self.expires_at, self.transitions + (receipt,)
+        )
 
     def _with(
         self,
         lifecycle: LeaseLifecycle,
         issued_at: str | None,
         expires_at: str | None,
-        transition: LeaseTransitionReceipt,
+        transitions: tuple[LeaseTransitionReceipt, ...],
     ) -> Self:
         return WorkItemLease(
             self.lease_id,
@@ -1254,7 +1373,7 @@ class WorkItemLease:
             lifecycle,
             issued_at,
             expires_at,
-            transition,
+            transitions,
             self.schema_identity,
             self.authority,
             self.effect,
@@ -1268,7 +1387,13 @@ class WorkItemLease:
             and _utc_value(observed_at) >= _utc_value(self.expires_at)
         )
 
-    def canonical_value(self) -> dict[str, object]:
+    def _canonical_value_for(
+        self,
+        lifecycle: LeaseLifecycle,
+        issued_at: str | None,
+        expires_at: str | None,
+        transitions: tuple[LeaseTransitionReceipt, ...],
+    ) -> dict[str, object]:
         return {
             "schema_identity": self.schema_identity,
             "authority": self.authority.value,
@@ -1282,13 +1407,16 @@ class WorkItemLease:
             "owner_profile_digest": self.owner_profile_digest,
             "capability_digest": self.capability_digest,
             "fence": self.fence,
-            "lifecycle": self.lifecycle.value,
-            "issued_at": self.issued_at,
-            "expires_at": self.expires_at,
-            "transition": None
-            if self.transition is None
-            else self.transition.canonical_value(),
+            "lifecycle": lifecycle.value,
+            "issued_at": issued_at,
+            "expires_at": expires_at,
+            "transitions": [receipt.canonical_value() for receipt in transitions],
         }
+
+    def canonical_value(self) -> dict[str, object]:
+        return self._canonical_value_for(
+            self.lifecycle, self.issued_at, self.expires_at, self.transitions
+        )
 
     @property
     def canonical_bytes(self) -> bytes:
@@ -1316,39 +1444,41 @@ class WorkItemLease:
             "lifecycle",
             "issued_at",
             "expires_at",
-            "transition",
+            "transitions",
         }
         item = _exact(_decode(raw), fields, "Work Item Lease")
+        if type(item["transitions"]) is not list:
+            raise ExecutionContractError("Lease transitions must be an array")
         try:
-            lifecycle = LeaseLifecycle(item["lifecycle"])
-            authority = ContractAuthority(item["authority"])
-            effect = ContractEffect(item["effect"])
-        except (TypeError, ValueError) as exc:
-            raise ExecutionContractError("Lease typed fields differ") from exc
-        value = cls(
-            _string(item["lease_id"], "lease_id"),
-            _string(item["attempt_id"], "lease attempt_id"),
-            _string(item["work_item_id"], "lease work_item_id"),
-            _string(item["work_item_version_id"], "lease version_id"),
-            _string(item["work_item_version_digest"], "lease version digest"),
-            _string(item["owner_id"], "owner_id"),
-            _string(item["owner_profile_digest"], "owner_profile_digest"),
-            _string(item["capability_digest"], "capability_digest"),
-            _integer(item["fence"], "lease fence"),
-            lifecycle,
-            None
-            if item["issued_at"] is None
-            else _string(item["issued_at"], "issued_at"),
-            None
-            if item["expires_at"] is None
-            else _string(item["expires_at"], "expires_at"),
-            None
-            if item["transition"] is None
-            else LeaseTransitionReceipt.from_value(item["transition"]),
-            _string(item["schema_identity"], "lease schema_identity"),
-            authority,
-            effect,
-        )
+            value = cls(
+                _string(item["lease_id"], "lease_id"),
+                _string(item["attempt_id"], "lease attempt_id"),
+                _string(item["work_item_id"], "lease work_item_id"),
+                _string(item["work_item_version_id"], "lease version_id"),
+                _string(item["work_item_version_digest"], "lease version digest"),
+                _string(item["owner_id"], "owner_id"),
+                _string(item["owner_profile_digest"], "owner_profile_digest"),
+                _string(item["capability_digest"], "capability_digest"),
+                _integer(item["fence"], "lease fence"),
+                LeaseLifecycle(item["lifecycle"]),
+                None
+                if item["issued_at"] is None
+                else _string(item["issued_at"], "issued_at"),
+                None
+                if item["expires_at"] is None
+                else _string(item["expires_at"], "expires_at"),
+                tuple(
+                    LeaseTransitionReceipt.from_value(entry)
+                    for entry in item["transitions"]
+                ),
+                _string(item["schema_identity"], "lease schema_identity"),
+                ContractAuthority(item["authority"]),
+                ContractEffect(item["effect"]),
+            )
+        except ExecutionContractError:
+            raise
+        except Exception as exc:
+            raise ExecutionContractError("Lease fields are invalid") from exc
         if value.canonical_bytes != raw:
             raise ExecutionContractError("Lease bytes differ")
         return value
