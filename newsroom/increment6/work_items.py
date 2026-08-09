@@ -11,7 +11,7 @@ import json
 import re
 import sqlite3
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -29,6 +29,7 @@ from newsroom.discovery import (
 )
 from newsroom.increment5.retrieval_context import (
     RetrievalContextOutcome,
+    RetrievalContextReason,
     RetrievalContextReceipt,
     RetrievalContextRequest,
 )
@@ -492,6 +493,14 @@ class RetrievalInputBinding:
         ):
             raise WorkItemContractError("retrieval receipt binding is incomplete")
         else:
+            try:
+                RetrievalContextOutcome(self.outcome)
+                if self.reason is not None:
+                    RetrievalContextReason(self.reason)
+            except (TypeError, ValueError) as exc:
+                raise WorkItemContractError(
+                    "retrieval outcome or reason is unsupported"
+                ) from exc
             _uuid(self.context_id, "retrieval context_id")
             _digest(self.context_digest, "retrieval context_digest")
             if digest_bytes(self.receipt_bytes) != self.context_digest:
@@ -581,16 +590,26 @@ class RetrievalContextAuthority:
     def __init__(
         self,
         journal_path: Path,
-        resolver: Callable[
-            [str], tuple[RetrievalContextRequest, RetrievalContextReceipt | None]
+        records: Mapping[
+            str, tuple[RetrievalContextRequest, RetrievalContextReceipt | None]
         ],
     ) -> None:
         self._path = Path(journal_path)
         if not self._path.is_file():
             raise WorkItemContractError("retrieval authority journal is absent")
-        if not callable(resolver):
-            raise WorkItemContractError("retrieval authority resolver is required")
-        self._resolver = resolver
+        if not isinstance(records, Mapping) or any(
+            not isinstance(digest, str)
+            or not isinstance(pair, tuple)
+            or len(pair) != 2
+            or not isinstance(pair[0], RetrievalContextRequest)
+            or (
+                pair[1] is not None and not isinstance(pair[1], RetrievalContextReceipt)
+            )
+            or digest != pair[0].request_digest
+            for digest, pair in records.items()
+        ):
+            raise WorkItemContractError("retrieval authority records differ")
+        self._records = dict(records)
 
     def attach(self, connection: sqlite3.Connection) -> None:
         attached = {
@@ -652,7 +671,29 @@ class RetrievalContextAuthority:
         self, connection: sqlite3.Connection, binding: RetrievalInputBinding
     ) -> None:
         try:
-            request, receipt = self._resolver(binding.request_digest)
+            purge = connection.execute(
+                "SELECT purge_id FROM "
+                "retrieval_authority.increment5d2_retrieval_context_purges "
+                "WHERE idempotency_key=?",
+                (binding.idempotency_key,),
+            ).fetchone()
+            row = connection.execute(
+                "SELECT request_digest,receipt_digest,receipt_bytes "
+                "FROM retrieval_authority.increment5d2_retrieval_contexts "
+                "WHERE idempotency_key=?",
+                (binding.idempotency_key,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise WorkItemContractError("retrieval authority journal differs") from exc
+        if purge is not None:
+            raise WorkItemContractError("retrieval authority was purged")
+        if binding.state is RetrievalBindingState.REQUEST_PENDING:
+            if row is not None:
+                raise WorkItemContractError("pending retrieval already has a receipt")
+        elif row is None:
+            raise WorkItemContractError("retrieval authority retained bytes differ")
+        try:
+            request, receipt = self._records[binding.request_digest]
         except Exception as exc:
             raise WorkItemContractError(
                 "retrieval authority resolution failed"
@@ -683,26 +724,7 @@ class RetrievalContextAuthority:
             or receipt.no_match != binding.no_match
         ):
             raise WorkItemContractError("retrieval authority receipt differs")
-        try:
-            purge = connection.execute(
-                "SELECT purge_id FROM "
-                "retrieval_authority.increment5d2_retrieval_context_purges "
-                "WHERE idempotency_key=?",
-                (binding.idempotency_key,),
-            ).fetchone()
-            if purge is not None:
-                raise WorkItemContractError("retrieval authority was purged")
-            row = connection.execute(
-                "SELECT request_digest,receipt_digest,receipt_bytes "
-                "FROM retrieval_authority.increment5d2_retrieval_contexts "
-                "WHERE idempotency_key=?",
-                (binding.idempotency_key,),
-            ).fetchone()
-        except sqlite3.Error as exc:
-            raise WorkItemContractError("retrieval authority journal differs") from exc
         if binding.state is RetrievalBindingState.REQUEST_PENDING:
-            if row is not None:
-                raise WorkItemContractError("pending retrieval already has a receipt")
             return
         if (
             row is None
@@ -976,6 +998,18 @@ class SupplementalDiscoveryReentry:
                 raise WorkItemContractError(
                     "supplemental discovery lineage binding differs"
                 )
+        request_value = _decode(self.lineage_bindings[1].canonical_bytes)
+        retained_trigger = request_value.get("trigger")
+        if (
+            not isinstance(retained_trigger, dict)
+            or canonical_json_bytes(retained_trigger)
+            != self.lineage_bindings[0].canonical_bytes
+            or digest_bytes(canonical_json_bytes(retained_trigger))
+            != self.lineage_bindings[0].digest
+        ):
+            raise WorkItemContractError(
+                "supplemental Trigger differs from the Check Request"
+            )
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -1164,6 +1198,139 @@ class SupplementalLineageBinding:
         if digest_bytes(self.canonical_bytes) != self.digest:
             raise WorkItemContractError("supplemental lineage bytes differ")
         value = _decode(self.canonical_bytes)
+        exact_fields = {
+            "TRIGGER": {
+                "kind",
+                "trigger_id",
+                "trigger_version",
+                "expected_window_digest",
+            },
+            "CHECK_REQUEST": {
+                "adapter_request_digest",
+                "baseline_policy",
+                "coverage",
+                "definition_id",
+                "definition_version_id",
+                "producer_slot_digest",
+                "purpose",
+                "request_id",
+                "requested_at",
+                "revision_policy",
+                "rights_decision_id",
+                "rights_policy_version",
+                "transition_policy",
+                "trigger",
+                "validator_policy",
+            },
+            "CHECK_OUTCOME": {
+                "admission_semantic_digest",
+                "attempt_id",
+                "candidate_observations",
+                "capture_digest",
+                "completed_at",
+                "definition_id",
+                "definition_version_id",
+                "incomplete",
+                "kind",
+                "observed_items",
+                "outcome_id",
+                "parser_result_digest",
+                "producer_slot_digest",
+                "proposal_id",
+                "quarantine",
+                "reason_codes",
+                "receipt_digest",
+                "representation_digest",
+                "request_id",
+                "source_body_digest",
+                "validator_digest",
+            },
+            "SIGNAL": {
+                "admission_policy",
+                "admitted_at",
+                "check_outcome_id",
+                "definition_id",
+                "definition_version_id",
+                "discriminator",
+                "incomplete",
+                "item_id",
+                "occurrence_id",
+                "operational_finding_ids",
+                "purpose",
+                "representation_id",
+                "revision_id",
+                "signal_id",
+                "transition_id",
+            },
+            "GATE": {
+                "basis",
+                "coverage",
+                "decided_at",
+                "decision_id",
+                "decision_ordinal",
+                "duplicate_policy",
+                "evaluated_definition_version_id",
+                "exclusion_policy",
+                "gate_policy",
+                "newness_policy",
+                "next_action",
+                "outcome",
+                "outcome_taxonomy_version",
+                "previous_decision_id",
+                "primary_reason",
+                "reason_taxonomy_version",
+                "rights_decision_id",
+                "rights_policy_version",
+                "signal_admission_policy",
+                "signal_id",
+                "supporting_reasons",
+                "terminality",
+                "time_validity_policy",
+            },
+            "LEAD": {
+                "coverage",
+                "created_at",
+                "definition_id",
+                "definition_version_id",
+                "incompleteness_warnings",
+                "item_id",
+                "lead_id",
+                "lead_policy",
+                "occurrence_id",
+                "outcome_taxonomy_version",
+                "portfolio_functions",
+                "promoting_gate_decision_id",
+                "reason_taxonomy_version",
+                "representation_id",
+                "revision_id",
+                "signal_id",
+                "source_dependencies",
+                "source_roles",
+                "transition_id",
+                "transition_kind",
+                "urgency",
+            },
+            "QUEUED_DISPOSITION": {
+                "decided_at",
+                "decision_id",
+                "decision_ordinal",
+                "disposition_policy",
+                "gate_decision_id",
+                "lead_id",
+                "next_action",
+                "outcome",
+                "outcome_taxonomy_version",
+                "previous_decision_id",
+                "primary_reason",
+                "reason_taxonomy_version",
+                "supporting_reasons",
+                "terminality",
+                "urgency_route",
+                "watch_condition_id",
+            },
+        }
+        if self.kind not in exact_fields or set(value) != exact_fields[self.kind]:
+            raise WorkItemContractError("supplemental lineage canonical schema differs")
         identity_fields = {
             "TRIGGER": "trigger_id",
             "CHECK_REQUEST": "request_id",

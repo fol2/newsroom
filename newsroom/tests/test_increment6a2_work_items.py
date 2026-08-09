@@ -10,7 +10,14 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.triage_work_item_migrations import (
     TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS,
 )
-from newsroom.discovery import LeadDispositionDecisionId, LeadDispositionOutcome
+from newsroom.discovery import (
+    DiscoverySignalId,
+    GateDecisionId,
+    LeadDispositionDecisionId,
+    LeadDispositionOutcome,
+    NewsLeadId,
+    SignalLeadAdmissionRequest,
+)
 from newsroom.increment6.outcomes import (
     PriorityLane,
     PrioritySelection,
@@ -23,6 +30,8 @@ from newsroom.increment6.work_items import (
     RetrievalBindingState,
     RetrievalContextAuthority,
     RetrievalInputBinding,
+    SupplementalDiscoveryReentry,
+    SupplementalLineageBinding,
     TriageWorkItem,
     TriageWorkItemStore,
     TriageWorkItemVersion,
@@ -32,6 +41,7 @@ from newsroom.increment6.work_items import (
 from newsroom.tests import test_increment5d1_hybrid_composer as composer_helpers
 from newsroom.tests import test_increment5d2_retrieval_context as retrieval_helpers
 from newsroom.tests.check_3c_authority_helpers import proof
+from newsroom.tests.check_3c_helpers import OUTCOME_ID, REQUEST_ID
 from newsroom.tests.discovery_3d_authority_helpers import (
     exact_admission_request,
     open_discovery_system,
@@ -189,6 +199,11 @@ def test_public_parser_rejects_bool_ordinal_and_enum_or_boolean_coercion() -> No
     retrieval["no_match"] = 0
     with pytest.raises(WorkItemContractError, match="boolean"):
         RetrievalInputBinding.from_value(retrieval)
+    huge_integer = b'{"value":' + b"9" * 5000 + b"}"
+    with pytest.raises(WorkItemContractError, match="invalid"):
+        TriageWorkItem.from_canonical_bytes(huge_integer)
+    with pytest.raises(WorkItemContractError, match="aggregate_version"):
+        replace(item.decision_leads[0], lead_aggregate_version=True)
 
 
 def _store(
@@ -329,9 +344,9 @@ def test_actual_retrieval_journal_is_exact_indexed_and_tamper_or_purge_fails(
 ) -> None:
     inputs = composer_helpers.branch_inputs.__wrapped__(tmp_path)
     (
-        _builder,
-        _composer,
-        _cas_root,
+        builder,
+        composer,
+        cas_root,
         _journal,
         journal_path,
         request,
@@ -340,6 +355,15 @@ def test_actual_retrieval_journal_is_exact_indexed_and_tamper_or_purge_fails(
     ) = retrieval_helpers._retained_complete_context(
         tmp_path, inputs, name="work-item-authority"
     )
+    missing_builder = retrieval_helpers._builder(
+        tmp_path, name="missing", composer=composer, cas_root=cas_root
+    )
+    missing_builder.journal.path.unlink()
+    with pytest.raises(WorkItemContractError, match="absent"):
+        RetrievalContextAuthority(
+            missing_builder.journal.path,
+            {request.request_digest: (request, receipt)},
+        )
     journal_connection = sqlite3.connect(journal_path)
     unrelated = [
         (
@@ -358,16 +382,20 @@ def test_actual_retrieval_journal_is_exact_indexed_and_tamper_or_purge_fails(
     journal_connection.close()
 
     authority = RetrievalContextAuthority(
-        journal_path,
-        lambda digest: (request, receipt) if digest == request.request_digest else None,
+        builder.journal.path, {request.request_digest: (request, receipt)}
     )
     decision = _decision(1)
     wrong_journal = retrieval_helpers.RetrievalContextJournal(
         tmp_path / "wrong-context.sqlite3"
     )
+    wrong_builder = retrieval_helpers.RetrievalContextBuilder(
+        composition_replayer=composer,
+        journal=wrong_journal,
+        hydrator=builder.hydrator,
+    )
     wrong_authority = RetrievalContextAuthority(
-        wrong_journal.path,
-        lambda _digest: (request, receipt),
+        wrong_builder.journal.path,
+        {request.request_digest: (request, receipt)},
     )
     _, wrong_store = _store((decision,), retrieval_authority=wrong_authority)
     wrong_item = TriageWorkItem.create((decision,))
@@ -377,6 +405,38 @@ def test_actual_retrieval_journal_is_exact_indexed_and_tamper_or_purge_fails(
     )
     with pytest.raises(WorkItemContractError, match="retrieval"):
         wrong_store.create_or_replay(wrong_item, wrong_version)
+    pending_authority = RetrievalContextAuthority(
+        wrong_builder.journal.path,
+        {request.request_digest: (request, None)},
+    )
+    pending_connection, pending_store = _store(
+        (decision,), retrieval_authority=pending_authority
+    )
+    pending_item = TriageWorkItem.create((decision,))
+    pending_version = replace(
+        _version(pending_item),
+        retrieval=RetrievalInputBinding.request_pending(request),
+    )
+    assert pending_store.create_or_replay(pending_item, pending_version) == (
+        pending_version
+    )
+    with pytest.raises(WorkItemContractError, match="retrieval_not_complete"):
+        pending_store.require_usable_current(pending_item.work_item_id)
+    pending_database = tmp_path / "pending-work-items.sqlite3"
+    pending_target = sqlite3.connect(pending_database)
+    pending_connection.backup(pending_target)
+    pending_target.close()
+    pending_connection.close()
+    restarted_pending_connection = sqlite3.connect(
+        pending_database, isolation_level=None
+    )
+    restarted_pending = TriageWorkItemStore(
+        restarted_pending_connection, retrieval_authority=pending_authority
+    )
+    assert restarted_pending.current_version(pending_item.work_item_id) == (
+        pending_version
+    )
+    restarted_pending_connection.close()
 
     connection, store = _store((decision,), retrieval_authority=authority)
     item = TriageWorkItem.create((decision,))
@@ -416,7 +476,112 @@ def test_actual_retrieval_journal_is_exact_indexed_and_tamper_or_purge_fails(
         store.require_usable_current(item.work_item_id)
 
 
-def test_sql_successor_scope_retarget_is_rejected() -> None:
+def test_actual_retrieval_complete_no_match_is_usable_and_incomplete_is_not(
+    tmp_path,
+) -> None:
+    branch_inputs = composer_helpers.branch_inputs.__wrapped__(tmp_path)
+    no_match_inputs = retrieval_helpers._no_match_inputs(branch_inputs)
+    composer, composition_request, composition = retrieval_helpers._compose(
+        tmp_path,
+        no_match_inputs,
+        key="hybrid:work-item-no-match",
+        request_id="00000000-0000-4000-8000-000000009300",
+    )
+    collision_digest = retrieval_helpers.context_collision_key_digest(composition)
+    database, _ = retrieval_helpers._authority_database(
+        tmp_path,
+        name="work-item-no-match",
+        admission_id="object:work-item-no-match",
+        passage_id=None,
+        content=None,
+        collision_digest=None,
+    )
+    cas_root = retrieval_helpers._cas_root(tmp_path, name="cas-work-item-no-match")
+    authority_request, authority_result = retrieval_helpers._authority_execution(
+        tmp_path,
+        name="work-item-no-match",
+        database=database,
+        composition=composition,
+        object_ids=("object:work-item-no-match",),
+    )
+    request = retrieval_helpers._context_request(
+        key="work-item-no-match",
+        composition_request=composition_request,
+        composition=composition,
+        inputs=no_match_inputs,
+        authority_request=authority_request,
+        authority_result=authority_result,
+    )
+    builder = retrieval_helpers._builder(
+        tmp_path,
+        name="work-item-no-match",
+        composer=composer,
+        cas_root=cas_root,
+    )
+    receipt = builder.execute(request)
+    assert collision_digest and receipt.no_match and receipt.outcome.value == "COMPLETE"
+    complete_authority = RetrievalContextAuthority(
+        builder.journal.path, {request.request_digest: (request, receipt)}
+    )
+    complete_decision = _decision(2)
+    _, complete_store = _store(
+        (complete_decision,), retrieval_authority=complete_authority
+    )
+    complete_item = TriageWorkItem.create((complete_decision,))
+    complete_version = replace(
+        _version(complete_item),
+        retrieval=RetrievalInputBinding.from_receipt(request, receipt),
+    )
+    complete_store.create_or_replay(complete_item, complete_version)
+    assert complete_store.require_usable_current(complete_item.work_item_id) == (
+        complete_version
+    )
+
+    incomplete_inputs = retrieval_helpers._exact_only_inputs(branch_inputs)
+    composer, composition_request, composition = retrieval_helpers._compose(
+        tmp_path,
+        incomplete_inputs,
+        key="hybrid:work-item-incomplete",
+        request_id="00000000-0000-4000-8000-000000009301",
+    )
+    incomplete_request = retrieval_helpers._context_request(
+        key="work-item-incomplete",
+        composition_request=composition_request,
+        composition=composition,
+        inputs=incomplete_inputs,
+    )
+    incomplete_builder = retrieval_helpers._builder(
+        tmp_path,
+        name="work-item-incomplete",
+        composer=composer,
+        cas_root=retrieval_helpers._cas_root(tmp_path, name="cas-work-item-incomplete"),
+    )
+    incomplete_receipt = incomplete_builder.execute(incomplete_request)
+    assert incomplete_receipt.outcome.value == "INCOMPLETE"
+    incomplete_authority = RetrievalContextAuthority(
+        incomplete_builder.journal.path,
+        {incomplete_request.request_digest: (incomplete_request, incomplete_receipt)},
+    )
+    incomplete_decision = _decision(3)
+    _, incomplete_store = _store(
+        (incomplete_decision,), retrieval_authority=incomplete_authority
+    )
+    incomplete_item = TriageWorkItem.create((incomplete_decision,))
+    incomplete_version = replace(
+        _version(incomplete_item),
+        retrieval=RetrievalInputBinding.from_receipt(
+            incomplete_request, incomplete_receipt
+        ),
+    )
+    assert (
+        incomplete_store.create_or_replay(incomplete_item, incomplete_version)
+        == incomplete_version
+    )
+    with pytest.raises(WorkItemContractError, match="retrieval_not_complete"):
+        incomplete_store.require_usable_current(incomplete_item.work_item_id)
+
+
+def test_sql_successor_scope_retarget_is_rejected(tmp_path) -> None:
     decision, peer = _decision(1), _decision(2)
     connection, store = _store((decision, peer))
     item = TriageWorkItem.create((decision,))
@@ -471,8 +636,15 @@ def test_sql_successor_scope_retarget_is_rejected() -> None:
             item.work_item_id,
         ),
     )
+    database = tmp_path / "retargeted.sqlite3"
+    target = sqlite3.connect(database)
+    connection.backup(target)
+    target.close()
+    connection.close()
+    reopened = sqlite3.connect(database, isolation_level=None)
     with pytest.raises(WorkItemContractError, match="retained bytes"):
-        TriageWorkItemStore(connection)
+        TriageWorkItemStore(reopened)
+    reopened.close()
 
 
 def test_two_connection_lost_response_replays_survive_restart(tmp_path) -> None:
@@ -501,6 +673,9 @@ def test_two_connection_lost_response_replays_survive_restart(tmp_path) -> None:
         second_store.append_version(first.version_id, first.canonical_digest, second)
         == second
     )
+    divergent = replace(second, retrieval=_pending(901))
+    with pytest.raises(WorkItemContractError, match="diverge"):
+        second_store.append_version(first.version_id, first.canonical_digest, divergent)
     first_connection.close()
     second_connection.close()
     restarted_connection = sqlite3.connect(database, isolation_level=None)
@@ -587,4 +762,230 @@ def test_watch_reentry_requires_exact_causal_successor_and_matching_condition(
             replace(second, reentry_kind="REVIEW")
         with pytest.raises(WorkItemContractError, match="condition"):
             replace(second, reentry_kind=ReentryKind.OPERATOR_CONDITION)
+        assert replace(second, reentry_kind=ReentryKind.EXPIRY).reentry_kind is (
+            ReentryKind.EXPIRY
+        )
+        with pytest.raises(WorkItemContractError, match="source disposition"):
+            WatchConditionWorkItemBinding.from_authority(
+                watch, admitted.initial_disposition
+            )
+
+        watch_value = watch_binding.canonical_value()["watch"]
+        assert isinstance(watch_value, dict)
+        deadline_value = dict(watch_value)
+        deadline_value["expected_occurrence"] = "Timer deadline elapsed."
+        deadline_bytes = canonical_json_bytes(deadline_value)
+        deadline_binding = replace(
+            watch_binding,
+            watch_bytes=deadline_bytes,
+            watch_condition_digest=digest_bytes(deadline_bytes),
+        )
+        assert (
+            replace(
+                second, watch=deadline_binding, reentry_kind=ReentryKind.DEADLINE
+            ).reentry_kind
+            is ReentryKind.DEADLINE
+        )
+
+        operator_value = dict(watch_value)
+        operator_value["operator_review_condition"] = "Operator confirms retry."
+        operator_bytes = canonical_json_bytes(operator_value)
+        operator_binding = replace(
+            watch_binding,
+            watch_bytes=operator_bytes,
+            watch_condition_digest=digest_bytes(operator_bytes),
+        )
+        assert (
+            replace(
+                second,
+                watch=operator_binding,
+                reentry_kind=ReentryKind.OPERATOR_CONDITION,
+            ).reentry_kind
+            is ReentryKind.OPERATOR_CONDITION
+        )
+
+        transition_value = dict(watch_value)
+        transition_value["resume_transition_kinds"] = ["REVISED"]
+        transition_bytes = canonical_json_bytes(transition_value)
+        transition_binding = replace(
+            watch_binding,
+            watch_bytes=transition_bytes,
+            watch_condition_digest=digest_bytes(transition_bytes),
+        )
+        with pytest.raises(WorkItemContractError, match="new Lead"):
+            replace(second, watch=transition_binding)
+        with pytest.raises(WorkItemContractError, match="scalars"):
+            replace(watch_binding, lead_id=_id(9992))
+        with pytest.raises(WorkItemContractError, match="source disposition bytes"):
+            replace(watch_binding, source_disposition_ordinal=1)
         connection.close()
+
+
+def test_actual_supplemental_lineage_persists_replays_and_restarts(tmp_path) -> None:
+    database = tmp_path / "supplemental-authority.sqlite3"
+    with open_discovery_system(database) as system:
+        seed_check_lineage(system)
+        source_admitted = system.discovery.admit_signal_to_lead(
+            exact_admission_request(), proof=proof()
+        )
+        assert source_admitted.lead is not None
+        assert source_admitted.initial_disposition is not None
+
+        base = exact_admission_request()
+        signal_id = DiscoverySignalId.parse("00000000-0000-4000-8000-000000009401")
+        gate_id = GateDecisionId.parse("00000000-0000-4000-8000-000000009402")
+        lead_id = NewsLeadId.parse("00000000-0000-4000-8000-000000009403")
+        disposition_id = LeadDispositionDecisionId.parse(
+            "00000000-0000-4000-8000-000000009404"
+        )
+        signal = replace(
+            base.signal,
+            signal_id=signal_id,
+            purpose="SUPPLEMENTAL_GOVERNED_DISCOVERY",
+            discriminator="SUPPLEMENTAL_GOVERNED_DISCOVERY_V1",
+            idempotency_key="supplemental-signal",
+        )
+        gate = replace(
+            base.gate,
+            decision_id=gate_id,
+            signal_id=signal_id,
+            idempotency_key="supplemental-gate",
+        )
+        lead = replace(
+            base.lead,
+            lead_id=lead_id,
+            signal_id=signal_id,
+            promoting_gate_decision_id=gate_id,
+            idempotency_key="supplemental-lead",
+        )
+        disposition = replace(
+            base.initial_disposition,
+            decision_id=disposition_id,
+            lead_id=lead_id,
+            gate_decision_id=gate_id,
+            idempotency_key="supplemental-queued-disposition",
+        )
+        target_admitted = system.discovery.admit_signal_to_lead(
+            SignalLeadAdmissionRequest(signal, gate, lead, disposition),
+            proof=proof(),
+        )
+        assert target_admitted.lead is not None
+        assert target_admitted.initial_disposition is not None
+        check_request = system.checks.request(REQUEST_ID, proof=proof())
+        check_outcome = system.checks.outcome(OUTCOME_ID, proof=proof())
+
+    lineage = (
+        SupplementalLineageBinding.from_authority(check_request.request.trigger),
+        SupplementalLineageBinding.from_authority(check_request),
+        SupplementalLineageBinding.from_authority(check_outcome),
+        SupplementalLineageBinding.from_authority(target_admitted.signal),
+        SupplementalLineageBinding.from_authority(target_admitted.gate),
+        SupplementalLineageBinding.from_authority(target_admitted.lead),
+        SupplementalLineageBinding.from_authority(target_admitted.initial_disposition),
+    )
+    source_decision = DecisionLeadBinding.from_authority(
+        source_admitted.lead, source_admitted.initial_disposition
+    )
+    target_decision = DecisionLeadBinding.from_authority(
+        target_admitted.lead, target_admitted.initial_disposition
+    )
+    connection = sqlite3.connect(database, isolation_level=None)
+    store = TriageWorkItemStore(connection)
+    source_item = TriageWorkItem.create((source_decision,))
+    source_version = _version(source_item)
+    store.create_or_replay(source_item, source_version)
+    target_item = TriageWorkItem.create((target_decision,))
+    target_version_id = str(
+        uuid.uuid5(uuid.NAMESPACE_URL, f"{target_item.work_item_id}|1")
+    )
+    proof_value = SupplementalDiscoveryReentry(
+        source_item.work_item_id,
+        source_version.version_id,
+        source_version.canonical_digest,
+        source_decision.disposition_id,
+        source_decision.disposition_digest,
+        source_decision.disposition_bytes,
+        source_decision.disposition_event_id,
+        source_decision.disposition_aggregate_version,
+        source_decision.disposition_outcome,
+        None,
+        lineage[0].identifier,
+        lineage[1].identifier,
+        lineage[2].identifier,
+        lineage[3].identifier,
+        lineage[4].identifier,
+        lineage[5].identifier,
+        lineage[6].identifier,
+        target_item.work_item_id,
+        target_version_id,
+        lineage_bindings=lineage,
+    )
+    target_version = TriageWorkItemVersion.create(
+        work_item_id=target_item.work_item_id,
+        ordinal=1,
+        previous_version_id=None,
+        decision_leads=(target_decision,),
+        context_leads=(),
+        retrieval=_pending(),
+        priority=PrioritySelection(
+            target_item.work_item_id,
+            target_version_id,
+            PriorityLane.ROUTINE,
+            (ReasonReference("fixture", "supplemental"),),
+        ),
+        supplemental_reentry=proof_value,
+    )
+    assert store.create_or_replay(target_item, target_version) == target_version
+    assert store.create_or_replay(target_item, target_version) == target_version
+    assert store.assess_current(target_item.work_item_id).current is True
+    with pytest.raises(WorkItemContractError, match="proposal-only"):
+        replace(proof_value, proposal_only_action=True)
+    with pytest.raises(WorkItemContractError, match="Trigger authority"):
+        replace(proof_value, source_disposition_authorises_trigger=True)
+    with pytest.raises(WorkItemContractError, match="lineage"):
+        replace(proof_value, lineage_bindings=lineage[:-1])
+    with pytest.raises(WorkItemContractError, match="parent"):
+        replace(lineage[2], parent_id=_id(9990))
+    sparse = canonical_json_bytes(
+        {"outcome_id": lineage[2].identifier, "request_id": lineage[2].parent_id}
+    )
+    with pytest.raises(WorkItemContractError, match="schema"):
+        replace(lineage[2], canonical_bytes=sparse, digest=digest_bytes(sparse))
+    trigger_value = lineage[0].canonical_value()["record"]
+    assert isinstance(trigger_value, dict)
+    changed_trigger_value = dict(trigger_value)
+    changed_trigger_value["trigger_version"] = "decoy-version"
+    changed_trigger_bytes = canonical_json_bytes(changed_trigger_value)
+    changed_trigger = replace(
+        lineage[0],
+        canonical_bytes=changed_trigger_bytes,
+        digest=digest_bytes(changed_trigger_bytes),
+    )
+    with pytest.raises(WorkItemContractError, match="Trigger differs"):
+        replace(
+            proof_value,
+            lineage_bindings=(changed_trigger, *lineage[1:]),
+        )
+    with pytest.raises(WorkItemContractError, match="target"):
+        replace(
+            target_version,
+            supplemental_reentry=replace(proof_value, target_version_id=_id(9991)),
+        )
+    connection.close()
+
+    reopened_connection = sqlite3.connect(database, isolation_level=None)
+    reopened = TriageWorkItemStore(reopened_connection)
+    assert reopened.load_version(target_version.version_id) == target_version
+    reopened_connection.close()
+    corrupt = sqlite3.connect(database, isolation_level=None)
+    corrupt.execute("PRAGMA foreign_keys=OFF")
+    corrupt.execute("DROP TRIGGER immutable_check_outcomes_update")
+    corrupt.execute(
+        "UPDATE check_outcomes SET canonical_digest='sha256:'||printf('%064d',0) WHERE outcome_id=?",
+        (lineage[2].identifier,),
+    )
+    corrupt.close()
+    corrupted_reopen = sqlite3.connect(database, isolation_level=None)
+    with pytest.raises(WorkItemContractError, match="supplemental_check_outcome"):
+        TriageWorkItemStore(corrupted_reopen)
+    corrupted_reopen.close()
