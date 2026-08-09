@@ -2127,11 +2127,13 @@ class TriageWorkItemStore:
                 raise WorkItemContractError("stale expected Work Item head")
             if version.ordinal != head[1] + 1 or version.previous_version_id != head[0]:
                 raise WorkItemContractError("Version is not the immediate successor")
+            predecessor = self.load_version(head[0])
             item = self._load_item(version.work_item_id)
             if tuple(v.stable_lead_value() for v in version.decision_leads) != tuple(
                 v.stable_lead_value() for v in item.decision_leads
             ):
                 raise WorkItemContractError("stable decision Lead identity changed")
+            self._require_disposition_transition(predecessor, version)
             self._require_upstream(version, initial=False)
             self._reject_overlap(item, version)
             self._reject_reused_causality(version)
@@ -2151,6 +2153,45 @@ class TriageWorkItemStore:
         except Exception:
             self._rollback()
             raise
+
+    def _require_disposition_transition(
+        self,
+        predecessor: TriageWorkItemVersion,
+        proposed: TriageWorkItemVersion,
+    ) -> None:
+        changed = tuple(
+            (before, after)
+            for before, after in zip(
+                predecessor.decision_leads,
+                proposed.decision_leads,
+                strict=True,
+            )
+            if before != after
+        )
+        if not changed:
+            return
+        if len(changed) != 1 or proposed.watch is None:
+            raise WorkItemContractError(
+                "disposition change requires exactly one Lead and typed Watch proof"
+            )
+        before, after = changed[0]
+        watch = proposed.watch
+        if (
+            watch.lead_id != before.lead_id
+            or after.lead_id != before.lead_id
+            or watch.source_disposition_ordinal
+            != before.disposition_ordinal + 1
+            or watch.source_previous_disposition_id != before.disposition_id
+            or after.disposition_outcome
+            != LeadDispositionOutcome.QUEUED_FOR_TRIAGE.value
+            or after.disposition_ordinal != watch.source_disposition_ordinal + 1
+            or after.previous_disposition_id != watch.source_disposition_id
+            or not self._watch_retained(watch)
+        ):
+            raise WorkItemContractError(
+                "disposition change requires typed Watch proof; "
+                "watch is not the exact immediate successor"
+            )
 
     def load_version(self, version_id: str) -> TriageWorkItemVersion:
         _uuid(version_id, "version_id")
@@ -2433,6 +2474,15 @@ class TriageWorkItemStore:
             and source[7] == binding.source_disposition_event_id
             and source[8] == binding.source_disposition_aggregate_version
             and source_request.get("decision_id") == binding.source_disposition_id
+            and source_request.get("lead_id") == binding.lead_id
+            and source_request.get("decision_ordinal")
+            == binding.source_disposition_ordinal
+            and source_request.get("previous_decision_id")
+            == binding.source_previous_disposition_id
+            and source_request.get("outcome")
+            == LeadDispositionOutcome.WATCH_DEFER.value
+            and source_request.get("watch_condition_id")
+            == binding.watch_condition_id
             and type(source_request.get("next_action")) is dict
             and source_request["next_action"].get("kind") == "RESUME_ON_WATCH"
         )
@@ -2471,6 +2521,20 @@ class TriageWorkItemStore:
         for lead in v.context_leads:
             if not self._lead_retained(lead):
                 reasons.append(f"context:{lead.lead_id}")
+            gate = self._connection.execute(
+                "SELECT current_decision_id FROM discovery_gate_decision_heads "
+                "WHERE signal_id=(SELECT signal_id FROM news_leads WHERE lead_id=?)",
+                (lead.lead_id,),
+            ).fetchone()
+            if gate is None or gate[0] != lead.gate_decision_id:
+                reasons.append(f"gate:{lead.lead_id}")
+            source = self._connection.execute(
+                "SELECT current_version_id FROM source_definition_version_heads "
+                "WHERE definition_id=?",
+                (lead.definition_id,),
+            ).fetchone()
+            if source is None or source[0] != lead.definition_version_id:
+                reasons.append(f"source:{lead.lead_id}")
         if v.watch is not None:
             if not self._watch_retained(v.watch):
                 reasons.append("watch")

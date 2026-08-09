@@ -1554,6 +1554,169 @@ def test_restart_integrity_is_linear_query_bounded(tmp_path) -> None:
     reopened.close()
 
 
+@pytest.mark.parametrize(
+    ("head_table", "head_column", "reason_prefix"),
+    (
+        ("discovery_gate_decision_heads", "current_decision_id", "gate"),
+        ("source_definition_version_heads", "current_version_id", "source"),
+    ),
+)
+def test_context_lead_gate_and_source_heads_are_use_time_current(
+    head_table: str,
+    head_column: str,
+    reason_prefix: str,
+) -> None:
+    decision, context_source = _decision(1), _decision(2)
+    connection, store = _store((decision, context_source))
+    item = TriageWorkItem.create((decision,))
+    context = ContextLeadBinding(
+        context_source.lead_id,
+        context_source.lead_digest,
+        context_source.lead_event_id,
+        context_source.lead_aggregate_version,
+        context_source.gate_decision_id,
+        context_source.definition_id,
+        context_source.definition_version_id,
+    )
+    first = replace(_version(item), context_leads=(context,))
+    store.create_or_replay(item, first)
+
+    key_column = "signal_id" if reason_prefix == "gate" else "definition_id"
+    key = (
+        connection.execute(
+            "SELECT signal_id FROM news_leads WHERE lead_id=?",
+            (context.lead_id,),
+        ).fetchone()[0]
+        if reason_prefix == "gate"
+        else context.definition_id
+    )
+    connection.execute(
+        f"UPDATE {head_table} SET {head_column}=? WHERE {key_column}=?",
+        (_id(9901), key),
+    )
+
+    assessment = store.assess_current(item.work_item_id)
+    assert assessment.current is False
+    assert f"{reason_prefix}:{context.lead_id}" in assessment.stale_reasons
+    with pytest.raises(WorkItemContractError, match=reason_prefix):
+        store.require_usable_current(item.work_item_id)
+
+    second = replace(_version(item, 2), context_leads=())
+    store.append_version(first.version_id, first.canonical_digest, second)
+    assert store.assess_current(item.work_item_id).current is True
+
+
+def test_unchanged_disposition_allows_an_ordinary_successor() -> None:
+    decision = _decision(1)
+    _, store = _store((decision,))
+    item = TriageWorkItem.create((decision,))
+    first = _version(item)
+    second = _version(item, 2)
+    store.create_or_replay(item, first)
+
+    assert store.append_version(
+        first.version_id, first.canonical_digest, second
+    ) == second
+
+
+def test_immediate_queued_disposition_change_requires_watch_proof(tmp_path) -> None:
+    database = tmp_path / "immediate-queue-without-watch.sqlite3"
+    with open_discovery_system(database) as system:
+        seed_check_lineage(system)
+        admitted = system.discovery.admit_signal_to_lead(
+            exact_admission_request(), proof=proof()
+        )
+        assert admitted.lead is not None and admitted.initial_disposition is not None
+        initial = DecisionLeadBinding.from_authority(
+            admitted.lead, admitted.initial_disposition
+        )
+        connection = sqlite3.connect(database, isolation_level=None)
+        store = TriageWorkItemStore(connection)
+        item = TriageWorkItem.create((initial,))
+        first = _version(item)
+        store.create_or_replay(item, first)
+
+        queued = system.discovery.record_lead_disposition(
+            replace(
+                disposition_request(),
+                decision_id=LeadDispositionDecisionId.parse(_id(8050)),
+                decision_ordinal=2,
+                previous_decision_id=admitted.initial_disposition.request.decision_id,
+                idempotency_key="fixture-immediate-requeue-without-watch",
+            ),
+            proof=proof(),
+        )
+        target = DecisionLeadBinding.from_authority(admitted.lead, queued)
+        second = replace(_version(item, 2), decision_leads=(target,))
+
+        with pytest.raises(WorkItemContractError, match="disposition.*Watch"):
+            store.append_version(first.version_id, first.canonical_digest, second)
+        connection.close()
+
+
+def test_multiple_disposition_changes_are_rejected_before_watch_use() -> None:
+    first_lead, second_lead = _decision(1), _decision(2)
+    _, store = _store((first_lead, second_lead))
+    item = TriageWorkItem.create((first_lead, second_lead))
+    first = _version(item)
+    store.create_or_replay(item, first)
+
+    watch_source_id = _id(8101)
+    first_target = replace(
+        first_lead,
+        disposition_id=_id(8102),
+        disposition_digest=digest_bytes(b"first target"),
+        disposition_event_id=_id(8103),
+        disposition_aggregate_version=3,
+        disposition_ordinal=3,
+        previous_disposition_id=watch_source_id,
+    )
+    second_target = replace(
+        second_lead,
+        disposition_id=_id(8112),
+        disposition_digest=digest_bytes(b"second target"),
+        disposition_event_id=_id(8113),
+        disposition_aggregate_version=2,
+        disposition_ordinal=2,
+        previous_disposition_id=second_lead.disposition_id,
+    )
+    watch = WatchConditionWorkItemBinding(
+        _id(8120),
+        digest_bytes(b"watch"),
+        first_lead.lead_id,
+        _id(8121),
+        1,
+        watch_source_id,
+        digest_bytes(b"watch source"),
+        2,
+        first_lead.disposition_id,
+        _id(8122),
+        2,
+        (ReentryKind.REVIEW.value,),
+        False,
+    )
+    version_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{item.work_item_id}|2"))
+    proposed = TriageWorkItemVersion.create(
+        work_item_id=item.work_item_id,
+        ordinal=2,
+        previous_version_id=first.version_id,
+        decision_leads=(first_target, second_target),
+        context_leads=(),
+        retrieval=_pending(),
+        priority=PrioritySelection(
+            item.work_item_id,
+            version_id,
+            PriorityLane.ROUTINE,
+            (ReasonReference("fixture", "multiple-disposition-changes"),),
+        ),
+        watch=watch,
+        reentry_kind=ReentryKind.REVIEW,
+    )
+
+    with pytest.raises(WorkItemContractError, match="exactly one Lead"):
+        store.append_version(first.version_id, first.canonical_digest, proposed)
+
+
 def test_watch_reentry_requires_exact_causal_successor_and_matching_condition(
     tmp_path,
 ) -> None:
@@ -1623,6 +1786,11 @@ def test_watch_reentry_requires_exact_causal_successor_and_matching_condition(
             watch=watch_binding,
             reentry_kind=ReentryKind.REVIEW,
         )
+        later_queue_without_watch = replace(second, watch=None, reentry_kind=None)
+        with pytest.raises(WorkItemContractError, match="disposition.*Watch"):
+            store.append_version(
+                first.version_id, first.canonical_digest, later_queue_without_watch
+            )
         deadline_binding = replace(
             watch_binding,
             allowed_reentry_kinds=tuple(
