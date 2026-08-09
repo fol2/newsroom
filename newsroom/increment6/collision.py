@@ -88,6 +88,10 @@ class CollisionEligibilityReason(StrEnum):
     GENERATION_BINDING_DIFFERS = "GENERATION_BINDING_DIFFERS"
     TIME_BINDING_DIFFERS = "TIME_BINDING_DIFFERS"
     WATERMARK_BINDING_DIFFERS = "WATERMARK_BINDING_DIFFERS"
+    CURRENT_AUTHORITY_ADVANCED = "CURRENT_AUTHORITY_ADVANCED"
+    CURRENT_SERVING_BOUNDARY_DIFFERS = "CURRENT_SERVING_BOUNDARY_DIFFERS"
+    EXECUTION_PROVENANCE_DIFFERS = "EXECUTION_PROVENANCE_DIFFERS"
+    AUTHORITY_IDENTITY_DIFFERS = "AUTHORITY_IDENTITY_DIFFERS"
 
 
 def _require_token(value: object, *, field: str) -> str:
@@ -392,6 +396,121 @@ class CurrentCollisionReceiptEvidence:
         return digest_bytes(self.authority_receipt_bytes)
 
 
+@dataclass(frozen=True, slots=True)
+class TrustedCurrentCollisionAuthorityContext:
+    """Trusted current authority position supplied by the enclosing boundary.
+
+    This pure seam deliberately performs no ambient authority read.  The
+    enclosing authoritative boundary must therefore supply the non-caller-
+    selectable current position and the exact execution provenance it trusts.
+    """
+
+    generation_id: str
+    authority_watermark: int
+    query_valid_time: str
+    serving_time: str
+    authority_scope_id: str
+    authority_profile_id: str
+    adapter_config_digest: str
+    authorization_receipt_digest: str
+    authorization_decision_id: str
+    port_registry_digest: str
+    port_id: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "generation_id",
+            "authority_scope_id",
+            "authority_profile_id",
+            "authorization_decision_id",
+            "port_id",
+        ):
+            _require_token(getattr(self, name), field=f"trusted_current_{name}")
+        for name in (
+            "adapter_config_digest",
+            "authorization_receipt_digest",
+            "port_registry_digest",
+        ):
+            _require_digest(getattr(self, name), field=f"trusted_current_{name}")
+        query_valid = _parse_utc(
+            self.query_valid_time,
+            field="trusted_current_query_valid_time",
+        )
+        serving = _parse_utc(
+            self.serving_time,
+            field="trusted_current_serving_time",
+        )
+        if query_valid > serving:
+            raise CollisionEligibilityContractError(
+                "trusted current query-valid time cannot follow serving time"
+            )
+        if (
+            isinstance(self.authority_watermark, bool)
+            or not isinstance(self.authority_watermark, int)
+            or self.authority_watermark < 0
+        ):
+            raise CollisionEligibilityContractError(
+                "trusted current authority watermark must be non-negative"
+            )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "generation_id": self.generation_id,
+            "authority_watermark": self.authority_watermark,
+            "query_valid_time": self.query_valid_time,
+            "serving_time": self.serving_time,
+            "authority_scope_id": self.authority_scope_id,
+            "authority_profile_id": self.authority_profile_id,
+            "adapter_config_digest": self.adapter_config_digest,
+            "authorization_receipt_digest": self.authorization_receipt_digest,
+            "authorization_decision_id": self.authorization_decision_id,
+            "port_registry_digest": self.port_registry_digest,
+            "port_id": self.port_id,
+        }
+
+    @property
+    def context_digest(self) -> str:
+        return digest_bytes(
+            canonical_json_bytes(
+                {
+                    "schema_version": COLLISION_ELIGIBILITY_SCHEMA_VERSION,
+                    "record_type": "trusted_current_collision_authority_context",
+                    "context": self.canonical_value(),
+                }
+            )
+        )
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, object],
+    ) -> "TrustedCurrentCollisionAuthorityContext":
+        required = {
+            "generation_id",
+            "authority_watermark",
+            "query_valid_time",
+            "serving_time",
+            "authority_scope_id",
+            "authority_profile_id",
+            "adapter_config_digest",
+            "authorization_receipt_digest",
+            "authorization_decision_id",
+            "port_registry_digest",
+            "port_id",
+        }
+        _strict_keys(
+            value,
+            required=required,
+            field="trusted_current_authority_context",
+        )
+        try:
+            return cls(**value)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise CollisionEligibilityContractError(
+                "trusted current authority context is malformed"
+            ) from exc
+
+
 _ELIGIBLE_REASONS = frozenset(
     {
         CollisionEligibilityReason.CURRENT_CANDIDATE_MATCH,
@@ -408,7 +527,11 @@ _REASONS_BY_OUTCOME = {
         }
     ),
     CollisionEligibilityOutcome.STALE: frozenset(
-        {CollisionEligibilityReason.AUTHORITY_STALE}
+        {
+            CollisionEligibilityReason.AUTHORITY_STALE,
+            CollisionEligibilityReason.CURRENT_AUTHORITY_ADVANCED,
+            CollisionEligibilityReason.CURRENT_SERVING_BOUNDARY_DIFFERS,
+        }
     ),
     CollisionEligibilityOutcome.INCOMPLETE: frozenset(
         {CollisionEligibilityReason.AUTHORITY_INCOMPLETE}
@@ -426,6 +549,8 @@ _REASONS_BY_OUTCOME = {
         {
             CollisionEligibilityReason.EXECUTION_RECEIPT_INVALID,
             CollisionEligibilityReason.AUTHORITY_RECEIPT_INVALID,
+            CollisionEligibilityReason.EXECUTION_PROVENANCE_DIFFERS,
+            CollisionEligibilityReason.AUTHORITY_IDENTITY_DIFFERS,
         }
     ),
     CollisionEligibilityOutcome.BINDING_MISMATCH: frozenset(
@@ -442,6 +567,7 @@ _REASONS_BY_OUTCOME = {
 @dataclass(frozen=True, slots=True)
 class CurrentCollisionEligibilityDecision:
     request: CurrentCollisionEligibilityRequest
+    trusted_context: TrustedCurrentCollisionAuthorityContext
     outcome: CollisionEligibilityOutcome
     reason: CollisionEligibilityReason
     execution_receipt_digest: str
@@ -458,6 +584,13 @@ class CurrentCollisionEligibilityDecision:
         if not isinstance(self.request, CurrentCollisionEligibilityRequest):
             raise CollisionEligibilityContractError(
                 "eligibility decision request must be typed"
+            )
+        if not isinstance(
+            self.trusted_context,
+            TrustedCurrentCollisionAuthorityContext,
+        ):
+            raise CollisionEligibilityContractError(
+                "eligibility decision trusted context must be typed"
             )
         if not isinstance(self.outcome, CollisionEligibilityOutcome):
             raise CollisionEligibilityContractError(
@@ -508,17 +641,23 @@ class CurrentCollisionEligibilityDecision:
                 "collision eligibility outcome and reason differ"
             )
         if self.outcome is CollisionEligibilityOutcome.ELIGIBLE:
+            binding = self.request.binding
             if (
                 self.authority_execution_outcome
                 is not NamedAuthorityExecutionOutcome.COMPLETE
                 or self.authority_receipt_digest is None
                 or self.observed_authority_watermark
-                != self.request.binding.authority_watermark
+                != binding.authority_watermark
+                or self.trusted_context.generation_id != binding.generation_id
+                or self.trusted_context.authority_watermark
+                != binding.authority_watermark
+                or self.trusted_context.query_valid_time
+                != binding.query_valid_time
+                or self.trusted_context.serving_time != binding.serving_time
             ):
                 raise CollisionEligibilityContractError(
                     "eligible decision lacks exact complete authority evidence"
                 )
-            binding = self.request.binding
             if binding.operation is CandidateUseOperation.ADMIT_NEW_CANDIDATE:
                 exact_operation_match = (
                     self.reason
@@ -555,6 +694,10 @@ class CurrentCollisionEligibilityDecision:
             "schema_version": COLLISION_ELIGIBILITY_SCHEMA_VERSION,
             "eligibility_request": self.request.canonical_value(),
             "eligibility_request_digest": self.request.request_digest,
+            "trusted_current_authority_context": self.trusted_context.canonical_value(),
+            "trusted_current_authority_context_digest": (
+                self.trusted_context.context_digest
+            ),
             "outcome": self.outcome.value,
             "reason": self.reason.value,
             "eligible": self.eligible,
@@ -597,6 +740,8 @@ class CurrentCollisionEligibilityDecision:
                 "schema_version",
                 "eligibility_request",
                 "eligibility_request_digest",
+                "trusted_current_authority_context",
+                "trusted_current_authority_context_digest",
                 "outcome",
                 "reason",
                 "eligible",
@@ -626,11 +771,26 @@ class CurrentCollisionEligibilityDecision:
             raise CollisionEligibilityContractError(
                 "collision eligibility request digest differs"
             )
+        raw_context = value["trusted_current_authority_context"]
+        if not isinstance(raw_context, dict):
+            raise CollisionEligibilityContractError(
+                "trusted current authority context must be an object"
+            )
+        trusted_context = TrustedCurrentCollisionAuthorityContext.from_mapping(
+            raw_context
+        )
+        if value["trusted_current_authority_context_digest"] != (
+            trusted_context.context_digest
+        ):
+            raise CollisionEligibilityContractError(
+                "trusted current authority context digest differs"
+            )
         raw_authority_outcome = value["authority_execution_outcome"]
         raw_state = value["collision_state"]
         try:
             decision = cls(
                 request=request,
+                trusted_context=trusted_context,
                 outcome=CollisionEligibilityOutcome(value["outcome"]),
                 reason=CollisionEligibilityReason(value["reason"]),
                 execution_receipt_digest=value["execution_receipt_digest"],  # type: ignore[arg-type]
@@ -671,6 +831,7 @@ class CurrentCollisionEligibilityDecision:
 def _decision(
     *,
     request: CurrentCollisionEligibilityRequest,
+    trusted_context: TrustedCurrentCollisionAuthorityContext,
     evidence: CurrentCollisionReceiptEvidence,
     outcome: CollisionEligibilityOutcome,
     reason: CollisionEligibilityReason,
@@ -687,6 +848,7 @@ def _decision(
     attribution = None if execution is None else execution.authority_attribution
     return CurrentCollisionEligibilityDecision(
         request=request,
+        trusted_context=trusted_context,
         outcome=outcome,
         reason=reason,
         execution_receipt_digest=evidence.execution_receipt_digest,
@@ -732,6 +894,7 @@ def decide_current_collision_eligibility(
     *,
     request: CurrentCollisionEligibilityRequest,
     evidence: CurrentCollisionReceiptEvidence,
+    trusted_context: TrustedCurrentCollisionAuthorityContext,
 ) -> CurrentCollisionEligibilityDecision:
     """Revalidate exact retained authority evidence and decide fail-closed."""
 
@@ -739,6 +902,11 @@ def decide_current_collision_eligibility(
         raise TypeError("collision eligibility request must be typed")
     if not isinstance(evidence, CurrentCollisionReceiptEvidence):
         raise TypeError("current collision evidence must be typed")
+    if not isinstance(
+        trusted_context,
+        TrustedCurrentCollisionAuthorityContext,
+    ):
+        raise TypeError("trusted current authority context must be typed")
 
     try:
         execution = NamedAuthorityExecutionReceipt.from_canonical_bytes(
@@ -756,6 +924,7 @@ def decide_current_collision_eligibility(
     ):
         return _decision(
             request=request,
+            trusted_context=trusted_context,
             evidence=evidence,
             outcome=CollisionEligibilityOutcome.INTEGRITY_BLOCKED,
             reason=CollisionEligibilityReason.EXECUTION_RECEIPT_INVALID,
@@ -770,9 +939,27 @@ def decide_current_collision_eligibility(
     ):
         return _decision(
             request=request,
+            trusted_context=trusted_context,
             evidence=evidence,
             outcome=CollisionEligibilityOutcome.INTEGRITY_BLOCKED,
             reason=CollisionEligibilityReason.EXECUTION_RECEIPT_INVALID,
+            execution=execution,
+        )
+
+    if (
+        execution.authorization_receipt_digest
+        != trusted_context.authorization_receipt_digest
+        or execution.authorization_decision_id
+        != trusted_context.authorization_decision_id
+        or execution.port_registry_digest != trusted_context.port_registry_digest
+        or execution.port_id != trusted_context.port_id
+    ):
+        return _decision(
+            request=request,
+            trusted_context=trusted_context,
+            evidence=evidence,
+            outcome=CollisionEligibilityOutcome.INTEGRITY_BLOCKED,
+            reason=CollisionEligibilityReason.EXECUTION_PROVENANCE_DIFFERS,
             execution=execution,
         )
 
@@ -780,6 +967,7 @@ def decide_current_collision_eligibility(
     if raw is None or execution.authority_attribution is None:
         return _decision(
             request=request,
+            trusted_context=trusted_context,
             evidence=evidence,
             outcome=CollisionEligibilityOutcome.UNAVAILABLE,
             reason=CollisionEligibilityReason.AUTHORITY_RECEIPT_MISSING,
@@ -801,6 +989,7 @@ def decide_current_collision_eligibility(
     ):
         return _decision(
             request=request,
+            trusted_context=trusted_context,
             evidence=evidence,
             outcome=CollisionEligibilityOutcome.INTEGRITY_BLOCKED,
             reason=CollisionEligibilityReason.AUTHORITY_RECEIPT_INVALID,
@@ -816,6 +1005,7 @@ def decide_current_collision_eligibility(
     ):
         return _decision(
             request=request,
+            trusted_context=trusted_context,
             evidence=evidence,
             outcome=CollisionEligibilityOutcome.INTEGRITY_BLOCKED,
             reason=CollisionEligibilityReason.EXECUTION_RECEIPT_INVALID,
@@ -823,9 +1013,54 @@ def decide_current_collision_eligibility(
             authority=authority,
         )
 
+    if (
+        authority.get("authority_scope_id") != trusted_context.authority_scope_id
+        or attribution.authority_profile_id
+        != trusted_context.authority_profile_id
+        or authority.get("adapter_config_digest")
+        != trusted_context.adapter_config_digest
+    ):
+        return _decision(
+            request=request,
+            trusted_context=trusted_context,
+            evidence=evidence,
+            outcome=CollisionEligibilityOutcome.INTEGRITY_BLOCKED,
+            reason=CollisionEligibilityReason.AUTHORITY_IDENTITY_DIFFERS,
+            execution=execution,
+            authority=authority,
+        )
+
+    if (
+        named.envelope.generation_id != trusted_context.generation_id
+        or attribution.authority_watermark != trusted_context.authority_watermark
+    ):
+        return _decision(
+            request=request,
+            trusted_context=trusted_context,
+            evidence=evidence,
+            outcome=CollisionEligibilityOutcome.STALE,
+            reason=CollisionEligibilityReason.CURRENT_AUTHORITY_ADVANCED,
+            execution=execution,
+            authority=authority,
+        )
+    if (
+        named.envelope.query_valid_time != trusted_context.query_valid_time
+        or named.envelope.serving_time != trusted_context.serving_time
+    ):
+        return _decision(
+            request=request,
+            trusted_context=trusted_context,
+            evidence=evidence,
+            outcome=CollisionEligibilityOutcome.STALE,
+            reason=CollisionEligibilityReason.CURRENT_SERVING_BOUNDARY_DIFFERS,
+            execution=execution,
+            authority=authority,
+        )
+
     if attribution.authority_watermark != request.binding.authority_watermark:
         return _decision(
             request=request,
+            trusted_context=trusted_context,
             evidence=evidence,
             outcome=CollisionEligibilityOutcome.BINDING_MISMATCH,
             reason=CollisionEligibilityReason.WATERMARK_BINDING_DIFFERS,
@@ -836,6 +1071,7 @@ def decide_current_collision_eligibility(
     if binding_reason is not None:
         return _decision(
             request=request,
+            trusted_context=trusted_context,
             evidence=evidence,
             outcome=CollisionEligibilityOutcome.BINDING_MISMATCH,
             reason=binding_reason,
@@ -869,6 +1105,7 @@ def decide_current_collision_eligibility(
             )
         return _decision(
             request=request,
+            trusted_context=trusted_context,
             evidence=evidence,
             outcome=mapped[0],
             reason=mapped[1],
@@ -886,6 +1123,7 @@ def decide_current_collision_eligibility(
     ):
         return _decision(
             request=request,
+            trusted_context=trusted_context,
             evidence=evidence,
             outcome=CollisionEligibilityOutcome.ELIGIBLE,
             reason=CollisionEligibilityReason.CURRENT_SLOT_UNOCCUPIED,
@@ -899,6 +1137,7 @@ def decide_current_collision_eligibility(
     ):
         return _decision(
             request=request,
+            trusted_context=trusted_context,
             evidence=evidence,
             outcome=CollisionEligibilityOutcome.ELIGIBLE,
             reason=CollisionEligibilityReason.CURRENT_CANDIDATE_MATCH,
@@ -913,6 +1152,7 @@ def decide_current_collision_eligibility(
         reason = CollisionEligibilityReason.CURRENT_CANDIDATE_DIFFERS
     return _decision(
         request=request,
+        trusted_context=trusted_context,
         evidence=evidence,
         outcome=CollisionEligibilityOutcome.COLLISION_CONFLICT,
         reason=reason,
@@ -939,6 +1179,7 @@ def enforce_current_collision_before_effect(
     *,
     request: CurrentCollisionEligibilityRequest,
     evidence: CurrentCollisionReceiptEvidence,
+    trusted_context: TrustedCurrentCollisionAuthorityContext,
     effect: Callable[[CurrentCollisionEligibilityDecision], _T],
 ) -> _T:
     """Invoke ``effect`` only after an exact eligible decision exists."""
@@ -948,6 +1189,7 @@ def enforce_current_collision_before_effect(
     decision = decide_current_collision_eligibility(
         request=request,
         evidence=evidence,
+        trusted_context=trusted_context,
     )
     if not decision.eligible:
         raise CurrentCollisionEligibilityBlocked(decision)
@@ -966,6 +1208,7 @@ __all__ = [
     "CurrentCollisionEligibilityDecision",
     "CurrentCollisionEligibilityRequest",
     "CurrentCollisionReceiptEvidence",
+    "TrustedCurrentCollisionAuthorityContext",
     "decide_current_collision_eligibility",
     "enforce_current_collision_before_effect",
 ]

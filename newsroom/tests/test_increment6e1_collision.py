@@ -8,6 +8,14 @@ from pathlib import Path
 import pytest
 
 from newsroom.authority.canonical import canonical_json_bytes
+from newsroom.increment5.named_tool_authority_adapters import (
+    CollisionHydrationNamedToolPort,
+    NamedAuthorityAdapterConfig,
+    SourceRevisionImpactNamedToolPort,
+)
+from newsroom.increment5.named_tool_authority_execution import (
+    NamedAuthorityExecutionReceipt,
+)
 from newsroom.increment6.collision import (
     CandidateUseCollisionBinding,
     CandidateUseOperation,
@@ -19,7 +27,8 @@ from newsroom.increment6.collision import (
     CurrentCollisionEligibilityDecision,
     CurrentCollisionEligibilityRequest,
     CurrentCollisionReceiptEvidence,
-    decide_current_collision_eligibility,
+    TrustedCurrentCollisionAuthorityContext,
+    decide_current_collision_eligibility as _decide_current_collision_eligibility,
     enforce_current_collision_before_effect,
 )
 from newsroom.tests.test_increment5c2_named_tool_authority_execution import (
@@ -69,10 +78,51 @@ def _occupied_evidence(tmp_path: Path):
     return requirement, evidence
 
 
+def _trusted_context(
+    evidence: CurrentCollisionReceiptEvidence,
+    **changes: object,
+) -> TrustedCurrentCollisionAuthorityContext:
+    execution = NamedAuthorityExecutionReceipt.from_canonical_bytes(
+        evidence.execution_receipt_bytes
+    )
+    assert execution.authority_attribution is not None
+    assert execution.port_id is not None
+    assert evidence.authority_receipt_bytes is not None
+    authority = json.loads(evidence.authority_receipt_bytes)
+    values: dict[str, object] = {
+        "generation_id": evidence.named_request.envelope.generation_id,
+        "authority_watermark": execution.authority_attribution.authority_watermark,
+        "query_valid_time": evidence.named_request.envelope.query_valid_time,
+        "serving_time": evidence.named_request.envelope.serving_time,
+        "authority_scope_id": authority["authority_scope_id"],
+        "authority_profile_id": execution.authority_attribution.authority_profile_id,
+        "adapter_config_digest": authority["adapter_config_digest"],
+        "authorization_receipt_digest": execution.authorization_receipt_digest,
+        "authorization_decision_id": execution.authorization_decision_id,
+        "port_registry_digest": execution.port_registry_digest,
+        "port_id": execution.port_id,
+    }
+    values.update(changes)
+    return TrustedCurrentCollisionAuthorityContext(**values)  # type: ignore[arg-type]
+
+
+def _decide(
+    *,
+    request: CurrentCollisionEligibilityRequest,
+    evidence: CurrentCollisionReceiptEvidence,
+    trusted_context: TrustedCurrentCollisionAuthorityContext | None = None,
+) -> CurrentCollisionEligibilityDecision:
+    return _decide_current_collision_eligibility(
+        request=request,
+        evidence=evidence,
+        trusted_context=trusted_context or _trusted_context(evidence),
+    )
+
+
 def test_current_matching_candidate_is_eligible_before_effect(tmp_path: Path) -> None:
     requirement, evidence = _occupied_evidence(tmp_path)
 
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=requirement,
         evidence=evidence,
     )
@@ -85,6 +135,7 @@ def test_current_matching_candidate_is_eligible_before_effect(tmp_path: Path) ->
     result = enforce_current_collision_before_effect(
         request=requirement,
         evidence=evidence,
+        trusted_context=_trusted_context(evidence),
         effect=lambda permit: effects.append(permit.decision_digest) or "used",
     )
     assert result == "used"
@@ -119,7 +170,7 @@ def test_current_unoccupied_slot_is_eligible_for_new_candidate(
         authorize(tmp_path, named_request),
     )
     assert result.authority_receipt_bytes is not None
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=CurrentCollisionEligibilityRequest(
             binding=binding,
             named_request_digest=named_request.request_digest,
@@ -174,6 +225,7 @@ def test_occupied_slot_blocks_new_candidate_before_effect(tmp_path: Path) -> Non
         enforce_current_collision_before_effect(
             request=requirement,
             evidence=evidence,
+            trusted_context=_trusted_context(evidence),
             effect=lambda permit: effects.append(permit.decision_digest),
         )
 
@@ -214,7 +266,7 @@ def test_stale_authority_receipt_never_becomes_candidate_eligibility(
     ).execute(named_request, authorize(tmp_path, named_request))
     assert result.authority_receipt_bytes is not None
 
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=CurrentCollisionEligibilityRequest(
             binding=binding,
             named_request_digest=named_request.request_digest,
@@ -260,7 +312,7 @@ def test_incomplete_collision_receipt_never_becomes_candidate_eligibility(
     )
     assert result.authority_receipt_bytes is not None
 
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=CurrentCollisionEligibilityRequest(
             binding=binding,
             named_request_digest=named_request.request_digest,
@@ -311,7 +363,7 @@ def test_policy_blocked_collision_receipt_never_becomes_eligibility(
     )
     assert result.authority_receipt_bytes is not None
 
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=CurrentCollisionEligibilityRequest(
             binding=binding,
             named_request_digest=named_request.request_digest,
@@ -362,7 +414,7 @@ def test_unavailable_collision_receipt_never_becomes_eligibility(
     )
     assert result.authority_receipt_bytes is not None
 
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=CurrentCollisionEligibilityRequest(
             binding=binding,
             named_request_digest=named_request.request_digest,
@@ -397,6 +449,7 @@ def test_tampered_authority_receipt_is_integrity_blocked_before_effect(
         enforce_current_collision_before_effect(
             request=requirement,
             evidence=tampered,
+            trusted_context=_trusted_context(evidence),
             effect=lambda permit: effects.append(permit.decision_digest),
         )
 
@@ -441,7 +494,7 @@ def test_complete_receipt_cannot_be_rebound_or_accepted_from_cached_state(
         named_request_digest=requirement.named_request_digest,
     )
 
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=rebound,
         evidence=evidence,
     )
@@ -451,16 +504,159 @@ def test_complete_receipt_cannot_be_rebound_or_accepted_from_cached_state(
     assert decision.eligible is False
 
 
+@pytest.mark.parametrize(
+    "current_changes",
+    (
+        {"authority_watermark": 43},
+        {"generation_id": "retrieval-generation-current"},
+        {"serving_time": "2026-08-06T09:00:01Z"},
+    ),
+)
+def test_cached_complete_receipt_blocks_when_trusted_authority_advances(
+    tmp_path: Path,
+    current_changes: dict[str, object],
+) -> None:
+    requirement, evidence = _occupied_evidence(tmp_path)
+    effects: list[str] = []
+
+    with pytest.raises(CurrentCollisionEligibilityBlocked) as caught:
+        enforce_current_collision_before_effect(
+            request=requirement,
+            evidence=evidence,
+            trusted_context=_trusted_context(evidence, **current_changes),
+            effect=lambda permit: effects.append(permit.decision_digest),
+        )
+
+    assert caught.value.decision.outcome is CollisionEligibilityOutcome.STALE
+    assert caught.value.decision.reason in {
+        CollisionEligibilityReason.CURRENT_AUTHORITY_ADVANCED,
+        CollisionEligibilityReason.CURRENT_SERVING_BOUNDARY_DIFFERS,
+    }
+    assert effects == []
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("authorization_receipt_digest", digest("different-authorization")),
+        ("port_registry_digest", digest("different-registry")),
+        ("port_id", "increment5.named.collision-hydration.other"),
+    ),
+)
+def test_execution_provenance_tamper_is_integrity_blocked(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    requirement, evidence = _occupied_evidence(tmp_path)
+    trusted_context = _trusted_context(evidence)
+    execution = json.loads(evidence.execution_receipt_bytes)
+    execution[field] = replacement
+    tampered = CurrentCollisionReceiptEvidence(
+        named_request=evidence.named_request,
+        execution_receipt_bytes=canonical_json_bytes(execution),
+        authority_receipt_bytes=evidence.authority_receipt_bytes,
+    )
+
+    decision = _decide(
+        request=requirement,
+        evidence=tampered,
+        trusted_context=trusted_context,
+    )
+
+    assert decision.outcome is CollisionEligibilityOutcome.INTEGRITY_BLOCKED
+    assert decision.reason is (
+        CollisionEligibilityReason.EXECUTION_PROVENANCE_DIFFERS
+    )
+
+
+@pytest.mark.parametrize(
+    "identity_changes",
+    (
+        {"authority_scope_id": "authority:unexpected"},
+        {"authority_profile_id": "unexpected-authority-profile"},
+        {"adapter_config_digest": digest("unexpected-adapter-config")},
+    ),
+)
+def test_self_consistent_receipt_cannot_select_untrusted_authority_identity(
+    tmp_path: Path,
+    identity_changes: dict[str, object],
+) -> None:
+    requirement, evidence = _occupied_evidence(tmp_path)
+
+    decision = _decide(
+        request=requirement,
+        evidence=evidence,
+        trusted_context=_trusted_context(evidence, **identity_changes),
+    )
+
+    assert decision.outcome is CollisionEligibilityOutcome.INTEGRITY_BLOCKED
+    assert decision.reason is CollisionEligibilityReason.AUTHORITY_IDENTITY_DIFFERS
+
+
+def test_self_consistent_unexpected_scope_and_adapter_are_integrity_blocked(
+    tmp_path: Path,
+) -> None:
+    requirement, standard_evidence = _occupied_evidence(tmp_path)
+    unexpected_config = NamedAuthorityAdapterConfig(
+        authority_scope_id="authority:unexpected",
+    )
+    unexpected_root = tmp_path / "unexpected"
+    unexpected_root.mkdir()
+    database = authority_database(unexpected_root)
+    unexpected_ports = (
+        CollisionHydrationNamedToolPort(
+            authority_database=database,
+            config=unexpected_config,
+        ),
+        SourceRevisionImpactNamedToolPort(
+            authority_database=database,
+            config=unexpected_config,
+        ),
+    )
+    result = executor(
+        unexpected_root,
+        database,
+        selected_ports=unexpected_ports,
+    ).execute(
+        standard_evidence.named_request,
+        authorize(unexpected_root, standard_evidence.named_request),
+    )
+    assert result.authority_receipt_bytes is not None
+    unexpected_evidence = CurrentCollisionReceiptEvidence(
+        named_request=standard_evidence.named_request,
+        execution_receipt_bytes=result.receipt.canonical_bytes,
+        authority_receipt_bytes=result.authority_receipt_bytes,
+    )
+    standard_config = NamedAuthorityAdapterConfig(
+        authority_scope_id="authority:fixture",
+    )
+    trusted_context = _trusted_context(
+        unexpected_evidence,
+        authority_scope_id="authority:fixture",
+        adapter_config_digest=standard_config.config_digest,
+    )
+
+    decision = _decide(
+        request=requirement,
+        evidence=unexpected_evidence,
+        trusted_context=trusted_context,
+    )
+
+    assert decision.outcome is CollisionEligibilityOutcome.INTEGRITY_BLOCKED
+    assert decision.reason is CollisionEligibilityReason.AUTHORITY_IDENTITY_DIFFERS
+
+
 def test_exact_replay_is_byte_stable_and_decision_round_trips(
     tmp_path: Path,
 ) -> None:
     requirement, evidence = _occupied_evidence(tmp_path)
 
-    first = decide_current_collision_eligibility(
+    first = _decide(
         request=requirement,
         evidence=evidence,
     )
-    replay = decide_current_collision_eligibility(
+    replay = _decide(
         request=requirement,
         evidence=evidence,
     )
@@ -489,7 +685,7 @@ def test_decision_parser_rejects_tamper_and_schema_widening(
     mutate,
 ) -> None:
     requirement, evidence = _occupied_evidence(tmp_path)
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=requirement,
         evidence=evidence,
     )
@@ -504,7 +700,7 @@ def test_decision_parser_rejects_tamper_and_schema_widening(
 
 def test_decision_parser_rejects_duplicate_json_keys(tmp_path: Path) -> None:
     requirement, evidence = _occupied_evidence(tmp_path)
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=requirement,
         evidence=evidence,
     )
@@ -543,7 +739,7 @@ def test_different_current_candidate_is_not_eligible_for_use(tmp_path: Path) -> 
     )
     assert result.authority_receipt_bytes is not None
 
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=CurrentCollisionEligibilityRequest(
             binding=binding,
             named_request_digest=named_request.request_digest,
@@ -572,9 +768,10 @@ def test_missing_retained_authority_bytes_fail_closed_as_unavailable(
         authority_receipt_bytes=None,
     )
 
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=requirement,
         evidence=missing,
+        trusted_context=_trusted_context(evidence),
     )
 
     assert decision.outcome is CollisionEligibilityOutcome.UNAVAILABLE
@@ -592,7 +789,7 @@ def test_tampered_execution_binding_is_integrity_blocked(tmp_path: Path) -> None
         authority_receipt_bytes=evidence.authority_receipt_bytes,
     )
 
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=requirement,
         evidence=tampered,
     )
@@ -608,7 +805,7 @@ def test_parser_cannot_rebind_eligible_decision_to_another_candidate(
     tmp_path: Path,
 ) -> None:
     requirement, evidence = _occupied_evidence(tmp_path)
-    decision = decide_current_collision_eligibility(
+    decision = _decide(
         request=requirement,
         evidence=evidence,
     )
