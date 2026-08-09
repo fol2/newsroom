@@ -714,9 +714,10 @@ def test_operational_action_selector_exhaustively_rejects_competing_seams() -> N
 
 
 def _typed_subclass(value: object, subclass: type[object]) -> object:
-    return subclass(**{
-        field.name: getattr(value, field.name) for field in fields(value)  # type: ignore[arg-type]
-    })
+    impostor = object.__new__(subclass)
+    for field in fields(value):  # type: ignore[arg-type]
+        object.__setattr__(impostor, field.name, getattr(value, field.name))
+    return impostor
 
 
 class _KeyErrorItemsMapping(Mapping[str, object]):
@@ -872,3 +873,75 @@ def test_key_errors_from_mapping_properties_and_subclass_parser_replay_are_norma
     for value in (disposition, validation, finding):
         with pytest.raises(DispositionContractError):
             _ = value.canonical_bytes
+
+
+def test_route_validator_uses_replayed_selection_not_a_canonical_facade() -> None:
+    selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+
+    class ConcealedSelection(OutcomeSelection):
+        def canonical_value(self) -> dict[str, object]:
+            return selection.canonical_value()
+
+    concealed = _typed_subclass(selection, ConcealedSelection)
+    object.__setattr__(concealed, "primary_reason", object())
+    with pytest.raises(DispositionContractError):
+        ProposalDisposition.validate_route_selection(
+            ProposalRoute.NEW_EVENT_CANDIDATE, concealed
+        )
+
+
+def test_validation_result_uses_replayed_proposal_before_set_operations() -> None:
+    validation = validate_proposal(_proposal_bytes(), _validator())
+    proposal = validation.proposal
+
+    class ConcealedProposal(TriageProposal):
+        def canonical_value(self) -> dict[str, object]:
+            return proposal.canonical_value()
+
+    concealed = _typed_subclass(proposal, ConcealedProposal)
+    object.__setattr__(concealed, "decision_lead_ids", ([],))
+    with pytest.raises(DispositionContractError):
+        replace(validation, proposal=concealed)
+
+
+def test_validator_factory_does_not_dispatch_to_subclass_digest_helper() -> None:
+    class ConcealedValidator(ValidatorInputBinding):
+        def expected_input_digest(self, proposal_canonical_digest: str) -> str:
+            raise KeyError(proposal_canonical_digest)
+
+    with pytest.raises(DispositionContractError):
+        ConcealedValidator.for_proposal(
+            proposal_bytes=_proposal_bytes(),
+            validator_id="validator:fixture",
+            validator_version="1",
+            authenticated_context_identity=DIGEST_A,
+            retrieval_request_id="request:001",
+            retrieval_request_digest=DIGEST_B,
+            retrieval_receipt_id="receipt:001",
+            retrieval_receipt_digest=DIGEST_C,
+            ruleset_id="triage-rules",
+            ruleset_version="1",
+            ruleset_digest=DIGEST_D,
+        )
+
+
+def test_builder_replays_findings_before_hashing_manifest_members() -> None:
+    raw = _proposal_bytes()
+    validation = validate_proposal(raw, _validator(raw))
+    object.__setattr__(
+        validation.findings[0], "evidence_reference_id", [LEAD_A]
+    )
+    head = LeadDispositionHeadBinding(LEAD_A, DIGEST_B, "head:a", DIGEST_A)
+    selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+    with pytest.raises(DispositionContractError):
+        build_pending_dispositions(
+            validation, {LEAD_A: head}, {LEAD_A: selection}
+        )

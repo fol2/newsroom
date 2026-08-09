@@ -137,7 +137,21 @@ def _digest(value: object, field: str) -> str:
 
 
 def _exact(value: object, keys: set[str], field: str) -> Mapping[str, object]:
-    if not isinstance(value, dict) or set(value) != keys:
+    if not isinstance(value, dict):
+        raise DispositionContractError(f"{field} keys are not exact")
+    try:
+        actual_keys = set(value)
+    except (
+        AttributeError,
+        KeyError,
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise DispositionContractError(f"{field} keys are not exact") from exc
+    if actual_keys != keys:
         raise DispositionContractError(f"{field} keys are not exact")
     return value
 
@@ -283,6 +297,10 @@ class ValidatorInputBinding(_NoEffect):
     authority: DispositionAuthority = DispositionAuthority.PENDING
 
     def __post_init__(self) -> None:
+        if type(self) is not ValidatorInputBinding:
+            raise DispositionContractError(
+                "validator input constructor requires the exact contract type"
+            )
         for field in (
             "validator_id", "validator_version", "retrieval_request_id",
             "retrieval_receipt_id", "ruleset_id", "ruleset_version",
@@ -315,6 +333,12 @@ class ValidatorInputBinding(_NoEffect):
     def expected_input_digest(self, proposal_canonical_digest: str) -> str:
         """Derive the exact deterministic validation-envelope identity."""
 
+        exact = _exact_validator_input(self, field="validator input binding")
+        return exact._expected_input_digest(proposal_canonical_digest)
+
+    def _expected_input_digest(self, proposal_canonical_digest: str) -> str:
+        """Derive from an exact base-class binding without virtual dispatch."""
+
         _digest(proposal_canonical_digest, "proposal_canonical_digest")
         return digest_bytes(_bounded_canonical({
             "proposal_canonical_digest": proposal_canonical_digest,
@@ -334,26 +358,64 @@ class ValidatorInputBinding(_NoEffect):
     def for_proposal(cls, *, proposal_bytes: bytes, **values: object) -> Self:
         """Create a pending binding whose input digest is derived, not asserted."""
 
+        if cls is not ValidatorInputBinding:
+            raise DispositionContractError(
+                "validator input factory requires the exact contract type"
+            )
         proposal_digest = digest_bytes(_bounded_canonical(
             _decode(proposal_bytes, field="proposal"), field="proposal"
         ))
-        provisional = cls(input_digest="sha256:" + "0" * 64, **values)  # type: ignore[arg-type]
-        return cls(
-            input_digest=provisional.expected_input_digest(proposal_digest),
-            **values,  # type: ignore[arg-type]
+        provisional = ValidatorInputBinding(
+            input_digest="sha256:" + "0" * 64, **values  # type: ignore[arg-type]
         )
+        return ValidatorInputBinding(
+            input_digest=provisional._expected_input_digest(proposal_digest),
+            **values,  # type: ignore[arg-type]
+        )  # type: ignore[return-value]
 
     @classmethod
     def from_mapping(cls, value: object) -> Self:
+        if cls is not ValidatorInputBinding:
+            raise DispositionContractError(
+                "validator input parser requires the exact contract type"
+            )
         item = _exact(value, {
             "validator_id", "validator_version", "authenticated_context_identity",
             "retrieval_request_id", "retrieval_request_digest", "retrieval_receipt_id",
             "retrieval_receipt_digest", "ruleset_id", "ruleset_version",
             "ruleset_digest", "input_digest", "authority",
         }, "validator input binding")
-        if item["authority"] != DispositionAuthority.PENDING.value:
+        authority = _constructed_value(
+            lambda: item["authority"], field="validator input binding"
+        )
+        if authority != DispositionAuthority.PENDING.value:
             raise DispositionContractError("validator input authority must remain PENDING")
-        return cls(**{key: item[key] for key in item if key != "authority"})  # type: ignore[arg-type]
+        values = _constructed_value(
+            lambda: {
+                key: item[key] for key in item if key != "authority"
+            },
+            field="validator input binding",
+        )
+        return _constructed_value(
+            lambda: ValidatorInputBinding(**values),  # type: ignore[arg-type]
+            field="validator input binding",
+        )  # type: ignore[return-value]
+
+
+def _exact_validator_input(
+    value: ValidatorInputBinding, *, field: str
+) -> ValidatorInputBinding:
+    if type(value) is not ValidatorInputBinding:
+        raise DispositionContractError(
+            f"{field} is outside canonical JSON: exact contract type required"
+        )
+    canonical = _constructed_value(
+        lambda: value.canonical_value(), field=field
+    )
+    _bounded_canonical(canonical, field=field)
+    return _constructed_value(
+        lambda: ValidatorInputBinding.from_mapping(canonical), field=field
+    )  # type: ignore[return-value]
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +434,10 @@ class ProposalValidationFinding(_NoEffect):
     authority: DispositionAuthority = DispositionAuthority.NONE
 
     def __post_init__(self) -> None:
+        if type(self) is not ProposalValidationFinding:
+            raise DispositionContractError(
+                "finding constructor requires the exact contract type"
+            )
         _digest(self.finding_id, "finding_id")
         _token(self.proposal_id, "proposal_id")
         _digest(self.proposal_content_identity, "proposal_content_identity")
@@ -384,13 +450,13 @@ class ProposalValidationFinding(_NoEffect):
         _digest(self.evidence_reference_digest, "evidence reference digest")
         if not isinstance(self.validator_input, ValidatorInputBinding):
             raise DispositionContractError("finding validator input must be typed")
-        expected_input_digest = _constructed_value(
-            lambda: self.validator_input.expected_input_digest(
-                self.proposal_canonical_digest
-            ),
-            field="validator input",
+        exact_validator = _exact_validator_input(
+            self.validator_input, field="validator input"
         )
-        if self.validator_input.input_digest != expected_input_digest:
+        object.__setattr__(self, "validator_input", exact_validator)
+        if exact_validator.input_digest != exact_validator._expected_input_digest(
+            self.proposal_canonical_digest
+        ):
             raise DispositionContractError(
                 "finding validator input differs from the exact validation envelope"
             )
@@ -425,12 +491,24 @@ class ProposalValidationFinding(_NoEffect):
 
     @property
     def canonical_bytes(self) -> bytes:
-        return _bounded_canonical_from(
+        if type(self) is not ProposalValidationFinding:
+            raise DispositionContractError(
+                "finding property requires the exact contract type"
+            )
+        raw = _bounded_canonical_from(
             lambda: self.canonical_value(), field="finding"
+        )
+        exact = ProposalValidationFinding.from_canonical_bytes(raw)
+        return _bounded_canonical_from(
+            lambda: exact.canonical_value(), field="finding"
         )
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
+        if cls is not ProposalValidationFinding:
+            raise DispositionContractError(
+                "finding parser requires the exact contract type"
+            )
         root = _exact(_decode(raw, field="finding"), {"schema_version", "finding"}, "finding document")
         if root["schema_version"] != PROPOSAL_VALIDATION_FINDING_SCHEMA_VERSION:
             raise DispositionContractError("finding schema version is unsupported")
@@ -442,7 +520,7 @@ class ProposalValidationFinding(_NoEffect):
         if item["authority"] != DispositionAuthority.NONE.value:
             raise DispositionContractError("a pure finding has no authority")
         try:
-            result = cls(
+            result = ProposalValidationFinding(
                 finding_id=item["finding_id"], proposal_id=item["proposal_id"],
                 proposal_content_identity=item["proposal_content_identity"],
                 proposal_canonical_digest=item["proposal_canonical_digest"],
@@ -466,7 +544,35 @@ class ProposalValidationFinding(_NoEffect):
             lambda: result.canonical_value(), field="finding"
         ) != raw:
             raise DispositionContractError("finding typed replay differs")
-        return result
+        return result  # type: ignore[return-value]
+
+
+def _exact_proposal(value: TriageProposal, *, field: str) -> TriageProposal:
+    if type(value) is not TriageProposal:
+        raise DispositionContractError(
+            f"{field} is outside canonical JSON: exact contract type required"
+        )
+    raw = _bounded_canonical_from(
+        lambda: value.canonical_value(), field=field
+    )
+    return _constructed_value(
+        lambda: TriageProposal.from_canonical_bytes(raw), field=field
+    )  # type: ignore[return-value]
+
+
+def _exact_finding(
+    value: ProposalValidationFinding, *, field: str
+) -> ProposalValidationFinding:
+    if type(value) is not ProposalValidationFinding:
+        raise DispositionContractError(
+            f"{field} is outside canonical JSON: exact contract type required"
+        )
+    raw = _bounded_canonical_from(
+        lambda: value.canonical_value(), field=field
+    )
+    return _constructed_value(
+        lambda: ProposalValidationFinding.from_canonical_bytes(raw), field=field
+    )  # type: ignore[return-value]
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,6 +584,10 @@ class ProposalValidationResult(_NoEffect):
     authority: DispositionAuthority = DispositionAuthority.NONE
 
     def __post_init__(self) -> None:
+        if type(self) is not ProposalValidationResult:
+            raise DispositionContractError(
+                "validation result constructor requires the exact contract type"
+            )
         if not isinstance(self.proposal, TriageProposal):
             raise DispositionContractError("validation result proposal must be typed")
         if not isinstance(self.validator_input, ValidatorInputBinding):
@@ -491,8 +601,18 @@ class ProposalValidationResult(_NoEffect):
             )
         ):
             raise DispositionContractError("finding set must be complete and bounded")
+        exact_proposal = _exact_proposal(self.proposal, field="proposal")
+        exact_validator = _exact_validator_input(
+            self.validator_input, field="validator input binding"
+        )
+        exact_findings = tuple(
+            _exact_finding(item, field="finding") for item in self.findings
+        )
+        object.__setattr__(self, "proposal", exact_proposal)
+        object.__setattr__(self, "validator_input", exact_validator)
+        object.__setattr__(self, "findings", exact_findings)
         proposal_bytes = _bounded_canonical_from(
-            lambda: self.proposal.canonical_value(), field="proposal"
+            lambda: exact_proposal.canonical_value(), field="proposal"
         )
         proposal_digest = digest_bytes(proposal_bytes)
         if any(
@@ -523,12 +643,25 @@ class ProposalValidationResult(_NoEffect):
 
     @property
     def canonical_bytes(self) -> bytes:
+        if type(self) is not ProposalValidationResult:
+            raise DispositionContractError(
+                "validation result property requires the exact contract type"
+            )
+        if self.authority is not DispositionAuthority.NONE:
+            raise DispositionContractError("pure validation has no authority")
+        proposal = _exact_proposal(self.proposal, field="proposal")
+        validator = _exact_validator_input(
+            self.validator_input, field="validator input binding"
+        )
+        findings = tuple(
+            _exact_finding(item, field="finding") for item in self.findings
+        )
         return _bounded_canonical_from(
             lambda: {
                 "schema_version": _FINDING_SET_SCHEMA_VERSION,
-                "proposal_content_identity": self.proposal.content_identity,
-                "validator_input_binding": self.validator_input.canonical_value(),
-                "finding_ids": [item.finding_id for item in self.findings],
+                "proposal_content_identity": proposal.content_identity,
+                "validator_input_binding": validator.canonical_value(),
+                "finding_ids": [item.finding_id for item in findings],
                 "authority": self.authority.value,
             },
             field="finding set",
@@ -543,6 +676,10 @@ class LeadDispositionHeadBinding:
     current_disposition_head_digest: str
 
     def __post_init__(self) -> None:
+        if type(self) is not LeadDispositionHeadBinding:
+            raise DispositionContractError(
+                "Lead head constructor requires the exact contract type"
+            )
         _token(self.decision_lead_id, "decision_lead_id")
         _digest(self.decision_lead_digest, "decision_lead_digest")
         _token(self.current_disposition_head_id, "current_disposition_head_id")
@@ -558,8 +695,31 @@ class LeadDispositionHeadBinding:
 
     @classmethod
     def from_mapping(cls, value: object) -> Self:
+        if cls is not LeadDispositionHeadBinding:
+            raise DispositionContractError(
+                "Lead head parser requires the exact contract type"
+            )
         item = _exact(value, {"decision_lead_id", "decision_lead_digest", "current_disposition_head_id", "current_disposition_head_digest"}, "Lead head binding")
-        return cls(**item)  # type: ignore[arg-type]
+        return _constructed_value(
+            lambda: LeadDispositionHeadBinding(**item),  # type: ignore[arg-type]
+            field="Lead head binding",
+        )  # type: ignore[return-value]
+
+
+def _exact_lead_head(
+    value: LeadDispositionHeadBinding, *, field: str
+) -> LeadDispositionHeadBinding:
+    if type(value) is not LeadDispositionHeadBinding:
+        raise DispositionContractError(
+            f"{field} is outside canonical JSON: exact contract type required"
+        )
+    canonical = _constructed_value(
+        lambda: value.canonical_value(), field=field
+    )
+    _bounded_canonical(canonical, field=field)
+    return _constructed_value(
+        lambda: LeadDispositionHeadBinding.from_mapping(canonical), field=field
+    )  # type: ignore[return-value]
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,6 +776,40 @@ _OPERATIONAL_ACTION_KINDS: Mapping[str, CanonicalNextAction] = MappingProxyType(
     "REQUEST_REVIEW": CanonicalNextAction.REQUEST_REVIEW,
     "WAIT_FOR_DEPENDENCY": CanonicalNextAction.WAIT_FOR_DEPENDENCY,
 })
+
+
+def _exact_recommendation(
+    value: LeadRecommendation, *, field: str
+) -> tuple[LeadRecommendation, object]:
+    if type(value) is not LeadRecommendation:
+        raise DispositionContractError(
+            f"{field} is outside canonical JSON: exact contract type required"
+        )
+    canonical = _constructed_value(
+        lambda: value.canonical_value(), field=field
+    )
+    _bounded_canonical(canonical, field=field)
+    exact = _constructed_value(
+        lambda: LeadRecommendation.from_value(canonical), field=field
+    )
+    return exact, canonical  # type: ignore[return-value]
+
+
+def _exact_selection(
+    value: OutcomeSelection, *, field: str
+) -> tuple[OutcomeSelection, object]:
+    if type(value) is not OutcomeSelection:
+        raise DispositionContractError(
+            f"{field} is outside canonical JSON: exact contract type required"
+        )
+    canonical = _constructed_value(
+        lambda: value.canonical_value(), field=field
+    )
+    _bounded_canonical(canonical, field=field)
+    exact = _constructed_value(
+        lambda: OutcomeSelection.from_mapping(canonical), field=field
+    )
+    return exact, canonical  # type: ignore[return-value]
 
 
 def _operational_expected_action(
@@ -720,6 +914,10 @@ class ProposalDisposition(_NoEffect):
     authority: DispositionAuthority = DispositionAuthority.NONE
 
     def __post_init__(self) -> None:
+        if type(self) is not ProposalDisposition:
+            raise DispositionContractError(
+                "disposition constructor requires the exact contract type"
+            )
         _digest(self.disposition_id, "disposition_id")
         if not isinstance(self.judgement, DispositionJudgement) or not isinstance(self.route, ProposalRoute):
             raise DispositionContractError("disposition judgement and route must be typed")
@@ -729,55 +927,47 @@ class ProposalDisposition(_NoEffect):
             _digest(getattr(self, field), field)
         if not isinstance(self.lead_head, LeadDispositionHeadBinding) or not isinstance(self.validator_input, ValidatorInputBinding):
             raise DispositionContractError("disposition bindings must be typed")
-        expected_input_digest = _constructed_value(
-            lambda: self.validator_input.expected_input_digest(
-                self.proposal_canonical_digest
-            ),
-            field="validator input",
+        exact_head = _exact_lead_head(self.lead_head, field="Lead head binding")
+        exact_validator = _exact_validator_input(
+            self.validator_input, field="validator input"
         )
-        if self.validator_input.input_digest != expected_input_digest:
+        object.__setattr__(self, "lead_head", exact_head)
+        object.__setattr__(self, "validator_input", exact_validator)
+        if exact_validator.input_digest != exact_validator._expected_input_digest(
+            self.proposal_canonical_digest
+        ):
             raise DispositionContractError(
                 "disposition validator input differs from the exact validation envelope"
             )
-        if (
-            not isinstance(self.route_binding, LeadRecommendation)
-            or self.route_binding.route is not self.route
-            or self.route_binding.decision_lead_id != self.lead_head.decision_lead_id
-        ):
-            raise DispositionContractError("route binding differs from the exact Lead route")
+        if not isinstance(self.route_binding, LeadRecommendation):
+            raise DispositionContractError("route binding must be typed")
         if not isinstance(self.selection, OutcomeSelection):
             raise DispositionContractError("outcome selection must be typed")
-        route_value = _constructed_value(
-            lambda: self.route_binding.canonical_value(), field="route binding"
+        exact_route, route_value = _exact_recommendation(
+            self.route_binding, field="route binding"
         )
+        exact_selection, selection_value = _exact_selection(
+            self.selection, field="selection"
+        )
+        object.__setattr__(self, "route_binding", exact_route)
+        object.__setattr__(self, "selection", exact_selection)
+        if (
+            exact_route.route is not self.route
+            or exact_route.decision_lead_id != exact_head.decision_lead_id
+        ):
+            raise DispositionContractError("route binding differs from the exact Lead route")
         expected_route_digest = digest_bytes(
             _bounded_canonical(route_value, field="route binding")
         )
         if self.route_binding_digest != expected_route_digest:
             raise DispositionContractError("route binding digest differs")
-        exact_route = _constructed_value(
-            lambda: LeadRecommendation.from_value(route_value),
-            field="route binding",
-        )
-        if exact_route != self.route_binding:
-            raise DispositionContractError("route binding typed replay differs")
-        selection_value = _constructed_value(
-            lambda: self.selection.canonical_value(), field="selection"
-        )
-        _bounded_canonical(selection_value, field="selection")
-        exact_selection = _constructed_value(
-            lambda: OutcomeSelection.from_mapping(selection_value),
-            field="selection",
-        )
-        if exact_selection != self.selection:
-            raise DispositionContractError("selection typed replay differs")
         citation_digests = {
             citation.source_digest
             for citation in exact_route.input_citations
             if citation.source_kind.value == "DECISION_LEAD"
-            and citation.source_id == self.lead_head.decision_lead_id
+            and citation.source_id == exact_head.decision_lead_id
         }
-        if citation_digests != {self.lead_head.decision_lead_digest}:
+        if citation_digests != {exact_head.decision_lead_digest}:
             raise DispositionContractError(
                 "Lead head digest differs from the exact Proposal citation"
             )
@@ -802,9 +992,7 @@ class ProposalDisposition(_NoEffect):
     def validate_route_selection(route: ProposalRoute, selection: OutcomeSelection) -> None:
         if not isinstance(route, ProposalRoute) or not isinstance(selection, OutcomeSelection):
             raise DispositionContractError("route selection must be typed")
-        _bounded_canonical_from(
-            lambda: selection.canonical_value(), field="selection"
-        )
+        selection, _ = _exact_selection(selection, field="selection")
         rule = _ROUTE_RULES[route]
         action = selection.next_action
         reason_codes = {
@@ -841,25 +1029,43 @@ class ProposalDisposition(_NoEffect):
 
     @property
     def canonical_bytes(self) -> bytes:
-        return _bounded_canonical_from(
+        if type(self) is not ProposalDisposition:
+            raise DispositionContractError(
+                "disposition property requires the exact contract type"
+            )
+        raw = _bounded_canonical_from(
             lambda: self.canonical_value(), field="disposition"
+        )
+        exact = ProposalDisposition.from_canonical_bytes(raw)
+        return _bounded_canonical_from(
+            lambda: exact.canonical_value(), field="disposition"
         )
 
     @property
     def decision_lead_id(self) -> str:
-        return self.lead_head.decision_lead_id
+        if type(self) is not ProposalDisposition:
+            raise DispositionContractError(
+                "disposition property requires the exact contract type"
+            )
+        return _exact_lead_head(
+            self.lead_head, field="Lead head binding"
+        ).decision_lead_id
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
+        if cls is not ProposalDisposition:
+            raise DispositionContractError(
+                "disposition parser requires the exact contract type"
+            )
         root = _exact(_decode(raw, field="disposition"), {"schema_version", "disposition"}, "disposition document")
-        if root["schema_version"] != cls.SCHEMA_VERSION:
+        if root["schema_version"] != ProposalDisposition.SCHEMA_VERSION:
             raise DispositionContractError("disposition schema version is unsupported")
         keys = {"disposition_id", "judgement", "proposal_id", "proposal_content_identity", "proposal_canonical_digest", "work_item_id", "work_item_version_id", "work_item_version_digest", "retrieval_context_id", "retrieval_context_digest", "lead_head_binding", "validator_input_binding", "finding_set_digest", "route", "route_binding", "route_binding_digest", "selection", "authority"}
         item = _exact(root["disposition"], keys, "disposition")
         if item["authority"] != DispositionAuthority.NONE.value:
             raise DispositionContractError("phase-one disposition has no authority")
         try:
-            result = cls(
+            result = ProposalDisposition(
                 disposition_id=item["disposition_id"], judgement=DispositionJudgement(item["judgement"]),
                 proposal_id=item["proposal_id"], proposal_content_identity=item["proposal_content_identity"],
                 proposal_canonical_digest=item["proposal_canonical_digest"], work_item_id=item["work_item_id"],
@@ -886,7 +1092,7 @@ class ProposalDisposition(_NoEffect):
             lambda: result.canonical_value(), field="disposition"
         ) != raw:
             raise DispositionContractError("disposition typed replay differs")
-        return result
+        return result  # type: ignore[return-value]
 
 
 def validate_proposal(raw: bytes, validator_input: ValidatorInputBinding) -> ProposalValidationResult:
@@ -894,18 +1100,9 @@ def validate_proposal(raw: bytes, validator_input: ValidatorInputBinding) -> Pro
 
     if not isinstance(validator_input, ValidatorInputBinding):
         raise DispositionContractError("validator input binding must be typed")
-    validator_value = _constructed_value(
-        lambda: validator_input.canonical_value(),
-        field="validator input binding",
+    validator_input = _exact_validator_input(
+        validator_input, field="validator input binding"
     )
-    _bounded_canonical(validator_value, field="validator input binding")
-    exact_validator_input = _constructed_value(
-        lambda: ValidatorInputBinding.from_mapping(validator_value),
-        field="validator input binding",
-    )
-    if exact_validator_input != validator_input:
-        raise DispositionContractError("validator input binding typed replay differs")
-    validator_input = exact_validator_input  # type: ignore[assignment]
     _decode(raw, field="proposal")
     try:
         proposal = TriageProposal.from_canonical_bytes(raw)
@@ -921,7 +1118,7 @@ def validate_proposal(raw: bytes, validator_input: ValidatorInputBinding) -> Pro
     ) as exc:
         raise DispositionContractError("proposal integrity validation failed") from exc
     proposal_digest = digest_bytes(raw)
-    if validator_input.input_digest != validator_input.expected_input_digest(
+    if validator_input.input_digest != validator_input._expected_input_digest(
         proposal_digest
     ):
         raise DispositionContractError(
@@ -974,7 +1171,7 @@ def build_pending_dispositions(
 ) -> tuple[ProposalDisposition, ...]:
     """Build a complete no-authority per-Lead set; persistence remains v19 work."""
 
-    if not isinstance(validation, ProposalValidationResult):
+    if type(validation) is not ProposalValidationResult:
         raise DispositionContractError("validation result must be typed")
     if not isinstance(lead_heads, Mapping) or not isinstance(selections, Mapping):
         raise DispositionContractError("per-Lead disposition inputs must be mappings")
@@ -986,86 +1183,86 @@ def build_pending_dispositions(
         )
     ):
         raise DispositionContractError("finding manifest must be typed")
-    proposal_value = _constructed_value(
-        lambda: validation.proposal.canonical_value(), field="proposal"
+    proposal = _exact_proposal(validation.proposal, field="proposal")
+    validator_input = _exact_validator_input(
+        validation.validator_input, field="validator input binding"
     )
-    proposal_bytes = _bounded_canonical(proposal_value, field="proposal")
+    findings = tuple(
+        _exact_finding(item, field="finding") for item in validation.findings
+    )
+    exact_validation = _constructed_value(
+        lambda: ProposalValidationResult(
+            proposal,
+            validator_input,
+            findings,
+            validation.finding_set_digest,
+            validation.authority,
+        ),
+        field="validation result",
+    )
+    proposal = exact_validation.proposal  # type: ignore[union-attr]
+    validator_input = exact_validation.validator_input  # type: ignore[union-attr]
+    findings = exact_validation.findings  # type: ignore[union-attr]
+    proposal_bytes = _bounded_canonical_from(
+        lambda: proposal.canonical_value(), field="proposal"
+    )
     proposal_digest = digest_bytes(proposal_bytes)
-    proposal = _constructed_value(
-        lambda: TriageProposal.from_canonical_bytes(proposal_bytes),
-        field="proposal",
-    )
-    if proposal != validation.proposal:
-        raise DispositionContractError("Proposal typed replay differs")
     if any(
         finding.severity is FindingSeverity.ERROR
-        for finding in validation.findings
+        for finding in findings
     ):
         raise DispositionContractError(
             "a disposition requires a complete finding set without validation errors"
         )
     expected = set(proposal.decision_lead_ids)
-    if set(lead_heads) != expected or set(selections) != expected:
+    head_keys = _constructed_value(lambda: set(lead_heads), field="Lead heads")
+    selection_keys = _constructed_value(
+        lambda: set(selections), field="outcome selections"
+    )
+    if head_keys != expected or selection_keys != expected:
         raise DispositionContractError("per-Lead disposition set must be complete")
-    findings_by_lead = {item.evidence_reference_id for item in validation.findings}
+    findings_by_lead = {
+        item.evidence_reference_id for item in findings
+    }
     if findings_by_lead != expected:
         raise DispositionContractError("finding manifest must be complete")
     recommendations = {
         item.decision_lead_id: item for item in proposal.recommendations
     }
     validator_value = _constructed_value(
-        lambda: validation.validator_input.canonical_value(),
-        field="validator input binding",
+        lambda: validator_input.canonical_value(), field="validator input binding"
     )
     _bounded_canonical(validator_value, field="validator input binding")
-    validator_input = _constructed_value(
-        lambda: ValidatorInputBinding.from_mapping(validator_value),
-        field="validator input binding",
-    )
-    if validator_input != validation.validator_input:
-        raise DispositionContractError("validator input binding typed replay differs")
     result: list[ProposalDisposition] = []
     for lead_id in proposal.decision_lead_ids:
-        head = lead_heads[lead_id]
-        selection = selections[lead_id]
+        head = _constructed_value(
+            lambda: lead_heads[lead_id], field="Lead head binding"
+        )
+        selection = _constructed_value(
+            lambda: selections[lead_id], field="outcome selection"
+        )
         if not isinstance(head, LeadDispositionHeadBinding):
             raise DispositionContractError("Lead head binding must be typed")
         if not isinstance(selection, OutcomeSelection):
             raise DispositionContractError("outcome selection must be typed")
+        head = _exact_lead_head(head, field="Lead head binding")
         head_value = _constructed_value(
             lambda: head.canonical_value(), field="Lead head binding"
         )
-        _bounded_canonical(head_value, field="Lead head binding")
-        exact_head = _constructed_value(
-            lambda: LeadDispositionHeadBinding.from_mapping(head_value),
-            field="Lead head binding",
-        )
-        if exact_head != head:
-            raise DispositionContractError("Lead head binding typed replay differs")
-        head = exact_head  # type: ignore[assignment]
         if head.decision_lead_id != lead_id:
             raise DispositionContractError("Lead head binding differs from manifest")
         recommendation = recommendations[lead_id]
         if not isinstance(recommendation, LeadRecommendation):
             raise DispositionContractError("Proposal recommendation must be typed")
-        route_value = _constructed_value(
-            lambda: recommendation.canonical_value(), field="recommendation"
+        recommendation, route_value = _exact_recommendation(
+            recommendation, field="recommendation"
         )
         route_digest = digest_bytes(
             _bounded_canonical(route_value, field="recommendation")
         )
-        recommendation = _constructed_value(
-            lambda: LeadRecommendation.from_value(route_value),
-            field="recommendation",
-        )
         rule = _ROUTE_RULES[recommendation.route]
-        selection_value = _constructed_value(
-            lambda: selection.canonical_value(), field="selection"
-        )
-        _bounded_canonical(selection_value, field="selection")
-        selection = _constructed_value(
-            lambda: OutcomeSelection.from_mapping(selection_value),
-            field="selection",
+        selection, selection_value = _exact_selection(
+            selection, field="selection"
         )
         citation_digests = {
             citation.source_digest
@@ -1088,7 +1285,7 @@ def build_pending_dispositions(
             retrieval_context_id=proposal.retrieval_context.context_id,
             retrieval_context_digest=proposal.retrieval_context.context_digest,
             lead_head=head, validator_input=validator_input,
-            finding_set_digest=validation.finding_set_digest,
+            finding_set_digest=exact_validation.finding_set_digest,
             route=recommendation.route, route_binding=recommendation,
             route_binding_digest=route_digest, selection=selection,
         )
@@ -1104,7 +1301,7 @@ def build_pending_dispositions(
             "retrieval_context_digest": proposal.retrieval_context.context_digest,
             "lead_head_binding": head_value,
             "validator_input_binding": validator_value,
-            "finding_set_digest": validation.finding_set_digest,
+            "finding_set_digest": exact_validation.finding_set_digest,
             "route": recommendation.route.value,
             "route_binding": route_value,
             "route_binding_digest": route_digest,
