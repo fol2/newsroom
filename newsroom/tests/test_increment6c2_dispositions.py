@@ -1203,3 +1203,37 @@ def test_digest_constructor_requires_exact_string_before_string_methods() -> Non
             _validator(),
             authenticated_context_identity=_ExplodingDigestStr(DIGEST_A),
         )
+
+
+class _ExplodingComparisonDigest(str):
+    def __ne__(self, other: object) -> bool:
+        raise RuntimeError("digest comparison")
+
+
+def test_finding_set_digest_is_rehydrated_before_comparison() -> None:
+    raw = _proposal_bytes()
+    validation = validate_proposal(raw, _validator(raw))
+
+    with pytest.raises(DispositionContractError):
+        replace(
+            validation,
+            finding_set_digest=_ExplodingComparisonDigest(
+                validation.finding_set_digest
+            ),
+        )
+
+
+def test_uninitialised_validation_result_is_normalised_at_public_entries() -> None:
+    validation = object.__new__(dispositions_module.ProposalValidationResult)
+
+    with pytest.raises(DispositionContractError):
+        _ = validation.canonical_bytes
+    with pytest.raises(DispositionContractError):
+        build_pending_dispositions(validation, {}, {})
+
+
+def test_uninitialised_disposition_lead_property_is_normalised() -> None:
+    disposition = object.__new__(ProposalDisposition)
+
+    with pytest.raises(DispositionContractError):
+        _ = disposition.decision_lead_id

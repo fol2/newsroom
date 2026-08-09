@@ -564,10 +564,16 @@ class ProposalValidationResult(_NoEffect):
             raise DispositionContractError(
                 "validation result constructor requires the exact contract type"
             )
+        finding_set_digest = _digest(
+            self.finding_set_digest, "finding_set_digest"
+        )
+        object.__setattr__(self, "finding_set_digest", finding_set_digest)
         if not isinstance(self.proposal, TriageProposal):
             raise DispositionContractError("validation result proposal must be typed")
         if not isinstance(self.validator_input, ValidatorInputBinding):
-            raise DispositionContractError("validation result input must be typed")
+            raise DispositionContractError(
+                "validation result validator input must be typed"
+            )
         if (
             type(self.findings) is not tuple
             or not 1 <= len(self.findings) <= _MAX_FINDINGS
@@ -604,7 +610,7 @@ class ProposalValidationResult(_NoEffect):
         ids = tuple(item.finding_id for item in self.findings)
         if ids != tuple(sorted(set(ids))):
             raise DispositionContractError("findings must be sorted and deduplicated")
-        if self.finding_set_digest != digest_bytes(self.canonical_bytes):
+        if finding_set_digest != digest_bytes(self.canonical_bytes):
             raise DispositionContractError("finding set digest differs")
         if self.authority is not DispositionAuthority.NONE:
             raise DispositionContractError("pure validation has no authority")
@@ -617,23 +623,43 @@ class ProposalValidationResult(_NoEffect):
             raise DispositionContractError(
                 "validation result property requires the exact contract type"
             )
-        if self.authority is not DispositionAuthority.NONE:
-            raise DispositionContractError("pure validation has no authority")
-        proposal = _exact_proposal(self.proposal, field="proposal")
-        validator = _exact_validator_input(
-            self.validator_input, field="validator input binding"
-        )
-        findings = _exact_findings(self.findings, field="finding set")
-        return _bounded_canonical_from(
-            lambda: {
+
+        def canonical_value() -> dict[str, object]:
+            if self.authority is not DispositionAuthority.NONE:
+                raise DispositionContractError("pure validation has no authority")
+            proposal = _exact_proposal(self.proposal, field="proposal")
+            validator = _exact_validator_input(
+                self.validator_input, field="validator input binding"
+            )
+            findings = _exact_findings(self.findings, field="finding set")
+            return {
                 "schema_version": _FINDING_SET_SCHEMA_VERSION,
                 "proposal_content_identity": proposal.content_identity,
                 "validator_input_binding": validator.canonical_value(),
                 "finding_ids": [item.finding_id for item in findings],
                 "authority": self.authority.value,
-            },
-            field="finding set",
+            }
+
+        return _bounded_canonical_from(canonical_value, field="finding set")
+
+
+def _exact_validation_result(
+    value: ProposalValidationResult, *, field: str
+) -> ProposalValidationResult:
+    if type(value) is not ProposalValidationResult:
+        raise DispositionContractError(
+            f"{field} is outside canonical JSON: exact contract type required"
         )
+    return _constructed_value(
+        lambda: ProposalValidationResult(
+            value.proposal,
+            value.validator_input,
+            value.findings,
+            value.finding_set_digest,
+            value.authority,
+        ),
+        field=field,
+    )  # type: ignore[return-value]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1015,9 +1041,12 @@ class ProposalDisposition(_NoEffect):
             raise DispositionContractError(
                 "disposition property requires the exact contract type"
             )
-        return _exact_lead_head(
-            self.lead_head, field="Lead head binding"
-        ).decision_lead_id
+        return _constructed_value(
+            lambda: _exact_lead_head(
+                self.lead_head, field="Lead head binding"
+            ).decision_lead_id,
+            field="disposition",
+        )  # type: ignore[return-value]
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
@@ -1125,27 +1154,11 @@ def build_pending_dispositions(
 ) -> tuple[ProposalDisposition, ...]:
     """Build a complete no-authority per-Lead set; persistence remains v19 work."""
 
-    if type(validation) is not ProposalValidationResult:
-        raise DispositionContractError("validation result must be typed")
+    exact_validation = _exact_validation_result(
+        validation, field="validation result"
+    )
     if not isinstance(lead_heads, Mapping) or not isinstance(selections, Mapping):
         raise DispositionContractError("per-Lead disposition inputs must be mappings")
-    if type(validation.findings) is not tuple:
-        raise DispositionContractError("finding manifest must be typed")
-    proposal = _exact_proposal(validation.proposal, field="proposal")
-    validator_input = _exact_validator_input(
-        validation.validator_input, field="validator input binding"
-    )
-    findings = _exact_findings(validation.findings, field="finding manifest")
-    exact_validation = _constructed_value(
-        lambda: ProposalValidationResult(
-            proposal,
-            validator_input,
-            findings,
-            validation.finding_set_digest,
-            validation.authority,
-        ),
-        field="validation result",
-    )
     proposal = exact_validation.proposal  # type: ignore[union-attr]
     validator_input = exact_validation.validator_input  # type: ignore[union-attr]
     findings = exact_validation.findings  # type: ignore[union-attr]
