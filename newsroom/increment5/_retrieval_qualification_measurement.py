@@ -219,5 +219,3 @@ def _exposure_metrics(
     ].items():
         add("SLICE", slice_id, slice_counts[slice_id], required)
     return rows, blockers
-
-
