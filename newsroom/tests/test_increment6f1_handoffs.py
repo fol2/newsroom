@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+from dataclasses import FrozenInstanceError, replace
+
+import pytest
+
+from newsroom.increment6.handoffs import (
+    Acknowledgement,
+    AcknowledgementOutcome,
+    HandoffContractError,
+    HandoffState,
+    correlate_acknowledgement,
+    create_handoff,
+    mark_attempt_ambiguous,
+    mark_attempt_sent,
+    persist_attempt,
+    request_retry,
+)
+
+
+CANDIDATE_VERSION_ID = "candidate-version:01JZX7V7G8Q6XKNR4M8J5TH9WD"
+MANIFEST_DIGEST = "sha256:" + "a" * 64
+SINK_ID = "evaluation-sink:fixture-v1"
+
+
+def _handoff(*, max_attempts: int = 3):
+    return create_handoff(
+        candidate_version_id=CANDIDATE_VERSION_ID,
+        governing_manifest_digest=MANIFEST_DIGEST,
+        sink_id=SINK_ID,
+        max_attempts=max_attempts,
+    )
+
+
+def _ack(handoff, attempt, *, outcome=AcknowledgementOutcome.ACKNOWLEDGED):
+    return Acknowledgement.create(
+        acknowledgement_id=f"sink-ack:{attempt.attempt_number}:{outcome.value}",
+        handoff_id=handoff.handoff_id,
+        attempt_id=attempt.attempt_id,
+        candidate_version_id=handoff.candidate_version_id,
+        governing_manifest_digest=handoff.governing_manifest_digest,
+        sink_id=handoff.sink_id,
+        outcome=outcome,
+        response_digest="sha256:" + "b" * 64,
+    )
+
+
+def test_logical_identity_is_immutable_semantic_and_exactly_bound() -> None:
+    first = _handoff()
+    replay = _handoff()
+
+    assert first == replay
+    assert first.handoff_id.startswith("handoff:sha256:")
+    assert first.candidate_version_id == CANDIDATE_VERSION_ID
+    assert first.governing_manifest_digest == MANIFEST_DIGEST
+    assert first.evaluation_only is True
+    assert first.publication_authority is False
+    assert first.evidence_authority is False
+    with pytest.raises(FrozenInstanceError):
+        first.sink_id = "evaluation-sink:other"  # type: ignore[misc]
+
+    changed_version = create_handoff(
+        candidate_version_id=CANDIDATE_VERSION_ID + ":2",
+        governing_manifest_digest=MANIFEST_DIGEST,
+        sink_id=SINK_ID,
+    )
+    changed_manifest = create_handoff(
+        candidate_version_id=CANDIDATE_VERSION_ID,
+        governing_manifest_digest="sha256:" + "c" * 64,
+        sink_id=SINK_ID,
+    )
+    assert len({first.handoff_id, changed_version.handoff_id, changed_manifest.handoff_id}) == 3
+
+
+def test_binding_and_evaluation_only_semantics_are_fail_closed() -> None:
+    with pytest.raises(HandoffContractError, match="candidate_version_id"):
+        create_handoff("", MANIFEST_DIGEST, SINK_ID)
+    with pytest.raises(HandoffContractError, match="governing_manifest_digest"):
+        create_handoff(CANDIDATE_VERSION_ID, "a" * 64, SINK_ID)
+    with pytest.raises(HandoffContractError, match="sink_id"):
+        create_handoff(CANDIDATE_VERSION_ID, MANIFEST_DIGEST, "publication:discord")
+    with pytest.raises(HandoffContractError, match="evaluation_only"):
+        replace(_handoff(), evaluation_only=False)
+    with pytest.raises(HandoffContractError, match="publication_authority"):
+        replace(_handoff(), publication_authority=True)
+
+
+def test_attempt_is_persisted_before_it_can_be_sent_and_replay_is_idempotent() -> None:
+    handoff = _handoff()
+    assert handoff.state is HandoffState.PENDING
+    assert handoff.attempts == ()
+
+    persisted = persist_attempt(handoff)
+    attempt = persisted.attempts[0]
+    assert attempt.persisted_before_send is True
+    assert attempt.attempt_number == 1
+    assert attempt.semantic_idempotency_key == handoff.handoff_id
+    assert persist_attempt(persisted) == persisted
+
+    sent = mark_attempt_sent(persisted, attempt.attempt_id)
+    assert sent.attempts[0].sent is True
+    assert mark_attempt_sent(sent, attempt.attempt_id) == sent
+    with pytest.raises(HandoffContractError, match="unknown attempt"):
+        mark_attempt_sent(handoff, "attempt:sha256:" + "0" * 64)
+
+
+def test_lost_ack_becomes_ambiguous_then_retry_reuses_logical_identity() -> None:
+    first = persist_attempt(_handoff())
+    first = mark_attempt_sent(first, first.attempts[0].attempt_id)
+    ambiguous = mark_attempt_ambiguous(first, first.attempts[0].attempt_id)
+    assert ambiguous.state is HandoffState.AMBIGUOUS
+
+    retry = request_retry(ambiguous)
+    assert retry.state is HandoffState.RETRY
+    second = persist_attempt(retry)
+    assert second.state is HandoffState.PENDING
+    assert second.handoff_id == first.handoff_id
+    assert second.attempts[1].attempt_number == 2
+    assert second.attempts[1].attempt_id != second.attempts[0].attempt_id
+    assert second.attempts[1].semantic_idempotency_key == first.handoff_id
+
+
+def test_retry_is_bounded_and_exhaustion_remains_truthfully_ambiguous() -> None:
+    handoff = persist_attempt(_handoff(max_attempts=1))
+    handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)
+    handoff = mark_attempt_ambiguous(handoff, handoff.attempts[0].attempt_id)
+
+    exhausted = request_retry(handoff)
+    assert exhausted.state is HandoffState.AMBIGUOUS
+    assert exhausted.retry_exhausted is True
+    assert persist_attempt(exhausted) == exhausted
+
+
+def test_exact_acknowledgement_and_duplicate_replay_are_idempotent() -> None:
+    handoff = persist_attempt(_handoff())
+    handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)
+    acknowledgement = _ack(handoff, handoff.attempts[0])
+
+    acknowledged = correlate_acknowledgement(handoff, acknowledgement)
+    assert acknowledged.state is HandoffState.ACKNOWLEDGED
+    assert acknowledged.acknowledgements == (acknowledgement,)
+    assert correlate_acknowledgement(acknowledged, acknowledgement) == acknowledged
+
+
+def test_rejected_acknowledgement_is_a_distinct_terminal_outcome() -> None:
+    handoff = persist_attempt(_handoff())
+    handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)
+
+    rejected = correlate_acknowledgement(
+        handoff,
+        _ack(handoff, handoff.attempts[0], outcome=AcknowledgementOutcome.REJECTED),
+    )
+    assert rejected.state is HandoffState.REJECTED
+    with pytest.raises(HandoffContractError, match="terminal"):
+        request_retry(rejected)
+
+
+def test_delayed_ack_for_an_earlier_attempt_correlates_to_same_handoff() -> None:
+    handoff = persist_attempt(_handoff())
+    first_attempt = handoff.attempts[0]
+    handoff = mark_attempt_sent(handoff, first_attempt.attempt_id)
+    handoff = mark_attempt_ambiguous(handoff, first_attempt.attempt_id)
+    handoff = persist_attempt(request_retry(handoff))
+    handoff = mark_attempt_sent(handoff, handoff.attempts[1].attempt_id)
+
+    acknowledged = correlate_acknowledgement(handoff, _ack(handoff, first_attempt))
+    assert acknowledged.state is HandoffState.ACKNOWLEDGED
+    assert acknowledged.handoff_id == handoff.handoff_id
+
+
+def test_replayed_timeout_for_earlier_attempt_does_not_undo_active_retry() -> None:
+    handoff = persist_attempt(_handoff())
+    first_attempt = handoff.attempts[0]
+    handoff = mark_attempt_sent(handoff, first_attempt.attempt_id)
+    handoff = mark_attempt_ambiguous(handoff, first_attempt.attempt_id)
+    handoff = persist_attempt(request_retry(handoff))
+
+    assert mark_attempt_ambiguous(handoff, first_attempt.attempt_id) == handoff
+    assert handoff.state is HandoffState.PENDING
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("handoff_id", "handoff:sha256:" + "0" * 64, "handoff_id"),
+        ("attempt_id", "attempt:sha256:" + "0" * 64, "attempt_id"),
+        ("candidate_version_id", CANDIDATE_VERSION_ID + ":other", "candidate_version_id"),
+        ("governing_manifest_digest", "sha256:" + "c" * 64, "governing_manifest_digest"),
+        ("sink_id", "evaluation-sink:other", "sink_id"),
+    ],
+)
+def test_uncorrelated_acknowledgements_are_retained_as_ambiguous(
+    field: str, value: str, reason: str
+) -> None:
+    handoff = persist_attempt(_handoff())
+    handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)
+    acknowledgement = replace(_ack(handoff, handoff.attempts[0]), **{field: value})
+
+    ambiguous = correlate_acknowledgement(handoff, acknowledgement)
+    assert ambiguous.state is HandoffState.AMBIGUOUS
+    assert ambiguous.ambiguity_reason == f"acknowledgement_{reason}_mismatch"
+    assert ambiguous.acknowledgements == (acknowledgement,)
+
+
+def test_conflicting_delayed_acknowledgement_is_ambiguous_not_overwritten() -> None:
+    handoff = persist_attempt(_handoff())
+    handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)
+    accepted = _ack(handoff, handoff.attempts[0])
+    handoff = correlate_acknowledgement(handoff, accepted)
+    rejected = replace(
+        accepted,
+        acknowledgement_id="sink-ack:conflict",
+        outcome=AcknowledgementOutcome.REJECTED,
+        response_digest="sha256:" + "d" * 64,
+    )
+
+    result = correlate_acknowledgement(handoff, rejected)
+    assert result.state is HandoffState.AMBIGUOUS
+    assert result.ambiguity_reason == "conflicting_acknowledgements"
+
+
+def test_same_acknowledgement_identity_cannot_replay_different_content() -> None:
+    handoff = persist_attempt(_handoff())
+    handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)
+    accepted = _ack(handoff, handoff.attempts[0])
+    handoff = correlate_acknowledgement(handoff, accepted)
+
+    with pytest.raises(HandoffContractError, match="acknowledgement identity conflict"):
+        correlate_acknowledgement(
+            handoff,
+            replace(accepted, response_digest="sha256:" + "e" * 64),
+        )
