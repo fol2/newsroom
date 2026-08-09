@@ -24,6 +24,8 @@ REASON_TAXONOMY_VERSION = "newsroom.increment6.reasons.v1"
 
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,255}\Z")
 _MAX_TEXT_BYTES = 4_096
+MAX_PRIORITY_REFERENCES = 30_000
+MAX_PRIORITY_CANONICAL_BYTES = 16 * 1_024 * 1_024
 
 
 class OutcomeContractError(ValueError):
@@ -1034,6 +1036,7 @@ class PrioritySelection(_NoAuthorityContract):
         if (
             not isinstance(self.basis_references, tuple)
             or not self.basis_references
+            or len(self.basis_references) > MAX_PRIORITY_REFERENCES
             or any(
                 not isinstance(item, ReasonReference)
                 for item in self.basis_references
@@ -1045,6 +1048,11 @@ class PrioritySelection(_NoAuthorityContract):
             raise OutcomeContractError(
                 "priority basis references must be sorted and unique"
             )
+        if (
+            len(canonical_json_bytes(self.canonical_value()))
+            > MAX_PRIORITY_CANONICAL_BYTES
+        ):
+            raise OutcomeContractError("priority selection exceeds canonical byte bound")
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -1062,7 +1070,10 @@ class PrioritySelection(_NoAuthorityContract):
 
     @property
     def canonical_bytes(self) -> bytes:
-        return canonical_json_bytes(self.canonical_value())
+        value = canonical_json_bytes(self.canonical_value())
+        if len(value) > MAX_PRIORITY_CANONICAL_BYTES:
+            raise OutcomeContractError("priority selection exceeds canonical byte bound")
+        return value
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> Self:

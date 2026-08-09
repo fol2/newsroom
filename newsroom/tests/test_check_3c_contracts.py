@@ -4,8 +4,10 @@ from dataclasses import replace
 
 import pytest
 
+from newsroom.authority.canonical import digest_bytes
 from newsroom.authority.policy import PayloadSchemaValidationError
 from newsroom.checks import (
+    CandidateObservationRef,
     CheckAttemptId,
     CheckAttemptKind,
     CheckContractError,
@@ -16,6 +18,7 @@ from newsroom.checks import (
     discovery_check_command_definitions,
     discovery_check_payload_contracts,
 )
+from newsroom.checks.check_models import MAX_CHECK_OUTCOME_REFERENCES
 from newsroom.tests.check_3c_helpers import (
     ATTEMPT_ID,
     DIGEST_A,
@@ -42,6 +45,34 @@ def test_check_request_semantic_identity_excludes_record_identity_and_time() -> 
         ),
     )
     assert changed.semantic_digest != original.semantic_digest
+
+
+def test_check_outcome_producer_accepts_maximum_and_rejects_max_plus_one() -> None:
+    references = tuple(
+        sorted(
+            (
+                CandidateObservationRef(
+                    digest_bytes(f"item-{index:05d}".encode()),
+                    digest_bytes(f"value-{index:05d}".encode()),
+                )
+                for index in range(MAX_CHECK_OUTCOME_REFERENCES)
+            ),
+            key=lambda item: item.item_key,
+        )
+    )
+    maximum = changed_outcome(candidates=references)
+    assert maximum.digest
+    with pytest.raises(CheckContractError, match="typed immutable tuple"):
+        replace(
+            maximum,
+            candidate_observations=references
+            + (
+                CandidateObservationRef(
+                    digest_bytes(b"item-over-bound"),
+                    digest_bytes(b"value-over-bound"),
+                ),
+            ),
+        )
 
 
 def test_planned_window_trigger_requires_only_its_exact_window_digest() -> None:

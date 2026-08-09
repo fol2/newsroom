@@ -25,6 +25,7 @@ from newsroom.increment6.outcomes import (
     OutcomeContractError,
     OutcomeFamily,
     OutcomeSelection,
+    MAX_PRIORITY_REFERENCES,
     PriorityLane,
     PrioritySelection,
     ReasonBasisClass,
@@ -424,6 +425,26 @@ def test_unknown_nested_fields_and_untyped_or_duplicate_reasons_fail_closed() ->
     )
     with pytest.raises(OutcomeContractError, match="duplicate"):
         StructuredReason.from_canonical_bytes(duplicate_reason)
+
+
+def test_priority_producer_accepts_its_maximum_and_rejects_max_plus_one() -> None:
+    references = tuple(
+        ReasonReference("fixture", f"priority-{index:05d}")
+        for index in range(MAX_PRIORITY_REFERENCES)
+    )
+    maximum = PrioritySelection(
+        "fixture-work-item",
+        "fixture-work-version",
+        PriorityLane.ROUTINE,
+        references,
+    )
+    assert PrioritySelection.from_canonical_bytes(maximum.canonical_bytes) == maximum
+    with pytest.raises(OutcomeContractError, match="typed exact"):
+        replace(
+            maximum,
+            basis_references=references
+            + (ReasonReference("fixture", "priority-over-bound"),),
+        )
 
 
 def test_terminal_and_pending_semantics_require_explicit_compatible_actions() -> None:
