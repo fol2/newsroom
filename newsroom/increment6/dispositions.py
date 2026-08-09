@@ -120,13 +120,13 @@ class _NoEffect:
 
 
 def _token(value: object, field: str) -> str:
-    if not isinstance(value, str) or _TOKEN.fullmatch(value) is None:
+    if type(value) is not str or _TOKEN.fullmatch(value) is None:
         raise DispositionContractError(f"{field} must be a bounded canonical token")
     return value
 
 
 def _digest(value: object, field: str) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise DispositionContractError(f"{field} must be a canonical SHA-256 digest")
     try:
         return validate_sha256_digest(value, field=field)
@@ -135,7 +135,7 @@ def _digest(value: object, field: str) -> str:
 
 
 def _exact(value: object, keys: set[str], field: str) -> Mapping[str, object]:
-    if not isinstance(value, dict):
+    if type(value) is not dict:
         raise DispositionContractError(f"{field} keys are not exact")
     try:
         actual_keys = set(value)
@@ -160,11 +160,9 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _decode(raw: bytes, *, field: str) -> dict[str, object]:
-    if (
-        not isinstance(raw, bytes)
-        or not raw
-        or len(raw) > MAX_DISPOSITION_CANONICAL_BYTES
-    ):
+    if type(raw) is not bytes:
+        raise DispositionContractError(f"{field} integrity requires bounded bytes")
+    if not raw or len(raw) > MAX_DISPOSITION_CANONICAL_BYTES:
         raise DispositionContractError(f"{field} integrity requires bounded bytes")
     depth = 0
     in_string = False
@@ -199,7 +197,7 @@ def _decode(raw: bytes, *, field: str) -> dict[str, object]:
         raise
     except Exception as exc:
         raise DispositionContractError(f"{field} integrity is not valid JSON") from exc
-    if not isinstance(value, dict):
+    if type(value) is not dict:
         raise DispositionContractError(f"{field} integrity requires an object")
     try:
         if canonical_json_bytes(value) != raw:
@@ -543,6 +541,16 @@ def _exact_finding(
     )  # type: ignore[return-value]
 
 
+def _exact_findings(
+    value: tuple[ProposalValidationFinding, ...], *, field: str
+) -> tuple[ProposalValidationFinding, ...]:
+    if type(value) is not tuple:
+        raise DispositionContractError(
+            f"{field} is outside canonical JSON: exact tuple required"
+        )
+    return tuple(_exact_finding(item, field="finding") for item in value)
+
+
 @dataclass(frozen=True, slots=True)
 class ProposalValidationResult(_NoEffect):
     proposal: TriageProposal
@@ -561,21 +569,15 @@ class ProposalValidationResult(_NoEffect):
         if not isinstance(self.validator_input, ValidatorInputBinding):
             raise DispositionContractError("validation result input must be typed")
         if (
-            not isinstance(self.findings, tuple)
+            type(self.findings) is not tuple
             or not 1 <= len(self.findings) <= _MAX_FINDINGS
-            or any(
-                not isinstance(item, ProposalValidationFinding)
-                for item in self.findings
-            )
         ):
             raise DispositionContractError("finding set must be complete and bounded")
         exact_proposal = _exact_proposal(self.proposal, field="proposal")
         exact_validator = _exact_validator_input(
             self.validator_input, field="validator input binding"
         )
-        exact_findings = tuple(
-            _exact_finding(item, field="finding") for item in self.findings
-        )
+        exact_findings = _exact_findings(self.findings, field="finding set")
         object.__setattr__(self, "proposal", exact_proposal)
         object.__setattr__(self, "validator_input", exact_validator)
         object.__setattr__(self, "findings", exact_findings)
@@ -621,9 +623,7 @@ class ProposalValidationResult(_NoEffect):
         validator = _exact_validator_input(
             self.validator_input, field="validator input binding"
         )
-        findings = tuple(
-            _exact_finding(item, field="finding") for item in self.findings
-        )
+        findings = _exact_findings(self.findings, field="finding set")
         return _bounded_canonical_from(
             lambda: {
                 "schema_version": _FINDING_SET_SCHEMA_VERSION,
@@ -1129,21 +1129,13 @@ def build_pending_dispositions(
         raise DispositionContractError("validation result must be typed")
     if not isinstance(lead_heads, Mapping) or not isinstance(selections, Mapping):
         raise DispositionContractError("per-Lead disposition inputs must be mappings")
-    if (
-        not isinstance(validation.findings, tuple)
-        or any(
-            not isinstance(finding, ProposalValidationFinding)
-            for finding in validation.findings
-        )
-    ):
+    if type(validation.findings) is not tuple:
         raise DispositionContractError("finding manifest must be typed")
     proposal = _exact_proposal(validation.proposal, field="proposal")
     validator_input = _exact_validator_input(
         validation.validator_input, field="validator input binding"
     )
-    findings = tuple(
-        _exact_finding(item, field="finding") for item in validation.findings
-    )
+    findings = _exact_findings(validation.findings, field="finding manifest")
     exact_validation = _constructed_value(
         lambda: ProposalValidationResult(
             proposal,

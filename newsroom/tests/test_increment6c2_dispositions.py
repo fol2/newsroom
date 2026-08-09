@@ -1099,3 +1099,107 @@ def test_mapping_iteration_does_not_capture_base_exceptions(
         ProposalDisposition.validate_route_selection(
             ProposalRoute.NEW_EVENT_CANDIDATE, selection
         )
+
+
+class _ExplodingFindingsTuple(tuple[object, ...]):
+    def __iter__(self) -> Iterator[object]:
+        raise RuntimeError("findings iteration")
+
+
+def test_findings_require_an_exact_tuple_before_all_public_iteration_paths() -> None:
+    raw = _proposal_bytes()
+
+    constructor_validation = validate_proposal(raw, _validator(raw))
+    with pytest.raises(DispositionContractError):
+        replace(
+            constructor_validation,
+            findings=_ExplodingFindingsTuple(constructor_validation.findings),
+        )
+
+    property_validation = validate_proposal(raw, _validator(raw))
+    object.__setattr__(
+        property_validation,
+        "findings",
+        _ExplodingFindingsTuple(property_validation.findings),
+    )
+    with pytest.raises(DispositionContractError):
+        _ = property_validation.canonical_bytes
+
+    builder_validation = validate_proposal(raw, _validator(raw))
+    object.__setattr__(
+        builder_validation,
+        "findings",
+        _ExplodingFindingsTuple(builder_validation.findings),
+    )
+    head = LeadDispositionHeadBinding(LEAD_A, DIGEST_B, "head:a", DIGEST_A)
+    selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+    with pytest.raises(DispositionContractError):
+        build_pending_dispositions(
+            builder_validation, {LEAD_A: head}, {LEAD_A: selection}
+        )
+
+
+class _ExplodingBytes(bytes):
+    def __len__(self) -> int:
+        raise RuntimeError("bytes length")
+
+    def __iter__(self) -> Iterator[int]:
+        raise RuntimeError("bytes iteration")
+
+
+def test_wire_parsers_require_exact_bytes_before_length_or_iteration() -> None:
+    raw = _proposal_bytes()
+    validation = validate_proposal(raw, _validator(raw))
+    head = LeadDispositionHeadBinding(LEAD_A, DIGEST_B, "head:a", DIGEST_A)
+    selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+    disposition = build_pending_dispositions(
+        validation, {LEAD_A: head}, {LEAD_A: selection}
+    )[0]
+    wire_values = (
+        (lambda value: validate_proposal(value, _validator(raw)), raw),
+        (ProposalDisposition.from_canonical_bytes, disposition.canonical_bytes),
+        (
+            ProposalValidationFinding.from_canonical_bytes,
+            validation.findings[0].canonical_bytes,
+        ),
+        (
+            lambda value: ValidatorInputBinding.for_proposal(
+                proposal_bytes=value,
+                validator_id="validator:fixture",
+                validator_version="1",
+                authenticated_context_identity=DIGEST_A,
+                retrieval_request_id="request:001",
+                retrieval_request_digest=DIGEST_B,
+                retrieval_receipt_id="receipt:001",
+                retrieval_receipt_digest=DIGEST_C,
+                ruleset_id="triage-rules",
+                ruleset_version="1",
+                ruleset_digest=DIGEST_D,
+            ),
+            raw,
+        ),
+    )
+    for call, value in wire_values:
+        with pytest.raises(DispositionContractError):
+            call(_ExplodingBytes(value))
+
+
+class _ExplodingDigestStr(str):
+    def strip(self, chars: str | None = None) -> str:
+        raise RuntimeError("digest strip")
+
+
+def test_digest_constructor_requires_exact_string_before_string_methods() -> None:
+    with pytest.raises(DispositionContractError):
+        replace(
+            _validator(),
+            authenticated_context_identity=_ExplodingDigestStr(DIGEST_A),
+        )
