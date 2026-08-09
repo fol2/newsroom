@@ -1954,20 +1954,31 @@ class TriageWorkItemStore:
     def require_usable_current(self, work_item_id: str) -> TriageWorkItemVersion:
         self._begin()
         try:
-            head = self._head(work_item_id)
-            version = self.load_version(head[0])
-            if version.canonical_digest != head[2]:
-                raise WorkItemContractError("Work Item head digest differs")
-            reasons = self._upstream_reasons(version)
-            if not version.retrieval.usable:
-                reasons.append("retrieval_not_complete")
-            if reasons:
-                raise WorkItemStaleError(";".join(sorted(set(reasons))))
+            version = self.require_usable_current_in_transaction(work_item_id)
             self._connection.execute("COMMIT")
             return version
         except Exception:
             self._rollback()
             raise
+
+    def require_usable_current_in_transaction(
+        self, work_item_id: str
+    ) -> TriageWorkItemVersion:
+        """Recheck for a trusted composition root holding ``BEGIN IMMEDIATE``."""
+        if not self._connection.in_transaction:
+            raise WorkItemContractError(
+                "transaction-aware Work Item use requires an active transaction"
+            )
+        head = self._head(work_item_id)
+        version = self.load_version(head[0])
+        if version.canonical_digest != head[2]:
+            raise WorkItemContractError("Work Item head digest differs")
+        reasons = self._upstream_reasons(version)
+        if not version.retrieval.usable:
+            reasons.append("retrieval_not_complete")
+        if reasons:
+            raise WorkItemStaleError(";".join(sorted(set(reasons))))
+        return version
 
     def _insert_version(self, v: TriageWorkItemVersion) -> None:
         item = self._load_item(v.work_item_id)

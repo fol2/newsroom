@@ -448,6 +448,38 @@ def test_actual_retrieval_journal_is_exact_indexed_and_tamper_or_purge_fails(
     assert store.create_or_replay(item, version) == version
     assert store.require_usable_current(item.work_item_id) == version
 
+    claim_database = tmp_path / "atomic-claim.sqlite3"
+    claim_seed = sqlite3.connect(claim_database)
+    connection.backup(claim_seed)
+    claim_seed.execute(
+        "CREATE TABLE simulated_claims(work_item_id TEXT PRIMARY KEY,version_id TEXT)"
+    )
+    claim_seed.commit()
+    claim_seed.close()
+    claim_one = sqlite3.connect(claim_database, isolation_level=None, timeout=0)
+    claim_two = sqlite3.connect(claim_database, isolation_level=None, timeout=0)
+    claim_store_one = TriageWorkItemStore(claim_one, retrieval_authority=authority)
+    claim_store_two = TriageWorkItemStore(claim_two, retrieval_authority=authority)
+    with pytest.raises(WorkItemContractError, match="active transaction"):
+        claim_store_one.require_usable_current_in_transaction(item.work_item_id)
+    claim_one.execute("BEGIN IMMEDIATE")
+    checked = claim_store_one.require_usable_current_in_transaction(item.work_item_id)
+    claim_one.execute(
+        "INSERT INTO simulated_claims VALUES(?,?)",
+        (item.work_item_id, checked.version_id),
+    )
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        claim_two.execute("BEGIN IMMEDIATE")
+    claim_one.execute("COMMIT")
+    claim_two.execute("BEGIN IMMEDIATE")
+    assert (
+        claim_store_two.require_usable_current_in_transaction(item.work_item_id)
+        == version
+    )
+    claim_two.execute("ROLLBACK")
+    claim_one.close()
+    claim_two.close()
+
     connection.execute(
         "UPDATE retrieval_authority.increment5d2_retrieval_contexts "
         "SET receipt_bytes=? WHERE idempotency_key=?",
