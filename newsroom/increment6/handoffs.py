@@ -484,6 +484,10 @@ def _validate_handoff_state(handoff: Handoff) -> None:
                 and len(handoff.attempts) >= 2
                 and latest is not None
                 and not latest.ambiguous
+                and all(
+                    item.attempt_id != latest.attempt_id
+                    for item in handoff.acknowledgements
+                )
             ):
                 return
         raise HandoffContractError("Handoff state differs from records")

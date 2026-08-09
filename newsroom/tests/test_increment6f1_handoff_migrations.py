@@ -784,6 +784,60 @@ def test_store_conflicting_old_acks_preserve_active_retry_across_restart(
     assert timed_out.ambiguity_reason == "conflicting_acknowledgements"
     connection.close()
 
+
+def test_sql_and_restart_reject_current_attempt_conflict_as_non_ambiguous(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "current-conflict-tamper.sqlite3"
+    connection = _fresh(database)
+    store = EvaluationHandoffStore(connection)
+    handoff = store.persist_attempt(store.register(_handoff()).handoff_id)
+    first = handoff.attempts[0]
+    handoff = store.mark_attempt_sent(handoff.handoff_id, first.attempt_id)
+    handoff = store.mark_attempt_ambiguous(handoff.handoff_id, first.attempt_id)
+    handoff = store.persist_attempt(store.request_retry(handoff.handoff_id).handoff_id)
+    handoff = store.mark_attempt_sent(handoff.handoff_id, handoff.attempts[1].attempt_id)
+    accepted_current = Acknowledgement.create(
+        handoff_id=handoff.handoff_id,
+        attempt_id=handoff.attempts[1].attempt_id,
+        candidate_version_id=handoff.candidate_version_id,
+        governing_manifest_digest=handoff.governing_manifest_digest,
+        sink_id=handoff.sink_id,
+        outcome=AcknowledgementOutcome.ACKNOWLEDGED,
+        response_digest="sha256:" + "2" * 64,
+    )
+    rejected_old = Acknowledgement.create(
+        handoff_id=handoff.handoff_id,
+        attempt_id=first.attempt_id,
+        candidate_version_id=handoff.candidate_version_id,
+        governing_manifest_digest=handoff.governing_manifest_digest,
+        sink_id=handoff.sink_id,
+        outcome=AcknowledgementOutcome.REJECTED,
+        response_digest="sha256:" + "3" * 64,
+    )
+    handoff = store.correlate_acknowledgement(handoff.handoff_id, accepted_current)
+    handoff = store.correlate_acknowledgement(handoff.handoff_id, rejected_old)
+    assert handoff.state is HandoffState.AMBIGUOUS
+
+    with pytest.raises(sqlite3.IntegrityError, match="state transition"):
+        connection.execute(
+            "UPDATE evaluation_handoffs SET transport_state='acknowledged',"
+            "ambiguity_reason=NULL WHERE handoff_id=?",
+            (handoff.handoff_id,),
+        )
+
+    connection.execute("DROP TRIGGER evaluation_handoff_state_guard")
+    connection.execute(
+        "UPDATE evaluation_handoffs SET transport_state='pending',"
+        "ambiguity_reason=NULL WHERE handoff_id=?",
+        (handoff.handoff_id,),
+    )
+    connection.close()
+    connection = _open(database)
+    with pytest.raises(HandoffContractError, match="Handoff state"):
+        EvaluationHandoffStore(connection).load(handoff.handoff_id)
+    connection.close()
+
 def test_concurrent_pristine_ack_and_attempt_persistence_remain_retry_inert(
     tmp_path: Path,
 ) -> None:

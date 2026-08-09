@@ -465,6 +465,41 @@ def test_conflicting_old_acknowledgements_preserve_active_unsent_retry() -> None
     assert timed_out.ambiguity_reason == "conflicting_acknowledgements"
 
 
+def test_current_attempt_conflict_cannot_be_forged_as_pending() -> None:
+    handoff = persist_attempt(_handoff())
+    first = handoff.attempts[0]
+    handoff = mark_attempt_sent(handoff, first.attempt_id)
+    handoff = mark_attempt_ambiguous(handoff, first.attempt_id)
+    handoff = persist_attempt(request_retry(handoff))
+    handoff = mark_attempt_sent(handoff, handoff.attempts[1].attempt_id)
+    accepted_current = _ack(handoff, handoff.attempts[1])
+    rejected_old = _ack(
+        handoff,
+        first,
+        outcome=AcknowledgementOutcome.REJECTED,
+        response_digest="sha256:" + "1" * 64,
+    )
+
+    results = []
+    for arrivals in permutations((accepted_current, rejected_old)):
+        result = handoff
+        for acknowledgement in arrivals:
+            result = correlate_acknowledgement(result, acknowledgement)
+        results.append(result)
+
+    assert {item.state for item in results} == {HandoffState.AMBIGUOUS}
+    assert {item.ambiguity_reason for item in results} == {
+        "conflicting_acknowledgements"
+    }
+    with pytest.raises(HandoffContractError, match="Handoff state"):
+        replace(
+            results[0],
+            state=HandoffState.PENDING,
+            retry_exhausted=False,
+            ambiguity_reason=None,
+        )
+
+
 def test_acknowledgement_identity_is_immutable_content_identity() -> None:
     handoff = persist_attempt(_handoff())
     handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)

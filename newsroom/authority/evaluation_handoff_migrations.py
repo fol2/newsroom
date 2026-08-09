@@ -331,7 +331,16 @@ EVALUATION_HANDOFF_MIGRATION_STATEMENTS: tuple[str, ...] = (
                   AND k.governing_manifest_digest=NEW.governing_manifest_digest
                   AND k.sink_id=NEW.sink_id
                   AND k.outcome=NEW.transport_state
-                  AND a.sent=1
+                AND a.sent=1
+            )
+        )
+        OR (
+            NEW.transport_state IN('acknowledged','rejected')
+            AND EXISTS(
+                SELECT 1
+                FROM evaluation_handoff_acknowledgements AS conflict
+                WHERE conflict.recorded_handoff_id=NEW.handoff_id
+                  AND conflict.outcome!=NEW.transport_state
             )
         )
         BEGIN SELECT RAISE(ABORT,'invalid evaluation Handoff state transition'); END""",
