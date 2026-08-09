@@ -195,7 +195,7 @@ class DeadlineBoundary:
             )
         try:
             zone = ZoneInfo(self.source_time_zone)
-        except ZoneInfoNotFoundError as exc:
+        except (ValueError, ZoneInfoNotFoundError) as exc:
             raise SchedulingContractError(
                 "deadline source time zone is not available"
             ) from exc

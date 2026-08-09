@@ -226,6 +226,29 @@ def test_deadline_boundary_resolves_exact_time_zone_and_dst_fold() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "source_time_zone",
+    ("Etc/../../etc/passwd", "UTC/", "A//B"),
+)
+def test_non_normalised_time_zone_fails_closed_at_constructor_and_parser(
+    source_time_zone: str,
+) -> None:
+    with pytest.raises(SchedulingContractError):
+        replace(_deadline(), source_time_zone=source_time_zone)
+
+    observation = calculate_urgency_deadline(policy=_policy(), item=_input())
+    value = observation.canonical_value()
+    value["input"]["deadline"]["source_time_zone"] = source_time_zone  # type: ignore[index]
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    with pytest.raises(SchedulingContractError):
+        UrgencyDeadlineDecision.from_canonical_bytes(raw)
+
+
 def test_required_lane_cannot_drop_its_deadline() -> None:
     tampered = replace(_input(), deadline=None)
 
