@@ -20,7 +20,8 @@ from newsroom.increment6.scheduling import (
     CapacityClass,
     CapacityPathState,
     CapacityPopulationItem,
-    CapacityRevalidationDisposition,
+    CapacityRevalidationEvidence,
+    CapacityRevalidationResult,
     CapacitySnapshot,
     CapacityWorkState,
     DeadlineBoundary,
@@ -315,6 +316,7 @@ def _capacity_item(
     state: CapacityWorkState = CapacityWorkState.PENDING,
     starved: bool = False,
     revalidated: bool = False,
+    revalidation_result: CapacityRevalidationResult | None = None,
     identity: str | None = None,
 ) -> CapacityPopulationItem:
     digest = (
@@ -341,20 +343,33 @@ def _capacity_item(
             else _deadline(),
         ),
     )
+    evidence = None
+    if observation.revalidation_required:
+        result = (
+            revalidation_result or CapacityRevalidationResult.REVALIDATED
+            if revalidated
+            else revalidation_result or CapacityRevalidationResult.EXPIRED
+        )
+        evidence = CapacityRevalidationEvidence(
+            work_item_id=observation.item.work_item_id,
+            work_item_version_id=observation.item.work_item_version_id,
+            work_item_version_digest=observation.item.work_item_version_digest,
+            starvation_observation_digest=observation.decision_digest,
+            governing_policy_digest=observation.policy.policy_digest,
+            snapshot_observed_at=observation.item.observed_at,
+            currentness_basis=(
+                ReasonReference(
+                    reference_type=f"revalidation-{result.value.lower()}",
+                    identifier=f"receipt-{name}",
+                    digest=SHA_C,
+                ),
+            ),
+            result=result,
+        )
     return CapacityPopulationItem(
-        work_item_id=observation.item.work_item_id,
-        work_item_version_id=observation.item.work_item_version_id,
-        work_item_version_digest=observation.item.work_item_version_digest,
-        priority_selection=observation.item.priority_selection,
         observation=observation,
         state=state,
-        revalidation=(
-            CapacityRevalidationDisposition.REVALIDATED
-            if revalidated
-            else CapacityRevalidationDisposition.REVALIDATION_REQUIRED
-            if observation.revalidation_required
-            else CapacityRevalidationDisposition.NOT_REQUIRED
-        ),
+        revalidation_evidence=evidence,
     )
 
 
@@ -364,6 +379,7 @@ def _snapshot(
 ) -> CapacitySnapshot:
     return CapacitySnapshot(
         observed_at="2026-08-09T15:10:00Z",
+        urgency_policy=_policy(),
         population=tuple(sorted(items, key=lambda item: item.identity_key)),
         urgent_path_state=urgent_path_state,
     )
@@ -447,6 +463,65 @@ def test_caller_cannot_tamper_with_derived_counts_lane_or_digest() -> None:
         )
 
 
+def test_capacity_snapshot_rejects_mixed_exact_urgency_policy_thresholds() -> None:
+    base = _capacity_item("base-policy", lane=PriorityLane.ROUTINE)
+    changed_rules = list(_rules())
+    changed_rules[PriorityLane.ROUTINE.ordinal - 1] = replace(
+        changed_rules[PriorityLane.ROUTINE.ordinal - 1],
+        starvation_warning_seconds=3_601,
+        starvation_limit_seconds=7_201,
+    )
+    changed_policy = replace(_policy(), lane_rules=tuple(changed_rules))
+    changed_observation = calculate_urgency_deadline(
+        policy=changed_policy,
+        item=_input(
+            work_item_id="work-item-changed-policy",
+            version_id="work-item-version-changed-policy",
+            version_digest=SHA_C,
+            lane=PriorityLane.ROUTINE,
+            enqueued_at="2026-08-09T15:05:00Z",
+            observed_at="2026-08-09T15:10:00Z",
+            deadline=None,
+        ),
+    )
+    changed = CapacityPopulationItem(
+        observation=changed_observation,
+        state=CapacityWorkState.PENDING,
+        revalidation_evidence=None,
+    )
+
+    with pytest.raises(SchedulingContractError):
+        _snapshot(base, changed)
+
+
+def test_revalidation_evidence_rejects_caller_flip_replay_and_binding_drift() -> None:
+    expired = _capacity_item("receipt", lane=PriorityLane.ROUTINE, starved=True)
+    evidence = expired.revalidation_evidence
+    assert evidence is not None
+
+    with pytest.raises(SchedulingContractError):
+        replace(evidence, result=CapacityRevalidationResult.REVALIDATED)
+    for drift in (
+        {"snapshot_observed_at": "2026-08-09T15:11:00Z"},
+        {"governing_policy_digest": SHA_A},
+        {"starvation_observation_digest": SHA_B},
+        {"work_item_version_digest": SHA_C},
+    ):
+        with pytest.raises(SchedulingContractError):
+            replace(expired, revalidation_evidence=replace(evidence, **drift))
+
+    decision = allocate_reserved_capacity(
+        policy=_capacity_policy(), snapshot=_snapshot(expired)
+    )
+    tampered = json.loads(decision.canonical_bytes)
+    raw_evidence = tampered["snapshot"]["population"][0]["revalidation_evidence"]
+    raw_evidence["result"] = CapacityRevalidationResult.REVALIDATED.value
+    with pytest.raises(SchedulingContractError):
+        ReservedCapacityDecision.from_canonical_bytes(
+            json.dumps(tampered, sort_keys=True, separators=(",", ":")).encode()
+        )
+
+
 def test_revalidated_starved_routine_gets_next_ordinary_grant_before_fresh_inflow() -> (
     None
 ):
@@ -486,7 +561,8 @@ def test_starved_routine_requires_visible_revalidation_before_protection() -> No
 
     assert decision.granted_items == (fresh,)
     allocation = next(a for a in decision.allocations if a.item == awaiting)
-    assert allocation.disposition is CapacityAllocationDisposition.REVALIDATION_REQUIRED
+    assert allocation.disposition is CapacityAllocationDisposition.CAPACITY_DEFERRED
+    assert allocation.item.revalidation_result is CapacityRevalidationResult.EXPIRED
     assert allocation.protected_routine_grant is False
 
 
@@ -511,6 +587,38 @@ def test_degraded_urgent_is_exact_visible_hold_and_never_downgraded() -> None:
         is CapacityAllocationDisposition.URGENT_VISIBLE_OPERATIONAL_HOLD
     )
     assert decision.downgraded_urgent_to_ordinary is False
+
+
+def test_degraded_urgent_hold_remains_primary_during_expired_revalidation() -> None:
+    urgent = _capacity_item("urgent-expired", lane=PriorityLane.URGENT, starved=True)
+    decision = allocate_reserved_capacity(
+        policy=_capacity_policy(),
+        snapshot=_snapshot(urgent, urgent_path_state=CapacityPathState.DEGRADED),
+    )
+    allocation = decision.allocations[0]
+
+    assert allocation.disposition is (
+        CapacityAllocationDisposition.URGENT_VISIBLE_OPERATIONAL_HOLD
+    )
+    assert allocation.item.revalidation_result is CapacityRevalidationResult.EXPIRED
+    assert decision.urgent_grants == 0
+    assert decision.downgraded_urgent_to_ordinary is False
+
+
+def test_maximum_valid_population_decision_round_trips_canonically() -> None:
+    items = tuple(
+        _capacity_item(f"maximum-{index:02d}", lane=PriorityLane.TIME_SENSITIVE)
+        for index in range(48)
+    )
+    decision = allocate_reserved_capacity(
+        policy=_capacity_policy(), snapshot=_snapshot(*items)
+    )
+
+    assert len(decision.snapshot.population) == 48
+    assert (
+        ReservedCapacityDecision.from_canonical_bytes(decision.canonical_bytes)
+        == decision
+    )
 
 
 @pytest.mark.parametrize("active_urgent", range(5))
@@ -658,6 +766,27 @@ def test_canonical_parsers_reject_boolean_ordinals_as_type_confusion() -> None:
         UrgencyDeadlineDecision.from_canonical_bytes(
             json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         )
+
+
+def test_deep_json_and_canonical_recursion_fail_as_contract_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deeply_nested = b'{"value":' * 1_100 + b"0" + b"}" * 1_100
+    with pytest.raises(SchedulingContractError):
+        ReservedCapacityDecision.from_canonical_bytes(deeply_nested)
+
+    decision = calculate_urgency_deadline(policy=_policy(), item=_input())
+    raw = decision.canonical_bytes
+
+    def recursive_canonical(_: object) -> bytes:
+        raise RecursionError("fixture canonical recursion")
+
+    monkeypatch.setattr(
+        "newsroom.increment6.scheduling.canonical_json_bytes",
+        recursive_canonical,
+    )
+    with pytest.raises(SchedulingContractError):
+        UrgencyDeadlineDecision.from_canonical_bytes(raw)
 
 
 def test_interface_aliases_and_schema_boundary_are_exact() -> None:

@@ -21,7 +21,11 @@ from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
 )
-from newsroom.increment6.outcomes import PriorityLane, PrioritySelection
+from newsroom.increment6.outcomes import (
+    PriorityLane,
+    PrioritySelection,
+    ReasonReference,
+)
 
 SCHEDULING_POLICY_SCHEMA_VERSION = "newsroom.increment6.triage-scheduling-policy.v1"
 
@@ -31,9 +35,13 @@ _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _LOCAL_TIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
 _UTC_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _TIE_BREAK = "WORK_ITEM_VERSION_ID_ASC"
-_MAX_CANONICAL_BYTES = 1_000_000
 _MAX_CAPACITY_ITEM_BYTES = 16_384
 _MAX_CAPACITY_POPULATION = 48
+_MAX_CANONICAL_OVERHEAD_BYTES = 131_072
+_MAX_JSON_DEPTH = 64
+_MAX_CANONICAL_BYTES = (
+    _MAX_CAPACITY_POPULATION * _MAX_CAPACITY_ITEM_BYTES + _MAX_CANONICAL_OVERHEAD_BYTES
+)
 _MAX_INTEGER = 2_147_483_647
 _MAX_DURATION_SECONDS = 315_576_000  # ten years, including leap-day headroom
 
@@ -107,15 +115,48 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 def _decode_canonical_object(raw: bytes, *, field: str) -> dict[str, object]:
     if not isinstance(raw, bytes) or not raw or len(raw) > _MAX_CANONICAL_BYTES:
         raise SchedulingContractError(f"{field} bounded bytes are required")
+    depth = 0
+    in_string = False
+    escaped = False
+    for byte in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == ord("\\"):
+                escaped = True
+            elif byte == ord('"'):
+                in_string = False
+        elif byte == ord('"'):
+            in_string = True
+        elif byte in {ord("{"), ord("[")}:
+            depth += 1
+            if depth > _MAX_JSON_DEPTH:
+                raise SchedulingContractError(f"{field} exceeds the JSON depth bound")
+        elif byte in {ord("}"), ord("]")}:
+            depth -= 1
+            if depth < 0:
+                raise SchedulingContractError(f"{field} has invalid JSON depth")
     try:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, MemoryError) as exc:
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+        MemoryError,
+        RecursionError,
+    ) as exc:
         raise SchedulingContractError(f"{field} is not JSON") from exc
     if not isinstance(value, dict):
         raise SchedulingContractError(f"{field} must be an object")
     try:
         canonical = canonical_json_bytes(value)
-    except (CanonicalizationError, ValueError, OverflowError, MemoryError) as exc:
+    except (
+        CanonicalizationError,
+        ValueError,
+        OverflowError,
+        MemoryError,
+        RecursionError,
+    ) as exc:
         raise SchedulingContractError(f"{field} is not canonical JSON") from exc
     if canonical != raw:
         raise SchedulingContractError(f"{field} is not canonical JSON")
@@ -916,7 +957,6 @@ class ReservedCapacityDisposition(StrEnum):
     NO_PENDING_WORK = "NO_PENDING_WORK"
     CAPACITY_DEFERRED = "CAPACITY_DEFERRED"
     URGENT_VISIBLE_OPERATIONAL_HOLD = "URGENT_VISIBLE_OPERATIONAL_HOLD"
-    REVALIDATION_REQUIRED = "REVALIDATION_REQUIRED"
 
 
 class CapacityWorkState(StrEnum):
@@ -924,17 +964,16 @@ class CapacityWorkState(StrEnum):
     PENDING = "PENDING"
 
 
-class CapacityRevalidationDisposition(StrEnum):
-    NOT_REQUIRED = "NOT_REQUIRED"
+class CapacityRevalidationResult(StrEnum):
     REVALIDATED = "REVALIDATED"
-    REVALIDATION_REQUIRED = "REVALIDATION_REQUIRED"
+    EXPIRED = "EXPIRED"
+    CLOSED = "CLOSED"
 
 
 class CapacityAllocationDisposition(StrEnum):
     GRANTED = "GRANTED"
     CAPACITY_DEFERRED = "CAPACITY_DEFERRED"
     URGENT_VISIBLE_OPERATIONAL_HOLD = "URGENT_VISIBLE_OPERATIONAL_HOLD"
-    REVALIDATION_REQUIRED = "REVALIDATION_REQUIRED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1074,84 +1113,251 @@ class ReservedCapacityPolicy:
 
 
 @dataclass(frozen=True, slots=True)
-class CapacityPopulationItem:
-    """One immutable population member bound to its canonical priority observation."""
+class CapacityRevalidationEvidence:
+    """Bounded input seam for a downstream authoritative currentness receipt.
+
+    This pure contract carries no authority itself.  A downstream authority may
+    bind its receipt to these exact bytes before presenting it to allocation.
+    """
 
     work_item_id: str
     work_item_version_id: str
     work_item_version_digest: str
-    priority_selection: PrioritySelection
-    observation: StarvationObservation
-    state: CapacityWorkState
-    revalidation: CapacityRevalidationDisposition
+    starvation_observation_digest: str
+    governing_policy_digest: str
+    snapshot_observed_at: str
+    currentness_basis: tuple[ReasonReference, ...]
+    result: CapacityRevalidationResult
+    authority: str = "NONE"
+    effect: str = "NONE"
 
     def __post_init__(self) -> None:
-        _require_token(self.work_item_id, field="capacity_work_item_id")
-        _require_token(self.work_item_version_id, field="capacity_work_item_version_id")
-        _require_digest(
-            self.work_item_version_digest, field="capacity_work_item_version_digest"
+        _require_token(self.work_item_id, field="revalidation_work_item_id")
+        _require_token(
+            self.work_item_version_id,
+            field="revalidation_work_item_version_id",
         )
-        if not isinstance(self.priority_selection, PrioritySelection) or not isinstance(
-            self.observation, StarvationObservation
+        _require_digest(
+            self.work_item_version_digest,
+            field="revalidation_work_item_version_digest",
+        )
+        _require_digest(
+            self.starvation_observation_digest,
+            field="revalidation_starvation_observation_digest",
+        )
+        _require_digest(
+            self.governing_policy_digest,
+            field="revalidation_governing_policy_digest",
+        )
+        _parse_utc(
+            self.snapshot_observed_at,
+            field="revalidation_snapshot_observed_at",
+        )
+        if (
+            not isinstance(self.currentness_basis, tuple)
+            or len(self.currentness_basis) != 1
+            or any(
+                not isinstance(item, ReasonReference) for item in self.currentness_basis
+            )
         ):
             raise SchedulingContractError(
-                "capacity item priority and observation must be typed"
+                "revalidation currentness basis must be an immutable typed tuple"
+            )
+        basis_bytes = tuple(
+            canonical_json_bytes(item.canonical_value())
+            for item in self.currentness_basis
+        )
+        if basis_bytes != tuple(sorted(basis_bytes)) or len(basis_bytes) != len(
+            set(basis_bytes)
+        ):
+            raise SchedulingContractError(
+                "revalidation currentness basis must be sorted and unique"
+            )
+        if not isinstance(self.result, CapacityRevalidationResult):
+            raise SchedulingContractError("revalidation result must be typed")
+        expected_basis_type = f"revalidation-{self.result.value.lower()}"
+        if self.currentness_basis[0].reference_type != expected_basis_type:
+            raise SchedulingContractError(
+                "revalidation result differs from its currentness basis"
+            )
+        if self.authority != "NONE" or self.effect != "NONE":
+            raise SchedulingContractError(
+                "revalidation evidence cannot claim authority or effect"
+            )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "work_item_id": self.work_item_id,
+            "work_item_version_id": self.work_item_version_id,
+            "work_item_version_digest": self.work_item_version_digest,
+            "starvation_observation_digest": self.starvation_observation_digest,
+            "governing_policy_digest": self.governing_policy_digest,
+            "snapshot_observed_at": self.snapshot_observed_at,
+            "currentness_basis": [
+                item.canonical_value() for item in self.currentness_basis
+            ],
+            "result": self.result.value,
+            "authority": self.authority,
+            "effect": self.effect,
+        }
+
+    @property
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(self.canonical_value())
+
+    @property
+    def evidence_digest(self) -> str:
+        return digest_bytes(self.canonical_bytes)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> CapacityRevalidationEvidence:
+        _strict_keys(
+            value,
+            required={
+                "work_item_id",
+                "work_item_version_id",
+                "work_item_version_digest",
+                "starvation_observation_digest",
+                "governing_policy_digest",
+                "snapshot_observed_at",
+                "currentness_basis",
+                "result",
+                "authority",
+                "effect",
+            },
+            field="capacity_revalidation_evidence",
+        )
+        raw_basis = value["currentness_basis"]
+        if not isinstance(raw_basis, list) or any(
+            not isinstance(item, dict) for item in raw_basis
+        ):
+            raise SchedulingContractError(
+                "revalidation currentness basis must be an array of objects"
             )
         try:
-            if (
-                len(self.priority_selection.canonical_bytes) > _MAX_CAPACITY_ITEM_BYTES
-                or len(self.observation.canonical_bytes) > _MAX_CAPACITY_ITEM_BYTES
-            ):
+            return cls(
+                work_item_id=value["work_item_id"],
+                work_item_version_id=value["work_item_version_id"],
+                work_item_version_digest=value["work_item_version_digest"],
+                starvation_observation_digest=value["starvation_observation_digest"],
+                governing_policy_digest=value["governing_policy_digest"],
+                snapshot_observed_at=value["snapshot_observed_at"],
+                currentness_basis=tuple(
+                    ReasonReference.from_mapping(item) for item in raw_basis
+                ),
+                result=CapacityRevalidationResult(value["result"]),
+                authority=value["authority"],
+                effect=value["effect"],
+            )  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise SchedulingContractError(
+                "capacity revalidation evidence is malformed"
+            ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class CapacityPopulationItem:
+    """One immutable population member with no duplicated identity or lane state."""
+
+    observation: StarvationObservation
+    state: CapacityWorkState
+    revalidation_evidence: CapacityRevalidationEvidence | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.observation, StarvationObservation):
+            raise SchedulingContractError("capacity item observation must be typed")
+        try:
+            if len(self.observation.canonical_bytes) > _MAX_CAPACITY_ITEM_BYTES:
                 raise SchedulingContractError(
                     "capacity item exceeds the canonical byte bound"
                 )
-        except (CanonicalizationError, ValueError, OverflowError, MemoryError) as exc:
+        except (
+            CanonicalizationError,
+            ValueError,
+            OverflowError,
+            MemoryError,
+            RecursionError,
+        ) as exc:
             raise SchedulingContractError(
                 "capacity item is not canonically representable"
             ) from exc
-        source = self.observation.item
-        if (
-            self.work_item_id != source.work_item_id
-            or self.work_item_version_id != source.work_item_version_id
-            or self.work_item_version_digest != source.work_item_version_digest
-            or self.priority_selection != source.priority_selection
+        if not isinstance(self.state, CapacityWorkState):
+            raise SchedulingContractError("capacity item state must be typed")
+        if self.revalidation_evidence is not None and not isinstance(
+            self.revalidation_evidence, CapacityRevalidationEvidence
         ):
             raise SchedulingContractError(
-                "capacity item differs from its exact scheduling observation"
-            )
-        if not isinstance(self.state, CapacityWorkState) or not isinstance(
-            self.revalidation, CapacityRevalidationDisposition
-        ):
-            raise SchedulingContractError(
-                "capacity item state and revalidation must be typed"
+                "capacity item revalidation evidence must be typed or null"
             )
         if not self.observation.schedulable:
             raise SchedulingContractError(
                 "capacity population may contain only canonical schedulable work"
             )
-        required = self.observation.revalidation_required
-        if required and self.revalidation not in {
-            CapacityRevalidationDisposition.REVALIDATED,
-            CapacityRevalidationDisposition.REVALIDATION_REQUIRED,
-        }:
+        evidence = self.revalidation_evidence
+        if self.observation.revalidation_required and evidence is None:
             raise SchedulingContractError(
-                "capacity item must expose required revalidation"
+                "capacity item must expose exact revalidation evidence"
             )
-        if (
-            not required
-            and self.revalidation is not CapacityRevalidationDisposition.NOT_REQUIRED
-        ):
+        if not self.observation.revalidation_required and evidence is not None:
             raise SchedulingContractError(
-                "capacity item has a conflicting revalidation state"
+                "capacity item has conflicting revalidation evidence"
             )
-        if (
-            self.state is CapacityWorkState.ACTIVE
-            and self.revalidation
-            is CapacityRevalidationDisposition.REVALIDATION_REQUIRED
-        ):
+        if evidence is not None:
+            source = self.observation.item
+            if (
+                evidence.work_item_id != source.work_item_id
+                or evidence.work_item_version_id != source.work_item_version_id
+                or evidence.work_item_version_digest != source.work_item_version_digest
+                or evidence.starvation_observation_digest
+                != self.observation.decision_digest
+                or evidence.governing_policy_digest
+                != self.observation.policy.policy_digest
+                or evidence.snapshot_observed_at != source.observed_at
+            ):
+                raise SchedulingContractError(
+                    "revalidation evidence differs from its exact observation"
+                )
+            if (
+                self.state is CapacityWorkState.ACTIVE
+                and evidence.result is not CapacityRevalidationResult.REVALIDATED
+            ):
+                raise SchedulingContractError(
+                    "active work requires current revalidated evidence"
+                )
+        try:
+            if (
+                len(canonical_json_bytes(self.canonical_value()))
+                > _MAX_CAPACITY_ITEM_BYTES
+            ):
+                raise SchedulingContractError(
+                    "capacity item exceeds the canonical byte bound"
+                )
+        except (
+            CanonicalizationError,
+            ValueError,
+            OverflowError,
+            MemoryError,
+            RecursionError,
+        ) as exc:
             raise SchedulingContractError(
-                "active work cannot still require revalidation"
-            )
+                "capacity item is not canonically representable"
+            ) from exc
+
+    @property
+    def work_item_id(self) -> str:
+        return self.observation.item.work_item_id
+
+    @property
+    def work_item_version_id(self) -> str:
+        return self.observation.item.work_item_version_id
+
+    @property
+    def work_item_version_digest(self) -> str:
+        return self.observation.item.work_item_version_digest
+
+    @property
+    def priority_selection(self) -> PrioritySelection:
+        return self.observation.item.priority_selection
 
     @property
     def lane(self) -> PriorityLane:
@@ -1165,21 +1371,29 @@ class CapacityPopulationItem:
     def identity_key(self) -> tuple[str, str]:
         return (self.work_item_id, self.work_item_version_id)
 
+    @property
+    def revalidation_result(self) -> CapacityRevalidationResult | None:
+        return (
+            None
+            if self.revalidation_evidence is None
+            else self.revalidation_evidence.result
+        )
+
     def canonical_value(self) -> dict[str, object]:
         return {
-            "work_item_id": self.work_item_id,
-            "work_item_version_id": self.work_item_version_id,
-            "work_item_version_digest": self.work_item_version_digest,
-            "priority_selection": self.priority_selection.canonical_value(),
-            "priority_selection_digest": digest_bytes(
-                self.priority_selection.canonical_bytes
-            ),
             "observation": self.observation.canonical_value(),
             "observation_digest": self.observation.decision_digest,
             "state": self.state.value,
-            "revalidation": self.revalidation.value,
-            "lane": self.lane.value,
-            "capacity_class": self.capacity_class.value,
+            "revalidation_evidence": (
+                None
+                if self.revalidation_evidence is None
+                else self.revalidation_evidence.canonical_value()
+            ),
+            "revalidation_evidence_digest": (
+                None
+                if self.revalidation_evidence is None
+                else self.revalidation_evidence.evidence_digest
+            ),
         }
 
     @classmethod
@@ -1187,58 +1401,50 @@ class CapacityPopulationItem:
         _strict_keys(
             value,
             required={
-                "work_item_id",
-                "work_item_version_id",
-                "work_item_version_digest",
-                "priority_selection",
-                "priority_selection_digest",
                 "observation",
                 "observation_digest",
                 "state",
-                "revalidation",
-                "lane",
-                "capacity_class",
+                "revalidation_evidence",
+                "revalidation_evidence_digest",
             },
             field="capacity_population_item",
         )
-        raw_priority, raw_observation = (
-            value["priority_selection"],
-            value["observation"],
-        )
-        if not isinstance(raw_priority, dict) or not isinstance(raw_observation, dict):
+        raw_observation = value["observation"]
+        raw_evidence = value["revalidation_evidence"]
+        if not isinstance(raw_observation, dict) or (
+            raw_evidence is not None and not isinstance(raw_evidence, dict)
+        ):
             raise SchedulingContractError(
-                "capacity item priority and observation must be objects"
+                "capacity item observation and evidence are malformed"
             )
         try:
-            priority = PrioritySelection.from_mapping(raw_priority)
             observation = StarvationObservation.from_canonical_bytes(
                 canonical_json_bytes(raw_observation)
             )
+            evidence = (
+                None
+                if raw_evidence is None
+                else CapacityRevalidationEvidence.from_mapping(raw_evidence)
+            )
             result = cls(
-                work_item_id=value["work_item_id"],
-                work_item_version_id=value["work_item_version_id"],
-                work_item_version_digest=value["work_item_version_digest"],
-                priority_selection=priority,
                 observation=observation,
                 state=CapacityWorkState(value["state"]),
-                revalidation=CapacityRevalidationDisposition(value["revalidation"]),
-            )  # type: ignore[arg-type]
+                revalidation_evidence=evidence,
+            )
         except (
             TypeError,
             ValueError,
             CanonicalizationError,
             MemoryError,
             OverflowError,
+            RecursionError,
         ) as exc:
             raise SchedulingContractError(
                 "capacity population item is malformed"
             ) from exc
-        if (
-            value["priority_selection_digest"] != digest_bytes(priority.canonical_bytes)
-            or value["observation_digest"] != observation.decision_digest
-            or value["lane"] != result.lane.value
-            or value["capacity_class"] != result.capacity_class.value
-        ):
+        if value["observation_digest"] != observation.decision_digest or value[
+            "revalidation_evidence_digest"
+        ] != (None if evidence is None else evidence.evidence_digest):
             raise SchedulingContractError("capacity item derived binding differs")
         return result
 
@@ -1246,11 +1452,16 @@ class CapacityPopulationItem:
 @dataclass(frozen=True, slots=True)
 class CapacitySnapshot:
     observed_at: str
+    urgency_policy: UrgencyDeadlinePolicy
     population: tuple[CapacityPopulationItem, ...]
     urgent_path_state: CapacityPathState
 
     def __post_init__(self) -> None:
         _parse_utc(self.observed_at, field="capacity_observed_at")
+        if not isinstance(self.urgency_policy, UrgencyDeadlinePolicy):
+            raise SchedulingContractError(
+                "capacity snapshot urgency policy must be typed"
+            )
         if not isinstance(self.population, tuple) or any(
             not isinstance(item, CapacityPopulationItem) for item in self.population
         ):
@@ -1266,6 +1477,10 @@ class CapacitySnapshot:
         identities: set[str] = set()
         versions: set[tuple[str, str]] = set()
         for item in self.population:
+            if item.observation.policy != self.urgency_policy:
+                raise SchedulingContractError(
+                    "capacity item uses a different exact urgency policy"
+                )
             if item.observation.item.observed_at != self.observed_at:
                 raise SchedulingContractError(
                     "capacity item observation time differs from snapshot"
@@ -1329,6 +1544,8 @@ class CapacitySnapshot:
     def canonical_value(self) -> dict[str, object]:
         return {
             "observed_at": self.observed_at,
+            "urgency_policy": self.urgency_policy.canonical_value(),
+            "urgency_policy_digest": self.urgency_policy.policy_digest,
             "population": [item.canonical_value() for item in self.population],
             "urgent_path_state": self.urgent_path_state.value,
             "active_urgent_slots": self.active_urgent_slots,
@@ -1343,6 +1560,8 @@ class CapacitySnapshot:
             value,
             required={
                 "observed_at",
+                "urgency_policy",
+                "urgency_policy_digest",
                 "population",
                 "urgent_path_state",
                 "active_urgent_slots",
@@ -1353,6 +1572,11 @@ class CapacitySnapshot:
             field="capacity_snapshot",
         )
         raw_population = value["population"]
+        raw_urgency_policy = value["urgency_policy"]
+        if not isinstance(raw_urgency_policy, dict):
+            raise SchedulingContractError(
+                "capacity snapshot urgency policy must be an object"
+            )
         if not isinstance(raw_population, list) or any(
             not isinstance(item, dict) for item in raw_population
         ):
@@ -1360,8 +1584,10 @@ class CapacitySnapshot:
                 "capacity population must be an array of objects"
             )
         try:
+            urgency_policy = UrgencyDeadlinePolicy.from_mapping(raw_urgency_policy)
             result = cls(
                 observed_at=value["observed_at"],
+                urgency_policy=urgency_policy,
                 population=tuple(
                     CapacityPopulationItem.from_mapping(item) for item in raw_population
                 ),
@@ -1369,6 +1595,10 @@ class CapacitySnapshot:
             )  # type: ignore[arg-type]
         except (TypeError, ValueError) as exc:
             raise SchedulingContractError("capacity snapshot is malformed") from exc
+        if value["urgency_policy_digest"] != urgency_policy.policy_digest:
+            raise SchedulingContractError(
+                "capacity snapshot urgency policy digest differs"
+            )
         for field in (
             "active_urgent_slots",
             "active_ordinary_slots",
@@ -1410,7 +1640,8 @@ class CapacityItemAllocation:
             self.disposition is not CapacityAllocationDisposition.GRANTED
             or self.item.lane is not PriorityLane.ROUTINE
             or self.item.observation.starvation_state is not StarvationState.STARVED
-            or self.item.revalidation is not CapacityRevalidationDisposition.REVALIDATED
+            or self.item.revalidation_result
+            is not CapacityRevalidationResult.REVALIDATED
         ):
             raise SchedulingContractError("protected Routine grant is not eligible")
 
@@ -1426,8 +1657,22 @@ class CapacityItemAllocation:
             "lane": self.item.lane.value,
             "capacity_class": self.item.capacity_class.value,
             "disposition": self.disposition.value,
+            "revalidation_result": (
+                None
+                if self.revalidation_result is None
+                else self.revalidation_result.value
+            ),
+            "revalidation_evidence_digest": (
+                None
+                if self.item.revalidation_evidence is None
+                else self.item.revalidation_evidence.evidence_digest
+            ),
             "protected_routine_grant": self.protected_routine_grant,
         }
+
+    @property
+    def revalidation_result(self) -> CapacityRevalidationResult | None:
+        return self.item.revalidation_result
 
 
 @dataclass(frozen=True, slots=True)
@@ -1515,11 +1760,6 @@ class ReservedCapacityDecision:
             for a in pending
         ):
             return ReservedCapacityDisposition.URGENT_VISIBLE_OPERATIONAL_HOLD
-        if all(
-            a.disposition is CapacityAllocationDisposition.REVALIDATION_REQUIRED
-            for a in pending
-        ):
-            return ReservedCapacityDisposition.REVALIDATION_REQUIRED
         return ReservedCapacityDisposition.CAPACITY_DEFERRED
 
     @property
@@ -1533,11 +1773,6 @@ class ReservedCapacityDecision:
             return ReservedCapacityDisposition.NO_PENDING_WORK
         if any(a.disposition is CapacityAllocationDisposition.GRANTED for a in pending):
             return ReservedCapacityDisposition.ADMITTED
-        if all(
-            a.disposition is CapacityAllocationDisposition.REVALIDATION_REQUIRED
-            for a in pending
-        ):
-            return ReservedCapacityDisposition.REVALIDATION_REQUIRED
         return ReservedCapacityDisposition.CAPACITY_DEFERRED
 
     @property
@@ -1684,8 +1919,7 @@ def _capacity_values(
     urgent_eligible = [
         item
         for item in urgent
-        if item.revalidation
-        is not CapacityRevalidationDisposition.REVALIDATION_REQUIRED
+        if item.revalidation_result in {None, CapacityRevalidationResult.REVALIDATED}
     ]
     urgent_limit = (
         0
@@ -1700,8 +1934,7 @@ def _capacity_values(
     ordinary_eligible = [
         item
         for item in ordinary
-        if item.revalidation
-        is not CapacityRevalidationDisposition.REVALIDATION_REQUIRED
+        if item.revalidation_result in {None, CapacityRevalidationResult.REVALIDATED}
     ]
     protected = next(
         (
@@ -1709,7 +1942,7 @@ def _capacity_values(
             for item in ordinary_eligible
             if item.lane is PriorityLane.ROUTINE
             and item.observation.starvation_state is StarvationState.STARVED
-            and item.revalidation is CapacityRevalidationDisposition.REVALIDATED
+            and item.revalidation_result is CapacityRevalidationResult.REVALIDATED
         ),
         None,
     )
@@ -1723,9 +1956,7 @@ def _capacity_values(
     ordinary_selected = {item.identity_key for item in selected_ordinary}
     allocations: list[CapacityItemAllocation] = []
     for item in urgent + ordinary:
-        if item.revalidation is CapacityRevalidationDisposition.REVALIDATION_REQUIRED:
-            disposition = CapacityAllocationDisposition.REVALIDATION_REQUIRED
-        elif (
+        if (
             item.capacity_class is CapacityClass.URGENT_RESERVED
             and snapshot.urgent_path_state is not CapacityPathState.AVAILABLE
         ):
@@ -1782,7 +2013,8 @@ __all__ = [
     "CapacityItemAllocation",
     "CapacityPathState",
     "CapacityPopulationItem",
-    "CapacityRevalidationDisposition",
+    "CapacityRevalidationEvidence",
+    "CapacityRevalidationResult",
     "CapacitySnapshot",
     "CapacityWorkState",
     "DeadlineBoundary",
