@@ -203,6 +203,7 @@ class Handoff:
     state: HandoffState = HandoffState.PENDING
     attempts: tuple[HandoffAttempt, ...] = ()
     acknowledgements: tuple[Acknowledgement, ...] = ()
+    causal_acknowledgement_ids: tuple[str, ...] = ()
     retry_exhausted: bool = False
     ambiguity_reason: str | None = None
     evaluation_only: bool = True
@@ -252,11 +253,36 @@ class Handoff:
             for item in self.acknowledgements
         ):
             raise HandoffContractError("acknowledgements")
+        if any(
+            not isinstance(item, str)
+            or _ACKNOWLEDGEMENT_ID.fullmatch(item) is None
+            for item in self.causal_acknowledgement_ids
+        ):
+            raise HandoffContractError("causal_acknowledgement_ids")
+        if tuple(sorted(set(self.causal_acknowledgement_ids))) != (
+            self.causal_acknowledgement_ids
+        ):
+            raise HandoffContractError("causal_acknowledgement_ids")
+        if not set(self.causal_acknowledgement_ids) <= {
+            item.acknowledgement_id for item in self.acknowledgements
+        }:
+            raise HandoffContractError("causal_acknowledgement_ids")
+        if self.causal_acknowledgement_ids and not any(
+            attempt.sent for attempt in self.attempts
+        ):
+            raise HandoffContractError(
+                "causal acknowledgement requires a sent attempt"
+            )
         expected_numbers = tuple(range(1, len(self.attempts) + 1))
         if tuple(item.attempt_number for item in self.attempts) != expected_numbers:
             raise HandoffContractError("attempt sequence")
         if any(item.handoff_id != self.handoff_id for item in self.attempts):
             raise HandoffContractError("attempt handoff_id")
+        if any(
+            not previous.sent or not previous.ambiguous
+            for previous in self.attempts[:-1]
+        ):
+            raise HandoffContractError("attempt history")
         if len(self.attempts) > self.max_attempts:
             raise HandoffContractError("attempt limit")
         if self.retry_exhausted and self.state is not HandoffState.AMBIGUOUS:
@@ -348,16 +374,23 @@ def mark_attempt_ambiguous(handoff: Handoff, attempt_id: str) -> Handoff:
         raise HandoffContractError("ambiguous attempt was not sent")
     if attempt.ambiguous:
         return handoff
-    if handoff.state is not HandoffState.PENDING:
-        raise HandoffContractError("ambiguous transition requires pending state")
     attempts = list(handoff.attempts)
     attempts[index] = replace(attempt, ambiguous=True)
+    if index < len(attempts) - 1:
+        return replace(handoff, attempts=tuple(attempts))
     reason = "target_outcome_unknown"
-    if handoff.acknowledgements:
-        derived = _derived_ack_state(handoff)
-        if derived is None or derived[0] is not HandoffState.AMBIGUOUS:
-            raise HandoffContractError("retry timeout acknowledgement state")
-        reason = derived[1]
+    derived = _derived_ack_state(handoff)
+    if derived is not None:
+        return replace(
+            handoff,
+            state=derived[0],
+            attempts=tuple(attempts),
+            retry_exhausted=(
+                derived[0] is HandoffState.AMBIGUOUS
+                and len(attempts) >= handoff.max_attempts
+            ),
+            ambiguity_reason=derived[1],
+        )
     return replace(
         handoff,
         state=HandoffState.AMBIGUOUS,
@@ -377,7 +410,17 @@ def request_retry(handoff: Handoff) -> Handoff:
         raise HandoffContractError("retry requires ambiguous state")
     if len(handoff.attempts) >= handoff.max_attempts:
         return replace(handoff, retry_exhausted=True)
-    return replace(handoff, state=HandoffState.RETRY, ambiguity_reason=None)
+    if not handoff.attempts or not handoff.attempts[-1].sent:
+        raise HandoffContractError("retry requires a sent attempt")
+    attempts = handoff.attempts[:-1] + (
+        replace(handoff.attempts[-1], ambiguous=True),
+    )
+    return replace(
+        handoff,
+        state=HandoffState.RETRY,
+        attempts=attempts,
+        ambiguity_reason=None,
+    )
 
 
 def _ack_mismatch(handoff: Handoff, acknowledgement: Acknowledgement) -> str | None:
@@ -410,17 +453,22 @@ def _ack_mismatch(handoff: Handoff, acknowledgement: Acknowledgement) -> str | N
 def _derived_ack_state(
     handoff: Handoff,
 ) -> tuple[HandoffState, str | None] | None:
-    if not handoff.acknowledgements:
+    authoritative = tuple(
+        item
+        for item in handoff.acknowledgements
+        if item.acknowledgement_id in handoff.causal_acknowledgement_ids
+    )
+    if not authoritative:
         return None
     correlated = {
         item.outcome
-        for item in handoff.acknowledgements
+        for item in authoritative
         if _ack_mismatch(handoff, item) is None
     }
     mismatches = sorted(
         {
             mismatch
-            for item in handoff.acknowledgements
+            for item in authoritative
             if (mismatch := _ack_mismatch(handoff, item)) is not None
         }
     )
@@ -451,6 +499,8 @@ def _validate_handoff_state(handoff: Handoff) -> None:
             if (
                 handoff.state is HandoffState.RETRY
                 and handoff.ambiguity_reason is None
+                and latest is not None
+                and latest.ambiguous
                 and len(handoff.attempts) < handoff.max_attempts
             ):
                 return
@@ -506,16 +556,25 @@ def correlate_acknowledgement(
             key=lambda item: item.acknowledgement_id,
         )
     )
+    causal_ids = handoff.causal_acknowledgement_ids
+    if any(attempt.sent for attempt in handoff.attempts):
+        causal_ids = tuple(
+            sorted(set(causal_ids) | {acknowledgement.acknowledgement_id})
+        )
+    if acknowledgement.acknowledgement_id not in causal_ids:
+        return replace(handoff, acknowledgements=acknowledgements)
     correlated_outcomes = {
         item.outcome
         for item in acknowledgements
-        if _ack_mismatch(handoff, item) is None
+        if item.acknowledgement_id in causal_ids
+        and _ack_mismatch(handoff, item) is None
     }
     if len(correlated_outcomes) > 1:
         return replace(
             handoff,
             state=HandoffState.AMBIGUOUS,
             acknowledgements=acknowledgements,
+            causal_acknowledgement_ids=causal_ids,
             retry_exhausted=len(handoff.attempts) >= handoff.max_attempts,
             ambiguity_reason="conflicting_acknowledgements",
         )
@@ -523,7 +582,8 @@ def correlate_acknowledgement(
         {
             mismatch
             for item in acknowledgements
-            if (mismatch := _ack_mismatch(handoff, item)) is not None
+            if item.acknowledgement_id in causal_ids
+            and (mismatch := _ack_mismatch(handoff, item)) is not None
         }
     )
     if mismatches:
@@ -531,6 +591,7 @@ def correlate_acknowledgement(
             handoff,
             state=HandoffState.AMBIGUOUS,
             acknowledgements=acknowledgements,
+            causal_acknowledgement_ids=causal_ids,
             retry_exhausted=len(handoff.attempts) >= handoff.max_attempts,
             ambiguity_reason=mismatches[0],
         )
@@ -546,6 +607,7 @@ def correlate_acknowledgement(
         handoff,
         state=state,
         acknowledgements=acknowledgements,
+        causal_acknowledgement_ids=causal_ids,
         retry_exhausted=False,
         ambiguity_reason=None,
     )
@@ -718,7 +780,8 @@ class EvaluationHandoffStore:
         acknowledgement_rows = self._connection.execute(
             "SELECT schema_identity,acknowledgement_id,handoff_id,attempt_id,"
             "candidate_version_id,governing_manifest_digest,sink_id,outcome,"
-            "response_digest FROM evaluation_handoff_acknowledgements "
+            "response_digest,state_authority "
+            "FROM evaluation_handoff_acknowledgements "
             "WHERE recorded_handoff_id=? ORDER BY acknowledgement_id",
             (handoff_id,),
         ).fetchall()
@@ -736,6 +799,9 @@ class EvaluationHandoffStore:
             for item in acknowledgement_rows
             if self._require_schema(item[0], HANDOFF_ACKNOWLEDGEMENT)
         )
+        causal_acknowledgement_ids = tuple(
+            str(item[1]) for item in acknowledgement_rows if bool(item[9])
+        )
         return Handoff(
             handoff_id=handoff_id,
             candidate_version_id=str(row[1]),
@@ -745,6 +811,7 @@ class EvaluationHandoffStore:
             state=HandoffState(str(row[5])),
             attempts=attempts,
             acknowledgements=acknowledgements,
+            causal_acknowledgement_ids=causal_acknowledgement_ids,
             retry_exhausted=bool(row[6]),
             ambiguity_reason=None if row[7] is None else str(row[7]),
             evaluation_only=bool(row[8]),
@@ -791,8 +858,8 @@ class EvaluationHandoffStore:
                 "INSERT INTO evaluation_handoff_acknowledgements("
                 "acknowledgement_id,schema_identity,recorded_handoff_id,"
                 "handoff_id,attempt_id,candidate_version_id,"
-                "governing_manifest_digest,sink_id,outcome,response_digest) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "governing_manifest_digest,sink_id,outcome,response_digest,"
+                "state_authority) VALUES(?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(recorded_handoff_id,acknowledgement_id) DO NOTHING",
                 (
                     acknowledgement.acknowledgement_id,
@@ -805,11 +872,16 @@ class EvaluationHandoffStore:
                     acknowledgement.sink_id,
                     acknowledgement.outcome.value,
                     acknowledgement.response_digest,
+                    int(
+                        acknowledgement.acknowledgement_id
+                        in handoff.causal_acknowledgement_ids
+                    ),
                 ),
             )
             retained = self._connection.execute(
                 "SELECT handoff_id,attempt_id,candidate_version_id,"
-                "governing_manifest_digest,sink_id,outcome,response_digest "
+                "governing_manifest_digest,sink_id,outcome,response_digest,"
+                "state_authority "
                 "FROM evaluation_handoff_acknowledgements "
                 "WHERE recorded_handoff_id=? AND acknowledgement_id=?",
                 (handoff.handoff_id, acknowledgement.acknowledgement_id),
@@ -822,6 +894,10 @@ class EvaluationHandoffStore:
                 acknowledgement.sink_id,
                 acknowledgement.outcome.value,
                 acknowledgement.response_digest,
+                int(
+                    acknowledgement.acknowledgement_id
+                    in handoff.causal_acknowledgement_ids
+                ),
             )
             if retained != expected:
                 raise HandoffContractError(

@@ -216,6 +216,77 @@ def test_replayed_timeout_for_earlier_attempt_does_not_undo_active_retry() -> No
     assert handoff.state is HandoffState.PENDING
 
 
+def test_delayed_timeout_for_earlier_attempt_preserves_sent_active_retry() -> None:
+    initial = persist_attempt(_handoff())
+    first = initial.attempts[0]
+    initial = mark_attempt_sent(initial, first.attempt_id)
+    wrong = _ack(
+        initial,
+        first,
+        handoff_id="handoff:sha256:" + "0" * 64,
+    )
+
+    timeout_first = correlate_acknowledgement(initial, wrong)
+    timeout_first = mark_attempt_ambiguous(timeout_first, first.attempt_id)
+    timeout_first = persist_attempt(request_retry(timeout_first))
+    timeout_first = mark_attempt_sent(
+        timeout_first, timeout_first.attempts[1].attempt_id
+    )
+
+    retry_first = correlate_acknowledgement(initial, wrong)
+    retry_first = persist_attempt(request_retry(retry_first))
+    retry_first = mark_attempt_sent(retry_first, retry_first.attempts[1].attempt_id)
+    retry_first = mark_attempt_ambiguous(retry_first, first.attempt_id)
+
+    assert retry_first == timeout_first
+    assert retry_first.state is HandoffState.PENDING
+    assert retry_first.attempts[0].ambiguous is True
+    assert retry_first.attempts[1].sent is True
+    assert persist_attempt(retry_first) == retry_first
+    with pytest.raises(HandoffContractError, match="retry requires ambiguous"):
+        request_retry(retry_first)
+
+
+def test_public_handoff_rejects_premature_retry_attempt_history() -> None:
+    first = persist_attempt(_handoff())
+    first = mark_attempt_sent(first, first.attempts[0].attempt_id)
+    valid = mark_attempt_ambiguous(first, first.attempts[0].attempt_id)
+    valid = persist_attempt(request_retry(valid))
+
+    with pytest.raises(HandoffContractError, match="attempt history"):
+        replace(first, attempts=(first.attempts[0], valid.attempts[1]))
+
+
+def test_pristine_wrong_ack_is_audited_without_granting_retry_authority() -> None:
+    handoff = _handoff()
+    future_attempt = persist_attempt(handoff).attempts[0]
+    wrong = _ack(
+        handoff,
+        future_attempt,
+        handoff_id="handoff:sha256:" + "0" * 64,
+    )
+
+    retained = correlate_acknowledgement(handoff, wrong)
+
+    assert retained.state is HandoffState.PENDING
+    assert retained.acknowledgements == (wrong,)
+    assert correlate_acknowledgement(retained, wrong) == retained
+    first = persist_attempt(retained)
+    assert first.state is HandoffState.PENDING
+    assert len(first.attempts) == 1
+    with pytest.raises(HandoffContractError, match="retry requires ambiguous"):
+        request_retry(first)
+
+    with pytest.raises(HandoffContractError, match="causal acknowledgement"):
+        replace(
+            handoff,
+            state=HandoffState.AMBIGUOUS,
+            acknowledgements=(wrong,),
+            causal_acknowledgement_ids=(wrong.acknowledgement_id,),
+            ambiguity_reason="acknowledgement_handoff_id_mismatch",
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "reason"),
     [

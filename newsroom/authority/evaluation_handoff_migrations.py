@@ -252,6 +252,7 @@ EVALUATION_HANDOFF_MIGRATION_STATEMENTS: tuple[str, ...] = (
         sink_id TEXT NOT NULL,
         outcome TEXT NOT NULL CHECK(outcome IN('acknowledged','rejected')),
         response_digest TEXT NOT NULL,
+        state_authority INTEGER NOT NULL CHECK(state_authority IN(0,1)),
         PRIMARY KEY(recorded_handoff_id,acknowledgement_id),
         CHECK(substr(governing_manifest_digest,1,7)='sha256:'
               AND length(governing_manifest_digest)=71
@@ -314,6 +315,20 @@ EVALUATION_HANDOFF_MIGRATION_STATEMENTS: tuple[str, ...] = (
                   WHERE handoff_id=NEW.handoff_id
               )
               AND NEW.attempt_number<=h.max_attempts
+              AND (
+                  (NEW.attempt_number=1 AND h.transport_state='pending')
+                  OR (
+                      NEW.attempt_number>1
+                      AND h.transport_state='retry'
+                      AND EXISTS(
+                          SELECT 1 FROM evaluation_handoff_attempts AS previous
+                          WHERE previous.handoff_id=NEW.handoff_id
+                            AND previous.attempt_number=NEW.attempt_number-1
+                            AND previous.sent=1
+                            AND previous.ambiguous=1
+                      )
+                  )
+              )
         )
         BEGIN SELECT RAISE(ABORT,'invalid evaluation Handoff attempt sequence'); END""",
     """CREATE TRIGGER evaluation_handoff_attempt_update_guard
@@ -341,6 +356,13 @@ EVALUATION_HANDOFF_MIGRATION_STATEMENTS: tuple[str, ...] = (
     """CREATE TRIGGER immutable_evaluation_handoff_acknowledgements_update
         BEFORE UPDATE ON evaluation_handoff_acknowledgements
         BEGIN SELECT RAISE(ABORT,'immutable evaluation Handoff acknowledgement'); END""",
+    """CREATE TRIGGER evaluation_handoff_ack_state_authority_guard
+        BEFORE INSERT ON evaluation_handoff_acknowledgements
+        WHEN NEW.state_authority=1 AND NOT EXISTS(
+            SELECT 1 FROM evaluation_handoff_attempts
+            WHERE handoff_id=NEW.recorded_handoff_id AND sent=1
+        )
+        BEGIN SELECT RAISE(ABORT,'invalid acknowledgement state authority'); END""",
 )
 
 
