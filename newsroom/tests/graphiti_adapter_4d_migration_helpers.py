@@ -6,13 +6,17 @@ from pathlib import Path
 from newsroom.authority.graphiti_adapter_migrations import (
     GRAPHITI_ADAPTER_SCHEMA_VERSION,
 )
+from newsroom.authority.evaluation_handoff_migrations import (
+    EVALUATION_HANDOFF_SCHEMA_VERSION,
+)
 
 
 def downgrade_empty_graphiti_adapter_schema_to_v15(database: Path) -> None:
     """Remove only the empty v16 Graphiti-adapter schema from a checked test DB.
 
-    This helper is test-only. It preserves all v1-v15 authority rows and restores
-    the migration-history delete guard after removing the v16 history record.
+    This helper is test-only. It first removes the empty additive v17 successor,
+    preserves all v1-v15 authority rows, and restores the migration-history
+    delete guard after removing the v16+ history records.
     """
 
     conn = sqlite3.connect(database, isolation_level=None)
@@ -27,6 +31,20 @@ def downgrade_empty_graphiti_adapter_schema_to_v15(database: Path) -> None:
         ).fetchone()
         assert delete_trigger is not None and delete_trigger[0]
         conn.execute("DROP TRIGGER immutable_authority_migrations_delete")
+
+        if current >= EVALUATION_HANDOFF_SCHEMA_VERSION:
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND (name LIKE '%evaluation_handoff%' "
+                "OR tbl_name LIKE 'evaluation_handoff%') ORDER BY name DESC"
+            ).fetchall():
+                conn.execute(f'DROP TRIGGER "{row[0]}"')
+            for table in (
+                "evaluation_handoff_acknowledgements",
+                "evaluation_handoff_attempts",
+                "evaluation_handoffs",
+            ):
+                conn.execute(f'DROP TABLE "{table}"')
 
         for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='view' "

@@ -8,7 +8,12 @@ from newsroom.increment6.handoffs import (
     Acknowledgement,
     AcknowledgementOutcome,
     HandoffContractError,
+    HandoffAttempt,
     HandoffState,
+    EVALUATION_HANDOFF,
+    HANDOFF_ACKNOWLEDGEMENT,
+    HANDOFF_ATTEMPT,
+    HANDOFF_TRANSPORT_STATE,
     correlate_acknowledgement,
     create_handoff,
     mark_attempt_ambiguous,
@@ -32,16 +37,26 @@ def _handoff(*, max_attempts: int = 3):
     )
 
 
-def _ack(handoff, attempt, *, outcome=AcknowledgementOutcome.ACKNOWLEDGED):
+def _ack(
+    handoff,
+    attempt,
+    *,
+    outcome=AcknowledgementOutcome.ACKNOWLEDGED,
+    response_digest="sha256:" + "b" * 64,
+    **overrides,
+):
+    values = {
+        "handoff_id": handoff.handoff_id,
+        "attempt_id": attempt.attempt_id,
+        "candidate_version_id": handoff.candidate_version_id,
+        "governing_manifest_digest": handoff.governing_manifest_digest,
+        "sink_id": handoff.sink_id,
+    }
+    values.update(overrides)
     return Acknowledgement.create(
-        acknowledgement_id=f"sink-ack:{attempt.attempt_number}:{outcome.value}",
-        handoff_id=handoff.handoff_id,
-        attempt_id=attempt.attempt_id,
-        candidate_version_id=handoff.candidate_version_id,
-        governing_manifest_digest=handoff.governing_manifest_digest,
-        sink_id=handoff.sink_id,
         outcome=outcome,
-        response_digest="sha256:" + "b" * 64,
+        response_digest=response_digest,
+        **values,
     )
 
 
@@ -50,6 +65,10 @@ def test_logical_identity_is_immutable_semantic_and_exactly_bound() -> None:
     replay = _handoff()
 
     assert first == replay
+    assert first.schema_identity == EVALUATION_HANDOFF
+    assert HandoffAttempt.schema_identity == HANDOFF_ATTEMPT
+    assert Acknowledgement.schema_identity == HANDOFF_ACKNOWLEDGEMENT
+    assert HANDOFF_TRANSPORT_STATE == tuple(item.value for item in HandoffState)
     assert first.handoff_id.startswith("handoff:sha256:")
     assert first.candidate_version_id == CANDIDATE_VERSION_ID
     assert first.governing_manifest_digest == MANIFEST_DIGEST
@@ -194,7 +213,7 @@ def test_uncorrelated_acknowledgements_are_retained_as_ambiguous(
 ) -> None:
     handoff = persist_attempt(_handoff())
     handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)
-    acknowledgement = replace(_ack(handoff, handoff.attempts[0]), **{field: value})
+    acknowledgement = _ack(handoff, handoff.attempts[0], **{field: value})
 
     ambiguous = correlate_acknowledgement(handoff, acknowledgement)
     assert ambiguous.state is HandoffState.AMBIGUOUS
@@ -207,9 +226,9 @@ def test_conflicting_delayed_acknowledgement_is_ambiguous_not_overwritten() -> N
     handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)
     accepted = _ack(handoff, handoff.attempts[0])
     handoff = correlate_acknowledgement(handoff, accepted)
-    rejected = replace(
-        accepted,
-        acknowledgement_id="sink-ack:conflict",
+    rejected = _ack(
+        handoff,
+        handoff.attempts[0],
         outcome=AcknowledgementOutcome.REJECTED,
         response_digest="sha256:" + "d" * 64,
     )
@@ -219,14 +238,10 @@ def test_conflicting_delayed_acknowledgement_is_ambiguous_not_overwritten() -> N
     assert result.ambiguity_reason == "conflicting_acknowledgements"
 
 
-def test_same_acknowledgement_identity_cannot_replay_different_content() -> None:
+def test_acknowledgement_identity_is_immutable_content_identity() -> None:
     handoff = persist_attempt(_handoff())
     handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)
     accepted = _ack(handoff, handoff.attempts[0])
-    handoff = correlate_acknowledgement(handoff, accepted)
 
-    with pytest.raises(HandoffContractError, match="acknowledgement identity conflict"):
-        correlate_acknowledgement(
-            handoff,
-            replace(accepted, response_digest="sha256:" + "e" * 64),
-        )
+    with pytest.raises(HandoffContractError, match="acknowledgement_id"):
+        replace(accepted, response_digest="sha256:" + "e" * 64)
