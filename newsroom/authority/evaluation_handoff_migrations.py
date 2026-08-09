@@ -134,6 +134,8 @@ def prepare_evaluation_handoff_backup(
         "INSERT INTO evaluation_handoff_backup_gate VALUES(?,?,?)",
         (str(backup_path), backup_digest, source_logical_digest),
     )
+    if connection.in_transaction:
+        connection.commit()
     return EvaluationHandoffBackupReceipt(
         backup_path=backup_path,
         digest_path=digest_path,

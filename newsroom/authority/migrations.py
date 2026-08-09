@@ -48,6 +48,7 @@ from .graphiti_adapter_migrations import (
     GRAPHITI_ADAPTER_SCHEMA_VERSION,
 )
 from .evaluation_handoff_migrations import (
+    EvaluationHandoffBackupReceipt,
     EVALUATION_HANDOFF_MIGRATION,
     EVALUATION_HANDOFF_MIGRATION_CHECKSUM,
     EVALUATION_HANDOFF_MIGRATION_NAME,
@@ -561,6 +562,25 @@ def schema_fingerprint(conn: sqlite3.Connection) -> str:
             for row in rows
         ]
     )
+
+
+def prepare_pending_migration_backup(
+    conn: sqlite3.Connection,
+) -> EvaluationHandoffBackupReceipt | None:
+    """Prepare the exact retained backup required by an existing v16 store."""
+    if int(conn.execute("PRAGMA user_version").fetchone()[0]) != 16:
+        return None
+    database_path = next(
+        str(row[2])
+        for row in conn.execute("PRAGMA database_list").fetchall()
+        if row[1] == "main"
+    )
+    if not database_path:
+        raise sqlite3.DatabaseError(
+            "existing v16 upgrade requires a file-backed database"
+        )
+    backup_path, _ = evaluation_handoff_backup_paths(database_path)
+    return prepare_evaluation_handoff_backup(conn, backup_path)
 
 
 def apply_migration(

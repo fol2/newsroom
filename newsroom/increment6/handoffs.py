@@ -263,6 +263,7 @@ class Handoff:
             raise HandoffContractError("retry_exhausted")
         if self.ambiguity_reason is not None:
             _text(self.ambiguity_reason, "ambiguity_reason")
+        _validate_handoff_state(self)
 
 
 def create_handoff(
@@ -351,11 +352,18 @@ def mark_attempt_ambiguous(handoff: Handoff, attempt_id: str) -> Handoff:
         raise HandoffContractError("ambiguous transition requires pending state")
     attempts = list(handoff.attempts)
     attempts[index] = replace(attempt, ambiguous=True)
+    reason = "target_outcome_unknown"
+    if handoff.acknowledgements:
+        derived = _derived_ack_state(handoff)
+        if derived is None or derived[0] is not HandoffState.AMBIGUOUS:
+            raise HandoffContractError("retry timeout acknowledgement state")
+        reason = derived[1]
     return replace(
         handoff,
         state=HandoffState.AMBIGUOUS,
         attempts=tuple(attempts),
-        ambiguity_reason="target_outcome_unknown",
+        retry_exhausted=len(attempts) >= handoff.max_attempts,
+        ambiguity_reason=reason,
     )
 
 
@@ -399,6 +407,82 @@ def _ack_mismatch(handoff: Handoff, acknowledgement: Acknowledgement) -> str | N
     return None
 
 
+def _derived_ack_state(
+    handoff: Handoff,
+) -> tuple[HandoffState, str | None] | None:
+    if not handoff.acknowledgements:
+        return None
+    correlated = {
+        item.outcome
+        for item in handoff.acknowledgements
+        if _ack_mismatch(handoff, item) is None
+    }
+    mismatches = sorted(
+        {
+            mismatch
+            for item in handoff.acknowledgements
+            if (mismatch := _ack_mismatch(handoff, item)) is not None
+        }
+    )
+    if len(correlated) > 1:
+        return HandoffState.AMBIGUOUS, "conflicting_acknowledgements"
+    if mismatches:
+        return HandoffState.AMBIGUOUS, mismatches[0]
+    if correlated == {AcknowledgementOutcome.ACKNOWLEDGED}:
+        return HandoffState.ACKNOWLEDGED, None
+    if correlated == {AcknowledgementOutcome.REJECTED}:
+        return HandoffState.REJECTED, None
+    raise HandoffContractError("Handoff acknowledgement state")
+
+
+def _validate_handoff_state(handoff: Handoff) -> None:
+    latest = handoff.attempts[-1] if handoff.attempts else None
+    derived_ack = _derived_ack_state(handoff)
+    exact_exhaustion = (
+        handoff.state is HandoffState.AMBIGUOUS
+        and len(handoff.attempts) >= handoff.max_attempts
+    )
+    if handoff.retry_exhausted != exact_exhaustion:
+        raise HandoffContractError("Handoff state retry exhaustion differs")
+    if derived_ack is not None:
+        if (handoff.state, handoff.ambiguity_reason) == derived_ack:
+            return
+        if derived_ack[0] is HandoffState.AMBIGUOUS:
+            if (
+                handoff.state is HandoffState.RETRY
+                and handoff.ambiguity_reason is None
+                and len(handoff.attempts) < handoff.max_attempts
+            ):
+                return
+            if (
+                handoff.state is HandoffState.PENDING
+                and handoff.ambiguity_reason is None
+                and len(handoff.attempts) >= 2
+                and latest is not None
+                and not latest.ambiguous
+            ):
+                return
+        raise HandoffContractError("Handoff state differs from records")
+    valid = (
+        handoff.state is HandoffState.PENDING
+        and handoff.ambiguity_reason is None
+        and (latest is None or not latest.ambiguous)
+    ) or (
+        handoff.state is HandoffState.AMBIGUOUS
+        and handoff.ambiguity_reason == "target_outcome_unknown"
+        and latest is not None
+        and latest.ambiguous
+    ) or (
+        handoff.state is HandoffState.RETRY
+        and handoff.ambiguity_reason is None
+        and latest is not None
+        and latest.ambiguous
+        and len(handoff.attempts) < handoff.max_attempts
+    )
+    if not valid:
+        raise HandoffContractError("Handoff state differs from records")
+
+
 def correlate_acknowledgement(
     handoff: Handoff, acknowledgement: Acknowledgement
 ) -> Handoff:
@@ -432,7 +516,7 @@ def correlate_acknowledgement(
             handoff,
             state=HandoffState.AMBIGUOUS,
             acknowledgements=acknowledgements,
-            retry_exhausted=False,
+            retry_exhausted=len(handoff.attempts) >= handoff.max_attempts,
             ambiguity_reason="conflicting_acknowledgements",
         )
     mismatches = sorted(
@@ -447,7 +531,7 @@ def correlate_acknowledgement(
             handoff,
             state=HandoffState.AMBIGUOUS,
             acknowledgements=acknowledgements,
-            retry_exhausted=False,
+            retry_exhausted=len(handoff.attempts) >= handoff.max_attempts,
             ambiguity_reason=mismatches[0],
         )
     if not correlated_outcomes:
@@ -652,7 +736,7 @@ class EvaluationHandoffStore:
             for item in acknowledgement_rows
             if self._require_schema(item[0], HANDOFF_ACKNOWLEDGEMENT)
         )
-        retained = Handoff(
+        return Handoff(
             handoff_id=handoff_id,
             candidate_version_id=str(row[1]),
             governing_manifest_digest=str(row[2]),
@@ -667,87 +751,6 @@ class EvaluationHandoffStore:
             publication_authority=bool(row[9]),
             evidence_authority=bool(row[10]),
         )
-        self._validate_retained_state(retained)
-        return retained
-
-    @staticmethod
-    def _validate_retained_state(handoff: Handoff) -> None:
-        if handoff.acknowledgements:
-            correlated = {
-                item.outcome
-                for item in handoff.acknowledgements
-                if _ack_mismatch(handoff, item) is None
-            }
-            mismatches = sorted(
-                {
-                    mismatch
-                    for item in handoff.acknowledgements
-                    if (mismatch := _ack_mismatch(handoff, item)) is not None
-                }
-            )
-            if len(correlated) > 1:
-                expected = (
-                    HandoffState.AMBIGUOUS,
-                    "conflicting_acknowledgements",
-                )
-            elif mismatches:
-                expected = (HandoffState.AMBIGUOUS, mismatches[0])
-            elif correlated == {AcknowledgementOutcome.ACKNOWLEDGED}:
-                expected = (HandoffState.ACKNOWLEDGED, None)
-            elif correlated == {AcknowledgementOutcome.REJECTED}:
-                expected = (HandoffState.REJECTED, None)
-            else:
-                raise HandoffContractError("retained Handoff acknowledgement state")
-            valid_exhaustion = not handoff.retry_exhausted or (
-                expected[0] is HandoffState.AMBIGUOUS
-                and len(handoff.attempts) >= handoff.max_attempts
-            )
-            derived_state_matches = (
-                handoff.state,
-                handoff.ambiguity_reason,
-            ) == expected and valid_exhaustion
-            latest = handoff.attempts[-1] if handoff.attempts else None
-            active_retry = (
-                expected[0] is HandoffState.AMBIGUOUS
-                and not handoff.retry_exhausted
-                and handoff.ambiguity_reason is None
-                and (
-                    (
-                        handoff.state is HandoffState.RETRY
-                        and len(handoff.attempts) < handoff.max_attempts
-                    )
-                    or (
-                        handoff.state is HandoffState.PENDING
-                        and len(handoff.attempts) >= 2
-                        and latest is not None
-                        and not latest.ambiguous
-                    )
-                )
-            )
-            if not derived_state_matches and not active_retry:
-                raise HandoffContractError("retained Handoff state differs from records")
-            return
-        latest = handoff.attempts[-1] if handoff.attempts else None
-        valid = (
-            handoff.state is HandoffState.PENDING
-            and handoff.ambiguity_reason is None
-            and not handoff.retry_exhausted
-            and (latest is None or not latest.ambiguous)
-        ) or (
-            handoff.state is HandoffState.AMBIGUOUS
-            and handoff.ambiguity_reason == "target_outcome_unknown"
-            and latest is not None
-            and latest.ambiguous
-        ) or (
-            handoff.state is HandoffState.RETRY
-            and handoff.ambiguity_reason is None
-            and not handoff.retry_exhausted
-            and latest is not None
-            and latest.ambiguous
-            and len(handoff.attempts) < handoff.max_attempts
-        )
-        if not valid:
-            raise HandoffContractError("retained Handoff state differs from records")
 
     @staticmethod
     def _require_schema(actual: object, expected: str) -> bool:

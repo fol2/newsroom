@@ -33,6 +33,8 @@ from newsroom.increment6.handoffs import (
 from .graphiti_adapter_4d_migration_helpers import (
     downgrade_empty_graphiti_adapter_schema_to_v15,
 )
+from .authority_event_helpers import open_test_system
+from .extraction_4a_helpers import open_extraction_system, seed_extraction_fixture
 
 
 CANDIDATE_VERSION_ID = "candidate-version:01JZX7V7G8Q6XKNR4M8J5TH9WD"
@@ -236,6 +238,49 @@ def test_exact_v16_upgrade_rejects_changed_backup_digest(tmp_path: Path) -> None
         connection.close()
 
 
+def test_standard_sqlite_connection_backup_preflight_leaves_no_transaction(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "standard-connection.sqlite3"
+    initial = _fresh(database)
+    _downgrade_empty_v17_to_v16(initial)
+    initial.close()
+    connection = sqlite3.connect(database)
+    try:
+        prepare_evaluation_handoff_backup(
+            connection, evaluation_handoff_backup_paths(database)[0]
+        )
+        assert connection.in_transaction is False
+        apply_pending_migrations(
+            connection, applied_at="2042-03-12T10:00:01.000000Z"
+        )
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 17
+    finally:
+        connection.close()
+
+
+def test_actual_service_event_and_object_open_preflight_exact_v16_backup(
+    tmp_path: Path,
+) -> None:
+    event_database = tmp_path / "event" / "authority.sqlite3"
+    with open_test_system(event_database):
+        pass
+    event_connection = _open(event_database)
+    _downgrade_empty_v17_to_v16(event_connection)
+    event_connection.close()
+    with open_test_system(event_database):
+        pass
+    assert evaluation_handoff_backup_paths(event_database)[0].is_file()
+
+    extraction = seed_extraction_fixture(tmp_path / "object")
+    object_connection = _open(extraction.database)
+    _downgrade_empty_v17_to_v16(object_connection)
+    object_connection.close()
+    with open_extraction_system(extraction):
+        pass
+    assert evaluation_handoff_backup_paths(extraction.database)[0].is_file()
+
+
 def test_failed_v17_upgrade_rolls_back_exclusively_after_backup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -381,6 +426,62 @@ def test_store_can_persist_bounded_retry_after_ambiguous_ack(tmp_path: Path) -> 
     connection.close()
 
 
+def test_retry_timeout_after_wrong_ack_uses_one_deterministic_reason(
+    tmp_path: Path,
+) -> None:
+    connection = _fresh(tmp_path / "retry-timeout.sqlite3")
+    store = EvaluationHandoffStore(connection)
+    handoff = store.persist_attempt(
+        store.register(_handoff(max_attempts=2)).handoff_id
+    )
+    first = handoff.attempts[0]
+    handoff = store.mark_attempt_sent(handoff.handoff_id, first.attempt_id)
+    wrong = Acknowledgement.create(
+        handoff_id="handoff:sha256:" + "0" * 64,
+        attempt_id=first.attempt_id,
+        candidate_version_id=handoff.candidate_version_id,
+        governing_manifest_digest=handoff.governing_manifest_digest,
+        sink_id=handoff.sink_id,
+        outcome=AcknowledgementOutcome.ACKNOWLEDGED,
+        response_digest="sha256:" + "6" * 64,
+    )
+    handoff = store.correlate_acknowledgement(handoff.handoff_id, wrong)
+    handoff = store.persist_attempt(store.request_retry(handoff.handoff_id).handoff_id)
+    second = handoff.attempts[1]
+    handoff = store.mark_attempt_sent(handoff.handoff_id, second.attempt_id)
+
+    timed_out = store.mark_attempt_ambiguous(handoff.handoff_id, second.attempt_id)
+
+    assert timed_out.state is HandoffState.AMBIGUOUS
+    assert timed_out.ambiguity_reason == "acknowledgement_handoff_id_mismatch"
+    assert timed_out.retry_exhausted is True
+    assert store.load(handoff.handoff_id) == timed_out
+
+
+def test_restart_rejects_premature_retry_exhaustion_sql_tamper(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "exhaustion-tamper.sqlite3"
+    connection = _fresh(database)
+    store = EvaluationHandoffStore(connection)
+    handoff = store.persist_attempt(
+        store.register(_handoff(max_attempts=3)).handoff_id
+    )
+    attempt = handoff.attempts[0]
+    handoff = store.mark_attempt_sent(handoff.handoff_id, attempt.attempt_id)
+    handoff = store.mark_attempt_ambiguous(handoff.handoff_id, attempt.attempt_id)
+    connection.execute(
+        "UPDATE evaluation_handoffs SET retry_exhausted=1 WHERE handoff_id=?",
+        (handoff.handoff_id,),
+    )
+    connection.close()
+
+    connection = _open(database)
+    with pytest.raises(HandoffContractError, match="Handoff state"):
+        EvaluationHandoffStore(connection).load(handoff.handoff_id)
+    connection.close()
+
+
 def test_store_correlates_delayed_ack_after_lost_response_and_retry(
     tmp_path: Path,
 ) -> None:
@@ -482,7 +583,7 @@ def test_restart_rederives_state_and_rejects_terminal_to_ambiguous_tamper(
     connection.close()
 
     connection = _open(tmp_path / "state-tamper.sqlite3")
-    with pytest.raises(HandoffContractError, match="retained Handoff state"):
+    with pytest.raises(HandoffContractError, match="Handoff state"):
         EvaluationHandoffStore(connection).load(handoff.handoff_id)
     connection.close()
 

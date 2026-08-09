@@ -105,6 +105,23 @@ def test_binding_and_evaluation_only_semantics_are_fail_closed() -> None:
         replace(_handoff(), publication_authority=True)
 
 
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [
+        (HandoffState.ACKNOWLEDGED, None),
+        (HandoffState.REJECTED, None),
+        (HandoffState.AMBIGUOUS, "target_outcome_unknown"),
+        (HandoffState.RETRY, None),
+    ],
+)
+def test_public_handoff_rejects_state_not_derived_from_records(
+    state: HandoffState,
+    reason: str | None,
+) -> None:
+    with pytest.raises(HandoffContractError, match="Handoff state"):
+        replace(_handoff(), state=state, ambiguity_reason=reason)
+
+
 def test_attempt_is_persisted_before_it_can_be_sent_and_replay_is_idempotent() -> None:
     handoff = _handoff()
     assert handoff.state is HandoffState.PENDING
