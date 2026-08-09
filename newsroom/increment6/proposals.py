@@ -134,6 +134,14 @@ def _optional_uuid(value: object, field: str) -> str | None:
     return None if value is None else _uuid(value, field)
 
 
+def _optional_text(value: object, field: str) -> str | None:
+    return None if value is None else _text(value, field)
+
+
+def _optional_token(value: object, field: str) -> str | None:
+    return None if value is None else _token(value, field)
+
+
 def _uint(value: object, field: str, *, minimum: int = 0, maximum: int | None = None) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ProposalContractError(f"{field} must be a bounded non-negative integer")
@@ -377,6 +385,7 @@ class InputCitation:
     byte_start: int
     byte_end: int
     quote_digest: str
+    target_hypothesis_id: str | None
 
     @classmethod
     def from_value(cls, value: object) -> "InputCitation":
@@ -391,6 +400,7 @@ class InputCitation:
                 "byte_start",
                 "byte_end",
                 "quote_digest",
+                "target_hypothesis_id",
             },
             "input citation",
         )
@@ -406,6 +416,17 @@ class InputCitation:
             in {CitationSourceKind.DECISION_LEAD, CitationSourceKind.CONTEXT_LEAD}
             else _token(item["source_id"], "citation source_id")
         )
+        target_hypothesis_id = _optional_uuid(
+            item["target_hypothesis_id"], "citation target_hypothesis_id"
+        )
+        if (
+            source_kind
+            in {CitationSourceKind.DECISION_LEAD, CitationSourceKind.CONTEXT_LEAD}
+            and target_hypothesis_id is not None
+        ):
+            raise ProposalContractError(
+                "a Lead citation cannot bind a retrieved Hypothesis target"
+            )
         return cls(
             citation_id=_token(item["citation_id"], "citation_id"),
             source_kind=source_kind,
@@ -415,6 +436,7 @@ class InputCitation:
             byte_start=byte_start,
             byte_end=byte_end,
             quote_digest=_digest(item["quote_digest"], "citation quote_digest"),
+            target_hypothesis_id=target_hypothesis_id,
         )
 
     def canonical_value(self) -> dict[str, object]:
@@ -427,6 +449,7 @@ class InputCitation:
             "byte_start": self.byte_start,
             "byte_end": self.byte_end,
             "quote_digest": self.quote_digest,
+            "target_hypothesis_id": self.target_hypothesis_id,
         }
 
 
@@ -551,6 +574,75 @@ class SupplementalAction:
 
 
 @dataclass(frozen=True, slots=True)
+class OperationalAction:
+    action_kind: str
+    owner_id: str | None
+    dependency: str | None
+    retry_condition: str | None
+    review_condition: str | None
+    expiry_condition: str | None
+
+    @classmethod
+    def from_value(cls, value: object) -> "OperationalAction":
+        item = _exact_keys(
+            value,
+            {
+                "action_kind",
+                "owner_id",
+                "dependency",
+                "retry_condition",
+                "review_condition",
+                "expiry_condition",
+            },
+            "operational action",
+        )
+        action_kind = _optional_token(item["action_kind"], "operational action_kind")
+        owner_id = _optional_token(item["owner_id"], "operational owner_id")
+        dependency = _optional_token(
+            item["dependency"], "operational dependency"
+        )
+        retry_condition = _optional_text(
+            item["retry_condition"], "operational retry_condition"
+        )
+        review_condition = _optional_text(
+            item["review_condition"], "operational review_condition"
+        )
+        expiry_condition = _optional_text(
+            item["expiry_condition"], "operational expiry_condition"
+        )
+        if action_kind is None or not any(
+            (
+                owner_id,
+                dependency,
+                retry_condition,
+                review_condition,
+                expiry_condition,
+            )
+        ):
+            raise ProposalContractError(
+                "operational hold requires an inspectable action and condition"
+            )
+        return cls(
+            action_kind=action_kind,
+            owner_id=owner_id,
+            dependency=dependency,
+            retry_condition=retry_condition,
+            review_condition=review_condition,
+            expiry_condition=expiry_condition,
+        )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "action_kind": self.action_kind,
+            "owner_id": self.owner_id,
+            "dependency": self.dependency,
+            "retry_condition": self.retry_condition,
+            "review_condition": self.review_condition,
+            "expiry_condition": self.expiry_condition,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateManifest:
     manifest_kind: CandidateManifestKind
     contributing_lead_ids: tuple[str, ...]
@@ -645,6 +737,7 @@ class LeadRecommendation:
     hypothesis: ProposedHypothesis | None
     watch_action: WatchAction | None
     supplemental_action: SupplementalAction | None
+    operational_action: OperationalAction | None
     candidate_manifest: CandidateManifest | None
 
     @classmethod
@@ -664,6 +757,7 @@ class LeadRecommendation:
                 "hypothesis",
                 "watch_action",
                 "supplemental_action",
+                "operational_action",
                 "candidate_manifest",
             },
             "recommendation",
@@ -696,6 +790,11 @@ class LeadRecommendation:
             if item["supplemental_action"] is None
             else SupplementalAction.from_value(item["supplemental_action"])
         )
+        operational = (
+            None
+            if item["operational_action"] is None
+            else OperationalAction.from_value(item["operational_action"])
+        )
         candidate = (
             None
             if item["candidate_manifest"] is None
@@ -707,6 +806,10 @@ class LeadRecommendation:
         if (route is ProposalRoute.SUPPLEMENTAL_DISCOVERY) != (supplemental is not None):
             raise ProposalContractError(
                 "supplemental action must exist only for SUPPLEMENTAL_DISCOVERY"
+            )
+        if (route is ProposalRoute.OPERATIONAL_HOLD) != (operational is not None):
+            raise ProposalContractError(
+                "operational action must exist only for OPERATIONAL_HOLD"
             )
         candidate_kinds = {
             ProposalRoute.NEW_EVENT_CANDIDATE: CandidateManifestKind.NEW_EVENT,
@@ -772,6 +875,7 @@ class LeadRecommendation:
             hypothesis=hypothesis,
             watch_action=watch,
             supplemental_action=supplemental,
+            operational_action=operational,
             candidate_manifest=candidate,
         )
 
@@ -796,6 +900,11 @@ class LeadRecommendation:
                 None
                 if self.supplemental_action is None
                 else self.supplemental_action.canonical_value()
+            ),
+            "operational_action": (
+                None
+                if self.operational_action is None
+                else self.operational_action.canonical_value()
             ),
             "candidate_manifest": (
                 None
@@ -932,6 +1041,37 @@ class TriageProposal:
             )
 
         admitted_leads = set(decision_leads) | set(context_leads)
+        recommendations_by_lead = {
+            recommendation.decision_lead_id: recommendation
+            for recommendation in recommendations
+        }
+        hypotheses_by_local_id: dict[str, dict[str, object]] = {}
+        for recommendation in recommendations:
+            hypothesis = recommendation.hypothesis
+            if hypothesis is None:
+                continue
+            hypothesis_value = hypothesis.canonical_value()
+            prior = hypotheses_by_local_id.setdefault(
+                hypothesis.proposal_local_id, hypothesis_value
+            )
+            if prior != hypothesis_value:
+                raise ProposalContractError(
+                    "proposal_local_id conflicts across Hypothesis recommendations"
+                )
+            if hypothesis.target_hypothesis_id is not None and not any(
+                citation.source_kind
+                in {
+                    CitationSourceKind.RETRIEVAL_MATCH,
+                    CitationSourceKind.RETRIEVAL_CONTRADICTION,
+                }
+                and citation.target_hypothesis_id
+                == hypothesis.target_hypothesis_id
+                for citation in recommendation.input_citations
+            ):
+                raise ProposalContractError(
+                    "relationship target lacks an exact Retrieval Context citation"
+                )
+
         for recommendation in recommendations:
             for citation in recommendation.input_citations:
                 if (
@@ -973,6 +1113,24 @@ class TriageProposal:
                     raise ProposalContractError(
                         "Candidate manifest contains an unbound Lead"
                     )
+                if not set(manifest.contributing_lead_ids) <= set(decision_leads):
+                    raise ProposalContractError(
+                        "Candidate contributor cannot be a context-only Lead"
+                    )
+                assert recommendation.hypothesis is not None
+                for contributor_id in manifest.contributing_lead_ids:
+                    contributor = recommendations_by_lead[contributor_id]
+                    if (
+                        contributor.candidate_manifest is None
+                        or contributor.hypothesis is None
+                        or contributor.hypothesis.proposal_local_id
+                        != recommendation.hypothesis.proposal_local_id
+                        or contributor.candidate_manifest.canonical_value()
+                        != manifest.canonical_value()
+                    ):
+                        raise ProposalContractError(
+                            "Candidate contributor is unrelated or has a non-Candidate route"
+                        )
 
         result = cls(
             proposal_id=_uuid(proposal["proposal_id"], "proposal_id"),
@@ -1040,6 +1198,7 @@ __all__ = [
     "HypothesisRelationship",
     "InputCitation",
     "LeadRecommendation",
+    "OperationalAction",
     "ProposalAuthority",
     "ProposalContractError",
     "ProposalRoute",

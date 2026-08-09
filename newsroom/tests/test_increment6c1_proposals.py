@@ -37,6 +37,7 @@ def _citation(citation_id: str, source_kind: str, source_id: str) -> dict[str, o
         "byte_start": 0,
         "byte_end": 18,
         "quote_digest": DIGEST_D,
+        "target_hypothesis_id": None,
     }
 
 
@@ -62,6 +63,7 @@ def _recommendation(lead_id: str = LEAD_A) -> dict[str, object]:
         },
         "watch_action": None,
         "supplemental_action": None,
+        "operational_action": None,
         "candidate_manifest": {
             "manifest_kind": "NEW_EVENT",
             "contributing_lead_ids": [lead_id],
@@ -279,6 +281,15 @@ def test_only_normative_routes_are_admitted(route: str) -> None:
             "maximum_attempts": 1,
             "requires_approval": True,
         }
+    elif route == "OPERATIONAL_HOLD":
+        recommendation["operational_action"] = {
+            "action_kind": "RETRY_RETRIEVAL",
+            "owner_id": "owner:newsroom",
+            "dependency": "retrieval-service",
+            "retry_condition": "Retry after the retrieval service is healthy.",
+            "review_condition": None,
+            "expiry_condition": None,
+        }
     elif route == "ASSOCIATE_WITHOUT_CANDIDATE":
         recommendation["hypothesis"] = {
             "proposal_local_id": "hypothesis:001",
@@ -286,6 +297,13 @@ def test_only_normative_routes_are_admitted(route: str) -> None:
             "relationship_kind": "SAME_STATE",
             "target_hypothesis_id": "44444444-4444-4444-8444-444444444444",
         }
+        citations = recommendation["input_citations"]
+        assert isinstance(citations, list)
+        retrieval_citation = citations[1]
+        assert isinstance(retrieval_citation, dict)
+        retrieval_citation["target_hypothesis_id"] = (
+            "44444444-4444-4444-8444-444444444444"
+        )
     elif route.endswith("_CANDIDATE"):
         kind, relationship, target = {
             "NEW_EVENT_CANDIDATE": ("NEW_EVENT", "NO_ADEQUATE_PRIOR_MATCH", None),
@@ -306,6 +324,12 @@ def test_only_normative_routes_are_admitted(route: str) -> None:
             "relationship_kind": relationship,
             "target_hypothesis_id": target,
         }
+        if target is not None:
+            citations = recommendation["input_citations"]
+            assert isinstance(citations, list)
+            retrieval_citation = citations[1]
+            assert isinstance(retrieval_citation, dict)
+            retrieval_citation["target_hypothesis_id"] = target
         manifest = deepcopy(_recommendation()["candidate_manifest"])
         assert isinstance(manifest, dict)
         manifest["manifest_kind"] = kind
@@ -313,6 +337,132 @@ def test_only_normative_routes_are_admitted(route: str) -> None:
 
     parsed = TriageProposal.from_canonical_bytes(_resign(document))
     assert parsed.recommendations[0].route.value == route
+
+
+def test_operational_hold_requires_an_inspectable_action_boundary() -> None:
+    missing = _proposal_value()
+    recommendation = _recommendation_value(missing)
+    recommendation["route"] = "OPERATIONAL_HOLD"
+    recommendation["hypothesis"] = None
+    recommendation["candidate_manifest"] = None
+    with pytest.raises(ProposalContractError, match="operational action"):
+        TriageProposal.from_canonical_bytes(_resign(missing))
+
+    uninspectable = deepcopy(missing)
+    recommendation = _recommendation_value(uninspectable)
+    recommendation["operational_action"] = {
+        "action_kind": None,
+        "owner_id": None,
+        "dependency": None,
+        "retry_condition": None,
+        "review_condition": None,
+        "expiry_condition": None,
+    }
+    with pytest.raises(ProposalContractError, match="inspectable"):
+        TriageProposal.from_canonical_bytes(_resign(uninspectable))
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "ASSOCIATE_WITHOUT_CANDIDATE",
+        "DEVELOPMENT_CANDIDATE",
+        "CORRECTION_CANDIDATE",
+    ],
+)
+def test_relationship_target_requires_exact_retrieval_context_citation(
+    route: str,
+) -> None:
+    target = "44444444-4444-4444-8444-444444444444"
+    document = _proposal_value()
+    recommendation = _recommendation_value(document)
+    recommendation["route"] = route
+    recommendation["hypothesis"] = {
+        "proposal_local_id": "hypothesis:targeted",
+        "summary": "The Lead may relate to one exact retrieved Hypothesis.",
+        "relationship_kind": {
+            "ASSOCIATE_WITHOUT_CANDIDATE": "SAME_STATE",
+            "DEVELOPMENT_CANDIDATE": "DEVELOPMENT_OF",
+            "CORRECTION_CANDIDATE": "CORRECTION_REVERSAL_OF",
+        }[route],
+        "target_hypothesis_id": target,
+    }
+    if route == "ASSOCIATE_WITHOUT_CANDIDATE":
+        recommendation["candidate_manifest"] = None
+    else:
+        manifest = recommendation["candidate_manifest"]
+        assert isinstance(manifest, dict)
+        manifest["manifest_kind"] = {
+            "DEVELOPMENT_CANDIDATE": "DEVELOPMENT",
+            "CORRECTION_CANDIDATE": "CORRECTION",
+        }[route]
+
+    citations = recommendation["input_citations"]
+    assert isinstance(citations, list)
+    citations.pop(1)
+    with pytest.raises(ProposalContractError, match="Retrieval Context citation"):
+        TriageProposal.from_canonical_bytes(_resign(document))
+
+    mismatched = deepcopy(document)
+    citations = _recommendation_value(mismatched)["input_citations"]
+    assert isinstance(citations, list)
+    citations.append(_citation("citation:002", "RETRIEVAL_MATCH", "passage:001"))
+    citation = citations[1]
+    assert isinstance(citation, dict)
+    citation["target_hypothesis_id"] = (
+        "55555555-5555-4555-8555-555555555555"
+    )
+    with pytest.raises(ProposalContractError, match="Retrieval Context citation"):
+        TriageProposal.from_canonical_bytes(_resign(mismatched))
+
+
+def test_cross_lead_candidate_and_hypothesis_content_must_be_coherent() -> None:
+    rejected_contributor = _proposal_value()
+    proposal = _proposal(rejected_contributor)
+    proposal["decision_lead_ids"] = [LEAD_A, LEAD_C]
+    candidate = _recommendation(LEAD_A)
+    manifest = candidate["candidate_manifest"]
+    assert isinstance(manifest, dict)
+    manifest["contributing_lead_ids"] = [LEAD_A, LEAD_C]
+    rejected = _recommendation(LEAD_C)
+    rejected["route"] = "EDITORIAL_REJECT"
+    rejected["hypothesis"] = None
+    rejected["candidate_manifest"] = None
+    proposal["recommendations"] = [candidate, rejected]
+    with pytest.raises(ProposalContractError, match="Candidate contributor"):
+        TriageProposal.from_canonical_bytes(_resign(rejected_contributor))
+
+    conflicting_hypothesis = _proposal_value()
+    proposal = _proposal(conflicting_hypothesis)
+    proposal["decision_lead_ids"] = [LEAD_A, LEAD_C]
+    first = _recommendation(LEAD_A)
+    second = _recommendation(LEAD_C)
+    first_manifest = first["candidate_manifest"]
+    second_manifest = second["candidate_manifest"]
+    assert isinstance(first_manifest, dict)
+    assert isinstance(second_manifest, dict)
+    first_manifest["contributing_lead_ids"] = [LEAD_A, LEAD_C]
+    second_manifest["contributing_lead_ids"] = [LEAD_A, LEAD_C]
+    second_hypothesis = second["hypothesis"]
+    assert isinstance(second_hypothesis, dict)
+    second_hypothesis["summary"] = "A conflicting summary for the same local identity."
+    proposal["recommendations"] = [first, second]
+    with pytest.raises(ProposalContractError, match="proposal_local_id conflicts"):
+        TriageProposal.from_canonical_bytes(_resign(conflicting_hypothesis))
+
+    coherent = _proposal_value()
+    proposal = _proposal(coherent)
+    proposal["decision_lead_ids"] = [LEAD_A, LEAD_C]
+    first = _recommendation(LEAD_A)
+    second = _recommendation(LEAD_C)
+    for recommendation in (first, second):
+        manifest = recommendation["candidate_manifest"]
+        assert isinstance(manifest, dict)
+        manifest["contributing_lead_ids"] = [LEAD_A, LEAD_C]
+    proposal["recommendations"] = [first, second]
+
+    parsed = TriageProposal.from_canonical_bytes(_resign(coherent))
+    assert len(parsed.recommendations) == 2
 
 
 @pytest.mark.parametrize(
