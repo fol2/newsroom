@@ -159,6 +159,43 @@ def test_identical_inputs_produce_byte_identical_deadline_and_order() -> None:
     assert UrgencyDeadlineDecision.from_canonical_bytes(first.canonical_bytes) == first
 
 
+def _input_with_basis_reference_count(count: int) -> UrgencyDeadlineInput:
+    item = _input()
+    references = tuple(
+        ReasonReference(
+            reference_type="boundary-basis",
+            identifier=f"{index:03d}-" + "x" * 3_996,
+            digest=SHA_B,
+        )
+        for index in range(count)
+    )
+    return replace(
+        item,
+        priority_selection=replace(
+            item.priority_selection,
+            basis_references=references,
+        ),
+    )
+
+
+def test_standalone_observation_size_boundary_matches_canonical_parser() -> None:
+    accepted = calculate_urgency_deadline(
+        policy=_policy(),
+        item=_input_with_basis_reference_count(220),
+    )
+
+    assert len(accepted.canonical_bytes) < 917_504
+    assert (
+        UrgencyDeadlineDecision.from_canonical_bytes(accepted.canonical_bytes)
+        == accepted
+    )
+    with pytest.raises(SchedulingContractError):
+        calculate_urgency_deadline(
+            policy=_policy(),
+            item=_input_with_basis_reference_count(230),
+        )
+
+
 def test_deadline_boundary_resolves_exact_time_zone_and_dst_fold() -> None:
     first_fold = DeadlineBoundary(
         kind=DeadlineKind.PLANNED_WINDOW_END,

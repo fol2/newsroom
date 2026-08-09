@@ -42,6 +42,7 @@ _MAX_JSON_DEPTH = 64
 _MAX_CANONICAL_BYTES = (
     _MAX_CAPACITY_POPULATION * _MAX_CAPACITY_ITEM_BYTES + _MAX_CANONICAL_OVERHEAD_BYTES
 )
+_MAX_STARVATION_OBSERVATION_BYTES = _MAX_CANONICAL_BYTES
 _MAX_INTEGER = 2_147_483_647
 _MAX_DURATION_SECONDS = 315_576_000  # ten years, including leap-day headroom
 
@@ -805,6 +806,22 @@ class StarvationObservation:
             raise SchedulingContractError(
                 "starvation observation cannot claim authority, effect or activation"
             )
+        try:
+            canonical = canonical_json_bytes(self.canonical_value())
+        except (
+            CanonicalizationError,
+            ValueError,
+            OverflowError,
+            MemoryError,
+            RecursionError,
+        ) as exc:
+            raise SchedulingContractError(
+                "starvation observation is not canonically representable"
+            ) from exc
+        if len(canonical) > _MAX_STARVATION_OBSERVATION_BYTES:
+            raise SchedulingContractError(
+                "starvation observation exceeds the canonical byte bound"
+            )
 
     @property
     def schema_version(self) -> str:
@@ -842,6 +859,10 @@ class StarvationObservation:
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> StarvationObservation:
+        if not isinstance(raw, bytes) or len(raw) > _MAX_STARVATION_OBSERVATION_BYTES:
+            raise SchedulingContractError(
+                "starvation observation exceeds the canonical byte bound"
+            )
         value = _decode_canonical_object(raw, field="starvation_observation")
         _strict_keys(
             value,
