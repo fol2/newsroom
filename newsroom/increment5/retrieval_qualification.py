@@ -19,7 +19,10 @@ from ._retrieval_qualification_run import (
     build_qualification_epoch,
     run_fixture_qualification,
 )
-from ._retrieval_qualification_corpus import load_qualification_corpus
+from ._retrieval_qualification_corpus import (
+    load_qualification_corpus,
+    rederive_qualification_corpus,
+)
 from ._retrieval_qualification_target import load_qualification_target
 from ._retrieval_qualification_journal import QualificationReportJournal
 from ._retrieval_qualification_evaluator import RetrievalQualificationEvaluator
@@ -67,4 +70,5 @@ __all__ = [
     "load_qualification_corpus",
     "load_qualification_target",
     "run_fixture_qualification",
+    "rederive_qualification_corpus",
 ]

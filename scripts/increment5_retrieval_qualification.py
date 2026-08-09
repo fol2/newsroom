@@ -60,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
             target=QUALIFICATION_TARGET,
             corpus=QUALIFICATION_CORPUS,
             epoch=epoch,
+            code_tree_sha=epoch.code_tree_sha,
             observations=observations,
             started_at=arguments.started_at,
             completed_at=arguments.completed_at,

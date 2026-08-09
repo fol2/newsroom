@@ -27,6 +27,7 @@ from newsroom.increment5.retrieval_qualification import (
     build_qualification_epoch,
     load_qualification_corpus,
     load_qualification_target,
+    rederive_qualification_corpus,
     run_fixture_qualification,
 )
 
@@ -46,6 +47,7 @@ def _evaluate(observations=None, *, tree: str = TREE):
         target=QUALIFICATION_TARGET,
         corpus=QUALIFICATION_CORPUS,
         epoch=epoch,
+        code_tree_sha=tree,
         observations=(
             run_fixture_qualification(
                 target=QUALIFICATION_TARGET,
@@ -69,6 +71,17 @@ def _replace_first_hybrid(observations, **changes):
     )
     values[index] = replace(values[index], **changes)
     return tuple(values), QUALIFICATION_CORPUS.cases[0]
+
+
+def _replace_first_system(observations, system, **changes):
+    values = list(observations)
+    index = next(
+        index
+        for index, item in enumerate(values)
+        if item.system is system
+    )
+    values[index] = replace(values[index], **changes)
+    return tuple(values)
 
 
 
@@ -169,6 +182,38 @@ def test_rights_temporal_scope_write_and_rebuild_violations_fail_closed() -> Non
         _, report = _evaluate(modified)
         assert report.decision is QualificationDecision.FAIL
         assert report.blockers
+
+
+@pytest.mark.parametrize(
+    ("system", "change"),
+    [
+        (
+            QualificationSystem.ADMITTED_GRAPH_ONLY,
+            {"rights_purge_residual_count": 1},
+        ),
+        (QualificationSystem.EXACT_ONLY, {"scope_escape_count": 1}),
+        (
+            QualificationSystem.FULL_TEXT_ONLY,
+            {"write_attempt_success_count": 1},
+        ),
+        (
+            QualificationSystem.VECTOR_ONLY,
+            {"rights_purge_residual_count": 1},
+        ),
+    ],
+)
+def test_safety_and_rights_violations_in_any_executed_system_block(
+    system,
+    change,
+) -> None:
+    observations = run_fixture_qualification(
+        target=QUALIFICATION_TARGET,
+        corpus=QUALIFICATION_CORPUS,
+    )
+    modified = _replace_first_system(observations, system, **change)
+    _, report = _evaluate(modified)
+    assert report.decision is QualificationDecision.FAIL
+    assert any(system.value in blocker for blocker in report.blockers)
 
 
 def test_false_no_match_false_merge_and_candidate_disposition_fail() -> None:
@@ -327,7 +372,9 @@ def test_family_required_slice_underexposure_is_not_evaluated() -> None:
             label for label in cases[index].slice_labels if label != "EN_GB"
         ),
     )
-    corpus = replace(QUALIFICATION_CORPUS, cases=tuple(cases))
+    corpus = rederive_qualification_corpus(
+        replace(QUALIFICATION_CORPUS, cases=tuple(cases))
+    )
     epoch = build_qualification_epoch(
         target=QUALIFICATION_TARGET,
         corpus=corpus,
@@ -338,6 +385,7 @@ def test_family_required_slice_underexposure_is_not_evaluated() -> None:
         target=QUALIFICATION_TARGET,
         corpus=corpus,
         epoch=epoch,
+        code_tree_sha=TREE,
         observations=observations,
         started_at=START,
         completed_at=END,
@@ -384,7 +432,10 @@ def test_epoch_identity_changes_with_code_tree_and_mismatch_is_rejected() -> Non
         target=QUALIFICATION_TARGET,
         corpus=QUALIFICATION_CORPUS,
     )
-    with pytest.raises(RetrievalQualificationError, match="Epoch binding"):
+    with pytest.raises(
+        RetrievalQualificationError,
+        match="target identity|Epoch binding",
+    ):
         RetrievalQualificationEvaluator().evaluate(
             run_id=str(uuid.uuid4()),
             target=replace(
@@ -393,9 +444,121 @@ def test_epoch_identity_changes_with_code_tree_and_mismatch_is_rejected() -> Non
             ),
             corpus=QUALIFICATION_CORPUS,
             epoch=first,
+            code_tree_sha=TREE,
             observations=observations,
             started_at=START,
             completed_at=END,
+        )
+
+
+def test_caller_modified_corpus_cannot_reuse_stale_content_identities() -> None:
+    cases = list(QUALIFICATION_CORPUS.cases)
+    case = cases[0]
+    changed_root = "authority-root:caller-modified"
+    cases[0] = replace(
+        case,
+        expected_root=changed_root,
+        fixture_hits=tuple(
+            (mode, (changed_root,) if roots else ())
+            for mode, roots in case.fixture_hits
+        ),
+    )
+    changed = replace(QUALIFICATION_CORPUS, cases=tuple(cases))
+
+    with pytest.raises(RetrievalQualificationError, match="content identities"):
+        build_qualification_epoch(
+            target=QUALIFICATION_TARGET,
+            corpus=changed,
+            code_tree_sha=TREE,
+        )
+    with pytest.raises(RetrievalQualificationError, match="content identities"):
+        run_fixture_qualification(
+            target=QUALIFICATION_TARGET,
+            corpus=changed,
+        )
+
+    rederived = rederive_qualification_corpus(changed)
+    assert rederived.dataset_manifest_digest != (
+        QUALIFICATION_CORPUS.dataset_manifest_digest
+    )
+    assert rederived.cases[0].label_digest != case.label_digest
+    assert rederived.cases[0].fixture_digest != case.fixture_digest
+    changed_epoch = build_qualification_epoch(
+        target=QUALIFICATION_TARGET,
+        corpus=rederived,
+        code_tree_sha=TREE,
+    )
+    assert changed_epoch.dataset_manifest_digest == (
+        rederived.dataset_manifest_digest
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_provider_versions_digest",
+        "adapter_parser_versions_digest",
+        "threshold_set_digest",
+        "policy_set_digest",
+    ],
+)
+def test_every_derived_epoch_identity_is_revalidated_before_evaluation(
+    field: str,
+) -> None:
+    epoch = build_qualification_epoch(
+        target=QUALIFICATION_TARGET,
+        corpus=QUALIFICATION_CORPUS,
+        code_tree_sha=TREE,
+    )
+    changed = replace(epoch, **{field: "sha256:" + "b" * 64})
+    observations = run_fixture_qualification(
+        target=QUALIFICATION_TARGET,
+        corpus=QUALIFICATION_CORPUS,
+    )
+    with pytest.raises(RetrievalQualificationError, match="Epoch binding"):
+        RetrievalQualificationEvaluator().evaluate(
+            run_id=str(uuid.uuid4()),
+            target=QUALIFICATION_TARGET,
+            corpus=QUALIFICATION_CORPUS,
+            epoch=changed,
+            code_tree_sha=TREE,
+            observations=observations,
+            started_at=START,
+            completed_at=END,
+        )
+
+
+def test_epoch_code_tree_and_exact_target_are_independently_revalidated() -> None:
+    epoch = build_qualification_epoch(
+        target=QUALIFICATION_TARGET,
+        corpus=QUALIFICATION_CORPUS,
+        code_tree_sha=TREE,
+    )
+    observations = run_fixture_qualification(
+        target=QUALIFICATION_TARGET,
+        corpus=QUALIFICATION_CORPUS,
+    )
+    with pytest.raises(RetrievalQualificationError, match="Epoch binding"):
+        RetrievalQualificationEvaluator().evaluate(
+            run_id=str(uuid.uuid4()),
+            target=QUALIFICATION_TARGET,
+            corpus=QUALIFICATION_CORPUS,
+            epoch=replace(epoch, code_tree_sha="b" * 40),
+            code_tree_sha=TREE,
+            observations=observations,
+            started_at=START,
+            completed_at=END,
+        )
+
+    changed_target = replace(
+        QUALIFICATION_TARGET,
+        profile_id="CALLER_SELECTED_TARGET",
+    )
+    with pytest.raises(RetrievalQualificationError, match="target identity"):
+        build_qualification_epoch(
+            target=changed_target,
+            corpus=QUALIFICATION_CORPUS,
+            code_tree_sha=TREE,
         )
 
 

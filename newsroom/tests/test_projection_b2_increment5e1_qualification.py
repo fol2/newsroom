@@ -61,6 +61,7 @@ def test_actual_service_increment5e1_target_and_report(
         target=QUALIFICATION_TARGET,
         corpus=QUALIFICATION_CORPUS,
         epoch=epoch,
+        code_tree_sha=tree,
         observations=run_fixture_qualification(
             target=QUALIFICATION_TARGET,
             corpus=QUALIFICATION_CORPUS,
