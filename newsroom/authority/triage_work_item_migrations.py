@@ -220,6 +220,11 @@ TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS: tuple[str, ...] = (
         BEGIN SELECT RAISE(ABORT,'retained Triage Work Item'); END""",
     """CREATE TRIGGER immutable_triage_work_item_versions_update BEFORE UPDATE ON triage_work_item_versions
         BEGIN SELECT RAISE(ABORT,'immutable Triage Work Item Version'); END""",
+    """CREATE TRIGGER triage_work_item_version_scope_guard BEFORE INSERT ON triage_work_item_versions
+        WHEN NOT EXISTS(SELECT 1 FROM triage_work_items i
+            WHERE i.work_item_id=NEW.work_item_id
+              AND i.decision_scope_digest=NEW.decision_scope_digest)
+        BEGIN SELECT RAISE(ABORT,'Work Item Version scope differs'); END""",
     """CREATE TRIGGER retained_triage_work_item_versions_delete BEFORE DELETE ON triage_work_item_versions
         BEGIN SELECT RAISE(ABORT,'retained Triage Work Item Version'); END""",
     """CREATE TRIGGER triage_work_item_head_insert_guard BEFORE INSERT ON triage_work_item_heads
