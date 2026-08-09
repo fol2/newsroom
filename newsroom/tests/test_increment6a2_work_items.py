@@ -139,44 +139,6 @@ def _pending(number: int = 900) -> RetrievalInputBinding:
     )
 
 
-class _FixtureSupplementalAuthority:
-    def __init__(
-        self,
-        *,
-        approval_id: str,
-        approval_digest: str,
-        approval_event_id: str,
-        approval_version: int,
-        lineage: tuple[SupplementalLineageBinding, ...],
-    ) -> None:
-        self._approval = (
-            approval_id,
-            approval_digest,
-            approval_event_id,
-            approval_version,
-            "LEAD_SUPPLEMENTAL_DISCOVERY",
-            "REQUEST_SUPPLEMENTAL_DISCOVERY",
-        )
-        self._lineage = lineage
-
-    def verify(
-        self, connection: sqlite3.Connection, proof: SupplementalDiscoveryReentry
-    ) -> None:
-        retained = (
-            proof.source_lead_disposition_id,
-            proof.source_lead_disposition_digest,
-            proof.source_lead_disposition_event_id,
-            proof.source_lead_disposition_aggregate_version,
-            proof.source_lead_disposition_outcome,
-            proof.source_approval_route,
-        )
-        if (
-            retained != self._approval
-            or proof.lineage_bindings != self._lineage
-            or not connection.in_transaction
-        ):
-            raise WorkItemContractError("supplemental approval differs")
-
 
 def _version(item: TriageWorkItem, ordinal: int = 1) -> TriageWorkItemVersion:
     version_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{item.work_item_id}|{ordinal}"))
@@ -242,6 +204,22 @@ def test_wrong_deterministic_predecessor_and_priority_backref_fail_closed() -> N
             _pending(),
             first.priority,
         )
+    with pytest.raises(WorkItemContractError, match="Priority Selection must be typed"):
+        TriageWorkItemVersion.create(
+            work_item_id=item.work_item_id,
+            ordinal=1,
+            previous_version_id=None,
+            decision_leads=item.decision_leads,
+            context_leads=(),
+            retrieval=_pending(),
+            priority=first.priority,  # type: ignore[arg-type]
+        )
+    with pytest.raises(WorkItemContractError, match="compact binding"):
+        replace(first.priority, basis_digest=digest_bytes(b"forged basis"))
+    value = first.priority.canonical_value()
+    value["selection_digest"] = digest_bytes(b"forged selection")
+    with pytest.raises(WorkItemContractError, match="digest"):
+        WorkItemPriorityBinding.from_value(value)
 
 
 def test_parser_rejects_duplicate_unknown_noncanonical_and_deep_input() -> None:
@@ -347,6 +325,28 @@ def test_public_boundaries_normalise_nested_type_and_canonical_failures() -> Non
         )
     with pytest.raises(WorkItemContractError):
         WorkItemPriorityBinding.from_selection(object.__new__(PrioritySelection))
+    with pytest.raises(WorkItemContractError, match="nested bindings"):
+        replace(
+            _version(item),
+            priority=object.__new__(WorkItemPriorityBinding),
+        )
+    watch_value = {
+        "watch_condition_id": _id(1),
+        "watch_condition_digest": digest_bytes(b"watch"),
+        "lead_id": _id(2),
+        "watch_event_id": _id(3),
+        "watch_aggregate_version": 1,
+        "source_disposition_id": _id(4),
+        "source_disposition_digest": digest_bytes(b"source"),
+        "source_disposition_ordinal": 1,
+        "source_previous_disposition_id": None,
+        "source_disposition_event_id": _id(5),
+        "source_disposition_aggregate_version": 1,
+        "allowed_reentry_kinds": [object()],
+        "observable_transition": False,
+    }
+    with pytest.raises(WorkItemContractError, match="exact text"):
+        WatchConditionWorkItemBinding.from_value(watch_value)
 
     class EvilStr(str):
         def encode(self, *args, **kwargs):
@@ -899,6 +899,7 @@ def test_actual_retrieval_journal_is_exact_indexed_and_tamper_or_purge_fails(
     reopened = TriageWorkItemStore(
         reopened_connection, retrieval_authority=refreshed_authority
     )
+    assert reopened.create_or_replay(item, version) == version
     assert not reopened.assess_current(item.work_item_id).usable
     reopened_connection.close()
     journal_connection = sqlite3.connect(builder.journal.path)
@@ -941,10 +942,61 @@ def test_actual_retrieval_journal_is_exact_indexed_and_tamper_or_purge_fails(
     )
     journal_connection.commit()
     multiple_connection = sqlite3.connect(work_database, isolation_level=None)
-    TriageWorkItemStore(
-        multiple_connection, retrieval_authority=refreshed_authority
-    )
+    with pytest.raises(WorkItemContractError, match="retrieval"):
+        TriageWorkItemStore(
+            multiple_connection, retrieval_authority=refreshed_authority
+        )
     multiple_connection.close()
+    journal_connection.execute(
+        "DELETE FROM increment5d2_retrieval_context_purges WHERE purge_id=?",
+        (second_purge.purge_id,),
+    )
+    for changes in (
+        {"prior_receipt_digest": digest_bytes(b"foreign prior")},
+        {"context_id": _id(4998)},
+    ):
+        values = {
+            "idempotency_key": first_purge.idempotency_key,
+            "context_id": changes.get("context_id", first_purge.context_id),
+            "request_digest": first_purge.request_digest,
+            "prior_receipt_digest": changes.get(
+                "prior_receipt_digest", first_purge.prior_receipt_digest
+            ),
+            "purged_derivative_identities": first_purge.purged_derivative_identities,
+            "context_derivative_identities": first_purge.context_derivative_identities,
+            "reason_code": "FOREIGN_SELF_CONSISTENT_PURGE",
+            "raw_context_bytes_deleted_in_event": False,
+        }
+        forged_purge = replace(
+            first_purge,
+            purge_id=_retrieval_context_purge_id(**values),
+            context_id=values["context_id"],
+            prior_receipt_digest=values["prior_receipt_digest"],
+            reason_code=values["reason_code"],
+            raw_context_bytes_deleted_in_event=False,
+        )
+        journal_connection.execute(
+            "INSERT INTO increment5d2_retrieval_context_purges VALUES(?,?,?,?,?,?)",
+            (
+                forged_purge.purge_id,
+                forged_purge.idempotency_key,
+                forged_purge.request_digest,
+                forged_purge.prior_receipt_digest,
+                forged_purge.receipt_digest,
+                forged_purge.canonical_bytes,
+            ),
+        )
+        journal_connection.commit()
+        forged_connection = sqlite3.connect(work_database, isolation_level=None)
+        with pytest.raises(WorkItemContractError, match="retrieval"):
+            TriageWorkItemStore(
+                forged_connection, retrieval_authority=refreshed_authority
+            )
+        forged_connection.close()
+        journal_connection.execute(
+            "DELETE FROM increment5d2_retrieval_context_purges WHERE purge_id=?",
+            (forged_purge.purge_id,),
+        )
 
     journal_connection.execute(
         "INSERT INTO increment5d2_retrieval_contexts VALUES(?,?,?,?)",
@@ -981,7 +1033,7 @@ def test_actual_retrieval_journal_is_exact_indexed_and_tamper_or_purge_fails(
     journal_connection.execute(
         "UPDATE increment5d2_retrieval_context_purges SET purge_receipt_bytes=? "
         "WHERE purge_id=?",
-        (b"{}", second_purge.purge_id),
+        (b"{}", first_purge.purge_id),
     )
     journal_connection.commit()
     journal_connection.close()
@@ -1096,6 +1148,173 @@ def test_actual_retrieval_complete_no_match_is_usable_and_incomplete_is_not(
     )
     with pytest.raises(WorkItemContractError, match="retrieval_not_complete"):
         incomplete_store.require_usable_current(incomplete_item.work_item_id)
+
+
+def test_two_passage_purge_history_is_disjoint_and_restart_safe(tmp_path) -> None:
+    branch_inputs = composer_helpers.branch_inputs.__wrapped__(tmp_path)
+    root_a = "authority:work-item-root-a"
+    root_b = "authority:work-item-root-b"
+    inputs = retrieval_helpers._selected_passage_inputs(
+        branch_inputs, {1: root_a, 2: root_b}
+    )
+    composer, composition_request, composition = retrieval_helpers._compose(
+        tmp_path,
+        inputs,
+        key="hybrid:work-item-two-passage",
+        request_id=_id(9601),
+    )
+    passages = {
+        candidate.dependency_root_id: retrieval_helpers._candidate_passage_id(
+            candidate
+        )
+        for candidate in composition.candidates
+    }
+    passage_a, passage_b = passages[root_a], passages[root_b]
+    admission_a = "object:work-item-a"
+    admission_b = "object:work-item-b"
+    content = b"governed two-passage Work Item bytes"
+    database, blob = retrieval_helpers._authority_database(
+        tmp_path,
+        name="work-item-two-passage",
+        admission_id=admission_a,
+        passage_id=passage_a,
+        content=content,
+    )
+    assert blob is not None
+    with sqlite3.connect(database) as authority_connection:
+        retrieval_helpers.authority_helpers.seed_object(
+            authority_connection,
+            admission_id=admission_b,
+            passage_id=passage_b,
+            run_id="run:work-item-two-passage:b",
+            allowed=1,
+        )
+        retrieval_helpers._retarget_seeded_passage_to_existing_blob(
+            authority_connection,
+            admission_id=admission_b,
+            passage_id=passage_b,
+            content=content,
+            blob_digest=blob,
+        )
+    cas_root = retrieval_helpers._cas_root(
+        tmp_path,
+        name="cas-work-item-two-passage",
+        blob_digest=blob,
+        content=content,
+    )
+    authority_request, authority_result = retrieval_helpers._authority_execution(
+        tmp_path,
+        name="work-item-two-passage",
+        database=database,
+        composition=composition,
+        passage_ids=tuple(sorted((passage_a, passage_b))),
+    )
+    request = retrieval_helpers._context_request(
+        key="work-item-two-passage",
+        composition_request=composition_request,
+        composition=composition,
+        inputs=inputs,
+        authority_request=authority_request,
+        authority_result=authority_result,
+    )
+    journal = retrieval_helpers.RetrievalContextJournal(
+        tmp_path / "work-item-two-passage.sqlite3"
+    )
+    builder = retrieval_helpers.RetrievalContextBuilder(
+        composition_replayer=composer,
+        journal=journal,
+        hydrator=retrieval_helpers.GovernedCasPassageHydrator(cas_root),
+    )
+    pending_authority = RetrievalContextAuthority(
+        journal.path, {request.request_digest: (request, None)}
+    )
+    pending_decision = _decision(2)
+    pending_connection, pending_store = _store(
+        (pending_decision,), retrieval_authority=pending_authority
+    )
+    pending_item = TriageWorkItem.create((pending_decision,))
+    pending_version = replace(
+        _version(pending_item),
+        retrieval=RetrievalInputBinding.request_pending(request),
+    )
+    pending_store.create_or_replay(pending_item, pending_version)
+    pending_database = tmp_path / "two-passage-pending.sqlite3"
+    pending_target = sqlite3.connect(pending_database)
+    pending_connection.backup(pending_target)
+    pending_target.close()
+    pending_connection.close()
+
+    receipt = builder.execute(request)
+    assert len(receipt.items) == 2
+    journal_connection = sqlite3.connect(journal.path)
+    live_row = journal_connection.execute(
+        "SELECT * FROM increment5d2_retrieval_contexts WHERE idempotency_key=?",
+        (request.idempotency_key,),
+    ).fetchone()
+    journal_connection.close()
+    assert live_row is not None
+    retrieval_authority = RetrievalContextAuthority(
+        journal.path, {request.request_digest: (request, receipt)}
+    )
+    decision = _decision(1)
+    connection, store = _store(
+        (decision,), retrieval_authority=retrieval_authority
+    )
+    item = TriageWorkItem.create((decision,))
+    version = replace(
+        _version(item),
+        retrieval=RetrievalInputBinding.from_receipt(request, receipt),
+    )
+    store.create_or_replay(item, version)
+    work_database = tmp_path / "two-passage-work-items.sqlite3"
+    target = sqlite3.connect(work_database)
+    connection.backup(target)
+    target.close()
+    connection.close()
+
+    first = journal.purge_affected(
+        admission_ids=(admission_a,), reason_code="RIGHTS_WITHDRAWN_A"
+    )
+    second = journal.purge_affected(
+        admission_ids=(admission_b,), reason_code="RIGHTS_WITHDRAWN_B"
+    )
+    relevant = tuple(
+        purge
+        for purge in (*first, *second)
+        if purge.idempotency_key == request.idempotency_key
+    )
+    assert len(relevant) == 2
+    assert set(relevant[0].purged_derivative_identities).isdisjoint(
+        relevant[1].purged_derivative_identities
+    )
+    restarted_connection = sqlite3.connect(work_database, isolation_level=None)
+    restarted = TriageWorkItemStore(
+        restarted_connection, retrieval_authority=retrieval_authority
+    )
+    assert restarted.assess_current(item.work_item_id).usable is False
+    restarted_connection.close()
+
+    journal_connection = sqlite3.connect(journal.path)
+    journal_connection.execute(
+        "INSERT INTO increment5d2_retrieval_contexts VALUES(?,?,?,?)", live_row
+    )
+    journal_connection.commit()
+    journal_connection.close()
+    contradictory_pending = sqlite3.connect(
+        pending_database, isolation_level=None
+    )
+    with pytest.raises(WorkItemContractError, match="retrieval"):
+        TriageWorkItemStore(
+            contradictory_pending, retrieval_authority=retrieval_authority
+        )
+    contradictory_pending.close()
+    journal_connection = sqlite3.connect(journal.path)
+    journal_connection.execute(
+        "DELETE FROM increment5d2_retrieval_contexts WHERE idempotency_key=?",
+        (request.idempotency_key,),
+    )
+    journal_connection.commit()
+    journal_connection.close()
 
 
 def test_sql_successor_scope_retarget_is_rejected(tmp_path) -> None:
@@ -1235,6 +1454,45 @@ def test_exact_replay_checks_the_retained_current_chain_immediately() -> None:
         store.append_version(first.version_id, first.canonical_digest, second)
 
 
+@pytest.mark.parametrize(
+    ("column", "value"),
+    (
+        ("retrieval_outcome", "FORGED"),
+        ("watch_condition_id", _id(9701)),
+    ),
+)
+def test_exact_replay_checks_all_retained_version_metadata(
+    column: str, value: str
+) -> None:
+    decision = _decision(1)
+    connection, store = _store((decision,))
+    item = TriageWorkItem.create((decision,))
+    version = _version(item)
+    store.create_or_replay(item, version)
+    connection.execute("DROP TRIGGER immutable_triage_work_item_versions_update")
+    connection.execute(
+        f"UPDATE triage_work_item_versions SET {column}=? WHERE version_id=?",
+        (value, version.version_id),
+    )
+    with pytest.raises(WorkItemContractError, match="chain"):
+        store.create_or_replay(item, version)
+
+
+def test_exact_replay_checks_retained_item_metadata() -> None:
+    decision = _decision(1)
+    connection, store = _store((decision,))
+    item = TriageWorkItem.create((decision,))
+    version = _version(item)
+    store.create_or_replay(item, version)
+    connection.execute("DROP TRIGGER immutable_triage_work_items_update")
+    connection.execute(
+        "UPDATE triage_work_items SET decision_lead_count=2 WHERE work_item_id=?",
+        (item.work_item_id,),
+    )
+    with pytest.raises(WorkItemContractError, match="retained bytes"):
+        store.create_or_replay(item, version)
+
+
 def test_restart_requires_exact_item_version_and_head_coverage(tmp_path) -> None:
     decision = _decision(1)
     for missing in ("versions", "head"):
@@ -1269,6 +1527,31 @@ def test_restart_requires_exact_item_version_and_head_coverage(tmp_path) -> None
         with pytest.raises(WorkItemContractError, match="coverage"):
             TriageWorkItemStore(reopened)
         reopened.close()
+
+
+def test_restart_integrity_is_linear_query_bounded(tmp_path) -> None:
+    decisions = tuple(_decision(index) for index in range(1, 101))
+    connection, store = _store(decisions)
+    for decision in decisions:
+        item = TriageWorkItem.create((decision,))
+        store.create_or_replay(item, _version(item))
+    database = tmp_path / "linear-integrity.sqlite3"
+    target = sqlite3.connect(database)
+    connection.backup(target)
+    target.close()
+    connection.close()
+
+    reopened = sqlite3.connect(database, isolation_level=None)
+    statements = 0
+
+    def count_statement(_statement: str) -> None:
+        nonlocal statements
+        statements += 1
+
+    reopened.set_trace_callback(count_statement)
+    TriageWorkItemStore(reopened)
+    assert statements < 300
+    reopened.close()
 
 
 def test_watch_reentry_requires_exact_causal_successor_and_matching_condition(
@@ -1340,6 +1623,19 @@ def test_watch_reentry_requires_exact_causal_successor_and_matching_condition(
             watch=watch_binding,
             reentry_kind=ReentryKind.REVIEW,
         )
+        deadline_binding = replace(
+            watch_binding,
+            allowed_reentry_kinds=tuple(
+                sorted((*watch_binding.allowed_reentry_kinds, "DEADLINE"))
+            ),
+        )
+        forged_deadline = replace(
+            second, watch=deadline_binding, reentry_kind=ReentryKind.DEADLINE
+        )
+        with pytest.raises(WorkItemContractError, match="watch"):
+            store.append_version(
+                first.version_id, first.canonical_digest, forged_deadline
+            )
         assert (
             store.append_version(first.version_id, first.canonical_digest, second)
             == second
@@ -1373,33 +1669,18 @@ def test_watch_reentry_requires_exact_causal_successor_and_matching_condition(
                 watch, admitted.initial_disposition
             )
 
-        deadline_binding = replace(
-            watch_binding,
-            allowed_reentry_kinds=tuple(
-                sorted((*watch_binding.allowed_reentry_kinds, "DEADLINE"))
-            ),
-        )
-        assert (
-            replace(
-                second, watch=deadline_binding, reentry_kind=ReentryKind.DEADLINE
-            ).reentry_kind
-            is ReentryKind.DEADLINE
-        )
-
         operator_binding = replace(
             watch_binding,
             allowed_reentry_kinds=tuple(
                 sorted((*watch_binding.allowed_reentry_kinds, "OPERATOR_CONDITION"))
             ),
         )
-        assert (
-            replace(
-                second,
-                watch=operator_binding,
-                reentry_kind=ReentryKind.OPERATOR_CONDITION,
-            ).reentry_kind
-            is ReentryKind.OPERATOR_CONDITION
+        forged_operator = replace(
+            second,
+            watch=operator_binding,
+            reentry_kind=ReentryKind.OPERATOR_CONDITION,
         )
+        assert forged_operator.reentry_kind is ReentryKind.OPERATOR_CONDITION
 
         transition_binding = replace(watch_binding, observable_transition=True)
         with pytest.raises(WorkItemContractError, match="new Lead"):
@@ -1413,21 +1694,22 @@ def test_watch_reentry_requires_exact_causal_successor_and_matching_condition(
             )
         with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
             connection.execute(
-            "INSERT INTO triage_work_item_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                third.version_id,
-                third.schema_identity,
-                third.work_item_id,
-                third.ordinal,
-                third.previous_version_id,
-                item.decision_scope_digest,
-                third.retrieval.state.value,
-                TriageWorkItemStore._causal_digests(third)[0],
-                TriageWorkItemStore._causal_digests(third)[1],
-                third.canonical_bytes,
-                third.canonical_digest,
-                "1970-01-01T00:00:00Z",
-            ),
+                "INSERT INTO triage_work_item_versions "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    third.version_id,
+                    third.schema_identity,
+                    third.work_item_id,
+                    third.ordinal,
+                    third.previous_version_id,
+                    item.decision_scope_digest,
+                    third.retrieval.state.value,
+                    TriageWorkItemStore._causal_ids(third)[0],
+                    TriageWorkItemStore._causal_ids(third)[1],
+                    third.canonical_bytes,
+                    third.canonical_digest,
+                    "1970-01-01T00:00:00Z",
+                ),
             )
         connection.close()
         reopened_connection = sqlite3.connect(database, isolation_level=None)
@@ -1506,17 +1788,8 @@ def test_actual_supplemental_lineage_persists_replays_and_restarts(tmp_path) -> 
     approval_id = _id(9501)
     approval_digest = digest_bytes(b"fixture-supplemental-approval")
     approval_event_id = _id(9502)
-    approval_authority = _FixtureSupplementalAuthority(
-        approval_id=approval_id,
-        approval_digest=approval_digest,
-        approval_event_id=approval_event_id,
-        approval_version=1,
-        lineage=lineage,
-    )
     connection = sqlite3.connect(database, isolation_level=None)
-    store = TriageWorkItemStore(
-        connection, supplemental_authority=approval_authority
-    )
+    store = TriageWorkItemStore(connection)
     source_item = TriageWorkItem.create((source_decision,))
     source_version = _version(source_item)
     store.create_or_replay(source_item, source_version)
@@ -1560,75 +1833,39 @@ def test_actual_supplemental_lineage_persists_replays_and_restarts(tmp_path) -> 
         ),
         supplemental_reentry=proof_value,
     )
-    assert store.create_or_replay(target_item, target_version) == target_version
-    assert store.create_or_replay(target_item, target_version) == target_version
-    assert store.assess_current(target_item.work_item_id).current is True
-    with pytest.raises(WorkItemContractError, match="proposal-only"):
-        replace(proof_value, proposal_only_action=True)
-    with pytest.raises(WorkItemContractError, match="Trigger authority"):
-        replace(proof_value, source_disposition_authorises_trigger=True)
-    with pytest.raises(WorkItemContractError, match="lineage"):
-        replace(proof_value, lineage_bindings=lineage[:-1])
-    with pytest.raises(WorkItemContractError, match="lineage"):
-        replace(
-            proof_value,
-            lineage_bindings=(
-                lineage[0],
-                lineage[1],
-                replace(lineage[2], parent_id=_id(9990)),
-                *lineage[3:],
+    with pytest.raises(WorkItemContractError, match="authority_unavailable_v18"):
+        store.create_or_replay(target_item, target_version)
+
+    second_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{target_item.work_item_id}|2"))
+    with pytest.raises(WorkItemContractError, match="ordinal"):
+        TriageWorkItemVersion.create(
+            work_item_id=target_item.work_item_id,
+            ordinal=2,
+            previous_version_id=target_version.version_id,
+            decision_leads=(target_decision,),
+            context_leads=(),
+            retrieval=_pending(),
+            priority=PrioritySelection(
+                target_item.work_item_id,
+                second_id,
+                PriorityLane.ROUTINE,
+                (ReasonReference("fixture", "supplemental-successor"),),
+            ),
+            supplemental_reentry=replace(
+                proof_value,
+                target_version_id=second_id,
             ),
         )
+    with pytest.raises(WorkItemContractError, match="lineage"):
+        replace(proof_value, lineage_bindings=lineage[:-1])
     with pytest.raises(WorkItemContractError, match="route"):
         replace(proof_value, source_approval_route="RESUME_ON_WATCH")
-    with pytest.raises(WorkItemContractError, match="target"):
-        replace(
-            target_version,
-            supplemental_reentry=replace(proof_value, target_version_id=_id(9991)),
-        )
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        with pytest.raises(WorkItemContractError, match="approval differs"):
-            approval_authority.verify(
-                connection,
-                replace(proof_value, source_lead_disposition_id=_id(9992)),
-            )
-        with pytest.raises(WorkItemContractError, match="approval differs"):
-            approval_authority.verify(
-                connection,
-                replace(
-                    proof_value,
-                    lineage_bindings=(
-                        lineage[0],
-                        replace(lineage[1], digest=digest_bytes(b"forged request")),
-                        *lineage[2:],
-                    ),
-                ),
-            )
-    finally:
-        connection.execute("ROLLBACK")
+
+    class NoOp:
+        @staticmethod
+        def verify(*_args: object) -> None:
+            return None
+
+    with pytest.raises(TypeError, match="supplemental_authority"):
+        TriageWorkItemStore(connection, supplemental_authority=NoOp())  # type: ignore[call-arg]
     connection.close()
-
-    missing_provider_connection = sqlite3.connect(database, isolation_level=None)
-    with pytest.raises(WorkItemContractError, match="authority_unavailable"):
-        TriageWorkItemStore(missing_provider_connection)
-    missing_provider_connection.close()
-
-    reopened_connection = sqlite3.connect(database, isolation_level=None)
-    reopened = TriageWorkItemStore(
-        reopened_connection, supplemental_authority=approval_authority
-    )
-    assert reopened.load_version(target_version.version_id) == target_version
-    reopened_connection.close()
-    corrupt = sqlite3.connect(database, isolation_level=None)
-    corrupt.execute("PRAGMA foreign_keys=OFF")
-    corrupt.execute("DROP TRIGGER immutable_check_outcomes_update")
-    corrupt.execute(
-        "UPDATE check_outcomes SET canonical_digest='sha256:'||printf('%064d',0) WHERE outcome_id=?",
-        (lineage[2].identifier,),
-    )
-    corrupt.close()
-    corrupted_reopen = sqlite3.connect(database, isolation_level=None)
-    with pytest.raises(WorkItemContractError, match="supplemental_check_outcome"):
-        TriageWorkItemStore(corrupted_reopen)
-    corrupted_reopen.close()

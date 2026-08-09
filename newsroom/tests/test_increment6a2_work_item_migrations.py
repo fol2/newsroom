@@ -46,7 +46,7 @@ def test_fresh_v18_is_exact_and_integral() -> None:
     columns = {
         row[1] for row in connection.execute("PRAGMA table_info(triage_work_item_versions)")
     }
-    assert {"watch_causality_digest", "supplemental_causality_digest"} <= columns
+    assert {"watch_condition_id", "source_lead_disposition_id"} <= columns
     unique_columns = {
         tuple(
             row[2]
@@ -59,8 +59,34 @@ def test_fresh_v18_is_exact_and_integral() -> None:
         )
         if index[2]
     }
-    assert ("watch_causality_digest",) in unique_columns
-    assert ("supplemental_causality_digest",) in unique_columns
+    assert ("watch_condition_id",) in unique_columns
+    assert ("source_lead_disposition_id",) in unique_columns
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+        connection.execute(
+            "INSERT INTO triage_work_items VALUES(?,?,?,?,?,?,?)",
+            (
+                "00000000-0000-4000-8000-000000000001",
+                "newsroom.increment6.triage-work-item.v1",
+                "sha256:" + "1" * 64,
+                1,
+                b"x" * (32 * 1024 + 1),
+                "sha256:" + "2" * 64,
+                "2042-03-12T10:00:00Z",
+            ),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+        connection.execute(
+            "INSERT INTO triage_work_items VALUES(?,?,?,?,?,?,?)",
+            (
+                "00000000-0000-4000-8000-000000000002",
+                "newsroom.increment6.triage-work-item.v1",
+                "sha256:" + "3" * 64,
+                1,
+                b"{}",
+                "sha256:not-a-digest",
+                "2042-03-12T10:00:00Z",
+            ),
+        )
 
 
 def test_exact_v17_upgrade_retains_pre_v18_backup(tmp_path: Path) -> None:

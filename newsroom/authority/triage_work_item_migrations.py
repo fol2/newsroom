@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from .canonical import digest_canonical
+from .canonical import canonical_json_bytes, digest_canonical
 
 TRIAGE_WORK_ITEM_SCHEMA_VERSION = 18
 TRIAGE_WORK_ITEM_MIGRATION_NAME = "triage_work_item_authority_v18"
@@ -45,11 +45,24 @@ def triage_work_item_backup_paths(database: str | Path) -> tuple[Path, Path]:
 
 
 def _logical_database_digest(connection: sqlite3.Connection) -> str:
-    return digest_canonical(list(connection.iterdump()))
+    digest = hashlib.sha256()
+    digest.update(b"[")
+    first = True
+    for statement in connection.iterdump():
+        if not first:
+            digest.update(b",")
+        digest.update(canonical_json_bytes(statement))
+        first = False
+    digest.update(b"]")
+    return "sha256:" + digest.hexdigest()
 
 
 def _file_digest(path: Path) -> str:
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
 
 
 def _schema_fingerprint(connection: sqlite3.Connection) -> str:
@@ -185,8 +198,8 @@ TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS: tuple[str, ...] = (
         schema_identity TEXT NOT NULL CHECK(schema_identity='newsroom.increment6.triage-work-item.v1'),
         decision_scope_digest TEXT NOT NULL UNIQUE,
         decision_lead_count INTEGER NOT NULL CHECK(decision_lead_count BETWEEN 1 AND 32),
-        canonical_bytes BLOB NOT NULL,
-        canonical_digest TEXT NOT NULL UNIQUE,
+        canonical_bytes BLOB NOT NULL CHECK(length(canonical_bytes) BETWEEN 1 AND 32768),
+        canonical_digest TEXT NOT NULL UNIQUE CHECK(substr(canonical_digest,1,7)='sha256:' AND length(canonical_digest)=71 AND substr(canonical_digest,8) NOT GLOB '*[^0-9a-f]*'),
         created_at TEXT NOT NULL,
         CHECK(length(canonical_bytes)>0)
     ) STRICT""",
@@ -198,10 +211,10 @@ TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS: tuple[str, ...] = (
         previous_version_id TEXT REFERENCES triage_work_item_versions(version_id),
         decision_scope_digest TEXT NOT NULL,
         retrieval_outcome TEXT NOT NULL,
-        watch_causality_digest TEXT UNIQUE,
-        supplemental_causality_digest TEXT UNIQUE,
-        canonical_bytes BLOB NOT NULL,
-        canonical_digest TEXT NOT NULL UNIQUE,
+        watch_condition_id TEXT UNIQUE CHECK(watch_condition_id IS NULL OR length(watch_condition_id)=36),
+        source_lead_disposition_id TEXT UNIQUE CHECK(source_lead_disposition_id IS NULL OR length(source_lead_disposition_id)=36),
+        canonical_bytes BLOB NOT NULL CHECK(length(canonical_bytes) BETWEEN 1 AND 393216),
+        canonical_digest TEXT NOT NULL UNIQUE CHECK(substr(canonical_digest,1,7)='sha256:' AND length(canonical_digest)=71 AND substr(canonical_digest,8) NOT GLOB '*[^0-9a-f]*'),
         recorded_at TEXT NOT NULL,
         UNIQUE(work_item_id,ordinal),
         UNIQUE(version_id,work_item_id),
@@ -228,10 +241,10 @@ TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS: tuple[str, ...] = (
               AND i.decision_scope_digest=NEW.decision_scope_digest)
         BEGIN SELECT RAISE(ABORT,'Work Item Version scope differs'); END""",
     """CREATE TRIGGER triage_work_item_version_causality_guard BEFORE INSERT ON triage_work_item_versions
-        WHEN (json_type(CAST(NEW.canonical_bytes AS TEXT),'$.watch')!='null')
-             !=(NEW.watch_causality_digest IS NOT NULL)
-          OR (json_type(CAST(NEW.canonical_bytes AS TEXT),'$.supplemental_reentry')!='null')
-             !=(NEW.supplemental_causality_digest IS NOT NULL)
+        WHEN COALESCE(json_extract(CAST(NEW.canonical_bytes AS TEXT),'$.watch.watch_condition_id'),'')
+             !=COALESCE(NEW.watch_condition_id,'')
+          OR COALESCE(json_extract(CAST(NEW.canonical_bytes AS TEXT),'$.supplemental_reentry.source_lead_disposition_id'),'')
+             !=COALESCE(NEW.source_lead_disposition_id,'')
         BEGIN SELECT RAISE(ABORT,'Work Item Version causality differs'); END""",
     """CREATE TRIGGER retained_triage_work_item_versions_delete BEFORE DELETE ON triage_work_item_versions
         BEGIN SELECT RAISE(ABORT,'retained Triage Work Item Version'); END""",
