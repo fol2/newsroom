@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import itertools
 import json
-from dataclasses import replace
+from collections.abc import Iterator, Mapping
+from dataclasses import fields, replace
 
 import pytest
 
@@ -39,6 +40,7 @@ from newsroom.increment6.outcomes import (
     OutcomeSelection,
 )
 from newsroom.increment6.proposals import (
+    LeadRecommendation,
     MAX_CONTEXT_LEADS,
     MAX_DECISION_LEADS,
     MAX_INPUT_CITATIONS,
@@ -709,3 +711,164 @@ def test_operational_action_selector_exhaustively_rejects_competing_seams() -> N
         else:
             with pytest.raises(DispositionContractError, match="validation errors"):
                 build_pending_dispositions(validation, {LEAD_A: head}, {LEAD_A: selection})
+
+
+def _typed_subclass(value: object, subclass: type[object]) -> object:
+    return subclass(**{
+        field.name: getattr(value, field.name) for field in fields(value)  # type: ignore[arg-type]
+    })
+
+
+class _KeyErrorItemsMapping(Mapping[str, object]):
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("value",))
+
+    def __len__(self) -> int:
+        return 1
+
+    def items(self) -> object:
+        raise KeyError("items")
+
+
+def test_key_errors_from_typed_nested_impostors_and_builder_inputs_are_normalised() -> None:
+    raw = _proposal_bytes()
+    validation = validate_proposal(raw, _validator(raw))
+    head = LeadDispositionHeadBinding(LEAD_A, DIGEST_B, "head:a", DIGEST_A)
+    selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+    disposition = build_pending_dispositions(
+        validation, {LEAD_A: head}, {LEAD_A: selection}
+    )[0]
+
+    class BadHead(LeadDispositionHeadBinding):
+        def canonical_value(self) -> dict[str, object]:
+            raise KeyError("head")
+
+    class BadValidator(ValidatorInputBinding):
+        def canonical_value(self) -> dict[str, object]:
+            raise KeyError("validator")
+
+    class BadRecommendation(LeadRecommendation):
+        def canonical_value(self) -> dict[str, object]:
+            raise KeyError("recommendation")
+
+    class BadProposal(TriageProposal):
+        def canonical_value(self) -> dict[str, object]:
+            raise KeyError("proposal")
+
+    class BadSelection(OutcomeSelection):
+        def canonical_value(self) -> dict[str, object]:
+            raise KeyError("selection")
+
+    bad_head = _typed_subclass(head, BadHead)
+    bad_validator = _typed_subclass(validation.validator_input, BadValidator)
+    bad_recommendation = _typed_subclass(
+        disposition.route_binding, BadRecommendation
+    )
+    bad_proposal = _typed_subclass(validation.proposal, BadProposal)
+    bad_selection = _typed_subclass(selection, BadSelection)
+
+    public_calls = (
+        lambda: replace(disposition, lead_head=bad_head),
+        lambda: replace(disposition, validator_input=bad_validator),
+        lambda: replace(disposition, route_binding=bad_recommendation),
+        lambda: replace(validation, proposal=bad_proposal),
+        lambda: validate_proposal(raw, bad_validator),
+        lambda: build_pending_dispositions(
+            validation, {LEAD_A: head}, {LEAD_A: bad_selection}
+        ),
+        lambda: build_pending_dispositions(
+            validation, {LEAD_A: bad_head}, {LEAD_A: selection}
+        ),
+        lambda: build_pending_dispositions(
+            replace(validation, validator_input=bad_validator),
+            {LEAD_A: head},
+            {LEAD_A: selection},
+        ),
+    )
+    for call in public_calls:
+        with pytest.raises(DispositionContractError):
+            call()
+
+    with pytest.raises(DispositionContractError, match="head binding"):
+        build_pending_dispositions(
+            validation, {LEAD_A: object()}, {LEAD_A: selection}
+        )
+    wrong_validator_validation = validate_proposal(raw, _validator(raw))
+    object.__setattr__(wrong_validator_validation, "validator_input", object())
+    with pytest.raises(DispositionContractError, match="validator"):
+        build_pending_dispositions(
+            wrong_validator_validation,
+            {LEAD_A: head},
+            {LEAD_A: selection},
+        )
+
+
+def test_key_errors_from_mapping_properties_and_subclass_parser_replay_are_normalised() -> None:
+    raw = _proposal_bytes()
+    validation = validate_proposal(raw, _validator(raw))
+    head = LeadDispositionHeadBinding(LEAD_A, DIGEST_B, "head:a", DIGEST_A)
+    selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+    disposition = build_pending_dispositions(
+        validation, {LEAD_A: head}, {LEAD_A: selection}
+    )[0]
+
+    class MappingSelection(OutcomeSelection):
+        def canonical_value(self) -> object:
+            return _KeyErrorItemsMapping()
+
+    with pytest.raises(DispositionContractError):
+        build_pending_dispositions(
+            validation,
+            {LEAD_A: head},
+            {LEAD_A: _typed_subclass(selection, MappingSelection)},
+        )
+
+    class ReplayFinding(ProposalValidationFinding):
+        def canonical_value(self) -> dict[str, object]:
+            calls = getattr(self, "_canonical_calls", 0) + 1
+            object.__setattr__(self, "_canonical_calls", calls)
+            if calls > 1:
+                raise KeyError("finding replay")
+            return super().canonical_value()
+
+    class ReplayDisposition(ProposalDisposition):
+        def canonical_value(self) -> dict[str, object]:
+            calls = getattr(self, "_canonical_calls", 0) + 1
+            object.__setattr__(self, "_canonical_calls", calls)
+            if calls > 1:
+                raise KeyError("disposition replay")
+            return super().canonical_value()
+
+    with pytest.raises(DispositionContractError):
+        ReplayFinding.from_canonical_bytes(validation.findings[0].canonical_bytes)
+    with pytest.raises(DispositionContractError):
+        ReplayDisposition.from_canonical_bytes(disposition.canonical_bytes)
+
+    bad_head = _typed_subclass(head, type(
+        "PropertyHead",
+        (LeadDispositionHeadBinding,),
+        {"canonical_value": lambda self: (_ for _ in ()).throw(KeyError("head"))},
+    ))
+    bad_validator = _typed_subclass(validation.validator_input, type(
+        "PropertyValidator",
+        (ValidatorInputBinding,),
+        {"canonical_value": lambda self: (_ for _ in ()).throw(KeyError("validator"))},
+    ))
+    object.__setattr__(disposition, "lead_head", bad_head)
+    object.__setattr__(validation, "validator_input", bad_validator)
+    finding = validate_proposal(raw, _validator(raw)).findings[0]
+    object.__setattr__(finding, "validator_input", bad_validator)
+    for value in (disposition, validation, finding):
+        with pytest.raises(DispositionContractError):
+            _ = value.canonical_bytes
