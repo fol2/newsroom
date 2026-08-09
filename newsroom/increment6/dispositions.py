@@ -54,7 +54,15 @@ VALIDATED_PROPOSAL_LEAD_DISPOSITION_BINDING = (
 
 _FINDING_SET_SCHEMA_VERSION = "newsroom.increment6.triage-proposal-finding-set.v1"
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,255}\Z")
-_MAX_CANONICAL_BYTES = 1_048_576
+# #356 has no public raw-byte constant. Its closed field bounds permit up to
+# 32 recommendations, each with 64 citations and bounded 32-item text lists.
+# Canonical JSON can expand each legal UTF-8 control byte to a six-byte escape,
+# so the complete maximum producer envelope is materially larger than the
+# ordinary-text equivalent. Sixty-four MiB covers that escaped 32-Lead envelope
+# plus this module's finding and disposition wrappers; consumers must not impose
+# the former private 1 MiB limit, which was smaller than a valid eight-Lead
+# Proposal.
+MAX_DISPOSITION_CANONICAL_BYTES = 67_108_864
 _MAX_JSON_DEPTH = 64
 _MAX_FINDINGS = 64
 
@@ -146,7 +154,11 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _decode(raw: bytes, *, field: str) -> dict[str, object]:
-    if not isinstance(raw, bytes) or not raw or len(raw) > _MAX_CANONICAL_BYTES:
+    if (
+        not isinstance(raw, bytes)
+        or not raw
+        or len(raw) > MAX_DISPOSITION_CANONICAL_BYTES
+    ):
         raise DispositionContractError(f"{field} integrity requires bounded bytes")
     depth = 0
     in_string = False
@@ -179,14 +191,27 @@ def _decode(raw: bytes, *, field: str) -> dict[str, object]:
         )
     except DispositionContractError:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError, MemoryError, RecursionError) as exc:
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        MemoryError,
+        RecursionError,
+        ValueError,
+    ) as exc:
         raise DispositionContractError(f"{field} integrity is not valid JSON") from exc
     if not isinstance(value, dict):
         raise DispositionContractError(f"{field} integrity requires an object")
     try:
         if canonical_json_bytes(value) != raw:
             raise DispositionContractError(f"{field} integrity is not canonical JSON")
-    except (CanonicalizationError, MemoryError, RecursionError) as exc:
+    except (
+        CanonicalizationError,
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise DispositionContractError(f"{field} integrity is outside canonical JSON") from exc
     return value
 
@@ -194,9 +219,16 @@ def _decode(raw: bytes, *, field: str) -> dict[str, object]:
 def _bounded_canonical(value: object, *, field: str) -> bytes:
     try:
         raw = canonical_json_bytes(value)
-    except (CanonicalizationError, MemoryError, RecursionError, ValueError) as exc:
+    except (
+        CanonicalizationError,
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise DispositionContractError(f"{field} is outside canonical JSON") from exc
-    if len(raw) > _MAX_CANONICAL_BYTES:
+    if len(raw) > MAX_DISPOSITION_CANONICAL_BYTES:
         raise DispositionContractError(f"{field} exceeds the canonical byte bound")
     return raw
 
@@ -378,9 +410,16 @@ class ProposalValidationFinding(_NoEffect):
                 evidence_reference_digest=item["evidence_reference_digest"],
                 validator_input=ValidatorInputBinding.from_mapping(item["validator_input_binding"]),
             )
-        except (TypeError, ValueError) as exc:
+        except (
+            CanonicalizationError,
+            MemoryError,
+            OverflowError,
+            RecursionError,
+            TypeError,
+            ValueError,
+        ) as exc:
             raise DispositionContractError("finding is malformed") from exc
-        if result.canonical_bytes != raw:
+        if _bounded_canonical(result.canonical_value(), field="finding") != raw:
             raise DispositionContractError("finding typed replay differs")
         return result
 
@@ -431,7 +470,7 @@ class ProposalValidationResult(_NoEffect):
             raise DispositionContractError("finding set digest differs")
         if self.authority is not DispositionAuthority.NONE:
             raise DispositionContractError("pure validation has no authority")
-        if len(self.canonical_bytes) > _MAX_CANONICAL_BYTES:
+        if len(self.canonical_bytes) > MAX_DISPOSITION_CANONICAL_BYTES:
             raise DispositionContractError("finding set exceeds the canonical byte bound")
 
     @property
@@ -536,7 +575,7 @@ def _operational_expected_action(
     expected = _OPERATIONAL_ACTION_KINDS.get(operational.action_kind)
     if expected is None:
         raise DispositionContractError("operational action kind is unsupported")
-    required = {
+    selected_seam = {
         CanonicalNextAction.RETRY_SAME_REQUEST: operational.retry_condition,
         CanonicalNextAction.REQUEST_REVIEW: (
             operational.review_condition
@@ -545,20 +584,32 @@ def _operational_expected_action(
         ),
         CanonicalNextAction.WAIT_FOR_DEPENDENCY: operational.dependency,
     }[expected]
-    if required is None:
+    if selected_seam is None:
         raise DispositionContractError(
             "operational action kind lacks its exact deterministic seam"
         )
-    competing = {
-        CanonicalNextAction.RETRY_SAME_REQUEST: operational.retry_condition,
-        CanonicalNextAction.REQUEST_REVIEW: (
-            operational.review_condition or operational.expiry_condition
-        ),
-        CanonicalNextAction.WAIT_FOR_DEPENDENCY: operational.dependency,
-    }
-    active = {action for action, value in competing.items() if value is not None}
-    if len(active) > 1 and expected not in active:
-        raise DispositionContractError("operational action seams are ambiguous")
+    competing_present = {
+        CanonicalNextAction.RETRY_SAME_REQUEST: any((
+            operational.owner_id,
+            operational.review_condition,
+            operational.expiry_condition,
+            operational.dependency,
+        )),
+        CanonicalNextAction.REQUEST_REVIEW: any((
+            operational.retry_condition,
+            operational.dependency,
+        )),
+        CanonicalNextAction.WAIT_FOR_DEPENDENCY: any((
+            operational.owner_id,
+            operational.retry_condition,
+            operational.review_condition,
+            operational.expiry_condition,
+        )),
+    }[expected]
+    if competing_present:
+        raise DispositionContractError(
+            "operational action contains a competing action seam"
+        )
     return expected
 
 
@@ -733,9 +784,17 @@ class ProposalDisposition(_NoEffect):
                 route_binding=LeadRecommendation.from_value(item["route_binding"]),
                 route_binding_digest=item["route_binding_digest"], selection=OutcomeSelection.from_mapping(item["selection"]),
             )
-        except (TypeError, ValueError, OutcomeContractError) as exc:
+        except (
+            CanonicalizationError,
+            MemoryError,
+            OutcomeContractError,
+            OverflowError,
+            RecursionError,
+            TypeError,
+            ValueError,
+        ) as exc:
             raise DispositionContractError("disposition is malformed") from exc
-        if result.canonical_bytes != raw:
+        if _bounded_canonical(result.canonical_value(), field="disposition") != raw:
             raise DispositionContractError("disposition typed replay differs")
         return result
 
@@ -748,7 +807,15 @@ def validate_proposal(raw: bytes, validator_input: ValidatorInputBinding) -> Pro
     _decode(raw, field="proposal")
     try:
         proposal = TriageProposal.from_canonical_bytes(raw)
-    except ProposalContractError as exc:
+    except (
+        CanonicalizationError,
+        MemoryError,
+        OverflowError,
+        ProposalContractError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise DispositionContractError("proposal integrity validation failed") from exc
     proposal_digest = digest_bytes(raw)
     if validator_input.input_digest != validator_input.expected_input_digest(
@@ -874,7 +941,8 @@ def build_pending_dispositions(
 
 
 __all__ = [
-    "DISPOSITION_AUTHORITY", "PROPOSAL_DISPOSITION", "PROPOSAL_DISPOSITION_SCHEMA_VERSION",
+    "DISPOSITION_AUTHORITY", "MAX_DISPOSITION_CANONICAL_BYTES",
+    "PROPOSAL_DISPOSITION", "PROPOSAL_DISPOSITION_SCHEMA_VERSION",
     "PROPOSAL_VALIDATION_FINDING", "PROPOSAL_VALIDATION_FINDING_SCHEMA_VERSION",
     "VALIDATED_PROPOSAL_LEAD_DISPOSITION_BINDING", "DispositionAuthority",
     "DispositionContractError", "DispositionJudgement", "FindingCode", "FindingSeverity",

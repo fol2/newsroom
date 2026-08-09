@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 from dataclasses import replace
 
@@ -9,6 +10,7 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.increment5.retrieval_context import RETRIEVAL_CONTEXT_CONTRACT_DIGEST
 from newsroom.increment6.dispositions import (
     DISPOSITION_AUTHORITY,
+    MAX_DISPOSITION_CANONICAL_BYTES,
     PROPOSAL_DISPOSITION,
     PROPOSAL_DISPOSITION_SCHEMA_VERSION,
     PROPOSAL_VALIDATION_FINDING,
@@ -35,7 +37,11 @@ from newsroom.increment6.outcomes import (
     StructuredReason,
     OutcomeSelection,
 )
-from newsroom.increment6.proposals import PROPOSAL_SCHEMA_VERSION, ProposalRoute
+from newsroom.increment6.proposals import (
+    PROPOSAL_SCHEMA_VERSION,
+    ProposalRoute,
+    TriageProposal,
+)
 
 
 DIGEST_A = "sha256:" + "a" * 64
@@ -74,7 +80,7 @@ def _recommendation(lead_id: str, route: str = "NEW_EVENT_CANDIDATE") -> dict[st
     elif route == "SUPPLEMENTAL_DISCOVERY":
         value["supplemental_action"] = {"action_kind": "CHECK_NAMED_SOURCE", "scope": "The primary organisation newsroom", "maximum_attempts": 1, "requires_approval": True}
     elif route == "OPERATIONAL_HOLD":
-        value["operational_action"] = {"action_kind": "RETRY_RETRIEVAL", "owner_id": "owner:newsroom", "dependency": "retrieval-service", "retry_condition": "Retry after service recovery.", "review_condition": None, "expiry_condition": None}
+        value["operational_action"] = {"action_kind": "RETRY_RETRIEVAL", "owner_id": None, "dependency": None, "retry_condition": "Retry after service recovery.", "review_condition": None, "expiry_condition": None}
     elif route == "ASSOCIATE_WITHOUT_CANDIDATE":
         target = "44444444-4444-4444-8444-444444444444"
         value["hypothesis"] = {"proposal_local_id": f"hypothesis:{lead_id[:4]}", "summary": "The lead concerns a prior state.", "relationship_kind": "SAME_STATE", "target_hypothesis_id": target}
@@ -93,7 +99,15 @@ def _recommendation(lead_id: str, route: str = "NEW_EVENT_CANDIDATE") -> dict[st
 
 
 def _proposal_bytes(routes: tuple[str, ...] = ("NEW_EVENT_CANDIDATE",)) -> bytes:
-    leads = (LEAD_A, LEAD_B)[:len(routes)]
+    available_leads = (
+        (LEAD_A, LEAD_B)
+        if len(routes) <= 2
+        else tuple(
+            f"00000000-0000-4000-8000-{index:012d}"
+            for index in range(1, 33)
+        )
+    )
+    leads = available_leads[:len(routes)]
     proposal: dict[str, object] = {
         "proposal_id": "84d0ae8c-1378-4b76-8792-1bb805ab6a91",
         "work_item_binding": {"work_item_id": "4d3b1b83-205e-4f77-a46b-ffbf5509d254", "work_item_version_id": "c37c30fd-cfab-4a57-ab69-a72515ebaa31", "work_item_version_digest": DIGEST_D},
@@ -112,6 +126,112 @@ def _resign(document: dict[str, object]) -> bytes:
     identity = {"schema_version": PROPOSAL_SCHEMA_VERSION, "proposal": document["proposal"]}
     document["content_identity"] = digest_bytes(canonical_json_bytes(identity))
     return canonical_json_bytes(document)
+
+
+def _reviewed_large_producer_payload() -> bytes:
+    """Reproduce the reviewed legal eight-Lead #356 payload's exact size."""
+
+    raw = _proposal_bytes(("EDITORIAL_REJECT",) * 8)
+    document = json.loads(raw)
+    recommendations = document["proposal"]["recommendations"]
+    for recommendation in recommendations:
+        lead_id = recommendation["decision_lead_id"]
+        recommendation["input_citations"] = [
+            {
+                "citation_id": f"citation:{index:03d}:" + "c" * 230,
+                "source_kind": "DECISION_LEAD" if index == 0 else "RETRIEVAL_MATCH",
+                "source_id": lead_id if index == 0 else f"passage:{index:03d}:" + "p" * 230,
+                "source_digest": DIGEST_B,
+                "field_path": f"passage:{index:03d}." + "f" * 230,
+                "byte_start": index * 20,
+                "byte_end": index * 20 + 18,
+                "quote_digest": DIGEST_D,
+                "target_hypothesis_id": None,
+            }
+            for index in range(64)
+        ]
+        recommendation["likely_new_information"] = "n" * 1_024
+        recommendation["materiality_basis"] = "m" * 1_024
+        recommendation["missing_context"] = [
+            f"{index:02d}:" + "x" * 1_020 for index in range(32)
+        ]
+        recommendation["retrieval_incompleteness"] = [
+            f"{index:02d}:" + "y" * 1_020 for index in range(32)
+        ]
+    document["proposal"]["rationale"] = "r" * 4_096
+
+    target_size = 1_103_922
+    deficit = target_size - len(_resign(document))
+    for recommendation in recommendations:
+        for citation in recommendation["input_citations"]:
+            for field, fill in (("field_path", "f"), ("citation_id", "c"), ("source_id", "p")):
+                if field == "source_id" and citation["source_kind"] == "DECISION_LEAD":
+                    continue
+                available = 256 - len(citation[field].encode("utf-8"))
+                addition = min(deficit, available)
+                citation[field] += fill * addition
+                deficit -= addition
+                if deficit == 0:
+                    raw = _resign(document)
+                    assert len(raw) == target_size
+                    return raw
+    raise AssertionError("reviewed producer payload could not reach its exact size")
+
+
+def _maximal_escaped_producer_payload() -> bytes:
+    """Exercise every dominant #356 text/list/citation bound across 32 Leads."""
+
+    document = json.loads(_proposal_bytes(("NEW_EVENT_CANDIDATE",) * 32))
+    bounded_text = "\x01" * 1_024
+
+    def unique_text(index: int) -> str:
+        return f"{index:02d}:" + "\x01" * 1_021
+
+    def full_token(prefix: str, fill: str = "x") -> str:
+        return prefix + fill * (256 - len(prefix))
+
+    for recommendation in document["proposal"]["recommendations"]:
+        lead_id = recommendation["decision_lead_id"]
+        recommendation["input_citations"] = [
+            {
+                "citation_id": full_token(f"citation:{index:03d}:", "c"),
+                "source_kind": "DECISION_LEAD" if index == 0 else "RETRIEVAL_MATCH",
+                "source_id": lead_id if index == 0 else full_token(f"passage:{index:03d}:", "p"),
+                "source_digest": DIGEST_B,
+                "field_path": "\x01" * 256,
+                "byte_start": index * 20,
+                "byte_end": index * 20 + 18,
+                "quote_digest": DIGEST_D,
+                "target_hypothesis_id": None,
+            }
+            for index in range(64)
+        ]
+        recommendation["likely_new_information"] = bounded_text
+        recommendation["materiality_basis"] = bounded_text
+        recommendation["missing_context"] = [unique_text(index) for index in range(32)]
+        recommendation["retrieval_incompleteness"] = [
+            f"{index:02d};" + "\x01" * 1_021 for index in range(32)
+        ]
+        recommendation["hypothesis"].update({
+            "proposal_local_id": full_token(f"hypothesis:{lead_id[:8]}:"),
+            "summary": bounded_text,
+        })
+        recommendation["candidate_manifest"].update({
+            "proposed_geography": full_token("geography:"),
+            "proposed_category": full_token("category:"),
+            "urgency": full_token("urgency:"),
+            "likely_new_information": bounded_text,
+            "reader_utility_basis": bounded_text,
+            "uncertainties": [unique_text(index) for index in range(32)],
+            "evidence_objectives": [
+                f"{index:02d};" + "\x01" * 1_021 for index in range(32)
+            ],
+            "governing_versions": [
+                full_token(f"version:{index:02d}:", "v") for index in range(32)
+            ],
+        })
+    document["proposal"]["rationale"] = "\x01" * 4_096
+    return _resign(document)
 
 
 def _validator(raw: bytes | None = None) -> ValidatorInputBinding:
@@ -306,6 +426,7 @@ def test_operational_owner_mapping_and_ambiguous_action_are_inspectable() -> Non
     action = owner_only["proposal"]["recommendations"][0]["operational_action"]
     action.update({
         "action_kind": "REQUEST_REVIEW",
+        "owner_id": "owner:newsroom",
         "dependency": None,
         "retry_condition": None,
         "review_condition": None,
@@ -337,6 +458,15 @@ def test_operational_owner_mapping_and_ambiguous_action_are_inspectable() -> Non
     assert invalid.findings[0].severity.value == "ERROR"
     with pytest.raises(DispositionContractError, match="validation errors"):
         build_pending_dispositions(invalid, {LEAD_A: head}, {LEAD_A: selection})
+    editorial_reject = _selection(
+        CanonicalOutcome.LEAD_EDITORIAL_REJECT,
+        CanonicalNextAction.CLOSE_DECISION,
+        ReasonCode.NOVELTY_EXACT_DUPLICATE,
+    )
+    with pytest.raises(DispositionContractError, match="validation errors"):
+        build_pending_dispositions(
+            invalid, {LEAD_A: head}, {LEAD_A: editorial_reject}
+        )
 
 
 def test_integrity_failures_are_not_editorial_rejections_and_no_effect_type_is_reachable() -> None:
@@ -369,9 +499,9 @@ def test_lead_digest_mismatch_and_oversized_constructed_disposition_fail_closed(
                     code=ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
                     basis=ReasonBasisClass.DETERMINISTIC_OBSERVATION,
                     references=(ReasonReference("evidence", f"evidence:{index:04d}", DIGEST_A),),
-                    explanation="x" * 1_000,
+                    explanation="\n" * 1_000,
                 )
-                for index in range(1_000)
+                for index in range(30_000)
             ),
             key=lambda item: item.canonical_bytes,
         )
@@ -382,3 +512,122 @@ def test_lead_digest_mismatch_and_oversized_constructed_disposition_fail_closed(
         build_pending_dispositions(
             validation, {LEAD_A: exact_head}, {LEAD_A: oversized}
         )
+
+
+def test_every_legal_producer_envelope_fits_the_public_consumer_bound() -> None:
+    reviewed = _reviewed_large_producer_payload()
+    assert len(reviewed) == 1_103_922
+    assert TriageProposal.from_canonical_bytes(reviewed).canonical_bytes == reviewed
+    reviewed_validation = validate_proposal(reviewed, _validator(reviewed))
+    assert len(reviewed_validation.findings) == 8
+
+    maximal = _maximal_escaped_producer_payload()
+    assert len(maximal) > 16_777_216
+    assert len(maximal) < MAX_DISPOSITION_CANONICAL_BYTES
+    assert TriageProposal.from_canonical_bytes(maximal).canonical_bytes == maximal
+    maximal_validation = validate_proposal(maximal, _validator(maximal))
+    assert len(maximal_validation.findings) == 32
+    assert maximal_validation.proposal.canonical_bytes == maximal
+
+    oversized = b" " * (MAX_DISPOSITION_CANONICAL_BYTES + 1)
+    with pytest.raises(DispositionContractError, match="bounded bytes"):
+        ValidatorInputBinding.for_proposal(
+            proposal_bytes=oversized,
+            validator_id="validator:fixture",
+            validator_version="1",
+            authenticated_context_identity=DIGEST_A,
+            retrieval_request_id="request:001",
+            retrieval_request_digest=DIGEST_B,
+            retrieval_receipt_id="receipt:001",
+            retrieval_receipt_digest=DIGEST_C,
+            ruleset_id="triage-rules",
+            ruleset_version="1",
+            ruleset_digest=DIGEST_D,
+        )
+
+
+def test_large_integer_json_errors_are_normalised_at_public_parse_boundaries() -> None:
+    raw = b'{"x":' + b"9" * 5_000 + b"}"
+    with pytest.raises(DispositionContractError):
+        validate_proposal(raw, _validator())
+    with pytest.raises(DispositionContractError):
+        ProposalDisposition.from_canonical_bytes(raw)
+    with pytest.raises(DispositionContractError):
+        ProposalValidationFinding.from_canonical_bytes(raw)
+    with pytest.raises(DispositionContractError):
+        ValidatorInputBinding.for_proposal(
+            proposal_bytes=raw,
+            validator_id="validator:fixture",
+            validator_version="1",
+            authenticated_context_identity=DIGEST_A,
+            retrieval_request_id="request:001",
+            retrieval_request_digest=DIGEST_B,
+            retrieval_receipt_id="receipt:001",
+            retrieval_receipt_digest=DIGEST_C,
+            ruleset_id="triage-rules",
+            ruleset_version="1",
+            ruleset_digest=DIGEST_D,
+        )
+
+
+def test_operational_action_selector_exhaustively_rejects_competing_seams() -> None:
+    action_codes = {
+        "RETRY_RETRIEVAL": (
+            CanonicalNextAction.RETRY_SAME_REQUEST,
+            ReasonCode.OPS_RETRIEVAL,
+        ),
+        "REQUEST_REVIEW": (
+            CanonicalNextAction.REQUEST_REVIEW,
+            ReasonCode.OPS_PARTIAL,
+        ),
+        "WAIT_FOR_DEPENDENCY": (
+            CanonicalNextAction.WAIT_FOR_DEPENDENCY,
+            ReasonCode.OPS_RETRIEVAL,
+        ),
+    }
+    head = LeadDispositionHeadBinding(LEAD_A, DIGEST_B, "head:a", DIGEST_A)
+    for action_kind, presence in itertools.product(action_codes, itertools.product((False, True), repeat=5)):
+        owner, retry, review, expiry, dependency = presence
+        document = json.loads(_proposal_bytes(("OPERATIONAL_HOLD",)))
+        action = document["proposal"]["recommendations"][0]["operational_action"]
+        action.update({
+            "action_kind": action_kind,
+            "owner_id": "owner:newsroom" if owner else None,
+            "retry_condition": "Retry when healthy." if retry else None,
+            "review_condition": "Review with owner." if review else None,
+            "expiry_condition": "Review at expiry." if expiry else None,
+            "dependency": "retrieval-service" if dependency else None,
+        })
+        # #356 requires at least one inspectable seam. Its only all-empty case is
+        # correctly a Proposal integrity failure before the 6C2 matrix.
+        raw = _resign(document)
+        if not any(presence):
+            with pytest.raises(DispositionContractError, match="integrity"):
+                validate_proposal(raw, _validator(raw))
+            continue
+        validation = validate_proposal(raw, _validator(raw))
+        expected_valid = {
+            "RETRY_RETRIEVAL": retry and not any((owner, review, expiry, dependency)),
+            "REQUEST_REVIEW": (owner or review or expiry) and not any((retry, dependency)),
+            "WAIT_FOR_DEPENDENCY": dependency and not any((owner, retry, review, expiry)),
+        }[action_kind]
+        assert (validation.findings[0].severity.value == "INFO") is expected_valid
+        recommendation = validation.proposal.recommendations[0]
+        route_digest = digest_bytes(canonical_json_bytes(recommendation.canonical_value()))
+        action_code, reason = action_codes[action_kind]
+        selection = _selection(
+            CanonicalOutcome.LEAD_OPERATIONAL_HOLD,
+            action_code,
+            reason,
+            DecisionTerminality.PENDING_CONDITION,
+        )
+        assert selection.next_action is not None
+        selection = replace(
+            selection,
+            next_action=replace(selection.next_action, condition_reference=route_digest),
+        )
+        if expected_valid:
+            assert build_pending_dispositions(validation, {LEAD_A: head}, {LEAD_A: selection})
+        else:
+            with pytest.raises(DispositionContractError, match="validation errors"):
+                build_pending_dispositions(validation, {LEAD_A: head}, {LEAD_A: selection})
