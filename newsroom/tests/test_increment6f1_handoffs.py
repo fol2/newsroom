@@ -233,7 +233,8 @@ def test_delayed_timeout_for_earlier_attempt_preserves_sent_active_retry() -> No
         timeout_first, timeout_first.attempts[1].attempt_id
     )
 
-    retry_first = correlate_acknowledgement(initial, wrong)
+    retry_first = mark_attempt_ambiguous(initial, first.attempt_id)
+    retry_first = correlate_acknowledgement(retry_first, wrong)
     retry_first = persist_attempt(request_retry(retry_first))
     retry_first = mark_attempt_sent(retry_first, retry_first.attempts[1].attempt_id)
     retry_first = mark_attempt_ambiguous(retry_first, first.attempt_id)
@@ -257,7 +258,26 @@ def test_public_handoff_rejects_premature_retry_attempt_history() -> None:
         replace(first, attempts=(first.attempts[0], valid.attempts[1]))
 
 
-def test_pristine_wrong_ack_is_audited_without_granting_retry_authority() -> None:
+def test_public_handoff_rejects_pre_send_acknowledgement_authority() -> None:
+    persisted = persist_attempt(_handoff())
+    acknowledgement = _ack(persisted, persisted.attempts[0])
+
+    with pytest.raises(TypeError, match="causal_acknowledgement_ids"):
+        replace(
+            persisted,
+            state=HandoffState.ACKNOWLEDGED,
+            acknowledgements=(acknowledgement,),
+            causal_acknowledgement_ids=(acknowledgement.acknowledgement_id,),
+        )
+    with pytest.raises(HandoffContractError, match="acknowledgement"):
+        replace(
+            persisted,
+            state=HandoffState.ACKNOWLEDGED,
+            acknowledgements=(acknowledgement,),
+        )
+
+
+def test_pristine_wrong_ack_is_not_an_authority_acknowledgement() -> None:
     handoff = _handoff()
     future_attempt = persist_attempt(handoff).attempts[0]
     wrong = _ack(
@@ -266,24 +286,18 @@ def test_pristine_wrong_ack_is_audited_without_granting_retry_authority() -> Non
         handoff_id="handoff:sha256:" + "0" * 64,
     )
 
-    retained = correlate_acknowledgement(handoff, wrong)
-
-    assert retained.state is HandoffState.PENDING
-    assert retained.acknowledgements == (wrong,)
-    assert correlate_acknowledgement(retained, wrong) == retained
-    first = persist_attempt(retained)
+    assert correlate_acknowledgement(handoff, wrong) == handoff
+    first = persist_attempt(handoff)
     assert first.state is HandoffState.PENDING
     assert len(first.attempts) == 1
     with pytest.raises(HandoffContractError, match="retry requires ambiguous"):
         request_retry(first)
 
-    with pytest.raises(HandoffContractError, match="causal acknowledgement"):
+    with pytest.raises(HandoffContractError, match="acknowledgement"):
         replace(
             handoff,
-            state=HandoffState.AMBIGUOUS,
+            state=HandoffState.ACKNOWLEDGED,
             acknowledgements=(wrong,),
-            causal_acknowledgement_ids=(wrong.acknowledgement_id,),
-            ambiguity_reason="acknowledgement_handoff_id_mismatch",
         )
 
 
@@ -297,17 +311,81 @@ def test_pristine_wrong_ack_is_audited_without_granting_retry_authority() -> Non
         ("sink_id", "evaluation-sink:other", "sink_id"),
     ],
 )
-def test_uncorrelated_acknowledgements_are_retained_as_ambiguous(
+def test_uncorrelated_responses_are_deterministic_inert_no_ops(
     field: str, value: str, reason: str
 ) -> None:
     handoff = persist_attempt(_handoff())
     handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)
     acknowledgement = _ack(handoff, handoff.attempts[0], **{field: value})
 
-    ambiguous = correlate_acknowledgement(handoff, acknowledgement)
-    assert ambiguous.state is HandoffState.AMBIGUOUS
-    assert ambiguous.ambiguity_reason == f"acknowledgement_{reason}_mismatch"
-    assert ambiguous.acknowledgements == (acknowledgement,)
+    assert correlate_acknowledgement(handoff, acknowledgement) == handoff
+
+
+def test_future_attempt_response_only_correlates_after_that_attempt_is_sent() -> None:
+    handoff = persist_attempt(_handoff())
+    first = handoff.attempts[0]
+    handoff = mark_attempt_sent(handoff, first.attempt_id)
+    handoff = mark_attempt_ambiguous(handoff, first.attempt_id)
+    future = persist_attempt(request_retry(handoff))
+    second = future.attempts[1]
+    response = _ack(future, second)
+
+    assert correlate_acknowledgement(handoff, response) == handoff
+    assert correlate_acknowledgement(future, response) == future
+
+    sent = mark_attempt_sent(future, second.attempt_id)
+    assert correlate_acknowledgement(sent, response).state is HandoffState.ACKNOWLEDGED
+
+
+def test_wrong_response_cannot_cancel_persisted_unsent_active_retry() -> None:
+    handoff = persist_attempt(_handoff())
+    first = handoff.attempts[0]
+    handoff = mark_attempt_sent(handoff, first.attempt_id)
+    handoff = mark_attempt_ambiguous(handoff, first.attempt_id)
+    pending = persist_attempt(request_retry(handoff))
+    wrong = _ack(
+        pending,
+        first,
+        handoff_id="handoff:sha256:" + "0" * 64,
+    )
+
+    assert correlate_acknowledgement(pending, wrong) == pending
+    sent = mark_attempt_sent(pending, pending.attempts[1].attempt_id)
+    rightful = _ack(sent, sent.attempts[1])
+    assert correlate_acknowledgement(sent, rightful).state is HandoffState.ACKNOWLEDGED
+
+
+def test_wrong_future_and_rightful_response_arrival_orders_are_deterministic() -> None:
+    handoff = persist_attempt(_handoff())
+    handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)
+    first = handoff.attempts[0]
+    future = persist_attempt(
+        request_retry(mark_attempt_ambiguous(handoff, first.attempt_id))
+    )
+    responses = (
+        _ack(handoff, first),
+        _ack(
+            handoff,
+            first,
+            handoff_id="handoff:sha256:" + "0" * 64,
+            response_digest="sha256:" + "c" * 64,
+        ),
+        _ack(
+            future,
+            future.attempts[1],
+            response_digest="sha256:" + "d" * 64,
+        ),
+    )
+
+    results = []
+    for arrivals in permutations(responses):
+        result = handoff
+        for response in arrivals:
+            result = correlate_acknowledgement(result, response)
+        results.append(result)
+
+    assert {item.state for item in results} == {HandoffState.ACKNOWLEDGED}
+    assert len({item.acknowledgements for item in results}) == 1
 
 
 def test_conflicting_delayed_acknowledgement_is_ambiguous_not_overwritten() -> None:
@@ -355,6 +433,36 @@ def test_conflicting_acknowledgement_arrival_orders_remain_ambiguous() -> None:
         "conflicting_acknowledgements"
     }
     assert len({item.acknowledgements for item in results}) == 1
+
+
+def test_conflicting_old_acknowledgements_preserve_active_unsent_retry() -> None:
+    handoff = persist_attempt(_handoff())
+    first = handoff.attempts[0]
+    handoff = mark_attempt_sent(handoff, first.attempt_id)
+    handoff = mark_attempt_ambiguous(handoff, first.attempt_id)
+    pending = persist_attempt(request_retry(handoff))
+    accepted = _ack(pending, first)
+    rejected = _ack(
+        pending,
+        first,
+        outcome=AcknowledgementOutcome.REJECTED,
+        response_digest="sha256:" + "f" * 64,
+    )
+
+    results = []
+    for arrivals in permutations((accepted, rejected)):
+        result = pending
+        for acknowledgement in arrivals:
+            result = correlate_acknowledgement(result, acknowledgement)
+        results.append(result)
+
+    assert {item.state for item in results} == {HandoffState.PENDING}
+    assert {item.ambiguity_reason for item in results} == {None}
+    assert len({item.acknowledgements for item in results}) == 1
+    sent = mark_attempt_sent(results[0], pending.attempts[1].attempt_id)
+    timed_out = mark_attempt_ambiguous(sent, sent.attempts[1].attempt_id)
+    assert timed_out.state is HandoffState.AMBIGUOUS
+    assert timed_out.ambiguity_reason == "conflicting_acknowledgements"
 
 
 def test_acknowledgement_identity_is_immutable_content_identity() -> None:

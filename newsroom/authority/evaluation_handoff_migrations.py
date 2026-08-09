@@ -252,7 +252,6 @@ EVALUATION_HANDOFF_MIGRATION_STATEMENTS: tuple[str, ...] = (
         sink_id TEXT NOT NULL,
         outcome TEXT NOT NULL CHECK(outcome IN('acknowledged','rejected')),
         response_digest TEXT NOT NULL,
-        state_authority INTEGER NOT NULL CHECK(state_authority IN(0,1)),
         PRIMARY KEY(recorded_handoff_id,acknowledgement_id),
         CHECK(substr(governing_manifest_digest,1,7)='sha256:'
               AND length(governing_manifest_digest)=71
@@ -286,6 +285,37 @@ EVALUATION_HANDOFF_MIGRATION_STATEMENTS: tuple[str, ...] = (
                 AND NEW.transport_state IN('pending','acknowledged','rejected'))
             OR (OLD.transport_state IN('acknowledged','rejected')
                 AND NEW.transport_state='ambiguous')
+            OR (OLD.transport_state IN('acknowledged','rejected')
+                AND NEW.transport_state='pending'
+                AND EXISTS(
+                    SELECT 1 FROM evaluation_handoff_attempts AS active
+                    WHERE active.handoff_id=NEW.handoff_id
+                      AND active.attempt_number=(
+                          SELECT MAX(attempt_number)
+                          FROM evaluation_handoff_attempts
+                          WHERE handoff_id=NEW.handoff_id
+                      )
+                      AND active.attempt_number>1
+                      AND active.ambiguous=0
+                      AND NOT EXISTS(
+                          SELECT 1
+                          FROM evaluation_handoff_acknowledgements AS current_ack
+                          WHERE current_ack.recorded_handoff_id=NEW.handoff_id
+                            AND current_ack.attempt_id=active.attempt_id
+                      )
+                      AND EXISTS(
+                          SELECT 1
+                          FROM evaluation_handoff_acknowledgements
+                          WHERE recorded_handoff_id=NEW.handoff_id
+                            AND outcome='acknowledged'
+                      )
+                      AND EXISTS(
+                          SELECT 1
+                          FROM evaluation_handoff_acknowledgements
+                          WHERE recorded_handoff_id=NEW.handoff_id
+                            AND outcome='rejected'
+                      )
+                ))
         )
         OR (
             NEW.transport_state IN('acknowledged','rejected')
@@ -356,13 +386,22 @@ EVALUATION_HANDOFF_MIGRATION_STATEMENTS: tuple[str, ...] = (
     """CREATE TRIGGER immutable_evaluation_handoff_acknowledgements_update
         BEFORE UPDATE ON evaluation_handoff_acknowledgements
         BEGIN SELECT RAISE(ABORT,'immutable evaluation Handoff acknowledgement'); END""",
-    """CREATE TRIGGER evaluation_handoff_ack_state_authority_guard
+    """CREATE TRIGGER evaluation_handoff_ack_correlation_guard
         BEFORE INSERT ON evaluation_handoff_acknowledgements
-        WHEN NEW.state_authority=1 AND NOT EXISTS(
-            SELECT 1 FROM evaluation_handoff_attempts
-            WHERE handoff_id=NEW.recorded_handoff_id AND sent=1
+        WHEN NOT EXISTS(
+            SELECT 1
+            FROM evaluation_handoffs AS h
+            JOIN evaluation_handoff_attempts AS a
+              ON a.handoff_id=h.handoff_id
+             AND a.attempt_id=NEW.attempt_id
+            WHERE h.handoff_id=NEW.recorded_handoff_id
+              AND NEW.handoff_id=h.handoff_id
+              AND NEW.candidate_version_id=h.candidate_version_id
+              AND NEW.governing_manifest_digest=h.governing_manifest_digest
+              AND NEW.sink_id=h.sink_id
+              AND a.sent=1
         )
-        BEGIN SELECT RAISE(ABORT,'invalid acknowledgement state authority'); END""",
+        BEGIN SELECT RAISE(ABORT,'invalid acknowledgement correlation'); END""",
 )
 
 

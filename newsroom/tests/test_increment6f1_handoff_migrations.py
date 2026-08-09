@@ -376,7 +376,7 @@ def test_store_persists_before_send_and_survives_restart_replay(tmp_path: Path) 
         connection.close()
 
 
-def test_store_retains_ambiguous_ack_and_bounds_retry(tmp_path: Path) -> None:
+def test_store_bounds_retry_after_exact_timeout(tmp_path: Path) -> None:
     connection = _fresh(tmp_path / "ambiguous.sqlite3")
     store = EvaluationHandoffStore(connection)
     handoff = store.register(_handoff(max_attempts=1))
@@ -392,16 +392,19 @@ def test_store_retains_ambiguous_ack_and_bounds_retry(tmp_path: Path) -> None:
         outcome=AcknowledgementOutcome.ACKNOWLEDGED,
         response_digest="sha256:" + "c" * 64,
     )
-    ambiguous = store.correlate_acknowledgement(handoff.handoff_id, mismatched)
+    assert store.correlate_acknowledgement(handoff.handoff_id, mismatched) == handoff
+    ambiguous = store.mark_attempt_ambiguous(handoff.handoff_id, attempt.attempt_id)
     assert ambiguous.state is HandoffState.AMBIGUOUS
-    assert ambiguous.ambiguity_reason == "acknowledgement_handoff_id_mismatch"
+    assert ambiguous.ambiguity_reason == "target_outcome_unknown"
     exhausted = store.request_retry(handoff.handoff_id)
     assert exhausted.retry_exhausted is True
     assert store.persist_attempt(handoff.handoff_id) == exhausted
     connection.close()
 
 
-def test_store_can_persist_bounded_retry_after_ambiguous_ack(tmp_path: Path) -> None:
+def test_store_can_persist_bounded_retry_after_wrong_response_and_timeout(
+    tmp_path: Path,
+) -> None:
     connection = _fresh(tmp_path / "ambiguous-retry.sqlite3")
     store = EvaluationHandoffStore(connection)
     handoff = store.persist_attempt(
@@ -419,6 +422,7 @@ def test_store_can_persist_bounded_retry_after_ambiguous_ack(tmp_path: Path) -> 
         response_digest="sha256:" + "7" * 64,
     )
     handoff = store.correlate_acknowledgement(handoff.handoff_id, mismatched)
+    handoff = store.mark_attempt_ambiguous(handoff.handoff_id, attempt.attempt_id)
 
     retry = store.request_retry(handoff.handoff_id)
     pending = store.persist_attempt(handoff.handoff_id)
@@ -450,6 +454,7 @@ def test_retry_timeout_after_wrong_ack_uses_one_deterministic_reason(
         response_digest="sha256:" + "6" * 64,
     )
     handoff = store.correlate_acknowledgement(handoff.handoff_id, wrong)
+    handoff = store.mark_attempt_ambiguous(handoff.handoff_id, first.attempt_id)
     handoff = store.persist_attempt(store.request_retry(handoff.handoff_id).handoff_id)
     second = handoff.attempts[1]
     handoff = store.mark_attempt_sent(handoff.handoff_id, second.attempt_id)
@@ -457,7 +462,7 @@ def test_retry_timeout_after_wrong_ack_uses_one_deterministic_reason(
     timed_out = store.mark_attempt_ambiguous(handoff.handoff_id, second.attempt_id)
 
     assert timed_out.state is HandoffState.AMBIGUOUS
-    assert timed_out.ambiguity_reason == "acknowledgement_handoff_id_mismatch"
+    assert timed_out.ambiguity_reason == "target_outcome_unknown"
     assert timed_out.retry_exhausted is True
     assert store.load(handoff.handoff_id) == timed_out
 
@@ -481,6 +486,7 @@ def test_store_delayed_old_timeout_preserves_active_sent_retry(
         response_digest="sha256:" + "5" * 64,
     )
     handoff = store.correlate_acknowledgement(handoff.handoff_id, wrong)
+    handoff = store.mark_attempt_ambiguous(handoff.handoff_id, first.attempt_id)
     handoff = store.persist_attempt(store.request_retry(handoff.handoff_id).handoff_id)
     second = handoff.attempts[1]
     handoff = store.mark_attempt_sent(handoff.handoff_id, second.attempt_id)
@@ -562,7 +568,8 @@ def test_store_pristine_wrong_ack_remains_inert_across_restart_and_send(
         response_digest="sha256:" + "4" * 64,
     )
     retained = store.correlate_acknowledgement(handoff.handoff_id, wrong)
-    assert retained.state is HandoffState.PENDING
+    assert retained == handoff
+    assert retained.acknowledgements == ()
     assert store.correlate_acknowledgement(handoff.handoff_id, wrong) == retained
     connection.close()
 
@@ -578,7 +585,7 @@ def test_store_pristine_wrong_ack_remains_inert_across_restart_and_send(
     connection.close()
 
 
-def test_database_rejects_pristine_ack_retry_authority(tmp_path: Path) -> None:
+def test_database_rejects_ack_without_exact_sent_attempt(tmp_path: Path) -> None:
     connection = _fresh(tmp_path / "pristine-ack-authority.sqlite3")
     handoff = EvaluationHandoffStore(connection).register(_handoff())
     wrong = Acknowledgement.create(
@@ -591,9 +598,9 @@ def test_database_rejects_pristine_ack_retry_authority(tmp_path: Path) -> None:
         response_digest="sha256:" + "2" * 64,
     )
 
-    with pytest.raises(sqlite3.IntegrityError, match="state authority"):
+    with pytest.raises(sqlite3.IntegrityError, match="correlation"):
         connection.execute(
-            "INSERT INTO evaluation_handoff_acknowledgements VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO evaluation_handoff_acknowledgements VALUES(?,?,?,?,?,?,?,?,?,?)",
             (
                 wrong.acknowledgement_id,
                 wrong.schema_identity,
@@ -605,9 +612,176 @@ def test_database_rejects_pristine_ack_retry_authority(tmp_path: Path) -> None:
                 wrong.sink_id,
                 wrong.outcome.value,
                 wrong.response_digest,
-                1,
             ),
         )
+    connection.close()
+
+
+def test_sql_exact_sent_ack_has_no_suppression_seam(tmp_path: Path) -> None:
+    connection = _fresh(tmp_path / "exact-sql-ack.sqlite3")
+    store = EvaluationHandoffStore(connection)
+    handoff = store.persist_attempt(store.register(_handoff()).handoff_id)
+    handoff = store.mark_attempt_sent(
+        handoff.handoff_id, handoff.attempts[0].attempt_id
+    )
+    acknowledgement = Acknowledgement.create(
+        handoff_id=handoff.handoff_id,
+        attempt_id=handoff.attempts[0].attempt_id,
+        candidate_version_id=handoff.candidate_version_id,
+        governing_manifest_digest=handoff.governing_manifest_digest,
+        sink_id=handoff.sink_id,
+        outcome=AcknowledgementOutcome.ACKNOWLEDGED,
+        response_digest="sha256:" + "1" * 64,
+    )
+    assert "state_authority" not in {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(evaluation_handoff_acknowledgements)"
+        )
+    }
+    connection.execute(
+        "INSERT INTO evaluation_handoff_acknowledgements VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (
+            acknowledgement.acknowledgement_id,
+            acknowledgement.schema_identity,
+            handoff.handoff_id,
+            acknowledgement.handoff_id,
+            acknowledgement.attempt_id,
+            acknowledgement.candidate_version_id,
+            acknowledgement.governing_manifest_digest,
+            acknowledgement.sink_id,
+            acknowledgement.outcome.value,
+            acknowledgement.response_digest,
+        ),
+    )
+    connection.execute(
+        "UPDATE evaluation_handoffs SET transport_state='acknowledged' "
+        "WHERE handoff_id=?",
+        (handoff.handoff_id,),
+    )
+    assert EvaluationHandoffStore(connection).load(handoff.handoff_id).state is (
+        HandoffState.ACKNOWLEDGED
+    )
+    connection.close()
+
+
+def test_store_future_response_is_inert_until_exact_attempt_is_sent(
+    tmp_path: Path,
+) -> None:
+    connection = _fresh(tmp_path / "future-response.sqlite3")
+    store = EvaluationHandoffStore(connection)
+    handoff = store.persist_attempt(store.register(_handoff()).handoff_id)
+    handoff = store.mark_attempt_sent(
+        handoff.handoff_id, handoff.attempts[0].attempt_id
+    )
+    handoff = store.mark_attempt_ambiguous(
+        handoff.handoff_id, handoff.attempts[0].attempt_id
+    )
+    future = persist_attempt(request_retry(handoff))
+    response = Acknowledgement.create(
+        handoff_id=future.handoff_id,
+        attempt_id=future.attempts[1].attempt_id,
+        candidate_version_id=future.candidate_version_id,
+        governing_manifest_digest=future.governing_manifest_digest,
+        sink_id=future.sink_id,
+        outcome=AcknowledgementOutcome.ACKNOWLEDGED,
+        response_digest="sha256:" + "0" * 64,
+    )
+
+    assert store.correlate_acknowledgement(handoff.handoff_id, response) == handoff
+    pending = store.persist_attempt(store.request_retry(handoff.handoff_id).handoff_id)
+    assert store.correlate_acknowledgement(handoff.handoff_id, response) == pending
+    sent = store.mark_attempt_sent(
+        handoff.handoff_id, pending.attempts[1].attempt_id
+    )
+    assert store.correlate_acknowledgement(
+        handoff.handoff_id, response
+    ).state is HandoffState.ACKNOWLEDGED
+    connection.close()
+
+
+def test_store_wrong_response_preserves_unsent_retry_for_rightful_ack(
+    tmp_path: Path,
+) -> None:
+    connection = _fresh(tmp_path / "wrong-active-retry.sqlite3")
+    store = EvaluationHandoffStore(connection)
+    handoff = store.persist_attempt(store.register(_handoff()).handoff_id)
+    handoff = store.mark_attempt_sent(
+        handoff.handoff_id, handoff.attempts[0].attempt_id
+    )
+    handoff = store.mark_attempt_ambiguous(
+        handoff.handoff_id, handoff.attempts[0].attempt_id
+    )
+    pending = store.persist_attempt(store.request_retry(handoff.handoff_id).handoff_id)
+    wrong = Acknowledgement.create(
+        handoff_id="handoff:sha256:" + "0" * 64,
+        attempt_id=pending.attempts[1].attempt_id,
+        candidate_version_id=pending.candidate_version_id,
+        governing_manifest_digest=pending.governing_manifest_digest,
+        sink_id=pending.sink_id,
+        outcome=AcknowledgementOutcome.ACKNOWLEDGED,
+        response_digest="sha256:" + "8" * 64,
+    )
+
+    assert store.correlate_acknowledgement(pending.handoff_id, wrong) == pending
+    sent = store.mark_attempt_sent(pending.handoff_id, pending.attempts[1].attempt_id)
+    rightful = Acknowledgement.create(
+        handoff_id=sent.handoff_id,
+        attempt_id=sent.attempts[1].attempt_id,
+        candidate_version_id=sent.candidate_version_id,
+        governing_manifest_digest=sent.governing_manifest_digest,
+        sink_id=sent.sink_id,
+        outcome=AcknowledgementOutcome.ACKNOWLEDGED,
+        response_digest="sha256:" + "7" * 64,
+    )
+    assert store.correlate_acknowledgement(
+        sent.handoff_id, rightful
+    ).state is HandoffState.ACKNOWLEDGED
+    connection.close()
+
+
+def test_store_conflicting_old_acks_preserve_active_retry_across_restart(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "old-conflict-active-retry.sqlite3"
+    connection = _fresh(database)
+    store = EvaluationHandoffStore(connection)
+    handoff = store.persist_attempt(store.register(_handoff()).handoff_id)
+    first = handoff.attempts[0]
+    handoff = store.mark_attempt_sent(handoff.handoff_id, first.attempt_id)
+    handoff = store.mark_attempt_ambiguous(handoff.handoff_id, first.attempt_id)
+    pending = store.persist_attempt(store.request_retry(handoff.handoff_id).handoff_id)
+    accepted = Acknowledgement.create(
+        handoff_id=pending.handoff_id,
+        attempt_id=first.attempt_id,
+        candidate_version_id=pending.candidate_version_id,
+        governing_manifest_digest=pending.governing_manifest_digest,
+        sink_id=pending.sink_id,
+        outcome=AcknowledgementOutcome.ACKNOWLEDGED,
+        response_digest="sha256:" + "a" * 64,
+    )
+    rejected = Acknowledgement.create(
+        handoff_id=pending.handoff_id,
+        attempt_id=first.attempt_id,
+        candidate_version_id=pending.candidate_version_id,
+        governing_manifest_digest=pending.governing_manifest_digest,
+        sink_id=pending.sink_id,
+        outcome=AcknowledgementOutcome.REJECTED,
+        response_digest="sha256:" + "b" * 64,
+    )
+    pending = store.correlate_acknowledgement(pending.handoff_id, accepted)
+    pending = store.correlate_acknowledgement(pending.handoff_id, rejected)
+    assert pending.state is HandoffState.PENDING
+    connection.close()
+
+    connection = _open(database)
+    store = EvaluationHandoffStore(connection)
+    pending = store.load(pending.handoff_id)
+    assert pending.state is HandoffState.PENDING
+    sent = store.mark_attempt_sent(pending.handoff_id, pending.attempts[1].attempt_id)
+    timed_out = store.mark_attempt_ambiguous(sent.handoff_id, sent.attempts[1].attempt_id)
+    assert timed_out.state is HandoffState.AMBIGUOUS
+    assert timed_out.ambiguity_reason == "conflicting_acknowledgements"
     connection.close()
 
 def test_concurrent_pristine_ack_and_attempt_persistence_remain_retry_inert(
@@ -646,7 +820,7 @@ def test_concurrent_pristine_ack_and_attempt_persistence_remain_retry_inert(
         retained = EvaluationHandoffStore(connection).load(handoff.handoff_id)
         assert retained.state is HandoffState.PENDING
         assert len(retained.attempts) == 1
-        assert retained.acknowledgements == (wrong,)
+        assert retained.acknowledgements == ()
     finally:
         connection.close()
 
@@ -736,7 +910,7 @@ def test_wrong_handoff_observation_cannot_poison_rightful_ack_correlation(
     poisoned = store.correlate_acknowledgement(first.handoff_id, acknowledgement)
     rightful = store.correlate_acknowledgement(second.handoff_id, acknowledgement)
 
-    assert poisoned.state is HandoffState.AMBIGUOUS
+    assert poisoned == first
     assert rightful.state is HandoffState.ACKNOWLEDGED
     assert store.correlate_acknowledgement(
         second.handoff_id, acknowledgement
@@ -745,7 +919,7 @@ def test_wrong_handoff_observation_cannot_poison_rightful_ack_correlation(
         "SELECT recorded_handoff_id FROM evaluation_handoff_acknowledgements "
         "WHERE acknowledgement_id=? ORDER BY recorded_handoff_id",
         (acknowledgement.acknowledgement_id,),
-    ).fetchall() == sorted([(first.handoff_id,), (second.handoff_id,)])
+    ).fetchall() == [(second.handoff_id,)]
     connection.close()
 
 
