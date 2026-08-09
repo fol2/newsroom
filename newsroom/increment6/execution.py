@@ -561,7 +561,9 @@ class ExecutionBatch:
 
     @property
     def canonical_digest(self) -> str:
-        return digest_bytes(self.canonical_bytes)
+        return _normalise(
+            "Execution Batch digest", lambda: digest_bytes(self.canonical_bytes)
+        )
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
@@ -815,18 +817,23 @@ class WorkerAttempt:
 
     @property
     def canonical_digest(self) -> str:
-        return digest_bytes(self.canonical_bytes)
+        return _normalise(
+            "Worker Attempt digest", lambda: digest_bytes(self.canonical_bytes)
+        )
 
     @property
     def proposal_binding(self) -> WorkerAttemptBinding:
-        return WorkerAttemptBinding(
-            self.attempt_id,
-            self.canonical_digest,
-            self.worker_kind,
-            self.worker_version,
-            self.input_digest,
-            self.work_item_version_digest,
-            self.retrieval_context_digest,
+        return _normalise(
+            "Worker Attempt proposal binding",
+            lambda: WorkerAttemptBinding(
+                self.attempt_id,
+                self.canonical_digest,
+                self.worker_kind,
+                self.worker_version,
+                self.input_digest,
+                self.work_item_version_digest,
+                self.retrieval_context_digest,
+            ),
         )
 
     @classmethod
@@ -1321,7 +1328,10 @@ class WorkItemLease:
 
     @property
     def transition(self) -> LeaseTransitionReceipt | None:
-        return None if not self.transitions else self.transitions[-1]
+        return _normalise(
+            "Work Item Lease transition",
+            lambda: None if not self.transitions else self.transitions[-1],
+        )
 
     def claim(
         self,
@@ -1472,7 +1482,9 @@ class WorkItemLease:
 
     @property
     def canonical_digest(self) -> str:
-        return digest_bytes(self.canonical_bytes)
+        return _normalise(
+            "Work Item Lease digest", lambda: digest_bytes(self.canonical_bytes)
+        )
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:

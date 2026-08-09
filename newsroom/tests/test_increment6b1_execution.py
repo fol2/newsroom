@@ -601,3 +601,45 @@ def test_public_exact_facades_normalise_uninitialised_and_dependency_failures(
         )
         with pytest.raises(KeyboardInterrupt):
             ExecutionBatch.from_canonical_bytes(raw)
+
+
+def test_computed_properties_normalise_uninitialised_and_dependency_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempt = _attempt()
+    assert attempt.proposal_binding.attempt_id == attempt.attempt_id
+    with pytest.raises(ExecutionContractError):
+        _ = object.__new__(WorkerAttempt).proposal_binding
+
+    claimed = WorkItemLease.pending(
+        attempt=attempt,
+        owner_id="worker:fixture",
+        owner_profile_digest=_digest(3),
+        capability_digest=_digest(4),
+        fence=1,
+    ).claim(
+        issued_at="2042-03-12T10:00:00Z",
+        expires_at="2042-03-12T10:05:00Z",
+    )
+    assert claimed.transition == claimed.transitions[-1]
+    with pytest.raises(ExecutionContractError):
+        _ = object.__new__(WorkItemLease).transition
+
+    batch = _batch(_version(1))
+    with monkeypatch.context() as context:
+        context.setattr(
+            execution_contract,
+            "digest_bytes",
+            lambda _: (_ for _ in ()).throw(RuntimeError("dependency failure")),
+        )
+        with pytest.raises(ExecutionContractError):
+            _ = batch.canonical_digest
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            execution_contract,
+            "digest_bytes",
+            lambda _: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+        with pytest.raises(KeyboardInterrupt):
+            _ = batch.canonical_digest
