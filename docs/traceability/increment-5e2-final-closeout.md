@@ -65,6 +65,11 @@ their product paths:
   journal mode, with WAL mode rejected before any success receipt; a
   content-addressed purge receipt binds every exactly matched passage,
   admission, blob and text identity without tombstoning an unselected sibling.
+  The pre-hydration tombstone guard compares the complete four-field
+  derivative identity; it never promotes a matched tuple's individual blob or
+  text coordinate into a broader deletion scope. A blob- or text-scoped purge
+  still records every retained tuple selected by that digest and therefore
+  blocks each of those exact derivatives.
   The same transaction retains a canonical, digest-checked and content-free
   per-context inventory of every sibling derivative before it deletes the raw
   context. Purge events are append-only by purge identity: an unselected

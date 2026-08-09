@@ -218,6 +218,47 @@ def _retarget_seeded_passage(
     return blob_digest
 
 
+def _retarget_seeded_passage_to_existing_blob(
+    connection: sqlite3.Connection,
+    *,
+    admission_id: str,
+    passage_id: str,
+    content: bytes,
+    blob_digest: str,
+    language: str = "ZH_HANT_HK",
+) -> None:
+    size = len(content)
+    assert connection.execute(
+        "SELECT size_bytes FROM blob_identities WHERE blob_digest=?",
+        (blob_digest,),
+    ).fetchone() == (size,)
+    connection.execute(
+        "UPDATE object_admissions SET blob_digest=? WHERE admission_id=?",
+        (blob_digest, admission_id),
+    )
+    connection.execute(
+        "UPDATE object_rights_decisions SET blob_digest=?,size_bytes=? "
+        "WHERE rights_decision_id=?",
+        (blob_digest, size, f"rights:{admission_id}"),
+    )
+    connection.execute(
+        "UPDATE object_access_decisions SET byte_offset=0,allowed_bytes=? "
+        "WHERE admission_id=?",
+        (size, admission_id),
+    )
+    connection.execute(
+        "UPDATE extraction_run_passages SET byte_offset=0,byte_length=?,"
+        "blob_digest=?,text_digest=?,language=? WHERE passage_id=?",
+        (
+            size,
+            blob_digest,
+            digest_bytes(content),
+            language,
+            passage_id,
+        ),
+    )
+
+
 def _authority_database(
     tmp_path: Path,
     *,
@@ -898,7 +939,11 @@ def test_rights_purge_does_not_tombstone_unselected_sibling_derivative(
     admission_a = "object:retained-a"
     admission_b = "object:retained-b"
     content_a = b"governed retained bytes A"
-    content_b = b"governed retained bytes B"
+    # A rights withdrawal is scoped by the selected authority identity, not by
+    # content deduplication.  A separately admitted sibling may legitimately
+    # bind the same governed bytes and must remain usable until its own scope is
+    # withdrawn.
+    content_b = content_a
     database, blob_a = _authority_database(
         tmp_path,
         name="purge-sibling",
@@ -915,11 +960,12 @@ def test_rights_purge_does_not_tombstone_unselected_sibling_derivative(
             run_id="run:purge-sibling:b",
             allowed=1,
         )
-        blob_b = _retarget_seeded_passage(
+        _retarget_seeded_passage_to_existing_blob(
             connection,
             admission_id=admission_b,
             passage_id=passage_b,
             content=content_b,
+            blob_digest=blob_a,
         )
     cas_root = _cas_root(
         tmp_path,
@@ -927,11 +973,6 @@ def test_rights_purge_does_not_tombstone_unselected_sibling_derivative(
         blob_digest=blob_a,
         content=content_a,
     )
-    digest_hex = blob_b.removeprefix("sha256:")
-    blob_b_path = cas_root / "objects" / digest_hex[:2] / digest_hex
-    blob_b_path.parent.mkdir(exist_ok=True)
-    blob_b_path.write_bytes(content_b)
-    blob_b_path.chmod(0o444)
     authority_request_ab, authority_result_ab = _authority_execution(
         tmp_path,
         name="purge-sibling-ab",
@@ -956,6 +997,10 @@ def test_rights_purge_does_not_tombstone_unselected_sibling_derivative(
     receipt_ab = builder_ab.execute(request_ab)
     assert receipt_ab.outcome is RetrievalContextOutcome.COMPLETE
     assert len(receipt_ab.items) == 2
+    assert {
+        (item.passage.blob_digest, item.passage.text_digest)
+        for item in receipt_ab.items
+    } == {(blob_a, receipt_ab.items[0].passage.text_digest)}
     item_a = next(
         item for item in receipt_ab.items if item.passage.admission_id == admission_a
     )
@@ -1005,6 +1050,44 @@ def test_rights_purge_does_not_tombstone_unselected_sibling_derivative(
     assert receipt_b.items[0].text.encode("utf-8") == content_b
 
     restarted = RetrievalContextJournal(journal.path)
+    replayed_b = RetrievalContextBuilder(
+        composition_replayer=composer_b,
+        journal=restarted,
+        hydrator=GovernedCasPassageHydrator(cas_root),
+    ).execute(request_b)
+    assert replayed_b.canonical_bytes == receipt_b.canonical_bytes
+
+    class ExplodingHydrator:
+        implementation_digest = GOVERNED_CAS_HYDRATOR_CONTRACT_DIGEST
+
+        @staticmethod
+        def read(_reference) -> bytes:
+            raise AssertionError("purged sibling bytes must not be rehydrated")
+
+    digest_journal = RetrievalContextJournal(
+        tmp_path / "context-purge-shared-blob.sqlite"
+    )
+    digest_receipt_ab = RetrievalContextBuilder(
+        composition_replayer=composer_ab,
+        journal=digest_journal,
+        hydrator=GovernedCasPassageHydrator(cas_root),
+    ).execute(request_ab)
+    assert digest_receipt_ab.outcome is RetrievalContextOutcome.COMPLETE
+    digest_purges = digest_journal.purge_affected(
+        blob_digests=(blob_a,),
+        reason_code="GOVERNED_BLOB_WITHDRAWN",
+    )
+    assert len(digest_purges) == 1
+    assert set(digest_purges[0].admission_ids) == {admission_a, admission_b}
+    assert len(digest_purges[0].purged_derivative_identities) == 2
+    digest_blocked_b = RetrievalContextBuilder(
+        composition_replayer=composer_b,
+        journal=RetrievalContextJournal(digest_journal.path),
+        hydrator=ExplodingHydrator(),
+    ).execute(request_b)
+    assert digest_blocked_b.outcome is RetrievalContextOutcome.RIGHTS_BLOCKED
+    assert digest_blocked_b.reason is RetrievalContextReason.RETAINED_CONTEXT_PURGED
+
     later_purges = restarted.purge_affected(
         admission_ids=(admission_b,),
         reason_code="RIGHTS_WITHDRAWN",
@@ -1029,13 +1112,6 @@ def test_rights_purge_does_not_tombstone_unselected_sibling_derivative(
         admission_ids=(admission_b,),
         reason_code="RIGHTS_WITHDRAWN",
     ) == later_purges
-
-    class ExplodingHydrator:
-        implementation_digest = GOVERNED_CAS_HYDRATOR_CONTRACT_DIGEST
-
-        @staticmethod
-        def read(_reference) -> bytes:
-            raise AssertionError("later-purged sibling bytes must not be rehydrated")
 
     blocked_request_b = replace(
         request_b,
@@ -1090,11 +1166,12 @@ def test_rights_purge_does_not_tombstone_unselected_sibling_derivative(
             admission_ids=(admission_b,),
             reason_code="RIGHTS_WITHDRAWN",
         )
-    for content in (content_a, content_b):
-        for suffix in ("", "-journal", "-wal", "-shm"):
-            storage_path = Path(f"{journal.path}{suffix}")
-            if storage_path.exists():
-                assert content not in storage_path.read_bytes()
+    for journal_path in (journal.path, digest_journal.path):
+        for content in {content_a, content_b}:
+            for suffix in ("", "-journal", "-wal", "-shm"):
+                storage_path = Path(f"{journal_path}{suffix}")
+                if storage_path.exists():
+                    assert content not in storage_path.read_bytes()
 
 
 def test_exact_only_root_without_authoritative_passage_fails_closed(

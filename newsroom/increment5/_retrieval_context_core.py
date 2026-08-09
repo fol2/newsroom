@@ -1762,13 +1762,11 @@ class RetrievalContextJournal:
                 *,
                 derivative_identities: tuple[_DerivativeIdentity, ...],
             ) -> bool:
-                selected = _require_derivative_identities(
-                    derivative_identities,
-                    "context_derivative_identities",
-                )
-                selected_columns = tuple(
-                    frozenset(column)
-                    for column in _derivative_identity_columns(selected)
+                selected = frozenset(
+                    _require_derivative_identities(
+                        derivative_identities,
+                        "context_derivative_identities",
+                    )
                 )
                 rows = connection.execute(
                     """
@@ -1781,19 +1779,8 @@ class RetrievalContextJournal:
                 )
                 for retained_row in rows:
                     retained = _retained_purge_receipt(retained_row)
-                    retained_columns = tuple(
-                        frozenset(column)
-                        for column in _derivative_identity_columns(
-                            retained.purged_derivative_identities
-                        )
-                    )
-                    if any(
-                        left.intersection(right)
-                        for left, right in zip(
-                            selected_columns,
-                            retained_columns,
-                            strict=True,
-                        )
+                    if selected.intersection(
+                        retained.purged_derivative_identities
                     ):
                         return True
                 return False
