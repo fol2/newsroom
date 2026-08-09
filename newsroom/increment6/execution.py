@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -18,7 +19,6 @@ from typing import Self
 
 from newsroom.authority.canonical import (
     MAX_SAFE_INTEGER,
-    CanonicalizationError,
     canonical_json_bytes,
     digest_bytes,
 )
@@ -60,6 +60,15 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 class ExecutionContractError(ValueError):
     """An execution contract value is malformed or exceeds its envelope."""
+
+
+def _normalise[T](field: str, operation: Callable[[], T]) -> T:
+    try:
+        return operation()
+    except ExecutionContractError:
+        raise
+    except Exception as exc:
+        raise ExecutionContractError(f"{field} is invalid") from exc
 
 
 class LeaseLifecycle(StrEnum):
@@ -200,17 +209,9 @@ def _decode(raw: bytes) -> dict[str, object]:
     try:
         if canonical_json_bytes(value) != raw:
             raise ExecutionContractError("canonical input bytes differ")
-    except (
-        CanonicalizationError,
-        UnicodeError,
-        ValueError,
-        TypeError,
-        OverflowError,
-        RecursionError,
-        MemoryError,
-    ) as exc:
-        if isinstance(exc, ExecutionContractError):
-            raise
+    except ExecutionContractError:
+        raise
+    except Exception as exc:
         raise ExecutionContractError("canonical input cannot be normalised") from exc
     return value
 
@@ -464,6 +465,15 @@ class ExecutionBatch:
             raise ExecutionContractError(
                 "Execution Batch members exceed the bounded typed envelope"
             )
+        members = tuple(
+            _normalise(
+                "Execution Batch member",
+                lambda member=member: ExecutionBatchMember.from_value(
+                    member.canonical_value()
+                ),
+            )
+            for member in members
+        )
         ordered = tuple(sorted(members, key=lambda member: member.work_item_id))
         identity = digest_bytes(
             _canonical(
@@ -483,6 +493,9 @@ class ExecutionBatch:
         )
 
     def __post_init__(self) -> None:
+        _normalise("Execution Batch", self._validate)
+
+    def _validate(self) -> None:
         _uuid(self.batch_id, "batch_id")
         _digest(self.scheduling_decision_digest, "scheduling decision digest")
         _digest(self.scheduling_policy_digest, "scheduling policy digest")
@@ -541,7 +554,10 @@ class ExecutionBatch:
 
     @property
     def canonical_bytes(self) -> bytes:
-        return _canonical(self.canonical_value(), "Execution Batch")
+        return _normalise(
+            "Execution Batch",
+            lambda: _canonical(self.canonical_value(), "Execution Batch"),
+        )
 
     @property
     def canonical_digest(self) -> str:
@@ -624,6 +640,17 @@ class WorkerAttempt:
     ) -> Self:
         if type(member) is not ExecutionBatchMember:
             raise ExecutionContractError("Worker Attempt member must be typed")
+        member = _normalise(
+            "Worker Attempt member",
+            lambda: ExecutionBatchMember.from_value(member.canonical_value()),
+        )
+        if previous_attempt is not None and type(previous_attempt) is WorkerAttempt:
+            previous_attempt = _normalise(
+                "Worker Attempt predecessor",
+                lambda: WorkerAttempt.from_canonical_bytes(
+                    previous_attempt.canonical_bytes
+                ),
+            )
         work_item_id = member.work_item_id
         work_item_version_id = member.work_item_version_id
         work_item_version_digest = member.work_item_version_digest
@@ -781,7 +808,10 @@ class WorkerAttempt:
 
     @property
     def canonical_bytes(self) -> bytes:
-        return _canonical(self.canonical_value(), "Worker Attempt")
+        return _normalise(
+            "Worker Attempt",
+            lambda: _canonical(self.canonical_value(), "Worker Attempt"),
+        )
 
     @property
     def canonical_digest(self) -> str:
@@ -927,6 +957,15 @@ def _progress_evidence(
         raise ExecutionContractError(
             "lease progress evidence must be bounded exact typed"
         )
+    value = tuple(
+        _normalise(
+            "lease progress evidence",
+            lambda item=item: LeaseProgressEvidence.from_value(
+                item.canonical_value()
+            ),
+        )
+        for item in value
+    )
     current = previous
     for item in value:
         if current is not None and item.progress not in _PROGRESS_SUCCESSORS[current]:
@@ -998,6 +1037,9 @@ class LeaseTransitionReceipt:
         )
 
     def __post_init__(self) -> None:
+        _normalise("lease transition", self._validate)
+
+    def _validate(self) -> None:
         _uuid(self.transition_id, "lease transition_id")
         _uuid(self.lease_id, "lease transition lease_id")
         _digest(self.predecessor_digest, "lease predecessor digest")
@@ -1162,6 +1204,9 @@ class WorkItemLease:
         )
 
     def __post_init__(self) -> None:
+        _normalise("Work Item Lease", self._validate)
+
+    def _validate(self) -> None:
         for value, field in (
             (self.lease_id, "lease_id"),
             (self.attempt_id, "lease attempt_id"),
@@ -1420,7 +1465,10 @@ class WorkItemLease:
 
     @property
     def canonical_bytes(self) -> bytes:
-        return _canonical(self.canonical_value(), "Work Item Lease")
+        return _normalise(
+            "Work Item Lease",
+            lambda: _canonical(self.canonical_value(), "Work Item Lease"),
+        )
 
     @property
     def canonical_digest(self) -> str:

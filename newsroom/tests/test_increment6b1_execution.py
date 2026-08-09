@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+import newsroom.increment6.execution as execution_contract
 from newsroom.authority.canonical import (
     MAX_SAFE_INTEGER,
     canonical_json_bytes,
@@ -39,6 +40,7 @@ from newsroom.increment6.scheduling import (
     CapacityPopulationItem,
     CapacitySnapshot,
     CapacityWorkState,
+    ReservedCapacityDecision,
     ReservedCapacityDisposition,
     ReservedCapacityPolicy,
     SchedulingEligibility,
@@ -517,3 +519,85 @@ def test_public_exact_builtins_and_typed_values_precede_dereference() -> None:
             capability_digest=_digest(4),
             fence=1,
         )
+
+
+def test_public_exact_facades_normalise_uninitialised_and_dependency_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = object.__new__(ExecutionBatchMember)
+    with pytest.raises(ExecutionContractError):
+        ExecutionBatch._from_bindings((member,), _digest(1), _digest(2))
+    with pytest.raises(ExecutionContractError):
+        WorkerAttempt.create(
+            member=member,
+            ordinal=1,
+            worker_kind=FixtureWorkerKind.REPLAY,
+            worker_version="fixture-v1",
+            input_digest=_digest(9),
+        )
+    with pytest.raises(ExecutionContractError):
+        ExecutionBatch.create(
+            scheduling_decision=object.__new__(ReservedCapacityDecision),
+            work_item_versions=(_version(1),),
+        )
+    with pytest.raises(ExecutionContractError):
+        WorkerAttempt.create(
+            member=_member(1),
+            ordinal=2,
+            previous_attempt=object.__new__(WorkerAttempt),
+            worker_kind=FixtureWorkerKind.REPLAY,
+            worker_version="fixture-v1",
+            input_digest=_digest(9),
+        )
+
+    progress = object.__new__(LeaseProgressEvidence)
+    with pytest.raises(ExecutionContractError):
+        LeaseTransitionReceipt.create(
+            lease_id=_id(1),
+            predecessor_digest=_digest(1),
+            from_lifecycle=LeaseLifecycle.PENDING,
+            to_lifecycle=LeaseLifecycle.CLAIMED,
+            observed_at="2042-03-12T10:00:00Z",
+            progress=(progress,),
+        )
+
+    claimed = WorkItemLease.pending(
+        attempt=_attempt(),
+        owner_id="worker:fixture",
+        owner_profile_digest=_digest(3),
+        capability_digest=_digest(4),
+        fence=1,
+    ).claim(
+        issued_at="2042-03-12T10:00:00Z",
+        expires_at="2042-03-12T10:05:00Z",
+    )
+    receipt = object.__new__(LeaseTransitionReceipt)
+    with pytest.raises(ExecutionContractError):
+        replace(claimed, transitions=(receipt,))
+    with pytest.raises(ExecutionContractError):
+        WorkItemLease.pending(
+            attempt=object.__new__(WorkerAttempt),
+            owner_id="worker:fixture",
+            owner_profile_digest=_digest(3),
+            capability_digest=_digest(4),
+            fence=1,
+        )
+
+    raw = _batch(_version(1)).canonical_bytes
+    with monkeypatch.context() as context:
+        context.setattr(
+            execution_contract,
+            "canonical_json_bytes",
+            lambda _: (_ for _ in ()).throw(RuntimeError("dependency failure")),
+        )
+        with pytest.raises(ExecutionContractError):
+            ExecutionBatch.from_canonical_bytes(raw)
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            execution_contract,
+            "canonical_json_bytes",
+            lambda _: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+        with pytest.raises(KeyboardInterrupt):
+            ExecutionBatch.from_canonical_bytes(raw)
