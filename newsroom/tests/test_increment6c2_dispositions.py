@@ -40,6 +40,8 @@ from newsroom.increment6.outcomes import (
     OutcomeSelection,
 )
 from newsroom.increment6.proposals import (
+    CandidateManifest,
+    InputCitation,
     LeadRecommendation,
     MAX_CONTEXT_LEADS,
     MAX_DECISION_LEADS,
@@ -734,6 +736,23 @@ class _KeyErrorItemsMapping(Mapping[str, object]):
         raise KeyError("items")
 
 
+class _RaisingItemsMapping(Mapping[str, object]):
+    def __init__(self, error_type: type[BaseException]) -> None:
+        self.error_type = error_type
+
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("value",))
+
+    def __len__(self) -> int:
+        return 1
+
+    def items(self) -> object:
+        raise self.error_type("items")
+
+
 def test_key_errors_from_typed_nested_impostors_and_builder_inputs_are_normalised() -> None:
     raw = _proposal_bytes()
     validation = validate_proposal(raw, _validator(raw))
@@ -944,4 +963,139 @@ def test_builder_replays_findings_before_hashing_manifest_members() -> None:
     with pytest.raises(DispositionContractError):
         build_pending_dispositions(
             validation, {LEAD_A: head}, {LEAD_A: selection}
+        )
+
+
+def test_nested_exact_base_contracts_normalise_mapping_traversal_failures() -> None:
+    raw = _proposal_bytes()
+    validation = validate_proposal(raw, _validator(raw))
+    head = LeadDispositionHeadBinding(LEAD_A, DIGEST_B, "head:a", DIGEST_A)
+    selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+    disposition = build_pending_dispositions(
+        validation, {LEAD_A: head}, {LEAD_A: selection}
+    )[0]
+
+    class BadReason(StructuredReason):
+        def canonical_value(self) -> object:
+            return _RaisingItemsMapping(AttributeError)
+
+    class BadNextAction(NextAction):
+        def canonical_value(self) -> object:
+            return _RaisingItemsMapping(AttributeError)
+
+    class BadInputCitation(InputCitation):
+        def canonical_value(self) -> object:
+            return _RaisingItemsMapping(AttributeError)
+
+    class BadCandidateManifest(CandidateManifest):
+        def canonical_value(self) -> object:
+            return _RaisingItemsMapping(AttributeError)
+
+    reason_selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+    object.__setattr__(
+        reason_selection,
+        "primary_reason",
+        _typed_subclass(reason_selection.primary_reason, BadReason),
+    )
+    action_selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+    assert action_selection.next_action is not None
+    object.__setattr__(
+        action_selection,
+        "next_action",
+        _typed_subclass(action_selection.next_action, BadNextAction),
+    )
+
+    citation_route = replace(
+        disposition.route_binding,
+        input_citations=(
+            _typed_subclass(
+                disposition.route_binding.input_citations[0], BadInputCitation
+            ),
+            *disposition.route_binding.input_citations[1:],
+        ),
+    )
+    assert disposition.route_binding.candidate_manifest is not None
+    candidate_route = replace(
+        disposition.route_binding,
+        candidate_manifest=_typed_subclass(
+            disposition.route_binding.candidate_manifest, BadCandidateManifest
+        ),
+    )
+
+    calls = (
+        lambda: ProposalDisposition.validate_route_selection(
+            ProposalRoute.NEW_EVENT_CANDIDATE, reason_selection
+        ),
+        lambda: ProposalDisposition.validate_route_selection(
+            ProposalRoute.NEW_EVENT_CANDIDATE, action_selection
+        ),
+        lambda: replace(disposition, route_binding=citation_route),
+        lambda: replace(disposition, route_binding=candidate_route),
+    )
+    for call in calls:
+        with pytest.raises(DispositionContractError):
+            call()
+
+
+@pytest.mark.parametrize(
+    "error_type", (AttributeError, IndexError, RuntimeError, KeyError)
+)
+def test_mapping_iteration_ordinary_exceptions_are_totalised(
+    error_type: type[Exception],
+) -> None:
+    selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+
+    class BadReason(StructuredReason):
+        def canonical_value(self) -> object:
+            return _RaisingItemsMapping(error_type)
+
+    object.__setattr__(
+        selection,
+        "primary_reason",
+        _typed_subclass(selection.primary_reason, BadReason),
+    )
+    with pytest.raises(DispositionContractError):
+        ProposalDisposition.validate_route_selection(
+            ProposalRoute.NEW_EVENT_CANDIDATE, selection
+        )
+
+
+@pytest.mark.parametrize("error_type", (KeyboardInterrupt, SystemExit))
+def test_mapping_iteration_does_not_capture_base_exceptions(
+    error_type: type[BaseException],
+) -> None:
+    selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+
+    class BadReason(StructuredReason):
+        def canonical_value(self) -> object:
+            return _RaisingItemsMapping(error_type)
+
+    object.__setattr__(
+        selection,
+        "primary_reason",
+        _typed_subclass(selection.primary_reason, BadReason),
+    )
+    with pytest.raises(error_type):
+        ProposalDisposition.validate_route_selection(
+            ProposalRoute.NEW_EVENT_CANDIDATE, selection
         )

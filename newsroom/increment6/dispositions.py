@@ -26,7 +26,6 @@ from newsroom.increment6.outcomes import (
     CanonicalNextAction,
     CanonicalOutcome,
     DecisionTerminality,
-    OutcomeContractError,
     OutcomeSelection,
     ReasonCode,
     SUPPLEMENTAL_ACTION_MAPPING,
@@ -34,7 +33,6 @@ from newsroom.increment6.outcomes import (
 )
 from newsroom.increment6.proposals import (
     LeadRecommendation,
-    ProposalContractError,
     ProposalRoute,
     TriageProposal,
 )
@@ -141,15 +139,9 @@ def _exact(value: object, keys: set[str], field: str) -> Mapping[str, object]:
         raise DispositionContractError(f"{field} keys are not exact")
     try:
         actual_keys = set(value)
-    except (
-        AttributeError,
-        KeyError,
-        MemoryError,
-        OverflowError,
-        RecursionError,
-        TypeError,
-        ValueError,
-    ) as exc:
+    except DispositionContractError:
+        raise
+    except Exception as exc:
         raise DispositionContractError(f"{field} keys are not exact") from exc
     if actual_keys != keys:
         raise DispositionContractError(f"{field} keys are not exact")
@@ -205,44 +197,28 @@ def _decode(raw: bytes, *, field: str) -> dict[str, object]:
         )
     except DispositionContractError:
         raise
-    except (
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        MemoryError,
-        RecursionError,
-        ValueError,
-    ) as exc:
+    except Exception as exc:
         raise DispositionContractError(f"{field} integrity is not valid JSON") from exc
     if not isinstance(value, dict):
         raise DispositionContractError(f"{field} integrity requires an object")
     try:
         if canonical_json_bytes(value) != raw:
             raise DispositionContractError(f"{field} integrity is not canonical JSON")
-    except (
-        CanonicalizationError,
-        KeyError,
-        MemoryError,
-        OverflowError,
-        RecursionError,
-        TypeError,
-        ValueError,
-    ) as exc:
+    except DispositionContractError:
+        raise
+    except Exception as exc:
         raise DispositionContractError(f"{field} integrity is outside canonical JSON") from exc
     return value
 
 
 def _bounded_canonical(value: object, *, field: str) -> bytes:
+    """Canonicalise untrusted values, totalising ordinary traversal failures."""
+
     try:
         raw = canonical_json_bytes(value)
-    except (
-        CanonicalizationError,
-        KeyError,
-        MemoryError,
-        OverflowError,
-        RecursionError,
-        TypeError,
-        ValueError,
-    ) as exc:
+    except DispositionContractError:
+        raise
+    except Exception as exc:
         raise DispositionContractError(f"{field} is outside canonical JSON") from exc
     if len(raw) > MAX_DISPOSITION_CANONICAL_BYTES:
         raise DispositionContractError(f"{field} exceeds the canonical byte bound")
@@ -252,19 +228,12 @@ def _bounded_canonical(value: object, *, field: str) -> bytes:
 def _constructed_value(
     factory: Callable[[], object], *, field: str
 ) -> object:
-    """Evaluate a constructed value without leaking nested type failures."""
+    """Totalise ordinary factory failures while leaving BaseException visible."""
     try:
         return factory()
-    except (
-        AttributeError,
-        CanonicalizationError,
-        KeyError,
-        MemoryError,
-        OverflowError,
-        RecursionError,
-        TypeError,
-        ValueError,
-    ) as exc:
+    except DispositionContractError:
+        raise
+    except Exception as exc:
         raise DispositionContractError(f"{field} is outside canonical JSON") from exc
 
 
@@ -273,10 +242,15 @@ def _bounded_canonical_from(
 ) -> bytes:
     """Canonicalise a lazily constructed value under the public error contract."""
 
-    return _bounded_canonical(
-        _constructed_value(factory, field=field),
-        field=field,
-    )
+    try:
+        return _bounded_canonical(
+            _constructed_value(factory, field=field),
+            field=field,
+        )
+    except DispositionContractError:
+        raise
+    except Exception as exc:
+        raise DispositionContractError(f"{field} is outside canonical JSON") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -530,15 +504,9 @@ class ProposalValidationFinding(_NoEffect):
                 evidence_reference_digest=item["evidence_reference_digest"],
                 validator_input=ValidatorInputBinding.from_mapping(item["validator_input_binding"]),
             )
-        except (
-            CanonicalizationError,
-            KeyError,
-            MemoryError,
-            OverflowError,
-            RecursionError,
-            TypeError,
-            ValueError,
-        ) as exc:
+        except DispositionContractError:
+            raise
+        except Exception as exc:
             raise DispositionContractError("finding is malformed") from exc
         if _bounded_canonical_from(
             lambda: result.canonical_value(), field="finding"
@@ -1077,16 +1045,9 @@ class ProposalDisposition(_NoEffect):
                 route_binding=LeadRecommendation.from_value(item["route_binding"]),
                 route_binding_digest=item["route_binding_digest"], selection=OutcomeSelection.from_mapping(item["selection"]),
             )
-        except (
-            CanonicalizationError,
-            KeyError,
-            MemoryError,
-            OutcomeContractError,
-            OverflowError,
-            RecursionError,
-            TypeError,
-            ValueError,
-        ) as exc:
+        except DispositionContractError:
+            raise
+        except Exception as exc:
             raise DispositionContractError("disposition is malformed") from exc
         if _bounded_canonical_from(
             lambda: result.canonical_value(), field="disposition"
@@ -1106,16 +1067,9 @@ def validate_proposal(raw: bytes, validator_input: ValidatorInputBinding) -> Pro
     _decode(raw, field="proposal")
     try:
         proposal = TriageProposal.from_canonical_bytes(raw)
-    except (
-        CanonicalizationError,
-        KeyError,
-        MemoryError,
-        OverflowError,
-        ProposalContractError,
-        RecursionError,
-        TypeError,
-        ValueError,
-    ) as exc:
+    except DispositionContractError:
+        raise
+    except Exception as exc:
         raise DispositionContractError("proposal integrity validation failed") from exc
     proposal_digest = digest_bytes(raw)
     if validator_input.input_digest != validator_input._expected_input_digest(
