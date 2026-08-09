@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
@@ -233,6 +233,35 @@ def _bounded_canonical(value: object, *, field: str) -> bytes:
     return raw
 
 
+def _constructed_value(
+    factory: Callable[[], object], *, field: str
+) -> object:
+    """Evaluate a constructed value without leaking nested type failures."""
+    try:
+        return factory()
+    except (
+        AttributeError,
+        CanonicalizationError,
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise DispositionContractError(f"{field} is outside canonical JSON") from exc
+
+
+def _bounded_canonical_from(
+    factory: Callable[[], object], *, field: str
+) -> bytes:
+    """Canonicalise a lazily constructed value under the public error contract."""
+
+    return _bounded_canonical(
+        _constructed_value(factory, field=field),
+        field=field,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ValidatorInputBinding(_NoEffect):
     """An exact validator input claim, pending provider authentication."""
@@ -361,10 +390,12 @@ class ProposalValidationFinding(_NoEffect):
         if self.authority is not DispositionAuthority.NONE:
             raise DispositionContractError("a pure finding has no authority")
         if self.finding_id != digest_bytes(
-            _bounded_canonical(self._identity_value(), field="finding identity")
+            _bounded_canonical_from(
+                self._identity_value, field="finding identity"
+            )
         ):
             raise DispositionContractError("finding identity differs")
-        _bounded_canonical(self.canonical_value(), field="finding")
+        _bounded_canonical_from(self.canonical_value, field="finding")
 
     def _identity_value(self) -> dict[str, object]:
         return {
@@ -387,7 +418,7 @@ class ProposalValidationFinding(_NoEffect):
 
     @property
     def canonical_bytes(self) -> bytes:
-        return _bounded_canonical(self.canonical_value(), field="finding")
+        return _bounded_canonical_from(self.canonical_value, field="finding")
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
@@ -448,8 +479,8 @@ class ProposalValidationResult(_NoEffect):
             )
         ):
             raise DispositionContractError("finding set must be complete and bounded")
-        proposal_bytes = _bounded_canonical(
-            self.proposal.canonical_value(), field="proposal"
+        proposal_bytes = _bounded_canonical_from(
+            self.proposal.canonical_value, field="proposal"
         )
         proposal_digest = digest_bytes(proposal_bytes)
         if any(
@@ -480,8 +511,8 @@ class ProposalValidationResult(_NoEffect):
 
     @property
     def canonical_bytes(self) -> bytes:
-        return _bounded_canonical(
-            {
+        return _bounded_canonical_from(
+            lambda: {
                 "schema_version": _FINDING_SET_SCHEMA_VERSION,
                 "proposal_content_identity": self.proposal.content_identity,
                 "validator_input_binding": self.validator_input.canonical_value(),
@@ -698,16 +729,35 @@ class ProposalDisposition(_NoEffect):
             or self.route_binding.decision_lead_id != self.lead_head.decision_lead_id
         ):
             raise DispositionContractError("route binding differs from the exact Lead route")
+        if not isinstance(self.selection, OutcomeSelection):
+            raise DispositionContractError("outcome selection must be typed")
+        route_value = _constructed_value(
+            self.route_binding.canonical_value, field="route binding"
+        )
         expected_route_digest = digest_bytes(
-            _bounded_canonical(
-                self.route_binding.canonical_value(), field="route binding"
-            )
+            _bounded_canonical(route_value, field="route binding")
         )
         if self.route_binding_digest != expected_route_digest:
             raise DispositionContractError("route binding digest differs")
+        exact_route = _constructed_value(
+            lambda: LeadRecommendation.from_value(route_value),
+            field="route binding",
+        )
+        if exact_route != self.route_binding:
+            raise DispositionContractError("route binding typed replay differs")
+        selection_value = _constructed_value(
+            self.selection.canonical_value, field="selection"
+        )
+        _bounded_canonical(selection_value, field="selection")
+        exact_selection = _constructed_value(
+            lambda: OutcomeSelection.from_mapping(selection_value),
+            field="selection",
+        )
+        if exact_selection != self.selection:
+            raise DispositionContractError("selection typed replay differs")
         citation_digests = {
             citation.source_digest
-            for citation in self.route_binding.input_citations
+            for citation in exact_route.input_citations
             if citation.source_kind.value == "DECISION_LEAD"
             and citation.source_id == self.lead_head.decision_lead_id
         }
@@ -716,23 +766,25 @@ class ProposalDisposition(_NoEffect):
                 "Lead head digest differs from the exact Proposal citation"
             )
         _validate_exact_route_seam(
-            self.route_binding, self.selection, self.route_binding_digest
+            exact_route, exact_selection, self.route_binding_digest
         )
         if self.judgement is not _ROUTE_RULES[self.route].judgement:
             raise DispositionContractError("judgement differs from route matrix")
         if self.authority is not DispositionAuthority.NONE:
             raise DispositionContractError("phase-one disposition has no authority")
         if self.disposition_id != digest_bytes(
-            _bounded_canonical(self._identity_value(), field="disposition identity")
+            _bounded_canonical_from(
+                self._identity_value, field="disposition identity"
+            )
         ):
             raise DispositionContractError("disposition identity differs")
-        _bounded_canonical(self.canonical_value(), field="disposition")
+        _bounded_canonical_from(self.canonical_value, field="disposition")
 
     @staticmethod
     def validate_route_selection(route: ProposalRoute, selection: OutcomeSelection) -> None:
         if not isinstance(route, ProposalRoute) or not isinstance(selection, OutcomeSelection):
             raise DispositionContractError("route selection must be typed")
-        _bounded_canonical(selection.canonical_value(), field="selection")
+        _bounded_canonical_from(selection.canonical_value, field="selection")
         rule = _ROUTE_RULES[route]
         action = selection.next_action
         reason_codes = {
@@ -769,7 +821,7 @@ class ProposalDisposition(_NoEffect):
 
     @property
     def canonical_bytes(self) -> bytes:
-        return _bounded_canonical(self.canonical_value(), field="disposition")
+        return _bounded_canonical_from(self.canonical_value, field="disposition")
 
     @property
     def decision_lead_id(self) -> str:
@@ -863,8 +915,8 @@ def validate_proposal(raw: bytes, validator_input: ValidatorInputBinding) -> Pro
             "evidence_reference_type": "PROPOSAL_RECOMMENDATION",
             "evidence_reference_id": recommendation.decision_lead_id,
             "evidence_reference_digest": digest_bytes(
-                _bounded_canonical(
-                    recommendation.canonical_value(), field="recommendation"
+                _bounded_canonical_from(
+                    recommendation.canonical_value, field="recommendation"
                 )
             ),
             "validator_input_binding": validator_input.canonical_value(),
@@ -885,6 +937,27 @@ def build_pending_dispositions(
 
     if not isinstance(validation, ProposalValidationResult):
         raise DispositionContractError("validation result must be typed")
+    if not isinstance(lead_heads, Mapping) or not isinstance(selections, Mapping):
+        raise DispositionContractError("per-Lead disposition inputs must be mappings")
+    if (
+        not isinstance(validation.findings, tuple)
+        or any(
+            not isinstance(finding, ProposalValidationFinding)
+            for finding in validation.findings
+        )
+    ):
+        raise DispositionContractError("finding manifest must be typed")
+    proposal_value = _constructed_value(
+        validation.proposal.canonical_value, field="proposal"
+    )
+    proposal_bytes = _bounded_canonical(proposal_value, field="proposal")
+    proposal_digest = digest_bytes(proposal_bytes)
+    proposal = _constructed_value(
+        lambda: TriageProposal.from_canonical_bytes(proposal_bytes),
+        field="proposal",
+    )
+    if proposal != validation.proposal:
+        raise DispositionContractError("Proposal typed replay differs")
     if any(
         finding.severity is FindingSeverity.ERROR
         for finding in validation.findings
@@ -892,25 +965,46 @@ def build_pending_dispositions(
         raise DispositionContractError(
             "a disposition requires a complete finding set without validation errors"
         )
-    expected = set(validation.proposal.decision_lead_ids)
+    expected = set(proposal.decision_lead_ids)
     if set(lead_heads) != expected or set(selections) != expected:
         raise DispositionContractError("per-Lead disposition set must be complete")
     findings_by_lead = {item.evidence_reference_id for item in validation.findings}
     if findings_by_lead != expected:
         raise DispositionContractError("finding manifest must be complete")
-    recommendations = {item.decision_lead_id: item for item in validation.proposal.recommendations}
+    recommendations = {
+        item.decision_lead_id: item for item in proposal.recommendations
+    }
     result: list[ProposalDisposition] = []
-    for lead_id in validation.proposal.decision_lead_ids:
+    for lead_id in proposal.decision_lead_ids:
         head = lead_heads[lead_id]
+        selection = selections[lead_id]
+        if not isinstance(head, LeadDispositionHeadBinding):
+            raise DispositionContractError("Lead head binding must be typed")
+        if not isinstance(selection, OutcomeSelection):
+            raise DispositionContractError("outcome selection must be typed")
         if head.decision_lead_id != lead_id:
             raise DispositionContractError("Lead head binding differs from manifest")
         recommendation = recommendations[lead_id]
-        selection = selections[lead_id]
-        rule = _ROUTE_RULES[recommendation.route]
+        if not isinstance(recommendation, LeadRecommendation):
+            raise DispositionContractError("Proposal recommendation must be typed")
+        route_value = _constructed_value(
+            recommendation.canonical_value, field="recommendation"
+        )
         route_digest = digest_bytes(
-            _bounded_canonical(
-                recommendation.canonical_value(), field="recommendation"
-            )
+            _bounded_canonical(route_value, field="recommendation")
+        )
+        recommendation = _constructed_value(
+            lambda: LeadRecommendation.from_value(route_value),
+            field="recommendation",
+        )
+        rule = _ROUTE_RULES[recommendation.route]
+        selection_value = _constructed_value(
+            selection.canonical_value, field="selection"
+        )
+        _bounded_canonical(selection_value, field="selection")
+        selection = _constructed_value(
+            lambda: OutcomeSelection.from_mapping(selection_value),
+            field="selection",
         )
         citation_digests = {
             citation.source_digest
@@ -924,18 +1018,14 @@ def build_pending_dispositions(
             )
         _validate_exact_route_seam(recommendation, selection, route_digest)
         kwargs = dict(
-            judgement=rule.judgement, proposal_id=validation.proposal.proposal_id,
-            proposal_content_identity=validation.proposal.content_identity,
-            proposal_canonical_digest=digest_bytes(
-                _bounded_canonical(
-                    validation.proposal.canonical_value(), field="proposal"
-                )
-            ),
-            work_item_id=validation.proposal.work_item.work_item_id,
-            work_item_version_id=validation.proposal.work_item.work_item_version_id,
-            work_item_version_digest=validation.proposal.work_item.work_item_version_digest,
-            retrieval_context_id=validation.proposal.retrieval_context.context_id,
-            retrieval_context_digest=validation.proposal.retrieval_context.context_digest,
+            judgement=rule.judgement, proposal_id=proposal.proposal_id,
+            proposal_content_identity=proposal.content_identity,
+            proposal_canonical_digest=proposal_digest,
+            work_item_id=proposal.work_item.work_item_id,
+            work_item_version_id=proposal.work_item.work_item_version_id,
+            work_item_version_digest=proposal.work_item.work_item_version_digest,
+            retrieval_context_id=proposal.retrieval_context.context_id,
+            retrieval_context_digest=proposal.retrieval_context.context_digest,
             lead_head=head, validator_input=validation.validator_input,
             finding_set_digest=validation.finding_set_digest,
             route=recommendation.route, route_binding=recommendation,
@@ -943,25 +1033,21 @@ def build_pending_dispositions(
         )
         identity = {
             "judgement": rule.judgement.value,
-            "proposal_id": validation.proposal.proposal_id,
-            "proposal_content_identity": validation.proposal.content_identity,
-            "proposal_canonical_digest": digest_bytes(
-                _bounded_canonical(
-                    validation.proposal.canonical_value(), field="proposal"
-                )
-            ),
-            "work_item_id": validation.proposal.work_item.work_item_id,
-            "work_item_version_id": validation.proposal.work_item.work_item_version_id,
-            "work_item_version_digest": validation.proposal.work_item.work_item_version_digest,
-            "retrieval_context_id": validation.proposal.retrieval_context.context_id,
-            "retrieval_context_digest": validation.proposal.retrieval_context.context_digest,
+            "proposal_id": proposal.proposal_id,
+            "proposal_content_identity": proposal.content_identity,
+            "proposal_canonical_digest": proposal_digest,
+            "work_item_id": proposal.work_item.work_item_id,
+            "work_item_version_id": proposal.work_item.work_item_version_id,
+            "work_item_version_digest": proposal.work_item.work_item_version_digest,
+            "retrieval_context_id": proposal.retrieval_context.context_id,
+            "retrieval_context_digest": proposal.retrieval_context.context_digest,
             "lead_head_binding": head.canonical_value(),
             "validator_input_binding": validation.validator_input.canonical_value(),
             "finding_set_digest": validation.finding_set_digest,
             "route": recommendation.route.value,
-            "route_binding": recommendation.canonical_value(),
+            "route_binding": route_value,
             "route_binding_digest": route_digest,
-            "selection": selection.canonical_value(),
+            "selection": selection_value,
             "authority": DispositionAuthority.NONE.value,
         }
         disposition_id = digest_bytes(

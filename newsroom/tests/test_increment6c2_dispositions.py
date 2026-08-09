@@ -581,6 +581,72 @@ def test_constructed_nested_canonicalisation_errors_are_normalised() -> None:
             validation, {LEAD_A: head}, {LEAD_A: selection}
         )
 
+    wrong_typed_recommendation = replace(
+        disposition.route_binding, input_citations=(object(),)
+    )
+    with pytest.raises(DispositionContractError, match="canonical JSON"):
+        replace(disposition, route_binding=wrong_typed_recommendation)
+    with pytest.raises(DispositionContractError, match="canonical JSON"):
+        replace(
+            validation,
+            proposal=replace(
+                validation.proposal,
+                recommendations=(wrong_typed_recommendation,),
+            ),
+        )
+
+    wrong_typed_selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+    object.__setattr__(wrong_typed_selection, "primary_reason", object())
+    with pytest.raises(DispositionContractError, match="canonical JSON"):
+        build_pending_dispositions(
+            validation,
+            {LEAD_A: head},
+            {LEAD_A: wrong_typed_selection},
+        )
+    with pytest.raises(DispositionContractError, match="head binding"):
+        build_pending_dispositions(
+            validation,
+            {LEAD_A: object()},
+            {
+                LEAD_A: _selection(
+                    CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+                    CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+                    ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+                )
+            },
+        )
+
+    property_disposition = build_pending_dispositions(
+        validation,
+        {LEAD_A: head},
+        {
+            LEAD_A: _selection(
+                CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+                CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+                ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+            )
+        },
+    )[0]
+    object.__setattr__(
+        property_disposition.route_binding, "candidate_manifest", object()
+    )
+    with pytest.raises(DispositionContractError, match="canonical JSON"):
+        _ = property_disposition.canonical_bytes
+
+    property_validation = validate_proposal(raw, _validator(raw))
+    object.__setattr__(property_validation, "validator_input", object())
+    with pytest.raises(DispositionContractError, match="canonical JSON"):
+        _ = property_validation.canonical_bytes
+
+    property_finding = validate_proposal(raw, _validator(raw)).findings[0]
+    object.__setattr__(property_finding, "validator_input", object())
+    with pytest.raises(DispositionContractError, match="canonical JSON"):
+        _ = property_finding.canonical_bytes
+
 
 def test_operational_action_selector_exhaustively_rejects_competing_seams() -> None:
     action_codes = {
