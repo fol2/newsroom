@@ -55,6 +55,9 @@ from .types import (
     sorted_reasons,
 )
 
+MAX_NEWS_LEAD_SOURCE_DEPENDENCIES = 160
+MAX_NEWS_LEAD_CANONICAL_BYTES = 384 * 1_024
+
 
 def _require_idempotency_key(value: str) -> str:
     return bounded_text(value, field="idempotency_key", maximum_bytes=256)
@@ -546,9 +549,13 @@ class NewsLeadRequest:
             raise DiscoveryContractError(
                 "Lead portfolio functions must be sorted unique typed values"
             )
-        if self.source_dependencies != sorted_dependencies(self.source_dependencies):
+        if (
+            not isinstance(self.source_dependencies, tuple)
+            or len(self.source_dependencies) > MAX_NEWS_LEAD_SOURCE_DEPENDENCIES
+            or self.source_dependencies != sorted_dependencies(self.source_dependencies)
+        ):
             raise DiscoveryContractError(
-                "Lead source dependencies must be canonical"
+                "Lead source dependencies must be bounded canonical values"
             )
         sorted_unique_text(
             self.incompleteness_warnings,
@@ -574,6 +581,11 @@ class NewsLeadRequest:
         )
         _require_utc(self.created_at, field="Lead creation time")
         _require_idempotency_key(self.idempotency_key)
+        if (
+            len(canonical_json_bytes(self.canonical_value()))
+            > MAX_NEWS_LEAD_CANONICAL_BYTES
+        ):
+            raise DiscoveryContractError("News Lead exceeds its canonical byte bound")
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -606,7 +618,10 @@ class NewsLeadRequest:
 
     @property
     def canonical_bytes(self) -> bytes:
-        return canonical_json_bytes(self.canonical_value())
+        value = canonical_json_bytes(self.canonical_value())
+        if len(value) > MAX_NEWS_LEAD_CANONICAL_BYTES:
+            raise DiscoveryContractError("News Lead exceeds its canonical byte bound")
+        return value
 
     @property
     def digest(self) -> str:
