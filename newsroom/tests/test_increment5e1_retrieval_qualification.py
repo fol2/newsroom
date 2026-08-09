@@ -308,6 +308,47 @@ def test_slice_and_triage_denominators_are_truthful_and_plan_derived() -> None:
     assert all(item["passed"] is True for item in families.values())
 
 
+
+def test_family_required_slice_underexposure_is_not_evaluated() -> None:
+    observations = run_fixture_qualification(
+        target=QUALIFICATION_TARGET,
+        corpus=QUALIFICATION_CORPUS,
+    )
+    cases = list(QUALIFICATION_CORPUS.cases)
+    index = next(
+        index
+        for index, case in enumerate(cases)
+        if case.family_id == "EVENT_AND_DEVELOPMENT_PRECISION"
+        and case.language == "EN_GB"
+    )
+    cases[index] = replace(
+        cases[index],
+        slice_labels=tuple(
+            label for label in cases[index].slice_labels if label != "EN_GB"
+        ),
+    )
+    corpus = replace(QUALIFICATION_CORPUS, cases=tuple(cases))
+    epoch = build_qualification_epoch(
+        target=QUALIFICATION_TARGET,
+        corpus=corpus,
+        code_tree_sha=TREE,
+    )
+    report = RetrievalQualificationEvaluator().evaluate(
+        run_id=str(uuid.uuid4()),
+        target=QUALIFICATION_TARGET,
+        corpus=corpus,
+        epoch=epoch,
+        observations=observations,
+        started_at=START,
+        completed_at=END,
+    )
+    assert report.decision is QualificationDecision.NOT_EVALUATED
+    assert (
+        "FAMILY_EXPOSURE:EVENT_AND_DEVELOPMENT_PRECISION:EN_GB"
+        in report.blockers
+    )
+    assert "MANDATORY_FAMILY:EVENT_AND_DEVELOPMENT_PRECISION" not in report.blockers
+
 def test_report_metrics_are_deeply_immutable() -> None:
     _, report = _evaluate()
     before = report.report_digest

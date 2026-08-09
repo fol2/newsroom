@@ -65,15 +65,27 @@ def _family_metrics(
             len(distractor_cases) - distractor_errors,
             len(distractor_cases),
         )
-        passed = (
+        family_exposure_blockers: list[str] = []
+        if (
             len(selected)
-            >= minima["minimum_cases_by_query_family"][family_id]
-            and precision >= criteria["minimum_precision_ppm"]
+            < minima["minimum_cases_by_query_family"][family_id]
+        ):
+            family_exposure_blockers.append(
+                f"FAMILY_EXPOSURE:{family_id}:CASES"
+            )
+        family_slice_minimum = minima[
+            "minimum_relevant_cases_per_family_required_slice"
+        ]
+        family_exposure_blockers.extend(
+            f"FAMILY_EXPOSURE:{family_id}:{item['slice_id']}"
+            for item in required_slices
+            if item["case_count"] < family_slice_minimum
+        )
+        quality_passed = (
+            precision >= criteria["minimum_precision_ppm"]
             and recall >= criteria["minimum_recall_ppm"]
             and all(
-                item["case_count"]
-                >= minima["minimum_relevant_cases_per_family_required_slice"]
-                and item["recall_at_12_ppm"]
+                item["recall_at_12_ppm"]
                 >= criteria["minimum_required_slice_recall_ppm"]
                 for item in required_slices
             )
@@ -84,6 +96,7 @@ def _family_metrics(
             and distractor_precision
             >= criteria.get("distractor_false_merge_precision_ppm", 0)
         )
+        passed = not family_exposure_blockers and quality_passed
         results.append(
             {
                 "family_id": family_id,
@@ -106,7 +119,8 @@ def _family_metrics(
                 "passed": passed,
             }
         )
-        if not passed:
+        blockers.extend(family_exposure_blockers)
+        if not family_exposure_blockers and not quality_passed:
             blockers.append(f"MANDATORY_FAMILY:{family_id}")
 
     global_slices: list[dict[str, object]] = []

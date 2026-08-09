@@ -197,7 +197,7 @@ class RetrievalQualificationEvaluator:
         blockers = sorted(set(blockers))
         under_exposed = any(
             blocker.startswith(
-                ("EXPOSURE:", "SLICE_EXPOSURE:", "TRIAGE_EXPOSURE:")
+                ("EXPOSURE:", "FAMILY_EXPOSURE:", "SLICE_EXPOSURE:", "TRIAGE_EXPOSURE:")
             )
             for blocker in blockers
         )
