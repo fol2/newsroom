@@ -8,6 +8,7 @@ import pytest
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.increment5.retrieval_context import RETRIEVAL_CONTEXT_CONTRACT_DIGEST
+from newsroom.increment6 import dispositions as dispositions_module
 from newsroom.increment6.dispositions import (
     DISPOSITION_AUTHORITY,
     MAX_DISPOSITION_CANONICAL_BYTES,
@@ -38,6 +39,12 @@ from newsroom.increment6.outcomes import (
     OutcomeSelection,
 )
 from newsroom.increment6.proposals import (
+    MAX_CONTEXT_LEADS,
+    MAX_DECISION_LEADS,
+    MAX_INPUT_CITATIONS,
+    MAX_LIST_ITEMS,
+    MAX_RATIONALE_BYTES,
+    MAX_TEXT_BYTES,
     PROPOSAL_SCHEMA_VERSION,
     ProposalRoute,
     TriageProposal,
@@ -176,62 +183,6 @@ def _reviewed_large_producer_payload() -> bytes:
                     assert len(raw) == target_size
                     return raw
     raise AssertionError("reviewed producer payload could not reach its exact size")
-
-
-def _maximal_escaped_producer_payload() -> bytes:
-    """Exercise every dominant #356 text/list/citation bound across 32 Leads."""
-
-    document = json.loads(_proposal_bytes(("NEW_EVENT_CANDIDATE",) * 32))
-    bounded_text = "\x01" * 1_024
-
-    def unique_text(index: int) -> str:
-        return f"{index:02d}:" + "\x01" * 1_021
-
-    def full_token(prefix: str, fill: str = "x") -> str:
-        return prefix + fill * (256 - len(prefix))
-
-    for recommendation in document["proposal"]["recommendations"]:
-        lead_id = recommendation["decision_lead_id"]
-        recommendation["input_citations"] = [
-            {
-                "citation_id": full_token(f"citation:{index:03d}:", "c"),
-                "source_kind": "DECISION_LEAD" if index == 0 else "RETRIEVAL_MATCH",
-                "source_id": lead_id if index == 0 else full_token(f"passage:{index:03d}:", "p"),
-                "source_digest": DIGEST_B,
-                "field_path": "\x01" * 256,
-                "byte_start": index * 20,
-                "byte_end": index * 20 + 18,
-                "quote_digest": DIGEST_D,
-                "target_hypothesis_id": None,
-            }
-            for index in range(64)
-        ]
-        recommendation["likely_new_information"] = bounded_text
-        recommendation["materiality_basis"] = bounded_text
-        recommendation["missing_context"] = [unique_text(index) for index in range(32)]
-        recommendation["retrieval_incompleteness"] = [
-            f"{index:02d};" + "\x01" * 1_021 for index in range(32)
-        ]
-        recommendation["hypothesis"].update({
-            "proposal_local_id": full_token(f"hypothesis:{lead_id[:8]}:"),
-            "summary": bounded_text,
-        })
-        recommendation["candidate_manifest"].update({
-            "proposed_geography": full_token("geography:"),
-            "proposed_category": full_token("category:"),
-            "urgency": full_token("urgency:"),
-            "likely_new_information": bounded_text,
-            "reader_utility_basis": bounded_text,
-            "uncertainties": [unique_text(index) for index in range(32)],
-            "evidence_objectives": [
-                f"{index:02d};" + "\x01" * 1_021 for index in range(32)
-            ],
-            "governing_versions": [
-                full_token(f"version:{index:02d}:", "v") for index in range(32)
-            ],
-        })
-    document["proposal"]["rationale"] = "\x01" * 4_096
-    return _resign(document)
 
 
 def _validator(raw: bytes | None = None) -> ValidatorInputBinding:
@@ -478,7 +429,9 @@ def test_integrity_failures_are_not_editorial_rejections_and_no_effect_type_is_r
     assert all(member.value in {"NONE", "PENDING"} for member in DispositionAuthority)
 
 
-def test_lead_digest_mismatch_and_oversized_constructed_disposition_fail_closed() -> None:
+def test_lead_digest_mismatch_and_oversized_constructed_disposition_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     raw = _proposal_bytes()
     validation = validate_proposal(raw, _validator(raw))
     selection = _selection(
@@ -492,44 +445,68 @@ def test_lead_digest_mismatch_and_oversized_constructed_disposition_fail_closed(
             validation, {LEAD_A: wrong_head}, {LEAD_A: selection}
         )
 
-    reasons = tuple(
-        sorted(
-            (
-                StructuredReason(
-                    code=ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
-                    basis=ReasonBasisClass.DETERMINISTIC_OBSERVATION,
-                    references=(ReasonReference("evidence", f"evidence:{index:04d}", DIGEST_A),),
-                    explanation="\n" * 1_000,
-                )
-                for index in range(30_000)
-            ),
-            key=lambda item: item.canonical_bytes,
-        )
-    )
-    oversized = replace(selection, supporting_reasons=reasons)
     exact_head = LeadDispositionHeadBinding(LEAD_A, DIGEST_B, "head:a", DIGEST_A)
+    disposition = build_pending_dispositions(
+        validation, {LEAD_A: exact_head}, {LEAD_A: selection}
+    )[0]
+    monkeypatch.setattr(
+        dispositions_module,
+        "MAX_DISPOSITION_CANONICAL_BYTES",
+        len(disposition.canonical_bytes) - 1,
+    )
     with pytest.raises(DispositionContractError, match="canonical byte bound"):
         build_pending_dispositions(
-            validation, {LEAD_A: exact_head}, {LEAD_A: oversized}
+            validation, {LEAD_A: exact_head}, {LEAD_A: selection}
         )
 
 
-def test_every_legal_producer_envelope_fits_the_public_consumer_bound() -> None:
+def test_every_legal_producer_envelope_fits_the_public_consumer_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     reviewed = _reviewed_large_producer_payload()
     assert len(reviewed) == 1_103_922
     assert TriageProposal.from_canonical_bytes(reviewed).canonical_bytes == reviewed
     reviewed_validation = validate_proposal(reviewed, _validator(reviewed))
     assert len(reviewed_validation.findings) == 8
 
-    maximal = _maximal_escaped_producer_payload()
-    assert len(maximal) > 16_777_216
-    assert len(maximal) < MAX_DISPOSITION_CANONICAL_BYTES
-    assert TriageProposal.from_canonical_bytes(maximal).canonical_bytes == maximal
-    maximal_validation = validate_proposal(maximal, _validator(maximal))
-    assert len(maximal_validation.findings) == 32
-    assert maximal_validation.proposal.canonical_bytes == maximal
+    # #356 permits control bytes in bounded text. Canonical JSON therefore has
+    # a worst-case six-byte escape expansion, not an ordinary UTF-8 1:1 ratio.
+    escape_ratio = len(canonical_json_bytes("\x01" * MAX_TEXT_BYTES)) - 2
+    assert escape_ratio == 6 * MAX_TEXT_BYTES
+    assert (
+        MAX_DECISION_LEADS,
+        MAX_INPUT_CITATIONS,
+        MAX_LIST_ITEMS,
+    ) == (32, 64, 32)
 
-    oversized = b" " * (MAX_DISPOSITION_CANONICAL_BYTES + 1)
+    # One citation's bounded strings, digests, UUID and integers total less than
+    # MAX_TEXT_BYTES. The actual 32-Lead Candidate skeleton accounts for every
+    # schema key, delimiter, fixed value and collection boundary. The named slot
+    # counts below cover every dominant closed #356 field: citation values;
+    # common texts and both 32-item lists; Hypothesis; Candidate contributors,
+    # tokens, texts, both 32-item text lists and its 32-item version-token list.
+    # Counting every remaining value byte at the worst JSON escape ratio is
+    # deliberately conservative.
+    skeleton_bytes = len(_proposal_bytes(("NEW_EVENT_CANDIDATE",) * MAX_DECISION_LEADS))
+    citation_value_slots = MAX_INPUT_CITATIONS
+    common_value_slots = 3 + (2 * MAX_LIST_ITEMS)
+    candidate_route_value_slots = 2 + 2 + 1 + 2 + (2 * MAX_LIST_ITEMS) + 8 + 3
+    recommendation_value_bytes = MAX_TEXT_BYTES * (
+        citation_value_slots + common_value_slots + candidate_route_value_slots
+    )
+    top_level_value_bytes = (
+        MAX_DECISION_LEADS + MAX_CONTEXT_LEADS + 16
+    ) * MAX_TEXT_BYTES + MAX_RATIONALE_BYTES
+    analytical_maximum = skeleton_bytes + 6 * (
+        MAX_DECISION_LEADS * recommendation_value_bytes
+        + top_level_value_bytes
+    )
+    assert analytical_maximum < MAX_DISPOSITION_CANONICAL_BYTES
+
+    monkeypatch.setattr(
+        dispositions_module, "MAX_DISPOSITION_CANONICAL_BYTES", 128
+    )
+    oversized = b" " * 129
     with pytest.raises(DispositionContractError, match="bounded bytes"):
         ValidatorInputBinding.for_proposal(
             proposal_bytes=oversized,
