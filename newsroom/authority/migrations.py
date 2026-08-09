@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import sqlite3
-from typing import Iterable
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 from .canonical import digest_canonical
 from .check_migrations import (
@@ -19,19 +19,19 @@ from .complete_projection_migrations import (
     COMPLETE_PROJECTION_MIGRATION_STATEMENTS,
     COMPLETE_PROJECTION_SCHEMA_VERSION,
 )
+from .development_candidate_migrations import (
+    DEVELOPMENT_CANDIDATE_MIGRATION,
+    DEVELOPMENT_CANDIDATE_MIGRATION_CHECKSUM,
+    DEVELOPMENT_CANDIDATE_MIGRATION_NAME,
+    DEVELOPMENT_CANDIDATE_MIGRATION_STATEMENTS,
+    DEVELOPMENT_CANDIDATE_SCHEMA_VERSION,
+)
 from .discovery_migrations import (
     DISCOVERY_AUTHORITY_MIGRATION,
     DISCOVERY_AUTHORITY_MIGRATION_CHECKSUM,
     DISCOVERY_AUTHORITY_MIGRATION_NAME,
     DISCOVERY_AUTHORITY_MIGRATION_STATEMENTS,
     DISCOVERY_AUTHORITY_SCHEMA_VERSION,
-)
-from .entity_migrations import (
-    ENTITY_AUTHORITY_MIGRATION,
-    ENTITY_AUTHORITY_MIGRATION_CHECKSUM,
-    ENTITY_AUTHORITY_MIGRATION_NAME,
-    ENTITY_AUTHORITY_MIGRATION_STATEMENTS,
-    ENTITY_AUTHORITY_SCHEMA_VERSION,
 )
 from .editorial_relation_migrations import (
     EDITORIAL_RELATION_MIGRATION,
@@ -40,20 +40,20 @@ from .editorial_relation_migrations import (
     EDITORIAL_RELATION_MIGRATION_STATEMENTS,
     EDITORIAL_RELATION_SCHEMA_VERSION,
 )
-from .graphiti_adapter_migrations import (
-    GRAPHITI_ADAPTER_MIGRATION,
-    GRAPHITI_ADAPTER_MIGRATION_CHECKSUM,
-    GRAPHITI_ADAPTER_MIGRATION_NAME,
-    GRAPHITI_ADAPTER_MIGRATION_STATEMENTS,
-    GRAPHITI_ADAPTER_SCHEMA_VERSION,
+from .entity_migrations import (
+    ENTITY_AUTHORITY_MIGRATION,
+    ENTITY_AUTHORITY_MIGRATION_CHECKSUM,
+    ENTITY_AUTHORITY_MIGRATION_NAME,
+    ENTITY_AUTHORITY_MIGRATION_STATEMENTS,
+    ENTITY_AUTHORITY_SCHEMA_VERSION,
 )
 from .evaluation_handoff_migrations import (
-    EvaluationHandoffBackupReceipt,
     EVALUATION_HANDOFF_MIGRATION,
     EVALUATION_HANDOFF_MIGRATION_CHECKSUM,
     EVALUATION_HANDOFF_MIGRATION_NAME,
     EVALUATION_HANDOFF_MIGRATION_STATEMENTS,
     EVALUATION_HANDOFF_SCHEMA_VERSION,
+    EvaluationHandoffBackupReceipt,
     evaluation_handoff_backup_paths,
     prepare_evaluation_handoff_backup,
     require_evaluation_handoff_backup,
@@ -65,12 +65,12 @@ from .extraction_migrations import (
     EXTRACTION_AUTHORITY_MIGRATION_STATEMENTS,
     EXTRACTION_AUTHORITY_SCHEMA_VERSION,
 )
-from .development_candidate_migrations import (
-    DEVELOPMENT_CANDIDATE_MIGRATION,
-    DEVELOPMENT_CANDIDATE_MIGRATION_CHECKSUM,
-    DEVELOPMENT_CANDIDATE_MIGRATION_NAME,
-    DEVELOPMENT_CANDIDATE_MIGRATION_STATEMENTS,
-    DEVELOPMENT_CANDIDATE_SCHEMA_VERSION,
+from .graphiti_adapter_migrations import (
+    GRAPHITI_ADAPTER_MIGRATION,
+    GRAPHITI_ADAPTER_MIGRATION_CHECKSUM,
+    GRAPHITI_ADAPTER_MIGRATION_NAME,
+    GRAPHITI_ADAPTER_MIGRATION_STATEMENTS,
+    GRAPHITI_ADAPTER_SCHEMA_VERSION,
 )
 from .integrated_migrations import (
     INTEGRATED_FOUNDATION_MIGRATION,
@@ -114,7 +114,6 @@ from .retrieval_migrations import (
     HYBRID_RETRIEVAL_MIGRATION_STATEMENTS,
     HYBRID_RETRIEVAL_SCHEMA_VERSION,
 )
-
 from .source_registry_migrations import (
     SOURCE_REGISTRY_MIGRATION,
     SOURCE_REGISTRY_MIGRATION_CHECKSUM,
@@ -122,9 +121,20 @@ from .source_registry_migrations import (
     SOURCE_REGISTRY_MIGRATION_STATEMENTS,
     SOURCE_REGISTRY_SCHEMA_VERSION,
 )
+from .triage_work_item_migrations import (
+    TRIAGE_WORK_ITEM_MIGRATION,
+    TRIAGE_WORK_ITEM_MIGRATION_CHECKSUM,
+    TRIAGE_WORK_ITEM_MIGRATION_NAME,
+    TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS,
+    TRIAGE_WORK_ITEM_SCHEMA_VERSION,
+    TriageWorkItemBackupReceipt,
+    prepare_triage_work_item_backup,
+    require_triage_work_item_backup,
+    triage_work_item_backup_paths,
+)
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = EVALUATION_HANDOFF_SCHEMA_VERSION
+SCHEMA_VERSION = TRIAGE_WORK_ITEM_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -557,18 +567,16 @@ def schema_fingerprint(conn: sqlite3.Connection) -> str:
         "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
     ).fetchall()
     return digest_canonical(
-        [
-            [str(row[0]), str(row[1]), str(row[2]), _normalize(row[3])]
-            for row in rows
-        ]
+        [[str(row[0]), str(row[1]), str(row[2]), _normalize(row[3])] for row in rows]
     )
 
 
 def prepare_pending_migration_backup(
     conn: sqlite3.Connection,
-) -> EvaluationHandoffBackupReceipt | None:
-    """Prepare the exact retained backup required by an existing v16 store."""
-    if int(conn.execute("PRAGMA user_version").fetchone()[0]) != 16:
+) -> EvaluationHandoffBackupReceipt | TriageWorkItemBackupReceipt | None:
+    """Prepare the exact retained backup required by a checked predecessor."""
+    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if version not in {16, 17}:
         return None
     database_path = next(
         str(row[2])
@@ -579,8 +587,11 @@ def prepare_pending_migration_backup(
         raise sqlite3.DatabaseError(
             "existing v16 upgrade requires a file-backed database"
         )
-    backup_path, _ = evaluation_handoff_backup_paths(database_path)
-    return prepare_evaluation_handoff_backup(conn, backup_path)
+    if version == 16:
+        backup_path, _ = evaluation_handoff_backup_paths(database_path)
+        return prepare_evaluation_handoff_backup(conn, backup_path)
+    backup_path, _ = triage_work_item_backup_paths(database_path)
+    return prepare_triage_work_item_backup(conn, backup_path)
 
 
 def apply_migration(
@@ -606,9 +617,7 @@ def apply_migration(
         raise
 
 
-def apply_pending_migrations(
-    conn: sqlite3.Connection, *, applied_at: str
-) -> None:
+def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> None:
     """Apply every pending checked migration in one exclusive transaction.
 
     Fresh schema creation is all-or-nothing across every retained authority
@@ -861,9 +870,7 @@ def apply_pending_migrations(
             current = GRAPHITI_ADAPTER_SCHEMA_VERSION
         if current == GRAPHITI_ADAPTER_SCHEMA_VERSION:
             if 0 < starting_version < GRAPHITI_ADAPTER_SCHEMA_VERSION:
-                conn.execute(
-                    f"PRAGMA user_version={GRAPHITI_ADAPTER_SCHEMA_VERSION}"
-                )
+                conn.execute(f"PRAGMA user_version={GRAPHITI_ADAPTER_SCHEMA_VERSION}")
                 conn.execute("COMMIT")
                 database_path = next(
                     str(row[2])
@@ -880,7 +887,7 @@ def apply_pending_migrations(
             if starting_version != 0:
                 require_evaluation_handoff_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-1],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-2],
                 )
             for statement in EVALUATION_HANDOFF_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -896,6 +903,40 @@ def apply_pending_migrations(
                 ),
             )
             current = EVALUATION_HANDOFF_SCHEMA_VERSION
+        if current == EVALUATION_HANDOFF_SCHEMA_VERSION:
+            if 0 < starting_version < EVALUATION_HANDOFF_SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version={EVALUATION_HANDOFF_SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+                database_path = next(
+                    str(row[2])
+                    for row in conn.execute("PRAGMA database_list").fetchall()
+                    if row[1] == "main"
+                )
+                if not database_path:
+                    raise sqlite3.DatabaseError(
+                        "existing multihop upgrade requires a file-backed database"
+                    )
+                backup_path, _ = triage_work_item_backup_paths(database_path)
+                prepare_triage_work_item_backup(conn, backup_path)
+                conn.execute("BEGIN EXCLUSIVE")
+            if starting_version != 0:
+                require_triage_work_item_backup(
+                    conn,
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-1],
+                )
+            for statement in TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    TRIAGE_WORK_ITEM_SCHEMA_VERSION,
+                    TRIAGE_WORK_ITEM_MIGRATION_NAME,
+                    TRIAGE_WORK_ITEM_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = TRIAGE_WORK_ITEM_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -922,15 +963,15 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     EDITORIAL_RELATION_MIGRATION,
     GRAPHITI_ADAPTER_MIGRATION,
     EVALUATION_HANDOFF_MIGRATION,
+    TRIAGE_WORK_ITEM_MIGRATION,
 )
+
 
 def _expected_fingerprint() -> str:
     conn = sqlite3.connect(":memory:", isolation_level=None)
     try:
         conn.execute("PRAGMA foreign_keys=ON")
-        apply_pending_migrations(
-            conn, applied_at="1970-01-01T00:00:00.000000Z"
-        )
+        apply_pending_migrations(conn, applied_at="1970-01-01T00:00:00.000000Z")
         return schema_fingerprint(conn)
     finally:
         conn.close()
@@ -1014,5 +1055,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         EVALUATION_HANDOFF_SCHEMA_VERSION,
         EVALUATION_HANDOFF_MIGRATION_NAME,
         EVALUATION_HANDOFF_MIGRATION_CHECKSUM,
+    ),
+    (
+        TRIAGE_WORK_ITEM_SCHEMA_VERSION,
+        TRIAGE_WORK_ITEM_MIGRATION_NAME,
+        TRIAGE_WORK_ITEM_MIGRATION_CHECKSUM,
     ),
 )

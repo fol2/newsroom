@@ -77,7 +77,7 @@ def test_fresh_schema_v15_history_registry_tables_and_view_are_exact(
     conn = sqlite3.connect(state.extraction.database)
     try:
         assert EDITORIAL_RELATION_SCHEMA_VERSION == 15
-        assert SCHEMA_VERSION == 17
+        assert SCHEMA_VERSION == 18
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(conn) == EXPECTED_SCHEMA_FINGERPRINT
         assert conn.execute(
