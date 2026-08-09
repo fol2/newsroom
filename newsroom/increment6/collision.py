@@ -11,10 +11,10 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
 from newsroom.authority.canonical import (
     CanonicalizationError,
@@ -92,6 +92,7 @@ class CollisionEligibilityReason(StrEnum):
     CURRENT_SERVING_BOUNDARY_DIFFERS = "CURRENT_SERVING_BOUNDARY_DIFFERS"
     EXECUTION_PROVENANCE_DIFFERS = "EXECUTION_PROVENANCE_DIFFERS"
     AUTHORITY_IDENTITY_DIFFERS = "AUTHORITY_IDENTITY_DIFFERS"
+    CURRENT_AUTHORITY_RECHECK_DIFFERS = "CURRENT_AUTHORITY_RECHECK_DIFFERS"
 
 
 def _require_token(value: object, *, field: str) -> str:
@@ -511,6 +512,68 @@ class TrustedCurrentCollisionAuthorityContext:
             ) from exc
 
 
+@dataclass(frozen=True, slots=True)
+class CurrentCollisionAuthoritySnapshot:
+    """One live snapshot returned by the trusted authority provider."""
+
+    evidence: CurrentCollisionReceiptEvidence
+    trusted_context: TrustedCurrentCollisionAuthorityContext
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.evidence, CurrentCollisionReceiptEvidence):
+            raise CollisionEligibilityContractError(
+                "current authority snapshot evidence must be typed"
+            )
+        if not isinstance(
+            self.trusted_context,
+            TrustedCurrentCollisionAuthorityContext,
+        ):
+            raise CollisionEligibilityContractError(
+                "current authority snapshot context must be typed"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedCurrentCollisionAuthorityBoundary:
+    """Authority identities fixed by the trusted composition root."""
+
+    authority_scope_id: str
+    authority_profile_id: str
+    adapter_config_digest: str
+    port_registry_digest: str
+    port_id: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "authority_scope_id",
+            "authority_profile_id",
+            "port_id",
+        ):
+            _require_token(getattr(self, name), field=f"trusted_boundary_{name}")
+        for name in ("adapter_config_digest", "port_registry_digest"):
+            _require_digest(getattr(self, name), field=f"trusted_boundary_{name}")
+
+    def accepts(self, context: TrustedCurrentCollisionAuthorityContext) -> bool:
+        if not isinstance(context, TrustedCurrentCollisionAuthorityContext):
+            return False
+        return (
+            context.authority_scope_id == self.authority_scope_id
+            and context.authority_profile_id == self.authority_profile_id
+            and context.adapter_config_digest == self.adapter_config_digest
+            and context.port_registry_digest == self.port_registry_digest
+            and context.port_id == self.port_id
+        )
+
+
+class CurrentCollisionAuthorityProvider(Protocol):
+    """Composition-root capability for a live current-authority read."""
+
+    def __call__(
+        self,
+        request: CurrentCollisionEligibilityRequest,
+    ) -> CurrentCollisionAuthoritySnapshot: ...
+
+
 _ELIGIBLE_REASONS = frozenset(
     {
         CollisionEligibilityReason.CURRENT_CANDIDATE_MATCH,
@@ -531,6 +594,7 @@ _REASONS_BY_OUTCOME = {
             CollisionEligibilityReason.AUTHORITY_STALE,
             CollisionEligibilityReason.CURRENT_AUTHORITY_ADVANCED,
             CollisionEligibilityReason.CURRENT_SERVING_BOUNDARY_DIFFERS,
+            CollisionEligibilityReason.CURRENT_AUTHORITY_RECHECK_DIFFERS,
         }
     ),
     CollisionEligibilityOutcome.INCOMPLETE: frozenset(
@@ -1175,25 +1239,82 @@ class CurrentCollisionEligibilityBlocked(RuntimeError):
 _T = TypeVar("_T")
 
 
-def enforce_current_collision_before_effect(
-    *,
-    request: CurrentCollisionEligibilityRequest,
-    evidence: CurrentCollisionReceiptEvidence,
-    trusted_context: TrustedCurrentCollisionAuthorityContext,
-    effect: Callable[[CurrentCollisionEligibilityDecision], _T],
-) -> _T:
-    """Invoke ``effect`` only after an exact eligible decision exists."""
+class CurrentCollisionEffectEnforcer:
+    """Pre-effect capability assembled only at the trusted composition root.
 
-    if not callable(effect):
-        raise TypeError("candidate-use effect must be callable")
-    decision = decide_current_collision_eligibility(
-        request=request,
-        evidence=evidence,
-        trusted_context=trusted_context,
-    )
-    if not decision.eligible:
-        raise CurrentCollisionEligibilityBlocked(decision)
-    return effect(decision)
+    Candidate-use callers receive this already-bound capability.  Its public
+    operation accepts only their request and effect; retained evidence and the
+    current authority context are read live from the pre-bound provider.  A
+    second read immediately before the effect is the commit-time recheck.
+    """
+
+    def __init__(
+        self,
+        *,
+        current_authority_provider: CurrentCollisionAuthorityProvider,
+        trusted_boundary: TrustedCurrentCollisionAuthorityBoundary,
+    ) -> None:
+        if not callable(current_authority_provider):
+            raise TypeError("current authority provider must be callable")
+        if not isinstance(
+            trusted_boundary,
+            TrustedCurrentCollisionAuthorityBoundary,
+        ):
+            raise TypeError("trusted current authority boundary must be typed")
+        self._current_authority_provider = current_authority_provider
+        self._trusted_boundary = trusted_boundary
+
+    def _current_decision(
+        self,
+        request: CurrentCollisionEligibilityRequest,
+    ) -> CurrentCollisionEligibilityDecision:
+        snapshot = self._current_authority_provider(request)
+        if not isinstance(snapshot, CurrentCollisionAuthoritySnapshot):
+            raise TypeError(
+                "current authority provider must return a typed snapshot"
+            )
+        decision = decide_current_collision_eligibility(
+            request=request,
+            evidence=snapshot.evidence,
+            trusted_context=snapshot.trusted_context,
+        )
+        if not self._trusted_boundary.accepts(snapshot.trusted_context):
+            return replace(
+                decision,
+                outcome=CollisionEligibilityOutcome.INTEGRITY_BLOCKED,
+                reason=CollisionEligibilityReason.AUTHORITY_IDENTITY_DIFFERS,
+            )
+        return decision
+
+    def enforce(
+        self,
+        *,
+        request: CurrentCollisionEligibilityRequest,
+        effect: Callable[[CurrentCollisionEligibilityDecision], _T],
+    ) -> _T:
+        """Invoke ``effect`` only after two identical live decisions."""
+
+        if not isinstance(request, CurrentCollisionEligibilityRequest):
+            raise TypeError("collision eligibility request must be typed")
+        if not callable(effect):
+            raise TypeError("candidate-use effect must be callable")
+        initial = self._current_decision(request)
+        if not initial.eligible:
+            raise CurrentCollisionEligibilityBlocked(initial)
+        rechecked = self._current_decision(request)
+        if not rechecked.eligible:
+            raise CurrentCollisionEligibilityBlocked(rechecked)
+        if rechecked.decision_digest != initial.decision_digest:
+            raise CurrentCollisionEligibilityBlocked(
+                replace(
+                    rechecked,
+                    outcome=CollisionEligibilityOutcome.STALE,
+                    reason=(
+                        CollisionEligibilityReason.CURRENT_AUTHORITY_RECHECK_DIFFERS
+                    ),
+                )
+            )
+        return effect(rechecked)
 
 
 __all__ = [
@@ -1204,11 +1325,14 @@ __all__ = [
     "CollisionEligibilityOutcome",
     "CollisionEligibilityReason",
     "CollisionState",
+    "CurrentCollisionAuthorityProvider",
+    "CurrentCollisionAuthoritySnapshot",
+    "CurrentCollisionEffectEnforcer",
     "CurrentCollisionEligibilityBlocked",
     "CurrentCollisionEligibilityDecision",
     "CurrentCollisionEligibilityRequest",
     "CurrentCollisionReceiptEvidence",
     "TrustedCurrentCollisionAuthorityContext",
+    "TrustedCurrentCollisionAuthorityBoundary",
     "decide_current_collision_eligibility",
-    "enforce_current_collision_before_effect",
 ]

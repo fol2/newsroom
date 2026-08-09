@@ -23,13 +23,15 @@ from newsroom.increment6.collision import (
     CollisionEligibilityReason,
     CollisionEligibilityOutcome,
     CollisionState,
+    CurrentCollisionAuthoritySnapshot,
+    CurrentCollisionEffectEnforcer,
     CurrentCollisionEligibilityBlocked,
     CurrentCollisionEligibilityDecision,
     CurrentCollisionEligibilityRequest,
     CurrentCollisionReceiptEvidence,
     TrustedCurrentCollisionAuthorityContext,
+    TrustedCurrentCollisionAuthorityBoundary,
     decide_current_collision_eligibility as _decide_current_collision_eligibility,
-    enforce_current_collision_before_effect,
 )
 from newsroom.tests.test_increment5c2_named_tool_authority_execution import (
     COLLISION_DIGEST,
@@ -119,6 +121,28 @@ def _decide(
     )
 
 
+def _enforcer(
+    evidence: CurrentCollisionReceiptEvidence,
+    *,
+    provider=None,
+) -> CurrentCollisionEffectEnforcer:
+    context = _trusted_context(evidence)
+    snapshot = CurrentCollisionAuthoritySnapshot(
+        evidence=evidence,
+        trusted_context=context,
+    )
+    return CurrentCollisionEffectEnforcer(
+        current_authority_provider=provider or (lambda request: snapshot),
+        trusted_boundary=TrustedCurrentCollisionAuthorityBoundary(
+            authority_scope_id=context.authority_scope_id,
+            authority_profile_id=context.authority_profile_id,
+            adapter_config_digest=context.adapter_config_digest,
+            port_registry_digest=context.port_registry_digest,
+            port_id=context.port_id,
+        ),
+    )
+
+
 def test_current_matching_candidate_is_eligible_before_effect(tmp_path: Path) -> None:
     requirement, evidence = _occupied_evidence(tmp_path)
 
@@ -132,10 +156,8 @@ def test_current_matching_candidate_is_eligible_before_effect(tmp_path: Path) ->
     assert decision.collision_state is CollisionState.OCCUPIED
     assert decision.observed_candidate_id == "candidate:001"
     effects: list[str] = []
-    result = enforce_current_collision_before_effect(
+    result = _enforcer(evidence).enforce(
         request=requirement,
-        evidence=evidence,
-        trusted_context=_trusted_context(evidence),
         effect=lambda permit: effects.append(permit.decision_digest) or "used",
     )
     assert result == "used"
@@ -222,10 +244,8 @@ def test_occupied_slot_blocks_new_candidate_before_effect(tmp_path: Path) -> Non
     effects: list[str] = []
 
     with pytest.raises(CurrentCollisionEligibilityBlocked) as caught:
-        enforce_current_collision_before_effect(
+        _enforcer(evidence).enforce(
             request=requirement,
-            evidence=evidence,
-            trusted_context=_trusted_context(evidence),
             effect=lambda permit: effects.append(permit.decision_digest),
         )
 
@@ -446,10 +466,15 @@ def test_tampered_authority_receipt_is_integrity_blocked_before_effect(
     effects: list[str] = []
 
     with pytest.raises(CurrentCollisionEligibilityBlocked) as caught:
-        enforce_current_collision_before_effect(
-            request=requirement,
+        tampered_snapshot = CurrentCollisionAuthoritySnapshot(
             evidence=tampered,
             trusted_context=_trusted_context(evidence),
+        )
+        _enforcer(
+            evidence,
+            provider=lambda request: tampered_snapshot,
+        ).enforce(
+            request=requirement,
             effect=lambda permit: effects.append(permit.decision_digest),
         )
 
@@ -518,12 +543,26 @@ def test_cached_complete_receipt_blocks_when_trusted_authority_advances(
 ) -> None:
     requirement, evidence = _occupied_evidence(tmp_path)
     effects: list[str] = []
+    advanced_snapshot = CurrentCollisionAuthoritySnapshot(
+        evidence=evidence,
+        trusted_context=_trusted_context(evidence, **current_changes),
+    )
+    snapshots = iter(
+        (
+            CurrentCollisionAuthoritySnapshot(
+                evidence=evidence,
+                trusted_context=_trusted_context(evidence),
+            ),
+            advanced_snapshot,
+        )
+    )
 
     with pytest.raises(CurrentCollisionEligibilityBlocked) as caught:
-        enforce_current_collision_before_effect(
+        _enforcer(
+            evidence,
+            provider=lambda request: next(snapshots),
+        ).enforce(
             request=requirement,
-            evidence=evidence,
-            trusted_context=_trusted_context(evidence, **current_changes),
             effect=lambda permit: effects.append(permit.decision_digest),
         )
 
@@ -532,6 +571,41 @@ def test_cached_complete_receipt_blocks_when_trusted_authority_advances(
         CollisionEligibilityReason.CURRENT_AUTHORITY_ADVANCED,
         CollisionEligibilityReason.CURRENT_SERVING_BOUNDARY_DIFFERS,
     }
+    assert effects == []
+
+
+def test_candidate_caller_cannot_submit_cached_evidence_or_context_to_effect_gate(
+    tmp_path: Path,
+) -> None:
+    requirement, old_evidence = _occupied_evidence(tmp_path)
+    old_context = _trusted_context(old_evidence)
+    live_snapshot = CurrentCollisionAuthoritySnapshot(
+        evidence=old_evidence,
+        trusted_context=replace(old_context, authority_watermark=43),
+    )
+    enforcer = _enforcer(
+        old_evidence,
+        provider=lambda request: live_snapshot,
+    )
+    effects: list[str] = []
+
+    with pytest.raises(TypeError):
+        enforcer.enforce(
+            request=requirement,
+            effect=lambda permit: effects.append(permit.decision_digest),
+            evidence=old_evidence,  # type: ignore[call-arg]
+            trusted_context=old_context,  # type: ignore[call-arg]
+        )
+    with pytest.raises(CurrentCollisionEligibilityBlocked) as caught:
+        enforcer.enforce(
+            request=requirement,
+            effect=lambda permit: effects.append(permit.decision_digest),
+        )
+
+    assert caught.value.decision.outcome is CollisionEligibilityOutcome.STALE
+    assert caught.value.decision.reason is (
+        CollisionEligibilityReason.CURRENT_AUTHORITY_ADVANCED
+    )
     assert effects == []
 
 
@@ -594,7 +668,7 @@ def test_self_consistent_receipt_cannot_select_untrusted_authority_identity(
     assert decision.reason is CollisionEligibilityReason.AUTHORITY_IDENTITY_DIFFERS
 
 
-def test_self_consistent_unexpected_scope_and_adapter_are_integrity_blocked(
+def test_effect_gate_rejects_self_consistent_unexpected_authority_provider(
     tmp_path: Path,
 ) -> None:
     requirement, standard_evidence = _occupied_evidence(tmp_path)
@@ -628,23 +702,146 @@ def test_self_consistent_unexpected_scope_and_adapter_are_integrity_blocked(
         execution_receipt_bytes=result.receipt.canonical_bytes,
         authority_receipt_bytes=result.authority_receipt_bytes,
     )
-    standard_config = NamedAuthorityAdapterConfig(
-        authority_scope_id="authority:fixture",
-    )
-    trusted_context = _trusted_context(
-        unexpected_evidence,
-        authority_scope_id="authority:fixture",
-        adapter_config_digest=standard_config.config_digest,
-    )
-
-    decision = _decide(
+    matching_unexpected_context = _trusted_context(unexpected_evidence)
+    assert _decide(
         request=requirement,
         evidence=unexpected_evidence,
-        trusted_context=trusted_context,
+        trusted_context=matching_unexpected_context,
+    ).eligible
+    standard_context = _trusted_context(standard_evidence)
+    unexpected_snapshot = CurrentCollisionAuthoritySnapshot(
+        evidence=unexpected_evidence,
+        trusted_context=matching_unexpected_context,
     )
+    enforcer = CurrentCollisionEffectEnforcer(
+        current_authority_provider=lambda request: unexpected_snapshot,
+        trusted_boundary=TrustedCurrentCollisionAuthorityBoundary(
+            authority_scope_id=standard_context.authority_scope_id,
+            authority_profile_id=standard_context.authority_profile_id,
+            adapter_config_digest=standard_context.adapter_config_digest,
+            port_registry_digest=standard_context.port_registry_digest,
+            port_id=standard_context.port_id,
+        ),
+    )
+    effects: list[str] = []
 
-    assert decision.outcome is CollisionEligibilityOutcome.INTEGRITY_BLOCKED
-    assert decision.reason is CollisionEligibilityReason.AUTHORITY_IDENTITY_DIFFERS
+    with pytest.raises(CurrentCollisionEligibilityBlocked) as caught:
+        enforcer.enforce(
+            request=requirement,
+            effect=lambda permit: effects.append(permit.decision_digest),
+        )
+
+    assert caught.value.decision.outcome is (
+        CollisionEligibilityOutcome.INTEGRITY_BLOCKED
+    )
+    assert caught.value.decision.reason is (
+        CollisionEligibilityReason.AUTHORITY_IDENTITY_DIFFERS
+    )
+    assert effects == []
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("authorization_receipt_digest", digest("advanced-authorization")),
+        ("authorization_decision_id", "00000000-0000-4000-8000-000000000099"),
+        ("port_registry_digest", digest("advanced-port-registry")),
+        ("port_id", "increment5.named.collision-hydration.advanced"),
+    ),
+)
+def test_commit_time_recheck_blocks_execution_provenance_drift(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    requirement, evidence = _occupied_evidence(tmp_path)
+    initial_snapshot = CurrentCollisionAuthoritySnapshot(
+        evidence=evidence,
+        trusted_context=_trusted_context(evidence),
+    )
+    execution = json.loads(evidence.execution_receipt_bytes)
+    execution[field] = replacement
+    changed_evidence = CurrentCollisionReceiptEvidence(
+        named_request=evidence.named_request,
+        execution_receipt_bytes=canonical_json_bytes(execution),
+        authority_receipt_bytes=evidence.authority_receipt_bytes,
+    )
+    changed_snapshot = CurrentCollisionAuthoritySnapshot(
+        evidence=changed_evidence,
+        trusted_context=replace(
+            initial_snapshot.trusted_context,
+            **{field: replacement},
+        ),
+    )
+    snapshots = iter((initial_snapshot, changed_snapshot))
+    effects: list[str] = []
+
+    with pytest.raises(CurrentCollisionEligibilityBlocked) as caught:
+        _enforcer(
+            evidence,
+            provider=lambda request: next(snapshots),
+        ).enforce(
+            request=requirement,
+            effect=lambda permit: effects.append(permit.decision_digest),
+        )
+
+    assert caught.value.decision.outcome in {
+        CollisionEligibilityOutcome.INTEGRITY_BLOCKED,
+        CollisionEligibilityOutcome.STALE,
+    }
+    assert effects == []
+
+
+def test_commit_time_recheck_blocks_current_candidate_drift(tmp_path: Path) -> None:
+    requirement, evidence = _occupied_evidence(tmp_path)
+    changed_root = tmp_path / "candidate-drift"
+    changed_root.mkdir()
+    database = authority_database(changed_root)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE development_candidates_v2 SET candidate_id = ?",
+            ("candidate:other",),
+        )
+    result = executor(changed_root, database).execute(
+        evidence.named_request,
+        authorize(changed_root, evidence.named_request),
+    )
+    assert result.authority_receipt_bytes is not None
+    changed_evidence = CurrentCollisionReceiptEvidence(
+        named_request=evidence.named_request,
+        execution_receipt_bytes=result.receipt.canonical_bytes,
+        authority_receipt_bytes=result.authority_receipt_bytes,
+    )
+    snapshots = iter(
+        (
+            CurrentCollisionAuthoritySnapshot(
+                evidence=evidence,
+                trusted_context=_trusted_context(evidence),
+            ),
+            CurrentCollisionAuthoritySnapshot(
+                evidence=changed_evidence,
+                trusted_context=_trusted_context(changed_evidence),
+            ),
+        )
+    )
+    effects: list[str] = []
+
+    with pytest.raises(CurrentCollisionEligibilityBlocked) as caught:
+        _enforcer(
+            evidence,
+            provider=lambda request: next(snapshots),
+        ).enforce(
+            request=requirement,
+            effect=lambda permit: effects.append(permit.decision_digest),
+        )
+
+    assert caught.value.decision.outcome is (
+        CollisionEligibilityOutcome.COLLISION_CONFLICT
+    )
+    assert caught.value.decision.reason is (
+        CollisionEligibilityReason.CURRENT_CANDIDATE_DIFFERS
+    )
+    assert effects == []
 
 
 def test_exact_replay_is_byte_stable_and_decision_round_trips(
