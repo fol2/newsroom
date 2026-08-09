@@ -155,7 +155,7 @@ def test_every_action_is_release_pinned_to_an_exact_sha() -> None:
     assert set(observed) == allowed
     assert observed.count(CHECKOUT) == 4
     assert observed.count(SETUP_PYTHON) == 4
-    assert observed.count(SETUP_UV) == 2
+    assert observed.count(SETUP_UV) == 3
     assert observed.count(UPLOAD) == 4
     assert observed.count(DOWNLOAD) == 2
 
@@ -179,7 +179,8 @@ def test_each_job_checks_out_the_exact_evaluated_head_without_credentials() -> N
 def test_uv_cache_is_exact_observable_and_untrusted_prs_cannot_save() -> None:
     core = _uses_steps("core", SETUP_UV)
     service = _uses_steps("service", SETUP_UV)
-    assert len(core) == len(service) == 1
+    decision = _uses_steps("decision", SETUP_UV)
+    assert len(core) == len(service) == len(decision) == 1
     common = {
         "version": "0.8.0",
         "github-token": "",
@@ -195,8 +196,11 @@ def test_uv_cache_is_exact_observable_and_untrusted_prs_cannot_save() -> None:
         "save-cache": "${{ github.event_name != 'pull_request' }}",
     }
     assert service[0]["with"] == {**common, "save-cache": "false"}
+    assert decision[0]["with"] == {**common, "save-cache": "false"}
+    assert decision[0]["if"] == (
+        "needs.route.outputs.service_required == 'true'"
+    )
     assert not _uses_steps("route", SETUP_UV)
-    assert not _uses_steps("decision", SETUP_UV)
 
     expected_cache_env = {
         "NEWSROOM_SDLC_CACHE_KEY": "${{ steps.setup_uv.outputs.cache-key }}",
@@ -307,6 +311,27 @@ def test_core_bootstrap_precompiles_exact_source_before_timed_lane() -> None:
     assert "compileall" not in _step(
         "service", "Sync locked environment"
     )["run"]
+
+
+def test_decision_bootstraps_locked_runtime_before_closeout_receipt() -> None:
+    sync_step = _step("decision", "Sync locked closeout environment")
+    assert sync_step["if"] == "needs.route.outputs.service_required == 'true'"
+    sync = sync_step["run"]
+    assert sync.splitlines() == [
+        "set -euo pipefail",
+        "uv lock --check",
+        "uv sync --locked --no-dev",
+    ]
+    closeout = _step("decision", "Build Increment 5E2 final closeout receipt")
+    invocation = (
+        "uv run --no-sync python -m "
+        "scripts.sdlc.increment5e2_closeout_receipt final"
+    )
+    assert invocation in closeout["run"]
+    names = [step["name"] for step in _steps("decision")]
+    assert names.index("Sync locked closeout environment") < names.index(
+        "Build Increment 5E2 final closeout receipt"
+    )
 
 
 def test_service_boundary_is_exact_authenticated_loopback_and_bounded() -> None:
@@ -436,7 +461,7 @@ def test_workflow_never_invokes_prohibited_product_runtime() -> None:
 
 
 def test_setup_uv_never_receives_the_github_token() -> None:
-    for job_id in ("core", "service"):
+    for job_id in ("core", "service", "decision"):
         setup = _uses_steps(job_id, SETUP_UV)
         assert len(setup) == 1
         assert setup[0]["with"]["github-token"] == ""
