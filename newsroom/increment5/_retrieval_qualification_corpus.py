@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from ._retrieval_qualification_common import (
@@ -20,6 +21,102 @@ from ._retrieval_qualification_contracts import (
 )
 from .decision import INCREMENT_5A_CONTRACT_DIGEST
 from .evaluation_plan import EVALUATION_PLAN_DIGEST, INCREMENT_5_EVALUATION_PLAN
+
+
+def _case_label_value(case: QualificationCase) -> dict[str, object]:
+    return {
+        "case_id": case.case_id,
+        "family_id": case.family_id,
+        "case_type": case.case_type,
+        "language": case.language,
+        "query_valid_time": case.query_valid_time,
+        "expected_root": case.expected_root,
+        "prohibited_root": case.prohibited_root,
+        "slice_labels": list(case.slice_labels),
+        "triage_labels": list(case.triage_labels),
+        "expected_candidate_count": case.expected_candidate_count,
+    }
+
+
+def _case_fixture_value(case: QualificationCase) -> dict[str, object]:
+    return {
+        "case_id": case.case_id,
+        "fixture_hits": [
+            {"mode": mode.value, "roots": list(roots)}
+            for mode, roots in case.fixture_hits
+        ],
+        "source_inventory_ids": list(case.source_inventory_ids),
+    }
+
+
+def rederive_qualification_corpus(
+    corpus: QualificationCorpus,
+) -> QualificationCorpus:
+    """Return the corpus with every content-derived identity recomputed."""
+
+    cases = tuple(
+        replace(
+            case,
+            label_digest=digest(_case_label_value(case)),
+            fixture_digest=digest(_case_fixture_value(case)),
+        )
+        for case in corpus.cases
+    )
+    source_inventory = sorted(
+        {
+            source_id
+            for case in cases
+            for source_id in case.source_inventory_ids
+        }
+    )
+    return replace(
+        corpus,
+        cases=cases,
+        query_set_digest=digest(
+            [
+                {
+                    "case_id": case.case_id,
+                    "query_valid_time": case.query_valid_time,
+                }
+                for case in cases
+            ]
+        ),
+        source_inventory_digest=digest(source_inventory),
+        dataset_manifest_digest=digest(
+            [
+                {
+                    "case_id": case.case_id,
+                    "family_id": case.family_id,
+                    "case_type": case.case_type,
+                    "language": case.language,
+                    "label_digest": case.label_digest,
+                    "fixture_digest": case.fixture_digest,
+                }
+                for case in cases
+            ]
+        ),
+    )
+
+
+def validate_qualification_corpus_content_identities(
+    corpus: QualificationCorpus,
+) -> None:
+    """Fail closed when supplied content reuses any stale stored identity."""
+
+    spec = thaw(CORPUS_SPEC)
+    if (
+        corpus.corpus_id != spec["corpus_id"]
+        or corpus.generator_version != spec["generator_version"]
+        or corpus.label_policy_digest != digest(spec["label_policy"])
+        or corpus.corpus_spec_digest != CORPUS_SPEC_DIGEST
+    ):
+        raise RetrievalQualificationError(
+            "qualification corpus policy identity differs"
+        )
+    if rederive_qualification_corpus(corpus) != corpus:
+        raise RetrievalQualificationError(
+            "qualification corpus content identities differ"
+        )
 
 
 def _candidate_count(case_type: str) -> int:
@@ -189,18 +286,6 @@ def load_qualification_corpus(
                 ).strftime("%Y-%m-%dT%H:%M:%SZ")
                 candidate_count = _candidate_count(case_type)
                 triage_labels = _triage_labels(case_type, candidate_count)
-                label = {
-                    "case_id": case_id,
-                    "family_id": family["family_id"],
-                    "case_type": case_type,
-                    "language": language,
-                    "query_valid_time": query_time,
-                    "expected_root": expected_root,
-                    "prohibited_root": prohibited_root,
-                    "slice_labels": sorted(slices),
-                    "triage_labels": list(triage_labels),
-                    "expected_candidate_count": candidate_count,
-                }
                 signals = _signals(case_type, language, sequence)
                 fixture_hits = tuple(
                     (mode, (expected_root,) if signals[mode] else ())
@@ -209,31 +294,28 @@ def load_qualification_corpus(
                 source_ids = (
                     f"fixture-source:{family['family_id'].lower()}",
                 )
-                fixture = {
-                    "case_id": case_id,
-                    "fixture_hits": [
-                        {"mode": mode.value, "roots": list(roots)}
-                        for mode, roots in fixture_hits
-                    ],
-                    "source_inventory_ids": list(source_ids),
-                }
+                case = QualificationCase(
+                    case_id=case_id,
+                    sequence=sequence,
+                    family_id=family["family_id"],
+                    case_type=case_type,
+                    language=language,
+                    query_valid_time=query_time,
+                    expected_root=expected_root,
+                    prohibited_root=prohibited_root,
+                    slice_labels=tuple(sorted(slices)),
+                    triage_labels=triage_labels,
+                    expected_candidate_count=candidate_count,
+                    fixture_hits=fixture_hits,
+                    source_inventory_ids=source_ids,
+                    label_digest="sha256:" + "0" * 64,
+                    fixture_digest="sha256:" + "0" * 64,
+                )
                 cases.append(
-                    QualificationCase(
-                        case_id=case_id,
-                        sequence=sequence,
-                        family_id=family["family_id"],
-                        case_type=case_type,
-                        language=language,
-                        query_valid_time=query_time,
-                        expected_root=expected_root,
-                        prohibited_root=prohibited_root,
-                        slice_labels=tuple(sorted(slices)),
-                        triage_labels=triage_labels,
-                        expected_candidate_count=candidate_count,
-                        fixture_hits=fixture_hits,
-                        source_inventory_ids=source_ids,
-                        label_digest=digest(label),
-                        fixture_digest=digest(fixture),
+                    replace(
+                        case,
+                        label_digest=digest(_case_label_value(case)),
+                        fixture_digest=digest(_case_fixture_value(case)),
                     )
                 )
     source_inventory = sorted(
@@ -243,7 +325,7 @@ def load_qualification_corpus(
             for source_id in case.source_inventory_ids
         }
     )
-    return QualificationCorpus(
+    corpus = QualificationCorpus(
         corpus_id=value["corpus_id"],
         generator_version=value["generator_version"],
         cases=tuple(cases),
@@ -273,3 +355,5 @@ def load_qualification_corpus(
         ),
         corpus_spec_digest=CORPUS_SPEC_DIGEST,
     )
+    validate_qualification_corpus_content_identities(corpus)
+    return corpus

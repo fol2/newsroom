@@ -28,7 +28,7 @@ Reports are canonical and content-addressed. A first-writer-wins SQLite journal 
 
 ## Actual-service lane
 
-The permanent Projection B2/B3/C1 Neo4j workflow automatically selects `test_projection_b2_increment5e1_qualification.py`. The test authenticates to the disposable Neo4j service, verifies the exact server edition/version and Python driver against the frozen target, binds the workflow Git tree into the Epoch, then evaluates all 500 repository fixture observations under that exact identity. It emits the Epoch digest, report digest, and complete canonical report into JUnit evidence. The service check proves the selected target identity; it does not claim that every synthetic fixture result was produced by a live graph query.
+The permanent Projection B2/B3/C1 Neo4j workflow automatically selects `test_projection_b2_increment5e2_neo4j_service.py`. The test authenticates to the disposable Neo4j service, verifies the exact server edition/version and Python driver against the frozen target, binds the workflow Git tree into the Epoch, then evaluates all 500 repository fixture observations under that exact identity. It emits the Epoch digest, report digest, complete canonical report, closed-world 5E2 case inventory digest, and declared non-effects into JUnit evidence. This 5E2 service lane reconciles the retained deterministic qualification evidence with the authenticated target; it does not claim that every synthetic fixture result was produced by a live graph query.
 
 ## Deferred ownership
 

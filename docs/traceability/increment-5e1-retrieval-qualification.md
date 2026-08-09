@@ -29,7 +29,7 @@ Complete requirement credit remains at parent #254 after #333 proves final secur
 - Typed target, corpus, Epoch, observation, report, measurement, gate, evaluator, and journal modules: `newsroom/increment5/_retrieval_qualification_*.py`
 - Deterministic contract and gate tests: `newsroom/tests/test_increment5e1_retrieval_qualification.py`
 - Immutable report-history tests: `newsroom/tests/test_increment5e1_retrieval_qualification_journal.py`
-- Actual Neo4j test: `newsroom/tests/test_projection_b2_increment5e1_qualification.py`
+- Actual Neo4j test, reconciled into the final 5E2 service lane: `newsroom/tests/test_projection_b2_increment5e2_neo4j_service.py`
 - Reproducible runner: `scripts/increment5_retrieval_qualification.py`
 
 ## Non-effects

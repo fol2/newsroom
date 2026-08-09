@@ -35,6 +35,7 @@ def _evaluate(observations=None, *, tree: str = TREE):
         target=QUALIFICATION_TARGET,
         corpus=QUALIFICATION_CORPUS,
         epoch=epoch,
+        code_tree_sha=tree,
         observations=(
             run_fixture_qualification(
                 target=QUALIFICATION_TARGET,
@@ -140,6 +141,7 @@ def test_report_journal_is_first_writer_wins_and_detects_corruption(tmp_path: Pa
         target=QUALIFICATION_TARGET,
         corpus=QUALIFICATION_CORPUS,
         epoch=epoch,
+        code_tree_sha=TREE,
         observations=tuple(observations),
         started_at=START,
         completed_at=END,

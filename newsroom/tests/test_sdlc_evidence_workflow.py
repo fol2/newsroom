@@ -15,6 +15,7 @@ SETUP_PYTHON = "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
 SETUP_UV = "astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b"
 UPLOAD = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 DOWNLOAD = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+ATTEST = "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"
 EVALUATED_SHA = (
     "${{ github.event.pull_request.head.sha || "
     "github.event.merge_group.head_sha || github.sha }}"
@@ -81,7 +82,10 @@ def test_shadow_workflow_has_exact_nonprivileged_event_surface() -> None:
     assert events["merge_group"] == {"types": ["checks_requested"]}
     manual = events["workflow_dispatch"]
     assert isinstance(manual, dict)
-    assert manual["inputs"]["base_sha"]["required"] == "false"
+    assert manual["inputs"]["base_sha"]["required"] == "true"
+    assert manual["inputs"]["base_sha"]["description"] == (
+        "Required exact non-head base commit for a manual comparison"
+    )
     assert manual["inputs"]["base_sha"]["type"] == "string"
 
     assert workflow["permissions"] == {"contents": "read"}
@@ -101,16 +105,24 @@ def test_shadow_workflow_has_exact_nonprivileged_event_surface() -> None:
 
 def test_job_graph_is_exact_and_decision_always_reports() -> None:
     jobs = _jobs()
-    assert set(jobs) == {"route", "core", "service", "decision"}
+    assert set(jobs) == {
+        "route",
+        "core",
+        "service",
+        "decision",
+        "signed-closeout",
+    }
     assert {job_id: jobs[job_id]["name"] for job_id in jobs} == {
         "route": "route",
         "core": "core",
         "service": "service",
         "decision": "decision",
+        "signed-closeout": "signed-closeout",
     }
     assert jobs["core"]["needs"] == ["route"]
     assert jobs["service"]["needs"] == ["route"]
     assert jobs["decision"]["needs"] == ["route", "core", "service"]
+    assert jobs["signed-closeout"]["needs"] == ["route", "decision"]
     assert jobs["core"]["if"] == "needs.route.result == 'success'"
     assert jobs["service"]["if"] == (
         "needs.route.result == 'success' && "
@@ -120,6 +132,19 @@ def test_job_graph_is_exact_and_decision_always_reports() -> None:
     assert jobs["decision"]["permissions"] == {
         "actions": "read",
         "contents": "read",
+    }
+    assert jobs["signed-closeout"]["if"] == (
+        "github.event_name == 'workflow_dispatch' && "
+        "github.ref == 'refs/heads/main' && "
+        "needs.route.outputs.service_required == 'true' && "
+        "needs.decision.result == 'success'"
+    )
+    assert jobs["signed-closeout"]["permissions"] == {
+        "actions": "read",
+        "artifact-metadata": "write",
+        "attestations": "write",
+        "contents": "read",
+        "id-token": "write",
     }
     assert jobs["route"]["outputs"] == {
         "service_required": "${{ steps.route_output.outputs.service_required }}"
@@ -131,12 +156,13 @@ def test_job_graph_is_exact_and_decision_always_reports() -> None:
         "core": "10",
         "service": "10",
         "decision": "10",
+        "signed-closeout": "6",
     }
 
 
 def test_every_action_is_release_pinned_to_an_exact_sha() -> None:
     workflow = _workflow()
-    allowed = {CHECKOUT, SETUP_PYTHON, SETUP_UV, UPLOAD, DOWNLOAD}
+    allowed = {CHECKOUT, SETUP_PYTHON, SETUP_UV, UPLOAD, DOWNLOAD, ATTEST}
     observed: list[str] = []
     for job_id in _jobs():
         for step in _steps(job_id):
@@ -152,13 +178,14 @@ def test_every_action_is_release_pinned_to_an_exact_sha() -> None:
     assert set(observed) == allowed
     assert observed.count(CHECKOUT) == 4
     assert observed.count(SETUP_PYTHON) == 4
-    assert observed.count(SETUP_UV) == 2
-    assert observed.count(UPLOAD) == 4
-    assert observed.count(DOWNLOAD) == 2
+    assert observed.count(SETUP_UV) == 3
+    assert observed.count(UPLOAD) == 5
+    assert observed.count(DOWNLOAD) == 3
+    assert observed.count(ATTEST) == 1
 
 
-def test_each_job_checks_out_the_exact_evaluated_head_without_credentials() -> None:
-    for job_id in _jobs():
+def test_execution_jobs_check_out_the_exact_evaluated_head_without_credentials() -> None:
+    for job_id in ("route", "core", "service", "decision"):
         checkouts = _uses_steps(job_id, CHECKOUT)
         assert len(checkouts) == 1
         assert _steps(job_id)[0] == checkouts[0]
@@ -171,12 +198,15 @@ def test_each_job_checks_out_the_exact_evaluated_head_without_credentials() -> N
         python = _uses_steps(job_id, SETUP_PYTHON)
         assert len(python) == 1
         assert python[0]["with"] == {"python-version": "3.12"}
+    assert not _uses_steps("signed-closeout", CHECKOUT)
+    assert not _uses_steps("signed-closeout", SETUP_PYTHON)
 
 
 def test_uv_cache_is_exact_observable_and_untrusted_prs_cannot_save() -> None:
     core = _uses_steps("core", SETUP_UV)
     service = _uses_steps("service", SETUP_UV)
-    assert len(core) == len(service) == 1
+    decision = _uses_steps("decision", SETUP_UV)
+    assert len(core) == len(service) == len(decision) == 1
     common = {
         "version": "0.8.0",
         "github-token": "",
@@ -192,8 +222,11 @@ def test_uv_cache_is_exact_observable_and_untrusted_prs_cannot_save() -> None:
         "save-cache": "${{ github.event_name != 'pull_request' }}",
     }
     assert service[0]["with"] == {**common, "save-cache": "false"}
+    assert decision[0]["with"] == {**common, "save-cache": "false"}
+    assert decision[0]["if"] == (
+        "needs.route.outputs.service_required == 'true'"
+    )
     assert not _uses_steps("route", SETUP_UV)
-    assert not _uses_steps("decision", SETUP_UV)
 
     expected_cache_env = {
         "NEWSROOM_SDLC_CACHE_KEY": "${{ steps.setup_uv.outputs.cache-key }}",
@@ -270,7 +303,86 @@ def test_lane_and_decision_artifacts_are_compact_immutable_and_attempt_scoped() 
                 ".sdlc-run/decision-input/context.json",
                 ".sdlc-run/decision-input/collection.json",
                 ".sdlc-run/decision.json",
+                ".sdlc-run/increment5e2-final-closeout.json",
             ]
+
+
+def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None:
+    job = _jobs()["signed-closeout"]
+    download = _step("signed-closeout", "Download exact final decision evidence")
+    assert download["uses"] == DOWNLOAD
+    assert download["with"] == {
+        "name": (
+            "newsroom-sdlc-decision-${{ github.run_id }}-"
+            "${{ github.run_attempt }}-${{ github.sha }}"
+        ),
+        "path": ".sdlc-run/signed-closeout-input",
+        "merge-multiple": "false",
+        "digest-mismatch": "error",
+    }
+
+    validate = _step("signed-closeout", "Validate final closeout subject")
+    assert validate["env"] == {"EXPECTED_HEAD_SHA": "${{ github.sha }}"}
+    validation = validate["run"]
+    for expected in (
+        "newsroom.increment5e2.final-closeout-receipt.v1",
+        "receipt_identity",
+        "evaluated_sha",
+        "EXPECTED_HEAD_SHA",
+        "hashlib.sha256",
+        "allow_nan=False",
+        "object_pairs_hook=unique_object",
+        "newsroom.sdlc.shadow-decision.v1",
+        "workflow_dispatch",
+        "refs/heads/main",
+        "signed decision binding differs",
+    ):
+        assert expected in validation
+
+    attest = _step(
+        "signed-closeout",
+        "Attest final decision and closeout receipt",
+    )
+    assert attest["uses"] == ATTEST
+    assert attest["with"]["subject-path"].splitlines() == [
+        ".sdlc-run/signed-closeout-input/decision.json",
+        (
+            ".sdlc-run/signed-closeout-input/"
+            "increment5e2-final-closeout.json"
+        ),
+    ]
+    upload = _step("signed-closeout", "Retain attestation bundle")
+    assert upload["uses"] == UPLOAD
+    assert upload["with"] == {
+        "name": (
+            "newsroom-sdlc-attestation-${{ github.run_id }}-"
+            "${{ github.run_attempt }}-${{ github.sha }}"
+        ),
+        "path": "${{ steps.attest.outputs.bundle-path }}",
+        "if-no-files-found": "error",
+        "retention-days": "30",
+        "compression-level": "0",
+        "overwrite": "false",
+        "include-hidden-files": "false",
+        "archive": "true",
+    }
+    assert job["steps"][-1] == upload
+
+
+def test_only_signed_closeout_receives_oidc_and_attestation_permissions() -> None:
+    jobs = _jobs()
+    for job_id, job in jobs.items():
+        permissions = job.get("permissions", _workflow()["permissions"])
+        if job_id == "signed-closeout":
+            continue
+        assert permissions.get("id-token") != "write"
+        assert permissions.get("attestations") != "write"
+        assert permissions.get("artifact-metadata") != "write"
+
+    rendered = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert rendered.count("id-token: write") == 1
+    assert rendered.count("attestations: write") == 1
+    assert rendered.count("artifact-metadata: write") == 1
 
 
 def test_lane_step_names_match_jobs_api_telemetry_contract() -> None:
@@ -303,6 +415,27 @@ def test_core_bootstrap_precompiles_exact_source_before_timed_lane() -> None:
     assert "compileall" not in _step(
         "service", "Sync locked environment"
     )["run"]
+
+
+def test_decision_bootstraps_locked_runtime_before_closeout_receipt() -> None:
+    sync_step = _step("decision", "Sync locked closeout environment")
+    assert sync_step["if"] == "needs.route.outputs.service_required == 'true'"
+    sync = sync_step["run"]
+    assert sync.splitlines() == [
+        "set -euo pipefail",
+        "uv lock --check",
+        "uv sync --locked --no-dev",
+    ]
+    closeout = _step("decision", "Build Increment 5E2 final closeout receipt")
+    invocation = (
+        "uv run --no-sync python -m "
+        "scripts.sdlc.increment5e2_closeout_receipt final"
+    )
+    assert invocation in closeout["run"]
+    names = [step["name"] for step in _steps("decision")]
+    assert names.index("Sync locked closeout environment") < names.index(
+        "Build Increment 5E2 final closeout receipt"
+    )
 
 
 def test_service_boundary_is_exact_authenticated_loopback_and_bounded() -> None:
@@ -390,6 +523,16 @@ def test_repository_owned_gate_budgets_drive_route_lane_and_decision() -> None:
     finalize = _step("decision", "Finalize decision")
     assert finalize["if"] == "always()"
     assert "scripts.sdlc.workflow_orchestrator decide" in finalize["run"]
+    closeout = _step("decision", "Build Increment 5E2 final closeout receipt")
+    assert closeout["if"] == "needs.route.outputs.service_required == 'true'"
+    for expected in (
+        "scripts.sdlc.increment5e2_closeout_receipt final",
+        "--core-transport-bundle-root .sdlc-run/decision-input/core-transport",
+        "--service-transport-bundle-root .sdlc-run/decision-input/service-transport",
+        "--decision .sdlc-run/decision.json",
+        "--output .sdlc-run/increment5e2-final-closeout.json",
+    ):
+        assert expected in closeout["run"]
     report = _step("decision", "Report decision")
     assert report["if"] == "always()"
     assert "scripts.sdlc.workflow_orchestrator enforce" in report["run"]
@@ -422,7 +565,7 @@ def test_workflow_never_invokes_prohibited_product_runtime() -> None:
 
 
 def test_setup_uv_never_receives_the_github_token() -> None:
-    for job_id in ("core", "service"):
+    for job_id in ("core", "service", "decision"):
         setup = _uses_steps(job_id, SETUP_UV)
         assert len(setup) == 1
         assert setup[0]["with"]["github-token"] == ""

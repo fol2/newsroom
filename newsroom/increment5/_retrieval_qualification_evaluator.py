@@ -34,6 +34,14 @@ from ._retrieval_qualification_measurement import (
     _system_metrics,
 )
 from .evaluation_plan import INCREMENT_5_EVALUATION_PLAN
+from ._retrieval_qualification_run import build_qualification_epoch
+
+
+_CROSS_SYSTEM_SAFETY_OR_RIGHTS_METRICS = (
+    "rights_purge_residual_count",
+    "scope_escape_count",
+    "write_attempt_success_count",
+)
 
 
 class RetrievalQualificationEvaluator:
@@ -46,6 +54,7 @@ class RetrievalQualificationEvaluator:
         target: QualificationTarget,
         corpus: QualificationCorpus,
         epoch: QualificationEpoch,
+        code_tree_sha: str,
         observations: Sequence[QualificationObservation],
         started_at: str,
         completed_at: str,
@@ -55,18 +64,13 @@ class RetrievalQualificationEvaluator:
                 raise ValueError
         except ValueError as exc:
             raise RetrievalQualificationError("run_id must be a UUID") from exc
-        if (
-            epoch.contract_digest != target.contract_digest
-            or epoch.evaluation_plan_digest != target.evaluation_plan_digest
-            or epoch.target_manifest_digest != target.manifest_digest
-            or epoch.component_digests != target.component_digests
-            or epoch.source_inventory_digest != corpus.source_inventory_digest
-            or epoch.query_set_digest != corpus.query_set_digest
-            or epoch.dataset_manifest_digest != corpus.dataset_manifest_digest
-            or epoch.label_adjudication_policy_digest
-            != corpus.label_policy_digest
-            or epoch.generation_id != target.generation_id
-        ):
+        expected_epoch = build_qualification_epoch(
+            target=target,
+            corpus=corpus,
+            code_tree_sha=code_tree_sha,
+            epoch_id=epoch.epoch_id,
+        )
+        if epoch != expected_epoch:
             raise RetrievalQualificationError("Epoch binding differs")
         parse_utc(started_at, field="started_at")
         parse_utc(completed_at, field="completed_at")
@@ -161,13 +165,6 @@ class RetrievalQualificationEvaluator:
                     <= thresholds["p95_latency_ms_max"]
                 ),
                 "false_no_match_count": hybrid["false_no_match_count"] == 0,
-                "rights_purge_residual_count": (
-                    hybrid["rights_purge_residual_count"] == 0
-                ),
-                "scope_escape_count": hybrid["scope_escape_count"] == 0,
-                "write_attempt_success_count": (
-                    hybrid["write_attempt_success_count"] == 0
-                ),
                 "temporal_correctness_error_count": (
                     hybrid["temporal_correctness_error_count"] == 0
                 ),
@@ -179,6 +176,13 @@ class RetrievalQualificationEvaluator:
                 f"TARGET_THRESHOLD:{name}"
                 for name, passed in threshold_checks.items()
                 if not passed
+            )
+            blockers.extend(
+                "EXECUTED_SYSTEM_SAFETY_OR_RIGHTS:"
+                f"{system['system']}:{metric}"
+                for system in systems
+                for metric in _CROSS_SYSTEM_SAFETY_OR_RIGHTS_METRICS
+                if system[metric] != 0
             )
             families, slices, family_blockers = _family_metrics(
                 corpus,

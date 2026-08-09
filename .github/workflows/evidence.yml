@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
     inputs:
       base_sha:
-        description: Optional exact base commit for a manual comparison
-        required: false
+        description: Required exact non-head base commit for a manual comparison
+        required: true
         type: string
 
 permissions:
@@ -440,6 +440,28 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set up exact uv with shared cache
+        if: needs.route.outputs.service_required == 'true'
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+
+      - name: Sync locked closeout environment
+        if: needs.route.outputs.service_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --locked --no-dev
+
       - name: Prepare decision workspace
         shell: bash
         run: mkdir -p .sdlc-run
@@ -472,6 +494,18 @@ jobs:
             > "${RUNNER_TEMP}/decision-result.json"
           cat "${RUNNER_TEMP}/decision-result.json"
 
+      - name: Build Increment 5E2 final closeout receipt
+        if: needs.route.outputs.service_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m scripts.sdlc.increment5e2_closeout_receipt final \
+            --repo-root . \
+            --core-transport-bundle-root .sdlc-run/decision-input/core-transport \
+            --service-transport-bundle-root .sdlc-run/decision-input/service-transport \
+            --decision .sdlc-run/decision.json \
+            --output .sdlc-run/increment5e2-final-closeout.json
+
       - name: Upload final decision evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -481,6 +515,7 @@ jobs:
             .sdlc-run/decision-input/context.json
             .sdlc-run/decision-input/collection.json
             .sdlc-run/decision.json
+            .sdlc-run/increment5e2-final-closeout.json
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
@@ -495,3 +530,200 @@ jobs:
           set -euo pipefail
           python -m scripts.sdlc.workflow_orchestrator enforce \
             --decision .sdlc-run/decision.json
+
+  signed-closeout:
+    name: signed-closeout
+    needs:
+      - route
+      - decision
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      needs.route.outputs.service_required == 'true' &&
+      needs.decision.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Download exact final decision evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: newsroom-sdlc-decision-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: .sdlc-run/signed-closeout-input
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Validate final closeout subject
+        shell: bash
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          receipt_subject = Path(
+              '.sdlc-run/signed-closeout-input/'
+              'increment5e2-final-closeout.json'
+          )
+          decision_subject = Path(
+              '.sdlc-run/signed-closeout-input/decision.json'
+          )
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f'duplicate JSON key: {key}')
+                  result[key] = value
+              return result
+
+          def reject_constant(value):
+              raise ValueError(f'non-finite JSON value: {value}')
+
+          def load_subject(path, label):
+              if path.is_symlink():
+                  raise SystemExit(f'{label} subject must not be a symlink')
+              payload = path.read_bytes()
+              if not payload or len(payload) > 8 * 1024 * 1024:
+                  raise SystemExit(f'{label} subject size is invalid')
+              value = json.loads(
+                  payload.decode('utf-8'),
+                  object_pairs_hook=unique_object,
+                  parse_constant=reject_constant,
+              )
+              canonical = json.dumps(
+                  value,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ).encode('utf-8') + b'\n'
+              if payload != canonical:
+                  raise SystemExit(f'{label} subject is not canonical JSON')
+              return value
+
+          value = load_subject(receipt_subject, 'closeout')
+          if not isinstance(value, dict):
+              raise SystemExit('closeout subject must be a JSON object')
+          if value.get('schema_version') != (
+              'newsroom.increment5e2.final-closeout-receipt.v1'
+          ):
+              raise SystemExit('unexpected closeout receipt schema')
+
+          git_sha = re.compile(r'[0-9a-f]{40}')
+          expected_head = os.environ['EXPECTED_HEAD_SHA']
+          if not git_sha.fullmatch(expected_head):
+              raise SystemExit('invalid expected source head')
+          if value.get('evaluated_sha') != expected_head:
+              raise SystemExit('closeout source head does not match this run')
+          if not git_sha.fullmatch(str(value.get('evaluated_tree_sha', ''))):
+              raise SystemExit('invalid closeout source tree')
+
+          lanes = value.get('lanes')
+          if (
+              not isinstance(lanes, list)
+              or len(lanes) != 2
+              or not all(isinstance(lane, dict) for lane in lanes)
+              or {
+              lane.get('lane_id')
+              for lane in lanes
+              } != {'core', 'service'}
+          ):
+              raise SystemExit('closeout lanes are not exact')
+          inventory = value.get('inventory')
+          selected_cases = value.get('selected_cases')
+          case_count = (
+              inventory.get('case_count')
+              if isinstance(inventory, dict)
+              else None
+          )
+          if (
+              type(case_count) is not int
+              or not 1 <= case_count <= 100_000
+              or not isinstance(selected_cases, list)
+              or len(selected_cases) != case_count
+              or not all(isinstance(item, dict) for item in selected_cases)
+              or not all(
+                  isinstance(item.get('case_id'), str)
+                  and item.get('case_id')
+                  and isinstance(item.get('test_id'), str)
+                  and item.get('test_id')
+                  and item.get('outcome') == 'passed'
+                  for item in selected_cases
+              )
+              or len({item.get('case_id') for item in selected_cases})
+              != case_count
+              or len({item.get('test_id') for item in selected_cases})
+              != case_count
+              or not re.fullmatch(
+                  r'sha256:[0-9a-f]{64}',
+                  str(inventory.get('digest', '')),
+              )
+          ):
+              raise SystemExit('closeout inventory is not exact')
+
+          claimed_identity = value.get('receipt_identity')
+          unsigned = dict(value)
+          unsigned.pop('receipt_identity', None)
+          canonical = json.dumps(
+              unsigned,
+              ensure_ascii=False,
+              allow_nan=False,
+              sort_keys=True,
+              separators=(',', ':'),
+          ).encode('utf-8')
+          actual_identity = 'sha256:' + hashlib.sha256(canonical).hexdigest()
+          if claimed_identity != actual_identity:
+              raise SystemExit('closeout receipt self-hash mismatch')
+
+          decision = load_subject(decision_subject, 'decision')
+          if (
+              not isinstance(decision, dict)
+              or decision.get('schema_version')
+              != 'newsroom.sdlc.shadow-decision.v1'
+              or decision.get('result') != 'PASS'
+              or decision.get('decision_identity')
+              != value.get('decision_identity')
+          ):
+              raise SystemExit('signed decision binding differs')
+          context = decision.get('context')
+          if (
+              not isinstance(context, dict)
+              or context.get('evaluated_sha') != expected_head
+              or context.get('evaluated_tree_sha')
+              != value.get('evaluated_tree_sha')
+              or context.get('event_name') != 'workflow_dispatch'
+              or context.get('ref') != 'refs/heads/main'
+          ):
+              raise SystemExit('signed decision context differs')
+          PY
+
+      - name: Attest final decision and closeout receipt
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            .sdlc-run/signed-closeout-input/decision.json
+            .sdlc-run/signed-closeout-input/increment5e2-final-closeout.json
+
+      - name: Retain attestation bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: newsroom-sdlc-attestation-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ steps.attest.outputs.bundle-path }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+          archive: true

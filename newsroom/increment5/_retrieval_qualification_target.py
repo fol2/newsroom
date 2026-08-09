@@ -111,3 +111,12 @@ def load_qualification_target(
         vector_scope=value["vector_scope"],
         manifest_digest=TARGET_SPEC_DIGEST,
     )
+
+
+def validate_qualification_target_identity(target: QualificationTarget) -> None:
+    """Require the exact repository-admitted v1 target at every run boundary."""
+
+    if target != load_qualification_target():
+        raise RetrievalQualificationError(
+            "qualification target identity differs from reviewed v1"
+        )

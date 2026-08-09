@@ -365,12 +365,14 @@ def _base_identity(
             raise WorkflowEvidenceError("event_base_unavailable")
         return before
     if context.event_name == "workflow_dispatch":
-        inputs = event.get("inputs")
-        if inputs is None:
-            return context.evaluated_sha
-        mapping = _mapping(inputs, "event_inputs")
+        mapping = _mapping(event.get("inputs"), "event_inputs")
         value = mapping.get("base_sha")
-        return context.evaluated_sha if value in {None, ""} else _sha(value, "event_base_sha")
+        if value in {None, ""}:
+            raise WorkflowEvidenceError("event_base_sha")
+        base = _sha(value, "event_base_sha")
+        if base == context.evaluated_sha:
+            raise WorkflowEvidenceError("event_base_matches_head")
+        return base
     raise WorkflowEvidenceError("event_name")
 
 

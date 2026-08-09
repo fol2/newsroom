@@ -168,7 +168,10 @@ def test_actual_service_workflow_masks_runtime_credentials() -> None:
     assert "secrets.token_urlsafe" in workflow
     assert 'echo "::add-mask::${NEO4J_ADMIN_PASSWORD}"' in workflow
     assert 'echo "::add-mask::${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"' in workflow
-    assert '>> "${GITHUB_ENV}"' in workflow
+    assert "GITHUB_ENV" not in workflow
+    assert '${RUNNER_TEMP}/newsroom-b2-neo4j-admin.env' in workflow
+    assert '${RUNNER_TEMP}/newsroom-b2-neo4j-projector.env' in workflow
+    assert 'chmod 600 "${admin_file}" "${projector_file}"' in workflow
     assert "docker run --detach" in workflow
     assert "--publish 127.0.0.1:7687:7687" in workflow
     assert "docker rm --force newsroom-b2-neo4j" in workflow

@@ -108,6 +108,7 @@ class RetrievalContextReason(StrEnum):
     COLLISION_CONTRADICTS_NO_MATCH = "COLLISION_CONTRADICTS_NO_MATCH"
     GOVERNED_BYTES_UNAVAILABLE = "GOVERNED_BYTES_UNAVAILABLE"
     GOVERNED_BYTES_INTEGRITY = "GOVERNED_BYTES_INTEGRITY"
+    RETAINED_CONTEXT_PURGED = "RETAINED_CONTEXT_PURGED"
     AUTHORITY_RESULT_BOUND = "AUTHORITY_RESULT_BOUND"
     CONTEXT_BYTE_BOUND = "CONTEXT_BYTE_BOUND"
 
@@ -1223,14 +1224,417 @@ class RetrievalContextReceipt:
         return _digest_bytes(self.canonical_bytes)
 
 
+_DERIVATIVE_IDENTITY_KEYS = frozenset(
+    {"passage_id", "admission_id", "blob_digest", "text_digest"}
+)
+_DerivativeIdentity = tuple[str, str, str, str]
+_PURGE_RECEIPT_SCHEMA_VERSION = "newsroom.increment5.retrieval-context-purge.v2"
+_LEGACY_PURGE_TABLE_SHAPE = (
+    ("idempotency_key", "TEXT", 0, None, 1),
+    ("request_digest", "TEXT", 1, None, 0),
+    ("prior_receipt_digest", "TEXT", 1, None, 0),
+    ("purge_receipt_digest", "TEXT", 1, None, 0),
+    ("purge_receipt_bytes", "BLOB", 1, None, 0),
+)
+_PURGE_TABLE_SHAPE = (
+    ("purge_id", "TEXT", 0, None, 1),
+    ("idempotency_key", "TEXT", 1, None, 0),
+    ("request_digest", "TEXT", 1, None, 0),
+    ("prior_receipt_digest", "TEXT", 1, None, 0),
+    ("purge_receipt_digest", "TEXT", 1, None, 0),
+    ("purge_receipt_bytes", "BLOB", 1, None, 0),
+)
+
+
+def _derivative_identity_value(
+    identity: _DerivativeIdentity,
+) -> dict[str, str]:
+    return {
+        "passage_id": identity[0],
+        "admission_id": identity[1],
+        "blob_digest": identity[2],
+        "text_digest": identity[3],
+    }
+
+
+def _require_derivative_identities(
+    value: object,
+    field: str,
+) -> tuple[_DerivativeIdentity, ...]:
+    if not isinstance(value, tuple) or not value:
+        raise RetrievalContextError(f"{field} differs")
+    identities: list[_DerivativeIdentity] = []
+    for item in value:
+        if not isinstance(item, tuple) or len(item) != 4:
+            raise RetrievalContextError(f"{field} differs")
+        identities.append(
+            (
+                _require_text(item[0], f"{field}_passage_id"),
+                _require_text(item[1], f"{field}_admission_id"),
+                _require_digest(item[2], f"{field}_blob_digest"),
+                _require_digest(item[3], f"{field}_text_digest"),
+            )
+        )
+    normalised = tuple(sorted(set(identities)))
+    if tuple(value) != normalised:
+        raise RetrievalContextError(f"{field} differs")
+    return normalised
+
+
+def _decode_derivative_identities(
+    value: object,
+    field: str,
+) -> tuple[_DerivativeIdentity, ...]:
+    if not isinstance(value, list) or not value:
+        raise RetrievalContextError(f"{field} differs")
+    identities: list[_DerivativeIdentity] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != _DERIVATIVE_IDENTITY_KEYS:
+            raise RetrievalContextError(f"{field} differs")
+        identities.append(
+            (
+                item["passage_id"],
+                item["admission_id"],
+                item["blob_digest"],
+                item["text_digest"],
+            )
+        )
+    decoded = _require_derivative_identities(tuple(identities), field)
+    if value != [_derivative_identity_value(item) for item in decoded]:
+        raise RetrievalContextError(f"{field} differs")
+    return decoded
+
+
+def _derivative_identity_columns(
+    identities: tuple[_DerivativeIdentity, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    return (
+        tuple(sorted({item[0] for item in identities})),
+        tuple(sorted({item[1] for item in identities})),
+        tuple(sorted({item[2] for item in identities})),
+        tuple(sorted({item[3] for item in identities})),
+    )
+
+
+def _retrieval_context_purge_id(
+    *,
+    idempotency_key: str,
+    context_id: str,
+    request_digest: str,
+    prior_receipt_digest: str,
+    purged_derivative_identities: tuple[_DerivativeIdentity, ...],
+    context_derivative_identities: tuple[_DerivativeIdentity, ...],
+    reason_code: str,
+    raw_context_bytes_deleted_in_event: bool,
+) -> str:
+    identity_digest = _digest_bytes(
+        _canonical(
+            {
+                "purged_derivative_identities": [
+                    _derivative_identity_value(item)
+                    for item in purged_derivative_identities
+                ],
+                "context_derivative_identities": [
+                    _derivative_identity_value(item)
+                    for item in context_derivative_identities
+                ],
+                "raw_context_bytes_deleted_in_event": (
+                    raw_context_bytes_deleted_in_event
+                ),
+            }
+        )
+    )
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "|".join(
+                (
+                    idempotency_key,
+                    context_id,
+                    request_digest,
+                    prior_receipt_digest,
+                    identity_digest,
+                    reason_code,
+                )
+            ),
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalContextPurgeReceipt:
+    purge_id: str
+    idempotency_key: str
+    context_id: str
+    request_digest: str
+    prior_receipt_digest: str
+    passage_ids: tuple[str, ...]
+    admission_ids: tuple[str, ...]
+    blob_digests: tuple[str, ...]
+    text_digests: tuple[str, ...]
+    purged_derivative_identities: tuple[_DerivativeIdentity, ...]
+    context_derivative_identities: tuple[_DerivativeIdentity, ...]
+    reason_code: str
+    raw_context_bytes_deleted_in_event: bool
+    raw_context_bytes_absent: bool = True
+    tombstone_retained: bool = True
+    external_call_count: int = 0
+    candidate_created: bool = False
+    hypothesis_created: bool = False
+
+    def __post_init__(self) -> None:
+        _require_uuid(self.purge_id, "purge_id")
+        _require_token(self.idempotency_key, "purge_idempotency_key")
+        _require_uuid(self.context_id, "purged_context_id")
+        _require_digest(self.request_digest, "purged_request_digest")
+        _require_digest(self.prior_receipt_digest, "prior_receipt_digest")
+        _sorted_unique_text(self.passage_ids, "purged_passage_id", allow_empty=False)
+        _sorted_unique_text(
+            self.admission_ids, "purged_admission_id", allow_empty=False
+        )
+        _sorted_unique_digests(
+            self.blob_digests, "purged_blob_digest", allow_empty=False
+        )
+        _sorted_unique_digests(
+            self.text_digests, "purged_text_digest", allow_empty=False
+        )
+        purged = _require_derivative_identities(
+            self.purged_derivative_identities,
+            "purged_derivative_identities",
+        )
+        context = _require_derivative_identities(
+            self.context_derivative_identities,
+            "context_derivative_identities",
+        )
+        if not set(purged) <= set(context) or (
+            self.passage_ids,
+            self.admission_ids,
+            self.blob_digests,
+            self.text_digests,
+        ) != _derivative_identity_columns(purged):
+            raise RetrievalContextError("purged derivative identity binding differs")
+        _require_token(self.reason_code, "purge_reason_code")
+        if (
+            type(self.raw_context_bytes_deleted_in_event) is not bool
+            or self.raw_context_bytes_absent is not True
+            or self.tombstone_retained is not True
+            or type(self.external_call_count) is not int
+            or self.external_call_count != 0
+            or type(self.candidate_created) is not bool
+            or self.candidate_created
+            or type(self.hypothesis_created) is not bool
+            or self.hypothesis_created
+        ):
+            raise RetrievalContextError("purge receipt claims an invalid effect")
+        expected_id = _retrieval_context_purge_id(
+            idempotency_key=self.idempotency_key,
+            context_id=self.context_id,
+            request_digest=self.request_digest,
+            prior_receipt_digest=self.prior_receipt_digest,
+            purged_derivative_identities=purged,
+            context_derivative_identities=context,
+            reason_code=self.reason_code,
+            raw_context_bytes_deleted_in_event=(
+                self.raw_context_bytes_deleted_in_event
+            ),
+        )
+        if self.purge_id != expected_id:
+            raise RetrievalContextError("purge identity differs from evidence")
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "schema_version": _PURGE_RECEIPT_SCHEMA_VERSION,
+            "purge_id": self.purge_id,
+            "idempotency_key": self.idempotency_key,
+            "context_id": self.context_id,
+            "request_digest": self.request_digest,
+            "prior_receipt_digest": self.prior_receipt_digest,
+            "passage_ids": list(self.passage_ids),
+            "admission_ids": list(self.admission_ids),
+            "blob_digests": list(self.blob_digests),
+            "text_digests": list(self.text_digests),
+            "purged_derivative_identities": [
+                _derivative_identity_value(item)
+                for item in self.purged_derivative_identities
+            ],
+            "context_derivative_identities": [
+                _derivative_identity_value(item)
+                for item in self.context_derivative_identities
+            ],
+            "reason_code": self.reason_code,
+            "raw_context_bytes_deleted_in_event": (
+                self.raw_context_bytes_deleted_in_event
+            ),
+            "raw_context_bytes_absent": self.raw_context_bytes_absent,
+            "tombstone_retained": self.tombstone_retained,
+            "external_call_count": self.external_call_count,
+            "candidate_created": self.candidate_created,
+            "hypothesis_created": self.hypothesis_created,
+        }
+
+    @property
+    def canonical_bytes(self) -> bytes:
+        return _canonical(self.canonical_value())
+
+    @property
+    def receipt_digest(self) -> str:
+        return _digest_bytes(self.canonical_bytes)
+
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> "RetrievalContextPurgeReceipt":
+        value = _decode_canonical(raw, "retrieval context purge receipt")
+        required = {
+            "schema_version",
+            "purge_id",
+            "idempotency_key",
+            "context_id",
+            "request_digest",
+            "prior_receipt_digest",
+            "passage_ids",
+            "admission_ids",
+            "blob_digests",
+            "text_digests",
+            "purged_derivative_identities",
+            "context_derivative_identities",
+            "reason_code",
+            "raw_context_bytes_deleted_in_event",
+            "raw_context_bytes_absent",
+            "tombstone_retained",
+            "external_call_count",
+            "candidate_created",
+            "hypothesis_created",
+        }
+        if (
+            set(value) != required
+            or value["schema_version"] != _PURGE_RECEIPT_SCHEMA_VERSION
+        ):
+            raise RetrievalContextError("purge receipt keys differ")
+        try:
+            return cls(
+                purge_id=value["purge_id"],
+                idempotency_key=value["idempotency_key"],
+                context_id=value["context_id"],
+                request_digest=value["request_digest"],
+                prior_receipt_digest=value["prior_receipt_digest"],
+                passage_ids=tuple(value["passage_ids"]),
+                admission_ids=tuple(value["admission_ids"]),
+                blob_digests=tuple(value["blob_digests"]),
+                text_digests=tuple(value["text_digests"]),
+                purged_derivative_identities=_decode_derivative_identities(
+                    value["purged_derivative_identities"],
+                    "purged_derivative_identities",
+                ),
+                context_derivative_identities=_decode_derivative_identities(
+                    value["context_derivative_identities"],
+                    "context_derivative_identities",
+                ),
+                reason_code=value["reason_code"],
+                raw_context_bytes_deleted_in_event=value[
+                    "raw_context_bytes_deleted_in_event"
+                ],
+                raw_context_bytes_absent=value["raw_context_bytes_absent"],
+                tombstone_retained=value["tombstone_retained"],
+                external_call_count=value["external_call_count"],
+                candidate_created=value["candidate_created"],
+                hypothesis_created=value["hypothesis_created"],
+            )
+        except (KeyError, TypeError) as exc:
+            raise RetrievalContextError("purge receipt values differ") from exc
+
+
+def _purge_derivative_identities(
+    raw: bytes,
+) -> tuple[str, tuple[tuple[str, str, str, str], ...]]:
+    value = _decode_canonical(raw, "retained retrieval context")
+    context_id = value.get("context_id")
+    items = value.get("items")
+    if not isinstance(context_id, str) or not isinstance(items, list):
+        raise RetrievalContextError("retained context purge evidence differs")
+    identities: set[tuple[str, str, str, str]] = set()
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("passage"), dict):
+            raise RetrievalContextError("retained context purge evidence differs")
+        passage = item["passage"]
+        try:
+            identities.add(
+                (
+                    _require_text(passage["passage_id"], "purged_passage_id"),
+                    _require_text(
+                        passage["admission_id"], "purged_admission_id"
+                    ),
+                    _require_digest(
+                        passage["blob_digest"], "purged_blob_digest"
+                    ),
+                    _require_digest(
+                        passage["text_digest"], "purged_text_digest"
+                    ),
+                )
+            )
+        except KeyError as exc:
+            raise RetrievalContextError(
+                "retained context purge evidence differs"
+            ) from exc
+    return _require_uuid(context_id, "purged_context_id"), tuple(sorted(identities))
+
+
+def _retained_purge_receipt(
+    row: tuple[object, ...],
+) -> RetrievalContextPurgeReceipt:
+    if len(row) != 6 or not isinstance(row[5], bytes):
+        raise RetrievalContextError("retained purge receipt metadata differs")
+    raw = bytes(row[5])
+    if _digest_bytes(raw) != row[4]:
+        raise RetrievalContextError("retained purge receipt is corrupt")
+    purge = RetrievalContextPurgeReceipt.from_canonical_bytes(raw)
+    if (
+        purge.purge_id != row[0]
+        or purge.idempotency_key != row[1]
+        or purge.request_digest != row[2]
+        or purge.prior_receipt_digest != row[3]
+    ):
+        raise RetrievalContextError("retained purge receipt metadata differs")
+    return purge
+
+
 class RetrievalContextJournal:
     """Immutable first-writer-wins journal with deterministic replay."""
 
-    def __init__(self, path: Path) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        with self._connect() as connection:
+    @staticmethod
+    def _purge_table_shape(
+        connection: sqlite3.Connection,
+    ) -> tuple[tuple[object, ...], ...]:
+        return tuple(
+            (
+                row[1],
+                str(row[2]).upper(),
+                int(row[3]),
+                row[4],
+                int(row[5]),
+            )
+            for row in connection.execute(
+                "PRAGMA table_info(increment5d2_retrieval_context_purges)"
+            )
+        )
+
+    @staticmethod
+    def _create_purge_table(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE increment5d2_retrieval_context_purges (
+                purge_id TEXT PRIMARY KEY,
+                idempotency_key TEXT NOT NULL,
+                request_digest TEXT NOT NULL,
+                prior_receipt_digest TEXT NOT NULL,
+                purge_receipt_digest TEXT NOT NULL,
+                purge_receipt_bytes BLOB NOT NULL
+            )
+            """
+        )
+
+    @classmethod
+    def _initialise_schema(cls, connection: sqlite3.Connection) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS increment5d2_retrieval_contexts (
@@ -1241,11 +1645,108 @@ class RetrievalContextJournal:
                 )
                 """
             )
+            objects = connection.execute(
+                "SELECT type FROM sqlite_master WHERE name=?",
+                ("increment5d2_retrieval_context_purges",),
+            ).fetchall()
+            if not objects:
+                cls._create_purge_table(connection)
+            elif objects != [("table",)]:
+                raise RetrievalContextError(
+                    "retrieval context purge journal schema differs"
+                )
+            else:
+                shape = cls._purge_table_shape(connection)
+                if shape == _LEGACY_PURGE_TABLE_SHAPE:
+                    retained = connection.execute(
+                        "SELECT COUNT(*) "
+                        "FROM increment5d2_retrieval_context_purges"
+                    ).fetchone()
+                    if retained != (0,):
+                        raise RetrievalContextError(
+                            "legacy purge journal lacks sibling identities"
+                        )
+                    connection.execute(
+                        "DROP TABLE increment5d2_retrieval_context_purges"
+                    )
+                    cls._create_purge_table(connection)
+                elif shape != _PURGE_TABLE_SHAPE:
+                    raise RetrievalContextError(
+                        "retrieval context purge journal schema differs"
+                    )
+
+            index_name = "increment5d2_retrieval_context_purges_by_key"
+            indexes = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA index_list(increment5d2_retrieval_context_purges)"
+                )
+            }
+            if index_name not in indexes:
+                conflicting = connection.execute(
+                    "SELECT type FROM sqlite_master WHERE name=?",
+                    (index_name,),
+                ).fetchall()
+                if conflicting:
+                    raise RetrievalContextError(
+                        "retrieval context purge journal index differs"
+                    )
+                connection.execute(
+                    """
+                    CREATE INDEX increment5d2_retrieval_context_purges_by_key
+                    ON increment5d2_retrieval_context_purges(
+                        idempotency_key,purge_id
+                    )
+                    """
+                )
+            index_columns = tuple(
+                row[2]
+                for row in connection.execute(
+                    "PRAGMA index_info("
+                    "increment5d2_retrieval_context_purges_by_key)"
+                )
+            )
+            if index_columns != ("idempotency_key", "purge_id"):
+                raise RetrievalContextError(
+                    "retrieval context purge journal index differs"
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        with self._connect() as connection:
+            self._initialise_schema(connection)
+
+    @staticmethod
+    def _require_purge_safe_journal(connection: sqlite3.Connection) -> None:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
+        if (
+            journal_mode is None
+            or len(journal_mode) != 1
+            or str(journal_mode[0]).lower() != "delete"
+        ):
+            raise RetrievalContextError(
+                "purge-safe SQLite journal mode is unavailable"
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30.0)
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")
+        try:
+            self._require_purge_safe_journal(connection)
+        except RetrievalContextError:
+            connection.close()
+            raise
+        secure_delete = connection.execute("PRAGMA secure_delete=ON").fetchone()
+        if secure_delete != (1,):
+            connection.close()
+            raise RetrievalContextError("secure context deletion is unavailable")
         return connection
 
     def execute(self, *, idempotency_key: str, request_digest: str, producer):
@@ -1255,6 +1756,59 @@ class RetrievalContextJournal:
             raise TypeError("journal producer must be callable")
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._require_purge_safe_journal(connection)
+
+            def derivative_was_purged(
+                *,
+                derivative_identities: tuple[_DerivativeIdentity, ...],
+            ) -> bool:
+                selected = frozenset(
+                    _require_derivative_identities(
+                        derivative_identities,
+                        "context_derivative_identities",
+                    )
+                )
+                rows = connection.execute(
+                    """
+                    SELECT purge_id,idempotency_key,request_digest,
+                           prior_receipt_digest,
+                           purge_receipt_digest,purge_receipt_bytes
+                    FROM increment5d2_retrieval_context_purges
+                    ORDER BY purge_id
+                    """
+                )
+                for retained_row in rows:
+                    retained = _retained_purge_receipt(retained_row)
+                    if selected.intersection(
+                        retained.purged_derivative_identities
+                    ):
+                        return True
+                return False
+
+            purge_rows = connection.execute(
+                """
+                SELECT purge_id,idempotency_key,request_digest,
+                       prior_receipt_digest,
+                       purge_receipt_digest,purge_receipt_bytes
+                FROM increment5d2_retrieval_context_purges
+                WHERE idempotency_key=?
+                ORDER BY purge_id
+                """,
+                (idempotency_key,),
+            ).fetchall()
+            if purge_rows:
+                purges = tuple(
+                    _retained_purge_receipt(item) for item in purge_rows
+                )
+                if any(
+                    purge.idempotency_key != idempotency_key
+                    or purge.request_digest != request_digest
+                    for purge in purges
+                ):
+                    raise RetrievalContextError(
+                        "purged idempotency key is bound to another request"
+                    )
+                raise RetrievalContextError("retrieval context was purged")
             row = connection.execute(
                 """
                 SELECT request_digest,receipt_digest,receipt_bytes
@@ -1271,7 +1825,7 @@ class RetrievalContextJournal:
                 raw = bytes(row[2])
                 if _digest_bytes(raw) != row[1]:
                     raise RetrievalContextError("retained context is corrupt")
-                expected = producer()
+                expected = producer(derivative_was_purged)
                 if (
                     not isinstance(expected, RetrievalContextReceipt)
                     or expected.request_digest != request_digest
@@ -1281,7 +1835,7 @@ class RetrievalContextJournal:
                         "retained context differs from deterministic replay"
                     )
                 return expected
-            receipt = producer()
+            receipt = producer(derivative_was_purged)
             if (
                 not isinstance(receipt, RetrievalContextReceipt)
                 or receipt.request_digest != request_digest
@@ -1303,6 +1857,198 @@ class RetrievalContextJournal:
             )
             connection.commit()
             return receipt
+
+    def purge_affected(
+        self,
+        *,
+        reason_code: str,
+        passage_ids: tuple[str, ...] = (),
+        admission_ids: tuple[str, ...] = (),
+        blob_digests: tuple[str, ...] = (),
+        text_digests: tuple[str, ...] = (),
+    ) -> tuple[RetrievalContextPurgeReceipt, ...]:
+        """Delete matching governed bytes and retain only exact purge tombstones."""
+
+        _require_token(reason_code, "purge_reason_code")
+        selected_passages = frozenset(
+            _sorted_unique_text(passage_ids, "purge_passage_id")
+        )
+        selected_admissions = frozenset(
+            _sorted_unique_text(admission_ids, "purge_admission_id")
+        )
+        selected_blobs = frozenset(
+            _sorted_unique_digests(blob_digests, "purge_blob_digest")
+        )
+        selected_texts = frozenset(
+            _sorted_unique_digests(text_digests, "purge_text_digest")
+        )
+        if not any(
+            (
+                selected_passages,
+                selected_admissions,
+                selected_blobs,
+                selected_texts,
+            )
+        ):
+            raise RetrievalContextError("purge requires an exact derivative identity")
+
+        def selected(identity: _DerivativeIdentity) -> bool:
+            return bool(
+                identity[0] in selected_passages
+                or identity[1] in selected_admissions
+                or identity[2] in selected_blobs
+                or identity[3] in selected_texts
+            )
+
+        retained: list[RetrievalContextPurgeReceipt] = []
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_purge_safe_journal(connection)
+            inventories: dict[
+                str,
+                tuple[
+                    str,
+                    str,
+                    str,
+                    tuple[_DerivativeIdentity, ...],
+                ],
+            ] = {}
+            purged_by_context: dict[str, set[_DerivativeIdentity]] = {}
+            raw_context_keys: dict[str, str] = {}
+            for row in connection.execute(
+                """
+                SELECT purge_id,idempotency_key,request_digest,
+                       prior_receipt_digest,
+                       purge_receipt_digest,purge_receipt_bytes
+                FROM increment5d2_retrieval_context_purges
+                ORDER BY purge_id
+                """
+            ):
+                purge = _retained_purge_receipt(row)
+                inventory = (
+                    purge.idempotency_key,
+                    purge.request_digest,
+                    purge.prior_receipt_digest,
+                    purge.context_derivative_identities,
+                )
+                previous = inventories.setdefault(purge.context_id, inventory)
+                if previous != inventory:
+                    raise RetrievalContextError(
+                        "retained purge context inventory differs"
+                    )
+                purged_by_context.setdefault(purge.context_id, set()).update(
+                    purge.purged_derivative_identities
+                )
+                if purge.reason_code == reason_code and any(
+                    selected(item)
+                    for item in purge.purged_derivative_identities
+                ):
+                    retained.append(purge)
+
+            rows = connection.execute(
+                """
+                SELECT idempotency_key,request_digest,receipt_digest,receipt_bytes
+                FROM increment5d2_retrieval_contexts
+                ORDER BY idempotency_key
+                """
+            ).fetchall()
+            for row in rows:
+                raw = bytes(row[3])
+                if _digest_bytes(raw) != row[2]:
+                    raise RetrievalContextError("retained context is corrupt")
+                context_id, identities = _purge_derivative_identities(raw)
+                inventory = (row[0], row[1], row[2], identities)
+                previous = inventories.setdefault(context_id, inventory)
+                if previous != inventory or context_id in raw_context_keys:
+                    raise RetrievalContextError(
+                        "retained purge context inventory differs"
+                    )
+                if context_id in purged_by_context:
+                    raise RetrievalContextError(
+                        "purged retrieval context bytes remain retained"
+                    )
+                raw_context_keys[context_id] = row[0]
+
+            for context_id in sorted(inventories):
+                (
+                    idempotency_key,
+                    request_digest,
+                    prior_receipt_digest,
+                    identities,
+                ) = inventories[context_id]
+                matched = tuple(item for item in identities if selected(item))
+                already_purged = purged_by_context.setdefault(context_id, set())
+                newly_purged = tuple(
+                    item for item in matched if item not in already_purged
+                )
+                if not newly_purged:
+                    continue
+                (
+                    matched_passages,
+                    matched_admissions,
+                    matched_blobs,
+                    matched_texts,
+                ) = _derivative_identity_columns(newly_purged)
+                raw_key = raw_context_keys.get(context_id)
+                deleted_in_event = raw_key is not None
+                purge_id = _retrieval_context_purge_id(
+                    idempotency_key=idempotency_key,
+                    context_id=context_id,
+                    request_digest=request_digest,
+                    prior_receipt_digest=prior_receipt_digest,
+                    purged_derivative_identities=newly_purged,
+                    context_derivative_identities=identities,
+                    reason_code=reason_code,
+                    raw_context_bytes_deleted_in_event=deleted_in_event,
+                )
+                purge = RetrievalContextPurgeReceipt(
+                    purge_id=purge_id,
+                    idempotency_key=idempotency_key,
+                    context_id=context_id,
+                    request_digest=request_digest,
+                    prior_receipt_digest=prior_receipt_digest,
+                    passage_ids=matched_passages,
+                    admission_ids=matched_admissions,
+                    blob_digests=matched_blobs,
+                    text_digests=matched_texts,
+                    purged_derivative_identities=newly_purged,
+                    context_derivative_identities=identities,
+                    reason_code=reason_code,
+                    raw_context_bytes_deleted_in_event=deleted_in_event,
+                )
+                if raw_key is not None:
+                    deleted = connection.execute(
+                        "DELETE FROM increment5d2_retrieval_contexts "
+                        "WHERE idempotency_key=?",
+                        (raw_key,),
+                    )
+                    if deleted.rowcount != 1:
+                        raise RetrievalContextError(
+                            "retained context purge deletion differs"
+                        )
+                connection.execute(
+                    """
+                    INSERT INTO increment5d2_retrieval_context_purges(
+                        purge_id,idempotency_key,request_digest,
+                        prior_receipt_digest,
+                        purge_receipt_digest,purge_receipt_bytes
+                    ) VALUES(?,?,?,?,?,?)
+                    """,
+                    (
+                        purge.purge_id,
+                        purge.idempotency_key,
+                        purge.request_digest,
+                        purge.prior_receipt_digest,
+                        purge.receipt_digest,
+                        purge.canonical_bytes,
+                    ),
+                )
+                already_purged.update(newly_purged)
+                retained.append(purge)
+            connection.commit()
+        return tuple(
+            sorted(retained, key=lambda item: (item.context_id, item.purge_id))
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1460,10 +2206,12 @@ class RetrievalContextBuilder:
         return self.journal.execute(
             idempotency_key=request.idempotency_key,
             request_digest=request.request_digest,
-            producer=lambda: self._produce(request),
+            producer=lambda purge_guard: self._produce(request, purge_guard),
         )
 
-    def _produce(self, request: RetrievalContextRequest) -> RetrievalContextReceipt:
+    def _produce(
+        self, request: RetrievalContextRequest, purge_guard
+    ) -> RetrievalContextReceipt:
         composition: HybridCompositionReceipt | None = None
         try:
             composition = HybridCompositionReceipt.from_canonical_bytes(
@@ -1588,6 +2336,26 @@ class RetrievalContextBuilder:
             )
 
         try:
+            if purge_guard(
+                derivative_identities=tuple(
+                    sorted(
+                        (
+                            passage_id,
+                            reference.admission_id,
+                            reference.blob_digest,
+                            reference.text_digest,
+                        )
+                        for passage_id, reference in references.items()
+                    )
+                ),
+            ):
+                return self._receipt(
+                    request,
+                    composition,
+                    authority,
+                    RetrievalContextOutcome.RIGHTS_BLOCKED,
+                    RetrievalContextReason.RETAINED_CONTEXT_PURGED,
+                )
             items = self._hydrate(request, composition, authority, planned, references)
         except GovernedBytesUnavailable:
             return self._receipt(
@@ -1982,6 +2750,7 @@ __all__ = [
     "RetrievalContextExclusionReason",
     "RetrievalContextJournal",
     "RetrievalContextOutcome",
+    "RetrievalContextPurgeReceipt",
     "RetrievalContextReason",
     "RetrievalContextReceipt",
     "RetrievalContextRequest",

@@ -54,3 +54,26 @@ def test_permanent_neo4j_gate_executes_every_b3_and_3e_actual_service_case() -> 
     )
     for statement in required:
         assert text.count(statement) == 1
+
+
+def test_permanent_neo4j_gate_retains_increment5e2_closed_world_receipt() -> None:
+    text = _WORKFLOW.read_text(encoding="utf-8")
+    required = (
+        "newsroom/tests/test_projection_b2_*.py",
+        "newsroom/tests/test_increment5b4_neo4j_service.py",
+        "scripts.sdlc.increment5e2_closeout_receipt actual-service",
+        "--service-junit-report projection-b2-b3-c1-complete-retrieval-neo4j-results.xml",
+        "--output increment5e2-actual-service-closeout.json",
+        "increment5e2-actual-service-closeout.json",
+        "Remove disposable credential files",
+        '${RUNNER_TEMP}/newsroom-b2-neo4j-admin.env',
+        '${RUNNER_TEMP}/newsroom-b2-neo4j-projector.env',
+        'export NEWSROOM_NEO4J_PASSWORD="${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"',
+    )
+    for statement in required:
+        assert statement in text
+    assert "GITHUB_ENV" not in text
+    assert text.index("Remove disposable credential files") < text.index(
+        "Build Increment 5E2 actual-service closeout receipt"
+    )
+    assert "if: steps.focused.outcome == 'success'" in text

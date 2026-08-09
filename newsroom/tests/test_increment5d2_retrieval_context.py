@@ -28,8 +28,10 @@ from newsroom.increment5.retrieval_context import (
     RETRIEVAL_CONTEXT_CONTRACT_DIGEST,
     GovernedCasPassageHydrator,
     RetrievalContextBuilder,
+    RetrievalContextError,
     RetrievalContextJournal,
     RetrievalContextOutcome,
+    RetrievalContextPurgeReceipt,
     RetrievalContextReason,
     RetrievalContextRequest,
     context_collision_key_digest,
@@ -74,6 +76,29 @@ def _single_root_inputs(
         )
         for item in inputs
     )
+
+
+def _selected_passage_inputs(
+    inputs: tuple[HybridCompositionInput, ...],
+    roots_by_index: dict[int, str],
+) -> tuple[HybridCompositionInput, ...]:
+    selected: list[HybridCompositionInput] = []
+    for index, item in enumerate(inputs):
+        root = roots_by_index.get(index)
+        transform = composer_helpers._without_hits
+        if root is not None:
+            def selected_transform(receipt, root=root):
+                return _one_hit_at_root(receipt, root)
+
+            transform = selected_transform
+        selected.append(
+            composer_helpers._branch_input(
+                item.named_tool_request,
+                _branch_result(item),
+                transform=transform,
+            )
+        )
+    return tuple(selected)
 
 
 def _exact_only_inputs(
@@ -122,10 +147,14 @@ def _compose(
 
 def _selected_passage_id(composition) -> str:
     assert len(composition.candidates) == 1
+    return _candidate_passage_id(composition.candidates[0])
+
+
+def _candidate_passage_id(candidate) -> str:
     mode_order = {mode: index for index, mode in enumerate(HybridMode)}
     origins = tuple(
         origin
-        for origin in composition.candidates[0].origins
+        for origin in candidate.origins
         if origin.passage_id is not None
     )
     assert origins
@@ -187,6 +216,47 @@ def _retarget_seeded_passage(
         (size, blob_digest, text_digest, language, passage_id),
     )
     return blob_digest
+
+
+def _retarget_seeded_passage_to_existing_blob(
+    connection: sqlite3.Connection,
+    *,
+    admission_id: str,
+    passage_id: str,
+    content: bytes,
+    blob_digest: str,
+    language: str = "ZH_HANT_HK",
+) -> None:
+    size = len(content)
+    assert connection.execute(
+        "SELECT size_bytes FROM blob_identities WHERE blob_digest=?",
+        (blob_digest,),
+    ).fetchone() == (size,)
+    connection.execute(
+        "UPDATE object_admissions SET blob_digest=? WHERE admission_id=?",
+        (blob_digest, admission_id),
+    )
+    connection.execute(
+        "UPDATE object_rights_decisions SET blob_digest=?,size_bytes=? "
+        "WHERE rights_decision_id=?",
+        (blob_digest, size, f"rights:{admission_id}"),
+    )
+    connection.execute(
+        "UPDATE object_access_decisions SET byte_offset=0,allowed_bytes=? "
+        "WHERE admission_id=?",
+        (size, admission_id),
+    )
+    connection.execute(
+        "UPDATE extraction_run_passages SET byte_offset=0,byte_length=?,"
+        "blob_digest=?,text_digest=?,language=? WHERE passage_id=?",
+        (
+            size,
+            blob_digest,
+            digest_bytes(content),
+            language,
+            passage_id,
+        ),
+    )
 
 
 def _authority_database(
@@ -363,6 +433,63 @@ def _builder(
     )
 
 
+def _retained_complete_context(
+    tmp_path: Path,
+    branch_inputs: tuple[HybridCompositionInput, ...],
+    *,
+    name: str,
+):
+    inputs = _single_root_inputs(branch_inputs)
+    composer, composition_request, composition = _compose(
+        tmp_path,
+        inputs,
+        key=f"hybrid:5d2:{name}",
+        request_id=str(uuid.uuid4()),
+    )
+    passage_id = _selected_passage_id(composition)
+    content = f"retained governed context bytes: {name}".encode("utf-8")
+    database, blob_digest = _authority_database(
+        tmp_path,
+        name=name,
+        admission_id=f"object:context-{name}",
+        passage_id=passage_id,
+        content=content,
+    )
+    assert blob_digest is not None
+    cas_root = _cas_root(
+        tmp_path,
+        name=f"cas-{name}",
+        blob_digest=blob_digest,
+        content=content,
+    )
+    authority_request, authority_result = _authority_execution(
+        tmp_path,
+        name=name,
+        database=database,
+        composition=composition,
+        passage_ids=(passage_id,),
+    )
+    request = _context_request(
+        key=name,
+        composition_request=composition_request,
+        composition=composition,
+        inputs=inputs,
+        authority_request=authority_request,
+        authority_result=authority_result,
+    )
+    journal_path = tmp_path / f"context-{name}.sqlite"
+    journal = RetrievalContextJournal(journal_path)
+    builder = RetrievalContextBuilder(
+        composition_replayer=composer,
+        journal=journal,
+        hydrator=GovernedCasPassageHydrator(cas_root),
+    )
+    receipt = builder.execute(request)
+    assert receipt.outcome is RetrievalContextOutcome.COMPLETE
+    assert len(receipt.items) == 1
+    return builder, composer, cas_root, journal, journal_path, request, receipt, content
+
+
 def test_context_contract_is_fixed_and_content_addressed() -> None:
     assert RETRIEVAL_CONTEXT_CONTRACT_DIGEST.startswith("sha256:")
     assert GOVERNED_CAS_HYDRATOR_CONTRACT_DIGEST.startswith("sha256:")
@@ -449,6 +576,602 @@ def test_complete_context_replays_and_hydrates_exact_governed_bytes(
     assert receipt.provider_spend_micros == 0
     assert len(receipt.canonical_bytes) <= CONTEXT_LIMIT_BYTES
     assert builder.execute(request) == receipt
+
+
+def test_retained_context_restart_replays_exact_bytes(
+    tmp_path: Path,
+    branch_inputs: tuple[HybridCompositionInput, ...],
+) -> None:
+    (
+        _builder_instance,
+        composer,
+        cas_root,
+        _journal,
+        journal_path,
+        request,
+        receipt,
+        _content,
+    ) = _retained_complete_context(tmp_path, branch_inputs, name="restart")
+
+    restarted = RetrievalContextBuilder(
+        composition_replayer=composer,
+        journal=RetrievalContextJournal(journal_path),
+        hydrator=GovernedCasPassageHydrator(cas_root),
+    ).execute(request)
+
+    assert restarted == receipt
+    assert restarted.canonical_bytes == receipt.canonical_bytes
+
+
+def test_retained_context_tamper_is_integrity_blocked(
+    tmp_path: Path,
+    branch_inputs: tuple[HybridCompositionInput, ...],
+) -> None:
+    (
+        builder,
+        _composer,
+        _cas_root,
+        _journal,
+        journal_path,
+        request,
+        _receipt,
+        _content,
+    ) = _retained_complete_context(tmp_path, branch_inputs, name="tamper")
+    with sqlite3.connect(journal_path) as connection:
+        connection.execute(
+            "UPDATE increment5d2_retrieval_contexts SET receipt_bytes=? "
+            "WHERE idempotency_key=?",
+            (b"{}", request.idempotency_key),
+        )
+
+    with pytest.raises(RetrievalContextError, match="retained context is corrupt"):
+        builder.execute(request)
+
+
+def _create_legacy_purge_journal(
+    path: Path,
+    *,
+    retained_purge: bool,
+) -> bytes:
+    retained_context = b"legacy governed context bytes"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE increment5d2_retrieval_contexts (
+                idempotency_key TEXT PRIMARY KEY,
+                request_digest TEXT NOT NULL,
+                receipt_digest TEXT NOT NULL,
+                receipt_bytes BLOB NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE increment5d2_retrieval_context_purges (
+                idempotency_key TEXT PRIMARY KEY,
+                request_digest TEXT NOT NULL,
+                prior_receipt_digest TEXT NOT NULL,
+                purge_receipt_digest TEXT NOT NULL,
+                purge_receipt_bytes BLOB NOT NULL
+            )
+            """
+        )
+        if retained_purge:
+            connection.execute(
+                """
+                INSERT INTO increment5d2_retrieval_contexts(
+                    idempotency_key,request_digest,receipt_digest,receipt_bytes
+                ) VALUES(?,?,?,?)
+                """,
+                (
+                    "context:legacy-retained",
+                    "sha256:" + "1" * 64,
+                    digest_bytes(retained_context),
+                    retained_context,
+                ),
+            )
+            legacy_purge = b"legacy purge receipt without sibling inventory"
+            connection.execute(
+                """
+                INSERT INTO increment5d2_retrieval_context_purges(
+                    idempotency_key,request_digest,prior_receipt_digest,
+                    purge_receipt_digest,purge_receipt_bytes
+                ) VALUES(?,?,?,?,?)
+                """,
+                (
+                    "context:legacy-purged",
+                    "sha256:" + "2" * 64,
+                    "sha256:" + "3" * 64,
+                    digest_bytes(legacy_purge),
+                    legacy_purge,
+                ),
+            )
+    return retained_context
+
+
+def test_empty_legacy_purge_schema_migrates_to_append_only_v2(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-empty.sqlite"
+    _create_legacy_purge_journal(path, retained_purge=False)
+
+    RetrievalContextJournal(path)
+
+    with sqlite3.connect(path) as connection:
+        columns = connection.execute(
+            "PRAGMA table_info(increment5d2_retrieval_context_purges)"
+        ).fetchall()
+        assert [row[1] for row in columns] == [
+            "purge_id",
+            "idempotency_key",
+            "request_digest",
+            "prior_receipt_digest",
+            "purge_receipt_digest",
+            "purge_receipt_bytes",
+        ]
+        assert {row[1]: row[5] for row in columns} == {
+            "purge_id": 1,
+            "idempotency_key": 0,
+            "request_digest": 0,
+            "prior_receipt_digest": 0,
+            "purge_receipt_digest": 0,
+            "purge_receipt_bytes": 0,
+        }
+
+
+def test_populated_legacy_purge_schema_fails_closed_without_mutation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-populated.sqlite"
+    retained_context = _create_legacy_purge_journal(path, retained_purge=True)
+
+    with pytest.raises(
+        RetrievalContextError,
+        match="legacy purge journal lacks sibling identities",
+    ):
+        RetrievalContextJournal(path)
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM increment5d2_retrieval_context_purges"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT receipt_bytes FROM increment5d2_retrieval_contexts"
+        ).fetchone() == (retained_context,)
+        assert [
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(increment5d2_retrieval_context_purges)"
+            )
+        ] == [
+            "idempotency_key",
+            "request_digest",
+            "prior_receipt_digest",
+            "purge_receipt_digest",
+            "purge_receipt_bytes",
+        ]
+
+
+def test_rights_purge_removes_retained_context_and_tombstone_blocks_replay(
+    tmp_path: Path,
+    branch_inputs: tuple[HybridCompositionInput, ...],
+) -> None:
+    (
+        builder,
+        _composer,
+        _cas_root,
+        journal,
+        journal_path,
+        request,
+        receipt,
+        content,
+    ) = _retained_complete_context(tmp_path, branch_inputs, name="purge")
+    passage = receipt.items[0].passage
+
+    purges = journal.purge_affected(
+        admission_ids=(passage.admission_id,),
+        reason_code="RIGHTS_WITHDRAWN",
+    )
+
+    assert len(purges) == 1
+    purge = purges[0]
+    assert isinstance(purge, RetrievalContextPurgeReceipt)
+    assert json.loads(purge.canonical_bytes)["schema_version"] == (
+        "newsroom.increment5.retrieval-context-purge.v2"
+    )
+    assert purge.raw_context_bytes_deleted_in_event is True
+    assert purge.raw_context_bytes_absent is True
+    assert purge.context_id == receipt.context_id
+    assert purge.request_digest == request.request_digest
+    assert purge.prior_receipt_digest == receipt.receipt_digest
+    assert purge.passage_ids == (passage.passage_id,)
+    assert purge.admission_ids == (passage.admission_id,)
+    assert purge.blob_digests == (passage.blob_digest,)
+    assert purge.text_digests == (passage.text_digest,)
+    assert content not in purge.canonical_bytes
+    with sqlite3.connect(journal_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM increment5d2_retrieval_contexts"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM increment5d2_retrieval_context_purges"
+            ).fetchone()[0]
+            == 1
+        )
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        storage_path = Path(f"{journal_path}{suffix}")
+        if storage_path.exists():
+            assert content not in storage_path.read_bytes()
+
+    assert journal.purge_affected(
+        admission_ids=(passage.admission_id,),
+        reason_code="RIGHTS_WITHDRAWN",
+    ) == (purge,)
+    with pytest.raises(RetrievalContextError, match="retrieval context was purged"):
+        builder.execute(request)
+
+    with sqlite3.connect(journal_path) as connection:
+        connection.execute(
+            "UPDATE increment5d2_retrieval_context_purges "
+            "SET prior_receipt_digest=? WHERE idempotency_key=?",
+            ("sha256:" + "0" * 64, request.idempotency_key),
+        )
+    with pytest.raises(RetrievalContextError, match="purge receipt metadata differs"):
+        builder.execute(request)
+
+
+def test_rights_purge_blocks_new_request_identity_before_rehydration(
+    tmp_path: Path,
+    branch_inputs: tuple[HybridCompositionInput, ...],
+) -> None:
+    (
+        _builder,
+        composer,
+        cas_root,
+        journal,
+        journal_path,
+        request,
+        receipt,
+        content,
+    ) = _retained_complete_context(tmp_path, branch_inputs, name="purge-new-key")
+    passage = receipt.items[0].passage
+    journal.purge_affected(
+        admission_ids=(passage.admission_id,),
+        reason_code="RIGHTS_WITHDRAWN",
+    )
+
+    class ExplodingHydrator:
+        implementation_digest = GOVERNED_CAS_HYDRATOR_CONTRACT_DIGEST
+
+        @staticmethod
+        def read(_reference) -> bytes:
+            raise AssertionError("purged governed bytes must not be rehydrated")
+
+    new_request = replace(
+        request,
+        request_id=str(uuid.uuid4()),
+        idempotency_key="context:purge-new-key:second-request",
+    )
+    blocked = RetrievalContextBuilder(
+        composition_replayer=composer,
+        journal=journal,
+        hydrator=ExplodingHydrator(),
+    ).execute(new_request)
+
+    assert blocked.outcome is RetrievalContextOutcome.RIGHTS_BLOCKED
+    assert blocked.reason is RetrievalContextReason.RETAINED_CONTEXT_PURGED
+    assert blocked.items == ()
+    assert content not in blocked.canonical_bytes
+    assert content not in journal_path.read_bytes()
+    assert cas_root.is_dir()
+
+
+def test_rights_purge_rejects_wal_mode_without_false_success(
+    tmp_path: Path,
+    branch_inputs: tuple[HybridCompositionInput, ...],
+) -> None:
+    (
+        _builder,
+        _composer,
+        _cas_root,
+        journal,
+        journal_path,
+        _request,
+        receipt,
+        _content,
+    ) = _retained_complete_context(tmp_path, branch_inputs, name="purge-wal")
+    passage = receipt.items[0].passage
+
+    reader = sqlite3.connect(journal_path)
+    try:
+        assert reader.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        reader.execute("BEGIN")
+        assert reader.execute(
+            "SELECT COUNT(*) FROM increment5d2_retrieval_contexts"
+        ).fetchone() == (1,)
+
+        with pytest.raises(
+            RetrievalContextError,
+            match="purge-safe SQLite journal mode is unavailable",
+        ):
+            journal.purge_affected(
+                admission_ids=(passage.admission_id,),
+                reason_code="RIGHTS_WITHDRAWN",
+            )
+    finally:
+        reader.rollback()
+        reader.close()
+
+    with sqlite3.connect(journal_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM increment5d2_retrieval_contexts"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM increment5d2_retrieval_context_purges"
+        ).fetchone() == (0,)
+
+
+def test_rights_purge_does_not_tombstone_unselected_sibling_derivative(
+    tmp_path: Path,
+    branch_inputs: tuple[HybridCompositionInput, ...],
+) -> None:
+    root_a = "authority:retained-root-a"
+    root_b = "authority:retained-root-b"
+    inputs_ab = _selected_passage_inputs(branch_inputs, {1: root_a, 2: root_b})
+    composer_ab, composition_request_ab, composition_ab = _compose(
+        tmp_path,
+        inputs_ab,
+        key="hybrid:5d2:purge-sibling:ab",
+        request_id=str(uuid.uuid4()),
+    )
+    passages_by_root = {
+        candidate.dependency_root_id: _candidate_passage_id(candidate)
+        for candidate in composition_ab.candidates
+    }
+    assert set(passages_by_root) == {root_a, root_b}
+    passage_a = passages_by_root[root_a]
+    passage_b = passages_by_root[root_b]
+    passage_ids = tuple(sorted((passage_a, passage_b)))
+    admission_a = "object:retained-a"
+    admission_b = "object:retained-b"
+    content_a = b"governed retained bytes A"
+    # A rights withdrawal is scoped by the selected authority identity, not by
+    # content deduplication.  A separately admitted sibling may legitimately
+    # bind the same governed bytes and must remain usable until its own scope is
+    # withdrawn.
+    content_b = content_a
+    database, blob_a = _authority_database(
+        tmp_path,
+        name="purge-sibling",
+        admission_id=admission_a,
+        passage_id=passage_a,
+        content=content_a,
+    )
+    assert blob_a is not None
+    with sqlite3.connect(database) as connection:
+        authority_helpers.seed_object(
+            connection,
+            admission_id=admission_b,
+            passage_id=passage_b,
+            run_id="run:purge-sibling:b",
+            allowed=1,
+        )
+        _retarget_seeded_passage_to_existing_blob(
+            connection,
+            admission_id=admission_b,
+            passage_id=passage_b,
+            content=content_b,
+            blob_digest=blob_a,
+        )
+    cas_root = _cas_root(
+        tmp_path,
+        name="cas-purge-sibling",
+        blob_digest=blob_a,
+        content=content_a,
+    )
+    authority_request_ab, authority_result_ab = _authority_execution(
+        tmp_path,
+        name="purge-sibling-ab",
+        database=database,
+        composition=composition_ab,
+        passage_ids=passage_ids,
+    )
+    request_ab = _context_request(
+        key="purge-sibling:ab",
+        composition_request=composition_request_ab,
+        composition=composition_ab,
+        inputs=inputs_ab,
+        authority_request=authority_request_ab,
+        authority_result=authority_result_ab,
+    )
+    journal = RetrievalContextJournal(tmp_path / "context-purge-sibling.sqlite")
+    builder_ab = RetrievalContextBuilder(
+        composition_replayer=composer_ab,
+        journal=journal,
+        hydrator=GovernedCasPassageHydrator(cas_root),
+    )
+    receipt_ab = builder_ab.execute(request_ab)
+    assert receipt_ab.outcome is RetrievalContextOutcome.COMPLETE
+    assert len(receipt_ab.items) == 2
+    assert {
+        (item.passage.blob_digest, item.passage.text_digest)
+        for item in receipt_ab.items
+    } == {(blob_a, receipt_ab.items[0].passage.text_digest)}
+    item_a = next(
+        item for item in receipt_ab.items if item.passage.admission_id == admission_a
+    )
+
+    purge = journal.purge_affected(
+        admission_ids=(admission_a,),
+        reason_code="RIGHTS_WITHDRAWN",
+    )[0]
+    assert purge.passage_ids == (item_a.passage.passage_id,)
+    assert purge.admission_ids == (admission_a,)
+    assert len(purge.purged_derivative_identities) == 1
+    assert len(purge.context_derivative_identities) == 2
+    assert purge.raw_context_bytes_deleted_in_event is True
+    assert purge.raw_context_bytes_absent is True
+
+    inputs_b = _selected_passage_inputs(branch_inputs, {2: root_b})
+    composer_b, composition_request_b, composition_b = _compose(
+        tmp_path,
+        inputs_b,
+        key="hybrid:5d2:purge-sibling:b",
+        request_id=str(uuid.uuid4()),
+    )
+    authority_request_b, authority_result_b = _authority_execution(
+        tmp_path,
+        name="purge-sibling-b",
+        database=database,
+        composition=composition_b,
+        passage_ids=(passage_b,),
+    )
+    request_b = _context_request(
+        key="purge-sibling:b",
+        composition_request=composition_request_b,
+        composition=composition_b,
+        inputs=inputs_b,
+        authority_request=authority_request_b,
+        authority_result=authority_result_b,
+    )
+    receipt_b = RetrievalContextBuilder(
+        composition_replayer=composer_b,
+        journal=journal,
+        hydrator=GovernedCasPassageHydrator(cas_root),
+    ).execute(request_b)
+
+    assert receipt_b.outcome is RetrievalContextOutcome.COMPLETE
+    assert len(receipt_b.items) == 1
+    assert receipt_b.items[0].passage.admission_id == admission_b
+    assert receipt_b.items[0].text.encode("utf-8") == content_b
+
+    restarted = RetrievalContextJournal(journal.path)
+    replayed_b = RetrievalContextBuilder(
+        composition_replayer=composer_b,
+        journal=restarted,
+        hydrator=GovernedCasPassageHydrator(cas_root),
+    ).execute(request_b)
+    assert replayed_b.canonical_bytes == receipt_b.canonical_bytes
+
+    class ExplodingHydrator:
+        implementation_digest = GOVERNED_CAS_HYDRATOR_CONTRACT_DIGEST
+
+        @staticmethod
+        def read(_reference) -> bytes:
+            raise AssertionError("purged sibling bytes must not be rehydrated")
+
+    digest_journal = RetrievalContextJournal(
+        tmp_path / "context-purge-shared-blob.sqlite"
+    )
+    digest_receipt_ab = RetrievalContextBuilder(
+        composition_replayer=composer_ab,
+        journal=digest_journal,
+        hydrator=GovernedCasPassageHydrator(cas_root),
+    ).execute(request_ab)
+    assert digest_receipt_ab.outcome is RetrievalContextOutcome.COMPLETE
+    digest_purges = digest_journal.purge_affected(
+        blob_digests=(blob_a,),
+        reason_code="GOVERNED_BLOB_WITHDRAWN",
+    )
+    assert len(digest_purges) == 1
+    assert set(digest_purges[0].admission_ids) == {admission_a, admission_b}
+    assert len(digest_purges[0].purged_derivative_identities) == 2
+    digest_blocked_b = RetrievalContextBuilder(
+        composition_replayer=composer_b,
+        journal=RetrievalContextJournal(digest_journal.path),
+        hydrator=ExplodingHydrator(),
+    ).execute(request_b)
+    assert digest_blocked_b.outcome is RetrievalContextOutcome.RIGHTS_BLOCKED
+    assert digest_blocked_b.reason is RetrievalContextReason.RETAINED_CONTEXT_PURGED
+
+    later_purges = restarted.purge_affected(
+        admission_ids=(admission_b,),
+        reason_code="RIGHTS_WITHDRAWN",
+    )
+
+    assert len(later_purges) == 2
+    assert {item.context_id for item in later_purges} == {
+        receipt_ab.context_id,
+        receipt_b.context_id,
+    }
+    assert all(item.passage_ids == (passage_b,) for item in later_purges)
+    assert all(item.admission_ids == (admission_b,) for item in later_purges)
+    later_by_context = {item.context_id: item for item in later_purges}
+    assert later_by_context[receipt_ab.context_id].raw_context_bytes_deleted_in_event is (
+        False
+    )
+    assert later_by_context[receipt_b.context_id].raw_context_bytes_deleted_in_event is (
+        True
+    )
+    assert all(item.raw_context_bytes_absent is True for item in later_purges)
+    assert restarted.purge_affected(
+        admission_ids=(admission_b,),
+        reason_code="RIGHTS_WITHDRAWN",
+    ) == later_purges
+
+    blocked_request_b = replace(
+        request_b,
+        request_id=str(uuid.uuid4()),
+        idempotency_key="context:purge-sibling:b-after-withdrawal",
+    )
+    post_purge_restart = RetrievalContextJournal(journal.path)
+    blocked_b = RetrievalContextBuilder(
+        composition_replayer=composer_b,
+        journal=post_purge_restart,
+        hydrator=ExplodingHydrator(),
+    ).execute(blocked_request_b)
+    assert blocked_b.outcome is RetrievalContextOutcome.RIGHTS_BLOCKED
+    assert blocked_b.reason is RetrievalContextReason.RETAINED_CONTEXT_PURGED
+    assert blocked_b.items == ()
+
+    with sqlite3.connect(journal.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM increment5d2_retrieval_contexts"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM increment5d2_retrieval_context_purges"
+        ).fetchone() == (3,)
+        primary_keys = {
+            row[1]: row[5]
+            for row in connection.execute(
+                "PRAGMA table_info(increment5d2_retrieval_context_purges)"
+            )
+        }
+        assert primary_keys["purge_id"] == 1
+        assert primary_keys["idempotency_key"] == 0
+        rows = connection.execute(
+            "SELECT purge_receipt_digest,purge_receipt_bytes "
+            "FROM increment5d2_retrieval_context_purges ORDER BY purge_id"
+        ).fetchall()
+        retained_values = [json.loads(bytes(row[1])) for row in rows]
+        assert all(
+            len(value["context_derivative_identities"]) == 2
+            for value in retained_values
+            if value["context_id"] == receipt_ab.context_id
+        )
+        tampered = retained_values[0]
+        tampered["context_derivative_identities"][0]["passage_id"] = "tampered"
+        connection.execute(
+            "UPDATE increment5d2_retrieval_context_purges "
+            "SET purge_receipt_bytes=? WHERE purge_receipt_digest=?",
+            (canonical_json_bytes(tampered), rows[0][0]),
+        )
+
+    with pytest.raises(RetrievalContextError, match="retained purge receipt is corrupt"):
+        restarted.purge_affected(
+            admission_ids=(admission_b,),
+            reason_code="RIGHTS_WITHDRAWN",
+        )
+    for journal_path in (journal.path, digest_journal.path):
+        for content in {content_a, content_b}:
+            for suffix in ("", "-journal", "-wal", "-shm"):
+                storage_path = Path(f"{journal_path}{suffix}")
+                if storage_path.exists():
+                    assert content not in storage_path.read_bytes()
 
 
 def test_exact_only_root_without_authoritative_passage_fails_closed(

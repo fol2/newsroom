@@ -20,6 +20,12 @@ from ._retrieval_qualification_contracts import (
     QualificationEpoch,
     QualificationTarget,
 )
+from ._retrieval_qualification_corpus import (
+    validate_qualification_corpus_content_identities,
+)
+from ._retrieval_qualification_target import (
+    validate_qualification_target_identity,
+)
 from ._retrieval_qualification_evidence import QualificationObservation
 from .evaluation_plan import INCREMENT_5_EVALUATION_PLAN
 
@@ -30,6 +36,23 @@ def build_qualification_epoch(
     corpus: QualificationCorpus,
     code_tree_sha: str,
     epoch_id: str = "increment5-retrieval-qualification-epoch-v1",
+) -> QualificationEpoch:
+    validate_qualification_target_identity(target)
+    validate_qualification_corpus_content_identities(corpus)
+    return _derive_qualification_epoch(
+        target=target,
+        corpus=corpus,
+        code_tree_sha=code_tree_sha,
+        epoch_id=epoch_id,
+    )
+
+
+def _derive_qualification_epoch(
+    *,
+    target: QualificationTarget,
+    corpus: QualificationCorpus,
+    code_tree_sha: str,
+    epoch_id: str,
 ) -> QualificationEpoch:
     plan = thaw(INCREMENT_5_EVALUATION_PLAN)
     return QualificationEpoch(
@@ -115,6 +138,8 @@ def run_fixture_qualification(
     target: QualificationTarget,
     corpus: QualificationCorpus,
 ) -> tuple[QualificationObservation, ...]:
+    validate_qualification_target_identity(target)
+    validate_qualification_corpus_content_identities(corpus)
     system_mode = {
         QualificationSystem.EXACT_ONLY: QualificationMode.EXACT,
         QualificationSystem.FULL_TEXT_ONLY: QualificationMode.FULL_TEXT,
