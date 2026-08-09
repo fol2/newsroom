@@ -41,9 +41,6 @@ from .types import (
     sorted_unique_text,
 )
 
-MAX_CHECK_OUTCOME_REFERENCES = 20_000
-MAX_CHECK_OUTCOME_CANONICAL_BYTES = 8 * 1_024 * 1_024
-
 
 @dataclass(frozen=True, slots=True)
 class CandidateObservationRef:
@@ -321,7 +318,6 @@ class CheckOutcomeRequest:
             optional_digest(value, field=field)
         if (
             not isinstance(self.candidate_observations, tuple)
-            or len(self.candidate_observations) > MAX_CHECK_OUTCOME_REFERENCES
             or any(
                 not isinstance(item, CandidateObservationRef)
                 for item in self.candidate_observations
@@ -345,7 +341,6 @@ class CheckOutcomeRequest:
             raise CheckContractError("candidate item keys must be unique")
         if (
             not isinstance(self.observed_items, tuple)
-            or len(self.observed_items) > MAX_CHECK_OUTCOME_REFERENCES
             or any(
                 not isinstance(item, CandidateObservationRef)
                 for item in self.observed_items
@@ -370,11 +365,6 @@ class CheckOutcomeRequest:
                 "check outcome completion time must be typed"
             )
         require_idempotency_key(self.idempotency_key)
-        if (
-            len(canonical_json_bytes(self.canonical_value()))
-            > MAX_CHECK_OUTCOME_CANONICAL_BYTES
-        ):
-            raise CheckContractError("Check Outcome exceeds its canonical byte bound")
 
     def _validate_outcome_shape(self) -> None:
         candidates = bool(self.candidate_observations)
@@ -516,10 +506,7 @@ class CheckOutcomeRequest:
 
     @property
     def canonical_bytes(self) -> bytes:
-        value = canonical_json_bytes(self.canonical_value())
-        if len(value) > MAX_CHECK_OUTCOME_CANONICAL_BYTES:
-            raise CheckContractError("Check Outcome exceeds its canonical byte bound")
-        return value
+        return canonical_json_bytes(self.canonical_value())
 
     @property
     def digest(self) -> str:

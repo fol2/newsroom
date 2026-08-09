@@ -15,19 +15,13 @@ from newsroom.discovery import (
     NextActionKind,
     ObservableNewness,
     ReasonBasisClass,
-    ReasonReference,
     ScopeDisposition,
-    StructuredReason,
     TimeValidity,
     deterministic_gate_outcome,
     permitted_newness_for_transition,
     UrgencyRoute,
 )
-from newsroom.discovery.models import (
-    MAX_LEAD_DISPOSITION_SUPPORTING_REASONS,
-    LeadDispositionDecisionRequest,
-)
-from newsroom.discovery.types import MAX_STRUCTURED_REASON_REFERENCES
+from newsroom.discovery.models import LeadDispositionDecisionRequest
 from newsroom.sources import VersionedPolicyRef
 
 from .discovery_3d_helpers import (
@@ -258,41 +252,6 @@ def test_increment_3d_rejects_later_candidate_dispositions() -> None:
             decided_at=queued.decided_at,
             idempotency_key="invalid-candidate-disposition",
         )
-
-
-def test_disposition_reason_producer_bounds_are_shared_and_closed() -> None:
-    references = tuple(
-        ReasonReference("fixture", f"reference-{index:05d}")
-        for index in range(MAX_STRUCTURED_REASON_REFERENCES)
-    )
-    maximum_reason = StructuredReason(
-        "FIXTURE.MAXIMUM_REFERENCES",
-        ReasonBasisClass.DETERMINISTIC_OBSERVATION,
-        references,
-        "The maximum retained reference set remains bounded.",
-    )
-    maximum = replace(disposition_request(), primary_reason=maximum_reason)
-    assert maximum.digest
-
-    with pytest.raises(DiscoveryContractError, match="reference count bound"):
-        over_bound = replace(
-            maximum_reason,
-            references=references + (ReasonReference("fixture", "reference-over"),),
-        )
-        _ = over_bound.digest
-
-    supporting = tuple(
-        StructuredReason(
-            f"FIXTURE.SUPPORTING.{index:02d}",
-            ReasonBasisClass.DETERMINISTIC_OBSERVATION,
-            (ReasonReference("fixture", f"supporting-{index:02d}"),),
-            "A bounded supporting reason.",
-        )
-        for index in range(MAX_LEAD_DISPOSITION_SUPPORTING_REASONS + 1)
-    )
-    with pytest.raises(DiscoveryContractError, match="too many supporting"):
-        over_bound = replace(disposition_request(), supporting_reasons=supporting)
-        _ = over_bound.digest
 
 
 def test_later_gate_and_disposition_require_exact_predecessors() -> None:

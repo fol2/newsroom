@@ -43,6 +43,24 @@ def test_fresh_v18_is_exact_and_integral() -> None:
     )
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     assert connection.execute("PRAGMA quick_check").fetchall() == [("ok",)]
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(triage_work_item_versions)")
+    }
+    assert {"watch_causality_digest", "supplemental_causality_digest"} <= columns
+    unique_columns = {
+        tuple(
+            row[2]
+            for row in connection.execute(
+                f"PRAGMA index_info({index[1]!r})"
+            )
+        )
+        for index in connection.execute(
+            "PRAGMA index_list(triage_work_item_versions)"
+        )
+        if index[2]
+    }
+    assert ("watch_causality_digest",) in unique_columns
+    assert ("supplemental_causality_digest",) in unique_columns
 
 
 def test_exact_v17_upgrade_retains_pre_v18_backup(tmp_path: Path) -> None:

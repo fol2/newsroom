@@ -4,12 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Iterable
 
-from newsroom.authority.canonical import (
-    canonical_json_bytes as _canonical_json_bytes,
-    digest_bytes,
-    digest_canonical as _digest_canonical,
-    validate_sha256_digest,
-)
+from newsroom.authority.canonical import digest_canonical, validate_sha256_digest
 from newsroom.authority.types import UUIDv4Id, UtcTimestamp, require_scope, require_token
 from newsroom.checks.types import (
     CoverageBasis,
@@ -19,37 +14,6 @@ from newsroom.checks.types import (
     sorted_unique_text,
 )
 from newsroom.sources import VersionedPolicyRef
-
-
-MAX_STRUCTURED_REASON_REFERENCES = 30_000
-MAX_STRUCTURED_REASON_CANONICAL_BYTES = 8 * 1_024 * 1_024
-MAX_LEAD_DISPOSITION_SUPPORTING_REASONS = 64
-
-
-def digest_canonical(value: object) -> str:
-    """Apply the Discovery reason envelope at its canonical digest boundary."""
-
-    if isinstance(value, dict) and set(value) == {
-        "code",
-        "basis",
-        "references",
-        "explanation",
-    }:
-        references = value["references"]
-        if (
-            not isinstance(references, list)
-            or len(references) > MAX_STRUCTURED_REASON_REFERENCES
-        ):
-            raise DiscoveryContractError(
-                "structured reason exceeds its reference count bound"
-            )
-        raw = _canonical_json_bytes(value)
-        if len(raw) > MAX_STRUCTURED_REASON_CANONICAL_BYTES:
-            raise DiscoveryContractError(
-                "structured reason exceeds its canonical byte bound"
-            )
-        return digest_bytes(raw)
-    return _digest_canonical(value)
 
 
 class DiscoveryAuthorityError(RuntimeError):
@@ -687,9 +651,6 @@ __all__ = [
     "GateOutcome",
     "LeadDispositionDecisionId",
     "LeadDispositionOutcome",
-    "MAX_STRUCTURED_REASON_CANONICAL_BYTES",
-    "MAX_STRUCTURED_REASON_REFERENCES",
-    "MAX_LEAD_DISPOSITION_SUPPORTING_REASONS",
     "NewsLeadId",
     "NextAction",
     "NextActionKind",

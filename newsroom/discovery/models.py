@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from newsroom.authority.canonical import (
-    canonical_json_bytes as _canonical_json_bytes,
+    canonical_json_bytes,
     digest_bytes,
     digest_canonical,
 )
@@ -42,9 +42,6 @@ from .types import (
     GateOutcome,
     LeadDispositionDecisionId,
     LeadDispositionOutcome,
-    MAX_LEAD_DISPOSITION_SUPPORTING_REASONS,
-    MAX_STRUCTURED_REASON_CANONICAL_BYTES,
-    MAX_STRUCTURED_REASON_REFERENCES,
     NewsLeadId,
     NextAction,
     NextActionKind,
@@ -57,56 +54,6 @@ from .types import (
     is_active_disposition,
     sorted_reasons,
 )
-
-MAX_NEWS_LEAD_SOURCE_DEPENDENCIES = 160
-MAX_NEWS_LEAD_CANONICAL_BYTES = 384 * 1_024
-MAX_LEAD_DISPOSITION_CANONICAL_BYTES = 8 * 1_024 * 1_024
-
-
-def canonical_json_bytes(value: object) -> bytes:
-    """Serialise requests while enforcing the shared disposition envelope."""
-
-    raw = _canonical_json_bytes(value)
-    if isinstance(value, dict) and {
-        "decision_id",
-        "lead_id",
-        "decision_ordinal",
-        "primary_reason",
-        "supporting_reasons",
-        "outcome",
-    } <= set(value):
-        supporting = value["supporting_reasons"]
-        if (
-            not isinstance(supporting, list)
-            or len(supporting) > MAX_LEAD_DISPOSITION_SUPPORTING_REASONS
-        ):
-            raise DiscoveryContractError(
-                "Lead disposition has too many supporting reasons"
-            )
-        reasons = (value["primary_reason"], *supporting)
-        for reason in reasons:
-            if not isinstance(reason, dict):
-                raise DiscoveryContractError("Lead disposition reason is malformed")
-            references = reason.get("references")
-            if (
-                not isinstance(references, list)
-                or len(references) > MAX_STRUCTURED_REASON_REFERENCES
-            ):
-                raise DiscoveryContractError(
-                    "structured reason exceeds its reference count bound"
-                )
-            if (
-                len(_canonical_json_bytes(reason))
-                > MAX_STRUCTURED_REASON_CANONICAL_BYTES
-            ):
-                raise DiscoveryContractError(
-                    "structured reason exceeds its canonical byte bound"
-                )
-        if len(raw) > MAX_LEAD_DISPOSITION_CANONICAL_BYTES:
-            raise DiscoveryContractError(
-                "Lead disposition exceeds its canonical byte bound"
-            )
-    return raw
 
 
 def _require_idempotency_key(value: str) -> str:
@@ -599,13 +546,9 @@ class NewsLeadRequest:
             raise DiscoveryContractError(
                 "Lead portfolio functions must be sorted unique typed values"
             )
-        if (
-            not isinstance(self.source_dependencies, tuple)
-            or len(self.source_dependencies) > MAX_NEWS_LEAD_SOURCE_DEPENDENCIES
-            or self.source_dependencies != sorted_dependencies(self.source_dependencies)
-        ):
+        if self.source_dependencies != sorted_dependencies(self.source_dependencies):
             raise DiscoveryContractError(
-                "Lead source dependencies must be bounded canonical values"
+                "Lead source dependencies must be canonical"
             )
         sorted_unique_text(
             self.incompleteness_warnings,
@@ -631,11 +574,6 @@ class NewsLeadRequest:
         )
         _require_utc(self.created_at, field="Lead creation time")
         _require_idempotency_key(self.idempotency_key)
-        if (
-            len(canonical_json_bytes(self.canonical_value()))
-            > MAX_NEWS_LEAD_CANONICAL_BYTES
-        ):
-            raise DiscoveryContractError("News Lead exceeds its canonical byte bound")
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -668,10 +606,7 @@ class NewsLeadRequest:
 
     @property
     def canonical_bytes(self) -> bytes:
-        value = canonical_json_bytes(self.canonical_value())
-        if len(value) > MAX_NEWS_LEAD_CANONICAL_BYTES:
-            raise DiscoveryContractError("News Lead exceeds its canonical byte bound")
-        return value
+        return canonical_json_bytes(self.canonical_value())
 
     @property
     def digest(self) -> str:
@@ -1033,8 +968,6 @@ __all__ = [
     "DiscoverySignalRequest",
     "GateDecisionRequest",
     "LeadDispositionDecisionRequest",
-    "MAX_LEAD_DISPOSITION_CANONICAL_BYTES",
-    "MAX_LEAD_DISPOSITION_SUPPORTING_REASONS",
     "NewsLeadRequest",
     "WatchConditionRequest",
 ]

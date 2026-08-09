@@ -18,19 +18,19 @@ from newsroom.discovery import (
     LeadDispositionOutcome,
     NewsLead,
     NewsLeadId,
-    ReasonBasisClass as DiscoveryReasonBasisClass,
-    ReasonReference as DiscoveryReasonReference,
     SignalLeadAdmissionRequest,
-    StructuredReason as DiscoveryStructuredReason,
 )
-from newsroom.discovery.types import MAX_STRUCTURED_REASON_REFERENCES
 from newsroom.increment6.outcomes import (
     OutcomeContractError,
     PriorityLane,
     PrioritySelection,
     ReasonReference,
 )
-from newsroom.increment6.proposals import WorkItemBinding
+from newsroom.increment5._retrieval_context_core import _retrieval_context_purge_id
+from newsroom.increment5.retrieval_context import (
+    RetrievalContextPurgeReceipt,
+    RetrievalContextRequest,
+)
 from newsroom.increment6.work_items import (
     ContextLeadBinding,
     DecisionLeadBinding,
@@ -44,9 +44,11 @@ from newsroom.increment6.work_items import (
     TriageWorkItemStore,
     TriageWorkItemVersion,
     WatchConditionWorkItemBinding,
+    WorkItemPriorityBinding,
     WorkItemContractError,
 )
 from newsroom.sources import SourceDependency, SourceDependencyKind
+from newsroom.sources import SourceDefinitionId, SourceDefinitionVersionId
 from newsroom.tests import test_increment5d1_hybrid_composer as composer_helpers
 from newsroom.tests import test_increment5d2_retrieval_context as retrieval_helpers
 from newsroom.tests.check_3c_authority_helpers import proof
@@ -60,7 +62,7 @@ from newsroom.tests.discovery_3d_helpers import disposition_request, watch_reque
 
 
 def _id(number: int) -> str:
-    return str(uuid.UUID(int=number))
+    return f"00000000-0000-4000-8000-{number:012x}"
 
 
 def _decision(number: int, *, disposition: int | None = None) -> DecisionLeadBinding:
@@ -69,41 +71,60 @@ def _decision(number: int, *, disposition: int | None = None) -> DecisionLeadBin
     definition_id = _id(number + 200)
     definition_version_id = _id(number + 300)
     disposition_id = _id(number + 400 if disposition is None else disposition)
-    lead = canonical_json_bytes(
-        {
-            "definition_id": definition_id,
-            "definition_version_id": definition_version_id,
-            "lead_id": lead_id,
-            "promoting_gate_decision_id": gate_id,
-        }
+    base = exact_admission_request()
+    lead = replace(
+        base.lead,
+        lead_id=NewsLeadId.parse(lead_id),
+        promoting_gate_decision_id=GateDecisionId.parse(gate_id),
+        definition_id=SourceDefinitionId.parse(definition_id),
+        definition_version_id=SourceDefinitionVersionId.parse(
+            definition_version_id
+        ),
     )
-    decision = canonical_json_bytes(
-        {
-            "decision_id": disposition_id,
-            "decision_ordinal": 1,
-            "lead_id": lead_id,
-            "outcome": "LEAD_QUEUED_FOR_TRIAGE",
-            "previous_decision_id": None,
-        }
+    decision = replace(
+        base.initial_disposition,
+        decision_id=LeadDispositionDecisionId.parse(disposition_id),
+        lead_id=NewsLeadId.parse(lead_id),
+        gate_decision_id=GateDecisionId.parse(gate_id),
     )
     return DecisionLeadBinding(
         lead_id,
-        digest_bytes(lead),
+        lead.digest,
         _id(number + 500),
         1,
         gate_id,
         definition_id,
         definition_version_id,
         disposition_id,
-        digest_bytes(decision),
+        decision.digest,
         _id(number + 600),
         1,
         1,
         None,
         "LEAD_QUEUED_FOR_TRIAGE",
-        lead,
-        decision,
     )
+
+
+def _authority_bytes(
+    decision: DecisionLeadBinding,
+) -> tuple[bytes, bytes]:
+    base = exact_admission_request()
+    lead = replace(
+        base.lead,
+        lead_id=NewsLeadId.parse(decision.lead_id),
+        promoting_gate_decision_id=GateDecisionId.parse(decision.gate_decision_id),
+        definition_id=SourceDefinitionId.parse(decision.definition_id),
+        definition_version_id=SourceDefinitionVersionId.parse(
+            decision.definition_version_id
+        ),
+    )
+    disposition = replace(
+        base.initial_disposition,
+        decision_id=LeadDispositionDecisionId.parse(decision.disposition_id),
+        lead_id=NewsLeadId.parse(decision.lead_id),
+        gate_decision_id=GateDecisionId.parse(decision.gate_decision_id),
+    )
+    return lead.canonical_bytes, disposition.canonical_bytes
 
 
 def _pending(number: int = 900) -> RetrievalInputBinding:
@@ -116,6 +137,45 @@ def _pending(number: int = 900) -> RetrievalInputBinding:
         digest_bytes(request),
         request,
     )
+
+
+class _FixtureSupplementalAuthority:
+    def __init__(
+        self,
+        *,
+        approval_id: str,
+        approval_digest: str,
+        approval_event_id: str,
+        approval_version: int,
+        lineage: tuple[SupplementalLineageBinding, ...],
+    ) -> None:
+        self._approval = (
+            approval_id,
+            approval_digest,
+            approval_event_id,
+            approval_version,
+            "LEAD_SUPPLEMENTAL_DISCOVERY",
+            "REQUEST_SUPPLEMENTAL_DISCOVERY",
+        )
+        self._lineage = lineage
+
+    def verify(
+        self, connection: sqlite3.Connection, proof: SupplementalDiscoveryReentry
+    ) -> None:
+        retained = (
+            proof.source_lead_disposition_id,
+            proof.source_lead_disposition_digest,
+            proof.source_lead_disposition_event_id,
+            proof.source_lead_disposition_aggregate_version,
+            proof.source_lead_disposition_outcome,
+            proof.source_approval_route,
+        )
+        if (
+            retained != self._approval
+            or proof.lineage_bindings != self._lineage
+            or not connection.in_transaction
+        ):
+            raise WorkItemContractError("supplemental approval differs")
 
 
 def _version(item: TriageWorkItem, ordinal: int = 1) -> TriageWorkItemVersion:
@@ -154,7 +214,7 @@ def test_identity_is_permutation_invariant_but_scope_and_initial_queue_sensitive
     assert TriageWorkItem.create((changed, second)).work_item_id != a.work_item_id
 
 
-def test_version_identity_ordinal_priority_backrefs_and_proposal_compatibility() -> (
+def test_version_identity_ordinal_and_compact_priority_backrefs() -> (
     None
 ):
     item = TriageWorkItem.create((_decision(1),))
@@ -162,9 +222,9 @@ def test_version_identity_ordinal_priority_backrefs_and_proposal_compatibility()
     second = _version(item, 2)
     assert first.version_id != second.version_id
     assert second.previous_version_id == first.version_id
-    assert second.proposal_binding == WorkItemBinding(
-        item.work_item_id, second.version_id, second.canonical_digest
-    )
+    assert second.priority.work_identity == item.work_item_id
+    assert second.priority.work_version == second.version_id
+    assert second.priority.basis_count == 1
     assert TriageWorkItemVersion.from_canonical_bytes(second.canonical_bytes) == second
 
 
@@ -279,6 +339,21 @@ def test_public_boundaries_normalise_nested_type_and_canonical_failures() -> Non
     )
     with pytest.raises(WorkItemContractError, match="typed tuple"):
         TriageWorkItem.create((subclass,))
+    with pytest.raises(WorkItemContractError):
+        TriageWorkItem.create((object.__new__(DecisionLeadBinding),))
+    with pytest.raises(WorkItemContractError):
+        RetrievalInputBinding.request_pending(
+            object.__new__(RetrievalContextRequest)
+        )
+    with pytest.raises(WorkItemContractError):
+        WorkItemPriorityBinding.from_selection(object.__new__(PrioritySelection))
+
+    class EvilStr(str):
+        def encode(self, *args, **kwargs):
+            raise RuntimeError("hostile string")
+
+    with pytest.raises(WorkItemContractError):
+        replace(item.decision_leads[0], lead_id=EvilStr(item.decision_leads[0].lead_id))
 
 
 def test_maximum_news_lead_dependency_envelope_round_trips(tmp_path) -> None:
@@ -307,45 +382,11 @@ def test_maximum_news_lead_dependency_envelope_round_trips(tmp_path) -> None:
             lead, admitted.initial_disposition
         )
         item = TriageWorkItem.create((binding,))
-        assert len(item.canonical_bytes) > 262_144
+        assert len(item.canonical_bytes) < 32 * 1_024
         assert TriageWorkItem.from_canonical_bytes(item.canonical_bytes) == item
         assert TriageWorkItemVersion.from_canonical_bytes(
             _version(item).canonical_bytes
         ) == _version(item)
-        with pytest.raises(DiscoveryContractError, match="bounded"):
-            replace(request, source_dependencies=dependencies + (dependencies[0],))
-
-
-def test_maximum_disposition_reason_envelope_round_trips_work_item(tmp_path) -> None:
-    references = tuple(
-        DiscoveryReasonReference("fixture", f"reference-{index:05d}")
-        for index in range(MAX_STRUCTURED_REASON_REFERENCES)
-    )
-    reason = DiscoveryStructuredReason(
-        "FIXTURE.MAXIMUM_REFERENCES",
-        DiscoveryReasonBasisClass.DETERMINISTIC_OBSERVATION,
-        references,
-        "The maximum retained reference set supports this decision.",
-    )
-    with open_discovery_system(tmp_path / "maximum-disposition.sqlite3") as system:
-        seed_check_lineage(system)
-        admitted = system.discovery.admit_signal_to_lead(
-            exact_admission_request(), proof=proof()
-        )
-        assert admitted.lead is not None and admitted.initial_disposition is not None
-        request = replace(admitted.initial_disposition.request, primary_reason=reason)
-        disposition = replace(
-            admitted.initial_disposition,
-            request=request,
-            canonical_digest=request.digest,
-        )
-        binding = DecisionLeadBinding.from_authority(admitted.lead, disposition)
-    item = TriageWorkItem.create((binding,))
-    version = _version(item)
-    assert TriageWorkItem.from_canonical_bytes(item.canonical_bytes) == item
-    assert (
-        TriageWorkItemVersion.from_canonical_bytes(version.canonical_bytes) == version
-    )
 
 
 def test_maximum_lead_scopes_and_priority_envelope_round_trip() -> None:
@@ -359,7 +400,6 @@ def test_maximum_lead_scopes_and_priority_envelope_round_trip() -> None:
             value.gate_decision_id,
             value.definition_id,
             value.definition_version_id,
-            value.lead_bytes,
         )
         for value in (_decision(index) for index in range(33, 65))
     )
@@ -367,7 +407,7 @@ def test_maximum_lead_scopes_and_priority_envelope_round_trip() -> None:
     version_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{item.work_item_id}|1"))
     references = tuple(
         ReasonReference("fixture", f"priority-{index:05d}")
-        for index in range(30_000)
+        for index in range(256)
     )
     version = TriageWorkItemVersion.create(
         work_item_id=item.work_item_id,
@@ -384,12 +424,20 @@ def test_maximum_lead_scopes_and_priority_envelope_round_trip() -> None:
         ),
     )
     assert TriageWorkItemVersion.from_canonical_bytes(version.canonical_bytes) == version
-    with pytest.raises(OutcomeContractError, match="typed exact"):
-        PrioritySelection(
-            item.work_item_id,
-            version_id,
-            PriorityLane.ROUTINE,
-            references + (ReasonReference("fixture", "priority-over-bound"),),
+    with pytest.raises(WorkItemContractError, match="exceeds Work Item bound"):
+        TriageWorkItemVersion.create(
+            work_item_id=item.work_item_id,
+            ordinal=1,
+            previous_version_id=None,
+            decision_leads=decisions,
+            context_leads=contexts,
+            retrieval=_pending(),
+            priority=PrioritySelection(
+                item.work_item_id,
+                version_id,
+                PriorityLane.ROUTINE,
+                references + (ReasonReference("fixture", "priority-over-bound"),),
+            ),
         )
 
 
@@ -414,13 +462,14 @@ def _store(
         connection.execute(statement)
     for index, decision in enumerate(decisions):
         signal = f"signal-{index}"
+        lead_bytes, disposition_bytes = _authority_bytes(decision)
         connection.execute(
             "INSERT INTO news_leads VALUES(?,?,?,?,?,?)",
             (
                 decision.lead_id,
                 signal,
-                decision.lead_digest,
-                decision.lead_bytes,
+                digest_bytes(lead_bytes),
+                lead_bytes,
                 decision.lead_event_id,
                 decision.lead_aggregate_version,
             ),
@@ -437,9 +486,9 @@ def _store(
             "INSERT INTO lead_disposition_decisions VALUES(?,?,?,?,?,?,?,?,?)",
             (
                 decision.disposition_id,
-                decision.disposition_digest,
+                digest_bytes(disposition_bytes),
                 decision.disposition_outcome,
-                decision.disposition_bytes,
+                disposition_bytes,
                 decision.disposition_event_id,
                 decision.disposition_aggregate_version,
                 decision.disposition_ordinal,
@@ -498,13 +547,14 @@ def test_store_exact_replay_cas_stale_and_active_overlap() -> None:
         ),
     )
     replacement = _decision(1, disposition=999)
+    _, replacement_disposition_bytes = _authority_bytes(replacement)
     connection.execute(
         "INSERT INTO lead_disposition_decisions VALUES(?,?,?,?,?,?,?,?,?)",
         (
             replacement.disposition_id,
-            replacement.disposition_digest,
+            digest_bytes(replacement_disposition_bytes),
             replacement.disposition_outcome,
-            replacement.disposition_bytes,
+            replacement_disposition_bytes,
             replacement.disposition_event_id,
             replacement.disposition_aggregate_version,
             replacement.disposition_ordinal,
@@ -547,7 +597,7 @@ def test_direct_unusable_overlap_does_not_brick_restart(tmp_path) -> None:
         ),
     )
     connection.execute(
-        "INSERT INTO triage_work_item_versions VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO triage_work_item_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             competing_version.version_id,
             competing_version.schema_identity,
@@ -556,6 +606,8 @@ def test_direct_unusable_overlap_does_not_brick_restart(tmp_path) -> None:
             None,
             competing.decision_scope_digest,
             competing_version.retrieval.state.value,
+            None,
+            None,
             competing_version.canonical_bytes,
             competing_version.canonical_digest,
             "1970-01-01T00:00:00Z",
@@ -672,6 +724,37 @@ def test_actual_retrieval_journal_is_exact_indexed_and_tamper_or_purge_fails(
     )
     with pytest.raises(WorkItemContractError, match="retrieval_not_complete"):
         pending_store.require_usable_current(pending_item.work_item_id)
+    source_journal = sqlite3.connect(builder.journal.path)
+    completed_row = source_journal.execute(
+        "SELECT * FROM increment5d2_retrieval_contexts WHERE idempotency_key=?",
+        (request.idempotency_key,),
+    ).fetchone()
+    source_journal.close()
+    assert completed_row is not None
+    pending_connection.execute(
+        "INSERT INTO retrieval_authority.increment5d2_retrieval_contexts "
+        "VALUES(?,?,?,?)",
+        completed_row,
+    )
+    completed_authority = RetrievalContextAuthority(
+        wrong_builder.journal.path,
+        {request.request_digest: (request, receipt)},
+    )
+    completed_store = TriageWorkItemStore(
+        pending_connection, retrieval_authority=completed_authority
+    )
+    completed_version = replace(
+        _version(pending_item, 2),
+        retrieval=RetrievalInputBinding.from_receipt(request, receipt),
+    )
+    assert completed_store.append_version(
+        pending_version.version_id,
+        pending_version.canonical_digest,
+        completed_version,
+    ) == completed_version
+    assert completed_store.require_usable_current(pending_item.work_item_id) == (
+        completed_version
+    )
     pending_database = tmp_path / "pending-work-items.sqlite3"
     pending_target = sqlite3.connect(pending_database)
     pending_connection.backup(pending_target)
@@ -681,10 +764,10 @@ def test_actual_retrieval_journal_is_exact_indexed_and_tamper_or_purge_fails(
         pending_database, isolation_level=None
     )
     restarted_pending = TriageWorkItemStore(
-        restarted_pending_connection, retrieval_authority=pending_authority
+        restarted_pending_connection, retrieval_authority=completed_authority
     )
     assert restarted_pending.current_version(pending_item.work_item_id) == (
-        pending_version
+        completed_version
     )
     restarted_pending_connection.close()
 
@@ -825,25 +908,80 @@ def test_actual_retrieval_journal_is_exact_indexed_and_tamper_or_purge_fails(
         (request.idempotency_key,),
     ).fetchone()
     assert retained_purge is not None
+    first_purge = RetrievalContextPurgeReceipt.from_canonical_bytes(
+        bytes(retained_purge[5])
+    )
+    second_reason = "SECOND_RIGHTS_WITHDRAWAL_PASSAGE"
+    second_purge_id = _retrieval_context_purge_id(
+        idempotency_key=first_purge.idempotency_key,
+        context_id=first_purge.context_id,
+        request_digest=first_purge.request_digest,
+        prior_receipt_digest=first_purge.prior_receipt_digest,
+        purged_derivative_identities=first_purge.purged_derivative_identities,
+        context_derivative_identities=first_purge.context_derivative_identities,
+        reason_code=second_reason,
+        raw_context_bytes_deleted_in_event=False,
+    )
+    second_purge = replace(
+        first_purge,
+        purge_id=second_purge_id,
+        reason_code=second_reason,
+        raw_context_bytes_deleted_in_event=False,
+    )
+    journal_connection.execute(
+        "INSERT INTO increment5d2_retrieval_context_purges VALUES(?,?,?,?,?,?)",
+        (
+            second_purge.purge_id,
+            second_purge.idempotency_key,
+            second_purge.request_digest,
+            second_purge.prior_receipt_digest,
+            second_purge.receipt_digest,
+            second_purge.canonical_bytes,
+        ),
+    )
+    journal_connection.commit()
+    multiple_connection = sqlite3.connect(work_database, isolation_level=None)
+    TriageWorkItemStore(
+        multiple_connection, retrieval_authority=refreshed_authority
+    )
+    multiple_connection.close()
+
+    journal_connection.execute(
+        "INSERT INTO increment5d2_retrieval_contexts VALUES(?,?,?,?)",
+        completed_row,
+    )
+    journal_connection.commit()
+    contradictory_connection = sqlite3.connect(
+        work_database, isolation_level=None
+    )
+    with pytest.raises(WorkItemContractError, match="retrieval"):
+        TriageWorkItemStore(
+            contradictory_connection, retrieval_authority=refreshed_authority
+        )
+    contradictory_connection.close()
+    journal_connection.execute(
+        "DELETE FROM increment5d2_retrieval_contexts WHERE idempotency_key=?",
+        (request.idempotency_key,),
+    )
     journal_connection.execute(
         "INSERT INTO increment5d2_retrieval_context_purges VALUES(?,?,?,?,?,?)",
         (_id(4999), *retained_purge[1:]),
     )
     journal_connection.commit()
-    duplicate_connection = sqlite3.connect(work_database, isolation_level=None)
+    malformed_connection = sqlite3.connect(work_database, isolation_level=None)
     with pytest.raises(WorkItemContractError, match="retrieval"):
         TriageWorkItemStore(
-            duplicate_connection, retrieval_authority=refreshed_authority
+            malformed_connection, retrieval_authority=refreshed_authority
         )
-    duplicate_connection.close()
+    malformed_connection.close()
     journal_connection.execute(
         "DELETE FROM increment5d2_retrieval_context_purges WHERE purge_id=?",
         (_id(4999),),
     )
     journal_connection.execute(
         "UPDATE increment5d2_retrieval_context_purges SET purge_receipt_bytes=? "
-        "WHERE idempotency_key=?",
-        (b"{}", request.idempotency_key),
+        "WHERE purge_id=?",
+        (b"{}", second_purge.purge_id),
     )
     journal_connection.commit()
     journal_connection.close()
@@ -991,7 +1129,7 @@ def test_sql_successor_scope_retarget_is_rejected(tmp_path) -> None:
         ),
     )
     connection.execute(
-        "INSERT INTO triage_work_item_versions VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO triage_work_item_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             retargeted.version_id,
             retargeted.schema_identity,
@@ -1000,6 +1138,8 @@ def test_sql_successor_scope_retarget_is_rejected(tmp_path) -> None:
             retargeted.previous_version_id,
             item.decision_scope_digest,
             retargeted.retrieval.state.value,
+            None,
+            None,
             retargeted.canonical_bytes,
             retargeted.canonical_digest,
             "1970-01-01T00:00:00Z",
@@ -1071,6 +1211,28 @@ def test_two_connection_lost_response_replays_survive_restart(tmp_path) -> None:
     with pytest.raises(WorkItemContractError, match="chain or head"):
         restarted.create_or_replay(item, first)
     restarted_connection.close()
+
+
+def test_exact_replay_checks_the_retained_current_chain_immediately() -> None:
+    decision = _decision(1)
+    connection, store = _store((decision,))
+    item = TriageWorkItem.create((decision,))
+    first = _version(item)
+    second = _version(item, 2)
+    store.create_or_replay(item, first)
+    store.append_version(first.version_id, first.canonical_digest, second)
+
+    corrupt = b"{}"
+    connection.execute("DROP TRIGGER immutable_triage_work_item_versions_update")
+    connection.execute(
+        "UPDATE triage_work_item_versions SET canonical_bytes=?,canonical_digest=? "
+        "WHERE version_id=?",
+        (corrupt, digest_bytes(corrupt), second.version_id),
+    )
+    with pytest.raises(WorkItemContractError):
+        store.create_or_replay(item, first)
+    with pytest.raises(WorkItemContractError):
+        store.append_version(first.version_id, first.canonical_digest, second)
 
 
 def test_restart_requires_exact_item_version_and_head_coverage(tmp_path) -> None:
@@ -1188,11 +1350,13 @@ def test_watch_reentry_requires_exact_causal_successor_and_matching_condition(
             version_id=third_id,
             ordinal=3,
             previous_version_id=second.version_id,
-            priority=PrioritySelection(
-                item.work_item_id,
-                third_id,
-                PriorityLane.ROUTINE,
-                (ReasonReference("fixture", "watch-reuse"),),
+            priority=WorkItemPriorityBinding.from_selection(
+                PrioritySelection(
+                    item.work_item_id,
+                    third_id,
+                    PriorityLane.ROUTINE,
+                    (ReasonReference("fixture", "watch-reuse"),),
+                )
             ),
         )
         with pytest.raises(WorkItemContractError, match="already claimed"):
@@ -1209,15 +1373,11 @@ def test_watch_reentry_requires_exact_causal_successor_and_matching_condition(
                 watch, admitted.initial_disposition
             )
 
-        watch_value = watch_binding.canonical_value()["watch"]
-        assert isinstance(watch_value, dict)
-        deadline_value = dict(watch_value)
-        deadline_value["expected_occurrence"] = "Timer deadline elapsed."
-        deadline_bytes = canonical_json_bytes(deadline_value)
         deadline_binding = replace(
             watch_binding,
-            watch_bytes=deadline_bytes,
-            watch_condition_digest=digest_bytes(deadline_bytes),
+            allowed_reentry_kinds=tuple(
+                sorted((*watch_binding.allowed_reentry_kinds, "DEADLINE"))
+            ),
         )
         assert (
             replace(
@@ -1226,13 +1386,11 @@ def test_watch_reentry_requires_exact_causal_successor_and_matching_condition(
             is ReentryKind.DEADLINE
         )
 
-        operator_value = dict(watch_value)
-        operator_value["operator_review_condition"] = "Operator confirms retry."
-        operator_bytes = canonical_json_bytes(operator_value)
         operator_binding = replace(
             watch_binding,
-            watch_bytes=operator_bytes,
-            watch_condition_digest=digest_bytes(operator_bytes),
+            allowed_reentry_kinds=tuple(
+                sorted((*watch_binding.allowed_reentry_kinds, "OPERATOR_CONDITION"))
+            ),
         )
         assert (
             replace(
@@ -1243,22 +1401,19 @@ def test_watch_reentry_requires_exact_causal_successor_and_matching_condition(
             is ReentryKind.OPERATOR_CONDITION
         )
 
-        transition_value = dict(watch_value)
-        transition_value["resume_transition_kinds"] = ["REVISED"]
-        transition_bytes = canonical_json_bytes(transition_value)
-        transition_binding = replace(
-            watch_binding,
-            watch_bytes=transition_bytes,
-            watch_condition_digest=digest_bytes(transition_bytes),
-        )
+        transition_binding = replace(watch_binding, observable_transition=True)
         with pytest.raises(WorkItemContractError, match="new Lead"):
             replace(second, watch=transition_binding)
-        with pytest.raises(WorkItemContractError, match="scalars"):
-            replace(watch_binding, lead_id=_id(9992))
-        with pytest.raises(WorkItemContractError, match="source disposition bytes"):
-            replace(watch_binding, source_disposition_ordinal=1)
-        connection.execute(
-            "INSERT INTO triage_work_item_versions VALUES(?,?,?,?,?,?,?,?,?,?)",
+        with pytest.raises(WorkItemContractError, match="does not belong"):
+            replace(second, watch=replace(watch_binding, lead_id=_id(9992)))
+        with pytest.raises(WorkItemContractError, match="immediate successor"):
+            replace(
+                second,
+                watch=replace(watch_binding, source_disposition_ordinal=1),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            connection.execute(
+            "INSERT INTO triage_work_item_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 third.version_id,
                 third.schema_identity,
@@ -1267,20 +1422,16 @@ def test_watch_reentry_requires_exact_causal_successor_and_matching_condition(
                 third.previous_version_id,
                 item.decision_scope_digest,
                 third.retrieval.state.value,
+                TriageWorkItemStore._causal_digests(third)[0],
+                TriageWorkItemStore._causal_digests(third)[1],
                 third.canonical_bytes,
                 third.canonical_digest,
                 "1970-01-01T00:00:00Z",
             ),
-        )
-        connection.execute(
-            "UPDATE triage_work_item_heads SET current_version_id=?,"
-            "current_ordinal=?,current_version_digest=? WHERE work_item_id=?",
-            (third.version_id, 3, third.canonical_digest, item.work_item_id),
-        )
+            )
         connection.close()
         reopened_connection = sqlite3.connect(database, isolation_level=None)
-        with pytest.raises(WorkItemContractError, match="not unique"):
-            TriageWorkItemStore(reopened_connection)
+        TriageWorkItemStore(reopened_connection)
         reopened_connection.close()
 
 
@@ -1352,8 +1503,20 @@ def test_actual_supplemental_lineage_persists_replays_and_restarts(tmp_path) -> 
     target_decision = DecisionLeadBinding.from_authority(
         target_admitted.lead, target_admitted.initial_disposition
     )
+    approval_id = _id(9501)
+    approval_digest = digest_bytes(b"fixture-supplemental-approval")
+    approval_event_id = _id(9502)
+    approval_authority = _FixtureSupplementalAuthority(
+        approval_id=approval_id,
+        approval_digest=approval_digest,
+        approval_event_id=approval_event_id,
+        approval_version=1,
+        lineage=lineage,
+    )
     connection = sqlite3.connect(database, isolation_level=None)
-    store = TriageWorkItemStore(connection)
+    store = TriageWorkItemStore(
+        connection, supplemental_authority=approval_authority
+    )
     source_item = TriageWorkItem.create((source_decision,))
     source_version = _version(source_item)
     store.create_or_replay(source_item, source_version)
@@ -1365,13 +1528,12 @@ def test_actual_supplemental_lineage_persists_replays_and_restarts(tmp_path) -> 
         source_item.work_item_id,
         source_version.version_id,
         source_version.canonical_digest,
-        source_decision.disposition_id,
-        source_decision.disposition_digest,
-        source_decision.disposition_bytes,
-        source_decision.disposition_event_id,
-        source_decision.disposition_aggregate_version,
-        source_decision.disposition_outcome,
-        None,
+        approval_id,
+        approval_digest,
+        approval_event_id,
+        1,
+        "LEAD_SUPPLEMENTAL_DISCOVERY",
+        "REQUEST_SUPPLEMENTAL_DISCOVERY",
         lineage[0].identifier,
         lineage[1].identifier,
         lineage[2].identifier,
@@ -1407,37 +1569,55 @@ def test_actual_supplemental_lineage_persists_replays_and_restarts(tmp_path) -> 
         replace(proof_value, source_disposition_authorises_trigger=True)
     with pytest.raises(WorkItemContractError, match="lineage"):
         replace(proof_value, lineage_bindings=lineage[:-1])
-    with pytest.raises(WorkItemContractError, match="parent"):
-        replace(lineage[2], parent_id=_id(9990))
-    sparse = canonical_json_bytes(
-        {"outcome_id": lineage[2].identifier, "request_id": lineage[2].parent_id}
-    )
-    with pytest.raises(WorkItemContractError, match="schema"):
-        replace(lineage[2], canonical_bytes=sparse, digest=digest_bytes(sparse))
-    trigger_value = lineage[0].canonical_value()["record"]
-    assert isinstance(trigger_value, dict)
-    changed_trigger_value = dict(trigger_value)
-    changed_trigger_value["trigger_version"] = "decoy-version"
-    changed_trigger_bytes = canonical_json_bytes(changed_trigger_value)
-    changed_trigger = replace(
-        lineage[0],
-        canonical_bytes=changed_trigger_bytes,
-        digest=digest_bytes(changed_trigger_bytes),
-    )
-    with pytest.raises(WorkItemContractError, match="Trigger differs"):
+    with pytest.raises(WorkItemContractError, match="lineage"):
         replace(
             proof_value,
-            lineage_bindings=(changed_trigger, *lineage[1:]),
+            lineage_bindings=(
+                lineage[0],
+                lineage[1],
+                replace(lineage[2], parent_id=_id(9990)),
+                *lineage[3:],
+            ),
         )
+    with pytest.raises(WorkItemContractError, match="route"):
+        replace(proof_value, source_approval_route="RESUME_ON_WATCH")
     with pytest.raises(WorkItemContractError, match="target"):
         replace(
             target_version,
             supplemental_reentry=replace(proof_value, target_version_id=_id(9991)),
         )
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(WorkItemContractError, match="approval differs"):
+            approval_authority.verify(
+                connection,
+                replace(proof_value, source_lead_disposition_id=_id(9992)),
+            )
+        with pytest.raises(WorkItemContractError, match="approval differs"):
+            approval_authority.verify(
+                connection,
+                replace(
+                    proof_value,
+                    lineage_bindings=(
+                        lineage[0],
+                        replace(lineage[1], digest=digest_bytes(b"forged request")),
+                        *lineage[2:],
+                    ),
+                ),
+            )
+    finally:
+        connection.execute("ROLLBACK")
     connection.close()
 
+    missing_provider_connection = sqlite3.connect(database, isolation_level=None)
+    with pytest.raises(WorkItemContractError, match="authority_unavailable"):
+        TriageWorkItemStore(missing_provider_connection)
+    missing_provider_connection.close()
+
     reopened_connection = sqlite3.connect(database, isolation_level=None)
-    reopened = TriageWorkItemStore(reopened_connection)
+    reopened = TriageWorkItemStore(
+        reopened_connection, supplemental_authority=approval_authority
+    )
     assert reopened.load_version(target_version.version_id) == target_version
     reopened_connection.close()
     corrupt = sqlite3.connect(database, isolation_level=None)

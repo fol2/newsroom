@@ -198,6 +198,8 @@ TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS: tuple[str, ...] = (
         previous_version_id TEXT REFERENCES triage_work_item_versions(version_id),
         decision_scope_digest TEXT NOT NULL,
         retrieval_outcome TEXT NOT NULL,
+        watch_causality_digest TEXT UNIQUE,
+        supplemental_causality_digest TEXT UNIQUE,
         canonical_bytes BLOB NOT NULL,
         canonical_digest TEXT NOT NULL UNIQUE,
         recorded_at TEXT NOT NULL,
@@ -225,6 +227,12 @@ TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS: tuple[str, ...] = (
             WHERE i.work_item_id=NEW.work_item_id
               AND i.decision_scope_digest=NEW.decision_scope_digest)
         BEGIN SELECT RAISE(ABORT,'Work Item Version scope differs'); END""",
+    """CREATE TRIGGER triage_work_item_version_causality_guard BEFORE INSERT ON triage_work_item_versions
+        WHEN (json_type(CAST(NEW.canonical_bytes AS TEXT),'$.watch')!='null')
+             !=(NEW.watch_causality_digest IS NOT NULL)
+          OR (json_type(CAST(NEW.canonical_bytes AS TEXT),'$.supplemental_reentry')!='null')
+             !=(NEW.supplemental_causality_digest IS NOT NULL)
+        BEGIN SELECT RAISE(ABORT,'Work Item Version causality differs'); END""",
     """CREATE TRIGGER retained_triage_work_item_versions_delete BEFORE DELETE ON triage_work_item_versions
         BEGIN SELECT RAISE(ABORT,'retained Triage Work Item Version'); END""",
     """CREATE TRIGGER triage_work_item_head_insert_guard BEFORE INSERT ON triage_work_item_heads

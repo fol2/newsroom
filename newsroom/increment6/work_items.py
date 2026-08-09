@@ -15,11 +15,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Self
+from typing import Protocol, Self
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.checks import CheckOutcome, CheckRequest, TriggerRef
-from newsroom.checks.check_models import MAX_CHECK_OUTCOME_CANONICAL_BYTES
 from newsroom.discovery import (
     DiscoverySignal,
     GateDecision,
@@ -28,13 +27,6 @@ from newsroom.discovery import (
     NewsLead,
     WatchCondition,
 )
-from newsroom.discovery.models import (
-    MAX_LEAD_DISPOSITION_CANONICAL_BYTES,
-    MAX_LEAD_DISPOSITION_SUPPORTING_REASONS,
-    MAX_NEWS_LEAD_CANONICAL_BYTES,
-    MAX_NEWS_LEAD_SOURCE_DEPENDENCIES,
-)
-from newsroom.discovery.types import MAX_STRUCTURED_REASON_REFERENCES
 from newsroom.increment5._retrieval_context_core import (
     RetrievalContextError,
     RetrievalContextPurgeReceipt,
@@ -46,11 +38,9 @@ from newsroom.increment5.retrieval_context import (
     RetrievalContextRequest,
 )
 from newsroom.increment6.outcomes import (
-    MAX_PRIORITY_CANONICAL_BYTES,
-    MAX_PRIORITY_REFERENCES,
+    PriorityLane,
     PrioritySelection,
 )
-from newsroom.increment6.proposals import WorkItemBinding
 
 TRIAGE_WORK_ITEM = "newsroom.increment6.triage-work-item.v1"
 TRIAGE_WORK_ITEM_VERSION = "newsroom.increment6.triage-work-item-version.v1"
@@ -61,36 +51,11 @@ SUPPLEMENTAL_DISCOVERY_REENTRY = "NEW_GOVERNED_DISCOVERY_LINEAGE_ONLY"
 
 MAX_DECISION_LEADS = 32
 MAX_CONTEXT_LEADS = 32
-# A News Lead may retain 160 maximum-sized (2 KiB) source dependencies.  A
-# Work Item may bind 32 decision and 32 context Leads, so the consumer envelope
-# is derived from that producer envelope rather than being an unrelated cap.
-MAX_SOURCE_DEPENDENCY_BYTES = 2_048
-MAX_LEAD_BINDING_BYTES = MAX_NEWS_LEAD_CANONICAL_BYTES + 64 * 1_024
-MAX_EMBEDDED_RECORD_BYTES = max(
-    MAX_CHECK_OUTCOME_CANONICAL_BYTES,
-    MAX_LEAD_DISPOSITION_CANONICAL_BYTES,
-)
-MAX_WORK_ITEM_DISPOSITION_REASONS = MAX_LEAD_DISPOSITION_SUPPORTING_REASONS
-MAX_WORK_ITEM_DISPOSITION_BYTES = MAX_LEAD_DISPOSITION_CANONICAL_BYTES
-MAX_VERSION_BYTES = (
-    MAX_DECISION_LEADS
-    * (MAX_NEWS_LEAD_CANONICAL_BYTES + MAX_WORK_ITEM_DISPOSITION_BYTES)
-    + MAX_CONTEXT_LEADS * MAX_NEWS_LEAD_CANONICAL_BYTES
-    + MAX_PRIORITY_CANONICAL_BYTES
-    + 10 * MAX_EMBEDDED_RECORD_BYTES
-    + 1 * 1_024 * 1_024
-)
-MAX_CANONICAL_NODES = (
-    (MAX_DECISION_LEADS + MAX_CONTEXT_LEADS)
-    * MAX_NEWS_LEAD_SOURCE_DEPENDENCIES
-    * 8
-    + MAX_DECISION_LEADS
-    * (MAX_WORK_ITEM_DISPOSITION_REASONS + 1)
-    * MAX_STRUCTURED_REASON_REFERENCES
-    * 4
-    + MAX_PRIORITY_REFERENCES * 5
-    + 131_072
-)
+MAX_WORK_ITEM_BYTES = 32 * 1_024
+MAX_VERSION_BYTES = 384 * 1_024
+MAX_PRIORITY_INPUT_BYTES = 64 * 1_024
+MAX_PRIORITY_INPUT_REFERENCES = 256
+MAX_CANONICAL_NODES = 131_072
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
@@ -144,7 +109,18 @@ def _exact_int(
     return value
 
 
-def _decode(raw: bytes, *, maximum: int = MAX_VERSION_BYTES) -> dict[str, object]:
+def _text(value: object, field: str) -> str:
+    if type(value) is not str:
+        raise WorkItemContractError(f"{field} must be exact text")
+    return value
+
+
+def _decode(
+    raw: bytes,
+    *,
+    maximum: int = MAX_VERSION_BYTES,
+    maximum_nodes: int = MAX_CANONICAL_NODES,
+) -> dict[str, object]:
     if type(raw) is not bytes or not raw or len(raw) > maximum:
         raise WorkItemContractError("canonical input is not bounded immutable bytes")
 
@@ -173,7 +149,7 @@ def _decode(raw: bytes, *, maximum: int = MAX_VERSION_BYTES) -> dict[str, object
     while pending:
         current, depth = pending.pop()
         nodes += 1
-        if depth > 32 or nodes > MAX_CANONICAL_NODES:
+        if depth > 32 or nodes > maximum_nodes:
             raise WorkItemContractError("canonical input exceeds structural bounds")
         if isinstance(current, float):
             raise WorkItemContractError("canonical input contains a float")
@@ -211,36 +187,14 @@ def _canonical(value: object, name: str) -> bytes:
         raise WorkItemContractError(f"{name} cannot be canonicalised") from exc
 
 
-def _retained_digest(value: object, expected: str, name: str) -> str:
-    if type(value) is not bytes or not value or len(value) > MAX_EMBEDDED_RECORD_BYTES:
+def _retained_digest(
+    value: object, expected: str, maximum: int, name: str
+) -> str:
+    if type(value) is not bytes or not value or len(value) > maximum:
         raise WorkItemContractError(f"{name} must be bounded immutable bytes")
     if digest_bytes(value) != expected:
         raise WorkItemContractError(f"{name} digest differs")
     return expected
-
-
-def _validate_disposition_envelope(
-    value: Mapping[str, object], *, name: str
-) -> None:
-    supporting = value.get("supporting_reasons")
-    primary = value.get("primary_reason")
-    if supporting is None and primary is None:
-        return
-    if (
-        type(supporting) is not list
-        or len(supporting) > MAX_WORK_ITEM_DISPOSITION_REASONS
-        or type(primary) is not dict
-    ):
-        raise WorkItemContractError(f"{name} reasons exceed bound")
-    for reason in (primary, *supporting):
-        if type(reason) is not dict:
-            raise WorkItemContractError(f"{name} reason is malformed")
-        references = reason.get("references")
-        if (
-            type(references) is not list
-            or len(references) > MAX_STRUCTURED_REASON_REFERENCES
-        ):
-            raise WorkItemContractError(f"{name} reason references exceed bound")
 
 
 def _bounded_utf8(value: object, maximum: int, name: str) -> str:
@@ -255,17 +209,6 @@ def _bounded_utf8(value: object, maximum: int, name: str) -> str:
     return value
 
 
-def _priority(value: object) -> PrioritySelection:
-    if type(value) is not dict:
-        raise WorkItemContractError("Priority Selection must be an object")
-    try:
-        return PrioritySelection.from_mapping(value)
-    except WorkItemContractError:
-        raise
-    except Exception as exc:
-        raise WorkItemContractError("Priority Selection is invalid") from exc
-
-
 def _authority_record(value: object, expected: type[object], name: str) -> None:
     if type(value) is not expected:
         raise WorkItemContractError(f"{name} requires an exact authority record")
@@ -277,6 +220,20 @@ def _authority_record(value: object, expected: type[object], name: str) -> None:
         raise WorkItemContractError(f"{name} authority record is invalid") from exc
     if type(raw) is not bytes or digest_bytes(raw) != retained_digest:
         raise WorkItemContractError(f"{name} authority record differs")
+
+
+def _retained_request(raw: object, digest: object, name: str) -> dict[str, object]:
+    if type(raw) is not bytes or type(digest) is not str:
+        raise WorkItemContractError(f"{name} retained row is malformed")
+    if digest_bytes(raw) != digest:
+        raise WorkItemContractError(f"{name} retained digest differs")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+        if type(value) is not dict or canonical_json_bytes(value) != raw:
+            raise WorkItemContractError(f"{name} retained bytes are not canonical")
+        return value
+    except Exception as exc:
+        raise WorkItemContractError(f"{name} retained bytes are invalid") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,8 +252,6 @@ class DecisionLeadBinding:
     disposition_ordinal: int
     previous_disposition_id: str | None
     disposition_outcome: str
-    lead_bytes: bytes
-    disposition_bytes: bytes
 
     @classmethod
     def from_authority(
@@ -327,8 +282,6 @@ class DecisionLeadBinding:
             if disposition.request.previous_decision_id is None
             else str(disposition.request.previous_decision_id),
             disposition.request.outcome.value,
-            lead.request.canonical_bytes,
-            disposition.request.canonical_bytes,
         )
 
     def __post_init__(self) -> None:
@@ -358,29 +311,6 @@ class DecisionLeadBinding:
             self.previous_disposition_id is None
         ):
             raise WorkItemContractError("Lead disposition predecessor differs")
-        _retained_digest(self.lead_bytes, self.lead_digest, "Lead binding")
-        _retained_digest(
-            self.disposition_bytes,
-            self.disposition_digest,
-            "Lead disposition binding",
-        )
-        lead = _decode(self.lead_bytes)
-        disposition = _decode(self.disposition_bytes)
-        _validate_disposition_envelope(disposition, name="Lead disposition")
-        if (
-            lead.get("lead_id") != self.lead_id
-            or lead.get("promoting_gate_decision_id") != self.gate_decision_id
-            or lead.get("definition_id") != self.definition_id
-            or lead.get("definition_version_id") != self.definition_version_id
-            or disposition.get("decision_id") != self.disposition_id
-            or disposition.get("lead_id") != self.lead_id
-            or disposition.get("decision_ordinal") != self.disposition_ordinal
-            or disposition.get("previous_decision_id") != self.previous_disposition_id
-            or disposition.get("outcome") != self.disposition_outcome
-        ):
-            raise WorkItemContractError(
-                "Lead binding scalars differ from canonical bytes"
-            )
 
     def stable_lead_value(self) -> tuple[object, ...]:
         return (
@@ -391,7 +321,6 @@ class DecisionLeadBinding:
             self.gate_decision_id,
             self.definition_id,
             self.definition_version_id,
-            self.lead_bytes,
         )
 
     def canonical_value(self) -> dict[str, object]:
@@ -410,8 +339,6 @@ class DecisionLeadBinding:
             "disposition_ordinal": self.disposition_ordinal,
             "previous_disposition_id": self.previous_disposition_id,
             "disposition_outcome": self.disposition_outcome,
-            "lead": _decode(self.lead_bytes),
-            "disposition": _decode(self.disposition_bytes),
         }
 
     @classmethod
@@ -431,21 +358,19 @@ class DecisionLeadBinding:
             "disposition_ordinal",
             "previous_disposition_id",
             "disposition_outcome",
-            "lead",
-            "disposition",
         }
         item = _exact(value, fields, "decision Lead binding")
         return cls(
-            str(item["lead_id"]),
-            str(item["lead_digest"]),
-            str(item["lead_event_id"]),
+            _text(item["lead_id"], "lead_id"),
+            _text(item["lead_digest"], "lead_digest"),
+            _text(item["lead_event_id"], "lead_event_id"),
             _exact_int(item["lead_aggregate_version"], "lead_aggregate_version"),
-            str(item["gate_decision_id"]),
-            str(item["definition_id"]),
-            str(item["definition_version_id"]),
-            str(item["disposition_id"]),
-            str(item["disposition_digest"]),
-            str(item["disposition_event_id"]),
+            _text(item["gate_decision_id"], "gate_decision_id"),
+            _text(item["definition_id"], "definition_id"),
+            _text(item["definition_version_id"], "definition_version_id"),
+            _text(item["disposition_id"], "disposition_id"),
+            _text(item["disposition_digest"], "disposition_digest"),
+            _text(item["disposition_event_id"], "disposition_event_id"),
             _exact_int(
                 item["disposition_aggregate_version"],
                 "disposition_aggregate_version",
@@ -453,10 +378,8 @@ class DecisionLeadBinding:
             _exact_int(item["disposition_ordinal"], "disposition_ordinal"),
             None
             if item["previous_disposition_id"] is None
-            else str(item["previous_disposition_id"]),
-            str(item["disposition_outcome"]),
-            _canonical(item["lead"], "Lead"),
-            _canonical(item["disposition"], "Lead disposition"),
+            else _text(item["previous_disposition_id"], "previous_disposition_id"),
+            _text(item["disposition_outcome"], "disposition_outcome"),
         )
 
 
@@ -469,7 +392,6 @@ class ContextLeadBinding:
     gate_decision_id: str
     definition_id: str
     definition_version_id: str
-    lead_bytes: bytes
 
     @classmethod
     def from_authority(cls, lead: NewsLead) -> Self:
@@ -482,7 +404,6 @@ class ContextLeadBinding:
             str(lead.request.promoting_gate_decision_id),
             str(lead.request.definition_id),
             str(lead.request.definition_version_id),
-            lead.request.canonical_bytes,
         )
 
     def __post_init__(self) -> None:
@@ -490,17 +411,9 @@ class ContextLeadBinding:
         _digest(self.lead_digest, "context lead_digest")
         _uuid(self.lead_event_id, "context Lead authority event")
         _exact_int(self.lead_aggregate_version, "context Lead aggregate version")
-        _retained_digest(self.lead_bytes, self.lead_digest, "context Lead")
-        lead = _decode(self.lead_bytes)
-        if (
-            lead.get("lead_id") != self.lead_id
-            or lead.get("promoting_gate_decision_id") != self.gate_decision_id
-            or lead.get("definition_id") != self.definition_id
-            or lead.get("definition_version_id") != self.definition_version_id
-        ):
-            raise WorkItemContractError(
-                "context Lead scalars differ from canonical bytes"
-            )
+        _uuid(self.gate_decision_id, "context Gate Decision")
+        _uuid(self.definition_id, "context Source Definition")
+        _uuid(self.definition_version_id, "context Source Definition Version")
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -511,7 +424,6 @@ class ContextLeadBinding:
             "gate_decision_id": self.gate_decision_id,
             "definition_id": self.definition_id,
             "definition_version_id": self.definition_version_id,
-            "lead": _decode(self.lead_bytes),
         }
 
     @classmethod
@@ -526,21 +438,19 @@ class ContextLeadBinding:
                 "gate_decision_id",
                 "definition_id",
                 "definition_version_id",
-                "lead",
             },
             "context Lead binding",
         )
         return cls(
-            str(item["lead_id"]),
-            str(item["lead_digest"]),
-            str(item["lead_event_id"]),
+            _text(item["lead_id"], "lead_id"),
+            _text(item["lead_digest"], "lead_digest"),
+            _text(item["lead_event_id"], "lead_event_id"),
             _exact_int(
                 item["lead_aggregate_version"], "context Lead aggregate version"
             ),
-            str(item["gate_decision_id"]),
-            str(item["definition_id"]),
-            str(item["definition_version_id"]),
-            _canonical(item["lead"], "Lead"),
+            _text(item["gate_decision_id"], "gate_decision_id"),
+            _text(item["definition_id"], "definition_id"),
+            _text(item["definition_version_id"], "definition_version_id"),
         )
 
 
@@ -560,42 +470,54 @@ class RetrievalInputBinding:
 
     @classmethod
     def request_pending(cls, request: RetrievalContextRequest) -> Self:
-        if not isinstance(request, RetrievalContextRequest):
+        if type(request) is not RetrievalContextRequest:
             raise WorkItemContractError("retrieval request must be typed")
-        return cls(
-            RetrievalBindingState.REQUEST_PENDING,
-            str(request.request_id),
-            request.idempotency_key,
-            request.request_digest,
-            request.canonical_bytes,
-        )
+        try:
+            return cls(
+                RetrievalBindingState.REQUEST_PENDING,
+                str(request.request_id),
+                request.idempotency_key,
+                request.request_digest,
+                request.canonical_bytes,
+            )
+        except WorkItemContractError:
+            raise
+        except Exception as exc:
+            raise WorkItemContractError("retrieval request is invalid") from exc
 
     @classmethod
     def from_receipt(
         cls, request: RetrievalContextRequest, receipt: RetrievalContextReceipt
     ) -> Self:
-        if not isinstance(request, RetrievalContextRequest) or not isinstance(
-            receipt, RetrievalContextReceipt
-        ):
+        if type(request) is not RetrievalContextRequest or type(
+            receipt
+        ) is not RetrievalContextReceipt:
             raise WorkItemContractError("retrieval request and receipt must be typed")
-        if (
-            request.request_digest != receipt.request_digest
-            or str(request.request_id) != receipt.request_id
-        ):
-            raise WorkItemContractError("retrieval receipt belongs to another request")
-        return cls(
-            RetrievalBindingState.RECEIPT,
-            receipt.request_id,
-            request.idempotency_key,
-            receipt.request_digest,
-            request.canonical_bytes,
-            receipt.context_id,
-            receipt.receipt_digest,
-            receipt.outcome.value,
-            None if receipt.reason is None else receipt.reason.value,
-            receipt.no_match,
-            receipt.canonical_bytes,
-        )
+        try:
+            if (
+                request.request_digest != receipt.request_digest
+                or str(request.request_id) != receipt.request_id
+            ):
+                raise WorkItemContractError(
+                    "retrieval receipt belongs to another request"
+                )
+            return cls(
+                RetrievalBindingState.RECEIPT,
+                receipt.request_id,
+                request.idempotency_key,
+                receipt.request_digest,
+                request.canonical_bytes,
+                receipt.context_id,
+                receipt.receipt_digest,
+                receipt.outcome.value,
+                None if receipt.reason is None else receipt.reason.value,
+                receipt.no_match,
+                receipt.canonical_bytes,
+            )
+        except WorkItemContractError:
+            raise
+        except Exception as exc:
+            raise WorkItemContractError("retrieval receipt is invalid") from exc
 
     def __post_init__(self) -> None:
         if type(self.state) is not RetrievalBindingState:
@@ -606,9 +528,12 @@ class RetrievalInputBinding:
         _bounded_utf8(self.idempotency_key, 512, "retrieval idempotency key")
         _digest(self.request_digest, "retrieval request_digest")
         _retained_digest(
-            self.request_bytes, self.request_digest, "retrieval request bytes"
+            self.request_bytes,
+            self.request_digest,
+            32 * 1_024,
+            "retrieval request bytes",
         )
-        request = _decode(self.request_bytes)
+        request = _decode(self.request_bytes, maximum=32 * 1_024)
         if (
             request.get("request_id") != self.request_id
             or request.get("idempotency_key") != self.idempotency_key
@@ -650,9 +575,10 @@ class RetrievalInputBinding:
             _retained_digest(
                 self.receipt_bytes,
                 self.context_digest,
+                256 * 1_024,
                 "retrieval receipt bytes",
             )
-            receipt = _decode(self.receipt_bytes)
+            receipt = _decode(self.receipt_bytes, maximum=256 * 1_024)
             if (
                 receipt.get("context_id") != self.context_id
                 or receipt.get("request_id") != self.request_id
@@ -718,14 +644,14 @@ class RetrievalInputBinding:
             raise WorkItemContractError("retrieval no_match must be boolean")
         return cls(
             state,
-            str(item["request_id"]),
-            str(item["idempotency_key"]),
-            str(item["request_digest"]),
+            _text(item["request_id"], "request_id"),
+            _text(item["idempotency_key"], "idempotency_key"),
+            _text(item["request_digest"], "request_digest"),
             _canonical(item["request"], "retrieval request"),
-            None if item["context_id"] is None else str(item["context_id"]),
-            None if item["context_digest"] is None else str(item["context_digest"]),
-            None if item["outcome"] is None else str(item["outcome"]),
-            None if item["reason"] is None else str(item["reason"]),
+            None if item["context_id"] is None else _text(item["context_id"], "context_id"),
+            None if item["context_digest"] is None else _text(item["context_digest"], "context_digest"),
+            None if item["outcome"] is None else _text(item["outcome"], "outcome"),
+            None if item["reason"] is None else _text(item["reason"], "reason"),
             item["no_match"],
             None if item["receipt"] is None else _canonical(item["receipt"], "retrieval receipt"),
         )
@@ -828,15 +754,15 @@ class RetrievalContextAuthority:
     def verify(
         self, connection: sqlite3.Connection, binding: RetrievalInputBinding
     ) -> None:
-        self._verify_typed_binding(binding)
+        self._verify_typed_binding(binding, historical=False)
         try:
-            purge = connection.execute(
+            purges = connection.execute(
                 "SELECT purge_id,idempotency_key,request_digest,"
                 "prior_receipt_digest,purge_receipt_digest,purge_receipt_bytes FROM "
                 "retrieval_authority.increment5d2_retrieval_context_purges "
-                "WHERE idempotency_key=?",
+                "WHERE idempotency_key=? ORDER BY purge_id",
                 (binding.idempotency_key,),
-            ).fetchone()
+            ).fetchall()
             row = connection.execute(
                 "SELECT request_digest,receipt_digest,receipt_bytes "
                 "FROM retrieval_authority.increment5d2_retrieval_contexts "
@@ -845,8 +771,9 @@ class RetrievalContextAuthority:
             ).fetchone()
         except sqlite3.Error as exc:
             raise WorkItemContractError("retrieval authority journal differs") from exc
-        if purge is not None:
+        for purge in purges:
             self._validate_purge(purge, binding)
+        if purges:
             raise WorkItemContractError("retrieval authority was purged")
         if binding.state is RetrievalBindingState.REQUEST_PENDING:
             if row is not None:
@@ -860,7 +787,7 @@ class RetrievalContextAuthority:
                 "retrieval authority resolution failed"
             ) from exc
         if (
-            not isinstance(request, RetrievalContextRequest)
+            type(request) is not RetrievalContextRequest
             or request.request_digest != binding.request_digest
             or request.request_id != binding.request_id
             or request.idempotency_key != binding.idempotency_key
@@ -873,7 +800,7 @@ class RetrievalContextAuthority:
         ):
             raise WorkItemContractError("pending retrieval already has a receipt")
         if binding.state is RetrievalBindingState.RECEIPT and (
-            not isinstance(receipt, RetrievalContextReceipt)
+            type(receipt) is not RetrievalContextReceipt
             or receipt.request_digest != request.request_digest
             or receipt.request_id != request.request_id
             or receipt.context_id != binding.context_id
@@ -896,7 +823,9 @@ class RetrievalContextAuthority:
         ):
             raise WorkItemContractError("retrieval authority retained bytes differ")
 
-    def _verify_typed_binding(self, binding: RetrievalInputBinding) -> None:
+    def _verify_typed_binding(
+        self, binding: RetrievalInputBinding, *, historical: bool
+    ) -> None:
         try:
             request, receipt = self._records[binding.request_digest]
         except Exception as exc:
@@ -912,7 +841,7 @@ class RetrievalContextAuthority:
         ):
             raise WorkItemContractError("retrieval authority request differs")
         if binding.state is RetrievalBindingState.REQUEST_PENDING:
-            if receipt is not None:
+            if not historical and receipt is not None:
                 raise WorkItemContractError("pending retrieval already has a receipt")
             return
         if (
@@ -958,7 +887,7 @@ class RetrievalContextAuthority:
     def verify_retained_integrity(
         self, connection: sqlite3.Connection, binding: RetrievalInputBinding
     ) -> None:
-        self._verify_typed_binding(binding)
+        self._verify_typed_binding(binding, historical=True)
         try:
             purges = connection.execute(
                 "SELECT purge_id,idempotency_key,request_digest,"
@@ -967,19 +896,34 @@ class RetrievalContextAuthority:
                 "WHERE idempotency_key=? ORDER BY purge_id",
                 (binding.idempotency_key,),
             ).fetchall()
+            live = connection.execute(
+                "SELECT request_digest,receipt_digest,receipt_bytes "
+                "FROM retrieval_authority.increment5d2_retrieval_contexts "
+                "WHERE idempotency_key=?",
+                (binding.idempotency_key,),
+            ).fetchone()
         except sqlite3.Error as exc:
             raise WorkItemContractError("retrieval authority journal differs") from exc
         for purge in purges:
             self._validate_purge(purge, binding)
+        if binding.state is RetrievalBindingState.REQUEST_PENDING:
+            return
+        if live is not None and purges:
+            raise WorkItemContractError("retrieval live receipt contradicts purge")
         if purges:
-            if binding.state is RetrievalBindingState.RECEIPT and sum(
-                row[3] == binding.context_digest for row in purges
-            ) != 1:
+            if not any(row[3] == binding.context_digest for row in purges):
                 raise WorkItemContractError(
                     "retrieval purge tombstone history differs"
                 )
             return
-        self.verify(connection, binding)
+        if (
+            live is None
+            or live[0] != binding.request_digest
+            or live[1] != binding.context_digest
+            or bytes(live[2]) != binding.receipt_bytes
+            or digest_bytes(bytes(live[2])) != live[1]
+        ):
+            raise WorkItemContractError("retrieval authority retained bytes differ")
 
 
 @dataclass(frozen=True, slots=True)
@@ -987,16 +931,16 @@ class WatchConditionWorkItemBinding:
     watch_condition_id: str
     watch_condition_digest: str
     lead_id: str
-    watch_bytes: bytes
     watch_event_id: str
     watch_aggregate_version: int
     source_disposition_id: str
     source_disposition_digest: str
     source_disposition_ordinal: int
     source_previous_disposition_id: str | None
-    source_disposition_bytes: bytes
     source_disposition_event_id: str
     source_disposition_aggregate_version: int
+    allowed_reentry_kinds: tuple[str, ...]
+    observable_transition: bool
 
     @classmethod
     def from_authority(
@@ -1016,11 +960,19 @@ class WatchConditionWorkItemBinding:
             or request.next_action.kind.value != "RESUME_ON_WATCH"
         ):
             raise WorkItemContractError("Watch source disposition differs")
+        allowed: list[str] = []
+        if watch.request.expected_occurrence and watch.request.review_at is not None:
+            allowed.append(ReentryKind.DEADLINE.value)
+        if watch.request.review_at is not None:
+            allowed.append(ReentryKind.REVIEW.value)
+        if watch.request.expires_at is not None:
+            allowed.append(ReentryKind.EXPIRY.value)
+        if watch.request.operator_review_condition:
+            allowed.append(ReentryKind.OPERATOR_CONDITION.value)
         return cls(
             str(watch.request.watch_condition_id),
             watch.canonical_digest,
             str(watch.request.lead_id),
-            watch.request.canonical_bytes,
             str(watch.event_id),
             watch.aggregate_version,
             str(request.decision_id),
@@ -1029,9 +981,13 @@ class WatchConditionWorkItemBinding:
             None
             if request.previous_decision_id is None
             else str(request.previous_decision_id),
-            request.canonical_bytes,
             str(source_disposition.event_id),
             source_disposition.aggregate_version,
+            tuple(sorted(set(allowed))),
+            bool(
+                watch.request.corroborating_lead_id
+                or watch.request.resume_transition_kinds
+            ),
         )
 
     def __post_init__(self) -> None:
@@ -1048,53 +1004,34 @@ class WatchConditionWorkItemBinding:
             self.source_disposition_aggregate_version,
             "Watch disposition aggregate version",
         )
+        if (
+            type(self.allowed_reentry_kinds) is not tuple
+            or not self.allowed_reentry_kinds
+            or tuple(sorted(set(self.allowed_reentry_kinds)))
+            != self.allowed_reentry_kinds
+            or any(type(value) is not str for value in self.allowed_reentry_kinds)
+        ):
+            raise WorkItemContractError("Watch re-entry kinds are invalid")
+        if type(self.observable_transition) is not bool:
+            raise WorkItemContractError("Watch transition flag must be boolean")
         if self.source_previous_disposition_id is not None:
             _uuid(self.source_previous_disposition_id, "Watch source predecessor")
-        _retained_digest(
-            self.watch_bytes, self.watch_condition_digest, "Watch Condition bytes"
-        )
-        watch = _decode(self.watch_bytes)
-        if (
-            watch.get("watch_condition_id") != self.watch_condition_id
-            or watch.get("lead_id") != self.lead_id
-        ):
-            raise WorkItemContractError("Watch Condition scalars differ from bytes")
-        source = _decode(self.source_disposition_bytes)
-        _validate_disposition_envelope(source, name="Watch disposition")
-        next_action = source.get("next_action")
-        if (
-            _retained_digest(
-                self.source_disposition_bytes,
-                self.source_disposition_digest,
-                "Watch source disposition bytes",
-            )
-            != self.source_disposition_digest
-            or source.get("decision_id") != self.source_disposition_id
-            or source.get("lead_id") != self.lead_id
-            or source.get("decision_ordinal") != self.source_disposition_ordinal
-            or source.get("previous_decision_id") != self.source_previous_disposition_id
-            or source.get("outcome") != LeadDispositionOutcome.WATCH_DEFER.value
-            or source.get("watch_condition_id") != self.watch_condition_id
-            or not isinstance(next_action, dict)
-            or next_action.get("kind") != "RESUME_ON_WATCH"
-        ):
-            raise WorkItemContractError("Watch source disposition bytes differ")
 
     def canonical_value(self) -> dict[str, object]:
         return {
             "watch_condition_id": self.watch_condition_id,
             "watch_condition_digest": self.watch_condition_digest,
             "lead_id": self.lead_id,
-            "watch": _decode(self.watch_bytes),
             "watch_event_id": self.watch_event_id,
             "watch_aggregate_version": self.watch_aggregate_version,
             "source_disposition_id": self.source_disposition_id,
             "source_disposition_digest": self.source_disposition_digest,
             "source_disposition_ordinal": self.source_disposition_ordinal,
             "source_previous_disposition_id": self.source_previous_disposition_id,
-            "source_disposition": _decode(self.source_disposition_bytes),
             "source_disposition_event_id": self.source_disposition_event_id,
             "source_disposition_aggregate_version": self.source_disposition_aggregate_version,
+            "allowed_reentry_kinds": list(self.allowed_reentry_kinds),
+            "observable_transition": self.observable_transition,
         }
 
     @classmethod
@@ -1105,40 +1042,45 @@ class WatchConditionWorkItemBinding:
                 "watch_condition_id",
                 "watch_condition_digest",
                 "lead_id",
-                "watch",
                 "watch_event_id",
                 "watch_aggregate_version",
                 "source_disposition_id",
                 "source_disposition_digest",
                 "source_disposition_ordinal",
                 "source_previous_disposition_id",
-                "source_disposition",
                 "source_disposition_event_id",
                 "source_disposition_aggregate_version",
+                "allowed_reentry_kinds",
+                "observable_transition",
             },
             "Watch binding",
         )
         return cls(
-            str(item["watch_condition_id"]),
-            str(item["watch_condition_digest"]),
-            str(item["lead_id"]),
-            _canonical(item["watch"], "Watch Condition"),
-            str(item["watch_event_id"]),
+            _text(item["watch_condition_id"], "watch_condition_id"),
+            _text(item["watch_condition_digest"], "watch_condition_digest"),
+            _text(item["lead_id"], "lead_id"),
+            _text(item["watch_event_id"], "watch_event_id"),
             _exact_int(item["watch_aggregate_version"], "Watch aggregate version"),
-            str(item["source_disposition_id"]),
-            str(item["source_disposition_digest"]),
+            _text(item["source_disposition_id"], "source_disposition_id"),
+            _text(item["source_disposition_digest"], "source_disposition_digest"),
             _exact_int(
                 item["source_disposition_ordinal"], "Watch source disposition ordinal"
             ),
             None
             if item["source_previous_disposition_id"] is None
-            else str(item["source_previous_disposition_id"]),
-            _canonical(item["source_disposition"], "Watch source disposition"),
-            str(item["source_disposition_event_id"]),
+            else _text(item["source_previous_disposition_id"], "source_previous_disposition_id"),
+            _text(item["source_disposition_event_id"], "source_disposition_event_id"),
             _exact_int(
                 item["source_disposition_aggregate_version"],
                 "Watch disposition aggregate version",
             ),
+            tuple(
+                str(value)
+                for value in _tuple(
+                    item["allowed_reentry_kinds"], "Watch re-entry kinds"
+                )
+            ),
+            item["observable_transition"],
         )
 
 
@@ -1149,11 +1091,10 @@ class SupplementalDiscoveryReentry:
     source_version_digest: str
     source_lead_disposition_id: str
     source_lead_disposition_digest: str
-    source_lead_disposition_bytes: bytes
     source_lead_disposition_event_id: str
     source_lead_disposition_aggregate_version: int
     source_lead_disposition_outcome: str
-    watch: WatchConditionWorkItemBinding | None
+    source_approval_route: str
     trigger_id: str
     check_request_id: str
     check_outcome_id: str
@@ -1208,22 +1149,12 @@ class SupplementalDiscoveryReentry:
             self.source_lead_disposition_aggregate_version,
             "source Lead disposition aggregate version",
         )
-        source_disposition = _decode(self.source_lead_disposition_bytes)
-        _validate_disposition_envelope(
-            source_disposition,
-            name="source Lead disposition",
-        )
-        if (
-            _retained_digest(
-                self.source_lead_disposition_bytes,
-                self.source_lead_disposition_digest,
-                "source Lead disposition bytes",
+        if self.source_lead_disposition_outcome != "LEAD_SUPPLEMENTAL_DISCOVERY":
+            raise WorkItemContractError(
+                "supplemental source approval outcome differs"
             )
-            != self.source_lead_disposition_digest
-            or source_disposition.get("decision_id") != self.source_lead_disposition_id
-            or source_disposition.get("outcome") != self.source_lead_disposition_outcome
-        ):
-            raise WorkItemContractError("source Lead disposition bytes differ")
+        if self.source_approval_route != "REQUEST_SUPPLEMENTAL_DISCOVERY":
+            raise WorkItemContractError("supplemental source approval route differs")
         if self.proposal_only_action:
             raise WorkItemContractError(
                 "proposal-only action cannot establish supplemental discovery"
@@ -1271,18 +1202,6 @@ class SupplementalDiscoveryReentry:
                 raise WorkItemContractError(
                     "supplemental discovery lineage binding differs"
                 )
-        request_value = _decode(self.lineage_bindings[1].canonical_bytes)
-        retained_trigger = request_value.get("trigger")
-        if (
-            not isinstance(retained_trigger, dict)
-            or canonical_json_bytes(retained_trigger)
-            != self.lineage_bindings[0].canonical_bytes
-            or digest_bytes(canonical_json_bytes(retained_trigger))
-            != self.lineage_bindings[0].digest
-        ):
-            raise WorkItemContractError(
-                "supplemental Trigger differs from the Check Request"
-            )
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -1296,6 +1215,7 @@ class SupplementalDiscoveryReentry:
                 "source_lead_disposition_event_id",
                 "source_lead_disposition_aggregate_version",
                 "source_lead_disposition_outcome",
+                "source_approval_route",
                 "trigger_id",
                 "check_request_id",
                 "check_outcome_id",
@@ -1309,8 +1229,6 @@ class SupplementalDiscoveryReentry:
                 "source_disposition_authorises_trigger",
             )
         } | {
-            "source_lead_disposition": _decode(self.source_lead_disposition_bytes),
-            "watch": None if self.watch is None else self.watch.canonical_value(),
             "lineage_bindings": [
                 item.canonical_value() for item in self.lineage_bindings
             ],
@@ -1326,11 +1244,10 @@ class SupplementalDiscoveryReentry:
                 "source_version_digest",
                 "source_lead_disposition_id",
                 "source_lead_disposition_digest",
-                "source_lead_disposition",
                 "source_lead_disposition_event_id",
                 "source_lead_disposition_aggregate_version",
                 "source_lead_disposition_outcome",
-                "watch",
+                "source_approval_route",
                 "trigger_id",
                 "check_request_id",
                 "check_outcome_id",
@@ -1354,30 +1271,27 @@ class SupplementalDiscoveryReentry:
         if type(item["lineage_bindings"]) is not list:
             raise WorkItemContractError("supplemental lineage must be an array")
         return cls(
-            str(item["source_work_item_id"]),
-            str(item["source_version_id"]),
-            str(item["source_version_digest"]),
-            str(item["source_lead_disposition_id"]),
-            str(item["source_lead_disposition_digest"]),
-            _canonical(item["source_lead_disposition"], "source Lead disposition"),
-            str(item["source_lead_disposition_event_id"]),
+            _text(item["source_work_item_id"], "source_work_item_id"),
+            _text(item["source_version_id"], "source_version_id"),
+            _text(item["source_version_digest"], "source_version_digest"),
+            _text(item["source_lead_disposition_id"], "source_lead_disposition_id"),
+            _text(item["source_lead_disposition_digest"], "source_lead_disposition_digest"),
+            _text(item["source_lead_disposition_event_id"], "source_lead_disposition_event_id"),
             _exact_int(
                 item["source_lead_disposition_aggregate_version"],
                 "source Lead disposition aggregate version",
             ),
-            str(item["source_lead_disposition_outcome"]),
-            None
-            if item["watch"] is None
-            else WatchConditionWorkItemBinding.from_value(item["watch"]),
-            str(item["trigger_id"]),
-            str(item["check_request_id"]),
-            str(item["check_outcome_id"]),
-            str(item["signal_id"]),
-            str(item["gate_decision_id"]),
-            str(item["lead_id"]),
-            str(item["queued_disposition_id"]),
-            str(item["target_work_item_id"]),
-            str(item["target_version_id"]),
+            _text(item["source_lead_disposition_outcome"], "source_lead_disposition_outcome"),
+            _text(item["source_approval_route"], "source_approval_route"),
+            _text(item["trigger_id"], "trigger_id"),
+            _text(item["check_request_id"], "check_request_id"),
+            _text(item["check_outcome_id"], "check_outcome_id"),
+            _text(item["signal_id"], "signal_id"),
+            _text(item["gate_decision_id"], "gate_decision_id"),
+            _text(item["lead_id"], "lead_id"),
+            _text(item["queued_disposition_id"], "queued_disposition_id"),
+            _text(item["target_work_item_id"], "target_work_item_id"),
+            _text(item["target_version_id"], "target_version_id"),
             item["proposal_only_action"],
             item["source_disposition_authorises_trigger"],
             tuple(
@@ -1393,7 +1307,6 @@ class SupplementalLineageBinding:
     identifier: str
     digest: str
     parent_id: str | None
-    canonical_bytes: bytes
     authority_event_id: str | None = None
     authority_aggregate_version: int | None = None
 
@@ -1413,7 +1326,7 @@ class SupplementalLineageBinding:
                 raw = _canonical(record.canonical_value(), "Trigger")
             except Exception as exc:
                 raise WorkItemContractError("Trigger authority record is invalid") from exc
-            return cls("TRIGGER", record.trigger_id, digest_bytes(raw), None, raw)
+            return cls("TRIGGER", record.trigger_id, digest_bytes(raw), None)
         kinds: tuple[tuple[type[object], str, str, str | None], ...] = (
             (CheckRequest, "CHECK_REQUEST", "request_id", None),
             (CheckOutcome, "CHECK_OUTCOME", "outcome_id", "request_id"),
@@ -1441,7 +1354,6 @@ class SupplementalLineageBinding:
                     str(getattr(request, identity_field)),
                     record.canonical_digest,
                     parent,
-                    request.canonical_bytes,
                     str(record.event_id),
                     record.aggregate_version,
                 )
@@ -1449,7 +1361,7 @@ class SupplementalLineageBinding:
 
     def __post_init__(self) -> None:
         if self.kind == "TRIGGER":
-            if not isinstance(self.identifier, str) or not self.identifier:
+            if type(self.identifier) is not str or not self.identifier:
                 raise WorkItemContractError("supplemental Trigger identity differs")
         else:
             _uuid(self.identifier, "supplemental lineage identity")
@@ -1472,179 +1384,6 @@ class SupplementalLineageBinding:
             else:
                 _uuid(self.parent_id, "supplemental lineage parent")
         _digest(self.digest, "supplemental lineage digest")
-        _retained_digest(
-            self.canonical_bytes, self.digest, "supplemental lineage bytes"
-        )
-        value = _decode(self.canonical_bytes)
-        exact_fields = {
-            "TRIGGER": {
-                "kind",
-                "trigger_id",
-                "trigger_version",
-                "expected_window_digest",
-            },
-            "CHECK_REQUEST": {
-                "adapter_request_digest",
-                "baseline_policy",
-                "coverage",
-                "definition_id",
-                "definition_version_id",
-                "producer_slot_digest",
-                "purpose",
-                "request_id",
-                "requested_at",
-                "revision_policy",
-                "rights_decision_id",
-                "rights_policy_version",
-                "transition_policy",
-                "trigger",
-                "validator_policy",
-            },
-            "CHECK_OUTCOME": {
-                "admission_semantic_digest",
-                "attempt_id",
-                "candidate_observations",
-                "capture_digest",
-                "completed_at",
-                "definition_id",
-                "definition_version_id",
-                "incomplete",
-                "kind",
-                "observed_items",
-                "outcome_id",
-                "parser_result_digest",
-                "producer_slot_digest",
-                "proposal_id",
-                "quarantine",
-                "reason_codes",
-                "receipt_digest",
-                "representation_digest",
-                "request_id",
-                "source_body_digest",
-                "validator_digest",
-            },
-            "SIGNAL": {
-                "admission_policy",
-                "admitted_at",
-                "check_outcome_id",
-                "definition_id",
-                "definition_version_id",
-                "discriminator",
-                "incomplete",
-                "item_id",
-                "occurrence_id",
-                "operational_finding_ids",
-                "purpose",
-                "representation_id",
-                "revision_id",
-                "signal_id",
-                "transition_id",
-            },
-            "GATE": {
-                "basis",
-                "coverage",
-                "decided_at",
-                "decision_id",
-                "decision_ordinal",
-                "duplicate_policy",
-                "evaluated_definition_version_id",
-                "exclusion_policy",
-                "gate_policy",
-                "newness_policy",
-                "next_action",
-                "outcome",
-                "outcome_taxonomy_version",
-                "previous_decision_id",
-                "primary_reason",
-                "reason_taxonomy_version",
-                "rights_decision_id",
-                "rights_policy_version",
-                "signal_admission_policy",
-                "signal_id",
-                "supporting_reasons",
-                "terminality",
-                "time_validity_policy",
-            },
-            "LEAD": {
-                "coverage",
-                "created_at",
-                "definition_id",
-                "definition_version_id",
-                "incompleteness_warnings",
-                "item_id",
-                "lead_id",
-                "lead_policy",
-                "occurrence_id",
-                "outcome_taxonomy_version",
-                "portfolio_functions",
-                "promoting_gate_decision_id",
-                "reason_taxonomy_version",
-                "representation_id",
-                "revision_id",
-                "signal_id",
-                "source_dependencies",
-                "source_roles",
-                "transition_id",
-                "transition_kind",
-                "urgency",
-            },
-            "QUEUED_DISPOSITION": {
-                "decided_at",
-                "decision_id",
-                "decision_ordinal",
-                "disposition_policy",
-                "gate_decision_id",
-                "lead_id",
-                "next_action",
-                "outcome",
-                "outcome_taxonomy_version",
-                "previous_decision_id",
-                "primary_reason",
-                "reason_taxonomy_version",
-                "supporting_reasons",
-                "terminality",
-                "urgency_route",
-                "watch_condition_id",
-            },
-        }
-        if self.kind not in exact_fields or set(value) != exact_fields[self.kind]:
-            raise WorkItemContractError("supplemental lineage canonical schema differs")
-        identity_fields = {
-            "TRIGGER": "trigger_id",
-            "CHECK_REQUEST": "request_id",
-            "CHECK_OUTCOME": "outcome_id",
-            "SIGNAL": "signal_id",
-            "GATE": "decision_id",
-            "LEAD": "lead_id",
-            "QUEUED_DISPOSITION": "decision_id",
-        }
-        if (
-            self.kind not in identity_fields
-            or value.get(identity_fields[self.kind]) != self.identifier
-        ):
-            raise WorkItemContractError("supplemental lineage identity is not retained")
-        if self.kind == "CHECK_REQUEST":
-            trigger = value.get("trigger")
-            retained_parent = (
-                trigger.get("trigger_id") if isinstance(trigger, dict) else None
-            )
-        else:
-            parent_fields = {
-                "CHECK_OUTCOME": "request_id",
-                "SIGNAL": "check_outcome_id",
-                "GATE": "signal_id",
-                "LEAD": "promoting_gate_decision_id",
-                "QUEUED_DISPOSITION": "lead_id",
-            }
-            retained_parent = (
-                value.get(parent_fields[self.kind])
-                if self.kind in parent_fields
-                else None
-            )
-        if self.kind != "TRIGGER" and retained_parent != self.parent_id:
-            raise WorkItemContractError(
-                "supplemental lineage parent differs from bytes"
-            )
 
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -1654,7 +1393,6 @@ class SupplementalLineageBinding:
             "parent_id": self.parent_id,
             "authority_event_id": self.authority_event_id,
             "authority_aggregate_version": self.authority_aggregate_version,
-            "record": _decode(self.canonical_bytes),
         }
 
     @classmethod
@@ -1668,19 +1406,17 @@ class SupplementalLineageBinding:
                 "parent_id",
                 "authority_event_id",
                 "authority_aggregate_version",
-                "record",
             },
             "supplemental lineage binding",
         )
         return cls(
-            str(item["kind"]),
-            str(item["identifier"]),
-            str(item["digest"]),
-            None if item["parent_id"] is None else str(item["parent_id"]),
-            _canonical(item["record"], "supplemental record"),
+            _text(item["kind"], "kind"),
+            _text(item["identifier"], "identifier"),
+            _text(item["digest"], "digest"),
+            None if item["parent_id"] is None else _text(item["parent_id"], "parent_id"),
             None
             if item["authority_event_id"] is None
-            else str(item["authority_event_id"]),
+            else _text(item["authority_event_id"], "authority_event_id"),
             None
             if item["authority_aggregate_version"] is None
             else _exact_int(
@@ -1704,6 +1440,95 @@ def _sorted_decision(
 
 
 @dataclass(frozen=True, slots=True)
+class WorkItemPriorityBinding:
+    work_identity: str
+    work_version: str
+    lane: str
+    basis_digest: str
+    basis_count: int
+    selection_digest: str
+
+    @classmethod
+    def from_selection(cls, value: PrioritySelection) -> Self:
+        if type(value) is not PrioritySelection:
+            raise WorkItemContractError("Priority Selection must be typed")
+        try:
+            raw = value.canonical_bytes
+            if (
+                len(raw) > MAX_PRIORITY_INPUT_BYTES
+                or len(value.basis_references) > MAX_PRIORITY_INPUT_REFERENCES
+            ):
+                raise WorkItemContractError("Priority Selection exceeds Work Item bound")
+            replay = PrioritySelection.from_canonical_bytes(raw)
+            basis = canonical_json_bytes(
+                [reference.canonical_value() for reference in value.basis_references]
+            )
+        except WorkItemContractError:
+            raise
+        except Exception as exc:
+            raise WorkItemContractError("Priority Selection is invalid") from exc
+        if replay != value:
+            raise WorkItemContractError("Priority Selection is not exact")
+        return cls(
+            value.work_identity,
+            value.work_version,
+            value.lane.value,
+            digest_bytes(basis),
+            len(value.basis_references),
+            digest_bytes(raw),
+        )
+
+    def __post_init__(self) -> None:
+        _uuid(self.work_identity, "Priority work identity")
+        _uuid(self.work_version, "Priority work version")
+        _bounded_utf8(self.lane, 64, "Priority lane")
+        try:
+            PriorityLane(self.lane)
+        except (TypeError, ValueError) as exc:
+            raise WorkItemContractError("Priority lane is unsupported") from exc
+        _digest(self.basis_digest, "Priority basis digest")
+        _exact_int(
+            self.basis_count,
+            "Priority basis count",
+            maximum=MAX_PRIORITY_INPUT_REFERENCES,
+        )
+        _digest(self.selection_digest, "Priority Selection digest")
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "work_identity": self.work_identity,
+            "work_version": self.work_version,
+            "lane": self.lane,
+            "basis_digest": self.basis_digest,
+            "basis_count": self.basis_count,
+            "selection_digest": self.selection_digest,
+        }
+
+    @classmethod
+    def from_value(cls, value: object) -> Self:
+        item = _exact(
+            value,
+            {
+                "work_identity",
+                "work_version",
+                "lane",
+                "basis_digest",
+                "basis_count",
+                "selection_digest",
+            },
+            "Priority binding",
+        )
+        return cls(
+            _text(item["work_identity"], "work_identity"),
+            _text(item["work_version"], "work_version"),
+            _text(item["lane"], "lane"),
+            _text(item["basis_digest"], "basis_digest"),
+            _exact_int(item["basis_count"], "Priority basis count"),
+            _text(item["selection_digest"], "selection_digest"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TriageWorkItem:
     work_item_id: str
     decision_leads: tuple[DecisionLeadBinding, ...]
@@ -1712,22 +1537,31 @@ class TriageWorkItem:
 
     @classmethod
     def create(cls, decision_leads: tuple[DecisionLeadBinding, ...]) -> Self:
-        leads = _sorted_decision(decision_leads)
-        identity = [
-            {
-                "lead_id": v.lead_id,
-                "lead_digest": v.lead_digest,
-                "initial_disposition_id": v.disposition_id,
-                "initial_disposition_digest": v.disposition_digest,
-            }
-            for v in leads
-        ]
-        scope_digest = digest_bytes(canonical_json_bytes(identity))
-        return cls(
-            str(uuid.uuid5(uuid.NAMESPACE_URL, f"{TRIAGE_WORK_ITEM}|{scope_digest}")),
-            leads,
-            scope_digest,
-        )
+        try:
+            leads = _sorted_decision(decision_leads)
+            identity = [
+                {
+                    "lead_id": v.lead_id,
+                    "lead_digest": v.lead_digest,
+                    "initial_disposition_id": v.disposition_id,
+                    "initial_disposition_digest": v.disposition_digest,
+                }
+                for v in leads
+            ]
+            scope_digest = digest_bytes(canonical_json_bytes(identity))
+            return cls(
+                str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL, f"{TRIAGE_WORK_ITEM}|{scope_digest}"
+                    )
+                ),
+                leads,
+                scope_digest,
+            )
+        except WorkItemContractError:
+            raise
+        except Exception as exc:
+            raise WorkItemContractError("Work Item inputs are invalid") from exc
 
     def __post_init__(self) -> None:
         _uuid(self.work_item_id, "work_item_id")
@@ -1773,7 +1607,7 @@ class TriageWorkItem:
         except Exception as exc:
             raise WorkItemContractError("Work Item fields are invalid") from exc
         value = _canonical(canonical_value, "Work Item")
-        if len(value) > MAX_VERSION_BYTES:
+        if len(value) > MAX_WORK_ITEM_BYTES:
             raise WorkItemContractError("Work Item exceeds fixed bound")
         return value
 
@@ -1784,7 +1618,7 @@ class TriageWorkItem:
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
         item = _exact(
-            _decode(raw),
+            _decode(raw, maximum=MAX_WORK_ITEM_BYTES, maximum_nodes=8_192),
             {
                 "schema_identity",
                 "work_item_id",
@@ -1795,10 +1629,10 @@ class TriageWorkItem:
         )
         decision_values = _tuple(item["decision_leads"], "decision Leads")
         value = cls(
-            str(item["work_item_id"]),
+            _text(item["work_item_id"], "work_item_id"),
             tuple(DecisionLeadBinding.from_value(v) for v in decision_values),
-            str(item["decision_scope_digest"]),
-            str(item["schema_identity"]),
+            _text(item["decision_scope_digest"], "decision_scope_digest"),
+            _text(item["schema_identity"], "schema_identity"),
         )  # type: ignore[arg-type]
         if value.canonical_bytes != raw:
             raise WorkItemContractError("Work Item bytes differ")
@@ -1814,7 +1648,7 @@ class TriageWorkItemVersion:
     decision_leads: tuple[DecisionLeadBinding, ...]
     context_leads: tuple[ContextLeadBinding, ...]
     retrieval: RetrievalInputBinding
-    priority: PrioritySelection
+    priority: WorkItemPriorityBinding
     watch: WatchConditionWorkItemBinding | None = None
     reentry_kind: ReentryKind | None = None
     supplemental_reentry: SupplementalDiscoveryReentry | None = None
@@ -1866,18 +1700,8 @@ class TriageWorkItemVersion:
             raise WorkItemContractError("decision and context Lead scopes overlap")
         if type(self.retrieval) is not RetrievalInputBinding:
             raise WorkItemContractError("retrieval binding must be typed")
-        if type(self.priority) is not PrioritySelection:
-            raise WorkItemContractError("Priority Selection must be typed")
-        if len(self.priority.basis_references) > MAX_PRIORITY_REFERENCES:
-            raise WorkItemContractError("Priority Selection references exceed bound")
-        try:
-            replayed_priority = _priority(self.priority.canonical_value())
-        except WorkItemContractError:
-            raise
-        except Exception as exc:
-            raise WorkItemContractError("Priority Selection is invalid") from exc
-        if replayed_priority != self.priority:
-            raise WorkItemContractError("Priority Selection is not an exact base value")
+        if type(self.priority) is not WorkItemPriorityBinding:
+            raise WorkItemContractError("Priority binding must be typed")
         if self.watch is not None and type(self.watch) is not WatchConditionWorkItemBinding:
             raise WorkItemContractError("Watch binding must be typed")
         if (
@@ -1895,7 +1719,7 @@ class TriageWorkItemVersion:
                 "Watch condition re-entry requires a new successor Version"
             )
         if self.watch is not None:
-            if not isinstance(self.reentry_kind, ReentryKind):
+            if type(self.reentry_kind) is not ReentryKind:
                 raise WorkItemContractError("Watch re-entry kind must be typed")
             matching = [
                 lead
@@ -1912,25 +1736,11 @@ class TriageWorkItemVersion:
                 raise WorkItemContractError(
                     "Watch re-entry queue is not the immediate successor"
                 )
-            watch_value = _decode(self.watch.watch_bytes)
-            required = {
-                ReentryKind.REVIEW: "review_at",
-                ReentryKind.EXPIRY: "expires_at",
-                ReentryKind.OPERATOR_CONDITION: "operator_review_condition",
-            }
-            condition_is_bound = (
-                bool(watch_value.get("expected_occurrence"))
-                and bool(watch_value.get("review_at"))
-                if self.reentry_kind is ReentryKind.DEADLINE
-                else bool(watch_value.get(required[self.reentry_kind]))
-            )
-            if not condition_is_bound:
+            if self.reentry_kind.value not in self.watch.allowed_reentry_kinds:
                 raise WorkItemContractError(
                     "Watch re-entry kind differs from its condition"
                 )
-            if watch_value.get("corroborating_lead_id") is not None or watch_value.get(
-                "resume_transition_kinds"
-            ):
+            if self.watch.observable_transition:
                 raise WorkItemContractError(
                     "observable Watch transition requires a new Lead lineage"
                 )
@@ -1966,7 +1776,7 @@ class TriageWorkItemVersion:
         decision_leads: tuple[DecisionLeadBinding, ...],
         context_leads: tuple[ContextLeadBinding, ...],
         retrieval: RetrievalInputBinding,
-        priority: PrioritySelection,
+        priority: PrioritySelection | WorkItemPriorityBinding,
         watch: WatchConditionWorkItemBinding | None = None,
         reentry_kind: ReentryKind | None = None,
         supplemental_reentry: SupplementalDiscoveryReentry | None = None,
@@ -1977,6 +1787,11 @@ class TriageWorkItemVersion:
             version_id = str(
                 uuid.uuid5(uuid.NAMESPACE_URL, f"{work_item_id}|{ordinal}")
             )
+            priority_binding = (
+                priority
+                if type(priority) is WorkItemPriorityBinding
+                else WorkItemPriorityBinding.from_selection(priority)
+            )
             return cls(
                 version_id,
                 work_item_id,
@@ -1985,7 +1800,7 @@ class TriageWorkItemVersion:
                 tuple(sorted(decision_leads, key=lambda v: v.lead_id)),
                 tuple(sorted(context_leads, key=lambda v: v.lead_id)),
                 retrieval,
-                priority,
+                priority_binding,
                 watch,
                 reentry_kind,
                 supplemental_reentry,
@@ -2032,12 +1847,6 @@ class TriageWorkItemVersion:
     def canonical_digest(self) -> str:
         return digest_bytes(self.canonical_bytes)
 
-    @property
-    def proposal_binding(self) -> WorkItemBinding:
-        return WorkItemBinding(
-            self.work_item_id, self.version_id, self.canonical_digest
-        )
-
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
         item = _exact(
@@ -2060,9 +1869,9 @@ class TriageWorkItemVersion:
         )
         decision_values = _tuple(item["decision_leads"], "decision Leads")
         context_values = _tuple(item["context_leads"], "context Leads")
-        if not isinstance(item["retrieval"], dict):
+        if type(item["retrieval"]) is not dict:
             raise WorkItemContractError("retrieval binding must be an object")
-        if not isinstance(item["priority"], dict):
+        if type(item["priority"]) is not dict:
             raise WorkItemContractError("Priority Selection must be an object")
         reentry: ReentryKind | None = None
         if item["reentry_kind"] is not None:
@@ -2071,16 +1880,16 @@ class TriageWorkItemVersion:
             except (TypeError, ValueError) as exc:
                 raise WorkItemContractError("re-entry kind is unsupported") from exc
         value = cls(
-            str(item["version_id"]),
-            str(item["work_item_id"]),
+            _text(item["version_id"], "version_id"),
+            _text(item["work_item_id"], "work_item_id"),
             _exact_int(item["ordinal"], "version ordinal"),
             None
             if item["previous_version_id"] is None
-            else str(item["previous_version_id"]),
+            else _text(item["previous_version_id"], "previous_version_id"),
             tuple(DecisionLeadBinding.from_value(v) for v in decision_values),
             tuple(ContextLeadBinding.from_value(v) for v in context_values),
             RetrievalInputBinding.from_value(item["retrieval"]),
-            _priority(item["priority"]),
+            WorkItemPriorityBinding.from_value(item["priority"]),
             None
             if item["watch"] is None
             else WatchConditionWorkItemBinding.from_value(item["watch"]),
@@ -2088,7 +1897,7 @@ class TriageWorkItemVersion:
             None
             if item["supplemental_reentry"] is None
             else SupplementalDiscoveryReentry.from_value(item["supplemental_reentry"]),
-            str(item["schema_identity"]),
+            _text(item["schema_identity"], "schema_identity"),
         )  # type: ignore[arg-type]
         if value.canonical_bytes != raw:
             raise WorkItemContractError("Version bytes differ")
@@ -2105,6 +1914,16 @@ class WorkItemCurrentAssessment:
     stale_reasons: tuple[str, ...]
 
 
+class SupplementalReentryAuthority(Protocol):
+    """Trusted composition-root verification for supplemental approval."""
+
+    def verify(
+        self,
+        connection: sqlite3.Connection,
+        proof: SupplementalDiscoveryReentry,
+    ) -> None: ...
+
+
 class TriageWorkItemStore:
     """Transactional append-only Work Item store over the authority database."""
 
@@ -2112,17 +1931,26 @@ class TriageWorkItemStore:
         self,
         connection: sqlite3.Connection,
         retrieval_authority: RetrievalContextAuthority | None = None,
+        supplemental_authority: SupplementalReentryAuthority | None = None,
     ) -> None:
-        if not isinstance(connection, sqlite3.Connection) or connection.in_transaction:
+        if type(connection) is not sqlite3.Connection or connection.in_transaction:
             raise WorkItemContractError("store requires an idle sqlite3 connection")
         connection.execute("PRAGMA foreign_keys=ON")
         if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
             raise WorkItemContractError("foreign keys must be enabled")
         self._connection = connection
         self._retrieval_authority = retrieval_authority
+        self._supplemental_authority = supplemental_authority
         if retrieval_authority is not None:
             retrieval_authority.attach(connection)
-        self._verify_integrity()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._verify_integrity()
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
 
     def _begin(self) -> None:
         if self._connection.in_transaction:
@@ -2354,8 +2182,9 @@ class TriageWorkItemStore:
 
     def _insert_version(self, v: TriageWorkItemVersion) -> None:
         item = self._load_item(v.work_item_id)
+        watch_causality, supplemental_causality = self._causal_digests(v)
         self._connection.execute(
-            "INSERT OR IGNORE INTO triage_work_item_versions VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO triage_work_item_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 v.version_id,
                 TRIAGE_WORK_ITEM_VERSION,
@@ -2364,6 +2193,8 @@ class TriageWorkItemStore:
                 v.previous_version_id,
                 item.decision_scope_digest,
                 v.retrieval.outcome or v.retrieval.state.value,
+                watch_causality,
+                supplemental_causality,
                 v.canonical_bytes,
                 v.canonical_digest,
                 self._recorded_at(),
@@ -2405,20 +2236,117 @@ class TriageWorkItemStore:
             raise WorkItemContractError("Work Item digest differs")
         return value
 
+    def _lead_retained(
+        self, lead: DecisionLeadBinding | ContextLeadBinding
+    ) -> bool:
+        row = self._connection.execute(
+            "SELECT canonical_digest,canonical_bytes,authority_event_id,"
+            "authority_aggregate_version FROM news_leads WHERE lead_id=?",
+            (lead.lead_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            request = _retained_request(
+                bytes(row[1]), row[0], "News Lead"
+            )
+        except WorkItemContractError:
+            return False
+        return (
+            row[0] == lead.lead_digest
+            and row[2] == lead.lead_event_id
+            and row[3] == lead.lead_aggregate_version
+            and request.get("lead_id") == lead.lead_id
+            and request.get("promoting_gate_decision_id") == lead.gate_decision_id
+            and request.get("definition_id") == lead.definition_id
+            and request.get("definition_version_id") == lead.definition_version_id
+        )
+
+    def _disposition_retained(self, lead: DecisionLeadBinding) -> bool:
+        row = self._connection.execute(
+            "SELECT canonical_digest,outcome,canonical_bytes,authority_event_id,"
+            "authority_aggregate_version,decision_ordinal,previous_decision_id,lead_id "
+            "FROM lead_disposition_decisions WHERE decision_id=?",
+            (lead.disposition_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            request = _retained_request(
+                bytes(row[2]),
+                row[0],
+                "Lead disposition",
+            )
+        except WorkItemContractError:
+            return False
+        return (
+            row[0] == lead.disposition_digest
+            and row[1] == lead.disposition_outcome
+            and row[3] == lead.disposition_event_id
+            and row[4] == lead.disposition_aggregate_version
+            and row[5] == lead.disposition_ordinal
+            and row[6] == lead.previous_disposition_id
+            and row[7] == lead.lead_id
+            and request.get("decision_id") == lead.disposition_id
+            and request.get("lead_id") == lead.lead_id
+            and request.get("decision_ordinal") == lead.disposition_ordinal
+            and request.get("previous_decision_id")
+            == lead.previous_disposition_id
+            and request.get("outcome") == lead.disposition_outcome
+        )
+
+    def _watch_retained(self, binding: WatchConditionWorkItemBinding) -> bool:
+        watch = self._connection.execute(
+            "SELECT canonical_digest,canonical_bytes,lead_id,authority_event_id,"
+            "authority_aggregate_version FROM discovery_watch_conditions "
+            "WHERE watch_condition_id=?",
+            (binding.watch_condition_id,),
+        ).fetchone()
+        source = self._connection.execute(
+            "SELECT canonical_digest,canonical_bytes,lead_id,decision_ordinal,"
+            "previous_decision_id,outcome,watch_condition_id,authority_event_id,"
+            "authority_aggregate_version FROM lead_disposition_decisions "
+            "WHERE decision_id=?",
+            (binding.source_disposition_id,),
+        ).fetchone()
+        if watch is None or source is None:
+            return False
+        try:
+            watch_request = _retained_request(
+                bytes(watch[1]), watch[0], "Watch Condition"
+            )
+            source_request = _retained_request(
+                bytes(source[1]),
+                source[0],
+                "Watch source disposition",
+            )
+        except WorkItemContractError:
+            return False
+        return (
+            watch[0] == binding.watch_condition_digest
+            and watch[2] == binding.lead_id
+            and watch[3] == binding.watch_event_id
+            and watch[4] == binding.watch_aggregate_version
+            and watch_request.get("watch_condition_id")
+            == binding.watch_condition_id
+            and watch_request.get("lead_id") == binding.lead_id
+            and source[0] == binding.source_disposition_digest
+            and source[2] == binding.lead_id
+            and source[3] == binding.source_disposition_ordinal
+            and source[4] == binding.source_previous_disposition_id
+            and source[5] == LeadDispositionOutcome.WATCH_DEFER.value
+            and source[6] == binding.watch_condition_id
+            and source[7] == binding.source_disposition_event_id
+            and source[8] == binding.source_disposition_aggregate_version
+            and source_request.get("decision_id") == binding.source_disposition_id
+            and type(source_request.get("next_action")) is dict
+            and source_request["next_action"].get("kind") == "RESUME_ON_WATCH"
+        )
+
     def _upstream_reasons(self, v: TriageWorkItemVersion) -> list[str]:
         reasons: list[str] = []
         for lead in v.decision_leads:
-            row = self._connection.execute(
-                "SELECT canonical_digest,canonical_bytes,authority_event_id,"
-                "authority_aggregate_version FROM news_leads WHERE lead_id=?",
-                (lead.lead_id,),
-            ).fetchone()
-            if row is None or tuple(row) != (
-                lead.lead_digest,
-                lead.lead_bytes,
-                lead.lead_event_id,
-                lead.lead_aggregate_version,
-            ):
+            if not self._lead_retained(lead):
                 reasons.append(f"lead:{lead.lead_id}")
             gate = self._connection.execute(
                 "SELECT current_decision_id FROM discovery_gate_decision_heads WHERE signal_id=(SELECT signal_id FROM news_leads WHERE lead_id=?)",
@@ -2440,70 +2368,17 @@ class TriageWorkItemStore:
                 "ON d.decision_id=h.current_decision_id WHERE h.lead_id=?",
                 (lead.lead_id,),
             ).fetchone()
-            if disp is None or tuple(disp) != (
-                lead.disposition_id,
-                lead.disposition_digest,
-                LeadDispositionOutcome.QUEUED_FOR_TRIAGE.value,
-                lead.disposition_bytes,
-                lead.disposition_event_id,
-                lead.disposition_aggregate_version,
-                lead.disposition_ordinal,
-                lead.previous_disposition_id,
-                lead.lead_id,
+            if (
+                disp is None
+                or disp[0] != lead.disposition_id
+                or not self._disposition_retained(lead)
             ):
                 reasons.append(f"disposition:{lead.lead_id}")
         for lead in v.context_leads:
-            row = self._connection.execute(
-                "SELECT canonical_digest,canonical_bytes,authority_event_id,"
-                "authority_aggregate_version FROM news_leads WHERE lead_id=?",
-                (lead.lead_id,),
-            ).fetchone()
-            if (
-                row is None
-                or row[0] != lead.lead_digest
-                or bytes(row[1]) != lead.lead_bytes
-                or row[2] != lead.lead_event_id
-                or row[3] != lead.lead_aggregate_version
-            ):
+            if not self._lead_retained(lead):
                 reasons.append(f"context:{lead.lead_id}")
         if v.watch is not None:
-            row = self._connection.execute(
-                "SELECT canonical_digest,canonical_bytes,lead_id,authority_event_id,"
-                "authority_aggregate_version FROM discovery_watch_conditions "
-                "WHERE watch_condition_id=?",
-                (v.watch.watch_condition_id,),
-            ).fetchone()
-            source = self._connection.execute(
-                "SELECT canonical_digest,canonical_bytes,lead_id,decision_ordinal,"
-                "previous_decision_id,outcome,watch_condition_id,authority_event_id,"
-                "authority_aggregate_version "
-                "FROM lead_disposition_decisions WHERE decision_id=?",
-                (v.watch.source_disposition_id,),
-            ).fetchone()
-            if (
-                row is None
-                or tuple(row)
-                != (
-                    v.watch.watch_condition_digest,
-                    v.watch.watch_bytes,
-                    v.watch.lead_id,
-                    v.watch.watch_event_id,
-                    v.watch.watch_aggregate_version,
-                )
-                or source is None
-                or tuple(source)
-                != (
-                    v.watch.source_disposition_digest,
-                    v.watch.source_disposition_bytes,
-                    v.watch.lead_id,
-                    v.watch.source_disposition_ordinal,
-                    v.watch.source_previous_disposition_id,
-                    LeadDispositionOutcome.WATCH_DEFER.value,
-                    v.watch.watch_condition_id,
-                    v.watch.source_disposition_event_id,
-                    v.watch.source_disposition_aggregate_version,
-                )
-            ):
+            if not self._watch_retained(v.watch):
                 reasons.append("watch")
         if self._retrieval_authority is not None:
             try:
@@ -2527,42 +2402,13 @@ class TriageWorkItemStore:
             or source.canonical_digest != proof.source_version_digest
         ):
             reasons.append("supplemental_source_version")
-        source_binding = next(
-            (
-                lead
-                for lead in source.decision_leads
-                if lead.disposition_id == proof.source_lead_disposition_id
-            ),
-            None,
-        )
-        source_disposition = self._connection.execute(
-            "SELECT lead_id,canonical_digest,canonical_bytes,authority_event_id,"
-            "authority_aggregate_version,outcome FROM lead_disposition_decisions "
-            "WHERE decision_id=?",
-            (proof.source_lead_disposition_id,),
-        ).fetchone()
-        if (
-            source_binding is None
-            or source_disposition is None
-            or tuple(source_disposition)
-            != (
-                source_binding.lead_id,
-                proof.source_lead_disposition_digest,
-                proof.source_lead_disposition_bytes,
-                proof.source_lead_disposition_event_id,
-                proof.source_lead_disposition_aggregate_version,
-                proof.source_lead_disposition_outcome,
-            )
-            or proof.source_lead_disposition_digest != source_binding.disposition_digest
-            or proof.source_lead_disposition_bytes != source_binding.disposition_bytes
-            or proof.source_lead_disposition_event_id
-            != source_binding.disposition_event_id
-            or proof.source_lead_disposition_aggregate_version
-            != source_binding.disposition_aggregate_version
-            or proof.source_lead_disposition_outcome
-            != source_binding.disposition_outcome
-        ):
-            reasons.append("supplemental_source_disposition")
+        if self._supplemental_authority is None:
+            reasons.append("supplemental_authority_unavailable")
+        else:
+            try:
+                self._supplemental_authority.verify(self._connection, proof)
+            except Exception:
+                reasons.append("supplemental_authority_differs")
         table_map = {
             "CHECK_REQUEST": ("check_requests", "request_id", "trigger_id"),
             "CHECK_OUTCOME": ("check_outcomes", "outcome_id", "request_id"),
@@ -2588,7 +2434,7 @@ class TriageWorkItemStore:
             if (
                 row is None
                 or row[0] != binding.digest
-                or bytes(row[1]) != binding.canonical_bytes
+                or digest_bytes(bytes(row[1])) != binding.digest
                 or row[2] != binding.authority_event_id
                 or row[3] != binding.authority_aggregate_version
                 or row[4] != binding.parent_id
@@ -2640,7 +2486,9 @@ class TriageWorkItemStore:
                 raise WorkItemContractError("active decision Lead scopes overlap")
 
     @staticmethod
-    def _causal_keys(version: TriageWorkItemVersion) -> tuple[str, ...]:
+    def _causal_digests(
+        version: TriageWorkItemVersion,
+    ) -> tuple[str | None, str | None]:
         values: list[dict[str, object]] = []
         if version.watch is not None:
             target = next(
@@ -2666,39 +2514,42 @@ class TriageWorkItemStore:
             values.append(
                 {
                     "kind": "SUPPLEMENTAL",
-                    "source_version_id": proof.source_version_id,
-                    "source_version_digest": proof.source_version_digest,
-                    "source_disposition_id": proof.source_lead_disposition_id,
-                    "source_disposition_digest": proof.source_lead_disposition_digest,
-                    "lineage": [
-                        {
-                            "kind": binding.kind,
-                            "identifier": binding.identifier,
-                            "digest": binding.digest,
-                        }
-                        for binding in proof.lineage_bindings
-                    ],
+                    "approval_id": proof.source_lead_disposition_id,
+                    "approval_digest": proof.source_lead_disposition_digest,
+                    "approval_event_id": proof.source_lead_disposition_event_id,
+                    "approval_aggregate_version": (
+                        proof.source_lead_disposition_aggregate_version
+                    ),
+                    "approval_route": proof.source_approval_route,
                 }
             )
-        return tuple(
+        digests = tuple(
             digest_bytes(_canonical(value, "re-entry causality"))
             for value in values
         )
+        return (
+            digests[0] if version.watch is not None else None,
+            digests[-1] if version.supplemental_reentry is not None else None,
+        )
 
     def _reject_reused_causality(self, version: TriageWorkItemVersion) -> None:
-        wanted = set(self._causal_keys(version))
-        if not wanted:
-            return
-        for (raw,) in self._connection.execute(
-            "SELECT canonical_bytes FROM triage_work_item_versions"
-        ):
-            retained = TriageWorkItemVersion.from_canonical_bytes(bytes(raw))
-            if wanted.intersection(self._causal_keys(retained)):
-                raise WorkItemContractError("re-entry causality was already claimed")
+        watch, supplemental = self._causal_digests(version)
+        if watch is not None and self._connection.execute(
+            "SELECT 1 FROM triage_work_item_versions WHERE watch_causality_digest=?",
+            (watch,),
+        ).fetchone():
+            raise WorkItemContractError("Watch causality was already claimed")
+        if supplemental is not None and self._connection.execute(
+            "SELECT 1 FROM triage_work_item_versions "
+            "WHERE supplemental_causality_digest=?",
+            (supplemental,),
+        ).fetchone():
+            raise WorkItemContractError("supplemental causality was already claimed")
 
     def _verify_item_chain(self, work_item_id: str) -> None:
         rows = self._connection.execute(
-            "SELECT version_id,ordinal,previous_version_id,canonical_digest "
+            "SELECT version_id,ordinal,previous_version_id,canonical_bytes,"
+            "canonical_digest "
             "FROM triage_work_item_versions WHERE work_item_id=? ORDER BY ordinal",
             (work_item_id,),
         ).fetchall()
@@ -2711,11 +2562,20 @@ class TriageWorkItemStore:
             raise WorkItemContractError("Work Item chain or head is absent")
         previous: str | None = None
         for expected_ordinal, row in enumerate(rows, 1):
-            if row[1] != expected_ordinal or row[2] != previous:
+            version = TriageWorkItemVersion.from_canonical_bytes(bytes(row[3]))
+            if (
+                version.version_id != row[0]
+                or version.work_item_id != work_item_id
+                or version.ordinal != row[1]
+                or version.previous_version_id != row[2]
+                or version.canonical_digest != row[4]
+                or row[1] != expected_ordinal
+                or row[2] != previous
+            ):
                 raise WorkItemContractError("Work Item Version chain differs")
             previous = str(row[0])
         latest = rows[-1]
-        if tuple(head) != (latest[0], latest[1], latest[3]):
+        if tuple(head) != (latest[0], latest[1], latest[4]):
             raise WorkItemContractError("Work Item head is not the chain maximum")
 
     def _verify_integrity(self) -> None:
@@ -2759,11 +2619,13 @@ class TriageWorkItemStore:
             ):
                 raise WorkItemContractError("Work Item retained bytes differ")
         previous_by_item: dict[str, tuple[int, str]] = {}
-        causal_keys: set[str] = set()
         for row in self._connection.execute(
-            "SELECT version_id,work_item_id,ordinal,previous_version_id,decision_scope_digest,retrieval_outcome,canonical_bytes,canonical_digest FROM triage_work_item_versions ORDER BY work_item_id,ordinal"
+            "SELECT version_id,work_item_id,ordinal,previous_version_id,"
+            "decision_scope_digest,retrieval_outcome,watch_causality_digest,"
+            "supplemental_causality_digest,canonical_bytes,canonical_digest "
+            "FROM triage_work_item_versions ORDER BY work_item_id,ordinal"
         ):
-            version = TriageWorkItemVersion.from_canonical_bytes(bytes(row[6]))
+            version = TriageWorkItemVersion.from_canonical_bytes(bytes(row[8]))
             item = self._load_item(version.work_item_id)
             prior = previous_by_item.get(version.work_item_id)
             version_stable_scope = tuple(
@@ -2785,7 +2647,8 @@ class TriageWorkItemStore:
                 )
                 or (version.retrieval.outcome or version.retrieval.state.value)
                 != row[5]
-                or version.canonical_digest != row[7]
+                or self._causal_digests(version) != (row[6], row[7])
+                or version.canonical_digest != row[9]
                 or (prior is None and version.ordinal != 1)
                 or (
                     prior is not None
@@ -2805,10 +2668,6 @@ class TriageWorkItemStore:
                 raise WorkItemContractError(
                     "Version immutable lineage differs: " + ",".join(missing)
                 )
-            for causal_key in self._causal_keys(version):
-                if causal_key in causal_keys:
-                    raise WorkItemContractError("re-entry causality is not unique")
-                causal_keys.add(causal_key)
         for row in self._connection.execute(
             "SELECT work_item_id,current_version_id,current_ordinal,current_version_digest FROM triage_work_item_heads"
         ):
@@ -2824,101 +2683,34 @@ class TriageWorkItemStore:
                 or maximum != row[2]
             ):
                 raise WorkItemContractError("Work Item head is not rebuildable")
+        active_leads: dict[str, str] = {}
         for work_item_id, raw in self._connection.execute(
             "SELECT work_item_id,canonical_bytes FROM triage_work_items "
             "ORDER BY work_item_id"
         ):
-            self._reject_overlap(
-                TriageWorkItem.from_canonical_bytes(bytes(raw)),
-                self.current_version(str(work_item_id)),
-            )
+            item = TriageWorkItem.from_canonical_bytes(bytes(raw))
+            version = self.current_version(str(work_item_id))
+            if not self._is_active_usable(version):
+                continue
+            for lead in item.decision_leads:
+                owner = active_leads.setdefault(lead.lead_id, item.work_item_id)
+                if owner != item.work_item_id:
+                    raise WorkItemContractError(
+                        "active decision Lead scopes overlap"
+                    )
 
     def _immutable_lineage_reasons(self, version: TriageWorkItemVersion) -> list[str]:
         reasons: list[str] = []
         for lead in version.decision_leads:
-            retained = self._connection.execute(
-                "SELECT canonical_digest,canonical_bytes,authority_event_id,"
-                "authority_aggregate_version FROM news_leads WHERE lead_id=?",
-                (lead.lead_id,),
-            ).fetchone()
-            if (
-                retained is None
-                or retained[0] != lead.lead_digest
-                or bytes(retained[1]) != lead.lead_bytes
-                or retained[2] != lead.lead_event_id
-                or retained[3] != lead.lead_aggregate_version
-            ):
+            if not self._lead_retained(lead):
                 reasons.append(f"lead:{lead.lead_id}")
-            disposition = self._connection.execute(
-                "SELECT canonical_digest,outcome,canonical_bytes,authority_event_id,"
-                "authority_aggregate_version,decision_ordinal,previous_decision_id,lead_id "
-                "FROM lead_disposition_decisions WHERE decision_id=?",
-                (lead.disposition_id,),
-            ).fetchone()
-            if (
-                disposition is None
-                or disposition[0] != lead.disposition_digest
-                or disposition[1] != lead.disposition_outcome
-                or bytes(disposition[2]) != lead.disposition_bytes
-                or disposition[3] != lead.disposition_event_id
-                or disposition[4] != lead.disposition_aggregate_version
-                or disposition[5] != lead.disposition_ordinal
-                or disposition[6] != lead.previous_disposition_id
-                or disposition[7] != lead.lead_id
-            ):
+            if not self._disposition_retained(lead):
                 reasons.append(f"disposition:{lead.lead_id}")
         for lead in version.context_leads:
-            retained = self._connection.execute(
-                "SELECT canonical_digest,canonical_bytes,authority_event_id,"
-                "authority_aggregate_version FROM news_leads WHERE lead_id=?",
-                (lead.lead_id,),
-            ).fetchone()
-            if (
-                retained is None
-                or retained[0] != lead.lead_digest
-                or bytes(retained[1]) != lead.lead_bytes
-                or retained[2] != lead.lead_event_id
-                or retained[3] != lead.lead_aggregate_version
-            ):
+            if not self._lead_retained(lead):
                 reasons.append(f"context:{lead.lead_id}")
         if version.watch is not None:
-            watch = self._connection.execute(
-                "SELECT canonical_digest,canonical_bytes,lead_id,authority_event_id,"
-                "authority_aggregate_version FROM discovery_watch_conditions "
-                "WHERE watch_condition_id=?",
-                (version.watch.watch_condition_id,),
-            ).fetchone()
-            source = self._connection.execute(
-                "SELECT canonical_digest,canonical_bytes,lead_id,decision_ordinal,"
-                "previous_decision_id,outcome,watch_condition_id,authority_event_id,"
-                "authority_aggregate_version FROM lead_disposition_decisions "
-                "WHERE decision_id=?",
-                (version.watch.source_disposition_id,),
-            ).fetchone()
-            if (
-                watch is None
-                or tuple(watch)
-                != (
-                    version.watch.watch_condition_digest,
-                    version.watch.watch_bytes,
-                    version.watch.lead_id,
-                    version.watch.watch_event_id,
-                    version.watch.watch_aggregate_version,
-                )
-                or source is None
-                or tuple(source)
-                != (
-                    version.watch.source_disposition_digest,
-                    version.watch.source_disposition_bytes,
-                    version.watch.lead_id,
-                    version.watch.source_disposition_ordinal,
-                    version.watch.source_previous_disposition_id,
-                    LeadDispositionOutcome.WATCH_DEFER.value,
-                    version.watch.watch_condition_id,
-                    version.watch.source_disposition_event_id,
-                    version.watch.source_disposition_aggregate_version,
-                )
-            ):
+            if not self._watch_retained(version.watch):
                 reasons.append("watch")
         if self._retrieval_authority is not None:
             try:
@@ -2949,6 +2741,7 @@ __all__ = [
     "RetrievalInputBinding",
     "SupplementalDiscoveryReentry",
     "SupplementalLineageBinding",
+    "SupplementalReentryAuthority",
     "TriageWorkItem",
     "TriageWorkItemStore",
     "TriageWorkItemVersion",
@@ -2956,4 +2749,5 @@ __all__ = [
     "WorkItemContractError",
     "WorkItemCurrentAssessment",
     "WorkItemStaleError",
+    "WorkItemPriorityBinding",
 ]
