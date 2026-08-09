@@ -169,18 +169,30 @@ def test_merge_group_and_push_bases_are_exact(
     assert event.evaluated_sha == head
 
 
-def test_workflow_dispatch_defaults_to_head_or_accepts_exact_base(tmp_path: Path) -> None:
-    repo, base, _, head, head_tree = _repository(tmp_path)
+def test_workflow_dispatch_requires_and_accepts_exact_base(tmp_path: Path) -> None:
+    repo, base, _, head, _head_tree = _repository(tmp_path)
 
-    defaulted = derive_workflow_event(
-        repo,
-        _environment(
+    with pytest.raises(WorkflowEvidenceError, match="event_base_sha"):
+        derive_workflow_event(
             repo,
-            event_name="workflow_dispatch",
-            base=base,
-            head=head,
-        ),
-    )
+            _environment(
+                repo,
+                event_name="workflow_dispatch",
+                base=base,
+                head=head,
+            ),
+        )
+    with pytest.raises(WorkflowEvidenceError, match="event_base_matches_head"):
+        derive_workflow_event(
+            repo,
+            _environment(
+                repo,
+                event_name="workflow_dispatch",
+                base=base,
+                head=head,
+                dispatch_base=head,
+            ),
+        )
     selected = derive_workflow_event(
         repo,
         _environment(
@@ -192,8 +204,6 @@ def test_workflow_dispatch_defaults_to_head_or_accepts_exact_base(tmp_path: Path
         ),
     )
 
-    assert defaulted.base_sha == head
-    assert defaulted.base_tree_sha == head_tree
     assert selected.base_sha == base
 
 

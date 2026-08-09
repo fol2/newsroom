@@ -96,6 +96,7 @@ def test_classifier_source_tests_policy_and_workflows_require_service() -> None:
         "newsroom/tests/test_increment5b4_neo4j_service.py",
             "newsroom/tests/test_increment_2d_neo4j_service.py",
             "newsroom/tests/test_integrated_c1_neo4j_service.py",
+            "newsroom/tests/test_projection_b2_increment5e2_neo4j_service.py",
             "newsroom/tests/test_projection_b2_neo4j_service.py",
             "newsroom/tests/test_projection_b3_neo4j_service.py",
             "newsroom/tests/test_retrieval_2c_neo4j_service.py",

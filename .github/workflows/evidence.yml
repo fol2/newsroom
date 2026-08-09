@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
     inputs:
       base_sha:
-        description: Optional exact base commit for a manual comparison
-        required: false
+        description: Required exact non-head base commit for a manual comparison
+        required: true
         type: string
 
 permissions:
@@ -472,6 +472,18 @@ jobs:
             > "${RUNNER_TEMP}/decision-result.json"
           cat "${RUNNER_TEMP}/decision-result.json"
 
+      - name: Build Increment 5E2 final closeout receipt
+        if: needs.route.outputs.service_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.sdlc.increment5e2_closeout_receipt final \
+            --repo-root . \
+            --core-transport-bundle-root .sdlc-run/decision-input/core-transport \
+            --service-transport-bundle-root .sdlc-run/decision-input/service-transport \
+            --decision .sdlc-run/decision.json \
+            --output .sdlc-run/increment5e2-final-closeout.json
+
       - name: Upload final decision evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -481,6 +493,7 @@ jobs:
             .sdlc-run/decision-input/context.json
             .sdlc-run/decision-input/collection.json
             .sdlc-run/decision.json
+            .sdlc-run/increment5e2-final-closeout.json
           if-no-files-found: error
           retention-days: 30
           compression-level: 0

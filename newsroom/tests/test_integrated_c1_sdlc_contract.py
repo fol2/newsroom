@@ -40,6 +40,7 @@ def test_increment_1c_native_graph_paths_require_actual_service_evidence() -> No
         "newsroom/tests/test_increment5b4_neo4j_service.py",
         "newsroom/tests/test_increment_2d_neo4j_service.py",
         _INTEGRATED_SERVICE_TEST,
+        "newsroom/tests/test_projection_b2_increment5e2_neo4j_service.py",
         "newsroom/tests/test_projection_b2_neo4j_service.py",
         "newsroom/tests/test_projection_b3_neo4j_service.py",
         "newsroom/tests/test_retrieval_2c_neo4j_service.py",
@@ -112,13 +113,17 @@ def test_complete_actual_service_cases_are_optional_only_in_core() -> None:
         'newsroom.tests.test_retrieval_2c_neo4j_service::test_actual_service_missing_vector_index_is_unavailable_not_no_match',
     }
     assert _INTEGRATED_SERVICE_TEST_ID in optional
+    assert (
+        "newsroom.tests.test_projection_b2_increment5e2_neo4j_service::"
+        "test_actual_service_increment5e2_target_and_report"
+    ) in optional
     assert {
         "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_3e_projects_complete_lineage_and_recovers_graph_loss",
         "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_3e_replacement_generation_becomes_only_active_lineage",
     } <= set(optional)
     assert complete <= set(optional)
     assert optional == tuple(sorted(optional))
-    assert len(optional) == 40
+    assert len(optional) == 41
 
     route = _route("newsroom/projection/neo4j/_complete_adapter.py")
     assert route["service_required"] is True

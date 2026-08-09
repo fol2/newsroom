@@ -102,6 +102,11 @@ retrieval corpus, exact/full-text/vector/graph/hybrid ablation, provenance and
 temporal blockers, named-surface security, rights purge and graph/index
 recovery.
 
+The final 5E2 closed-world reconciliation is recorded in
+[`increment-5e2-final-closeout.md`](increment-5e2-final-closeout.md). Its
+content-addressed inventory binds the deterministic and authenticated
+actual-service cases required for the final Tier-M receipt.
+
 It does not claim complete human evaluation, live shadow, canary, Operational
 Profiles, scheduling, queues, backup/restore of the complete newsroom,
 capacity, licence or Operational Admission.

@@ -81,7 +81,10 @@ def test_shadow_workflow_has_exact_nonprivileged_event_surface() -> None:
     assert events["merge_group"] == {"types": ["checks_requested"]}
     manual = events["workflow_dispatch"]
     assert isinstance(manual, dict)
-    assert manual["inputs"]["base_sha"]["required"] == "false"
+    assert manual["inputs"]["base_sha"]["required"] == "true"
+    assert manual["inputs"]["base_sha"]["description"] == (
+        "Required exact non-head base commit for a manual comparison"
+    )
     assert manual["inputs"]["base_sha"]["type"] == "string"
 
     assert workflow["permissions"] == {"contents": "read"}
@@ -270,6 +273,7 @@ def test_lane_and_decision_artifacts_are_compact_immutable_and_attempt_scoped() 
                 ".sdlc-run/decision-input/context.json",
                 ".sdlc-run/decision-input/collection.json",
                 ".sdlc-run/decision.json",
+                ".sdlc-run/increment5e2-final-closeout.json",
             ]
 
 
@@ -390,6 +394,16 @@ def test_repository_owned_gate_budgets_drive_route_lane_and_decision() -> None:
     finalize = _step("decision", "Finalize decision")
     assert finalize["if"] == "always()"
     assert "scripts.sdlc.workflow_orchestrator decide" in finalize["run"]
+    closeout = _step("decision", "Build Increment 5E2 final closeout receipt")
+    assert closeout["if"] == "needs.route.outputs.service_required == 'true'"
+    for expected in (
+        "scripts.sdlc.increment5e2_closeout_receipt final",
+        "--core-transport-bundle-root .sdlc-run/decision-input/core-transport",
+        "--service-transport-bundle-root .sdlc-run/decision-input/service-transport",
+        "--decision .sdlc-run/decision.json",
+        "--output .sdlc-run/increment5e2-final-closeout.json",
+    ):
+        assert expected in closeout["run"]
     report = _step("decision", "Report decision")
     assert report["if"] == "always()"
     assert "scripts.sdlc.workflow_orchestrator enforce" in report["run"]

@@ -687,6 +687,7 @@ def test_optional_core_skips_are_exact_actual_service_cases() -> None:
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_replacement_generation_deduplicates_candidate_authority',
         'newsroom.tests.test_increment_2d_neo4j_service::test_actual_service_required_gap_blocks_complete_candidate_proof',
         'newsroom.tests.test_integrated_c1_neo4j_service::test_actual_service_integrated_foundation_replay_recovery_and_tombstone',
+        'newsroom.tests.test_projection_b2_increment5e2_neo4j_service::test_actual_service_increment5e2_target_and_report',
         'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_private_adapter_exact_duplicate_and_digest_conflict',
         'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_public_round_trip_duplicate_and_generation_isolation',
         'newsroom.tests.test_projection_b2_neo4j_service::test_actual_service_requires_explicit_authentication_configuration',
