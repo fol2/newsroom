@@ -587,6 +587,130 @@ def test_retained_context_tamper_is_integrity_blocked(
         builder.execute(request)
 
 
+def _create_legacy_purge_journal(
+    path: Path,
+    *,
+    retained_purge: bool,
+) -> bytes:
+    retained_context = b"legacy governed context bytes"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE increment5d2_retrieval_contexts (
+                idempotency_key TEXT PRIMARY KEY,
+                request_digest TEXT NOT NULL,
+                receipt_digest TEXT NOT NULL,
+                receipt_bytes BLOB NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE increment5d2_retrieval_context_purges (
+                idempotency_key TEXT PRIMARY KEY,
+                request_digest TEXT NOT NULL,
+                prior_receipt_digest TEXT NOT NULL,
+                purge_receipt_digest TEXT NOT NULL,
+                purge_receipt_bytes BLOB NOT NULL
+            )
+            """
+        )
+        if retained_purge:
+            connection.execute(
+                """
+                INSERT INTO increment5d2_retrieval_contexts(
+                    idempotency_key,request_digest,receipt_digest,receipt_bytes
+                ) VALUES(?,?,?,?)
+                """,
+                (
+                    "context:legacy-retained",
+                    "sha256:" + "1" * 64,
+                    digest_bytes(retained_context),
+                    retained_context,
+                ),
+            )
+            legacy_purge = b"legacy purge receipt without sibling inventory"
+            connection.execute(
+                """
+                INSERT INTO increment5d2_retrieval_context_purges(
+                    idempotency_key,request_digest,prior_receipt_digest,
+                    purge_receipt_digest,purge_receipt_bytes
+                ) VALUES(?,?,?,?,?)
+                """,
+                (
+                    "context:legacy-purged",
+                    "sha256:" + "2" * 64,
+                    "sha256:" + "3" * 64,
+                    digest_bytes(legacy_purge),
+                    legacy_purge,
+                ),
+            )
+    return retained_context
+
+
+def test_empty_legacy_purge_schema_migrates_to_append_only_v2(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-empty.sqlite"
+    _create_legacy_purge_journal(path, retained_purge=False)
+
+    RetrievalContextJournal(path)
+
+    with sqlite3.connect(path) as connection:
+        columns = connection.execute(
+            "PRAGMA table_info(increment5d2_retrieval_context_purges)"
+        ).fetchall()
+        assert [row[1] for row in columns] == [
+            "purge_id",
+            "idempotency_key",
+            "request_digest",
+            "prior_receipt_digest",
+            "purge_receipt_digest",
+            "purge_receipt_bytes",
+        ]
+        assert {row[1]: row[5] for row in columns} == {
+            "purge_id": 1,
+            "idempotency_key": 0,
+            "request_digest": 0,
+            "prior_receipt_digest": 0,
+            "purge_receipt_digest": 0,
+            "purge_receipt_bytes": 0,
+        }
+
+
+def test_populated_legacy_purge_schema_fails_closed_without_mutation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-populated.sqlite"
+    retained_context = _create_legacy_purge_journal(path, retained_purge=True)
+
+    with pytest.raises(
+        RetrievalContextError,
+        match="legacy purge journal lacks sibling identities",
+    ):
+        RetrievalContextJournal(path)
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM increment5d2_retrieval_context_purges"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT receipt_bytes FROM increment5d2_retrieval_contexts"
+        ).fetchone() == (retained_context,)
+        assert [
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(increment5d2_retrieval_context_purges)"
+            )
+        ] == [
+            "idempotency_key",
+            "request_digest",
+            "prior_receipt_digest",
+            "purge_receipt_digest",
+            "purge_receipt_bytes",
+        ]
+
+
 def test_rights_purge_removes_retained_context_and_tombstone_blocks_replay(
     tmp_path: Path,
     branch_inputs: tuple[HybridCompositionInput, ...],
@@ -611,6 +735,11 @@ def test_rights_purge_removes_retained_context_and_tombstone_blocks_replay(
     assert len(purges) == 1
     purge = purges[0]
     assert isinstance(purge, RetrievalContextPurgeReceipt)
+    assert json.loads(purge.canonical_bytes)["schema_version"] == (
+        "newsroom.increment5.retrieval-context-purge.v2"
+    )
+    assert purge.raw_context_bytes_deleted_in_event is True
+    assert purge.raw_context_bytes_absent is True
     assert purge.context_id == receipt.context_id
     assert purge.request_digest == request.request_digest
     assert purge.prior_receipt_digest == receipt.receipt_digest
@@ -837,6 +966,10 @@ def test_rights_purge_does_not_tombstone_unselected_sibling_derivative(
     )[0]
     assert purge.passage_ids == (item_a.passage.passage_id,)
     assert purge.admission_ids == (admission_a,)
+    assert len(purge.purged_derivative_identities) == 1
+    assert len(purge.context_derivative_identities) == 2
+    assert purge.raw_context_bytes_deleted_in_event is True
+    assert purge.raw_context_bytes_absent is True
 
     inputs_b = _selected_passage_inputs(branch_inputs, {2: root_b})
     composer_b, composition_request_b, composition_b = _compose(
@@ -870,6 +1003,98 @@ def test_rights_purge_does_not_tombstone_unselected_sibling_derivative(
     assert len(receipt_b.items) == 1
     assert receipt_b.items[0].passage.admission_id == admission_b
     assert receipt_b.items[0].text.encode("utf-8") == content_b
+
+    restarted = RetrievalContextJournal(journal.path)
+    later_purges = restarted.purge_affected(
+        admission_ids=(admission_b,),
+        reason_code="RIGHTS_WITHDRAWN",
+    )
+
+    assert len(later_purges) == 2
+    assert {item.context_id for item in later_purges} == {
+        receipt_ab.context_id,
+        receipt_b.context_id,
+    }
+    assert all(item.passage_ids == (passage_b,) for item in later_purges)
+    assert all(item.admission_ids == (admission_b,) for item in later_purges)
+    later_by_context = {item.context_id: item for item in later_purges}
+    assert later_by_context[receipt_ab.context_id].raw_context_bytes_deleted_in_event is (
+        False
+    )
+    assert later_by_context[receipt_b.context_id].raw_context_bytes_deleted_in_event is (
+        True
+    )
+    assert all(item.raw_context_bytes_absent is True for item in later_purges)
+    assert restarted.purge_affected(
+        admission_ids=(admission_b,),
+        reason_code="RIGHTS_WITHDRAWN",
+    ) == later_purges
+
+    class ExplodingHydrator:
+        implementation_digest = GOVERNED_CAS_HYDRATOR_CONTRACT_DIGEST
+
+        @staticmethod
+        def read(_reference) -> bytes:
+            raise AssertionError("later-purged sibling bytes must not be rehydrated")
+
+    blocked_request_b = replace(
+        request_b,
+        request_id=str(uuid.uuid4()),
+        idempotency_key="context:purge-sibling:b-after-withdrawal",
+    )
+    post_purge_restart = RetrievalContextJournal(journal.path)
+    blocked_b = RetrievalContextBuilder(
+        composition_replayer=composer_b,
+        journal=post_purge_restart,
+        hydrator=ExplodingHydrator(),
+    ).execute(blocked_request_b)
+    assert blocked_b.outcome is RetrievalContextOutcome.RIGHTS_BLOCKED
+    assert blocked_b.reason is RetrievalContextReason.RETAINED_CONTEXT_PURGED
+    assert blocked_b.items == ()
+
+    with sqlite3.connect(journal.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM increment5d2_retrieval_contexts"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM increment5d2_retrieval_context_purges"
+        ).fetchone() == (3,)
+        primary_keys = {
+            row[1]: row[5]
+            for row in connection.execute(
+                "PRAGMA table_info(increment5d2_retrieval_context_purges)"
+            )
+        }
+        assert primary_keys["purge_id"] == 1
+        assert primary_keys["idempotency_key"] == 0
+        rows = connection.execute(
+            "SELECT purge_receipt_digest,purge_receipt_bytes "
+            "FROM increment5d2_retrieval_context_purges ORDER BY purge_id"
+        ).fetchall()
+        retained_values = [json.loads(bytes(row[1])) for row in rows]
+        assert all(
+            len(value["context_derivative_identities"]) == 2
+            for value in retained_values
+            if value["context_id"] == receipt_ab.context_id
+        )
+        tampered = retained_values[0]
+        tampered["context_derivative_identities"][0]["passage_id"] = "tampered"
+        connection.execute(
+            "UPDATE increment5d2_retrieval_context_purges "
+            "SET purge_receipt_bytes=? WHERE purge_receipt_digest=?",
+            (canonical_json_bytes(tampered), rows[0][0]),
+        )
+
+    with pytest.raises(RetrievalContextError, match="retained purge receipt is corrupt"):
+        restarted.purge_affected(
+            admission_ids=(admission_b,),
+            reason_code="RIGHTS_WITHDRAWN",
+        )
+    for content in (content_a, content_b):
+        for suffix in ("", "-journal", "-wal", "-shm"):
+            storage_path = Path(f"{journal.path}{suffix}")
+            if storage_path.exists():
+                assert content not in storage_path.read_bytes()
 
 
 def test_exact_only_root_without_authoritative_passage_fails_closed(

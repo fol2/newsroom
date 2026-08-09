@@ -64,9 +64,17 @@ their product paths:
 - secure deletion of retained Retrieval Context bytes in required rollback
   journal mode, with WAL mode rejected before any success receipt; a
   content-addressed purge receipt binds every exactly matched passage,
-  admission, blob and text identity without tombstoning an unselected sibling,
-  and the retained derivative tombstone blocks both replay and rehydration
-  under a new request identity after restart;
+  admission, blob and text identity without tombstoning an unselected sibling.
+  The same transaction retains a canonical, digest-checked and content-free
+  per-context inventory of every sibling derivative before it deletes the raw
+  context. Purge events are append-only by purge identity: an unselected
+  sibling remains usable until its own rights withdrawal, after which a later
+  restart can locate it, retain a second exact tombstone and block replay or
+  rehydration under a new request identity. Each version-two receipt separates
+  whether that event deleted retained raw bytes from the required postcondition
+  that those bytes are absent. An empty legacy prototype table migrates
+  transactionally; a legacy table containing receipts fails closed because it
+  cannot reconstruct the lost sibling inventory;
 - generation-scoped rebuild from retained authority, checkpoint enforcement,
   graph-loss restart and isolated replacement; and
 - missing graph/full-text/vector, stale watermark, required gap and dead-letter
@@ -112,6 +120,17 @@ branch-local or pre-merge receipt does not close #333, #254, #145 or #351.
 An exact-main manual SDLC run must supply an explicit, resolvable non-head
 `base_sha`; the workflow and event decoder reject a blank manual base rather
 than routing an empty R0 comparison that omits service evidence.
+
+Only that successful service-required manual run on `refs/heads/main` advances
+to the isolated `signed-closeout` job. The job downloads the run-, attempt- and
+HEAD-scoped final decision artifact, independently checks the PASS decision,
+final receipt schema, source HEAD, source tree, lane set, inventory count,
+decision binding and content-addressed self-hash using the Python standard
+library, then requests a GitHub artifact attestation for the exact decision and
+receipt files. Its attestation bundle is retained as a separate run-scoped
+artifact. Pull-request and merge-queue runs remain
+evidence-only: they neither receive OIDC or attestation write permissions nor
+execute this signing job.
 
 ## Non-effects and later ownership
 
