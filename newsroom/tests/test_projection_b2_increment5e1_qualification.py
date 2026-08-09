@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+import os
+import subprocess
+import uuid
+
+
+from newsroom.increment5.retrieval_qualification import (
+    QUALIFICATION_CORPUS,
+    QUALIFICATION_TARGET,
+    QualificationDecision,
+    RetrievalQualificationEvaluator,
+    build_qualification_epoch,
+    run_fixture_qualification,
+)
+from newsroom.projection.neo4j import (
+    NEO4J_B2_DRIVER_VERSION,
+    NEO4J_B2_IMAGE,
+    NEO4J_B2_SERVER_VERSION,
+    Neo4jProjectorConfig,
+)
+from newsroom.projection.neo4j._adapter import _open_neo4j_adapter
+
+
+_REQUIRED_FLAG = "NEWSROOM_NEO4J_SERVICE_REQUIRED"
+
+
+def test_actual_service_increment5e1_target_and_report(
+    record_property,
+) -> None:
+    assert QUALIFICATION_TARGET.graph_engine_image == NEO4J_B2_IMAGE
+    assert (
+        QUALIFICATION_TARGET.graph_driver_version
+        == NEO4J_B2_DRIVER_VERSION
+    )
+    if os.environ.get(_REQUIRED_FLAG) != "1":
+        return
+
+    config = Neo4jProjectorConfig.from_environment()
+    adapter = _open_neo4j_adapter(config)
+    try:
+        compatibility = adapter.verify_compatibility()
+    finally:
+        adapter.close()
+
+    assert compatibility.server_version == NEO4J_B2_SERVER_VERSION
+    assert compatibility.edition == "community"
+    assert compatibility.driver_version == NEO4J_B2_DRIVER_VERSION
+    tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        text=True,
+    ).strip()
+    epoch = build_qualification_epoch(
+        target=QUALIFICATION_TARGET,
+        corpus=QUALIFICATION_CORPUS,
+        code_tree_sha=tree,
+    )
+    run_id = str(uuid.uuid5(uuid.NAMESPACE_URL, epoch.epoch_digest))
+    report = RetrievalQualificationEvaluator().evaluate(
+        run_id=run_id,
+        target=QUALIFICATION_TARGET,
+        corpus=QUALIFICATION_CORPUS,
+        epoch=epoch,
+        observations=run_fixture_qualification(
+            target=QUALIFICATION_TARGET,
+            corpus=QUALIFICATION_CORPUS,
+        ),
+        started_at="2026-08-08T20:00:00Z",
+        completed_at="2026-08-08T20:01:00Z",
+    )
+    assert report.decision is QualificationDecision.PASS
+    assert report.observation_count == 500
+    assert report.code_tree_sha == tree
+    assert report.external_call_count == 0
+    assert report.provider_spend_micros == 0
+    assert report.authority_effect == "NONE"
+    assert report.production_activation_authorized is False
+
+    record_property("increment5e1_epoch_digest", epoch.epoch_digest)
+    record_property("increment5e1_report_digest", report.report_digest)
+    record_property(
+        "increment5e1_report_json",
+        report.canonical_bytes.decode("utf-8"),
+    )
