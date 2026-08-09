@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from newsroom.authority.evaluation_handoff_migrations import (
     EVALUATION_HANDOFF_MIGRATION_CHECKSUM,
     EVALUATION_HANDOFF_MIGRATION_NAME,
     EVALUATION_HANDOFF_SCHEMA_VERSION,
+    evaluation_handoff_backup_paths,
+    prepare_evaluation_handoff_backup,
 )
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
@@ -22,6 +25,7 @@ from newsroom.increment6.handoffs import (
     Acknowledgement,
     AcknowledgementOutcome,
     EvaluationHandoffStore,
+    HandoffContractError,
     HandoffState,
     create_handoff,
 )
@@ -112,26 +116,114 @@ def test_fresh_v17_schema_history_fingerprint_and_integrity_are_exact() -> None:
         connection.close()
 
 
-def test_exact_v16_upgrade_is_additive_and_failure_rolls_back_exclusively() -> None:
-    connection = _fresh()
+def test_exact_v16_upgrade_requires_and_retains_exact_backup_digest(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "upgrade.sqlite3"
+    connection = _fresh(database)
     try:
         retained_v16_history = connection.execute(
             "SELECT version,name,checksum FROM authority_migrations "
             "WHERE version<=16 ORDER BY version"
         ).fetchall()
         _downgrade_empty_v17_to_v16(connection)
+        prepare_evaluation_handoff_backup(
+            connection, evaluation_handoff_backup_paths(database)[0]
+        )
+        connection.close()
+        connection = _open(database)
+        replayed_receipt = prepare_evaluation_handoff_backup(
+            connection, evaluation_handoff_backup_paths(database)[0]
+        )
         apply_pending_migrations(
             connection, applied_at="2042-03-12T10:00:01.000000Z"
         )
+        backup, digest_file = evaluation_handoff_backup_paths(database)
+        digest = "sha256:" + hashlib.sha256(backup.read_bytes()).hexdigest()
+        assert backup.is_file()
+        assert replayed_receipt.backup_path == backup
+        assert digest_file.read_text(encoding="ascii") == digest + "\n"
+        backup_connection = _open(backup)
+        try:
+            assert backup_connection.execute("PRAGMA user_version").fetchone()[0] == 16
+            assert backup_connection.execute(
+                "SELECT version,name,checksum FROM authority_migrations "
+                "ORDER BY version"
+            ).fetchall() == retained_v16_history
+        finally:
+            backup_connection.close()
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 17
         assert connection.execute(
             "SELECT version,name,checksum FROM authority_migrations "
             "WHERE version<=16 ORDER BY version"
         ).fetchall() == retained_v16_history
 
+    finally:
+        connection.close()
+
+
+def test_exact_v16_upgrade_without_prepared_backup_fails_closed(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "missing-backup.sqlite3"
+    connection = _fresh(database)
+    try:
         _downgrade_empty_v17_to_v16(connection)
-        connection.execute("CREATE TABLE evaluation_handoffs(conflict TEXT) STRICT")
-        with pytest.raises(sqlite3.OperationalError, match="already exists"):
+        with pytest.raises(sqlite3.DatabaseError, match="requires a prepared backup"):
+            apply_pending_migrations(
+                connection, applied_at="2042-03-12T10:00:01.000000Z"
+            )
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 16
+        assert connection.execute(
+            "SELECT COUNT(*) FROM authority_migrations WHERE version=17"
+        ).fetchone()[0] == 0
+        assert not evaluation_handoff_backup_paths(database)[0].exists()
+    finally:
+        connection.close()
+
+
+def test_exact_v16_upgrade_rejects_changed_backup_digest(tmp_path: Path) -> None:
+    database = tmp_path / "changed-backup.sqlite3"
+    connection = _fresh(database)
+    try:
+        _downgrade_empty_v17_to_v16(connection)
+        backup, digest_path = evaluation_handoff_backup_paths(database)
+        prepare_evaluation_handoff_backup(connection, backup)
+        digest_path.write_text("sha256:" + "0" * 64 + "\n", encoding="ascii")
+
+        with pytest.raises(sqlite3.DatabaseError, match="identity differs"):
+            apply_pending_migrations(
+                connection, applied_at="2042-03-12T10:00:01.000000Z"
+            )
+
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 16
+        assert connection.execute(
+            "SELECT COUNT(*) FROM authority_migrations WHERE version=17"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_failed_v17_upgrade_rolls_back_exclusively_after_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "failed-upgrade.sqlite3"
+    connection = _fresh(database)
+    try:
+        _downgrade_empty_v17_to_v16(connection)
+        prepare_evaluation_handoff_backup(
+            connection, evaluation_handoff_backup_paths(database)[0]
+        )
+        from newsroom.authority import migrations
+
+        monkeypatch.setattr(
+            migrations,
+            "EVALUATION_HANDOFF_MIGRATION_STATEMENTS",
+            migrations.EVALUATION_HANDOFF_MIGRATION_STATEMENTS
+            + ("CREATE TABLE injected_failure(",),
+        )
+        with pytest.raises(sqlite3.OperationalError):
             apply_pending_migrations(
                 connection, applied_at="2042-03-12T10:00:02.000000Z"
             )
@@ -139,6 +231,9 @@ def test_exact_v16_upgrade_is_additive_and_failure_rolls_back_exclusively() -> N
         assert connection.execute(
             "SELECT COUNT(*) FROM authority_migrations WHERE version=17"
         ).fetchone()[0] == 0
+        backup, digest_file = evaluation_handoff_backup_paths(database)
+        assert backup.is_file()
+        assert digest_file.is_file()
         assert connection.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
             "AND name='evaluation_handoff_attempts'"
@@ -225,6 +320,35 @@ def test_store_retains_ambiguous_ack_and_bounds_retry(tmp_path: Path) -> None:
     connection.close()
 
 
+def test_store_can_persist_bounded_retry_after_ambiguous_ack(tmp_path: Path) -> None:
+    connection = _fresh(tmp_path / "ambiguous-retry.sqlite3")
+    store = EvaluationHandoffStore(connection)
+    handoff = store.persist_attempt(
+        store.register(_handoff(max_attempts=2)).handoff_id
+    )
+    attempt = handoff.attempts[0]
+    handoff = store.mark_attempt_sent(handoff.handoff_id, attempt.attempt_id)
+    mismatched = Acknowledgement.create(
+        handoff_id="handoff:sha256:" + "0" * 64,
+        attempt_id=attempt.attempt_id,
+        candidate_version_id=handoff.candidate_version_id,
+        governing_manifest_digest=handoff.governing_manifest_digest,
+        sink_id=handoff.sink_id,
+        outcome=AcknowledgementOutcome.ACKNOWLEDGED,
+        response_digest="sha256:" + "7" * 64,
+    )
+    handoff = store.correlate_acknowledgement(handoff.handoff_id, mismatched)
+
+    retry = store.request_retry(handoff.handoff_id)
+    pending = store.persist_attempt(handoff.handoff_id)
+
+    assert retry.state is HandoffState.RETRY
+    assert pending.state is HandoffState.PENDING
+    assert len(pending.attempts) == 2
+    assert store.load(handoff.handoff_id) == pending
+    connection.close()
+
+
 def test_store_correlates_delayed_ack_after_lost_response_and_retry(
     tmp_path: Path,
 ) -> None:
@@ -254,6 +378,80 @@ def test_store_correlates_delayed_ack_after_lost_response_and_retry(
     assert result.state is HandoffState.ACKNOWLEDGED
     assert result.handoff_id == handoff.handoff_id
     assert len(result.attempts) == 2
+    connection.close()
+
+
+def test_wrong_handoff_observation_cannot_poison_rightful_ack_correlation(
+    tmp_path: Path,
+) -> None:
+    connection = _fresh(tmp_path / "ack-association.sqlite3")
+    store = EvaluationHandoffStore(connection)
+    first = store.persist_attempt(store.register(_handoff()).handoff_id)
+    first = store.mark_attempt_sent(first.handoff_id, first.attempts[0].attempt_id)
+    second_request = create_handoff(
+        CANDIDATE_VERSION_ID + ":second",
+        MANIFEST_DIGEST,
+        SINK_ID,
+    )
+    second = store.persist_attempt(store.register(second_request).handoff_id)
+    second = store.mark_attempt_sent(
+        second.handoff_id, second.attempts[0].attempt_id
+    )
+    acknowledgement = Acknowledgement.create(
+        handoff_id=second.handoff_id,
+        attempt_id=second.attempts[0].attempt_id,
+        candidate_version_id=second.candidate_version_id,
+        governing_manifest_digest=second.governing_manifest_digest,
+        sink_id=second.sink_id,
+        outcome=AcknowledgementOutcome.ACKNOWLEDGED,
+        response_digest="sha256:" + "f" * 64,
+    )
+
+    poisoned = store.correlate_acknowledgement(first.handoff_id, acknowledgement)
+    rightful = store.correlate_acknowledgement(second.handoff_id, acknowledgement)
+
+    assert poisoned.state is HandoffState.AMBIGUOUS
+    assert rightful.state is HandoffState.ACKNOWLEDGED
+    assert store.correlate_acknowledgement(
+        second.handoff_id, acknowledgement
+    ) == rightful
+    assert connection.execute(
+        "SELECT recorded_handoff_id FROM evaluation_handoff_acknowledgements "
+        "WHERE acknowledgement_id=? ORDER BY recorded_handoff_id",
+        (acknowledgement.acknowledgement_id,),
+    ).fetchall() == sorted([(first.handoff_id,), (second.handoff_id,)])
+    connection.close()
+
+
+def test_restart_rederives_state_and_rejects_terminal_to_ambiguous_tamper(
+    tmp_path: Path,
+) -> None:
+    connection = _fresh(tmp_path / "state-tamper.sqlite3")
+    store = EvaluationHandoffStore(connection)
+    handoff = store.persist_attempt(store.register(_handoff()).handoff_id)
+    handoff = store.mark_attempt_sent(
+        handoff.handoff_id, handoff.attempts[0].attempt_id
+    )
+    acknowledgement = Acknowledgement.create(
+        handoff_id=handoff.handoff_id,
+        attempt_id=handoff.attempts[0].attempt_id,
+        candidate_version_id=handoff.candidate_version_id,
+        governing_manifest_digest=handoff.governing_manifest_digest,
+        sink_id=handoff.sink_id,
+        outcome=AcknowledgementOutcome.ACKNOWLEDGED,
+        response_digest="sha256:" + "9" * 64,
+    )
+    handoff = store.correlate_acknowledgement(handoff.handoff_id, acknowledgement)
+    connection.execute(
+        "UPDATE evaluation_handoffs SET transport_state='ambiguous',"
+        "ambiguity_reason='target_outcome_unknown' WHERE handoff_id=?",
+        (handoff.handoff_id,),
+    )
+    connection.close()
+
+    connection = _open(tmp_path / "state-tamper.sqlite3")
+    with pytest.raises(HandoffContractError, match="retained Handoff state"):
+        EvaluationHandoffStore(connection).load(handoff.handoff_id)
     connection.close()
 
 

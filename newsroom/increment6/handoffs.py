@@ -416,23 +416,18 @@ def correlate_acknowledgement(
             raise HandoffContractError("acknowledgement identity conflict")
         return handoff
 
-    acknowledgements = handoff.acknowledgements + (acknowledgement,)
-    mismatch = _ack_mismatch(handoff, acknowledgement)
-    if mismatch is not None:
-        return replace(
-            handoff,
-            state=HandoffState.AMBIGUOUS,
-            acknowledgements=acknowledgements,
-            retry_exhausted=False,
-            ambiguity_reason=mismatch,
+    acknowledgements = tuple(
+        sorted(
+            handoff.acknowledgements + (acknowledgement,),
+            key=lambda item: item.acknowledgement_id,
         )
-
+    )
     correlated_outcomes = {
         item.outcome
-        for item in handoff.acknowledgements
+        for item in acknowledgements
         if _ack_mismatch(handoff, item) is None
     }
-    if correlated_outcomes and acknowledgement.outcome not in correlated_outcomes:
+    if len(correlated_outcomes) > 1:
         return replace(
             handoff,
             state=HandoffState.AMBIGUOUS,
@@ -440,9 +435,27 @@ def correlate_acknowledgement(
             retry_exhausted=False,
             ambiguity_reason="conflicting_acknowledgements",
         )
+    mismatches = sorted(
+        {
+            mismatch
+            for item in acknowledgements
+            if (mismatch := _ack_mismatch(handoff, item)) is not None
+        }
+    )
+    if mismatches:
+        return replace(
+            handoff,
+            state=HandoffState.AMBIGUOUS,
+            acknowledgements=acknowledgements,
+            retry_exhausted=False,
+            ambiguity_reason=mismatches[0],
+        )
+    if not correlated_outcomes:
+        raise HandoffContractError("acknowledgement correlation produced no outcome")
+    outcome = next(iter(correlated_outcomes))
     state = (
         HandoffState.ACKNOWLEDGED
-        if acknowledgement.outcome is AcknowledgementOutcome.ACKNOWLEDGED
+        if outcome is AcknowledgementOutcome.ACKNOWLEDGED
         else HandoffState.REJECTED
     )
     return replace(
@@ -622,7 +635,7 @@ class EvaluationHandoffStore:
             "SELECT schema_identity,acknowledgement_id,handoff_id,attempt_id,"
             "candidate_version_id,governing_manifest_digest,sink_id,outcome,"
             "response_digest FROM evaluation_handoff_acknowledgements "
-            "WHERE recorded_handoff_id=? ORDER BY rowid",
+            "WHERE recorded_handoff_id=? ORDER BY acknowledgement_id",
             (handoff_id,),
         ).fetchall()
         acknowledgements = tuple(
@@ -639,7 +652,7 @@ class EvaluationHandoffStore:
             for item in acknowledgement_rows
             if self._require_schema(item[0], HANDOFF_ACKNOWLEDGEMENT)
         )
-        return Handoff(
+        retained = Handoff(
             handoff_id=handoff_id,
             candidate_version_id=str(row[1]),
             governing_manifest_digest=str(row[2]),
@@ -654,6 +667,87 @@ class EvaluationHandoffStore:
             publication_authority=bool(row[9]),
             evidence_authority=bool(row[10]),
         )
+        self._validate_retained_state(retained)
+        return retained
+
+    @staticmethod
+    def _validate_retained_state(handoff: Handoff) -> None:
+        if handoff.acknowledgements:
+            correlated = {
+                item.outcome
+                for item in handoff.acknowledgements
+                if _ack_mismatch(handoff, item) is None
+            }
+            mismatches = sorted(
+                {
+                    mismatch
+                    for item in handoff.acknowledgements
+                    if (mismatch := _ack_mismatch(handoff, item)) is not None
+                }
+            )
+            if len(correlated) > 1:
+                expected = (
+                    HandoffState.AMBIGUOUS,
+                    "conflicting_acknowledgements",
+                )
+            elif mismatches:
+                expected = (HandoffState.AMBIGUOUS, mismatches[0])
+            elif correlated == {AcknowledgementOutcome.ACKNOWLEDGED}:
+                expected = (HandoffState.ACKNOWLEDGED, None)
+            elif correlated == {AcknowledgementOutcome.REJECTED}:
+                expected = (HandoffState.REJECTED, None)
+            else:
+                raise HandoffContractError("retained Handoff acknowledgement state")
+            valid_exhaustion = not handoff.retry_exhausted or (
+                expected[0] is HandoffState.AMBIGUOUS
+                and len(handoff.attempts) >= handoff.max_attempts
+            )
+            derived_state_matches = (
+                handoff.state,
+                handoff.ambiguity_reason,
+            ) == expected and valid_exhaustion
+            latest = handoff.attempts[-1] if handoff.attempts else None
+            active_retry = (
+                expected[0] is HandoffState.AMBIGUOUS
+                and not handoff.retry_exhausted
+                and handoff.ambiguity_reason is None
+                and (
+                    (
+                        handoff.state is HandoffState.RETRY
+                        and len(handoff.attempts) < handoff.max_attempts
+                    )
+                    or (
+                        handoff.state is HandoffState.PENDING
+                        and len(handoff.attempts) >= 2
+                        and latest is not None
+                        and not latest.ambiguous
+                    )
+                )
+            )
+            if not derived_state_matches and not active_retry:
+                raise HandoffContractError("retained Handoff state differs from records")
+            return
+        latest = handoff.attempts[-1] if handoff.attempts else None
+        valid = (
+            handoff.state is HandoffState.PENDING
+            and handoff.ambiguity_reason is None
+            and not handoff.retry_exhausted
+            and (latest is None or not latest.ambiguous)
+        ) or (
+            handoff.state is HandoffState.AMBIGUOUS
+            and handoff.ambiguity_reason == "target_outcome_unknown"
+            and latest is not None
+            and latest.ambiguous
+        ) or (
+            handoff.state is HandoffState.RETRY
+            and handoff.ambiguity_reason is None
+            and not handoff.retry_exhausted
+            and latest is not None
+            and latest.ambiguous
+            and len(handoff.attempts) < handoff.max_attempts
+        )
+        if not valid:
+            raise HandoffContractError("retained Handoff state differs from records")
 
     @staticmethod
     def _require_schema(actual: object, expected: str) -> bool:
@@ -691,11 +785,12 @@ class EvaluationHandoffStore:
             )
         for acknowledgement in handoff.acknowledgements:
             self._connection.execute(
-                "INSERT OR IGNORE INTO evaluation_handoff_acknowledgements("
+                "INSERT INTO evaluation_handoff_acknowledgements("
                 "acknowledgement_id,schema_identity,recorded_handoff_id,"
                 "handoff_id,attempt_id,candidate_version_id,"
                 "governing_manifest_digest,sink_id,outcome,response_digest) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(recorded_handoff_id,acknowledgement_id) DO NOTHING",
                 (
                     acknowledgement.acknowledgement_id,
                     HANDOFF_ACKNOWLEDGEMENT,
@@ -709,6 +804,26 @@ class EvaluationHandoffStore:
                     acknowledgement.response_digest,
                 ),
             )
+            retained = self._connection.execute(
+                "SELECT handoff_id,attempt_id,candidate_version_id,"
+                "governing_manifest_digest,sink_id,outcome,response_digest "
+                "FROM evaluation_handoff_acknowledgements "
+                "WHERE recorded_handoff_id=? AND acknowledgement_id=?",
+                (handoff.handoff_id, acknowledgement.acknowledgement_id),
+            ).fetchone()
+            expected = (
+                acknowledgement.handoff_id,
+                acknowledgement.attempt_id,
+                acknowledgement.candidate_version_id,
+                acknowledgement.governing_manifest_digest,
+                acknowledgement.sink_id,
+                acknowledgement.outcome.value,
+                acknowledgement.response_digest,
+            )
+            if retained != expected:
+                raise HandoffContractError(
+                    "acknowledgement association conflicts with authority"
+                )
         self._connection.execute(
             "UPDATE evaluation_handoffs SET transport_state=?,"
             "retry_exhausted=?,ambiguity_reason=? WHERE handoff_id=?",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
+from itertools import permutations
 
 import pytest
 
@@ -236,6 +237,36 @@ def test_conflicting_delayed_acknowledgement_is_ambiguous_not_overwritten() -> N
     result = correlate_acknowledgement(handoff, rejected)
     assert result.state is HandoffState.AMBIGUOUS
     assert result.ambiguity_reason == "conflicting_acknowledgements"
+
+
+def test_conflicting_acknowledgement_arrival_orders_remain_ambiguous() -> None:
+    handoff = persist_attempt(_handoff())
+    handoff = mark_attempt_sent(handoff, handoff.attempts[0].attempt_id)
+    accepted = _ack(handoff, handoff.attempts[0])
+    rejected = _ack(
+        handoff,
+        handoff.attempts[0],
+        outcome=AcknowledgementOutcome.REJECTED,
+        response_digest="sha256:" + "d" * 64,
+    )
+    later_accepted = _ack(
+        handoff,
+        handoff.attempts[0],
+        response_digest="sha256:" + "e" * 64,
+    )
+
+    results = []
+    for arrivals in permutations((accepted, rejected, later_accepted)):
+        result = handoff
+        for acknowledgement in arrivals:
+            result = correlate_acknowledgement(result, acknowledgement)
+        results.append(result)
+
+    assert {item.state for item in results} == {HandoffState.AMBIGUOUS}
+    assert {item.ambiguity_reason for item in results} == {
+        "conflicting_acknowledgements"
+    }
+    assert len({item.acknowledgements for item in results}) == 1
 
 
 def test_acknowledgement_identity_is_immutable_content_identity() -> None:

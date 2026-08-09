@@ -53,6 +53,7 @@ from .evaluation_handoff_migrations import (
     EVALUATION_HANDOFF_MIGRATION_NAME,
     EVALUATION_HANDOFF_MIGRATION_STATEMENTS,
     EVALUATION_HANDOFF_SCHEMA_VERSION,
+    require_evaluation_handoff_backup,
 )
 from .extraction_migrations import (
     EXTRACTION_AUTHORITY_MIGRATION,
@@ -592,9 +593,16 @@ def apply_pending_migrations(
     migration. Existing databases upgrade through checked extraction v13,
     entity-resolution v14, editorial-relation v15, isolated Graphiti
     proposal-adapter v16 and evaluation-Handoff authority v17.
+
+    An exact retained v16 database must first call
+    ``evaluation_handoff_migrations.prepare_evaluation_handoff_backup`` with a
+    durable backup path.
+    The v17 transaction revalidates that backup, its digest sidecar, the exact
+    predecessor schema and migration history while holding its exclusive lock.
     """
 
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    starting_version = current
     if current > SCHEMA_VERSION:
         raise sqlite3.DatabaseError(
             f"database schema {current} is newer than supported {SCHEMA_VERSION}"
@@ -830,6 +838,11 @@ def apply_pending_migrations(
             )
             current = GRAPHITI_ADAPTER_SCHEMA_VERSION
         if current == GRAPHITI_ADAPTER_SCHEMA_VERSION:
+            if starting_version == GRAPHITI_ADAPTER_SCHEMA_VERSION:
+                require_evaluation_handoff_backup(
+                    conn,
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-1],
+                )
             for statement in EVALUATION_HANDOFF_MIGRATION_STATEMENTS:
                 conn.execute(statement)
             conn.execute(
