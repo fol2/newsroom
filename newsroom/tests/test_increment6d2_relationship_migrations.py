@@ -130,6 +130,27 @@ def test_exact_v21_backup_upgrade_and_injected_rollback(
     assert connection.execute("PRAGMA user_version").fetchone() == (22,)
 
 
+def test_standard_sqlite_connection_v22_backup_gate_closes_implicit_transaction(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "standard-connection.sqlite3"
+    initial = _fresh(database)
+    _downgrade_to_v21(initial)
+    initial.close()
+
+    connection = sqlite3.connect(database)
+    try:
+        backup, _ = event_hypothesis_relationship_backup_paths(database)
+        prepare_event_hypothesis_relationship_backup(connection, backup)
+        assert connection.in_transaction is False
+
+        apply_pending_migrations(connection, applied_at="2042-01-01T00:00:01.000000Z")
+
+        assert connection.execute("PRAGMA user_version").fetchone() == (22,)
+    finally:
+        connection.close()
+
+
 def test_v21_backup_required_and_v23_fails_closed(tmp_path: Path) -> None:
     connection = _fresh(tmp_path / "authority.sqlite3")
     _downgrade_to_v21(connection)
