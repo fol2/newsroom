@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from threading import RLock
@@ -18,8 +19,8 @@ from .authority_store_conformance import (
     IntegrityViolation,
     LostResponse,
     OutcomeStatus,
+    RollbackScope,
     StoredAuthorityState,
-    StoreTransaction,
     TamperKind,
     WriteCommand,
     run_conformance,
@@ -38,6 +39,25 @@ class MemoryLocation:
     head: str = "record-0"
     open_count: int = 0
     lock: RLock = field(default_factory=RLock)
+
+
+class MemoryRollbackScope:
+    def __init__(self, owner: InMemoryStoreAdapter, location: MemoryLocation) -> None:
+        self.owner = owner
+        self.location = location
+
+    def submit(self, command: WriteCommand) -> AuthorityValue:
+        return self.owner._submit(self.location, command)
+
+    def observe(self, record_id: str) -> StoredAuthorityState | None:
+        if self.owner.defect == "rollback_wrong_state_swallow":
+            return None
+        return deepcopy(self.location.rows.get(record_id))
+
+    def history(self) -> tuple[AuthorityValue, ...]:
+        if self.owner.defect == "rollback_wrong_history_wrap":
+            return ()
+        return tuple(deepcopy(self.location.history_entries))
 
 
 class MemoryHandle:
@@ -112,45 +132,54 @@ class MemoryHandle:
         self._open()
         self.owner._tamper(self.location, record_id, kind)
 
-    def begin(self) -> StoreTransaction:
+    def rollback_scope(self, operation: Callable[[RollbackScope], None]) -> None:
         self._open()
-        return MemoryTransaction(self.owner, self.location)
+        with self.location.lock:
+            snapshot = (
+                deepcopy(self.location.rows),
+                deepcopy(self.location.commands),
+                deepcopy(self.location.trusted_digests),
+                deepcopy(self.location.history_entries),
+                self.location.head,
+            )
+            failed = False
+            try:
+                if self.owner.defect == "rollback_omit_callback":
+                    return
+                scope = MemoryRollbackScope(self.owner, self.location)
+                operation(scope)
+                if self.owner.defect == "rollback_duplicate_callback":
+                    operation(scope)
+            except Exception as exc:
+                failed = True
+                if self.owner.defect in {
+                    "rollback_wrong_state_swallow",
+                    "rollback_swallow_exception",
+                }:
+                    return
+                if self.owner.defect == "rollback_wrong_history_wrap":
+                    raise RuntimeError("wrapped scope failure") from exc
+                if self.owner.defect == "rollback_wrong_rethrow":
+                    raise RuntimeError("wrong rollback exception") from exc
+                if self.owner.defect == "rollback_same_type_rethrow":
+                    raise type(exc) from exc
+                raise
+            finally:
+                commit = self.owner.defect == "rollback_commit_normal" and not failed
+                commit = commit or (
+                    self.owner.defect == "rollback_commit_on_exception" and failed
+                )
+                if not commit:
+                    (
+                        self.location.rows,
+                        self.location.commands,
+                        self.location.trusted_digests,
+                        self.location.history_entries,
+                        self.location.head,
+                    ) = snapshot
 
     def close(self) -> None:
         self.closed = True
-
-
-class MemoryTransaction:
-    def __init__(self, owner: InMemoryStoreAdapter, target: MemoryLocation) -> None:
-        self.owner = owner
-        self.target = target
-        with target.lock:
-            self.working = MemoryLocation(
-                rows=deepcopy(target.rows),
-                commands=deepcopy(target.commands),
-                trusted_digests=deepcopy(target.trusted_digests),
-                history_entries=deepcopy(target.history_entries),
-                upstream_heads=deepcopy(target.upstream_heads),
-                head=target.head,
-            )
-
-    def submit(self, command: WriteCommand) -> AuthorityValue:
-        return self.owner._submit(self.working, command)
-
-    def observe(self, record_id: str) -> StoredAuthorityState | None:
-        return deepcopy(self.working.rows.get(record_id))
-
-    def history(self) -> tuple[AuthorityValue, ...]:
-        return tuple(deepcopy(self.working.history_entries))
-
-    def rollback(self) -> None:
-        if self.owner.defect == "rollback":
-            with self.target.lock:
-                self.target.rows = self.working.rows
-                self.target.commands = self.working.commands
-                self.target.trusted_digests = self.working.trusted_digests
-                self.target.history_entries = self.working.history_entries
-                self.target.head = self.working.head
 
 
 class InMemoryStoreAdapter:
@@ -494,7 +523,47 @@ def test_stateful_all_required_store_passes_every_kernel_owned_scenario() -> Non
             FailureCode.COMPETING_WRITERS_NONDETERMINISTIC,
         ),
         (
-            "rollback",
+            "rollback_commit_normal",
+            CaseId.TRANSACTION_ROLLBACK,
+            FailureCode.TRANSACTION_NOT_ROLLED_BACK,
+        ),
+        (
+            "rollback_commit_on_exception",
+            CaseId.TRANSACTION_ROLLBACK,
+            FailureCode.TRANSACTION_NOT_ROLLED_BACK,
+        ),
+        (
+            "rollback_omit_callback",
+            CaseId.TRANSACTION_ROLLBACK,
+            FailureCode.TRANSACTION_NOT_ROLLED_BACK,
+        ),
+        (
+            "rollback_duplicate_callback",
+            CaseId.TRANSACTION_ROLLBACK,
+            FailureCode.TRANSACTION_NOT_ROLLED_BACK,
+        ),
+        (
+            "rollback_wrong_state_swallow",
+            CaseId.TRANSACTION_ROLLBACK,
+            FailureCode.TRANSACTION_NOT_ROLLED_BACK,
+        ),
+        (
+            "rollback_wrong_history_wrap",
+            CaseId.TRANSACTION_ROLLBACK,
+            FailureCode.TRANSACTION_NOT_ROLLED_BACK,
+        ),
+        (
+            "rollback_swallow_exception",
+            CaseId.TRANSACTION_ROLLBACK,
+            FailureCode.TRANSACTION_NOT_ROLLED_BACK,
+        ),
+        (
+            "rollback_wrong_rethrow",
+            CaseId.TRANSACTION_ROLLBACK,
+            FailureCode.TRANSACTION_NOT_ROLLED_BACK,
+        ),
+        (
+            "rollback_same_type_rethrow",
             CaseId.TRANSACTION_ROLLBACK,
             FailureCode.TRANSACTION_NOT_ROLLED_BACK,
         ),
@@ -508,6 +577,90 @@ def test_primitive_store_defects_have_exact_family_classification(
     assert [(failure.case, failure.code) for failure in report.failures] == [
         (case, code)
     ]
+
+
+def test_rollback_seam_is_store_owned_not_an_externally_held_transaction() -> None:
+    assert not hasattr(MemoryHandle, "begin")
+    assert not hasattr(AuthorityStoreHandle, "begin")
+    assert hasattr(AuthorityStoreHandle, "rollback_scope")
+
+
+def test_rollback_inspection_runs_against_staged_state_and_history() -> None:
+    adapter = InMemoryStoreAdapter()
+    location = adapter.create_location()
+    handle = adapter.open_handle(location)
+    command = WriteCommand(
+        record_id="record-inspection",
+        canonical_bytes=b'{"value":"visible"}',
+        scalar_columns={"value": "visible", "version": 1},
+        identity_columns={"record_id": "record-inspection", "authority": "fixture"},
+        linked_rows=(),
+        actor="actor",
+        request="request",
+        idempotency="idempotency",
+        cas_predecessor="record-0",
+        required_upstream_heads=(),
+    )
+    seen: list[tuple[StoredAuthorityState | None, tuple[AuthorityValue, ...]]] = []
+
+    def operate(scope: RollbackScope) -> None:
+        scope.submit(command)
+        state = scope.observe(command.record_id)
+        history = scope.history()
+        assert handle.observe(command.record_id) == state
+        assert handle.history() == history
+        seen.append((state, history))
+
+    handle.rollback_scope(operate)
+
+    assert seen == [
+        (
+            StoredAuthorityState.from_command(command),
+            (AuthorityValue.from_command(command),),
+        )
+    ]
+    assert handle.observe(command.record_id) is None
+    assert handle.history() == ()
+
+
+def test_rollback_scope_rolls_back_when_inspection_raises() -> None:
+    adapter = InMemoryStoreAdapter()
+    location = adapter.create_location()
+    handle = adapter.open_handle(location)
+    command = WriteCommand(
+        record_id="record-inspection-error",
+        canonical_bytes=b'{"value":"visible"}',
+        scalar_columns={"value": "visible", "version": 1},
+        identity_columns={
+            "record_id": "record-inspection-error",
+            "authority": "fixture",
+        },
+        linked_rows=(),
+        actor="actor",
+        request="request",
+        idempotency="idempotency",
+        cas_predecessor="record-0",
+        required_upstream_heads=(),
+    )
+
+    def fail_inspection(scope: RollbackScope) -> None:
+        scope.submit(command)
+        assert scope.observe(command.record_id) == StoredAuthorityState.from_command(
+            command
+        )
+        assert scope.history() == (AuthorityValue.from_command(command),)
+        raise RuntimeError("inspection failed")
+
+    with pytest.raises(RuntimeError, match="inspection failed"):
+        handle.rollback_scope(fail_inspection)
+
+    assert handle.observe(command.record_id) is None
+    assert handle.history() == ()
+    handle.close()
+    reopened = adapter.open_handle(location)
+    assert reopened is not handle
+    assert reopened.observe(command.record_id) is None
+    assert reopened.history() == ()
 
 
 @pytest.mark.parametrize(
