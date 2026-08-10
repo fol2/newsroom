@@ -183,7 +183,10 @@ release_operational = [
 clustering = [
   "newsroom/event_manager.py",
   "newsroom/clustering.py",
+  "newsroom/eval_dataset.py",
+  "newsroom/eval_metrics.py",
   "newsroom/evals/clustering_*",
+  "newsroom/lang_hint.py",
   "scripts/eval_clustering_metrics.py",
   "scripts/newsroom_clustering_decisions.py",
 ]

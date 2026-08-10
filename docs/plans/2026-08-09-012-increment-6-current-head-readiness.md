@@ -166,11 +166,11 @@ Bounded preparation for #355, #356 and #357 may exist as draft PRs before 6R mer
 
 ### Tier L
 
-Focused tests, one complete deterministic CI run, source-integrity and boundary checks, one feature-complete review, and zero P1/material-P2 findings.
+Focused tests, one decision-validated exact-head SDLC core receipt as the canonical complete deterministic evidence, source-integrity and boundary checks, one review at the feature-complete stop, and zero P1/material-P2 findings. Pull-request and merge-queue receipts are content-addressed, transport-verified evidence-only artifacts, not signed attestations. Fast CI and manually dispatched legacy diagnostics are compatibility signals only.
 
 ### Tier S
 
-All Tier L requirements plus only the affected Authority, Projection and actual-service lanes; checked migration/upgrade/rollback proof when persistence is present; and restart, replay and concurrency proof where applicable.
+All Tier L requirements plus only the affected lanes selected by the route; checked migration/upgrade/rollback proof when persistence is present; and restart, replay and concurrency proof where applicable.
 
 ### Tier M
 

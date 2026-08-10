@@ -32,8 +32,11 @@ changed files:
 
 ## Verification
 
-List focused tests, complete repository evidence, permanent workflows and current
-review state.
+List the one decision-validated exact-head SDLC core receipt that supplies
+canonical complete deterministic evidence. Record fast CI and any manually run
+legacy diagnostics as compatibility signals only. For Tier S, add only the
+affected lanes selected by the route. Reserve the signed exact-main closeout
+attestation for Tier M. Record one feature-complete stop and its review state.
 
 ## Non-effects
 

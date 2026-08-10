@@ -22,6 +22,8 @@ The normal pull-request path has one always-reporting decision workflow with two
 1. a core lane for routing, source integrity and deterministic repository tests;
 2. a Neo4j service lane when the exact change affects the graph adapter, projection-authority integration, graph migrations, service compatibility, credentials, workflow service setup or qualifying GraphRAG behaviour.
 
+One decision-validated exact-head SDLC core receipt is the canonical complete deterministic evidence. Pull-request and merge-queue core/decision receipts are content-addressed, transport-verified evidence-only artifacts, not signed attestations. The isolated signed-closeout job remains limited to exact-main, service-required manual runs and supplies the Tier-M attestation. Fast CI and manually dispatched legacy diagnostics are compatibility signals only; Tier S adds only the affected lanes selected by the route. The change has one feature-complete stop and one review at that stop.
+
 The measured exact-head test selections are currently small: the recorded JUnit suites range from 1.134 to 7.401 seconds. The exact full-repository pytest p95 has not yet been recorded. Full deterministic tests remain the blocking default until measurement proves that their p95 no longer fits the core-lane budget. Test-impact analysis begins in observe mode and cannot replace full evidence until repository-specific shadow controls demonstrate that it preserves defect detection.
 
 Deep mutation, fuzz, compatibility, flake, performance and recovery work runs as independent scientific shards outside the interactive path. Each shard has its own 220-second hard budget; a large experiment is many content-addressed shards, not one unbounded job.
@@ -413,6 +415,8 @@ The complete deterministic suite remains blocking while all are true:
 
 Current component selections are well below the test threshold, but the exact full-suite p95 must be added during telemetry Phase 1 before conformance is claimed. Selective regression is not justified as a blocking optimisation before that measurement and shadow evidence.
 
+The decision-validated exact-head SDLC core receipt records that complete deterministic decision. A fixed bounded CI smoke selection does not replace it, and a manual legacy diagnostic cannot become canonical admission evidence. Cryptographic signing remains the separate exact-main Tier-M closeout boundary.
+
 ### 10.2 Test sizes
 
 - `micro`: individual p95 below 100 ms;
@@ -578,6 +582,8 @@ Default review triggers:
 These are triggers, not blind rejection. A larger change needs a decomposition note explaining why a smaller sequence is less safe.
 
 Use trunk-based short-lived branches and branch-by-abstraction or disabled feature seams for incomplete behaviour. Long-running branches and increment-named permanent CI workflows are not the target.
+
+Each delivery atom has one feature-complete stop and one substantive review at that stop; compatibility reruns do not create extra review gates.
 
 ## 14. Scientific control loop
 

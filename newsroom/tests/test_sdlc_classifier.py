@@ -130,8 +130,19 @@ def test_unknown_path_fails_closed_to_r3() -> None:
     ]
 
 
-def test_clustering_change_selects_the_clustering_gate_without_over_escalation() -> None:
-    route = _route("newsroom/event_manager.py")
+@pytest.mark.parametrize(
+    "path",
+    (
+        "newsroom/event_manager.py",
+        "newsroom/eval_dataset.py",
+        "newsroom/eval_metrics.py",
+        "newsroom/lang_hint.py",
+    ),
+)
+def test_clustering_change_selects_the_clustering_gate_without_over_escalation(
+    path: str,
+) -> None:
+    route = _route(path)
 
     assert route["risk_tier"] == "R1_LOCAL_CODE"
     assert route["clustering_required"] is True
