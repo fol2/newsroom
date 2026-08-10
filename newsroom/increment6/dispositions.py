@@ -1666,56 +1666,9 @@ class ProposalDispositionStore:
         _digest(disposition_id, "disposition_id")
         try:
             self._begin()
-            _, authenticated_identity = self._authenticate(proof)
-            self._verify_integrity()
-            row = self._connection.execute(
-                "SELECT canonical_bytes FROM triage_proposal_dispositions WHERE disposition_id=?",
-                (disposition_id,),
-            ).fetchone()
-            if row is None:
-                raise DispositionContractError("unknown disposition")
-            disposition = ProposalDisposition.from_canonical_bytes(bytes(row[0]))
-            version = _WORK_ITEM_REQUIRE_CURRENT(
-                self._work_items, disposition.work_item_id
+            disposition = self.require_current_in_transaction(
+                disposition_id, proof=proof
             )
-            _RETRIEVAL_VERIFY(
-                self._retrieval_authority, self._connection, version.retrieval
-            )
-            lead = next(
-                (item for item in version.decision_leads
-                 if item.lead_id == disposition.decision_lead_id),
-                None,
-            )
-            if (
-                version.version_id != disposition.work_item_version_id
-                or version.canonical_digest != disposition.work_item_version_digest
-                or version.retrieval.context_id != disposition.retrieval_context_id
-                or version.retrieval.context_digest != disposition.retrieval_context_digest
-                or disposition.validator_input.authenticated_context_identity
-                != authenticated_identity
-                or disposition.validator_input.validator_id != _VALIDATOR_ID
-                or disposition.validator_input.validator_version
-                != _VALIDATOR_VERSION
-                or disposition.validator_input.ruleset_id != _RULESET_ID
-                or disposition.validator_input.ruleset_version
-                != _RULESET_VERSION
-                or disposition.validator_input.ruleset_digest != _RULESET_DIGEST
-                or disposition.validator_input.retrieval_request_id
-                != version.retrieval.request_id
-                or disposition.validator_input.retrieval_request_digest
-                != version.retrieval.request_digest
-                or disposition.validator_input.retrieval_receipt_id
-                != version.retrieval.context_id
-                or disposition.validator_input.retrieval_receipt_digest
-                != version.retrieval.context_digest
-                or lead is None
-                or lead.lead_digest != disposition.lead_head.decision_lead_digest
-                or lead.disposition_id
-                != disposition.lead_head.current_disposition_head_id
-                or lead.disposition_digest
-                != disposition.lead_head.current_disposition_head_digest
-            ):
-                raise DispositionContractError("disposition is no longer current")
             self._connection.execute("COMMIT")
             return disposition
         except BaseException as exc:
@@ -1726,9 +1679,77 @@ class ProposalDispositionStore:
                 raise
             raise DispositionContractError("disposition currentness failed") from exc
 
+    def require_current_in_transaction(
+        self, disposition_id: str, *, proof: AuthenticationProof
+    ) -> ProposalDisposition:
+        """Recheck a retained disposition inside the caller's write transaction."""
+        _digest(disposition_id, "disposition_id")
+        if not self._connection.in_transaction:
+            raise DispositionContractError(
+                "transaction-aware disposition use requires an active transaction"
+            )
+        _, authenticated_identity = self._authenticate(proof)
+        self._verify_integrity()
+        row = self._connection.execute(
+            "SELECT canonical_bytes FROM triage_proposal_dispositions WHERE disposition_id=?",
+            (disposition_id,),
+        ).fetchone()
+        if row is None:
+            raise DispositionContractError("unknown disposition")
+        disposition = ProposalDisposition.from_canonical_bytes(bytes(row[0]))
+        version = _WORK_ITEM_REQUIRE_CURRENT(self._work_items, disposition.work_item_id)
+        _RETRIEVAL_VERIFY(
+            self._retrieval_authority, self._connection, version.retrieval
+        )
+        lead = next(
+            (
+                item
+                for item in version.decision_leads
+                if item.lead_id == disposition.decision_lead_id
+            ),
+            None,
+        )
+        if (
+            version.version_id != disposition.work_item_version_id
+            or version.canonical_digest != disposition.work_item_version_digest
+            or version.retrieval.context_id != disposition.retrieval_context_id
+            or version.retrieval.context_digest != disposition.retrieval_context_digest
+            or disposition.validator_input.authenticated_context_identity
+            != authenticated_identity
+            or disposition.validator_input.validator_id != _VALIDATOR_ID
+            or disposition.validator_input.validator_version != _VALIDATOR_VERSION
+            or disposition.validator_input.ruleset_id != _RULESET_ID
+            or disposition.validator_input.ruleset_version != _RULESET_VERSION
+            or disposition.validator_input.ruleset_digest != _RULESET_DIGEST
+            or disposition.validator_input.retrieval_request_id
+            != version.retrieval.request_id
+            or disposition.validator_input.retrieval_request_digest
+            != version.retrieval.request_digest
+            or disposition.validator_input.retrieval_receipt_id
+            != version.retrieval.context_id
+            or disposition.validator_input.retrieval_receipt_digest
+            != version.retrieval.context_digest
+            or lead is None
+            or lead.lead_digest != disposition.lead_head.decision_lead_digest
+            or lead.disposition_id != disposition.lead_head.current_disposition_head_id
+            or lead.disposition_digest
+            != disposition.lead_head.current_disposition_head_digest
+        ):
+            raise DispositionContractError("disposition is no longer current")
+        return disposition
+
+    def verify_retained_integrity_in_transaction(self) -> None:
+        """Revalidate retained disposition/finding authority without currentness."""
+        if not self._connection.in_transaction:
+            raise DispositionContractError(
+                "transaction-aware disposition integrity requires an active transaction"
+            )
+        self._verify_integrity()
+
     def _verify_integrity(self) -> None:
         tables = {
-            str(row[0]) for row in self._connection.execute(
+            str(row[0])
+            for row in self._connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }

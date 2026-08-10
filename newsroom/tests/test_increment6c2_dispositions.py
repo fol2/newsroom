@@ -41,6 +41,8 @@ from newsroom.increment6.work_items import (
     RetrievalContextAuthority,
     RetrievalInputBinding,
     TriageWorkItem,
+    TriageWorkItemStore,
+    TriageWorkItemVersion,
 )
 from newsroom.tests import test_increment5d1_hybrid_composer as composer_helpers
 from newsroom.tests import test_increment5d2_retrieval_context as retrieval_helpers
@@ -276,6 +278,125 @@ def _persistable_proposal(version: object, decision: object, receipt: object) ->
         decision.lead_id
     ]
     return _resign(document)
+
+
+def _persisted_disposition_store(
+    tmp_path: object, *, name: str
+) -> tuple[
+    sqlite3.Connection,
+    TriageWorkItemStore,
+    TriageWorkItem,
+    TriageWorkItemVersion,
+    ProposalDispositionStore,
+    AuthenticationProof,
+    ProposalDisposition,
+]:
+    inputs = composer_helpers.branch_inputs.__wrapped__(tmp_path)
+    builder, _, _, _, _, request, receipt, _ = (
+        retrieval_helpers._retained_complete_context(tmp_path, inputs, name=name)
+    )
+    authority = RetrievalContextAuthority(
+        builder.journal.path, {request.request_digest: (request, receipt)}
+    )
+    decision = work_item_helpers._decision(1)
+    connection, work_store = work_item_helpers._store(
+        (decision,), retrieval_authority=authority
+    )
+    item = TriageWorkItem.create((decision,))
+    version = replace(
+        work_item_helpers._version(item),
+        retrieval=RetrievalInputBinding.from_receipt(request, receipt),
+    )
+    work_store.create_or_replay(item, version)
+    for statement in TRIAGE_DISPOSITION_MIGRATION_STATEMENTS:
+        connection.execute(statement)
+    authenticator = StaticAuthenticator(
+        credentials={"credential": StaticPrincipal("editor")},
+        authority_domain="newsroom.dispositions",
+    )
+    proof = AuthenticationProof(method="STATIC_TOKEN", credential="credential")
+    store = ProposalDispositionStore(connection, authority, authenticator)
+    disposition = store.persist(
+        _persistable_proposal(version, decision, receipt),
+        {
+            decision.lead_id: _selection(
+                CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+                CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+                ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+            )
+        },
+        proof=proof,
+    )[0]
+    return connection, work_store, item, version, store, proof, disposition
+
+
+def test_transaction_aware_retained_integrity_requires_a_transaction_and_passes(
+    tmp_path,
+) -> None:
+    connection, _, _, _, store, _, _ = _persisted_disposition_store(
+        tmp_path, name="retained-integrity-transaction"
+    )
+
+    with pytest.raises(DispositionContractError, match="active transaction"):
+        store.verify_retained_integrity_in_transaction()
+
+    connection.execute("BEGIN IMMEDIATE")
+    assert store.verify_retained_integrity_in_transaction() is None
+    connection.execute("ROLLBACK")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("disposition_scalar", "disposition_digest", "linked_finding"),
+)
+def test_transaction_aware_retained_integrity_rejects_retained_tamper(
+    tmp_path, mutation: str
+) -> None:
+    connection, _, _, _, store, _, _ = _persisted_disposition_store(
+        tmp_path, name=f"retained-integrity-{mutation}"
+    )
+    if mutation == "disposition_scalar":
+        connection.execute("DROP TRIGGER immutable_triage_proposal_dispositions_update")
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            "UPDATE triage_proposal_dispositions SET proposal_id=?",
+            ("00000000-0000-4000-8000-000000009999",),
+        )
+        connection.execute("PRAGMA foreign_keys=ON")
+    elif mutation == "disposition_digest":
+        connection.execute("DROP TRIGGER immutable_triage_proposal_dispositions_update")
+        connection.execute(
+            "UPDATE triage_proposal_dispositions SET canonical_digest=?", (DIGEST_A,)
+        )
+    else:
+        connection.execute("DROP TRIGGER immutable_triage_proposal_findings_update")
+        connection.execute(
+            "UPDATE triage_proposal_validation_findings SET canonical_digest=?",
+            (DIGEST_A,),
+        )
+
+    connection.execute("BEGIN IMMEDIATE")
+    with pytest.raises(DispositionContractError, match="retained"):
+        store.verify_retained_integrity_in_transaction()
+    connection.execute("ROLLBACK")
+
+
+def test_retained_integrity_ignores_upstream_currentness_but_current_use_does_not(
+    tmp_path,
+) -> None:
+    connection, work_store, item, version, store, proof, disposition = (
+        _persisted_disposition_store(tmp_path, name="retained-integrity-stale")
+    )
+    successor = replace(
+        work_item_helpers._version(item, 2), retrieval=version.retrieval
+    )
+    work_store.append_version(version.version_id, version.canonical_digest, successor)
+
+    connection.execute("BEGIN IMMEDIATE")
+    assert store.verify_retained_integrity_in_transaction() is None
+    with pytest.raises(DispositionContractError, match="no longer current"):
+        store.require_current_in_transaction(disposition.disposition_id, proof=proof)
+    connection.execute("ROLLBACK")
 
 
 def test_v19_store_exact_success_replay_restart_and_use_time_currentness(tmp_path) -> None:
