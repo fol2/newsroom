@@ -15,6 +15,9 @@ from newsroom.authority.triage_work_item_migrations import (
 from newsroom.authority.triage_disposition_migrations import (
     TRIAGE_DISPOSITION_SCHEMA_VERSION,
 )
+from newsroom.authority.triage_execution_migrations import (
+    TRIAGE_EXECUTION_SCHEMA_VERSION,
+)
 
 
 def downgrade_empty_graphiti_adapter_schema_to_v15(database: Path) -> None:
@@ -37,6 +40,14 @@ def downgrade_empty_graphiti_adapter_schema_to_v15(database: Path) -> None:
         ).fetchone()
         assert delete_trigger is not None and delete_trigger[0]
         conn.execute("DROP TRIGGER immutable_authority_migrations_delete")
+
+        if current >= TRIAGE_EXECUTION_SCHEMA_VERSION:
+            for table in (
+                "triage_work_item_leases",
+                "triage_worker_attempts",
+                "triage_execution_batches",
+            ):
+                conn.execute(f'DROP TABLE "{table}"')
 
         if current >= TRIAGE_DISPOSITION_SCHEMA_VERSION:
             for table in (

@@ -10,7 +10,6 @@ import newsroom.increment6.execution as execution_contract
 from newsroom.authority.canonical import (
     MAX_SAFE_INTEGER,
     canonical_json_bytes,
-    digest_bytes,
 )
 from newsroom.increment6.execution import (
     EXECUTION_BATCH,
@@ -48,7 +47,11 @@ from newsroom.increment6.scheduling import (
     allocate_reserved_capacity,
     calculate_urgency_deadline,
 )
-from newsroom.increment6.work_items import TriageWorkItem, TriageWorkItemVersion
+from newsroom.increment6.work_items import (
+    ContextLeadBinding,
+    TriageWorkItem,
+    TriageWorkItemVersion,
+)
 from newsroom.tests.test_increment6a2_work_items import _decision, _pending
 from newsroom.tests.test_increment6b2_scheduling import _policy
 
@@ -88,27 +91,27 @@ def _version(number: int) -> TriageWorkItemVersion:
 
 
 def _maximum_legal_version() -> TriageWorkItemVersion:
-    decisions = []
-    for number in range(1, 33):
-        decision = _decision(number)
-        lead = json.loads(decision.lead_bytes)
-        lead["padding"] = "x" * (660_611 if number == 1 else 660_609)
-        lead_bytes = canonical_json_bytes(lead)
-        decisions.append(
-            replace(
-                decision,
-                lead_digest=digest_bytes(lead_bytes),
-                lead_bytes=lead_bytes,
-            )
+    decisions = tuple(_decision(number) for number in range(1, 33))
+    contexts = tuple(
+        ContextLeadBinding(
+            decision.lead_id,
+            decision.lead_digest,
+            decision.lead_event_id,
+            decision.lead_aggregate_version,
+            decision.gate_decision_id,
+            decision.definition_id,
+            decision.definition_version_id,
         )
-    item = TriageWorkItem.create(tuple(decisions))
+        for decision in (_decision(number) for number in range(33, 65))
+    )
+    item = TriageWorkItem.create(decisions)
     version_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{item.work_item_id}|1"))
     return TriageWorkItemVersion.create(
         work_item_id=item.work_item_id,
         ordinal=1,
         previous_version_id=None,
         decision_leads=item.decision_leads,
-        context_leads=(),
+        context_leads=contexts,
         retrieval=_pending(99_999),
         priority=_priority(item.work_item_id, version_id),
     )
@@ -123,7 +126,9 @@ def _decision_for(versions: tuple[TriageWorkItemVersion, ...]):
                     version.work_item_id,
                     version.version_id,
                     version.canonical_digest,
-                    version.priority,
+                    PrioritySelection.from_canonical_bytes(
+                        version.priority.selection_bytes
+                    ),
                     PriorityLane.ROUTINE,
                     "2026-08-09T15:00:00Z",
                     "2026-08-09T15:10:00Z",
@@ -222,6 +227,38 @@ def test_batch_identity_is_permutation_invariant_and_members_are_exact_per_item(
 def test_attempt_identity_retry_predecessor_and_proposal_binding() -> None:
     first = _attempt()
     member = _member(1)
+    for field, divergent_digest in (
+        ("work_item_version_digest", _digest(701)),
+        ("retrieval_context_digest", _digest(702)),
+        ("priority_digest", _digest(703)),
+    ):
+        member_values = member.canonical_value()
+        member_values[field] = divergent_digest
+        binding_values = tuple(
+            member_values[name]
+            for name in (
+                "work_item_id",
+                "work_item_version_id",
+                "work_item_version_digest",
+                "retrieval_context_id",
+                "retrieval_context_digest",
+                "priority_digest",
+                "scheduling_grant_digest",
+            )
+        )
+        member_values["producer_binding_digest"] = (
+            ExecutionBatchMember._binding_digest(*binding_values)  # type: ignore[arg-type]
+        )
+        forged_member = ExecutionBatchMember.from_value(member_values)
+        with pytest.raises(ExecutionContractError, match="predecessor binding"):
+            WorkerAttempt.create(
+                member=forged_member,
+                ordinal=2,
+                previous_attempt=first,
+                worker_kind=FixtureWorkerKind.REPLAY,
+                worker_version="fixture-v1",
+                input_digest=_digest(999),
+            )
     second = WorkerAttempt.create(
         member=member,
         ordinal=2,
@@ -269,6 +306,33 @@ def test_attempt_identity_retry_predecessor_and_proposal_binding() -> None:
     )
     with pytest.raises(ExecutionContractError, match="deterministic"):
         replace(second, previous_attempt_id=_id(888))
+    with pytest.raises(ExecutionContractError, match="deterministic"):
+        replace(second, previous_attempt_digest=_digest(888))
+    divergent_predecessor_digest = _digest(888)
+    divergent = replace(
+        second,
+        attempt_id=str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"{WORKER_ATTEMPT_SCHEMA}|{second.semantic_request_digest}|"
+                f"{second.ordinal}|{second.previous_attempt_id}|"
+                f"{divergent_predecessor_digest}",
+            )
+        ),
+        previous_attempt_digest=divergent_predecessor_digest,
+    )
+    lease_arguments = {
+        "owner_id": "worker:fixture",
+        "owner_profile_digest": _digest(3),
+        "capability_digest": _digest(4),
+        "fence": 1,
+    }
+    exact_lease = WorkItemLease.pending(attempt=second, **lease_arguments)
+    divergent_lease = WorkItemLease.pending(attempt=divergent, **lease_arguments)
+    assert divergent.attempt_id != second.attempt_id
+    assert divergent_lease.attempt_digest == divergent.canonical_digest
+    assert divergent_lease.lease_id != exact_lease.lease_id
+    assert divergent_lease.canonical_bytes != exact_lease.canonical_bytes
     with pytest.raises(
         ExecutionContractError, match="exact interoperable bounded integer"
     ):
@@ -277,7 +341,8 @@ def test_attempt_identity_retry_predecessor_and_proposal_binding() -> None:
 
 def test_maximum_legal_version_and_48_members_remain_compact() -> None:
     maximum = _maximum_legal_version()
-    assert len(maximum.canonical_bytes) == 21_180_301
+    assert len(maximum.decision_leads) == 32
+    assert len(maximum.context_leads) == 32
     versions = (maximum, *(_version(index) for index in range(33, 80)))
     batch = _batch(*versions)
     assert len(batch.members) == 48
@@ -299,14 +364,47 @@ def test_lease_represents_capability_fence_lifecycle_and_expiry_without_authorit
         capability_digest=_digest(4),
         fence=1,
     )
+    assert pending.attempt_digest == attempt.canonical_digest
+    with pytest.raises(ExecutionContractError, match="deterministic"):
+        replace(pending, attempt_digest=_digest(888))
+    old_wire = pending.canonical_value()
+    old_wire.pop("attempt_digest", None)
+    with pytest.raises(ExecutionContractError, match="fields"):
+        WorkItemLease.from_canonical_bytes(canonical_json_bytes(old_wire))
     assert pending.lifecycle is LeaseLifecycle.PENDING
     lease = pending.claim(
         issued_at="2042-03-12T10:00:00Z",
         expires_at="2042-03-12T10:05:00Z",
+        actor_identity_digest=_digest(6),
     )
+    later_expiry = pending.claim(
+        issued_at="2042-03-12T10:00:00Z",
+        expires_at="2042-03-12T10:06:00Z",
+        actor_identity_digest=_digest(6),
+    )
+    assert lease.transition.actor_identity_digest == _digest(6)
+    assert lease.transition.transition_id != later_expiry.transition.transition_id
+    assert (
+        lease.transition.successor_parameters_digest
+        != later_expiry.transition.successor_parameters_digest
+    )
+    with pytest.raises(ExecutionContractError, match="identity"):
+        replace(lease.transition, actor_identity_digest=_digest(999))
+    old_transition_wire = lease.canonical_value()
+    transition_values = old_transition_wire["transitions"]
+    assert isinstance(transition_values, list)
+    assert isinstance(transition_values[0], dict)
+    transition_values[0].pop("actor_identity_digest")
+    with pytest.raises(ExecutionContractError, match="fields"):
+        WorkItemLease.from_canonical_bytes(
+            canonical_json_bytes(old_transition_wire)
+        )
     assert lease.is_expired_at("2042-03-12T10:04:59Z") is False
     assert lease.is_expired_at("2042-03-12T10:05:00Z") is True
-    expired = lease.expire(observed_at="2042-03-12T10:05:00Z")
+    expired = lease.expire(
+        observed_at="2042-03-12T10:05:00Z",
+        actor_identity_digest=_digest(6),
+    )
     assert expired.lifecycle is LeaseLifecycle.EXPIRED
     assert expired.issued_at == lease.issued_at
     assert expired.expires_at == lease.expires_at
@@ -314,6 +412,7 @@ def test_lease_represents_capability_fence_lifecycle_and_expiry_without_authorit
     assert lease.canonical_value()["authority"] == "NONE"
     released = lease.release(
         observed_at="2042-03-12T10:03:00Z",
+        actor_identity_digest=_digest(6),
         progress=(LeaseProgressEvidence(LeaseProgress.COMPLETED, _digest(5)),),
     )
     assert released.issued_at == lease.issued_at
@@ -327,16 +426,26 @@ def test_lease_represents_capability_fence_lifecycle_and_expiry_without_authorit
     with pytest.raises(ExecutionContractError, match="expiry"):
         replace(lease, expires_at=lease.issued_at)
     with pytest.raises(ExecutionContractError, match="expired transition"):
-        lease.release(observed_at=lease.expires_at)
+        lease.release(
+            observed_at=lease.expires_at,
+            actor_identity_digest=_digest(6),
+        )
     with pytest.raises(ExecutionContractError, match="not allowed"):
-        pending.expire(observed_at="2042-03-12T10:06:00Z")
+        pending.expire(
+            observed_at="2042-03-12T10:06:00Z",
+            actor_identity_digest=_digest(6),
+        )
     with pytest.raises(ExecutionContractError, match="not allowed"):
         lease.claim(
             issued_at="2042-03-12T10:01:00Z",
             expires_at="2042-03-12T10:06:00Z",
+            actor_identity_digest=_digest(6),
         )
     with pytest.raises(ExecutionContractError, match="not allowed"):
-        released.release(observed_at="2042-03-12T10:04:00Z")
+        released.release(
+            observed_at="2042-03-12T10:04:00Z",
+            actor_identity_digest=_digest(6),
+        )
     with pytest.raises(
         ExecutionContractError, match="exact interoperable bounded integer"
     ):
@@ -453,17 +562,21 @@ def test_lease_chain_rejects_recomputed_wrong_predecessor_and_progress_regressio
     claimed = pending.claim(
         issued_at="2042-03-12T10:00:00Z",
         expires_at="2042-03-12T10:05:00Z",
+        actor_identity_digest=_digest(7),
         progress=(LeaseProgressEvidence(LeaseProgress.COMPLETED, _digest(5)),),
     )
     with pytest.raises(ExecutionContractError, match="progress"):
         claimed.release(
             observed_at="2042-03-12T10:03:00Z",
+            actor_identity_digest=_digest(7),
             progress=(LeaseProgressEvidence(LeaseProgress.IN_PROGRESS, _digest(6)),),
         )
     with pytest.raises(ExecutionContractError, match="not allowed"):
         LeaseTransitionReceipt.create(
             lease_id=pending.lease_id,
             predecessor_digest=pending.canonical_digest,
+            successor_parameters_digest=_digest(7),
+            actor_identity_digest=_digest(8),
             from_lifecycle=LeaseLifecycle.PENDING,
             to_lifecycle=LeaseLifecycle.EXPIRED,
             observed_at="2042-03-12T10:05:00Z",
@@ -472,10 +585,16 @@ def test_lease_chain_rejects_recomputed_wrong_predecessor_and_progress_regressio
     released = pending.claim(
         issued_at="2042-03-12T10:00:00Z",
         expires_at="2042-03-12T10:05:00Z",
-    ).release(observed_at="2042-03-12T10:03:00Z")
+        actor_identity_digest=_digest(7),
+    ).release(
+        observed_at="2042-03-12T10:03:00Z",
+        actor_identity_digest=_digest(8),
+    )
     wrong = LeaseTransitionReceipt.create(
         lease_id=released.lease_id,
         predecessor_digest=_digest(999),
+        successor_parameters_digest=released.transition.successor_parameters_digest,
+        actor_identity_digest=_digest(8),
         from_lifecycle=LeaseLifecycle.CLAIMED,
         to_lifecycle=LeaseLifecycle.RELEASED,
         observed_at="2042-03-12T10:03:00Z",
@@ -555,6 +674,8 @@ def test_public_exact_facades_normalise_uninitialised_and_dependency_failures(
         LeaseTransitionReceipt.create(
             lease_id=_id(1),
             predecessor_digest=_digest(1),
+            successor_parameters_digest=_digest(2),
+            actor_identity_digest=_digest(3),
             from_lifecycle=LeaseLifecycle.PENDING,
             to_lifecycle=LeaseLifecycle.CLAIMED,
             observed_at="2042-03-12T10:00:00Z",
@@ -570,6 +691,7 @@ def test_public_exact_facades_normalise_uninitialised_and_dependency_failures(
     ).claim(
         issued_at="2042-03-12T10:00:00Z",
         expires_at="2042-03-12T10:05:00Z",
+        actor_identity_digest=_digest(6),
     )
     receipt = object.__new__(LeaseTransitionReceipt)
     with pytest.raises(ExecutionContractError):
@@ -620,6 +742,7 @@ def test_computed_properties_normalise_uninitialised_and_dependency_failures(
     ).claim(
         issued_at="2042-03-12T10:00:00Z",
         expires_at="2042-03-12T10:05:00Z",
+        actor_identity_digest=_digest(6),
     )
     assert claimed.transition == claimed.transitions[-1]
     with pytest.raises(ExecutionContractError):

@@ -25,6 +25,7 @@ from newsroom.authority.canonical import (
 from newsroom.increment6.outcomes import (
     ContractAuthority,
     ContractEffect,
+    PrioritySelection,
 )
 from newsroom.increment6.proposals import FixtureWorkerKind, WorkerAttemptBinding
 from newsroom.increment6.scheduling import (
@@ -279,7 +280,10 @@ class ExecutionBatchMember:
             )
         try:
             version_digest = version.canonical_digest
-            priority_digest = digest_bytes(version.priority.canonical_bytes)
+            priority = PrioritySelection.from_canonical_bytes(
+                version.priority.selection_bytes
+            )
+            priority_digest = version.priority.selection_digest
             grant_digest = digest_bytes(
                 _canonical(allocation.canonical_value(), "capacity grant")
             )
@@ -291,7 +295,7 @@ class ExecutionBatchMember:
                 or allocation.item.work_item_id != version.work_item_id
                 or allocation.item.work_item_version_id != version.version_id
                 or allocation.item.work_item_version_digest != version_digest
-                or allocation.item.priority_selection != version.priority
+                or allocation.item.priority_selection != priority
             ):
                 raise ExecutionContractError(
                     "batch member differs from its exact scheduling grant"
@@ -685,15 +689,17 @@ class WorkerAttempt:
         if previous_attempt is not None and (
             previous_attempt.work_item_id != work_item_id
             or previous_attempt.work_item_version_id != work_item_version_id
+            or previous_attempt.work_item_version_digest != work_item_version_digest
+            or previous_attempt.retrieval_context_digest != retrieval_context_digest
+            or previous_attempt.priority_digest != priority_digest
             or previous_attempt.ordinal + 1 != ordinal
         ):
             raise ExecutionContractError("attempt predecessor binding differs")
-        attempt_id = str(
-            uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"{WORKER_ATTEMPT_SCHEMA}|{request_digest}|{ordinal}|{previous_id}",
-            )
+        identity = (
+            f"{WORKER_ATTEMPT_SCHEMA}|{request_digest}|{ordinal}|"
+            f"{previous_id}|{previous_digest}"
         )
+        attempt_id = str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
         return cls(
             attempt_id,
             work_item_id,
@@ -738,12 +744,11 @@ class WorkerAttempt:
             "priority_digest": self.priority_digest,
         }
         request_digest = digest_bytes(_canonical(request_value, "semantic request"))
-        expected = str(
-            uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"{WORKER_ATTEMPT_SCHEMA}|{request_digest}|{self.ordinal}|{self.previous_attempt_id}",
-            )
+        identity = (
+            f"{WORKER_ATTEMPT_SCHEMA}|{request_digest}|{self.ordinal}|"
+            f"{self.previous_attempt_id}|{self.previous_attempt_digest}"
         )
+        expected = str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
         if (
             (self.ordinal == 1)
             != (
@@ -951,6 +956,15 @@ _PROGRESS_SUCCESSORS = {
 }
 
 
+def _lease_successor_parameters_digest(issued_at: str, expires_at: str) -> str:
+    return digest_bytes(
+        _canonical(
+            {"issued_at": issued_at, "expires_at": expires_at},
+            "lease successor parameters",
+        )
+    )
+
+
 def _progress_evidence(
     value: object,
     *,
@@ -988,6 +1002,8 @@ class LeaseTransitionReceipt:
     transition_id: str
     lease_id: str
     predecessor_digest: str
+    successor_parameters_digest: str
+    actor_identity_digest: str
     from_lifecycle: LeaseLifecycle
     to_lifecycle: LeaseLifecycle
     observed_at: str
@@ -999,6 +1015,8 @@ class LeaseTransitionReceipt:
         *,
         lease_id: str,
         predecessor_digest: str,
+        successor_parameters_digest: str,
+        actor_identity_digest: str,
         from_lifecycle: LeaseLifecycle,
         to_lifecycle: LeaseLifecycle,
         observed_at: str,
@@ -1006,6 +1024,8 @@ class LeaseTransitionReceipt:
     ) -> Self:
         _uuid(lease_id, "lease transition lease_id")
         _digest(predecessor_digest, "lease predecessor digest")
+        _digest(successor_parameters_digest, "lease successor parameters digest")
+        _digest(actor_identity_digest, "lease actor identity digest")
         if (
             type(from_lifecycle) is not LeaseLifecycle
             or type(to_lifecycle) is not LeaseLifecycle
@@ -1021,6 +1041,8 @@ class LeaseTransitionReceipt:
             {
                 "lease_id": lease_id,
                 "predecessor_digest": predecessor_digest,
+                "successor_parameters_digest": successor_parameters_digest,
+                "actor_identity_digest": actor_identity_digest,
                 "from_lifecycle": from_lifecycle.value,
                 "to_lifecycle": to_lifecycle.value,
                 "observed_at": observed_at,
@@ -1037,6 +1059,8 @@ class LeaseTransitionReceipt:
             ),
             lease_id,
             predecessor_digest,
+            successor_parameters_digest,
+            actor_identity_digest,
             from_lifecycle,
             to_lifecycle,
             observed_at,
@@ -1050,6 +1074,11 @@ class LeaseTransitionReceipt:
         _uuid(self.transition_id, "lease transition_id")
         _uuid(self.lease_id, "lease transition lease_id")
         _digest(self.predecessor_digest, "lease predecessor digest")
+        _digest(
+            self.successor_parameters_digest,
+            "lease successor parameters digest",
+        )
+        _digest(self.actor_identity_digest, "lease actor identity digest")
         if (
             type(self.from_lifecycle) is not LeaseLifecycle
             or type(self.to_lifecycle) is not LeaseLifecycle
@@ -1065,6 +1094,8 @@ class LeaseTransitionReceipt:
             {
                 "lease_id": self.lease_id,
                 "predecessor_digest": self.predecessor_digest,
+                "successor_parameters_digest": self.successor_parameters_digest,
+                "actor_identity_digest": self.actor_identity_digest,
                 "from_lifecycle": self.from_lifecycle.value,
                 "to_lifecycle": self.to_lifecycle.value,
                 "observed_at": self.observed_at,
@@ -1086,6 +1117,8 @@ class LeaseTransitionReceipt:
             "transition_id": self.transition_id,
             "lease_id": self.lease_id,
             "predecessor_digest": self.predecessor_digest,
+            "successor_parameters_digest": self.successor_parameters_digest,
+            "actor_identity_digest": self.actor_identity_digest,
             "from_lifecycle": self.from_lifecycle.value,
             "to_lifecycle": self.to_lifecycle.value,
             "observed_at": self.observed_at,
@@ -1100,6 +1133,8 @@ class LeaseTransitionReceipt:
                 "transition_id",
                 "lease_id",
                 "predecessor_digest",
+                "successor_parameters_digest",
+                "actor_identity_digest",
                 "from_lifecycle",
                 "to_lifecycle",
                 "observed_at",
@@ -1114,6 +1149,14 @@ class LeaseTransitionReceipt:
                 _string(item["transition_id"], "lease transition_id"),
                 _string(item["lease_id"], "lease transition lease_id"),
                 _string(item["predecessor_digest"], "lease predecessor digest"),
+                _string(
+                    item["successor_parameters_digest"],
+                    "lease successor parameters digest",
+                ),
+                _string(
+                    item["actor_identity_digest"],
+                    "lease actor identity digest",
+                ),
                 LeaseLifecycle(item["from_lifecycle"]),
                 LeaseLifecycle(item["to_lifecycle"]),
                 _string(item["observed_at"], "lease transition observed_at"),
@@ -1132,6 +1175,7 @@ class LeaseTransitionReceipt:
 class WorkItemLease:
     lease_id: str
     attempt_id: str
+    attempt_digest: str
     work_item_id: str
     work_item_version_id: str
     work_item_version_digest: str
@@ -1166,6 +1210,7 @@ class WorkItemLease:
             _digest(capability_digest, "lease capability")
             values = (
                 attempt.attempt_id,
+                attempt.canonical_digest,
                 attempt.work_item_id,
                 attempt.work_item_version_id,
                 attempt.work_item_version_digest,
@@ -1185,6 +1230,7 @@ class WorkItemLease:
     @staticmethod
     def _identity(
         attempt_id: str,
+        attempt_digest: str,
         work_item_id: str,
         work_item_version_id: str,
         work_item_version_digest: str,
@@ -1195,6 +1241,7 @@ class WorkItemLease:
     ) -> str:
         value = {
             "attempt_id": attempt_id,
+            "attempt_digest": attempt_digest,
             "work_item_id": work_item_id,
             "work_item_version_id": work_item_version_id,
             "work_item_version_digest": work_item_version_digest,
@@ -1221,6 +1268,7 @@ class WorkItemLease:
             (self.work_item_version_id, "lease work_item_version_id"),
         ):
             _uuid(value, field)
+        _digest(self.attempt_digest, "lease attempt digest")
         _digest(self.work_item_version_digest, "lease Work Item Version digest")
         _token(self.owner_id, "lease owner")
         _digest(self.owner_profile_digest, "lease owner profile digest")
@@ -1250,6 +1298,7 @@ class WorkItemLease:
             raise ExecutionContractError("Lease contract claims authority or effect")
         expected = self._identity(
             self.attempt_id,
+            self.attempt_digest,
             self.work_item_id,
             self.work_item_version_id,
             self.work_item_version_digest,
@@ -1285,9 +1334,14 @@ class WorkItemLease:
                     "Lease genesis",
                 )
             )
+            successor_parameters_digest = _lease_successor_parameters_digest(
+                issued, expires
+            )
             for index, receipt in enumerate(self.transitions):
                 if (
                     receipt.lease_id != self.lease_id
+                    or receipt.successor_parameters_digest
+                    != successor_parameters_digest
                     or receipt.from_lifecycle is not state
                     or (receipt.from_lifecycle, receipt.to_lifecycle)
                     not in _ALLOWED_LEASE_TRANSITIONS
@@ -1338,17 +1392,23 @@ class WorkItemLease:
         *,
         issued_at: str,
         expires_at: str,
+        actor_identity_digest: str,
         progress: tuple[LeaseProgressEvidence, ...] = (),
     ) -> Self:
         if self.lifecycle is not LeaseLifecycle.PENDING:
             raise ExecutionContractError("Lease lifecycle transition is not allowed")
         _utc(issued_at, "lease issued_at")
         _utc(expires_at, "lease expires_at")
+        _digest(actor_identity_digest, "lease actor identity digest")
         if _utc_value(expires_at) <= _utc_value(issued_at):
             raise ExecutionContractError("lease expiry must follow issue time")
         receipt = LeaseTransitionReceipt.create(
             lease_id=self.lease_id,
             predecessor_digest=self.canonical_digest,
+            successor_parameters_digest=_lease_successor_parameters_digest(
+                issued_at, expires_at
+            ),
+            actor_identity_digest=actor_identity_digest,
             from_lifecycle=LeaseLifecycle.PENDING,
             to_lifecycle=LeaseLifecycle.CLAIMED,
             observed_at=issued_at,
@@ -1359,7 +1419,11 @@ class WorkItemLease:
         )
 
     def release(
-        self, *, observed_at: str, progress: tuple[LeaseProgressEvidence, ...] = ()
+        self,
+        *,
+        observed_at: str,
+        actor_identity_digest: str,
+        progress: tuple[LeaseProgressEvidence, ...] = (),
     ) -> Self:
         if self.lifecycle is not LeaseLifecycle.CLAIMED:
             raise ExecutionContractError("Lease lifecycle transition is not allowed")
@@ -1367,26 +1431,44 @@ class WorkItemLease:
             raise ExecutionContractError(
                 "Lease at or beyond expiry must use expired transition"
             )
-        return self._finish(LeaseLifecycle.RELEASED, observed_at, progress)
+        return self._finish(
+            LeaseLifecycle.RELEASED,
+            observed_at,
+            actor_identity_digest,
+            progress,
+        )
 
     def expire(
-        self, *, observed_at: str, progress: tuple[LeaseProgressEvidence, ...] = ()
+        self,
+        *,
+        observed_at: str,
+        actor_identity_digest: str,
+        progress: tuple[LeaseProgressEvidence, ...] = (),
     ) -> Self:
         if self.lifecycle is not LeaseLifecycle.CLAIMED:
             raise ExecutionContractError("Lease lifecycle transition is not allowed")
         if not self.is_expired_at(observed_at):
             raise ExecutionContractError("Lease has not reached its expiry boundary")
-        return self._finish(LeaseLifecycle.EXPIRED, observed_at, progress)
+        return self._finish(
+            LeaseLifecycle.EXPIRED,
+            observed_at,
+            actor_identity_digest,
+            progress,
+        )
 
     def _finish(
         self,
         lifecycle: LeaseLifecycle,
         observed_at: str,
+        actor_identity_digest: str,
         progress: tuple[LeaseProgressEvidence, ...],
     ) -> Self:
         _utc(observed_at, "lease transition observed_at")
-        if self.issued_at is None or _utc_value(observed_at) < _utc_value(
-            self.issued_at
+        _digest(actor_identity_digest, "lease actor identity digest")
+        if (
+            self.issued_at is None
+            or self.expires_at is None
+            or _utc_value(observed_at) < _utc_value(self.issued_at)
         ):
             raise ExecutionContractError(
                 "Lease transition cannot precede acquisition time"
@@ -1399,6 +1481,10 @@ class WorkItemLease:
         receipt = LeaseTransitionReceipt.create(
             lease_id=self.lease_id,
             predecessor_digest=self.canonical_digest,
+            successor_parameters_digest=_lease_successor_parameters_digest(
+                self.issued_at, self.expires_at
+            ),
+            actor_identity_digest=actor_identity_digest,
             from_lifecycle=LeaseLifecycle.CLAIMED,
             to_lifecycle=lifecycle,
             observed_at=observed_at,
@@ -1418,6 +1504,7 @@ class WorkItemLease:
         return WorkItemLease(
             self.lease_id,
             self.attempt_id,
+            self.attempt_digest,
             self.work_item_id,
             self.work_item_version_id,
             self.work_item_version_digest,
@@ -1455,6 +1542,7 @@ class WorkItemLease:
             "effect": self.effect.value,
             "lease_id": self.lease_id,
             "attempt_id": self.attempt_id,
+            "attempt_digest": self.attempt_digest,
             "work_item_id": self.work_item_id,
             "work_item_version_id": self.work_item_version_id,
             "work_item_version_digest": self.work_item_version_digest,
@@ -1494,6 +1582,7 @@ class WorkItemLease:
             "effect",
             "lease_id",
             "attempt_id",
+            "attempt_digest",
             "work_item_id",
             "work_item_version_id",
             "work_item_version_digest",
@@ -1513,6 +1602,7 @@ class WorkItemLease:
             value = cls(
                 _string(item["lease_id"], "lease_id"),
                 _string(item["attempt_id"], "lease attempt_id"),
+                _string(item["attempt_digest"], "lease attempt digest"),
                 _string(item["work_item_id"], "lease work_item_id"),
                 _string(item["work_item_version_id"], "lease version_id"),
                 _string(item["work_item_version_digest"], "lease version digest"),
@@ -1560,4 +1650,19 @@ __all__ = [
     "LeaseTransitionReceipt",
     "WorkItemLease",
     "WorkerAttempt",
+]
+
+# The only public v20 authority composition seam.  Importing here preserves the
+# phase-one value types above while keeping the trusted SQLite implementation
+# private to ``newsroom.authority``.
+from newsroom.authority._triage_execution_store import (  # noqa: E402
+    TriageExecutionAuthority,
+    TriageExecutionAuthorityError,
+    open_triage_execution_authority,
+)
+
+__all__ += [
+    "TriageExecutionAuthority",
+    "TriageExecutionAuthorityError",
+    "open_triage_execution_authority",
 ]
