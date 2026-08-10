@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Self
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.types import UtcTimestamp
 from newsroom.checks import CheckOutcome, CheckRequest, TriggerRef
 from newsroom.discovery import (
     DiscoverySignal,
@@ -270,7 +271,7 @@ class DecisionLeadBinding:
             lead.canonical_digest,
             str(lead.event_id),
             lead.aggregate_version,
-            str(lead.request.promoting_gate_decision_id),
+            str(disposition.request.gate_decision_id),
             str(lead.request.definition_id),
             str(lead.request.definition_version_id),
             str(disposition.request.decision_id),
@@ -318,7 +319,6 @@ class DecisionLeadBinding:
             self.lead_digest,
             self.lead_event_id,
             self.lead_aggregate_version,
-            self.gate_decision_id,
             self.definition_id,
             self.definition_version_id,
         )
@@ -2170,11 +2170,28 @@ class TriageWorkItemStore:
         )
         if not changed:
             return
-        if len(changed) != 1 or proposed.watch is None:
+        if len(changed) != 1:
             raise WorkItemContractError(
                 "disposition change requires exactly one Lead and typed Watch proof"
             )
         before, after = changed[0]
+        if before.gate_decision_id != after.gate_decision_id:
+            if (
+                proposed.watch is not None
+                or after.lead_id != before.lead_id
+                or after.disposition_outcome
+                != LeadDispositionOutcome.QUEUED_FOR_TRIAGE.value
+                or after.disposition_ordinal != before.disposition_ordinal + 1
+                or after.previous_disposition_id != before.disposition_id
+            ):
+                raise WorkItemContractError(
+                    "Gate re-promotion requires an exact immediate queued disposition"
+                )
+            return
+        if proposed.watch is None:
+            raise WorkItemContractError(
+                "disposition change requires exactly one Lead and typed Watch proof"
+            )
         watch = proposed.watch
         if (
             watch.lead_id != before.lead_id
@@ -2355,9 +2372,12 @@ class TriageWorkItemStore:
             and row[2] == lead.lead_event_id
             and row[3] == lead.lead_aggregate_version
             and request.get("lead_id") == lead.lead_id
-            and request.get("promoting_gate_decision_id") == lead.gate_decision_id
             and request.get("definition_id") == lead.definition_id
             and request.get("definition_version_id") == lead.definition_version_id
+            and (
+                type(lead) is DecisionLeadBinding
+                or request.get("promoting_gate_decision_id") == lead.gate_decision_id
+            )
         )
 
     def _disposition_retained(self, lead: DecisionLeadBinding) -> bool:
@@ -2387,6 +2407,7 @@ class TriageWorkItemStore:
             and row[7] == lead.lead_id
             and request.get("decision_id") == lead.disposition_id
             and request.get("lead_id") == lead.lead_id
+            and request.get("gate_decision_id") == lead.gate_decision_id
             and request.get("decision_ordinal") == lead.disposition_ordinal
             and request.get("previous_decision_id")
             == lead.previous_disposition_id
@@ -2487,6 +2508,43 @@ class TriageWorkItemStore:
             and source_request["next_action"].get("kind") == "RESUME_ON_WATCH"
         )
 
+    def _watch_occurrence_reached(
+        self,
+        binding: WatchConditionWorkItemBinding,
+        reentry_kind: ReentryKind | None,
+    ) -> bool:
+        if reentry_kind is ReentryKind.OPERATOR_CONDITION or reentry_kind is None:
+            return False
+        row = self._connection.execute(
+            "SELECT canonical_digest,canonical_bytes "
+            "FROM discovery_watch_conditions WHERE watch_condition_id=?",
+            (binding.watch_condition_id,),
+        ).fetchone()
+        if row is None or row[0] != binding.watch_condition_digest:
+            return False
+        try:
+            request = _retained_request(
+                bytes(row[1]), row[0], "Watch Condition occurrence"
+            )
+            field = (
+                "expires_at"
+                if reentry_kind is ReentryKind.EXPIRY
+                else "review_at"
+            )
+            timestamp = request[field]
+            if type(timestamp) is not str:
+                return False
+            parsed = UtcTimestamp.parse(timestamp)
+            if parsed.to_text() != timestamp:
+                return False
+        except (KeyError, TypeError, ValueError):
+            return False
+        reached = self._connection.execute(
+            "SELECT julianday(?) <= julianday('now')",
+            (timestamp,),
+        ).fetchone()
+        return reached is not None and reached[0] == 1
+
     def _upstream_reasons(self, v: TriageWorkItemVersion) -> list[str]:
         reasons: list[str] = []
         for lead in v.decision_leads:
@@ -2538,6 +2596,8 @@ class TriageWorkItemStore:
         if v.watch is not None:
             if not self._watch_retained(v.watch):
                 reasons.append("watch")
+            elif not self._watch_occurrence_reached(v.watch, v.reentry_kind):
+                reasons.append("watch occurrence")
         if self._retrieval_authority is not None:
             self._retrieval_authority.verify_retained_integrity(
                 self._connection, v.retrieval
