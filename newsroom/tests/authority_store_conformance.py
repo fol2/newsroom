@@ -1,7 +1,7 @@
 """Test-only authority-store conformance kernel.
 
-Adapters expose store operations and observable persisted state.  The kernel,
-not the adapter, owns the commands, scenario order and normative assertions.
+Adapters create persisted locations and primitive handles. The kernel owns all
+commands, concurrency, transactions, reopen sequencing and assertions.
 """
 
 from __future__ import annotations
@@ -9,8 +9,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from enum import Enum
+from threading import Barrier
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -83,7 +85,7 @@ class IntegrityViolation(StoreOperationError):
     pass
 
 
-class WriteConflict(StoreOperationError):
+class BindingConflict(StoreOperationError):
     pass
 
 
@@ -99,7 +101,7 @@ class Applicability:
 
     @classmethod
     def required(cls) -> Applicability:
-        return cls(supported=True)
+        return cls(True)
 
     @classmethod
     def waived(cls, *, reason: str, waiver_reference: str) -> Applicability:
@@ -196,33 +198,46 @@ class AuthorityValue:
     @classmethod
     def from_command(cls, command: WriteCommand) -> AuthorityValue:
         return cls(
-            record_id=command.record_id,
-            value=command.scalar_columns["value"],
-            digest=_command_digest(command),
-            provenance=command.request,
+            command.record_id,
+            command.scalar_columns["value"],
+            _command_digest(command),
+            command.request,
         )
 
 
 @runtime_checkable
-class AuthorityStoreAdapter(Protocol):
-    """Primitive store operations required by the generic scenario kernel."""
+class StoreTransaction(Protocol):
+    def submit(self, command: WriteCommand) -> AuthorityValue: ...
+    def observe(self, record_id: str) -> StoredAuthorityState | None: ...
+    def history(self) -> tuple[AuthorityValue, ...]: ...
+    def rollback(self) -> None: ...
 
-    name: str
-    applicability: Mapping[CaseId, Applicability]
 
-    def reset(self) -> None: ...
-    def put(
+@runtime_checkable
+class AuthorityStoreHandle(Protocol):
+    def submit(
         self, command: WriteCommand, *, lose_response: bool = False
     ) -> AuthorityValue: ...
-    def replay(self, command: WriteCommand) -> AuthorityValue: ...
     def observe(self, record_id: str) -> StoredAuthorityState | None: ...
-    def load(self, record_id: str) -> AuthorityValue: ...
+    def history(self) -> tuple[AuthorityValue, ...]: ...
+    def read(self, record_id: str) -> AuthorityValue: ...
     def list_history(self) -> tuple[AuthorityValue, ...]: ...
     def set_upstream_head(self, authority: str, value: str) -> None: ...
     def current_use(self, record_id: str) -> AuthorityValue: ...
     def tamper(self, record_id: str, kind: TamperKind) -> None: ...
-    def reopen(self, *, migrate: bool) -> None: ...
-    def rollback(self, command: WriteCommand) -> None: ...
+    def begin(self) -> StoreTransaction: ...
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class AuthorityStoreAdapter(Protocol):
+    name: str
+    applicability: Mapping[CaseId, Applicability]
+
+    def create_location(self) -> object: ...
+    def open_handle(
+        self, location: object, *, migrate: bool = False
+    ) -> AuthorityStoreHandle: ...
 
 
 @dataclass(frozen=True)
@@ -269,7 +284,7 @@ class ConformanceReport:
                 line += " codes=" + ",".join(
                     failure.code.value for failure in outcome.failures
                 )
-            if outcome.status is OutcomeStatus.SKIPPED:
+            if outcome.status is OutcomeStatus.SKIPPED and outcome.waiver_reference:
                 line += (
                     f" waiver={outcome.waiver_reference} reason={outcome.waiver_reason}"
                 )
@@ -322,7 +337,7 @@ def _command(
 ) -> WriteCommand:
     return WriteCommand(
         record_id=record_id,
-        canonical_bytes=(f'{{"value":"{value}"}}').encode(),
+        canonical_bytes=f'{{"value":"{value}"}}'.encode(),
         scalar_columns={"value": value, "version": 1},
         identity_columns={"record_id": record_id, "authority": "fixture"},
         linked_rows=(
@@ -339,198 +354,303 @@ def _command(
     )
 
 
-def _seed_heads(adapter: AuthorityStoreAdapter, command: WriteCommand) -> None:
+def _new_handle(
+    adapter: AuthorityStoreAdapter,
+) -> tuple[object, AuthorityStoreHandle]:
+    location = adapter.create_location()
+    return location, adapter.open_handle(location)
+
+
+def _snapshot(
+    handle: AuthorityStoreHandle, record_id: str
+) -> tuple[StoredAuthorityState | None, tuple[AuthorityValue, ...]]:
+    return handle.observe(record_id), handle.history()
+
+
+def _seed_heads(handle: AuthorityStoreHandle, command: WriteCommand) -> None:
     for authority, head in command.required_upstream_heads:
-        adapter.set_upstream_head(authority, head)
+        handle.set_upstream_head(authority, head)
+
+
+def _assert_tampers_rejected(
+    adapter: AuthorityStoreAdapter,
+    kinds: tuple[TamperKind, ...],
+) -> None:
+    command = _command()
+    for kind in kinds:
+        location, handle = _new_handle(adapter)
+        handle.submit(command)
+        handle.tamper(command.record_id, kind)
+        _expect_exception(
+            IntegrityViolation,
+            lambda handle=handle: handle.read(command.record_id),
+            f"fresh read accepted {kind.value} mutation",
+        )
+        handle.close()
+        reopened = adapter.open_handle(location)
+        _require(reopened is not handle, "reopen returned the original handle")
+        _expect_exception(
+            IntegrityViolation,
+            lambda reopened=reopened: reopened.read(command.record_id),
+            f"reopened read accepted {kind.value} mutation",
+        )
 
 
 def _fresh_replay(adapter: AuthorityStoreAdapter) -> None:
     command = _command()
-    adapter.reset()
-    _require(adapter.observe(command.record_id) is None, "record existed before write")
+    _, handle = _new_handle(adapter)
+    before_history = handle.history()
+    _require(handle.observe(command.record_id) is None, "record existed before write")
     expected = AuthorityValue.from_command(command)
-    _require(adapter.put(command) == expected, "fresh write result is not normative")
-    _require(adapter.replay(command) == expected, "exact replay result differs")
-    _require(adapter.observe(command.record_id) is not None, "write retained no state")
+    _require(handle.submit(command) == expected, "fresh submission result differs")
+    after_fresh = _snapshot(handle, command.record_id)
+    _require(
+        len(after_fresh[1]) == len(before_history) + 1,
+        "fresh submission did not append once",
+    )
+    _require(handle.submit(command) == expected, "exact replay result differs")
+    _require(
+        _snapshot(handle, command.record_id) == after_fresh,
+        "exact replay changed state or append-only history",
+    )
 
 
 def _fresh_reopen(adapter: AuthorityStoreAdapter) -> None:
     command = _command()
-    adapter.reset()
-    adapter.put(command)
-    adapter.reopen(migrate=False)
+    location, handle = _new_handle(adapter)
+    expected = AuthorityValue.from_command(command)
+    handle.submit(command)
+    _require(handle.read(command.record_id) == expected, "fresh-handle read differs")
+    snapshot = _snapshot(handle, command.record_id)
+    handle.close()
+    reopened = adapter.open_handle(location)
+    _require(reopened is not handle, "reopen returned the original handle")
     _require(
-        adapter.load(command.record_id) == AuthorityValue.from_command(command),
-        "reopened load differs",
+        reopened.read(command.record_id) == expected, "reopened-handle read differs"
     )
+    _require(
+        _snapshot(reopened, command.record_id) == snapshot,
+        "reopen changed state or history",
+    )
+    _assert_tampers_rejected(adapter, (TamperKind.DIGEST,))
 
 
 def _representation(adapter: AuthorityStoreAdapter) -> None:
     command = _command()
-    adapter.reset()
-    adapter.put(command)
+    _, handle = _new_handle(adapter)
+    handle.submit(command)
     _require(
-        adapter.observe(command.record_id)
-        == StoredAuthorityState.from_command(command),
-        "persisted canonical/scalar/identity/linked representation differs",
+        handle.observe(command.record_id) == StoredAuthorityState.from_command(command),
+        "persisted representation differs",
+    )
+    _assert_tampers_rejected(
+        adapter,
+        (
+            TamperKind.SCALAR,
+            TamperKind.CANONICAL,
+            TamperKind.IDENTITY,
+            TamperKind.LINKED_ROW,
+        ),
     )
 
 
 def _request_binding(adapter: AuthorityStoreAdapter) -> None:
     command = _command()
-    adapter.reset()
-    adapter.put(command)
-    state = adapter.observe(command.record_id)
-    _require(state is not None, "persisted state is absent")
-    _require(
-        (state.actor, state.request, state.idempotency, state.cas_predecessor)
-        == (
-            command.actor,
-            command.request,
-            command.idempotency,
-            command.cas_predecessor,
-        ),
-        "actor/request/idempotency/CAS predecessor differs",
-    )
+    for field_name in ("actor", "request", "idempotency", "cas_predecessor"):
+        _, handle = _new_handle(adapter)
+        handle.submit(command)
+        before = _snapshot(handle, command.record_id)
+        divergent = replace(command, **{field_name: f"different-{field_name}"})
+        _expect_exception(
+            BindingConflict,
+            lambda divergent=divergent, handle=handle: handle.submit(divergent),
+            f"divergent {field_name} binding was accepted",
+        )
+        _require(
+            _snapshot(handle, command.record_id) == before,
+            f"divergent {field_name} changed state or history",
+        )
 
 
 def _lost_response(adapter: AuthorityStoreAdapter) -> None:
     command = _command()
-    adapter.reset()
-    _seed_heads(adapter, command)
+    _, handle = _new_handle(adapter)
+    _seed_heads(handle, command)
     _expect_exception(
         LostResponse,
-        lambda: adapter.put(command, lose_response=True),
-        "lost response was not simulated after retention",
+        lambda: handle.submit(command, lose_response=True),
+        "lost response was not raised after retention",
     )
-    _require(
-        adapter.observe(command.record_id) is not None, "lost response retained no row"
-    )
+    retained = _snapshot(handle, command.record_id)
+    _require(retained[0] is not None, "lost response retained no state")
     for authority, _ in command.required_upstream_heads:
-        adapter.set_upstream_head(authority, "changed-after-write")
+        handle.set_upstream_head(authority, "changed-after-write")
     _require(
-        adapter.replay(command) == AuthorityValue.from_command(command),
-        "replay imposed use-time currentness",
+        handle.submit(command) == AuthorityValue.from_command(command),
+        "exact replay imposed use-time currentness",
     )
-    adapter.reset()
-    _expect_exception(
-        LostResponse,
-        lambda: adapter.put(command, lose_response=True),
-        "lost response was not simulated",
+    _require(
+        _snapshot(handle, command.record_id) == retained,
+        "lost-response replay changed state or history",
     )
-    adapter.tamper(command.record_id, TamperKind.DIGEST)
+    handle.tamper(command.record_id, TamperKind.DIGEST)
     _expect_exception(
         IntegrityViolation,
-        lambda: adapter.replay(command),
-        "replay accepted corrupt retained integrity",
+        lambda: handle.submit(command),
+        "lost-response replay accepted corrupt retained integrity",
     )
 
 
 def _historical(adapter: AuthorityStoreAdapter) -> None:
     first = _command()
     second = _command("record-2", "record-1", "beta")
-    expected_first = AuthorityValue.from_command(first)
-    for tamper in (TamperKind.IDENTITY, TamperKind.DIGEST, TamperKind.PROVENANCE):
-        adapter.reset()
-        adapter.put(first)
-        adapter.put(second)
-        _require(
-            adapter.load(first.record_id) == expected_first, "historical load differs"
-        )
-        _require(
-            expected_first in adapter.list_history(),
-            "historical list omitted retained value",
-        )
-        adapter.tamper(first.record_id, tamper)
-        _expect_exception(
-            IntegrityViolation,
-            lambda: adapter.load(first.record_id),
-            f"historical load accepted {tamper.value} tamper",
-        )
-        _expect_exception(
-            IntegrityViolation,
-            adapter.list_history,
-            f"historical list accepted {tamper.value} tamper",
-        )
+    _, handle = _new_handle(adapter)
+    handle.submit(first)
+    handle.submit(second)
+    expected = AuthorityValue.from_command(first)
+    _require(handle.read(first.record_id) == expected, "historical load differs")
+    _require(
+        expected in handle.list_history(), "historical list omitted retained value"
+    )
+    _assert_tampers_rejected(
+        adapter,
+        (TamperKind.IDENTITY, TamperKind.DIGEST, TamperKind.PROVENANCE),
+    )
 
 
 def _current_use(adapter: AuthorityStoreAdapter) -> None:
     command = _command()
     for changed_authority, _ in command.required_upstream_heads:
-        adapter.reset()
-        _seed_heads(adapter, command)
-        adapter.put(command)
+        _, handle = _new_handle(adapter)
+        _seed_heads(handle, command)
+        handle.submit(command)
         _require(
-            adapter.current_use(command.record_id)
+            handle.current_use(command.record_id)
             == AuthorityValue.from_command(command),
             "valid current-use read differs",
         )
-        adapter.set_upstream_head(changed_authority, "changed")
+        handle.set_upstream_head(changed_authority, "changed")
         _expect_exception(
             IntegrityViolation,
-            lambda: adapter.current_use(command.record_id),
+            lambda handle=handle: handle.current_use(command.record_id),
             f"changed {changed_authority} head was accepted",
         )
 
 
 def _tamper_rejection(adapter: AuthorityStoreAdapter) -> None:
-    command = _command()
-    for tamper in (
-        TamperKind.CANONICAL,
-        TamperKind.LINKED_ROW,
-        TamperKind.OFFLINE_REWRITE,
-    ):
-        adapter.reset()
-        adapter.put(command)
-        adapter.tamper(command.record_id, tamper)
-        _expect_exception(
-            IntegrityViolation,
-            lambda: adapter.load(command.record_id),
-            f"{tamper.value} mutation was accepted",
-        )
+    _assert_tampers_rejected(
+        adapter,
+        (TamperKind.CANONICAL, TamperKind.LINKED_ROW, TamperKind.OFFLINE_REWRITE),
+    )
 
 
 def _competing_writers(adapter: AuthorityStoreAdapter) -> None:
+    location = adapter.create_location()
+    first_handle = adapter.open_handle(location)
+    second_handle = adapter.open_handle(location)
+    _require(second_handle is not first_handle, "competing writers share one handle")
     first = _command("record-a", "record-0", "alpha")
     second = _command("record-b", "record-0", "beta")
-    adapter.reset()
-    adapter.put(first)
-    _expect_exception(
-        WriteConflict,
-        lambda: adapter.put(second),
-        "second same-predecessor writer was accepted",
+    before_history = first_handle.history()
+    barrier = Barrier(3)
+
+    def submit(handle: AuthorityStoreHandle, command: WriteCommand) -> str:
+        barrier.wait()
+        try:
+            handle.submit(command)
+        except BindingConflict:
+            return "conflict"
+        return "success"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = (
+            executor.submit(submit, first_handle, first),
+            executor.submit(submit, second_handle, second),
+        )
+        barrier.wait()
+        outcomes = tuple(future.result() for future in futures)
+    _require(
+        sorted(outcomes) == ["conflict", "success"],
+        "competing writers did not produce one winner and one conflict",
     )
-    _require(adapter.observe(first.record_id) is not None, "winning write disappeared")
-    _require(adapter.observe(second.record_id) is None, "losing write was retained")
+    states = (
+        first_handle.observe(first.record_id),
+        first_handle.observe(second.record_id),
+    )
+    _require(
+        sum(state is not None for state in states) == 1,
+        "loser row retained or winner missing",
+    )
+    history = first_handle.history()
+    _require(
+        len(history) == len(before_history) + 1,
+        "competing writers duplicated or omitted history",
+    )
+    winner = first if states[0] is not None else second
+    _require(
+        states[0] == StoredAuthorityState.from_command(first)
+        if states[0] is not None
+        else states[1] == StoredAuthorityState.from_command(second),
+        "winning state differs from its submitted command",
+    )
+    _require(
+        history[-1] == AuthorityValue.from_command(winner),
+        "history retained the loser or a non-normative winner",
+    )
 
 
 def _rollback(adapter: AuthorityStoreAdapter) -> None:
     command = _command()
-    adapter.reset()
-    adapter.rollback(command)
+    location, handle = _new_handle(adapter)
+    before_history = handle.history()
+    transaction = handle.begin()
+    transaction.submit(command)
     _require(
-        adapter.observe(command.record_id) is None, "rolled-back row remains visible"
+        transaction.observe(command.record_id)
+        == StoredAuthorityState.from_command(command),
+        "transaction cannot observe submitted state",
     )
-    _require(adapter.list_history() == (), "rolled-back row remains in history")
+    _require(
+        len(transaction.history()) == len(before_history) + 1,
+        "transaction history did not append once",
+    )
+    transaction.rollback()
+    handle.close()
+    reopened = adapter.open_handle(location)
+    _require(reopened is not handle, "post-rollback reopen returned original handle")
+    _require(
+        reopened.observe(command.record_id) is None, "rolled-back row remains visible"
+    )
+    _require(
+        reopened.history() == before_history, "rollback changed append-only history"
+    )
 
 
 def _restart_migration(adapter: AuthorityStoreAdapter) -> None:
     command = _command()
-    expected = AuthorityValue.from_command(command)
-    adapter.reset()
-    adapter.put(command)
-    adapter.reopen(migrate=False)
+    location, original = _new_handle(adapter)
+    original.submit(command)
+    expected_value = AuthorityValue.from_command(command)
+    expected_snapshot = _snapshot(original, command.record_id)
+    original.close()
+    restarted = adapter.open_handle(location)
+    _require(restarted is not original, "restart returned original handle")
     _require(
-        adapter.load(command.record_id) == expected, "restart/reopen changed value"
+        restarted.read(command.record_id) == expected_value, "restart read differs"
     )
-    adapter.reopen(migrate=True)
     _require(
-        adapter.load(command.record_id) == expected, "migration/reopen changed value"
+        _snapshot(restarted, command.record_id) == expected_snapshot,
+        "restart changed state or history",
+    )
+    restarted.close()
+    migrated = adapter.open_handle(location, migrate=True)
+    _require(migrated is not restarted, "migration returned prior handle")
+    _require(
+        migrated.read(command.record_id) == expected_value, "migration read differs"
     )
     _require(
-        adapter.observe(command.record_id)
-        == StoredAuthorityState.from_command(command),
-        "migration/reopen changed persisted representation",
+        _snapshot(migrated, command.record_id) == expected_snapshot,
+        "migration changed state or history",
     )
 
 
@@ -551,14 +671,13 @@ _SCENARIOS = {
 
 def _adapter_name(adapter: object) -> str:
     name = getattr(adapter, "name", None)
-    return name if isinstance(name, str) and name else type(adapter).__name__
+    return name if type(name) is str and name else type(adapter).__name__
 
 
 def _manifest(
     adapter: object,
 ) -> tuple[dict[CaseId, Applicability], tuple[ConformanceFailure, ...]]:
     raw = getattr(adapter, "applicability", None)
-    failures: list[ConformanceFailure] = []
     if not isinstance(raw, Mapping):
         return {}, (
             ConformanceFailure(
@@ -566,23 +685,33 @@ def _manifest(
             ),
         )
     manifest: dict[CaseId, Applicability] = {}
+    failures: list[ConformanceFailure] = []
     for case in CASE_INVENTORY:
         entry = raw.get(case)
-        if entry is None:
+        if type(entry) is not Applicability:
+            detail = (
+                f"applicability missing {case.value}"
+                if entry is None
+                else f"invalid applicability for {case.value}"
+            )
             failures.append(
-                ConformanceFailure(
-                    case,
-                    FailureCode.ADAPTER_PROTOCOL,
-                    f"applicability missing {case.value}",
-                )
+                ConformanceFailure(case, FailureCode.ADAPTER_PROTOCOL, detail)
             )
             continue
-        if not isinstance(entry, Applicability):
+        malformed = (
+            type(entry.supported) is not bool
+            or (entry.reason is not None and type(entry.reason) is not str)
+            or (
+                entry.waiver_reference is not None
+                and type(entry.waiver_reference) is not str
+            )
+        )
+        if malformed:
             failures.append(
                 ConformanceFailure(
                     case,
                     FailureCode.ADAPTER_PROTOCOL,
-                    f"invalid applicability for {case.value}",
+                    f"malformed applicability fields for {case.value}",
                 )
             )
             continue
@@ -596,9 +725,11 @@ def _manifest(
                     f"supported case {case.value} must not declare waiver metadata",
                 )
             )
-        if not entry.supported and (
-            not (entry.reason or "").strip()
-            or not (entry.waiver_reference or "").strip()
+        elif not entry.supported and (
+            not entry.reason
+            or not entry.reason.strip()
+            or not entry.waiver_reference
+            or not entry.waiver_reference.strip()
         ):
             failures.append(
                 ConformanceFailure(
@@ -608,37 +739,22 @@ def _manifest(
                 )
             )
         manifest[case] = entry
-    unknown = sorted(str(key) for key in raw if key not in CASE_INVENTORY)
-    for key in unknown:
+    known_count = sum(case in raw for case in CASE_INVENTORY)
+    if len(raw) != known_count:
         failures.append(
             ConformanceFailure(
-                None, FailureCode.ADAPTER_PROTOCOL, f"unknown applicability case {key}"
+                None, FailureCode.ADAPTER_PROTOCOL, "unknown applicability entries"
             )
         )
     return manifest, tuple(failures)
 
 
 def run_conformance(adapter: AuthorityStoreAdapter) -> ConformanceReport:
-    """Execute fixed scenarios in inventory order against primitive operations."""
-
     name = _adapter_name(adapter)
     manifest, protocol_failures = _manifest(adapter)
-    required_methods = (
-        "reset",
-        "put",
-        "replay",
-        "observe",
-        "load",
-        "list_history",
-        "set_upstream_head",
-        "current_use",
-        "tamper",
-        "reopen",
-        "rollback",
-    )
     missing = tuple(
         method
-        for method in required_methods
+        for method in ("create_location", "open_handle")
         if not callable(getattr(adapter, method, None))
     )
     if missing:
@@ -681,7 +797,7 @@ def run_conformance(adapter: AuthorityStoreAdapter) -> ConformanceReport:
                 f"unexpected store rejection {type(exc).__name__}",
             )
             outcomes.append(CaseOutcome(case, OutcomeStatus.FAIL, (failure,)))
-        except Exception as exc:  # noqa: BLE001 - classify adapter failures
+        except Exception as exc:  # noqa: BLE001 - deterministic adapter classification
             failure = ConformanceFailure(
                 case, FailureCode.ADAPTER_ERROR, f"scenario raised {type(exc).__name__}"
             )
@@ -703,7 +819,9 @@ __all__ = [
     "Applicability",
     "AuthorityStoreAdapter",
     "AuthorityStoreConformanceError",
+    "AuthorityStoreHandle",
     "AuthorityValue",
+    "BindingConflict",
     "CaseId",
     "CaseOutcome",
     "ConformanceFailure",
@@ -712,10 +830,10 @@ __all__ = [
     "IntegrityViolation",
     "LostResponse",
     "OutcomeStatus",
+    "StoreTransaction",
     "StoredAuthorityState",
     "TamperKind",
     "WriteCommand",
-    "WriteConflict",
     "assert_conformant",
     "run_conformance",
 ]
