@@ -167,7 +167,7 @@ def test_exact_types_uninitialised_values_and_corrupted_nested_sources_are_total
 
 def test_public_facade_requires_exact_private_authority() -> None:
     with pytest.raises(HypothesisContractError):
-        EventHypothesisAuthority(object())
+        EventHypothesisAuthority(object(), object())
 
 
 def test_structural_depth_node_caps_and_constructed_self_cycles_are_total() -> None:

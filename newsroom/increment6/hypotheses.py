@@ -494,17 +494,16 @@ class EventHypothesisVersion(_NoEffect):
         )
 
 
+_FACADE_TOKEN = object()
+
+
 class EventHypothesisAuthority:
     """Narrow public facade over the private checked v21 store."""
 
     __slots__ = ("__authority",)
 
-    def __init__(self, authority: object) -> None:
-        from newsroom.authority.event_hypothesis_system import (
-            EventHypothesisAuthoritySystem,
-        )
-
-        if type(authority) is not EventHypothesisAuthoritySystem:
+    def __init__(self, token: object, authority: object) -> None:
+        if token is not _FACADE_TOKEN:
             raise HypothesisContractError(
                 "Hypothesis authority facade requires the exact private authority"
             )
@@ -564,12 +563,23 @@ def open_event_hypothesis_authority(
         open_event_hypothesis_authority_system,
     )
 
-    return _normalise(
-        lambda: EventHypothesisAuthority(
-            open_event_hypothesis_authority_system(*args, **kwargs)
-        ),
+    authority = _normalise(
+        lambda: open_event_hypothesis_authority_system(*args, **kwargs),
         "Hypothesis authority open failed",
     )
+    if type(authority) is not EventHypothesisAuthority:
+        raise HypothesisContractError(
+            "Hypothesis authority opener returned a forged facade"
+        )
+    return authority
+
+
+def _compose_event_hypothesis_authority(
+    authority: object,
+) -> EventHypothesisAuthority:
+    """Private composition seam used only by the authority opener."""
+
+    return EventHypothesisAuthority(_FACADE_TOKEN, authority)
 
 
 open_hypothesis_authority = open_event_hypothesis_authority

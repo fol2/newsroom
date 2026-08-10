@@ -672,14 +672,7 @@ class EventHypothesisRelationshipAuthority:
     __slots__ = ("__authority",)
 
     def __init__(self, token: object, authority: object) -> None:
-        from newsroom.authority.event_hypothesis_relationship_system import (
-            EventHypothesisRelationshipAuthoritySystem,
-        )
-
-        if (
-            token is not _FACADE_TOKEN
-            or type(authority) is not EventHypothesisRelationshipAuthoritySystem
-        ):
+        if token is not _FACADE_TOKEN:
             raise RelationshipContractError(
                 "relationship authority facade requires the exact private authority"
             )
@@ -736,22 +729,32 @@ def open_event_hypothesis_relationship_authority(
         open_event_hypothesis_relationship_authority_system,
     )
 
-    return _normalise(
-        lambda: EventHypothesisRelationshipAuthority(
-            _FACADE_TOKEN,
-            open_event_hypothesis_relationship_authority_system(
-                database,
-                retrieval_authority=retrieval_authority,  # type: ignore[arg-type]
-                authenticator=authenticator,
-                authorizer=authorizer,
-                command_registry=command_registry,
-                payload_schemas=payload_schemas,
-                clock=clock,
-                busy_timeout_ms=busy_timeout_ms,
-            ),
+    authority = _normalise(
+        lambda: open_event_hypothesis_relationship_authority_system(
+            database,
+            retrieval_authority=retrieval_authority,  # type: ignore[arg-type]
+            authenticator=authenticator,
+            authorizer=authorizer,
+            command_registry=command_registry,
+            payload_schemas=payload_schemas,
+            clock=clock,
+            busy_timeout_ms=busy_timeout_ms,
         ),
         "relationship authority open failed",
     )
+    if type(authority) is not EventHypothesisRelationshipAuthority:
+        raise RelationshipContractError(
+            "relationship authority opener returned a forged facade"
+        )
+    return authority
+
+
+def _compose_event_hypothesis_relationship_authority(
+    authority: object,
+) -> EventHypothesisRelationshipAuthority:
+    """Private composition seam used only by the authority opener."""
+
+    return EventHypothesisRelationshipAuthority(_FACADE_TOKEN, authority)
 
 
 def _relationship_payload_canonicalizer(value: object) -> bytes:

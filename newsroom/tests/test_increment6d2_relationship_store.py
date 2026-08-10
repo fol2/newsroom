@@ -372,6 +372,44 @@ def _open_unlocked_for_test(seed):
     return _open_unlocked_relationship_authority_for_test(**_open_arguments(seed))
 
 
+def test_public_relationship_system_closes_raw_when_facade_wrapping_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from newsroom.authority import _event_hypothesis_relationship_system as private
+    from newsroom.authority import event_hypothesis_relationship_system
+    from newsroom.increment6 import relationships
+
+    closed: list[bool] = []
+
+    class Raw:
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(
+        private,
+        "open_relationship_authority",
+        lambda *args, **kwargs: Raw(),
+    )
+    monkeypatch.setattr(
+        relationships,
+        "_compose_event_hypothesis_relationship_authority",
+        lambda authority: (_ for _ in ()).throw(RuntimeError("wrap failed")),
+    )
+    with pytest.raises(RuntimeError, match="wrap failed"):
+        opener = event_hypothesis_relationship_system.open_event_hypothesis_relationship_authority_system
+        opener()
+    assert closed == [True]
+
+    monkeypatch.setattr(
+        relationships,
+        "_compose_event_hypothesis_relationship_authority",
+        lambda authority: object(),
+    )
+    with pytest.raises(RelationshipContractError, match="forged facade"):
+        opener()
+    assert closed == [True, True]
+
+
 @pytest.mark.parametrize(
     "outcome",
     (
@@ -418,6 +456,14 @@ def test_factory_lock_facade_and_self_consistent_rewrite_fail_closed(
         EventHypothesisRelationshipAuthority(object(), object())
 
     from newsroom.authority import event_hypothesis_relationship_system
+
+    assert event_hypothesis_relationship_system.__all__ == [
+        "open_event_hypothesis_relationship_authority_system"
+    ]
+    assert not hasattr(
+        event_hypothesis_relationship_system,
+        "EventHypothesisRelationshipAuthoritySystem",
+    )
 
     with monkeypatch.context() as patch:
         patch.setattr(

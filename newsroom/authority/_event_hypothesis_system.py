@@ -958,10 +958,22 @@ class _HypothesisStore:
             raise HypothesisContractError("Hypothesis foreign keys differ")
 
 
+_AUTHORITY_TOKEN = object()
+
+
 class EventHypothesisAuthority:
     __slots__ = ("__close", "__closed", "__store")
 
-    def __init__(self, store: _HypothesisStore, close: Callable[[], None]):
+    def __init__(
+        self,
+        token: object,
+        store: _HypothesisStore,
+        close: Callable[[], None],
+    ) -> None:
+        if token is not _AUTHORITY_TOKEN or type(store) is not _HypothesisStore:
+            raise HypothesisContractError(
+                "Hypothesis authority construction is private"
+            )
         self.__store = store
         self.__close = close
         self.__closed = False
@@ -1070,7 +1082,7 @@ class EventHypothesisAuthority:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
 
-            return cls(store, close)
+            return cls(_AUTHORITY_TOKEN, store, close)
         except Exception:
             if connection is not None:
                 connection.close()
@@ -1111,6 +1123,18 @@ class EventHypothesisAuthority:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+def _compose_event_hypothesis_authority_for_test(
+    store: object, close: Callable[[], None]
+) -> EventHypothesisAuthority:
+    """Compose an exact raw authority for focused in-memory store tests."""
+
+    return EventHypothesisAuthority(
+        _AUTHORITY_TOKEN,
+        store,
+        close,  # type: ignore[arg-type]
+    )
 
 
 __all__: list[str] = []
