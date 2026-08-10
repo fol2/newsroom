@@ -1,20 +1,18 @@
-"""Pure proposal validation and non-authoritative disposition contracts.
-
-This module deliberately owns no store, authentication provider, controller or
-effect.  Caller-supplied validator bindings remain pending claims.  A future v19
-composition root must authenticate them, persist the complete finding set, and
-only then commit every per-Lead disposition in one transaction.
-"""
+"""Proposal validation and the v19 disposition-authority persistence seam."""
 
 from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 from typing import ClassVar, Self
+
+from newsroom.authority.auth import AuthenticationProof, StaticAuthenticator
+from newsroom.authority.types import UtcTimestamp
 
 from newsroom.authority.canonical import (
     CanonicalizationError,
@@ -35,6 +33,13 @@ from newsroom.increment6.proposals import (
     LeadRecommendation,
     ProposalRoute,
     TriageProposal,
+)
+from newsroom.increment6.work_items import (
+    DecisionLeadBinding,
+    RetrievalBindingState,
+    RetrievalContextAuthority,
+    TriageWorkItemStore,
+    TriageWorkItemVersion,
 )
 
 
@@ -63,6 +68,23 @@ _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,255}\Z")
 MAX_DISPOSITION_CANONICAL_BYTES = 67_108_864
 _MAX_JSON_DEPTH = 64
 _MAX_FINDINGS = 64
+_VALIDATOR_ID = "triage-proposal-validator"
+_VALIDATOR_VERSION = "1"
+_RULESET_ID = "triage-proposal-disposition"
+_RULESET_VERSION = "1"
+_RULESET_DIGEST = digest_bytes(canonical_json_bytes({
+    "ruleset_id": _RULESET_ID,
+    "ruleset_version": _RULESET_VERSION,
+    "binding": VALIDATED_PROPOSAL_LEAD_DISPOSITION_BINDING,
+}))
+
+# Bind trusted implementation functions once.  Public instance/class method
+# substitution must not turn an untrusted duck type into an authority provider.
+_AUTHENTICATE = StaticAuthenticator.authenticate
+_RETRIEVAL_ATTACH = RetrievalContextAuthority.attach
+_RETRIEVAL_VERIFY = RetrievalContextAuthority.verify
+_RETRIEVAL_VERIFY_RETAINED = RetrievalContextAuthority.verify_retained_integrity
+_WORK_ITEM_REQUIRE_CURRENT = TriageWorkItemStore.require_usable_current_in_transaction
 
 
 class DispositionContractError(ValueError):
@@ -1274,6 +1296,514 @@ def build_pending_dispositions(
     return tuple(result)
 
 
+class ProposalDispositionStore:
+    """Trusted v19 facade that persists one complete Proposal decision."""
+
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        retrieval_authority: RetrievalContextAuthority,
+        authenticator: StaticAuthenticator,
+    ) -> None:
+        if (
+            type(connection) is not sqlite3.Connection
+            or connection.in_transaction
+            or type(retrieval_authority) is not RetrievalContextAuthority
+            or type(authenticator) is not StaticAuthenticator
+        ):
+            raise DispositionContractError(
+                "disposition store requires exact trusted collaborators"
+            )
+        self._connection = connection
+        self._retrieval_authority = retrieval_authority
+        self._authenticator = authenticator
+        try:
+            connection.execute("PRAGMA foreign_keys=ON")
+            if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+                raise DispositionContractError("foreign keys must be enabled")
+            _RETRIEVAL_ATTACH(retrieval_authority, connection)
+            self._work_items = TriageWorkItemStore(connection, retrieval_authority)
+            self._begin()
+            self._verify_integrity()
+            connection.execute("COMMIT")
+        except BaseException as exc:
+            self._rollback()
+            if not isinstance(exc, Exception):
+                raise
+            if isinstance(exc, DispositionContractError):
+                raise
+            raise DispositionContractError(
+                "disposition authority initialisation failed"
+            ) from exc
+
+    def _begin(self) -> None:
+        if self._connection.in_transaction:
+            raise DispositionContractError("connection has an active transaction")
+        self._connection.execute("BEGIN IMMEDIATE")
+
+    def _rollback(self) -> None:
+        if self._connection.in_transaction:
+            self._connection.execute("ROLLBACK")
+
+    @staticmethod
+    def _authenticated_identity(context: object) -> str:
+        try:
+            return digest_bytes(canonical_json_bytes({
+                "principal_id": context.principal_id,  # type: ignore[attr-defined]
+                "credential_binding_digest": context.credential_binding_digest,  # type: ignore[attr-defined]
+            }))
+        except Exception as exc:
+            raise DispositionContractError("authenticated context differs") from exc
+
+    def _authenticate(self, proof: AuthenticationProof) -> tuple[object, str]:
+        if type(proof) is not AuthenticationProof:
+            raise DispositionContractError("authentication proof must be exact")
+        try:
+            context = _AUTHENTICATE(
+                self._authenticator, proof, now=UtcTimestamp.now()
+            )
+        except Exception as exc:
+            raise DispositionContractError("authentication failed") from exc
+        return context, self._authenticated_identity(context)
+
+    @staticmethod
+    def _validator(
+        proposal_bytes: bytes,
+        version: TriageWorkItemVersion,
+        authenticated_identity: str,
+    ) -> ValidatorInputBinding:
+        retrieval = version.retrieval
+        if (
+            retrieval.state is not RetrievalBindingState.RECEIPT
+            or not retrieval.usable
+            or retrieval.context_id is None
+            or retrieval.context_digest is None
+            or retrieval.receipt_bytes is None
+        ):
+            raise DispositionContractError("retrieval receipt is not COMPLETE")
+        return ValidatorInputBinding.for_proposal(
+            proposal_bytes=proposal_bytes,
+            validator_id=_VALIDATOR_ID,
+            validator_version=_VALIDATOR_VERSION,
+            authenticated_context_identity=authenticated_identity,
+            retrieval_request_id=retrieval.request_id,
+            retrieval_request_digest=retrieval.request_digest,
+            retrieval_receipt_id=retrieval.context_id,
+            retrieval_receipt_digest=retrieval.context_digest,
+            ruleset_id=_RULESET_ID,
+            ruleset_version=_RULESET_VERSION,
+            ruleset_digest=_RULESET_DIGEST,
+        )
+
+    def _current_version(
+        self, proposal: TriageProposal
+    ) -> TriageWorkItemVersion:
+        version = _WORK_ITEM_REQUIRE_CURRENT(
+            self._work_items, proposal.work_item.work_item_id
+        )
+        _RETRIEVAL_VERIFY(
+            self._retrieval_authority, self._connection, version.retrieval
+        )
+        if (
+            version.version_id != proposal.work_item.work_item_version_id
+            or version.canonical_digest
+            != proposal.work_item.work_item_version_digest
+            or version.retrieval.context_id != proposal.retrieval_context.context_id
+            or version.retrieval.context_digest
+            != proposal.retrieval_context.context_digest
+            or version.retrieval.outcome != "COMPLETE"
+            or tuple(proposal.decision_lead_ids)
+            != tuple(lead.lead_id for lead in version.decision_leads)
+            or tuple(proposal.context_lead_ids)
+            != tuple(lead.lead_id for lead in version.context_leads)
+        ):
+            raise DispositionContractError(
+                "Proposal differs from the exact current Work Item"
+            )
+        return version
+
+    @staticmethod
+    def _lead_heads(
+        version: TriageWorkItemVersion,
+    ) -> dict[str, LeadDispositionHeadBinding]:
+        result: dict[str, LeadDispositionHeadBinding] = {}
+        for lead in version.decision_leads:
+            if type(lead) is not DecisionLeadBinding:
+                raise DispositionContractError("decision Lead binding is not exact")
+            result[lead.lead_id] = LeadDispositionHeadBinding(
+                lead.lead_id,
+                lead.lead_digest,
+                lead.disposition_id,
+                lead.disposition_digest,
+            )
+        return result
+
+    def persist(
+        self,
+        proposal_bytes: bytes,
+        selections: Mapping[str, OutcomeSelection],
+        *,
+        proof: AuthenticationProof,
+    ) -> tuple[ProposalDisposition, ...]:
+        """Validate and atomically replay or persist the complete disposition set."""
+        try:
+            self._begin()
+            proposal = TriageProposal.from_canonical_bytes(proposal_bytes)
+            _, authenticated_identity = self._authenticate(proof)
+            version = self._current_version(proposal)
+            validator = self._validator(
+                proposal_bytes, version, authenticated_identity
+            )
+            validation = validate_proposal(proposal_bytes, validator)
+            findings = validation.findings
+            self._persist_findings(version, validation)
+            if any(item.severity is FindingSeverity.ERROR for item in findings):
+                raise DispositionContractError("Proposal validation contains ERROR")
+            dispositions = build_pending_dispositions(
+                validation, self._lead_heads(version), selections
+            )
+            self._persist_dispositions(version, findings, dispositions)
+            stored = self._load_complete_set(
+                version.version_id, proposal.proposal_id
+            )
+            if tuple(item.canonical_bytes for item in stored) != tuple(
+                item.canonical_bytes for item in dispositions
+            ):
+                raise DispositionContractError("disposition replay diverges")
+            self._connection.execute("COMMIT")
+            return stored
+        except BaseException as exc:
+            self._rollback()
+            if not isinstance(exc, Exception):
+                raise
+            if isinstance(exc, DispositionContractError):
+                raise
+            raise DispositionContractError("disposition persistence failed") from exc
+
+    # A concise alias makes the facade legible at composition sites.
+    decide = persist
+
+    def _persist_findings(
+        self,
+        version: TriageWorkItemVersion,
+        validation: ProposalValidationResult,
+    ) -> None:
+        for finding in validation.findings:
+            raw = finding.canonical_bytes
+            self._connection.execute(
+                "INSERT OR IGNORE INTO triage_proposal_validation_findings("
+                "finding_id,work_item_id,work_item_version_id,work_item_version_digest,"
+                "proposal_id,proposal_content_identity,proposal_canonical_digest,"
+                "decision_lead_id,validator_input_digest,finding_set_digest,severity,"
+                "canonical_bytes,canonical_digest,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    finding.finding_id, version.work_item_id, version.version_id,
+                    version.canonical_digest, finding.proposal_id,
+                    finding.proposal_content_identity,
+                    finding.proposal_canonical_digest,
+                    finding.evidence_reference_id,
+                    finding.validator_input.input_digest,
+                    validation.finding_set_digest, finding.severity.value, raw,
+                    digest_bytes(raw), self._recorded_at(),
+                ),
+            )
+            row = self._connection.execute(
+                "SELECT canonical_bytes,finding_set_digest FROM triage_proposal_validation_findings "
+                "WHERE work_item_version_id=? AND proposal_id=? AND decision_lead_id=?",
+                (version.version_id, finding.proposal_id, finding.evidence_reference_id),
+            ).fetchone()
+            if row is None or bytes(row[0]) != raw or row[1] != validation.finding_set_digest:
+                raise DispositionContractError("finding replay diverges")
+        rows = self._connection.execute(
+            "SELECT decision_lead_id FROM triage_proposal_validation_findings "
+            "WHERE work_item_version_id=? AND proposal_id=? ORDER BY decision_lead_id",
+            (version.version_id, validation.proposal.proposal_id),
+        ).fetchall()
+        if tuple(str(row[0]) for row in rows) != tuple(
+            sorted(validation.proposal.decision_lead_ids)
+        ):
+            raise DispositionContractError("finding set replay is partial or extra")
+
+    def _persist_dispositions(
+        self,
+        version: TriageWorkItemVersion,
+        findings: tuple[ProposalValidationFinding, ...],
+        dispositions: tuple[ProposalDisposition, ...],
+    ) -> None:
+        finding_by_lead = {item.evidence_reference_id: item for item in findings}
+        for disposition in dispositions:
+            raw = disposition.canonical_bytes
+            selection_digest = digest_bytes(canonical_json_bytes(
+                disposition.selection.canonical_value()
+            ))
+            self._connection.execute(
+                "INSERT OR IGNORE INTO triage_proposal_dispositions("
+                "disposition_id,work_item_id,work_item_version_id,work_item_version_digest,"
+                "proposal_id,proposal_content_identity,proposal_canonical_digest,"
+                "decision_lead_id,lead_head_id,lead_head_digest,validator_input_digest,"
+                "finding_set_digest,finding_id,selection_digest,canonical_bytes,"
+                "canonical_digest,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    disposition.disposition_id, version.work_item_id,
+                    version.version_id, version.canonical_digest,
+                    disposition.proposal_id, disposition.proposal_content_identity,
+                    disposition.proposal_canonical_digest,
+                    disposition.decision_lead_id,
+                    disposition.lead_head.current_disposition_head_id,
+                    disposition.lead_head.current_disposition_head_digest,
+                    disposition.validator_input.input_digest,
+                    disposition.finding_set_digest,
+                    finding_by_lead[disposition.decision_lead_id].finding_id,
+                    selection_digest, raw, digest_bytes(raw), self._recorded_at(),
+                ),
+            )
+            row = self._connection.execute(
+                "SELECT canonical_bytes FROM triage_proposal_dispositions "
+                "WHERE work_item_version_id=? AND proposal_id=? AND decision_lead_id=?",
+                (version.version_id, disposition.proposal_id, disposition.decision_lead_id),
+            ).fetchone()
+            if row is None or bytes(row[0]) != raw:
+                raise DispositionContractError("disposition replay diverges")
+
+    def _load_complete_set(
+        self, version_id: str, proposal_id: str
+    ) -> tuple[ProposalDisposition, ...]:
+        rows = self._connection.execute(
+            "SELECT canonical_bytes FROM triage_proposal_dispositions "
+            "WHERE work_item_version_id=? AND proposal_id=? ORDER BY decision_lead_id",
+            (version_id, proposal_id),
+        ).fetchall()
+        result = tuple(
+            ProposalDisposition.from_canonical_bytes(bytes(row[0])) for row in rows
+        )
+        if not result:
+            raise DispositionContractError("complete disposition set is absent")
+        return result
+
+    def require_current(
+        self, disposition_id: str, *, proof: AuthenticationProof
+    ) -> ProposalDisposition:
+        """Load a retained disposition and recheck every use-time authority seam."""
+        _digest(disposition_id, "disposition_id")
+        try:
+            self._begin()
+            _, authenticated_identity = self._authenticate(proof)
+            self._verify_integrity()
+            row = self._connection.execute(
+                "SELECT canonical_bytes FROM triage_proposal_dispositions WHERE disposition_id=?",
+                (disposition_id,),
+            ).fetchone()
+            if row is None:
+                raise DispositionContractError("unknown disposition")
+            disposition = ProposalDisposition.from_canonical_bytes(bytes(row[0]))
+            version = _WORK_ITEM_REQUIRE_CURRENT(
+                self._work_items, disposition.work_item_id
+            )
+            _RETRIEVAL_VERIFY(
+                self._retrieval_authority, self._connection, version.retrieval
+            )
+            lead = next(
+                (item for item in version.decision_leads
+                 if item.lead_id == disposition.decision_lead_id),
+                None,
+            )
+            if (
+                version.version_id != disposition.work_item_version_id
+                or version.canonical_digest != disposition.work_item_version_digest
+                or version.retrieval.context_id != disposition.retrieval_context_id
+                or version.retrieval.context_digest != disposition.retrieval_context_digest
+                or disposition.validator_input.authenticated_context_identity
+                != authenticated_identity
+                or disposition.validator_input.validator_id != _VALIDATOR_ID
+                or disposition.validator_input.validator_version
+                != _VALIDATOR_VERSION
+                or disposition.validator_input.ruleset_id != _RULESET_ID
+                or disposition.validator_input.ruleset_version
+                != _RULESET_VERSION
+                or disposition.validator_input.ruleset_digest != _RULESET_DIGEST
+                or disposition.validator_input.retrieval_request_id
+                != version.retrieval.request_id
+                or disposition.validator_input.retrieval_request_digest
+                != version.retrieval.request_digest
+                or disposition.validator_input.retrieval_receipt_id
+                != version.retrieval.context_id
+                or disposition.validator_input.retrieval_receipt_digest
+                != version.retrieval.context_digest
+                or lead is None
+                or lead.lead_digest != disposition.lead_head.decision_lead_digest
+                or lead.disposition_id
+                != disposition.lead_head.current_disposition_head_id
+                or lead.disposition_digest
+                != disposition.lead_head.current_disposition_head_digest
+            ):
+                raise DispositionContractError("disposition is no longer current")
+            self._connection.execute("COMMIT")
+            return disposition
+        except BaseException as exc:
+            self._rollback()
+            if not isinstance(exc, Exception):
+                raise
+            if isinstance(exc, DispositionContractError):
+                raise
+            raise DispositionContractError("disposition currentness failed") from exc
+
+    def _verify_integrity(self) -> None:
+        tables = {
+            str(row[0]) for row in self._connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        required = {
+            "triage_proposal_validation_findings",
+            "triage_proposal_dispositions",
+        }
+        if not required <= tables:
+            raise DispositionContractError("v19 disposition schema is absent")
+        findings_by_group: dict[tuple[str, str], dict[str, ProposalValidationFinding]] = {}
+        finding_sets: dict[tuple[str, str], str] = {}
+        finding_meta: dict[tuple[str, str, str], tuple[str, str]] = {}
+        for row in self._connection.execute(
+            "SELECT finding_id,work_item_id,work_item_version_id,work_item_version_digest,"
+            "proposal_id,proposal_content_identity,proposal_canonical_digest,decision_lead_id,"
+            "validator_input_digest,finding_set_digest,severity,canonical_bytes,canonical_digest "
+            "FROM triage_proposal_validation_findings"
+        ):
+            finding = ProposalValidationFinding.from_canonical_bytes(bytes(row[11]))
+            group = (str(row[2]), str(row[4]))
+            if (
+                finding.finding_id != row[0]
+                or finding.proposal_id != row[4]
+                or finding.proposal_content_identity != row[5]
+                or finding.proposal_canonical_digest != row[6]
+                or finding.evidence_reference_id != row[7]
+                or finding.validator_input.input_digest != row[8]
+                or finding.severity.value != row[10]
+                or digest_bytes(bytes(row[11])) != row[12]
+            ):
+                raise DispositionContractError("retained finding bytes differ")
+            findings_by_group.setdefault(group, {})[finding.evidence_reference_id] = finding
+            finding_meta[(group[0], group[1], finding.evidence_reference_id)] = (
+                str(row[1]), str(row[3])
+            )
+            previous = finding_sets.setdefault(group, str(row[9]))
+            if previous != row[9]:
+                raise DispositionContractError("retained finding set differs")
+        dispositions_by_group: dict[tuple[str, str], dict[str, ProposalDisposition]] = {}
+        for row in self._connection.execute(
+            "SELECT disposition_id,work_item_id,work_item_version_id,work_item_version_digest,"
+            "proposal_id,proposal_content_identity,proposal_canonical_digest,decision_lead_id,"
+            "lead_head_id,lead_head_digest,validator_input_digest,finding_set_digest,finding_id,"
+            "selection_digest,canonical_bytes,canonical_digest FROM triage_proposal_dispositions"
+        ):
+            disposition = ProposalDisposition.from_canonical_bytes(bytes(row[14]))
+            group = (str(row[2]), str(row[4]))
+            findings = findings_by_group.get(group, {})
+            finding = findings.get(disposition.decision_lead_id)
+            if (
+                disposition.disposition_id != row[0]
+                or disposition.work_item_id != row[1]
+                or disposition.work_item_version_id != row[2]
+                or disposition.work_item_version_digest != row[3]
+                or disposition.proposal_id != row[4]
+                or disposition.proposal_content_identity != row[5]
+                or disposition.proposal_canonical_digest != row[6]
+                or disposition.decision_lead_id != row[7]
+                or disposition.lead_head.current_disposition_head_id != row[8]
+                or disposition.lead_head.current_disposition_head_digest != row[9]
+                or disposition.validator_input.input_digest != row[10]
+                or disposition.finding_set_digest != row[11]
+                or finding is None or finding.finding_id != row[12]
+                or digest_bytes(canonical_json_bytes(disposition.selection.canonical_value())) != row[13]
+                or digest_bytes(bytes(row[14])) != row[15]
+            ):
+                raise DispositionContractError("retained disposition bytes differ")
+            dispositions_by_group.setdefault(group, {})[disposition.decision_lead_id] = disposition
+        if set(findings_by_group) != set(dispositions_by_group):
+            raise DispositionContractError("retained disposition group coverage differs")
+        for group, findings in findings_by_group.items():
+            dispositions = dispositions_by_group[group]
+            if set(findings) != set(dispositions):
+                raise DispositionContractError("retained disposition set is partial or extra")
+            version_row = self._connection.execute(
+                "SELECT work_item_id,retrieval_outcome,canonical_bytes,canonical_digest "
+                "FROM triage_work_item_versions WHERE version_id=?",
+                (group[0],),
+            ).fetchone()
+            if version_row is None:
+                raise DispositionContractError("retained Work Item Version is absent")
+            version = TriageWorkItemVersion.from_canonical_bytes(bytes(version_row[2]))
+            if (
+                version.version_id != group[0]
+                or version.work_item_id != version_row[0]
+                or version.canonical_digest != version_row[3]
+                or version.retrieval.outcome != "COMPLETE"
+                or version_row[1] != "COMPLETE"
+                or version.retrieval.context_id is None
+                or version.retrieval.context_digest is None
+            ):
+                raise DispositionContractError("retained Work Item Version differs")
+            _RETRIEVAL_VERIFY_RETAINED(
+                self._retrieval_authority, self._connection, version.retrieval
+            )
+            leads = {lead.lead_id: lead for lead in version.decision_leads}
+            if set(leads) != set(findings):
+                raise DispositionContractError("retained decision Lead manifest differs")
+            first = next(iter(findings.values()))
+            if any(
+                item.proposal_content_identity != first.proposal_content_identity
+                or item.proposal_canonical_digest != first.proposal_canonical_digest
+                or item.validator_input != first.validator_input
+                or item.severity is FindingSeverity.ERROR
+                for item in findings.values()
+            ):
+                raise DispositionContractError("retained finding set differs")
+            for lead_id, disposition in dispositions.items():
+                finding = findings[lead_id]
+                lead = leads[lead_id]
+                if (
+                    finding_meta[(group[0], group[1], lead_id)]
+                    != (version.work_item_id, version.canonical_digest)
+                    or disposition.work_item_id != version.work_item_id
+                    or disposition.work_item_version_digest != version.canonical_digest
+                    or disposition.retrieval_context_id != version.retrieval.context_id
+                    or disposition.retrieval_context_digest != version.retrieval.context_digest
+                    or disposition.lead_head.decision_lead_id != lead.lead_id
+                    or disposition.lead_head.decision_lead_digest != lead.lead_digest
+                    or disposition.lead_head.current_disposition_head_id != lead.disposition_id
+                    or disposition.lead_head.current_disposition_head_digest != lead.disposition_digest
+                    or finding.proposal_id != disposition.proposal_id
+                    or finding.proposal_content_identity != disposition.proposal_content_identity
+                    or finding.proposal_canonical_digest != disposition.proposal_canonical_digest
+                    or finding.validator_input != disposition.validator_input
+                    or finding.evidence_reference_digest != disposition.route_binding_digest
+                    or finding.evidence_reference_id != disposition.decision_lead_id
+                    or disposition.route_binding.decision_lead_id != lead_id
+                    or disposition.validator_input.retrieval_request_id != version.retrieval.request_id
+                    or disposition.validator_input.retrieval_request_digest != version.retrieval.request_digest
+                    or disposition.validator_input.retrieval_receipt_id != version.retrieval.context_id
+                    or disposition.validator_input.retrieval_receipt_digest != version.retrieval.context_digest
+                ):
+                    raise DispositionContractError("retained finding linkage differs")
+            ordered_ids = sorted(item.finding_id for item in findings.values())
+            expected_set = digest_bytes(canonical_json_bytes({
+                "schema_version": _FINDING_SET_SCHEMA_VERSION,
+                "proposal_content_identity": first.proposal_content_identity,
+                "validator_input_binding": first.validator_input.canonical_value(),
+                "finding_ids": ordered_ids,
+                "authority": DispositionAuthority.NONE.value,
+            }))
+            if expected_set != finding_sets[group] or any(
+                item.finding_set_digest != expected_set
+                for item in dispositions.values()
+            ):
+                raise DispositionContractError("retained finding-set digest differs")
+
+    def _recorded_at(self) -> str:
+        return str(self._connection.execute(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+        ).fetchone()[0])
+
+
 __all__ = [
     "DISPOSITION_AUTHORITY", "MAX_DISPOSITION_CANONICAL_BYTES",
     "PROPOSAL_DISPOSITION", "PROPOSAL_DISPOSITION_SCHEMA_VERSION",
@@ -1281,6 +1811,6 @@ __all__ = [
     "VALIDATED_PROPOSAL_LEAD_DISPOSITION_BINDING", "DispositionAuthority",
     "DispositionContractError", "DispositionJudgement", "FindingCode", "FindingSeverity",
     "LeadDispositionHeadBinding", "ProposalDisposition", "ProposalValidationFinding",
-    "ProposalValidationResult", "ValidatorInputBinding", "build_pending_dispositions",
+    "ProposalDispositionStore", "ProposalValidationResult", "ValidatorInputBinding", "build_pending_dispositions",
     "validate_proposal",
 ]

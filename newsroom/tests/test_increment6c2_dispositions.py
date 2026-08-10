@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import itertools
 import json
+import sqlite3
 from collections.abc import Iterator, Mapping
 from dataclasses import fields, replace
 
 import pytest
 
+from newsroom.authority.auth import AuthenticationProof, StaticAuthenticator, StaticPrincipal
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.triage_disposition_migrations import (
+    TRIAGE_DISPOSITION_MIGRATION_STATEMENTS,
+)
 from newsroom.increment5.retrieval_context import RETRIEVAL_CONTEXT_CONTRACT_DIGEST
 from newsroom.increment6 import dispositions as dispositions_module
 from newsroom.increment6.dispositions import (
@@ -23,11 +28,20 @@ from newsroom.increment6.dispositions import (
     DispositionJudgement,
     LeadDispositionHeadBinding,
     ProposalDisposition,
+    ProposalDispositionStore,
     ProposalValidationFinding,
     ValidatorInputBinding,
     build_pending_dispositions,
     validate_proposal,
 )
+from newsroom.increment6.work_items import (
+    RetrievalContextAuthority,
+    RetrievalInputBinding,
+    TriageWorkItem,
+)
+from newsroom.tests import test_increment5d1_hybrid_composer as composer_helpers
+from newsroom.tests import test_increment5d2_retrieval_context as retrieval_helpers
+from newsroom.tests import test_increment6a2_work_items as work_item_helpers
 from newsroom.increment6.outcomes import (
     CanonicalNextAction,
     CanonicalOutcome,
@@ -207,6 +221,228 @@ def _selection(outcome: CanonicalOutcome, action: CanonicalNextAction, reason: R
         supporting_reasons=(),
         next_action=NextAction(action.kind, action, "condition:1" if action.kind.value in {"RETRY", "REVIEW", "WAIT_DEPENDENCY", "RESUME_ON_WATCH", "REQUEST_SUPPLEMENTAL_DISCOVERY"} else None),
     )
+
+
+def _persistable_proposal(version: object, decision: object, receipt: object) -> bytes:
+    document = json.loads(_proposal_bytes())
+    proposal = document["proposal"]
+    proposal["work_item_binding"] = {
+        "work_item_id": version.work_item_id,
+        "work_item_version_id": version.version_id,
+        "work_item_version_digest": version.canonical_digest,
+    }
+    proposal["retrieval_context_binding"] = {
+        "context_id": str(receipt.context_id),
+        "context_digest": receipt.receipt_digest,
+        "contract_digest": RETRIEVAL_CONTEXT_CONTRACT_DIGEST,
+    }
+    proposal["worker_attempt_binding"]["work_item_version_digest"] = (
+        version.canonical_digest
+    )
+    proposal["worker_attempt_binding"]["retrieval_context_digest"] = (
+        receipt.receipt_digest
+    )
+    proposal["decision_lead_ids"] = [decision.lead_id]
+    recommendation = proposal["recommendations"][0]
+    recommendation["decision_lead_id"] = decision.lead_id
+    recommendation["input_citations"][0]["source_id"] = decision.lead_id
+    recommendation["input_citations"][0]["source_digest"] = decision.lead_digest
+    recommendation["candidate_manifest"]["contributing_lead_ids"] = [
+        decision.lead_id
+    ]
+    return _resign(document)
+
+
+def test_v19_store_exact_success_replay_restart_and_use_time_currentness(tmp_path) -> None:
+    inputs = composer_helpers.branch_inputs.__wrapped__(tmp_path)
+    (
+        builder,
+        _composer,
+        _cas_root,
+        _journal,
+        _journal_path,
+        request,
+        receipt,
+        _content,
+    ) = retrieval_helpers._retained_complete_context(
+        tmp_path, inputs, name="disposition-authority"
+    )
+    authority = RetrievalContextAuthority(
+        builder.journal.path, {request.request_digest: (request, receipt)}
+    )
+    decision = work_item_helpers._decision(1)
+    connection, work_store = work_item_helpers._store(
+        (decision,), retrieval_authority=authority
+    )
+    item = TriageWorkItem.create((decision,))
+    version = replace(
+        work_item_helpers._version(item),
+        retrieval=RetrievalInputBinding.from_receipt(request, receipt),
+    )
+    work_store.create_or_replay(item, version)
+    for statement in TRIAGE_DISPOSITION_MIGRATION_STATEMENTS:
+        connection.execute(statement)
+    authenticator = StaticAuthenticator(
+        credentials={"credential": StaticPrincipal("editor")},
+        authority_domain="newsroom.dispositions",
+    )
+    proof = AuthenticationProof(method="STATIC_TOKEN", credential="credential")
+    store = ProposalDispositionStore(connection, authority, authenticator)
+    proposal = _persistable_proposal(version, decision, receipt)
+    context_mismatch = json.loads(proposal)
+    context_mismatch["proposal"]["context_lead_ids"] = [LEAD_B]
+    with pytest.raises(DispositionContractError, match="exact current Work Item"):
+        store.persist(_resign(context_mismatch), {}, proof=proof)
+    assert connection.in_transaction is False
+    selection = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+    )
+    first = store.persist(proposal, {decision.lead_id: selection}, proof=proof)
+    assert len(first) == 1
+    assert first[0].authority is DispositionAuthority.NONE
+    assert store.persist(proposal, {decision.lead_id: selection}, proof=proof) == first
+    assert store.require_current(first[0].disposition_id, proof=proof) == first[0]
+    assert connection.execute(
+        "SELECT COUNT(*) FROM triage_proposal_validation_findings"
+    ).fetchone() == (1,)
+    assert connection.execute(
+        "SELECT COUNT(*) FROM triage_proposal_dispositions"
+    ).fetchone() == (1,)
+    divergent = _selection(
+        CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+        CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+        ReasonCode.REL_NO_ADEQUATE_PRIOR_MATCH,
+    )
+    with pytest.raises(DispositionContractError, match="replay diverges"):
+        store.persist(proposal, {decision.lead_id: divergent}, proof=proof)
+    assert connection.execute(
+        "SELECT COUNT(*) FROM triage_proposal_dispositions"
+    ).fetchone() == (1,)
+
+    interrupted_document = json.loads(proposal)
+    interrupted_document["proposal"]["proposal_id"] = (
+        "00000000-0000-4000-8000-000000009999"
+    )
+    interrupted = _resign(interrupted_document)
+    store._persist_dispositions = lambda *_args: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        GeneratorExit()
+    )
+    with pytest.raises(GeneratorExit):
+        store.persist(interrupted, {decision.lead_id: selection}, proof=proof)
+    del store._persist_dispositions
+    assert connection.execute(
+        "SELECT COUNT(*) FROM triage_proposal_validation_findings"
+    ).fetchone() == (1,)
+    assert connection.in_transaction is False
+    with pytest.raises(DispositionContractError, match="authentication"):
+        store.require_current(
+            first[0].disposition_id,
+            proof=AuthenticationProof(method="STATIC_TOKEN", credential="wrong"),
+        )
+
+    database = tmp_path / "restarted-dispositions.sqlite3"
+    target = sqlite3.connect(database, isolation_level=None)
+    connection.backup(target)
+    target.close()
+    first_connection = sqlite3.connect(database, isolation_level=None, timeout=10)
+    second_connection = sqlite3.connect(database, isolation_level=None, timeout=10)
+    first_restarted = ProposalDispositionStore(
+        first_connection, authority, authenticator
+    )
+    second_restarted = ProposalDispositionStore(
+        second_connection, authority, authenticator
+    )
+    assert first_restarted.persist(
+        proposal, {decision.lead_id: selection}, proof=proof
+    ) == first
+    assert second_restarted.persist(
+        proposal, {decision.lead_id: selection}, proof=proof
+    ) == first
+    first_connection.close()
+    second_connection.close()
+
+
+def test_v19_reopen_rejects_self_consistent_finding_route_cross_link(tmp_path) -> None:
+    inputs = composer_helpers.branch_inputs.__wrapped__(tmp_path)
+    builder, _, _, _, _, request, receipt, _ = retrieval_helpers._retained_complete_context(
+        tmp_path, inputs, name="disposition-cross-link"
+    )
+    authority = RetrievalContextAuthority(
+        builder.journal.path, {request.request_digest: (request, receipt)}
+    )
+    decision = work_item_helpers._decision(1)
+    connection, work_store = work_item_helpers._store(
+        (decision,), retrieval_authority=authority
+    )
+    item = TriageWorkItem.create((decision,))
+    version = replace(
+        work_item_helpers._version(item),
+        retrieval=RetrievalInputBinding.from_receipt(request, receipt),
+    )
+    work_store.create_or_replay(item, version)
+    for statement in TRIAGE_DISPOSITION_MIGRATION_STATEMENTS:
+        connection.execute(statement)
+    authenticator = StaticAuthenticator(
+        credentials={"credential": StaticPrincipal("editor")},
+        authority_domain="newsroom.dispositions",
+    )
+    proof = AuthenticationProof(method="STATIC_TOKEN", credential="credential")
+    store = ProposalDispositionStore(connection, authority, authenticator)
+    stored = store.persist(
+        _persistable_proposal(version, decision, receipt),
+        {decision.lead_id: _selection(
+            CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
+            CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+            ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
+        )},
+        proof=proof,
+    )[0]
+    finding_raw = connection.execute(
+        "SELECT canonical_bytes FROM triage_proposal_validation_findings"
+    ).fetchone()[0]
+    finding_doc = json.loads(bytes(finding_raw))
+    finding_doc["finding"]["evidence_reference_digest"] = DIGEST_A
+    finding_identity = dict(finding_doc["finding"])
+    finding_identity.pop("finding_id")
+    new_finding_id = digest_bytes(canonical_json_bytes(finding_identity))
+    finding_doc["finding"]["finding_id"] = new_finding_id
+    new_finding_raw = canonical_json_bytes(finding_doc)
+    new_finding_set = digest_bytes(canonical_json_bytes({
+        "schema_version": "newsroom.increment6.triage-proposal-finding-set.v1",
+        "proposal_content_identity": stored.proposal_content_identity,
+        "validator_input_binding": stored.validator_input.canonical_value(),
+        "finding_ids": [new_finding_id],
+        "authority": "NONE",
+    }))
+    disposition_doc = json.loads(stored.canonical_bytes)
+    disposition_doc["disposition"]["finding_set_digest"] = new_finding_set
+    disposition_identity = dict(disposition_doc["disposition"])
+    disposition_identity.pop("disposition_id")
+    new_disposition_id = digest_bytes(canonical_json_bytes(disposition_identity))
+    disposition_doc["disposition"]["disposition_id"] = new_disposition_id
+    new_disposition_raw = canonical_json_bytes(disposition_doc)
+
+    connection.execute("DROP TRIGGER immutable_triage_proposal_findings_update")
+    connection.execute("DROP TRIGGER immutable_triage_proposal_dispositions_update")
+    connection.execute("PRAGMA foreign_keys=OFF")
+    connection.execute(
+        "UPDATE triage_proposal_validation_findings SET finding_id=?,finding_set_digest=?,"
+        "canonical_bytes=?,canonical_digest=?",
+        (new_finding_id, new_finding_set, new_finding_raw, digest_bytes(new_finding_raw)),
+    )
+    connection.execute(
+        "UPDATE triage_proposal_dispositions SET disposition_id=?,finding_set_digest=?,"
+        "finding_id=?,canonical_bytes=?,canonical_digest=?",
+        (new_disposition_id, new_finding_set, new_finding_id, new_disposition_raw,
+         digest_bytes(new_disposition_raw)),
+    )
+    connection.execute("PRAGMA foreign_keys=ON")
+
+    with pytest.raises(DispositionContractError, match="finding linkage"):
+        ProposalDispositionStore(connection, authority, authenticator)
+    assert connection.in_transaction is False
 
 
 def test_public_allocation_and_no_authority_are_exact() -> None:
