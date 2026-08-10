@@ -23,25 +23,35 @@ class MyStoreHandle:
     def set_upstream_head(self, authority, value): ...
     def current_use(self, record_id): ...
     def tamper(self, record_id, kind): ...
-    def begin(self): ...
+    def rollback_scope(self, operation): ...
     def close(self): ...
-
-
-class MyTransaction:
-    def submit(self, command): ...
-    def observe(self, record_id): ...
-    def history(self): ...
-    def rollback(self): ...
-
 
 report = assert_conformant(MyStoreAdapter())
 ```
 
 The adapter does not implement replay, reopen, competing-writer or rollback
-scenarios and does not provide expected values or success booleans. The kernel
-owns those sequences and their fixed commands. Adapters translate product
-exceptions to `IntegrityViolation`, `BindingConflict` and `LostResponse` at
-the test seam.
+scenarios and does not provide expected values or success booleans. The
+`rollback_scope` primitive is the narrow exception needed for stores whose
+authority submission is internally atomic. The adapter opens a real
+store-owned transaction, passes a narrow scope with `submit`, `observe` and
+`history` operations to the kernel callback exactly once, and rolls the
+transaction back in a `finally` block. It must also roll back and re-raise the
+original exception when the callback raises. A product adapter may map that
+scope to private active-transaction helpers; it does not expose a production
+transaction API. The kernel callback owns the command, submission and staged
+assertions. The kernel also owns callback-count checks, deliberate abort,
+same-handle checks, close/reopen sequence and post-rollback assertions.
+Adapters translate product exceptions to `IntegrityViolation`,
+`BindingConflict` and `LostResponse` at the test seam.
+
+This test-only protocol is a reviewed mapping boundary. A generic black-box
+kernel cannot cryptographically distinguish a malicious, perfect in-memory
+scope from the real store. Reviewers therefore **must** verify that each
+adapter wraps the real store and its private transaction, never a shadow
+transaction or in-memory substitute, and never fabricates staged state or
+history. Runtime sensitivity checks still reject omitted or duplicate
+callbacks, swallowed or replaced callback exceptions, wrong staged evidence,
+and commits on both normal and abort paths.
 
 ## Kernel-owned scenarios
 
@@ -58,15 +68,18 @@ The kernel performs these observations in fixed inventory order:
 | `current_use_revalidation` | accept matching heads and independently reject every changed required head |
 | `tamper_rejection` | reject direct canonical, linked-row and self-consistent offline rewrites through fresh and reopened reads |
 | `competing_writers` | coordinate two independent handles with a kernel barrier and threads; require one winner, one binding conflict, one row and one history append |
-| `transaction_rollback` | begin, submit, observe transaction-visible state/history, roll back, open a new handle, then require absence and unchanged history |
+| `transaction_rollback` | invoke two store-owned rollback scopes; in each kernel callback submit and require exact transaction-visible state plus one history append; require normal return for the first and exact rethrow of a deliberate kernel sentinel for the second; after each require same-handle absence and unchanged history, then close and require both rows absent through a newly opened distinct handle |
 | `restart_migration` | close and create distinct restart and migration handles over the same location; require validated value, full state and history parity |
 
-The focused persisted in-memory fake uses shared state, locks, independent
-handles and copy-on-write transactions. Its sensitivity tests inject defects
-into primitive submission, validation, handle creation, concurrency and
-transaction behaviour, including a point-read-validating implementation whose
-history list skips validation, then require the exact family-specific
-`FailureCode`.
+The focused persisted in-memory fake uses shared state, locks and independent
+handles. Its store-owned rollback primitive stages against that shared store
+and restores its snapshot in `finally`, including when the kernel callback
+raises. Sensitivity tests inject defects into primitive submission,
+validation, handle creation, concurrency and transaction behaviour, including
+a point-read-validating implementation whose history list skips validation, a
+primitive which commits instead of rolling back, omitted and duplicate
+callbacks, fabricated evidence, and swallowed or replaced exceptions; each
+must produce the exact family-specific `FailureCode`.
 
 ## Exhaustive applicability
 

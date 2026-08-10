@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -205,12 +205,13 @@ class AuthorityValue:
         )
 
 
-@runtime_checkable
-class StoreTransaction(Protocol):
+class RollbackScope(Protocol):
     def submit(self, command: WriteCommand) -> AuthorityValue: ...
     def observe(self, record_id: str) -> StoredAuthorityState | None: ...
     def history(self) -> tuple[AuthorityValue, ...]: ...
-    def rollback(self) -> None: ...
+
+
+RollbackOperation = Callable[[RollbackScope], None]
 
 
 @runtime_checkable
@@ -225,7 +226,7 @@ class AuthorityStoreHandle(Protocol):
     def set_upstream_head(self, authority: str, value: str) -> None: ...
     def current_use(self, record_id: str) -> AuthorityValue: ...
     def tamper(self, record_id: str, kind: TamperKind) -> None: ...
-    def begin(self) -> StoreTransaction: ...
+    def rollback_scope(self, operation: RollbackOperation) -> None: ...
     def close(self) -> None: ...
 
 
@@ -314,6 +315,10 @@ _CASE_FAILURES = {
 
 
 class _CaseFailed(AssertionError):
+    pass
+
+
+class _RollbackInspectionAbort(Exception):
     pass
 
 
@@ -622,29 +627,110 @@ def _competing_writers(adapter: AuthorityStoreAdapter) -> None:
 
 
 def _rollback(adapter: AuthorityStoreAdapter) -> None:
-    command = _command()
     location, handle = _new_handle(adapter)
     before_history = handle.history()
-    transaction = handle.begin()
-    transaction.submit(command)
+    normal_command = _command("record-rollback-normal")
+    normal_invocations = 0
+    normal_complete = False
+
+    def normal_operation(scope: RollbackScope) -> None:
+        nonlocal normal_invocations, normal_complete
+        normal_invocations += 1
+        _require(
+            normal_invocations == 1,
+            "normal rollback scope invoked kernel callback more than once",
+        )
+        scope.submit(normal_command)
+        _require(
+            scope.observe(normal_command.record_id)
+            == StoredAuthorityState.from_command(normal_command),
+            "normal rollback scope cannot observe submitted state",
+        )
+        _require(
+            scope.history()
+            == before_history + (AuthorityValue.from_command(normal_command),),
+            "normal rollback scope history did not append exactly once",
+        )
+        normal_complete = True
+
+    try:
+        handle.rollback_scope(normal_operation)
+    except _CaseFailed:
+        raise
+    except Exception as exc:
+        raise _CaseFailed(f"normal rollback scope raised {type(exc).__name__}") from exc
+    _require(normal_invocations == 1, "normal rollback scope skipped kernel callback")
+    _require(normal_complete, "normal rollback scope swallowed kernel inspection")
     _require(
-        transaction.observe(command.record_id)
-        == StoredAuthorityState.from_command(command),
-        "transaction cannot observe submitted state",
+        handle.observe(normal_command.record_id) is None,
+        "normal rolled-back row remains visible on same handle",
     )
     _require(
-        len(transaction.history()) == len(before_history) + 1,
-        "transaction history did not append once",
+        handle.history() == before_history,
+        "normal rollback changed same-handle append-only history",
     )
-    transaction.rollback()
+
+    abort_command = _command("record-rollback-abort")
+    abort_invocations = 0
+    abort_complete = False
+    sentinel = _RollbackInspectionAbort()
+
+    def abort_operation(scope: RollbackScope) -> None:
+        nonlocal abort_invocations, abort_complete
+        abort_invocations += 1
+        _require(
+            abort_invocations == 1,
+            "abort rollback scope invoked kernel callback more than once",
+        )
+        scope.submit(abort_command)
+        _require(
+            scope.observe(abort_command.record_id)
+            == StoredAuthorityState.from_command(abort_command),
+            "abort rollback scope cannot observe submitted state",
+        )
+        _require(
+            scope.history()
+            == before_history + (AuthorityValue.from_command(abort_command),),
+            "abort rollback scope history did not append exactly once",
+        )
+        abort_complete = True
+        raise sentinel
+
+    abort_rethrown = False
+    try:
+        handle.rollback_scope(abort_operation)
+    except Exception as exc:
+        if exc is sentinel:
+            abort_rethrown = True
+        elif isinstance(exc, _CaseFailed):
+            raise
+        else:
+            raise _CaseFailed(
+                f"abort rollback scope raised {type(exc).__name__}"
+            ) from exc
+    _require(abort_invocations == 1, "abort rollback scope skipped kernel callback")
+    _require(abort_complete, "abort rollback scope swallowed kernel inspection")
+    _require(abort_rethrown, "abort rollback scope swallowed kernel sentinel")
+    _require(
+        handle.observe(abort_command.record_id) is None,
+        "abort rolled-back row remains visible on same handle",
+    )
+    _require(
+        handle.history() == before_history,
+        "abort rollback changed same-handle append-only history",
+    )
+
     handle.close()
     reopened = adapter.open_handle(location)
     _require(reopened is not handle, "post-rollback reopen returned original handle")
+    for command in (normal_command, abort_command):
+        _require(
+            reopened.observe(command.record_id) is None,
+            f"rolled-back row remains visible after reopen: {command.record_id}",
+        )
     _require(
-        reopened.observe(command.record_id) is None, "rolled-back row remains visible"
-    )
-    _require(
-        reopened.history() == before_history, "rollback changed append-only history"
+        reopened.history() == before_history,
+        "rollback changed reopened append-only history",
     )
 
 
@@ -852,7 +938,8 @@ __all__ = [
     "IntegrityViolation",
     "LostResponse",
     "OutcomeStatus",
-    "StoreTransaction",
+    "RollbackOperation",
+    "RollbackScope",
     "StoredAuthorityState",
     "TamperKind",
     "WriteCommand",
