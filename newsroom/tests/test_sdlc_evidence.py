@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import hashlib
 import json
-from pathlib import Path
 import shutil
 import stat
 import subprocess
+from copy import deepcopy
+from pathlib import Path
 
-from jsonschema import Draft202012Validator, FormatChecker
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker
 
 from scripts.sdlc import emit_evidence
 from scripts.sdlc.classify_change import resolve_commit, resolve_tree
@@ -19,11 +19,12 @@ from scripts.sdlc.emit_evidence import (
     build_gate_evidence,
     canonical_json_bytes,
     installed_uv_version,
-    main as evidence_main,
     sha256_identity,
     validate_evidence_record,
 )
-
+from scripts.sdlc.emit_evidence import (
+    main as evidence_main,
+)
 
 REPO_ROOT = Path(__file__).parents[2]
 COMMAND_DIGEST = "sha256:" + "a" * 64
@@ -54,6 +55,7 @@ def _copy_contract(root: Path) -> None:
         "docs/specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md",
         "docs/specs/sdlc/2026-07-30-sdlc-v2.3-owner-budget-amendment.md",
         "docs/specs/sdlc/2026-08-02-sdlc-v2.4-owner-budget-amendment.md",
+        "docs/specs/sdlc/2026-08-10-sdlc-v2.5-core-sharding-amendment.md",
     )
     for relative in paths:
         target = root / relative
@@ -176,9 +178,7 @@ def _build(
 ) -> dict[str, object]:
     run = gate_run or _gate_run()
     if junit is _MISSING:
-        selected_junit: object | None = (
-            _junit() if run["result"] == "PASS" else None
-        )
+        selected_junit: object | None = _junit() if run["result"] == "PASS" else None
     else:
         selected_junit = junit
     return build_gate_evidence(

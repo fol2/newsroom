@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-import re
-from typing import Mapping
 
 from .artifact_envelope import GithubRunContext
 from .artifact_receipt import (
@@ -27,11 +27,13 @@ from .workflow_event import (
     measure_job_telemetry,
     validate_job_telemetry,
 )
-
+from .workflow_event import (
+    _timestamp as _workflow_timestamp,
+)
 
 SCHEMA_VERSION = "newsroom.sdlc.shadow-lane.v1"
 POLICY_VERSION = "sdlc-shadow-lane-v1"
-CONTRACT_VERSION = "sdlc-v2.4"
+CONTRACT_VERSION = "sdlc-v2.5"
 CLASSIFIER_VERSION = "sdlc-risk-v1"
 _SERVICE_RISKS = frozenset({"R3_EXTERNAL_SERVICE_SECURITY", "R4_RELEASE_OPERATIONAL"})
 _OWNER_RISKS = frozenset({"R4_RELEASE_OPERATIONAL"})
@@ -78,7 +80,7 @@ _POLICIES = {
         ),
         bootstrap_end_step="Sync locked environment",
         finalization_step="Finalize evidence",
-        ready_after_jobs=("route",),
+        ready_after_jobs=("core_shard", "route", "source"),
     ),
     "service": LanePolicy(
         lane_id="service",
@@ -110,7 +112,11 @@ class ShadowLaneRecord:
             replay = validate_transport_replay(self.replay.as_dict())
             receipt = validate_receipt(self.receipt.as_dict())
             telemetry = validate_job_telemetry(self.telemetry.as_dict())
-        except (TransportReplayError, ArtifactReceiptError, WorkflowEvidenceError) as exc:
+        except (
+            TransportReplayError,
+            ArtifactReceiptError,
+            WorkflowEvidenceError,
+        ) as exc:
             raise ShadowLaneError("nested_evidence") from exc
         if (
             replay != self.replay
@@ -177,7 +183,7 @@ def _timestamp(value: object) -> str:
     if _TIMESTAMP.fullmatch(text) is None:
         raise ShadowLaneError("run_created_at")
     try:
-        datetime.fromisoformat(text[:-1] + "+00:00")
+        datetime.fromisoformat(text)
     except ValueError as exc:
         raise ShadowLaneError("run_created_at") from exc
     return text
@@ -276,8 +282,7 @@ def _cross_check(
     if policy.lane_id == "service" and not route.service_required:
         raise ShadowLaneError("lane_route")
     gate_keys = frozenset(
-        (decision.gate_id, decision.phase)
-        for decision in receipt.gate_decisions
+        (decision.gate_id, decision.phase) for decision in receipt.gate_decisions
     )
     if gate_keys != policy.gate_keys:
         raise ShadowLaneError("lane_gates")
@@ -313,6 +318,50 @@ def validate_shadow_lane_record(
     )
 
 
+def _telemetry_jobs(
+    value: object, *, policy: LanePolicy, run_id: int, run_attempt: int
+) -> object:
+    if policy.lane_id != "core":
+        return value
+    jobs = value.get("jobs") if isinstance(value, dict) else None
+    if not isinstance(jobs, list):
+        raise WorkflowEvidenceError("jobs_shape")
+    matrix = [
+        job
+        for job in jobs
+        if isinstance(job, dict)
+        and isinstance(job.get("name"), str)
+        and str(job["name"]).startswith("core-shard-")
+    ]
+    expected = {f"core-shard-{index}" for index in range(4)}
+    if (
+        len(matrix) != 4
+        or {job["name"] for job in matrix} != expected
+        or any(job.get("name") == "core_shard" for job in jobs if isinstance(job, dict))
+        or any(
+            (job.get("run_id"), job.get("run_attempt"), job.get("status"))
+            != (run_id, run_attempt, "completed")
+            for job in matrix
+        )
+    ):
+        raise WorkflowEvidenceError("ready_after_job")
+    completed_at = max(
+        (
+            _workflow_timestamp(job.get("completed_at"), "ready_after_job_completed_at")
+            for job in matrix
+        ),
+        key=lambda item: item[1],
+    )[0]
+    dependency = {
+        "name": "core_shard",
+        "run_id": run_id,
+        "run_attempt": run_attempt,
+        "status": "completed",
+        "completed_at": completed_at,
+    }
+    return {**value, "jobs": [*jobs, dependency]}
+
+
 def verify_shadow_lane(
     *,
     repo_root: str | Path,
@@ -335,8 +384,14 @@ def verify_shadow_lane(
     run_event = _event_name(run.get("event"))
     run_created_at = _timestamp(run.get("created_at"))
     try:
-        telemetry = measure_job_telemetry(
+        jobs = _telemetry_jobs(
             transport.jobs,
+            policy=policy,
+            run_id=transport.replay.run_id,
+            run_attempt=transport.replay.run_attempt,
+        )
+        telemetry = measure_job_telemetry(
+            jobs,
             run_id=transport.replay.run_id,
             run_attempt=transport.replay.run_attempt,
             job_name=policy.producer_job_id,

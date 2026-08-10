@@ -85,8 +85,8 @@ jobs:
           include-hidden-files: false
           archive: true
 
-  core:
-    name: core
+  source:
+    name: source
     needs:
       - route
     if: needs.route.result == 'success'
@@ -100,12 +100,153 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           show-progress: false
-
       - name: Set up Python 3.12
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
+      - name: Set up exact uv with shared cache
+        id: setup_uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+      - name: Download exact route evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: newsroom-sdlc-route-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          path: .sdlc-run/route
+          merge-multiple: false
+          digest-mismatch: error
+      - name: Sync locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+      - name: Execute source integrity
+        shell: bash
+        env:
+          NEWSROOM_SDLC_CACHE_KEY: ${{ steps.setup_uv.outputs.cache-key }}
+          NEWSROOM_SDLC_CACHE_HIT: ${{ steps.setup_uv.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m scripts.sdlc.workflow_lane execute-source \
+            --route .sdlc-run/route/route.json \
+            --artifact-root .sdlc-run/source-fragment
+      - name: Upload source fragment
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: newsroom-sdlc-source-fragment-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          path: .sdlc-run/source-fragment
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+          archive: true
 
+  core_shard:
+    name: core-shard-${{ matrix.shard }}
+    needs:
+      - route
+    if: needs.route.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout evaluated head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - name: Set up exact uv with shared cache
+        id: setup_uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          restore-cache: true
+          save-cache: false
+          cache-suffix: newsroom-py312
+          prune-cache: false
+          cache-python: false
+      - name: Download exact route evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: newsroom-sdlc-route-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          path: .sdlc-run/route
+          merge-multiple: false
+          digest-mismatch: error
+      - name: Sync locked environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --dev --locked
+      - name: Execute bounded core shard
+        shell: bash
+        env:
+          NEWSROOM_SDLC_CACHE_KEY: ${{ steps.setup_uv.outputs.cache-key }}
+          NEWSROOM_SDLC_CACHE_HIT: ${{ steps.setup_uv.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m scripts.sdlc.workflow_lane execute-core-shard \
+            --route .sdlc-run/route/route.json \
+            --shard-index ${{ matrix.shard }} \
+            --artifact-root .sdlc-run/core-fragment
+      - name: Upload canonical core fragment
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: newsroom-sdlc-core-fragment-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}-${{ matrix.shard }}
+          path: .sdlc-run/core-fragment
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+          archive: true
+
+  core:
+    name: core
+    needs:
+      - route
+      - source
+      - core_shard
+    if: always() && needs.route.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout evaluated head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
       - name: Set up exact uv with shared cache
         id: setup_uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -119,7 +260,6 @@ jobs:
           cache-suffix: newsroom-py312
           prune-cache: false
           cache-python: false
-
       - name: Download exact route evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -127,35 +267,39 @@ jobs:
           path: .sdlc-run/route
           merge-multiple: false
           digest-mismatch: error
-
+      - name: Download exact source fragment
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: newsroom-sdlc-source-fragment-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          path: .sdlc-run/source-fragments/source
+          merge-multiple: false
+          digest-mismatch: error
+      - name: Download exact core fragments
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: newsroom-sdlc-core-fragment-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}-*
+          path: .sdlc-run/core-fragments
+          merge-multiple: false
+          digest-mismatch: error
       - name: Sync locked environment
         shell: bash
         run: |
           set -euo pipefail
           uv lock --check
           uv sync --dev --locked
-          uv run --no-sync python - <<'PY'
-          import platform
-          import sys
-
-          assert sys.version_info[:2] == (3, 12), sys.version
-          assert platform.python_implementation() == 'CPython'
-          PY
           uv run --no-sync python -m compileall -q newsroom scripts
-
-      - name: Execute evidence lane
+      - name: Reduce exact core fragments
         shell: bash
         env:
           NEWSROOM_SDLC_CACHE_KEY: ${{ steps.setup_uv.outputs.cache-key }}
           NEWSROOM_SDLC_CACHE_HIT: ${{ steps.setup_uv.outputs.cache-hit }}
         run: |
           set -euo pipefail
-          uv run --no-sync python -m scripts.sdlc.workflow_lane execute \
+          uv run --no-sync python -m scripts.sdlc.workflow_lane reduce-core \
             --route .sdlc-run/route/route.json \
-            --lane core \
-            --artifact-root .sdlc-run/core \
-            --output .sdlc-run/core-execution.json
-
+            --fragment-root .sdlc-run/core-fragments \
+            --source-root .sdlc-run/source-fragments \
+            --artifact-root .sdlc-run/core
       - name: Finalize evidence
         if: always()
         shell: bash
@@ -171,7 +315,6 @@ jobs:
             --output .sdlc-run/core-lane.json \
             > "${RUNNER_TEMP}/core-finalize-gate.json"
           cat "${RUNNER_TEMP}/core-finalize-gate.json"
-
       - name: Upload core lane evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

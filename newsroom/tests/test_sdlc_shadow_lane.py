@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,7 +20,6 @@ from scripts.sdlc.shadow_lane import (
 from scripts.sdlc.transport_replay import TransportReplay, TransportReplayError
 from scripts.sdlc.workflow_event import JobTelemetry, WorkflowEvidenceError
 
-
 RUN_ID = 123
 RUN_ATTEMPT = 2
 REPOSITORY_ID = 1153895518
@@ -29,6 +28,7 @@ HEAD_SHA = "a" * 40
 ARTIFACT_ID = 456
 ARTIFACT_NAME = f"newsroom-sdlc-{RUN_ID}-{RUN_ATTEMPT}-core-{HEAD_SHA}"
 ARTIFACT_DIGEST = "sha256:" + "1" * 64
+CORE_READY_AFTER_JOBS = ("core_shard", "route", "source")
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ class _Metadata:
 
 @dataclass(frozen=True)
 class _Route:
-    contract_version: str = "sdlc-v2.4"
+    contract_version: str = "sdlc-v2.5"
     risk_classifier_version: str = "sdlc-risk-v1"
     risk_tier: str = "R1_LOCAL_CODE"
     service_required: bool = False
@@ -115,7 +115,7 @@ def _replay(*, artifact_name: str = ARTIFACT_NAME) -> TransportReplay:
 def _telemetry(
     *,
     job_name: str = "core",
-    ready_after_jobs: tuple[str, ...] = ("route",),
+    ready_after_jobs: tuple[str, ...] = CORE_READY_AFTER_JOBS,
 ) -> JobTelemetry:
     return JobTelemetry(
         run_id=RUN_ID,
@@ -135,6 +135,19 @@ def _telemetry(
         finalization_completed_at="2026-07-22T12:00:41.000Z",
         job_completed_at="2026-07-22T12:00:42.000Z",
     )
+
+
+def _core_matrix_jobs() -> list[dict[str, object]]:
+    return [
+        {
+            "name": f"core-shard-{index}",
+            "run_id": RUN_ID,
+            "run_attempt": RUN_ATTEMPT,
+            "status": "completed",
+            "completed_at": f"2026-07-22T12:00:0{index + 1}Z",
+        }
+        for index in range(4)
+    ]
 
 
 def _identity(
@@ -205,7 +218,7 @@ def test_verify_shadow_lane_composes_replay_telemetry_and_receipt(
     transport = SimpleNamespace(
         replay=replay,
         run={"event": "pull_request", "created_at": telemetry.workflow_created_at},
-        jobs={"jobs": []},
+        jobs={"jobs": _core_matrix_jobs()},
         metadata={"id": ARTIFACT_ID},
         artifact_root=tmp_path / "artifact",
         archive_path=tmp_path / "artifact.zip",
@@ -233,18 +246,86 @@ def test_verify_shadow_lane_composes_replay_telemetry_and_receipt(
         lane_id="core",
         decision_context=decision_context,  # type: ignore[arg-type]
         contract=contract,  # type: ignore[arg-type]
-        now=datetime(2026, 7, 22, 12, 1, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 22, 12, 1, tzinfo=UTC),
     )
 
     assert record.lane_id == "core"
     assert record.replay == replay
     assert record.receipt == receipt
     assert record.telemetry == telemetry
+    measured_jobs = calls["measure"][0]["jobs"]  # type: ignore[index]
+    assert measured_jobs[-1] == {
+        "name": "core_shard",
+        "run_id": RUN_ID,
+        "run_attempt": RUN_ATTEMPT,
+        "status": "completed",
+        "completed_at": "2026-07-22T12:00:04Z",
+    }
     assert calls["measure"][1]["job_name"] == "core"  # type: ignore[index]
-    assert calls["measure"][1]["ready_after_job_names"] == ("route",)  # type: ignore[index]
+    assert calls["measure"][1]["ready_after_job_names"] == (  # type: ignore[index]
+        CORE_READY_AFTER_JOBS
+    )
     assert calls["measure"][1]["bootstrap_end_step"] == "Sync locked environment"  # type: ignore[index]
     assert calls["verify"]["expected_job_id"] == "core"  # type: ignore[index]
     assert validate_shadow_lane_record(record.as_dict(), contract=contract) == record
+
+
+def test_core_telemetry_ready_dependencies_match_the_reducer_topology() -> None:
+    assert lane_module._POLICIES["core"].ready_after_jobs == (
+        "core_shard",
+        "route",
+        "source",
+    )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["missing", "duplicate", "extra", "wrong-run", "wrong-attempt", "incomplete"],
+)
+def test_core_telemetry_rejects_noncanonical_matrix_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    jobs = _core_matrix_jobs()
+    if fault == "missing":
+        jobs.pop()
+    elif fault == "duplicate":
+        jobs.append(dict(jobs[0]))
+    elif fault == "extra":
+        jobs.append({**jobs[0], "name": "core-shard-4"})
+    elif fault == "wrong-run":
+        jobs[0]["run_id"] = RUN_ID + 1
+    elif fault == "wrong-attempt":
+        jobs[0]["run_attempt"] = RUN_ATTEMPT + 1
+    else:
+        jobs[0]["status"] = "in_progress"
+    replay = _replay()
+    telemetry = _telemetry()
+    transport = SimpleNamespace(
+        replay=replay,
+        run={"event": "pull_request", "created_at": telemetry.workflow_created_at},
+        jobs={"jobs": jobs},
+        metadata={},
+        artifact_root=tmp_path / "artifact",
+        archive_path=tmp_path / "artifact.zip",
+    )
+    monkeypatch.setattr(lane_module, "load_verified_transport", lambda _root: transport)
+    monkeypatch.setattr(
+        lane_module, "measure_job_telemetry", lambda *_args, **_kwargs: telemetry
+    )
+    receipt = _Receipt(_Metadata())
+    monkeypatch.setattr(lane_module, "verify_artifact", lambda **_kwargs: receipt)
+    _patch_receipt_validator(monkeypatch, receipt)
+
+    with pytest.raises(ShadowLaneError, match="job_telemetry"):
+        verify_shadow_lane(
+            repo_root=tmp_path,
+            bundle_root=tmp_path / "bundle",
+            lane_id="core",
+            decision_context=SimpleNamespace(job_id="decision"),  # type: ignore[arg-type]
+            contract=SimpleNamespace(repo_root=tmp_path),  # type: ignore[arg-type]
+        )
 
 
 def test_service_lane_uses_exact_service_policy(
@@ -261,7 +342,7 @@ def test_service_lane_uses_exact_service_policy(
         gate_decisions=(_GateDecision("service-neo4j", "tests"),),
     )
     replay = _replay(artifact_name=receipt.metadata.name)
-    telemetry = _telemetry(job_name="service")
+    telemetry = _telemetry(job_name="service", ready_after_jobs=("route",))
     transport = SimpleNamespace(
         replay=replay,
         run={"event": "pull_request", "created_at": telemetry.workflow_created_at},
@@ -386,7 +467,7 @@ def test_route_and_lane_gate_semantics_fail_closed(
             run_created_at="2026-07-22T12:00:00.000Z",
             replay=service_replay,
             receipt=unexpected_service,  # type: ignore[arg-type]
-            telemetry=_telemetry(job_name="service"),
+            telemetry=_telemetry(job_name="service", ready_after_jobs=("route",)),
             lane_identity="sha256:" + "0" * 64,
         )
 

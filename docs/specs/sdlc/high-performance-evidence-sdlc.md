@@ -1,15 +1,15 @@
 # High-performance evidence SDLC
 
 - Role: Normative target specification
-- Status: Accepted — amended by the owner on 2026-08-02
+- Status: Accepted — amended by the owner on 2026-08-10
 - Owner: fol2
 - Canonical language: English
 - Date: 2026-07-21
 - Specification ID: `SDLC-V2`
-- Contract version: `sdlc-v2.4`
+- Contract version: `sdlc-v2.5`
 - Related issue: #98
 - Related active product work: #96 / PR #97
-- Current owner amendment: `docs/specs/sdlc/2026-08-02-sdlc-v2.4-owner-budget-amendment.md`
+- Current owner amendment: `docs/specs/sdlc/2026-08-10-sdlc-v2.5-core-sharding-amendment.md`
 
 ## 1. Decision
 
@@ -17,14 +17,14 @@ Newsroom will replace increment-by-increment CI accumulation with an evidence-or
 
 A machine gate is a bounded decision over an exact change, environment and evidence contract. It either produces a reproducible typed decision inside its budget or fails closed. Its timeout does not grow whenever repository scope grows.
 
-The normal pull-request path has one always-reporting decision workflow with two possible parallel lanes:
+The normal pull-request path has one always-reporting decision workflow with parallel source-integrity, four-way deterministic-core and conditional service work:
 
-1. a core lane for routing, source integrity and deterministic repository tests;
+1. a core topology for routing, concurrent source integrity and four deterministic repository-test shards, followed by one canonical reducer;
 2. a Neo4j service lane when the exact change affects the graph adapter, projection-authority integration, graph migrations, service compatibility, credentials, workflow service setup or qualifying GraphRAG behaviour.
 
 One decision-validated exact-head SDLC core receipt is the canonical complete deterministic evidence. Pull-request and merge-queue core/decision receipts are content-addressed, transport-verified evidence-only artifacts, not signed attestations. The isolated signed-closeout job remains limited to exact-main, service-required manual runs and supplies the Tier-M attestation. Fast CI and manually dispatched legacy diagnostics are compatibility signals only; Tier S adds only the affected lanes selected by the route. The change has one feature-complete stop and one review at that stop.
 
-The measured exact-head test selections are currently small: the recorded JUnit suites range from 1.134 to 7.401 seconds. The exact full-repository pytest p95 has not yet been recorded. Full deterministic tests remain the blocking default until measurement proves that their p95 no longer fits the core-lane budget. Test-impact analysis begins in observe mode and cannot replace full evidence until repository-specific shadow controls demonstrate that it preserves defect detection.
+The complete deterministic inventory remains blocking. Its stable node-ID inventory is divided into four complete, duplicate-free balanced shards because a single runner no longer fits the unchanged 220-second envelope. Test-impact analysis remains in observe mode and cannot replace this complete evidence until repository-specific shadow controls demonstrate that it preserves defect detection.
 
 Deep mutation, fuzz, compatibility, flake, performance and recovery work runs as independent scientific shards outside the interactive path. Each shard has its own 220-second hard budget; a large experiment is many content-addressed shards, not one unbounded job.
 
@@ -152,6 +152,10 @@ The 2026-08-02 owner amendment doubles every `sdlc-v2.3` hard command, lane, sha
 Aggregate execution rules:
 
 - core-lane repository-owned execution hard deadline: 220 seconds;
+- core-lane execution is `max(source lifecycle, maximum shard lifecycle) +
+  reducer lifecycle`, with source timed from pre-preparation, each shard timed
+  from pre-collection and the reducer timed from pre-input-loading through
+  durable canonical output staging;
 - service-lane repository-owned execution hard deadline: 220 seconds;
 - merge-lane repository-owned execution hard deadline: 220 seconds;
 - finalisation hard deadline: 20 seconds;
@@ -295,12 +299,17 @@ Shape:
 1. always start;
 2. cancel obsolete heads with a PR-specific concurrency group;
 3. checkout exact head and sufficient base history;
-4. install pinned Python and pinned uv once;
+4. install pinned Python and pinned uv in each isolated exact-head job;
 5. restore an exact lock/toolchain-keyed cache;
 6. run `route`;
-7. run source integrity and deterministic tests in the same environment under one lane deadline;
-8. emit one compact evidence bundle;
-9. report one stable required decision name.
+7. run source integrity and four independently watched deterministic shards concurrently;
+8. prove each shard producer's tracked tree after collection and again before
+   fragment publication, and prove the source producer after execution and at
+   publication;
+9. validate their exact provenance, full lifecycle accounting and JUnit
+   universes in one bounded reducer, which alone emits the compact canonical
+   core evidence bundle;
+10. report one stable required decision name.
 
 Historical increment names do not remain separate required workflows. Requirement IDs live in test/evidence manifests.
 
@@ -381,7 +390,7 @@ Canonical output shape:
 ```json
 {
   "schema_version": "newsroom.sdlc.route.v1",
-  "contract_version": "sdlc-v2.4",
+  "contract_version": "sdlc-v2.5",
   "base_sha": "0000000000000000000000000000000000000000",
   "head_sha": "1111111111111111111111111111111111111111",
   "base_tree_sha": "2222222222222222222222222222222222222222",
