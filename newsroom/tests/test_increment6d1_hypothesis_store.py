@@ -31,6 +31,8 @@ from newsroom.increment6._hypothesis_store import (
 from newsroom.increment6._hypothesis_store import (
     _creation_event_id,
     _HypothesisStore,
+    _require_exact_proposal_authorisation,
+    _require_exact_proposal_provenance,
     _version_event_id,
 )
 from newsroom.increment6.dispositions import (
@@ -51,6 +53,7 @@ from newsroom.increment6.outcomes import (
     CanonicalOutcome,
     ReasonCode,
 )
+from newsroom.increment6.proposals import TriageProposal
 from newsroom.increment6.work_items import (
     RetrievalContextAuthority,
     RetrievalInputBinding,
@@ -519,7 +522,9 @@ def test_self_consistent_direct_tamper_fails_current_and_reopen(tmp_path) -> Non
     _assert_wrong_stable_identity_fails(wrong_identity_fixture, fixture[0], valid)
 
 
-def _assert_self_consistent_disposition_retarget_fails(fixture, valid) -> None:
+def _assert_self_consistent_disposition_retarget_fails(
+    fixture, valid, *, complete_route: bool = False
+) -> None:
     connection = fixture[0]
     old_disposition = ProposalDisposition.from_canonical_bytes(
         bytes(
@@ -536,15 +541,25 @@ def _assert_self_consistent_disposition_retarget_fails(fixture, valid) -> None:
         )
     )
 
-    assert old_disposition.route_binding.hypothesis is not None
-    forged_hypothesis = replace(
-        old_disposition.route_binding.hypothesis,
-        summary="Self-consistent forged summary",
-    )
-    forged_route = replace(
-        old_disposition.route_binding,
-        hypothesis=forged_hypothesis,
-    )
+    if complete_route:
+        assert old_disposition.route_binding.candidate_manifest is not None
+        forged_route = replace(
+            old_disposition.route_binding,
+            candidate_manifest=replace(
+                old_disposition.route_binding.candidate_manifest,
+                likely_new_information="Self-consistent forged Candidate coverage.",
+            ),
+        )
+    else:
+        assert old_disposition.route_binding.hypothesis is not None
+        forged_hypothesis = replace(
+            old_disposition.route_binding.hypothesis,
+            summary="Self-consistent forged summary",
+        )
+        forged_route = replace(
+            old_disposition.route_binding,
+            hypothesis=forged_hypothesis,
+        )
     forged_route_digest = digest_bytes(
         canonical_json_bytes(forged_route.canonical_value())
     )
@@ -661,6 +676,214 @@ def _assert_self_consistent_disposition_retarget_fails(fixture, valid) -> None:
     with pytest.raises(HypothesisContractError, match="exact Proposal group"):
         _open(fixture)
     connection.close()
+
+
+def test_self_consistent_complete_route_rewrite_fails_reopen(tmp_path) -> None:
+    fixture = _authority_fixture(tmp_path)
+    authority = _open(fixture)
+    valid = authority.retain(fixture[4], fixture[5], proof=fixture[3])
+    authority.close()
+    _assert_self_consistent_disposition_retarget_fails(
+        fixture, valid, complete_route=True
+    )
+
+
+def test_exact_proposal_authorisation_compares_complete_recommendation(
+    tmp_path,
+) -> None:
+    fixture = _authority_fixture(tmp_path)
+    proposal = TriageProposal.from_canonical_bytes(fixture[4])
+    disposition = fixture[5][0]
+    recommendation = next(
+        item
+        for item in proposal.recommendations
+        if item.decision_lead_id == disposition.decision_lead_id
+    )
+    forged_route = replace(
+        disposition.route_binding,
+        materiality_basis="A different but self-consistent retained route binding.",
+    )
+    forged_route_digest = digest_bytes(
+        canonical_json_bytes(forged_route.canonical_value())
+    )
+    identity = disposition._identity_value()
+    identity.update(
+        route_binding=forged_route.canonical_value(),
+        route_binding_digest=forged_route_digest,
+    )
+    forged = replace(
+        disposition,
+        disposition_id=digest_bytes(canonical_json_bytes(identity)),
+        route_binding=forged_route,
+        route_binding_digest=forged_route_digest,
+    )
+    assert recommendation.hypothesis is not None
+    with pytest.raises(HypothesisContractError, match="exact Proposal group"):
+        _require_exact_proposal_authorisation(
+            forged,
+            recommendation,
+            proposal,
+            digest_bytes(fixture[4]),
+        )
+
+
+def test_version_provenance_must_equal_retained_proposal_binding(tmp_path) -> None:
+    fixture = _authority_fixture(tmp_path)
+    authority = _open(fixture)
+    value = authority.retain(fixture[4], fixture[5], proof=fixture[3])
+    authority.close()
+    connection, _, _, _, _, _, work_store, item, first_work, *_ = fixture
+    second_work = replace(
+        work_item_helpers._version(item, 2), retrieval=first_work.retrieval
+    )
+    work_store.append_version(
+        first_work.version_id, first_work.canonical_digest, second_work
+    )
+    old_disposition = ProposalDisposition.from_canonical_bytes(
+        bytes(
+            connection.execute(
+                "SELECT canonical_bytes FROM triage_proposal_dispositions"
+            ).fetchone()[0]
+        )
+    )
+    disposition_identity = old_disposition._identity_value()
+    disposition_identity.update(
+        work_item_version_id=second_work.version_id,
+        work_item_version_digest=second_work.canonical_digest,
+    )
+    forged_disposition = replace(
+        old_disposition,
+        disposition_id=digest_bytes(canonical_json_bytes(disposition_identity)),
+        work_item_version_id=second_work.version_id,
+        work_item_version_digest=second_work.canonical_digest,
+    )
+    forged_bindings = _HypothesisStore._bindings((forged_disposition,))
+    forged_event_id = _version_event_id(
+        value.hypothesis_id,
+        value.ordinal,
+        value.previous_version_digest,
+        value.proposal_canonical_digest,
+        value.proposal_local_id,
+        value.target_version_digest,
+        forged_bindings,
+        value.actor_identity_digest,
+        value.recorded_at,
+    )
+    forged_version = replace(
+        value,
+        work_item_version_id=second_work.version_id,
+        work_item_version_digest=second_work.canonical_digest,
+        source_bindings=forged_bindings,
+        authority_event_id=forged_event_id,
+    )
+    affected_tables = (
+        "'triage_proposal_validation_findings',"
+        "'triage_proposal_dispositions',"
+        "'event_hypothesis_versions_v2',"
+        "'event_hypothesis_heads_v2'"
+    )
+    triggers = connection.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' "
+        f"AND tbl_name IN ({affected_tables}) ORDER BY name"
+    ).fetchall()
+    connection.execute("PRAGMA foreign_keys=OFF")
+    connection.execute("BEGIN")
+    for name, _ in triggers:
+        connection.execute(f'DROP TRIGGER "{name}"')
+    connection.execute(
+        "UPDATE triage_proposal_validation_findings SET "
+        "work_item_version_id=?,work_item_version_digest=?",
+        (second_work.version_id, second_work.canonical_digest),
+    )
+    connection.execute(
+        "UPDATE triage_proposal_dispositions SET disposition_id=?,"
+        "work_item_version_id=?,work_item_version_digest=?,"
+        "canonical_bytes=?,canonical_digest=? WHERE disposition_id=?",
+        (
+            forged_disposition.disposition_id,
+            second_work.version_id,
+            second_work.canonical_digest,
+            forged_disposition.canonical_bytes,
+            digest_bytes(forged_disposition.canonical_bytes),
+            old_disposition.disposition_id,
+        ),
+    )
+    connection.execute(
+        "UPDATE event_hypothesis_versions_v2 SET work_item_version_id=?,"
+        "work_item_version_digest=?,authority_event_id=?,canonical_bytes=?,"
+        "canonical_digest=? WHERE version_id=?",
+        (
+            second_work.version_id,
+            second_work.canonical_digest,
+            forged_version.authority_event_id,
+            forged_version.canonical_bytes,
+            forged_version.canonical_digest,
+            forged_version.version_id,
+        ),
+    )
+    connection.execute(
+        "UPDATE event_hypothesis_heads_v2 SET version_digest=? WHERE version_id=?",
+        (forged_version.canonical_digest, forged_version.version_id),
+    )
+    for _, statement in triggers:
+        connection.execute(statement)
+    connection.execute("COMMIT")
+    connection.execute("PRAGMA foreign_keys=ON")
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    proposal = TriageProposal.from_canonical_bytes(fixture[4])
+    with pytest.raises(HypothesisContractError, match="exact Proposal"):
+        _require_exact_proposal_provenance(forged_version, proposal)
+    with pytest.raises(HypothesisContractError, match="exact Proposal"):
+        _open(fixture)
+
+
+@pytest.mark.parametrize("operation", ("load_version", "load_hypothesis", "versions"))
+def test_historical_reads_revalidate_post_open_integrity(
+    tmp_path, operation: str
+) -> None:
+    fixture = _authority_fixture(tmp_path)
+    authority = _open(fixture)
+    value = authority.retain(fixture[4], fixture[5], proof=fixture[3])
+    connection = fixture[0]
+    if operation == "load_hypothesis":
+        trigger_name = "immutable_event_hypothesis_update"
+        statement = "UPDATE event_hypotheses_v2 SET canonical_digest=?"
+    else:
+        trigger_name = "immutable_event_hypothesis_version_update"
+        statement = "UPDATE event_hypothesis_versions_v2 SET canonical_digest=?"
+    trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name=?", (trigger_name,)
+    ).fetchone()[0]
+    connection.execute(f"DROP TRIGGER {trigger_name}")
+    connection.execute(statement, (_D2,))
+    connection.execute(trigger)
+    with pytest.raises(HypothesisContractError):
+        if operation == "load_version":
+            authority.load_version(value.version_id)
+        elif operation == "load_hypothesis":
+            authority.load_hypothesis(value.hypothesis_id)
+        else:
+            authority.versions(value.hypothesis_id)
+
+
+def test_replay_revalidates_retained_disposition_without_upstream_currentness(
+    tmp_path,
+) -> None:
+    fixture = _authority_fixture(tmp_path)
+    authority = _open(fixture)
+    authority.retain(fixture[4], fixture[5], proof=fixture[3])
+    connection = fixture[0]
+    trigger = connection.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE name='immutable_triage_proposal_dispositions_update'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_triage_proposal_dispositions_update")
+    connection.execute(
+        "UPDATE triage_proposal_dispositions SET work_item_version_digest=?", (_D2,)
+    )
+    connection.execute(trigger)
+    with pytest.raises(HypothesisContractError):
+        authority.retain(fixture[4], fixture[5], proof=fixture[3])
 
 
 def _assert_wrong_stable_identity_fails(fixture, source, valid) -> None:

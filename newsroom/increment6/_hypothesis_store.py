@@ -38,13 +38,15 @@ from newsroom.increment6.proposals import (
     HypothesisRelationship,
     LeadRecommendation,
     ProposalRoute,
-    ProposedHypothesis,
     TriageProposal,
 )
 from newsroom.increment6.work_items import RetrievalContextAuthority
 
 _REQUIRE_DISPOSITION = ProposalDispositionStore.require_current_in_transaction
 _AUTHENTICATE_DISPOSITION = ProposalDispositionStore._authenticate
+_VERIFY_DISPOSITION_INTEGRITY = (
+    ProposalDispositionStore.verify_retained_integrity_in_transaction
+)
 _CREATE_ROUTES = {
     HypothesisRelationship.NO_ADEQUATE_PRIOR_MATCH,
     HypothesisRelationship.RELATED_DISTINCT,
@@ -66,7 +68,6 @@ _ALLOWED_ROUTES = {
 def _require_exact_proposal_authorisation(
     disposition: ProposalDisposition,
     recommendation: LeadRecommendation,
-    proposed: ProposedHypothesis,
     proposal: TriageProposal,
     proposal_digest: str,
 ) -> None:
@@ -76,11 +77,28 @@ def _require_exact_proposal_authorisation(
         or disposition.proposal_id != proposal.proposal_id
         or disposition.proposal_content_identity != proposal.content_identity
         or disposition.proposal_canonical_digest != proposal_digest
-        or disposition.route_binding.hypothesis != proposed
+        or disposition.route_binding != recommendation
         or disposition.decision_lead_id != recommendation.decision_lead_id
     ):
         raise HypothesisContractError(
             "disposition does not authorise the exact Proposal group"
+        )
+
+
+def _require_exact_proposal_provenance(
+    version: EventHypothesisVersion,
+    proposal: TriageProposal,
+) -> None:
+    if (
+        version.work_item_id != proposal.work_item.work_item_id
+        or version.work_item_version_id != proposal.work_item.work_item_version_id
+        or version.work_item_version_digest
+        != proposal.work_item.work_item_version_digest
+        or version.retrieval_context_id != proposal.retrieval_context.context_id
+        or version.retrieval_context_digest != proposal.retrieval_context.context_digest
+    ):
+        raise HypothesisContractError(
+            "Hypothesis Version provenance differs from the exact Proposal"
         )
 
 
@@ -360,7 +378,6 @@ class _HypothesisStore:
                 _require_exact_proposal_authorisation(
                     value,
                     recommendation,
-                    proposed,
                     proposal,
                     digest_bytes(proposal_bytes),
                 )
@@ -451,6 +468,7 @@ class _HypothesisStore:
                 authority_event_id,
                 now,
             )
+            _require_exact_proposal_provenance(version, proposal)
             self._connection.execute(
                 "INSERT OR IGNORE INTO event_hypotheses_v2 VALUES(?,?,?,?,?,?)",
                 (
@@ -552,6 +570,7 @@ class _HypothesisStore:
     def load_version(self, version_id: str) -> EventHypothesisVersion:
         try:
             self._begin()
+            self._verify()
             row = self._connection.execute(
                 "SELECT canonical_bytes FROM event_hypothesis_versions_v2 WHERE version_id=?",
                 (version_id,),
@@ -572,6 +591,7 @@ class _HypothesisStore:
     def load_hypothesis(self, hypothesis_id: str) -> EventHypothesis:
         try:
             self._begin()
+            self._verify()
             row = self._connection.execute(
                 "SELECT canonical_bytes FROM event_hypotheses_v2 WHERE hypothesis_id=?",
                 (hypothesis_id,),
@@ -632,6 +652,7 @@ class _HypothesisStore:
     def versions(self, hypothesis_id: str) -> tuple[EventHypothesisVersion, ...]:
         try:
             self._begin()
+            self._verify()
             rows = self._connection.execute(
                 "SELECT canonical_bytes FROM event_hypothesis_versions_v2 WHERE hypothesis_id=? ORDER BY ordinal",
                 (hypothesis_id,),
@@ -658,6 +679,7 @@ class _HypothesisStore:
             self._lock.release()
 
     def _verify(self) -> None:
+        _VERIFY_DISPOSITION_INTEGRITY(self._dispositions)
         tables = {
             str(row[0])
             for row in self._connection.execute(
@@ -757,6 +779,7 @@ class _HypothesisStore:
                 or proposal.content_identity != value.proposal_content_identity
             ):
                 raise HypothesisContractError("retained Proposal differs")
+            _require_exact_proposal_provenance(value, proposal)
             recs = [
                 r
                 for r in proposal.recommendations
@@ -771,8 +794,6 @@ class _HypothesisStore:
                 for r in recs
             ):
                 raise HypothesisContractError("retained Proposal retargeted")
-            proposed = recs[0].hypothesis
-            assert proposed is not None
             if tuple(r.decision_lead_id for r in recs) != tuple(
                 binding.decision_lead_id for binding in value.source_bindings
             ):
@@ -797,7 +818,6 @@ class _HypothesisStore:
                 _require_exact_proposal_authorisation(
                     disposition,
                     recommendation,
-                    proposed,
                     proposal,
                     value.proposal_canonical_digest,
                 )
