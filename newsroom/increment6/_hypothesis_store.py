@@ -303,6 +303,20 @@ class _HypothesisStore:
                 _, replay_actor = _AUTHENTICATE_DISPOSITION(self._dispositions, proof)
                 if replay_actor != retained.actor_identity_digest:
                     raise HypothesisContractError("semantic replay actor differs")
+                if retained.proposed_target_hypothesis_id is None:
+                    if expected_target_version is not None:
+                        raise HypothesisContractError(
+                            "semantic replay comparator diverges"
+                        )
+                elif (
+                    type(expected_target_version) is not EventHypothesisVersion
+                    or expected_target_version.hypothesis_id
+                    != retained.proposed_target_hypothesis_id
+                    or expected_target_version.version_id != retained.target_version_id
+                    or expected_target_version.canonical_digest
+                    != retained.target_version_digest
+                ):
+                    raise HypothesisContractError("semantic replay comparator diverges")
                 self._commit()
                 return retained
             retained_values = tuple(

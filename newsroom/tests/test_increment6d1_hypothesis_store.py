@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
@@ -15,6 +16,7 @@ from newsroom.authority.auth import (
     StaticAuthenticator,
     StaticPrincipal,
 )
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.event_hypothesis_migrations import (
     EVENT_HYPOTHESIS_MIGRATION_STATEMENTS,
 )
@@ -27,10 +29,13 @@ from newsroom.increment6._hypothesis_store import (
     EventHypothesisAuthority as PrivateAuthority,
 )
 from newsroom.increment6._hypothesis_store import (
+    _creation_event_id,
     _HypothesisStore,
+    _version_event_id,
 )
 from newsroom.increment6.dispositions import ProposalDispositionStore
 from newsroom.increment6.hypotheses import (
+    EVENT_HYPOTHESIS,
     EventHypothesisAuthority,
     HypothesisContractError,
     open_event_hypothesis_authority,
@@ -215,6 +220,13 @@ def test_real_store_create_replay_current_history_and_reopen(tmp_path) -> None:
     try:
         first = authority.retain(proposal, dispositions, proof=proof)
         assert authority.retain(proposal, dispositions, proof=proof) == first
+        with pytest.raises(HypothesisContractError, match="comparator"):
+            authority.retain(
+                proposal,
+                dispositions,
+                proof=proof,
+                expected_target_version=first,
+            )
         assert authority.current(first.hypothesis_id, proof=proof) == first
         assert authority.load_version(first.version_id) == first
         assert (
@@ -453,6 +465,77 @@ def test_direct_scalar_tamper_is_detected_by_current_and_reopen(tmp_path) -> Non
         _open(fixture)
 
 
+def test_self_consistent_direct_insert_with_wrong_stable_identity_fails_reopen(
+    tmp_path,
+) -> None:
+    fixture = _authority_fixture(tmp_path)
+    forged_connection = sqlite3.connect(":memory:", isolation_level=None)
+    fixture[0].backup(forged_connection)
+    authority = _open(fixture)
+    valid = authority.retain(fixture[4], fixture[5], proof=fixture[3])
+    authority.close()
+
+    wrong_hypothesis_id = str(uuid.UUID(int=999))
+    wrong_version_id = str(uuid.uuid5(uuid.UUID(wrong_hypothesis_id), "version:1"))
+    identity_row = list(
+        fixture[0].execute("SELECT * FROM event_hypotheses_v2").fetchone()
+    )
+    identity_row[0] = wrong_hypothesis_id
+    identity_row[1] = canonical_json_bytes(
+        {
+            "schema_version": EVENT_HYPOTHESIS,
+            "hypothesis_id": wrong_hypothesis_id,
+        }
+    )
+    identity_row[2] = digest_bytes(identity_row[1])
+    identity_row[4] = _creation_event_id(
+        wrong_hypothesis_id, str(identity_row[3]), str(identity_row[5])
+    )
+
+    version_row = list(
+        fixture[0].execute("SELECT * FROM event_hypothesis_versions_v2").fetchone()
+    )
+    version_document = json.loads(valid.canonical_bytes)
+    version_document["version"]["hypothesis_id"] = wrong_hypothesis_id
+    version_document["version"]["version_id"] = wrong_version_id
+    version_document["version"]["authority_event_id"] = _version_event_id(
+        wrong_hypothesis_id,
+        valid.ordinal,
+        valid.previous_version_digest,
+        valid.proposal_canonical_digest,
+        valid.proposal_local_id,
+        valid.target_version_digest,
+        valid.source_bindings,
+        valid.actor_identity_digest,
+        valid.recorded_at,
+    )
+    version_row[0] = wrong_version_id
+    version_row[1] = wrong_hypothesis_id
+    version_row[20] = version_document["version"]["authority_event_id"]
+    version_row[21] = canonical_json_bytes(version_document)
+    version_row[22] = digest_bytes(version_row[21])
+    head_row = list(
+        fixture[0].execute("SELECT * FROM event_hypothesis_heads_v2").fetchone()
+    )
+    head_row[0] = wrong_hypothesis_id
+    head_row[1] = wrong_version_id
+    head_row[3] = version_row[22]
+
+    forged_connection.execute(
+        "INSERT INTO event_hypotheses_v2 VALUES(?,?,?,?,?,?)", identity_row
+    )
+    forged_connection.execute(
+        "INSERT INTO event_hypothesis_versions_v2 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        version_row,
+    )
+    forged_connection.execute(
+        "INSERT INTO event_hypothesis_heads_v2 VALUES(?,?,?,?,?)", head_row
+    )
+    with pytest.raises(HypothesisContractError, match="stable identity"):
+        _HypothesisStore(forged_connection, fixture[1], fixture[2], UtcTimestamp.now)
+    forged_connection.close()
+
+
 @pytest.mark.parametrize("relationship", ("RELATED_DISTINCT", "UNCERTAIN"))
 def test_target_bearing_create_pins_current_target_and_reopens(
     tmp_path, relationship: str
@@ -476,6 +559,12 @@ def test_target_bearing_create_pins_current_target_and_reopens(
         target.version_id,
         target.canonical_digest,
     )
+    assert (
+        authority.retain(raw, source, proof=proof, expected_target_version=target)
+        == created
+    )
+    with pytest.raises(HypothesisContractError, match="comparator"):
+        authority.retain(raw, source, proof=proof)
     reopened, connection = _reopen_copy(fixture, authority)
     try:
         assert reopened.versions(created.hypothesis_id) == (created,)
@@ -605,6 +694,10 @@ def test_append_replay_stale_cas_and_reopen_exact_chain(
         authority.retain(raw, source, proof=proof, expected_target_version=first)
         == second
     )
+    for comparator in (None, second, object()):
+        kwargs = {} if comparator is None else {"expected_target_version": comparator}
+        with pytest.raises(HypothesisContractError, match="comparator"):
+            authority.retain(raw, source, proof=proof, **kwargs)
     assert connection.execute(
         "SELECT count(*) FROM event_hypothesis_versions_v2 WHERE hypothesis_id=?",
         (first.hypothesis_id,),

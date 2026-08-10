@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from newsroom.authority.canonical import canonical_json_bytes
 from newsroom.increment6.hypotheses import (
     EVENT_HYPOTHESIS,
     EVENT_HYPOTHESIS_VERSION,
@@ -20,7 +21,8 @@ D = "sha256:" + "1" * 64
 
 
 def _version() -> EventHypothesisVersion:
-    hypothesis = EventHypothesis.allocate(str(uuid.UUID(int=1)), "local-1")
+    proposal_id = str(uuid.UUID(int=1))
+    hypothesis = EventHypothesis.allocate(proposal_id, "local-1")
     source = HypothesisSourceBinding(
         D, D, D, D, str(uuid.UUID(int=2)), D, str(uuid.UUID(int=3)), D
     )
@@ -35,7 +37,7 @@ def _version() -> EventHypothesisVersion:
         None,
         None,
         None,
-        str(uuid.UUID(int=4)),
+        proposal_id,
         D,
         D,
         "local-1",
@@ -58,6 +60,43 @@ def test_exact_contract_round_trip_and_non_effects() -> None:
     assert EVENT_HYPOTHESIS_VERSION.endswith("event-hypothesis-version.v1")
     assert value.creates_candidate is value.creates_relationship is False
     assert value.authorises_publication is value.authorises_external_effect is False
+
+
+def test_version_identity_and_create_append_topology_fail_closed() -> None:
+    value = _version()
+    wrong_hypothesis_id = str(uuid.UUID(int=999))
+    wrong_version_id = str(uuid.uuid5(uuid.UUID(wrong_hypothesis_id), "version:1"))
+    with pytest.raises(HypothesisContractError, match="stable identity"):
+        replace(
+            value,
+            hypothesis_id=wrong_hypothesis_id,
+            version_id=wrong_version_id,
+        )
+    with pytest.raises(HypothesisContractError, match="create relationship"):
+        replace(
+            value,
+            proposed_relationship=HypothesisRelationship.SAME_STATE,
+            proposed_target_hypothesis_id=value.hypothesis_id,
+            target_version_id=value.version_id,
+            target_version_digest=value.canonical_digest,
+        )
+    with pytest.raises(HypothesisContractError, match="append relationship"):
+        replace(
+            value,
+            ordinal=2,
+            version_id=str(uuid.uuid5(uuid.UUID(value.hypothesis_id), "version:2")),
+            previous_version_id=value.version_id,
+            previous_version_digest=value.canonical_digest,
+        )
+
+    forged = value.canonical_value
+    forged["hypothesis_id"] = wrong_hypothesis_id
+    forged["version_id"] = wrong_version_id
+    raw = canonical_json_bytes(
+        {"schema_version": EVENT_HYPOTHESIS_VERSION, "version": forged}
+    )
+    with pytest.raises(HypothesisContractError, match="stable identity"):
+        EventHypothesisVersion.from_canonical_bytes(raw)
 
 
 @pytest.mark.parametrize(

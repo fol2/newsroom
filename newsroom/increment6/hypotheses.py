@@ -29,6 +29,16 @@ MAX_HYPOTHESIS_VERSION_BYTES = 1_048_576
 _NAMESPACE = uuid.UUID("435812df-489e-5e4c-9b3d-838148b1918a")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,255}\Z")
+_CREATE_RELATIONSHIPS = {
+    HypothesisRelationship.NO_ADEQUATE_PRIOR_MATCH,
+    HypothesisRelationship.RELATED_DISTINCT,
+    HypothesisRelationship.UNCERTAIN,
+}
+_APPEND_RELATIONSHIPS = {
+    HypothesisRelationship.SAME_STATE,
+    HypothesisRelationship.DEVELOPMENT_OF,
+    HypothesisRelationship.CORRECTION_REVERSAL_OF,
+}
 
 
 class HypothesisContractError(ValueError):
@@ -351,6 +361,31 @@ class EventHypothesisVersion(_NoEffect):
             "retrieval_context_id",
         ):
             _token(getattr(self, name), name)
+        if ordinal == 1:
+            if self.proposed_relationship not in _CREATE_RELATIONSHIPS:
+                raise HypothesisContractError(
+                    "first Version requires a create relationship"
+                )
+            stable_identity = EventHypothesis.allocate(
+                self.proposal_id, self.proposal_local_id
+            )
+            if self.hypothesis_id != stable_identity.hypothesis_id:
+                raise HypothesisContractError(
+                    "Hypothesis differs from stable identity allocation"
+                )
+        else:
+            if self.proposed_relationship not in _APPEND_RELATIONSHIPS:
+                raise HypothesisContractError(
+                    "later Version requires an append relationship"
+                )
+            if (
+                self.proposed_target_hypothesis_id != self.hypothesis_id
+                or self.target_version_id != self.previous_version_id
+                or self.target_version_digest != self.previous_version_digest
+            ):
+                raise HypothesisContractError(
+                    "append target differs from the exact predecessor"
+                )
         for name in (
             "proposal_content_identity",
             "proposal_canonical_digest",
