@@ -79,6 +79,11 @@ class MemoryHandle:
     def list_history(self) -> tuple[AuthorityValue, ...]:
         self._open()
         with self.location.lock:
+            if self.owner.defect == "list_skips_validation":
+                return tuple(
+                    self.owner._value(self.location.rows[entry.record_id])
+                    for entry in self.location.history_entries
+                )
             return tuple(
                 self.owner._read(self.location, entry.record_id, self.reopened)
                 for entry in self.location.history_entries
@@ -429,6 +434,11 @@ def test_stateful_all_required_store_passes_every_kernel_owned_scenario() -> Non
         ),
         (
             "accept_provenance_tamper",
+            CaseId.HISTORICAL_READ,
+            FailureCode.HISTORICAL_INTEGRITY,
+        ),
+        (
+            "list_skips_validation",
             CaseId.HISTORICAL_READ,
             FailureCode.HISTORICAL_INTEGRITY,
         ),

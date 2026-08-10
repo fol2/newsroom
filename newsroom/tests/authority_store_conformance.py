@@ -504,18 +504,40 @@ def _lost_response(adapter: AuthorityStoreAdapter) -> None:
 def _historical(adapter: AuthorityStoreAdapter) -> None:
     first = _command()
     second = _command("record-2", "record-1", "beta")
-    _, handle = _new_handle(adapter)
-    handle.submit(first)
-    handle.submit(second)
     expected = AuthorityValue.from_command(first)
-    _require(handle.read(first.record_id) == expected, "historical load differs")
-    _require(
-        expected in handle.list_history(), "historical list omitted retained value"
-    )
-    _assert_tampers_rejected(
-        adapter,
-        (TamperKind.IDENTITY, TamperKind.DIGEST, TamperKind.PROVENANCE),
-    )
+    for kind in (TamperKind.IDENTITY, TamperKind.DIGEST, TamperKind.PROVENANCE):
+        location, handle = _new_handle(adapter)
+        handle.submit(first)
+        handle.submit(second)
+        _require(handle.read(first.record_id) == expected, "historical load differs")
+        _require(
+            expected in handle.list_history(),
+            "historical list omitted retained value",
+        )
+        handle.tamper(first.record_id, kind)
+        _expect_exception(
+            IntegrityViolation,
+            lambda handle=handle: handle.read(first.record_id),
+            f"fresh historical read accepted {kind.value} mutation",
+        )
+        _expect_exception(
+            IntegrityViolation,
+            handle.list_history,
+            f"fresh historical list accepted {kind.value} mutation",
+        )
+        handle.close()
+        reopened = adapter.open_handle(location)
+        _require(reopened is not handle, "historical reopen returned original handle")
+        _expect_exception(
+            IntegrityViolation,
+            lambda reopened=reopened: reopened.read(first.record_id),
+            f"reopened historical read accepted {kind.value} mutation",
+        )
+        _expect_exception(
+            IntegrityViolation,
+            reopened.list_history,
+            f"reopened historical list accepted {kind.value} mutation",
+        )
 
 
 def _current_use(adapter: AuthorityStoreAdapter) -> None:

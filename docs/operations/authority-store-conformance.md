@@ -54,7 +54,7 @@ The kernel performs these observations in fixed inventory order:
 | `representation_binding` | observe exact canonical bytes, scalar/identity columns and linked rows; independently mutate each form and require both fresh and newly reopened handles to reject it |
 | `request_binding` | independently change actor, request, idempotency and CAS predecessor; each resubmission must conflict without changing state or history |
 | `lost_response_replay` | lose the response after retention, change use-time heads, resubmit the identical command without a new history entry, then prove retained corruption is rejected |
-| `historical_read` | validate retained load/list results and reject identity, digest and provenance mutation from both fresh and newly reopened handles |
+| `historical_read` | create two versions, independently mutate the first version's identity, digest and provenance, then require both point read and full history list to reject each mutation through fresh and newly reopened handles |
 | `current_use_revalidation` | accept matching heads and independently reject every changed required head |
 | `tamper_rejection` | reject direct canonical, linked-row and self-consistent offline rewrites through fresh and reopened reads |
 | `competing_writers` | coordinate two independent handles with a kernel barrier and threads; require one winner, one binding conflict, one row and one history append |
@@ -64,7 +64,9 @@ The kernel performs these observations in fixed inventory order:
 The focused persisted in-memory fake uses shared state, locks, independent
 handles and copy-on-write transactions. Its sensitivity tests inject defects
 into primitive submission, validation, handle creation, concurrency and
-transaction behaviour, then require the exact family-specific `FailureCode`.
+transaction behaviour, including a point-read-validating implementation whose
+history list skips validation, then require the exact family-specific
+`FailureCode`.
 
 ## Exhaustive applicability
 
