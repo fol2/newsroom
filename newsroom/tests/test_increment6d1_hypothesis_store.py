@@ -11,6 +11,16 @@ from dataclasses import replace
 
 import pytest
 
+from newsroom.authority._event_hypothesis_system import (
+    EventHypothesisAuthority as PrivateAuthority,
+)
+from newsroom.authority._event_hypothesis_system import (
+    _creation_event_id,
+    _HypothesisStore,
+    _require_exact_proposal_authorisation,
+    _require_exact_proposal_provenance,
+    _version_event_id,
+)
 from newsroom.authority.auth import (
     AuthenticationProof,
     StaticAuthenticator,
@@ -25,16 +35,6 @@ from newsroom.authority.triage_disposition_migrations import (
     TRIAGE_DISPOSITION_MIGRATION_STATEMENTS,
 )
 from newsroom.authority.types import UtcTimestamp
-from newsroom.increment6._hypothesis_store import (
-    EventHypothesisAuthority as PrivateAuthority,
-)
-from newsroom.increment6._hypothesis_store import (
-    _creation_event_id,
-    _HypothesisStore,
-    _require_exact_proposal_authorisation,
-    _require_exact_proposal_provenance,
-    _version_event_id,
-)
 from newsroom.increment6.dispositions import (
     _FINDING_SET_SCHEMA_VERSION,
     DispositionAuthority,

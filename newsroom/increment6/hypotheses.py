@@ -500,11 +500,11 @@ class EventHypothesisAuthority:
     __slots__ = ("__authority",)
 
     def __init__(self, authority: object) -> None:
-        from newsroom.increment6._hypothesis_store import (
-            EventHypothesisAuthority as PrivateAuthority,
+        from newsroom.authority.event_hypothesis_system import (
+            EventHypothesisAuthoritySystem,
         )
 
-        if type(authority) is not PrivateAuthority:
+        if type(authority) is not EventHypothesisAuthoritySystem:
             raise HypothesisContractError(
                 "Hypothesis authority facade requires the exact private authority"
             )
@@ -560,12 +560,14 @@ def open_event_hypothesis_authority(
     *args: object, **kwargs: object
 ) -> EventHypothesisAuthority:
     """Open the checked v21 authority without exposing SQLite mutation."""
-    from newsroom.increment6._hypothesis_store import (
-        EventHypothesisAuthority as PrivateAuthority,
+    from newsroom.authority.event_hypothesis_system import (
+        open_event_hypothesis_authority_system,
     )
 
     return _normalise(
-        lambda: EventHypothesisAuthority(PrivateAuthority.open(*args, **kwargs)),
+        lambda: EventHypothesisAuthority(
+            open_event_hypothesis_authority_system(*args, **kwargs)
+        ),
         "Hypothesis authority open failed",
     )
 
