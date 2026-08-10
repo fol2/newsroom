@@ -55,6 +55,7 @@ from newsroom.increment6.work_items import (
     RetrievalContextAuthority,
     RetrievalInputBinding,
     TriageWorkItem,
+    TriageWorkItemStore,
 )
 from newsroom.tests import test_increment5d1_hybrid_composer as composer_helpers
 from newsroom.tests import test_increment5d2_retrieval_context as retrieval_helpers
@@ -62,7 +63,7 @@ from newsroom.tests import test_increment6a2_work_items as work_item_helpers
 from newsroom.tests import test_increment6c2_dispositions as disposition_helpers
 
 
-def _authority_fixture(tmp_path, *, persist_sources: bool = True):
+def _build_authority_fixture(tmp_path, *, persist_sources: bool = True):
     inputs = composer_helpers.branch_inputs.__wrapped__(tmp_path)
     builder, _, _, _, _, request, receipt, _ = (
         retrieval_helpers._retained_complete_context(
@@ -134,6 +135,39 @@ def _authority_fixture(tmp_path, *, persist_sources: bool = True):
         receipt,
         proposal_sources,
     )
+
+
+_AUTHORITY_SEED = None
+
+
+def _clone_authority_fixture(seed):
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    seed[0].backup(connection)
+    retrieval = seed[1]
+    work_store = TriageWorkItemStore(connection, retrieval)
+    return (
+        connection,
+        retrieval,
+        seed[2],
+        seed[3],
+        seed[4],
+        seed[5],
+        work_store,
+        seed[7],
+        seed[8],
+        seed[9],
+        seed[10],
+        list(seed[11]),
+    )
+
+
+def _authority_fixture(tmp_path, *, persist_sources: bool = True):
+    if not persist_sources:
+        return _build_authority_fixture(tmp_path, persist_sources=False)
+    global _AUTHORITY_SEED
+    if _AUTHORITY_SEED is None:
+        _AUTHORITY_SEED = _build_authority_fixture(tmp_path)
+    return _clone_authority_fixture(_AUTHORITY_SEED)
 
 
 def _open(fixture):
