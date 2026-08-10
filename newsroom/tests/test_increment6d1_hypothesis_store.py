@@ -454,29 +454,39 @@ def test_second_opener_and_unsafe_modes_fail_closed(tmp_path) -> None:
         )
 
 
-def test_direct_scalar_tamper_is_detected_by_current_and_reopen(tmp_path) -> None:
+def _copy_authority_fixture(fixture):
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    fixture[0].backup(connection)
+    return (connection, *fixture[1:])
+
+
+def test_self_consistent_direct_tamper_fails_current_and_reopen(tmp_path) -> None:
     fixture = _authority_fixture(tmp_path)
-    connection, _, _, proof, proposal, dispositions, *_ = fixture
+    wrong_identity_fixture = _copy_authority_fixture(fixture)
+    _, _, _, proof, proposal, dispositions, *_ = fixture
     authority = _open(fixture)
     try:
-        authority.retain(proposal, dispositions, proof=proof)
+        valid = authority.retain(proposal, dispositions, proof=proof)
     finally:
         authority.close()
+    scalar_fixture = _copy_authority_fixture(fixture)
+    connection = scalar_fixture[0]
     connection.execute("DROP TRIGGER immutable_event_hypothesis_version_update")
     connection.execute(
         "UPDATE event_hypothesis_versions_v2 SET actor_identity_digest=?",
         ("sha256:" + "f" * 64,),
     )
     with pytest.raises(HypothesisContractError):
-        _open(fixture)
+        _open(scalar_fixture)
+    connection.close()
+    _assert_self_consistent_disposition_retarget_fails(
+        _copy_authority_fixture(fixture), valid
+    )
+    _assert_wrong_stable_identity_fails(wrong_identity_fixture, fixture[0], valid)
 
 
-def test_self_consistent_disposition_retarget_fails_reopen(tmp_path) -> None:
-    fixture = _authority_fixture(tmp_path)
+def _assert_self_consistent_disposition_retarget_fails(fixture, valid) -> None:
     connection = fixture[0]
-    authority = _open(fixture)
-    valid = authority.retain(fixture[4], fixture[5], proof=fixture[3])
-    authority.close()
     old_disposition = ProposalDisposition.from_canonical_bytes(
         bytes(
             connection.execute(
@@ -616,23 +626,14 @@ def test_self_consistent_disposition_retarget_fails_reopen(tmp_path) -> None:
 
     with pytest.raises(HypothesisContractError, match="exact Proposal group"):
         _open(fixture)
+    connection.close()
 
 
-def test_self_consistent_direct_insert_with_wrong_stable_identity_fails_reopen(
-    tmp_path,
-) -> None:
-    fixture = _authority_fixture(tmp_path)
-    forged_connection = sqlite3.connect(":memory:", isolation_level=None)
-    fixture[0].backup(forged_connection)
-    authority = _open(fixture)
-    valid = authority.retain(fixture[4], fixture[5], proof=fixture[3])
-    authority.close()
-
+def _assert_wrong_stable_identity_fails(fixture, source, valid) -> None:
+    forged_connection = fixture[0]
     wrong_hypothesis_id = str(uuid.UUID(int=999))
     wrong_version_id = str(uuid.uuid5(uuid.UUID(wrong_hypothesis_id), "version:1"))
-    identity_row = list(
-        fixture[0].execute("SELECT * FROM event_hypotheses_v2").fetchone()
-    )
+    identity_row = list(source.execute("SELECT * FROM event_hypotheses_v2").fetchone())
     identity_row[0] = wrong_hypothesis_id
     identity_row[1] = canonical_json_bytes(
         {
@@ -646,7 +647,7 @@ def test_self_consistent_direct_insert_with_wrong_stable_identity_fails_reopen(
     )
 
     version_row = list(
-        fixture[0].execute("SELECT * FROM event_hypothesis_versions_v2").fetchone()
+        source.execute("SELECT * FROM event_hypothesis_versions_v2").fetchone()
     )
     version_document = json.loads(valid.canonical_bytes)
     version_document["version"]["hypothesis_id"] = wrong_hypothesis_id
@@ -668,7 +669,7 @@ def test_self_consistent_direct_insert_with_wrong_stable_identity_fails_reopen(
     version_row[21] = canonical_json_bytes(version_document)
     version_row[22] = digest_bytes(version_row[21])
     head_row = list(
-        fixture[0].execute("SELECT * FROM event_hypothesis_heads_v2").fetchone()
+        source.execute("SELECT * FROM event_hypothesis_heads_v2").fetchone()
     )
     head_row[0] = wrong_hypothesis_id
     head_row[1] = wrong_version_id
@@ -1096,38 +1097,6 @@ def test_transaction_owner_lock_isolates_failure_from_replay_and_current(
     assert store.versions(first.hypothesis_id) == (first,)
 
 
-def _retained_file_fixture(tmp_path, fixture, *, append: bool = False):
-    """Copy a genuinely persisted authority so corruption is externally observable."""
-    _, _, _, proof, proposal, dispositions, *_ = fixture
-    seed = _open(fixture)
-    first = seed.retain(proposal, dispositions, proof=proof)
-    last = first
-    if append:
-        raw, source = _targeted_proposal(
-            fixture,
-            proposal_id="00000000-0000-4000-8000-000000000991",
-            local_id="hypothesis:integrity-append",
-            relationship="SAME_STATE",
-            target=first.hypothesis_id,
-        )
-        last = seed.retain(raw, source, proof=proof, expected_target_version=first)
-    seed.close()
-    database = tmp_path / ("retained-chain.sqlite3" if append else "retained.sqlite3")
-    copied = sqlite3.connect(database, isolation_level=None)
-    fixture[0].backup(copied)
-    copied.close()
-    reader_connection = sqlite3.connect(database, isolation_level=None)
-    reader = _HypothesisStore(
-        reader_connection,
-        fixture[1],
-        fixture[2],
-        lambda: UtcTimestamp.parse("2042-01-01T00:00:00.000000Z"),
-    )
-    mutator = sqlite3.connect(database, isolation_level=None)
-    mutator.execute("PRAGMA foreign_keys=OFF")
-    return database, reader, reader_connection, mutator, first, last
-
-
 _D2 = "sha256:" + "e" * 64
 
 
@@ -1266,35 +1235,33 @@ _SINGLE_INTEGRITY_MUTATIONS = (
 )
 
 
-@pytest.mark.parametrize("shard", range(4))
 def test_retained_single_version_integrity_mutations_fail_current_and_reopen(
-    tmp_path, shard: int
+    tmp_path,
 ) -> None:
     fixture = _authority_fixture(tmp_path)
     seed = _open(fixture)
     first = seed.retain(fixture[4], fixture[5], proof=fixture[3])
     seed.close()
-    for index, (trigger, statement, parameters) in enumerate(
-        _SINGLE_INTEGRITY_MUTATIONS
-    ):
-        if index % 4 != shard:
-            continue
-        database = tmp_path / f"retained-{index}.sqlite3"
-        copied = sqlite3.connect(database, isolation_level=None)
-        fixture[0].backup(copied)
-        copied.close()
-        reader_connection = sqlite3.connect(database, isolation_level=None)
+    for trigger, statement, parameters in _SINGLE_INTEGRITY_MUTATIONS:
+        reader_connection = sqlite3.connect(":memory:", isolation_level=None)
+        fixture[0].backup(reader_connection)
         reader = _HypothesisStore(
             reader_connection, fixture[1], fixture[2], UtcTimestamp.now
         )
-        mutator = sqlite3.connect(database, isolation_level=None)
-        mutator.execute("PRAGMA foreign_keys=OFF")
         try:
-            mutator.execute(f"DROP TRIGGER {trigger}")
-            mutator.execute(statement, parameters)
+            trigger_sql = reader_connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                (trigger,),
+            ).fetchone()[0]
+            reader_connection.execute("PRAGMA foreign_keys=OFF")
+            reader_connection.execute(f"DROP TRIGGER {trigger}")
+            reader_connection.execute(statement, parameters)
+            reader_connection.execute(trigger_sql)
+            reader_connection.execute("PRAGMA foreign_keys=ON")
             with pytest.raises(HypothesisContractError):
                 reader.current(first.hypothesis_id, proof=fixture[3])
-            reopen_connection = sqlite3.connect(database, isolation_level=None)
+            reopen_connection = sqlite3.connect(":memory:", isolation_level=None)
+            reader_connection.backup(reopen_connection)
             try:
                 with pytest.raises(HypothesisContractError):
                     _HypothesisStore(
@@ -1303,7 +1270,6 @@ def test_retained_single_version_integrity_mutations_fail_current_and_reopen(
             finally:
                 reopen_connection.close()
         finally:
-            mutator.close()
             reader_connection.close()
 
 
@@ -1352,9 +1318,8 @@ _CHAIN_INTEGRITY_MUTATIONS = (
 )
 
 
-@pytest.mark.parametrize("shard", range(2))
 def test_retained_chain_gaps_and_noncontiguous_links_fail_closed(
-    tmp_path, shard: int
+    tmp_path,
 ) -> None:
     fixture = _authority_fixture(tmp_path)
     seed = _open(fixture)
@@ -1368,25 +1333,26 @@ def test_retained_chain_gaps_and_noncontiguous_links_fail_closed(
     )
     last = seed.retain(raw, source, proof=fixture[3], expected_target_version=first)
     seed.close()
-    for index, (trigger, statement) in enumerate(_CHAIN_INTEGRITY_MUTATIONS):
-        if index % 2 != shard:
-            continue
-        database = tmp_path / f"chain-{index}.sqlite3"
-        copied = sqlite3.connect(database, isolation_level=None)
-        fixture[0].backup(copied)
-        copied.close()
-        reader_connection = sqlite3.connect(database, isolation_level=None)
+    for trigger, statement in _CHAIN_INTEGRITY_MUTATIONS:
+        reader_connection = sqlite3.connect(":memory:", isolation_level=None)
+        fixture[0].backup(reader_connection)
         reader = _HypothesisStore(
             reader_connection, fixture[1], fixture[2], UtcTimestamp.now
         )
-        mutator = sqlite3.connect(database, isolation_level=None)
-        mutator.execute("PRAGMA foreign_keys=OFF")
         try:
-            mutator.execute(f"DROP TRIGGER {trigger}")
-            mutator.execute(statement)
+            trigger_sql = reader_connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                (trigger,),
+            ).fetchone()[0]
+            reader_connection.execute("PRAGMA foreign_keys=OFF")
+            reader_connection.execute(f"DROP TRIGGER {trigger}")
+            reader_connection.execute(statement)
+            reader_connection.execute(trigger_sql)
+            reader_connection.execute("PRAGMA foreign_keys=ON")
             with pytest.raises(HypothesisContractError):
                 reader.current(last.hypothesis_id, proof=fixture[3])
-            reopen_connection = sqlite3.connect(database, isolation_level=None)
+            reopen_connection = sqlite3.connect(":memory:", isolation_level=None)
+            reader_connection.backup(reopen_connection)
             try:
                 with pytest.raises(HypothesisContractError):
                     _HypothesisStore(
@@ -1395,5 +1361,4 @@ def test_retained_chain_gaps_and_noncontiguous_links_fail_closed(
             finally:
                 reopen_connection.close()
         finally:
-            mutator.close()
             reader_connection.close()
