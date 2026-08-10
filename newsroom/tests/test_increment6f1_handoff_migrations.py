@@ -70,13 +70,13 @@ def _fresh(database: str | Path = ":memory:") -> sqlite3.Connection:
 
 
 def _downgrade_empty_v17_to_v16(connection: sqlite3.Connection) -> None:
+    drop_empty_v22_relationship_schema(connection)
     connection.execute("PRAGMA foreign_keys=OFF")
     delete_guard = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type='trigger' "
         "AND name='immutable_authority_migrations_delete'"
     ).fetchone()[0]
     connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
-    drop_empty_v22_relationship_schema(connection)
     for table in (
         "event_hypothesis_heads_v2",
         "event_hypothesis_versions_v2",

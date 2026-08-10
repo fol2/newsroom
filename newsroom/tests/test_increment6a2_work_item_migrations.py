@@ -98,12 +98,12 @@ def test_exact_v17_upgrade_retains_pre_v18_backup(tmp_path: Path) -> None:
     database = tmp_path / "authority.sqlite3"
     connection = _open(database)
     apply_pending_migrations(connection, applied_at="2042-03-12T10:00:00Z")
+    drop_empty_v22_relationship_schema(connection)
     connection.execute("PRAGMA foreign_keys=OFF")
     delete_guard = connection.execute(
         "SELECT sql FROM sqlite_master WHERE name='immutable_authority_migrations_delete'"
     ).fetchone()[0]
     connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
-    drop_empty_v22_relationship_schema(connection)
     for table in (
         "event_hypothesis_heads_v2",
         "event_hypothesis_versions_v2",
