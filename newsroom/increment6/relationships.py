@@ -672,11 +672,14 @@ class EventHypothesisRelationshipAuthority:
     __slots__ = ("__authority",)
 
     def __init__(self, token: object, authority: object) -> None:
-        from newsroom.increment6._hypothesis_relationship_store import (
-            EventHypothesisRelationshipAuthority as PrivateAuthority,
+        from newsroom.authority.event_hypothesis_relationship_system import (
+            EventHypothesisRelationshipAuthoritySystem,
         )
 
-        if token is not _FACADE_TOKEN or type(authority) is not PrivateAuthority:
+        if (
+            token is not _FACADE_TOKEN
+            or type(authority) is not EventHypothesisRelationshipAuthoritySystem
+        ):
             raise RelationshipContractError(
                 "relationship authority facade requires the exact private authority"
             )
@@ -729,14 +732,14 @@ def open_event_hypothesis_relationship_authority(
     busy_timeout_ms: int = 5000,
 ) -> EventHypothesisRelationshipAuthority:
     """Open the checked v22 relationship authority."""
-    from newsroom.increment6._hypothesis_relationship_store import (
-        open_relationship_authority,
+    from newsroom.authority.event_hypothesis_relationship_system import (
+        open_event_hypothesis_relationship_authority_system,
     )
 
     return _normalise(
         lambda: EventHypothesisRelationshipAuthority(
             _FACADE_TOKEN,
-            open_relationship_authority(
+            open_event_hypothesis_relationship_authority_system(
                 database,
                 retrieval_authority=retrieval_authority,  # type: ignore[arg-type]
                 authenticator=authenticator,

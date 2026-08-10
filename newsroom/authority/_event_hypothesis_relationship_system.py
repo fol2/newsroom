@@ -10,8 +10,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Self
 
-from newsroom.authority._capability import _CapabilityIssuer
-from newsroom.authority._event_store import _EventAuthorityStore
 from newsroom.authority.auth import AuthenticationProof
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.models import InlinePayload, SemanticCommand
@@ -19,7 +17,6 @@ from newsroom.authority.persistence import AuthoritySchemaError
 from newsroom.authority.policy import CommandRegistry, PayloadSchemaRegistry
 from newsroom.authority.service import CommandService
 from newsroom.authority.types import AggregateId, UtcTimestamp
-from newsroom.increment6._hypothesis_store import _HypothesisStore
 from newsroom.increment6.dispositions import ProposalDispositionStore
 from newsroom.increment6.relationships import (
     RELATIONSHIP_AGGREGATE_TYPE,
@@ -33,6 +30,10 @@ from newsroom.increment6.relationships import (
     verify_relationship_assessment_replay,
 )
 from newsroom.increment6.work_items import RetrievalContextAuthority
+
+from ._capability import _CapabilityIssuer
+from ._event_hypothesis_system import _HypothesisStore
+from ._event_store import _EventAuthorityStore
 
 _STORE_TOKEN = object()
 
