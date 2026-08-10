@@ -66,6 +66,21 @@ def test_fresh_v19_history_fingerprint_guards_and_integrity_are_exact() -> None:
     ).fetchall() == list(EXPECTED_MIGRATION_HISTORY)
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     assert connection.execute("PRAGMA quick_check").fetchall() == [("ok",)]
+    for table in (
+        "triage_proposal_validation_findings",
+        "triage_proposal_dispositions",
+    ):
+        unique_columns = {
+            tuple(
+                str(column[2])
+                for column in connection.execute(
+                    f"PRAGMA index_info('{index[1]}')"
+                )
+            )
+            for index in connection.execute(f"PRAGMA index_list('{table}')")
+            if index[2]
+        }
+        assert ("work_item_version_id", "decision_lead_id") in unique_columns
     assert {
         row[0]
         for row in connection.execute(
@@ -198,10 +213,10 @@ def _insert_disposition(connection: sqlite3.Connection) -> None:
 
 def test_v19_checksum_and_schema_fingerprint_are_literal_release_pins() -> None:
     assert TRIAGE_DISPOSITION_MIGRATION_CHECKSUM == (
-        "sha256:bc8788ef52b6c692d52dc09f474bdb488ef53043ec822f788accb4484ffc8d0c"
+        "sha256:d5f9702d359836e3b564ba1cadbad27e5fc17ba79e5155e2b34382ec30681177"
     )
     assert EXPECTED_SCHEMA_FINGERPRINT == (
-        "sha256:5f7979ed011017b881c6b953075d00ae5e0c968439d192c3f0dfd3af0c838b53"
+        "sha256:542bd9c351094cf4d56905fa92aa042924b5dab877cc04374a097c48fe6b6003"
     )
 
 

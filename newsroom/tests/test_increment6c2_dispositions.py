@@ -3,6 +3,8 @@ from __future__ import annotations
 import itertools
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterator, Mapping
 from dataclasses import fields, replace
 
@@ -35,6 +37,7 @@ from newsroom.increment6.dispositions import (
     validate_proposal,
 )
 from newsroom.increment6.work_items import (
+    ContextLeadBinding,
     RetrievalContextAuthority,
     RetrievalInputBinding,
     TriageWorkItem,
@@ -247,6 +250,28 @@ def _persistable_proposal(version: object, decision: object, receipt: object) ->
     recommendation["decision_lead_id"] = decision.lead_id
     recommendation["input_citations"][0]["source_id"] = decision.lead_id
     recommendation["input_citations"][0]["source_digest"] = decision.lead_digest
+    item = receipt.items[0]
+    text = item.text.encode("utf-8")
+    recommendation["input_citations"][1].update({
+        "source_id": item.passage.passage_id,
+        "source_digest": item.passage.text_digest,
+        "byte_start": 0,
+        "byte_end": len(text),
+        "quote_digest": digest_bytes(text),
+    })
+    proposal["context_lead_ids"] = [lead.lead_id for lead in version.context_leads]
+    recommendation["input_citations"].extend({
+        "citation_id": f"context:{lead.lead_id[:4]}",
+        "source_kind": "CONTEXT_LEAD",
+        "source_id": lead.lead_id,
+        "source_digest": lead.lead_digest,
+        "field_path": "lead.summary",
+        "byte_start": 0,
+        "byte_end": 18,
+        "quote_digest": DIGEST_D,
+        "target_hypothesis_id": None,
+    } for lead in version.context_leads)
+    recommendation["input_citations"].sort(key=lambda citation: citation["citation_id"])
     recommendation["candidate_manifest"]["contributing_lead_ids"] = [
         decision.lead_id
     ]
@@ -270,13 +295,21 @@ def test_v19_store_exact_success_replay_restart_and_use_time_currentness(tmp_pat
     authority = RetrievalContextAuthority(
         builder.journal.path, {request.request_digest: (request, receipt)}
     )
-    decision = work_item_helpers._decision(1)
+    decision, context_source = (
+        work_item_helpers._decision(1), work_item_helpers._decision(2)
+    )
     connection, work_store = work_item_helpers._store(
-        (decision,), retrieval_authority=authority
+        (decision, context_source), retrieval_authority=authority
     )
     item = TriageWorkItem.create((decision,))
     version = replace(
         work_item_helpers._version(item),
+        context_leads=(ContextLeadBinding(
+            context_source.lead_id, context_source.lead_digest,
+            context_source.lead_event_id, context_source.lead_aggregate_version,
+            context_source.gate_decision_id, context_source.definition_id,
+            context_source.definition_version_id,
+        ),),
         retrieval=RetrievalInputBinding.from_receipt(request, receipt),
     )
     work_store.create_or_replay(item, version)
@@ -290,15 +323,124 @@ def test_v19_store_exact_success_replay_restart_and_use_time_currentness(tmp_pat
     store = ProposalDispositionStore(connection, authority, authenticator)
     proposal = _persistable_proposal(version, decision, receipt)
     context_mismatch = json.loads(proposal)
-    context_mismatch["proposal"]["context_lead_ids"] = [LEAD_B]
+    context_mismatch["proposal"]["context_lead_ids"] = []
+    context_mismatch["proposal"]["recommendations"][0]["input_citations"] = [
+        citation for citation in context_mismatch["proposal"]["recommendations"][0]["input_citations"]
+        if citation["source_kind"] != "CONTEXT_LEAD"
+    ]
     with pytest.raises(DispositionContractError, match="exact current Work Item"):
         store.persist(_resign(context_mismatch), {}, proof=proof)
     assert connection.in_transaction is False
+    for mutator in (
+        lambda citation: citation.update(source_digest=DIGEST_A),
+        lambda citation: citation.update(source_id="invented-passage"),
+        lambda citation: citation.update(byte_end=citation["byte_end"] - 1),
+        lambda citation: citation.update(quote_digest=DIGEST_A),
+    ):
+        mismatched = json.loads(proposal)
+        retrieval_citation = next(
+            citation for citation in mismatched["proposal"]["recommendations"][0]["input_citations"]
+            if citation["source_kind"] == "RETRIEVAL_MATCH"
+        )
+        mutator(retrieval_citation)
+        with pytest.raises(DispositionContractError, match="citation"):
+            store.persist(_resign(mismatched), {}, proof=proof)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM triage_proposal_validation_findings"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM triage_proposal_dispositions"
+        ).fetchone() == (0,)
+    for source_kind in ("DECISION_LEAD", "CONTEXT_LEAD"):
+        mismatched = json.loads(proposal)
+        citation = next(
+            citation for citation in mismatched["proposal"]["recommendations"][0]["input_citations"]
+            if citation["source_kind"] == source_kind
+        )
+        citation["source_digest"] = DIGEST_A
+        with pytest.raises(DispositionContractError, match="citation"):
+            store.persist(_resign(mismatched), {}, proof=proof)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM triage_proposal_validation_findings"
+        ).fetchone() == (0,)
     selection = _selection(
         CanonicalOutcome.LEAD_ADMIT_NEW_CANDIDATE,
         CanonicalNextAction.HANDOFF_FOR_EVALUATION,
         ReasonCode.NOVELTY_LIKELY_NEW_EVENT,
     )
+    competing_document = json.loads(proposal)
+    competing_document["proposal"]["proposal_id"] = (
+        "00000000-0000-4000-8000-000000009998"
+    )
+    competing = _resign(competing_document)
+
+    race_database = tmp_path / "empty-race-dispositions.sqlite3"
+    race_target = sqlite3.connect(race_database, isolation_level=None)
+    connection.backup(race_target)
+    race_target.close()
+    race_connections = tuple(
+        sqlite3.connect(
+            race_database,
+            isolation_level=None,
+            timeout=10,
+            check_same_thread=False,
+        )
+        for _ in range(2)
+    )
+    race_stores = tuple(
+        ProposalDispositionStore(candidate, authority, authenticator)
+        for candidate in race_connections
+    )
+    barrier = threading.Barrier(2)
+
+    def competing_first_write(
+        candidate_store: ProposalDispositionStore, candidate: bytes
+    ) -> tuple[ProposalDisposition, ...] | str:
+        barrier.wait()
+        try:
+            return candidate_store.persist(
+                candidate, {decision.lead_id: selection}, proof=proof
+            )
+        except DispositionContractError as exc:
+            return str(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        race_results = tuple(
+            future.result()
+            for future in (
+                executor.submit(competing_first_write, race_stores[0], proposal),
+                executor.submit(competing_first_write, race_stores[1], competing),
+            )
+        )
+    winners = tuple(result for result in race_results if type(result) is tuple)
+    losers = tuple(result for result in race_results if type(result) is str)
+    assert len(winners) == len(losers) == 1
+    assert "finding replay diverges" in losers[0]
+    assert race_connections[0].execute(
+        "SELECT COUNT(*) FROM triage_proposal_validation_findings"
+    ).fetchone() == (1,)
+    assert race_connections[0].execute(
+        "SELECT COUNT(*) FROM triage_proposal_dispositions"
+    ).fetchone() == (1,)
+    winner_id = winners[0][0].proposal_id
+    winner_proposal = (
+        proposal
+        if winner_id == json.loads(proposal)["proposal"]["proposal_id"]
+        else competing
+    )
+    for race_connection in race_connections:
+        race_connection.close()
+    reopened_race_connection = sqlite3.connect(
+        race_database, isolation_level=None, timeout=10
+    )
+    reopened_race = ProposalDispositionStore(
+        reopened_race_connection, authority, authenticator
+    )
+    assert reopened_race.persist(
+        winner_proposal, {decision.lead_id: selection}, proof=proof
+    ) == winners[0]
+    reopened_race_connection.close()
+
     first = store.persist(proposal, {decision.lead_id: selection}, proof=proof)
     assert len(first) == 1
     assert first[0].authority is DispositionAuthority.NONE
@@ -321,11 +463,16 @@ def test_v19_store_exact_success_replay_restart_and_use_time_currentness(tmp_pat
         "SELECT COUNT(*) FROM triage_proposal_dispositions"
     ).fetchone() == (1,)
 
-    interrupted_document = json.loads(proposal)
-    interrupted_document["proposal"]["proposal_id"] = (
-        "00000000-0000-4000-8000-000000009999"
-    )
-    interrupted = _resign(interrupted_document)
+    with pytest.raises(DispositionContractError, match="replay diverges"):
+        store.persist(competing, {decision.lead_id: selection}, proof=proof)
+    assert connection.execute(
+        "SELECT COUNT(*) FROM triage_proposal_validation_findings"
+    ).fetchone() == (1,)
+    assert connection.execute(
+        "SELECT COUNT(*) FROM triage_proposal_dispositions"
+    ).fetchone() == (1,)
+
+    interrupted = proposal
     store._persist_dispositions = lambda *_args: (_ for _ in ()).throw(  # type: ignore[method-assign]
         GeneratorExit()
     )

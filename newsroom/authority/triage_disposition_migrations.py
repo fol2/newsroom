@@ -175,7 +175,7 @@ TRIAGE_DISPOSITION_MIGRATION_STATEMENTS: tuple[str, ...] = (
         canonical_bytes BLOB NOT NULL CHECK(length(canonical_bytes) BETWEEN 1 AND 67108864),
         canonical_digest TEXT NOT NULL UNIQUE CHECK({_DIGEST_CHECK.format('canonical_digest')}),
         recorded_at TEXT NOT NULL,
-        UNIQUE(work_item_version_id,proposal_id,decision_lead_id),
+        UNIQUE(work_item_version_id,decision_lead_id),
         UNIQUE(finding_id,work_item_version_id,proposal_id,decision_lead_id),
         FOREIGN KEY(work_item_version_id,work_item_id) REFERENCES triage_work_item_versions(version_id,work_item_id)
     ) STRICT""",
@@ -197,7 +197,7 @@ TRIAGE_DISPOSITION_MIGRATION_STATEMENTS: tuple[str, ...] = (
         canonical_bytes BLOB NOT NULL CHECK(length(canonical_bytes) BETWEEN 1 AND 67108864),
         canonical_digest TEXT NOT NULL UNIQUE CHECK({_DIGEST_CHECK.format('canonical_digest')}),
         recorded_at TEXT NOT NULL,
-        UNIQUE(work_item_version_id,proposal_id,decision_lead_id),
+        UNIQUE(work_item_version_id,decision_lead_id),
         FOREIGN KEY(finding_id,work_item_version_id,proposal_id,decision_lead_id)
             REFERENCES triage_proposal_validation_findings(finding_id,work_item_version_id,proposal_id,decision_lead_id),
         FOREIGN KEY(work_item_version_id,work_item_id) REFERENCES triage_work_item_versions(version_id,work_item_id)

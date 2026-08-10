@@ -30,6 +30,7 @@ from newsroom.increment6.outcomes import (
     WATCH_CONDITION_MAPPING,
 )
 from newsroom.increment6.proposals import (
+    CitationSourceKind,
     LeadRecommendation,
     ProposalRoute,
     TriageProposal,
@@ -1438,6 +1439,83 @@ class ProposalDispositionStore:
             )
         return result
 
+    def _reconcile_citations(
+        self,
+        version: TriageWorkItemVersion,
+        recommendations: tuple[LeadRecommendation, ...],
+    ) -> None:
+        """Bind every Proposal citation to the exact retained v18 inputs."""
+
+        decision_leads = {
+            lead.lead_id: lead.lead_digest for lead in version.decision_leads
+        }
+        context_leads = {
+            lead.lead_id: lead.lead_digest for lead in version.context_leads
+        }
+        if version.retrieval.receipt_bytes is None:
+            raise DispositionContractError("retrieval citation authority differs")
+        receipt = _decode(
+            version.retrieval.receipt_bytes, field="retrieval citation receipt"
+        )
+        raw_items = receipt.get("items")
+        if type(raw_items) is not list:
+            raise DispositionContractError("retrieval citation authority differs")
+        retrieval_items: dict[str, tuple[str, bytes]] = {}
+        try:
+            for item in raw_items:
+                if type(item) is not dict or type(item.get("passage")) is not dict:
+                    raise DispositionContractError(
+                        "retrieval citation authority differs"
+                    )
+                passage = item["passage"]
+                passage_id = passage["passage_id"]
+                text_digest = passage["text_digest"]
+                text = item["text"].encode("utf-8")
+                if passage_id in retrieval_items:
+                    raise DispositionContractError(
+                        "retrieval citation authority differs"
+                    )
+                retrieval_items[passage_id] = (text_digest, text)
+        except DispositionContractError:
+            raise
+        except Exception as exc:
+            raise DispositionContractError(
+                "retrieval citation authority differs"
+            ) from exc
+
+        for recommendation in recommendations:
+            for citation in recommendation.input_citations:
+                if citation.source_kind is CitationSourceKind.DECISION_LEAD:
+                    if decision_leads.get(citation.source_id) != citation.source_digest:
+                        raise DispositionContractError(
+                            "decision Lead citation differs from the exact Version"
+                        )
+                    continue
+                if citation.source_kind is CitationSourceKind.CONTEXT_LEAD:
+                    if context_leads.get(citation.source_id) != citation.source_digest:
+                        raise DispositionContractError(
+                            "context Lead citation differs from the exact Version"
+                        )
+                    continue
+                item = retrieval_items.get(citation.source_id)
+                if (
+                    item is None
+                    or citation.field_path != "passage.text"
+                    or citation.source_digest != item[0]
+                ):
+                    raise DispositionContractError(
+                        "retrieval citation differs from the exact receipt item"
+                    )
+                text = item[1]
+                if (
+                    citation.byte_end > len(text)
+                    or digest_bytes(text[citation.byte_start:citation.byte_end])
+                    != citation.quote_digest
+                ):
+                    raise DispositionContractError(
+                        "retrieval citation range differs from the exact receipt item"
+                    )
+
     def persist(
         self,
         proposal_bytes: bytes,
@@ -1456,6 +1534,7 @@ class ProposalDispositionStore:
             )
             validation = validate_proposal(proposal_bytes, validator)
             findings = validation.findings
+            self._reconcile_citations(version, validation.proposal.recommendations)
             self._persist_findings(version, validation)
             if any(item.severity is FindingSeverity.ERROR for item in findings):
                 raise DispositionContractError("Proposal validation contains ERROR")
@@ -1509,8 +1588,8 @@ class ProposalDispositionStore:
             )
             row = self._connection.execute(
                 "SELECT canonical_bytes,finding_set_digest FROM triage_proposal_validation_findings "
-                "WHERE work_item_version_id=? AND proposal_id=? AND decision_lead_id=?",
-                (version.version_id, finding.proposal_id, finding.evidence_reference_id),
+                "WHERE work_item_version_id=? AND decision_lead_id=?",
+                (version.version_id, finding.evidence_reference_id),
             ).fetchone()
             if row is None or bytes(row[0]) != raw or row[1] != validation.finding_set_digest:
                 raise DispositionContractError("finding replay diverges")
@@ -1559,8 +1638,8 @@ class ProposalDispositionStore:
             )
             row = self._connection.execute(
                 "SELECT canonical_bytes FROM triage_proposal_dispositions "
-                "WHERE work_item_version_id=? AND proposal_id=? AND decision_lead_id=?",
-                (version.version_id, disposition.proposal_id, disposition.decision_lead_id),
+                "WHERE work_item_version_id=? AND decision_lead_id=?",
+                (version.version_id, disposition.decision_lead_id),
             ).fetchone()
             if row is None or bytes(row[0]) != raw:
                 raise DispositionContractError("disposition replay diverges")
@@ -1744,6 +1823,13 @@ class ProposalDispositionStore:
                 raise DispositionContractError("retained Work Item Version differs")
             _RETRIEVAL_VERIFY_RETAINED(
                 self._retrieval_authority, self._connection, version.retrieval
+            )
+            self._reconcile_citations(
+                version,
+                tuple(
+                    disposition.route_binding
+                    for disposition in dispositions.values()
+                ),
             )
             leads = {lead.lead_id: lead for lead in version.decision_leads}
             if set(leads) != set(findings):
