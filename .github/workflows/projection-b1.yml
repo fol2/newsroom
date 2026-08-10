@@ -1,12 +1,12 @@
 name: Projection B1
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   projection-authority:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

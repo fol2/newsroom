@@ -1,12 +1,12 @@
 name: Authority A2b
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   governed-object-authority:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 

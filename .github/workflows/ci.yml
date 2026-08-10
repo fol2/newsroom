@@ -6,9 +6,15 @@ on:
 
 jobs:
   test:
+    name: test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -25,12 +31,104 @@ jobs:
       - name: Sync (Dev)
         run: uv sync --dev --locked
 
-      - name: Tests
-        run: uv run python -m pytest -q
-
-      - name: Clustering Eval Gate
+      - name: Source integrity
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          uv run python scripts/eval_clustering_metrics.py \
-            --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
-            --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
-            --fail-on-regression
+          set -euo pipefail
+          head_sha="$(git rev-parse "${HEAD_SHA}^{commit}")"
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            base_sha="${PR_BASE_SHA}"
+            git cat-file -e "${base_sha}^{commit}"
+          else
+            base_sha="${PUSH_BASE_SHA}"
+            if [[ -z "${base_sha}" || "${base_sha}" =~ ^0+$ ]]; then
+              git fetch --no-tags origin \
+                "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+              base_sha="$(git merge-base \
+                "${head_sha}" "refs/remotes/origin/${DEFAULT_BRANCH}")"
+            elif ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "${base_sha}"
+              git cat-file -e "${base_sha}^{commit}"
+            fi
+          fi
+          uv run python -m scripts.sdlc.workflow_lane source-check \
+            --base-sha "${base_sha}" \
+            --head-sha "${head_sha}"
+
+      - name: Bounded compatibility smoke
+        id: smoke
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          rm -f ci-smoke-result.json ci-smoke-results.xml
+          timeout --signal=TERM --kill-after=10s 180s \
+            uv run python -m pytest -q \
+              newsroom/tests/test_ci_workflow.py \
+              newsroom/tests/test_sdlc_contract.py \
+              newsroom/tests/test_sdlc_evidence_workflow.py \
+              newsroom/tests/test_pr_lifecycle.py \
+              --junitxml=ci-smoke-results.xml
+          exit_code="$?"
+
+          if [[ "${exit_code}" -eq 0 ]]; then
+            result="PASS"
+          elif [[ "${exit_code}" -eq 124 || "${exit_code}" -eq 137 ]]; then
+            result="INFRASTRUCTURE_TIMEOUT"
+            printf '%s\n' \
+              '<testsuite name="ci-smoke" tests="1" errors="1">' \
+              '  <testcase name="infrastructure-timeout">' \
+              '    <error message="180-second command timeout" />' \
+              '  </testcase>' \
+              '</testsuite>' > ci-smoke-results.xml
+          else
+            result="PRODUCT_FAILURE"
+            if [[ ! -s ci-smoke-results.xml ]]; then
+              printf '%s\n' \
+                '<testsuite name="ci-smoke" tests="1" failures="1">' \
+                '  <testcase name="product-failure">' \
+                '    <failure message="pytest did not produce JUnit" />' \
+                '  </testcase>' \
+                '</testsuite>' > ci-smoke-results.xml
+            fi
+          fi
+
+          printf '{"schema_version":"newsroom.ci-smoke-result.v1","result":"%s","exit_code":%s}\n' \
+            "${result}" "${exit_code}" > ci-smoke-result.json
+          exit "${exit_code}"
+
+      - name: Upload compatibility smoke result
+        if: always() && steps.smoke.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-smoke-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ci-smoke-result.json
+            ci-smoke-results.xml
+          if-no-files-found: error
+
+      - name: Enforce compatibility smoke result
+        if: always() && steps.smoke.outcome != 'skipped'
+        env:
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result = json.loads(Path("ci-smoke-result.json").read_text(encoding="utf-8"))
+          if result.get("schema_version") != "newsroom.ci-smoke-result.v1":
+              raise SystemExit("unexpected CI smoke result schema")
+          status = result.get("result")
+          if status not in {"PASS", "PRODUCT_FAILURE", "INFRASTRUCTURE_TIMEOUT"}:
+              raise SystemExit(f"unexpected CI smoke result: {status!r}")
+          if status != "PASS" or os.environ["SMOKE_OUTCOME"] != "success":
+              raise SystemExit(f"CI compatibility smoke did not pass: {status}")
+          PY

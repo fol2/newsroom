@@ -51,6 +51,7 @@ jobs:
       contents: read
       pull-requests: read
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,6 +73,7 @@ jobs:
       contents: read
       pull-requests: read
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       GITHUB_TOKEN: ${{ github.token }}
       LIFECYCLE_REVISION: ${{ github.sha }}
@@ -112,6 +114,7 @@ jobs:
       issues: write
       pull-requests: write
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       GITHUB_TOKEN: ${{ github.token }}
       PR_HOUSEKEEPING_APPLY: CLOSE_ELIGIBLE_DISPOSABLE_PRS
