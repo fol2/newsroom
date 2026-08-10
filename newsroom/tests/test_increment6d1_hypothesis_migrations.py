@@ -15,6 +15,9 @@ from newsroom.authority.event_hypothesis_migrations import (
     event_hypothesis_backup_paths,
     prepare_event_hypothesis_backup,
 )
+from newsroom.authority.event_hypothesis_relationship_migrations import (
+    EVENT_HYPOTHESIS_RELATIONSHIP_PREDECESSOR_FINGERPRINT,
+)
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
     EXPECTED_SCHEMA_FINGERPRINT,
@@ -33,6 +36,19 @@ def _open(path: str | Path = ":memory:") -> sqlite3.Connection:
 def _fresh(path: str | Path = ":memory:") -> sqlite3.Connection:
     connection = _open(path)
     apply_pending_migrations(connection, applied_at="2042-01-01T00:00:00.000000Z")
+    connection.execute("PRAGMA foreign_keys=OFF")
+    immutable = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name='immutable_authority_migrations_delete'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+    connection.execute("DROP TRIGGER retained_event_hypothesis_relationship_delete")
+    connection.execute("DROP TRIGGER immutable_event_hypothesis_relationship_update")
+    connection.execute("DROP TRIGGER event_hypothesis_relationship_coherence")
+    connection.execute("DROP TABLE event_hypothesis_relationship_decisions")
+    connection.execute("DELETE FROM authority_migrations WHERE version=22")
+    connection.execute(immutable)
+    connection.execute("PRAGMA user_version=21")
+    connection.execute("PRAGMA foreign_keys=ON")
     return connection
 
 
@@ -71,13 +87,13 @@ def _history(connection: sqlite3.Connection) -> list[tuple[int, str, str]]:
 
 def test_fresh_v21_has_exact_allocation_history_and_integrity() -> None:
     connection = _fresh()
-    assert SCHEMA_VERSION == 21
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+    assert SCHEMA_VERSION == 22
+    assert EXPECTED_MIGRATION_HISTORY[-2] == (
         21,
         EVENT_HYPOTHESIS_MIGRATION_NAME,
         EVENT_HYPOTHESIS_MIGRATION_CHECKSUM,
     )
-    assert _history(connection) == list(EXPECTED_MIGRATION_HISTORY)
+    assert _history(connection) == list(EXPECTED_MIGRATION_HISTORY[:-1])
     assert {
         r[0]
         for r in connection.execute(
@@ -90,7 +106,10 @@ def test_fresh_v21_has_exact_allocation_history_and_integrity() -> None:
     }
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     assert connection.execute("PRAGMA quick_check").fetchall() == [("ok",)]
-    assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
+    assert (
+        schema_fingerprint(connection)
+        == EVENT_HYPOTHESIS_RELATIONSHIP_PREDECESSOR_FINGERPRINT
+    )
 
 
 def test_literal_v21_and_predecessor_pins() -> None:
@@ -107,7 +126,7 @@ def test_literal_v21_and_predecessor_pins() -> None:
         == "sha256:42009475669a475af8e3e24bbcd02e6fcd9fbb71a800e18d83624e34e79e5e21"
     )
     assert (
-        EXPECTED_SCHEMA_FINGERPRINT
+        EVENT_HYPOTHESIS_RELATIONSHIP_PREDECESSOR_FINGERPRINT
         == "sha256:d314d06118a25f8a32a0f9d8acb1af5383abd6b30be682cb5f65943ae15c213f"
     )
 
@@ -116,14 +135,14 @@ def test_exact_v20_predecessor_backup_receipt_reuse_and_upgrade(tmp_path: Path) 
     database = tmp_path / "authority.sqlite3"
     connection = _fresh(database)
     _downgrade_to_v20(connection)
-    assert _history(connection) == list(EXPECTED_MIGRATION_HISTORY[:-1])
+    assert _history(connection) == list(EXPECTED_MIGRATION_HISTORY[:-2])
     assert schema_fingerprint(connection) == EVENT_HYPOTHESIS_PREDECESSOR_FINGERPRINT
     backup, digest = event_hypothesis_backup_paths(database)
     receipt = prepare_event_hypothesis_backup(connection, backup)
     assert prepare_event_hypothesis_backup(connection, backup) == receipt
     assert receipt.backup_path == backup and receipt.digest_path == digest
     apply_pending_migrations(connection, applied_at="2042-01-01T00:00:01.000000Z")
-    assert connection.execute("PRAGMA user_version").fetchone() == (21,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (22,)
     assert _history(connection) == list(EXPECTED_MIGRATION_HISTORY)
     assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
 
@@ -152,11 +171,11 @@ def test_incomplete_or_tampered_v20_backup_is_rejected(
     with pytest.raises(EventHypothesisBackupError):
         apply_pending_migrations(connection, applied_at="2042-01-01T00:00:01.000000Z")
     assert connection.execute("PRAGMA user_version").fetchone() == (20,)
-    assert _history(connection) == list(EXPECTED_MIGRATION_HISTORY[:-1])
+    assert _history(connection) == list(EXPECTED_MIGRATION_HISTORY[:-2])
     assert schema_fingerprint(connection) == EVENT_HYPOTHESIS_PREDECESSOR_FINGERPRINT
 
 
-def test_direct_v20_apply_requires_prepared_backup_and_v22_rejects(
+def test_direct_v20_apply_requires_prepared_backup_and_v23_rejects(
     tmp_path: Path,
 ) -> None:
     connection = _fresh(tmp_path / "direct.sqlite3")
@@ -166,7 +185,7 @@ def test_direct_v20_apply_requires_prepared_backup_and_v22_rejects(
     assert connection.execute("PRAGMA user_version").fetchone() == (20,)
     assert schema_fingerprint(connection) == EVENT_HYPOTHESIS_PREDECESSOR_FINGERPRINT
     newer = _open()
-    newer.execute("PRAGMA user_version=22")
+    newer.execute("PRAGMA user_version=23")
     with pytest.raises(sqlite3.DatabaseError, match="newer"):
         apply_pending_migrations(newer, applied_at="2042-01-01T00:00:00.000000Z")
 
@@ -190,7 +209,7 @@ def test_injected_v21_failure_rolls_back_exact_v20(
     with pytest.raises(sqlite3.OperationalError):
         apply_pending_migrations(connection, applied_at="2042-01-01T00:00:01.000000Z")
     assert connection.execute("PRAGMA user_version").fetchone() == (20,)
-    assert _history(connection) == list(EXPECTED_MIGRATION_HISTORY[:-1])
+    assert _history(connection) == list(EXPECTED_MIGRATION_HISTORY[:-2])
     assert schema_fingerprint(connection) == before
     assert (
         connection.execute(
@@ -209,11 +228,13 @@ def test_older_file_backed_multihop_retains_each_stage_backup(tmp_path: Path) ->
     _downgrade_to_v19(connection)
     migrations.prepare_pending_migration_backup(connection)
     apply_pending_migrations(connection, applied_at="2042-01-01T00:00:01.000000Z")
-    assert connection.execute("PRAGMA user_version").fetchone() == (21,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (22,)
     assert (tmp_path / "multihop.sqlite3.pre-v20.sqlite3").is_file()
     assert (tmp_path / "multihop.sqlite3.pre-v20.sqlite3.sha256").is_file()
     assert (tmp_path / "multihop.sqlite3.pre-v21.sqlite3").is_file()
     assert (tmp_path / "multihop.sqlite3.pre-v21.sqlite3.sha256").is_file()
+    assert (tmp_path / "multihop.sqlite3.pre-v22.sqlite3").is_file()
+    assert (tmp_path / "multihop.sqlite3.pre-v22.sqlite3.sha256").is_file()
 
 
 def test_v21_sql_guards_are_sensitive() -> None:

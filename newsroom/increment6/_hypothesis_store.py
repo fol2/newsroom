@@ -231,6 +231,17 @@ class _HypothesisStore:
         self._owner = None
         self._lock.release()
 
+    def adopt_active_transaction(self) -> None:
+        """Bind checked private helpers to an enclosing authority transaction."""
+        if self._owner is not None or not self._connection.in_transaction:
+            raise HypothesisContractError("active transaction adoption differs")
+        self._owner = get_ident()
+
+    def release_active_transaction(self) -> None:
+        if self._owner != get_ident() or not self._connection.in_transaction:
+            raise HypothesisContractError("active transaction ownership differs")
+        self._owner = None
+
     def _rollback(self) -> None:
         if self._owner != get_ident():
             return
@@ -623,6 +634,36 @@ class _HypothesisStore:
         if version is None:
             raise HypothesisContractError("current Hypothesis Version is absent")
         return EventHypothesisVersion.from_canonical_bytes(bytes(version[0]))
+
+    def require_retained_version_in_transaction(
+        self, version_id: str
+    ) -> EventHypothesisVersion:
+        """Load one retained Version inside this store's checked transaction."""
+        if self._owner != get_ident() or not self._connection.in_transaction:
+            raise HypothesisContractError("transaction ownership differs")
+        self._verify()
+        row = self._connection.execute(
+            "SELECT canonical_bytes FROM event_hypothesis_versions_v2 WHERE version_id=?",
+            (version_id,),
+        ).fetchone()
+        if row is None:
+            raise HypothesisContractError("unknown retained Hypothesis Version")
+        return EventHypothesisVersion.from_canonical_bytes(bytes(row[0]))
+
+    def require_current_version_in_transaction(
+        self, version_id: str, *, proof: AuthenticationProof
+    ) -> EventHypothesisVersion:
+        """Recheck the exact Version head and its authenticated source chain."""
+        version = self.require_retained_version_in_transaction(version_id)
+        if self._head(version.hypothesis_id) != version:
+            raise HypothesisContractError("Hypothesis Version is not the current head")
+        for binding in version.source_bindings:
+            disposition = _REQUIRE_DISPOSITION(
+                self._dispositions, binding.disposition_id, proof=proof
+            )
+            if self._bindings((disposition,)) != (binding,):
+                raise HypothesisContractError("current source binding differs")
+        return version
 
     def current(
         self, hypothesis_id: str, *, proof: AuthenticationProof
