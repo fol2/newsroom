@@ -146,6 +146,8 @@ def prepare_event_hypothesis_relationship_backup(
         "INSERT INTO event_hypothesis_relationship_backup_gate VALUES(?,?,?)",
         (str(backup_path), backup_digest, logical_digest),
     )
+    if connection.in_transaction:
+        connection.commit()
     return EventHypothesisRelationshipBackupReceipt(
         backup_path, digest_path, backup_digest, logical_digest
     )
