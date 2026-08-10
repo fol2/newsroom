@@ -104,15 +104,15 @@ def test_v20_literal_predecessor_pins_are_exact() -> None:
         "sha256:542bd9c351094cf4d56905fa92aa042924b5dab877cc04374a097c48fe6b6003"
     )
     assert TRIAGE_EXECUTION_MIGRATION_CHECKSUM == (
-        "sha256:60a7d8e5fd895b854555041b6588eba310dcc83d22fd50884b6ac20859a796cf"
+        "sha256:6eb04f981f650bbb4956f148d11f1656bcd2b7c510117db96602dd9d83ab9bd3"
     )
     assert EXPECTED_SCHEMA_FINGERPRINT == (
-        "sha256:fb4f358187ef024c8822bfb99034af3ae449e406ec43b8b3ee643a029319e2bd"
+        "sha256:36a7c9910775ede9c29113a43e08bba261a5a98c4fab5225dd2cae9448689389"
     )
     assert EXPECTED_MIGRATION_HISTORY[-1] == (
         20,
         "triage_execution_authority_v20",
-        "sha256:60a7d8e5fd895b854555041b6588eba310dcc83d22fd50884b6ac20859a796cf",
+        "sha256:6eb04f981f650bbb4956f148d11f1656bcd2b7c510117db96602dd9d83ab9bd3",
     )
 
 

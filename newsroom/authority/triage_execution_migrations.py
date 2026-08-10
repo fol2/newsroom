@@ -243,10 +243,21 @@ TRIAGE_EXECUTION_MIGRATION_STATEMENTS: tuple[str, ...] = (
               SELECT 1 FROM triage_worker_attempts p
               WHERE p.attempt_id=NEW.previous_attempt_id
                 AND p.batch_id=NEW.batch_id
-                AND p.canonical_digest=NEW.previous_attempt_digest))
+                AND p.canonical_digest=NEW.previous_attempt_digest
+                AND p.ordinal=NEW.ordinal-1
+                AND p.work_item_id=NEW.work_item_id
+                AND p.work_item_version_id=NEW.work_item_version_id
+                AND p.work_item_version_digest=NEW.work_item_version_digest
+                AND p.retrieval_context_digest=NEW.retrieval_context_digest
+                AND p.priority_digest=NEW.priority_digest))
           OR (NEW.ordinal>1 AND NOT EXISTS(
               SELECT 1 FROM triage_work_item_leases l
               WHERE l.attempt_id=NEW.previous_attempt_id
+                AND l.attempt_digest=NEW.previous_attempt_digest
+                AND l.batch_id=NEW.batch_id
+                AND l.work_item_id=NEW.work_item_id
+                AND l.work_item_version_id=NEW.work_item_version_id
+                AND l.work_item_version_digest=NEW.work_item_version_digest
                 AND l.lifecycle IN ('RELEASED','EXPIRED')))
           OR NOT EXISTS(
               SELECT 1 FROM triage_execution_batches b, json_each(CAST(b.canonical_bytes AS TEXT),'$.members') m

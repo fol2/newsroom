@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
+from threading import Lock, get_ident
 from typing import Self
 
 from newsroom.authority.auth import AuthenticationProof, StaticAuthenticator
@@ -22,7 +23,6 @@ from newsroom.authority.migrations import (
     prepare_pending_migration_backup,
     schema_fingerprint,
 )
-from newsroom.authority._event_store_base import _EventStoreBase
 from newsroom.authority.types import UtcTimestamp
 from newsroom.increment6.work_items import (
     RetrievalContextAuthority,
@@ -67,6 +67,42 @@ def _execution_time(value: UtcTimestamp) -> str:
     return value.value.isoformat().replace("+00:00", "Z")
 
 
+def _secure_directory(path: Path) -> None:
+    if path.exists():
+        if path.is_symlink() or not path.is_dir():
+            raise TriageExecutionAuthorityError(
+                "authority database parent must be a real directory"
+            )
+    else:
+        path.mkdir(parents=True, mode=0o700)
+        os.chmod(path, 0o700)
+    info = path.stat()
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise TriageExecutionAuthorityError(
+            "authority directory must be owned by the writer"
+        )
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise TriageExecutionAuthorityError(
+            "authority directory cannot grant group or other permissions"
+        )
+
+
+def _validate_owned_file(path: Path) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise TriageExecutionAuthorityError(
+            "authority database must be a regular file"
+        )
+    info = path.stat()
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise TriageExecutionAuthorityError(
+            "authority database must be owned by the writer"
+        )
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise TriageExecutionAuthorityError(
+            "authority database cannot grant group or other permissions"
+        )
+
+
 class _TriageExecutionStore:
     def __init__(
         self,
@@ -92,13 +128,15 @@ class _TriageExecutionStore:
         self._authenticator = authenticator
         self._clock = clock
         self._lease_ttl_seconds = lease_ttl_seconds
+        self._transaction_lock = Lock()
+        self._transaction_owner: int | None = None
         try:
             connection.execute("PRAGMA foreign_keys=ON")
             retrieval_authority.attach(connection)
             self._work_items = TriageWorkItemStore(connection, retrieval_authority)
             self._begin()
             self._verify_integrity()
-            connection.execute("COMMIT")
+            self._commit()
         except BaseException as exc:
             self._rollback()
             if not isinstance(exc, Exception):
@@ -108,13 +146,34 @@ class _TriageExecutionStore:
             raise TriageExecutionAuthorityError("execution authority initialisation failed") from exc
 
     def _begin(self) -> None:
-        if self._connection.in_transaction:
-            raise TriageExecutionAuthorityError("connection has an active transaction")
-        self._connection.execute("BEGIN IMMEDIATE")
+        self._transaction_lock.acquire()
+        try:
+            if self._connection.in_transaction:
+                raise TriageExecutionAuthorityError("connection has an active transaction")
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._transaction_owner = get_ident()
+        except BaseException:
+            self._transaction_lock.release()
+            raise
+
+    def _commit(self) -> None:
+        if self._transaction_owner != get_ident():
+            raise TriageExecutionAuthorityError("transaction owner differs")
+        if not self._connection.in_transaction:
+            raise TriageExecutionAuthorityError("owned transaction is absent")
+        self._connection.execute("COMMIT")
+        self._transaction_owner = None
+        self._transaction_lock.release()
 
     def _rollback(self) -> None:
-        if self._connection.in_transaction:
-            self._connection.execute("ROLLBACK")
+        if self._transaction_owner != get_ident():
+            return
+        try:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+        finally:
+            self._transaction_owner = None
+            self._transaction_lock.release()
 
     def _authenticate(self, proof: AuthenticationProof) -> tuple[object, str, str, str]:
         if type(proof) is not AuthenticationProof:
@@ -180,7 +239,7 @@ class _TriageExecutionStore:
                 if bytes(row[0]) != raw:
                     raise TriageExecutionAuthorityError("execution Batch replay diverges")
                 retained = ExecutionBatch.from_canonical_bytes(bytes(row[0]))
-                self._connection.execute("COMMIT")
+                self._commit()
                 return retained
             exact = ExecutionBatch.from_canonical_bytes(raw)
             for member in exact.members:
@@ -204,7 +263,7 @@ class _TriageExecutionStore:
                     recorded_at,
                 ),
             )
-            self._connection.execute("COMMIT")
+            self._commit()
             return exact
         except BaseException as exc:
             self._rollback()
@@ -258,15 +317,21 @@ class _TriageExecutionStore:
         raw = attempt.canonical_bytes
         try:
             self._begin()
+            batch = self._load_batch(batch_id)
             row = self._connection.execute(
-                "SELECT canonical_bytes FROM triage_worker_attempts WHERE attempt_id=?",
+                "SELECT canonical_bytes,batch_id FROM triage_worker_attempts WHERE attempt_id=?",
                 (attempt.attempt_id,),
             ).fetchone()
             if row is not None:
+                if str(row[1]) != batch_id:
+                    raise TriageExecutionAuthorityError(
+                        "Worker Attempt requested Batch differs"
+                    )
                 if bytes(row[0]) != raw:
                     raise TriageExecutionAuthorityError("Worker Attempt replay diverges")
                 retained = WorkerAttempt.from_canonical_bytes(bytes(row[0]))
-                self._connection.execute("COMMIT")
+                self._batch_member(batch, retained)
+                self._commit()
                 return retained
             conflict = self._connection.execute(
                 "SELECT canonical_bytes FROM triage_worker_attempts "
@@ -275,7 +340,6 @@ class _TriageExecutionStore:
             ).fetchone()
             if conflict is not None:
                 raise TriageExecutionAuthorityError("Worker Attempt ordinal diverges")
-            batch = self._load_batch(batch_id)
             self._batch_member(batch, attempt)
             current = self._work_items.require_usable_current_in_transaction(
                 attempt.work_item_id
@@ -284,7 +348,7 @@ class _TriageExecutionStore:
             if not self._version_matches_member(current, member):
                 raise TriageExecutionAuthorityError("Worker Attempt Work Item is stale")
             self._insert_attempt(batch_id, attempt, actor)
-            self._connection.execute("COMMIT")
+            self._commit()
             return attempt
         except BaseException as exc:
             self._rollback()
@@ -368,7 +432,7 @@ class _TriageExecutionStore:
                     or retained.capability_digest != capability
                 ):
                     raise TriageExecutionAuthorityError("Lease replay owner differs")
-                self._connection.execute("COMMIT")
+                self._commit()
                 return retained
             attempt, batch_id = self._load_attempt_row(attempt_id)
             self._require_current_attempt(attempt)
@@ -423,7 +487,7 @@ class _TriageExecutionStore:
                     recorded_at,
                 ),
             )
-            self._connection.execute("COMMIT")
+            self._commit()
             return lease
         except BaseException as exc:
             self._rollback()
@@ -500,21 +564,21 @@ class _TriageExecutionStore:
                         and progress[-1].progress is LeaseProgress.COMPLETED
                         and progress[-1].evidence_digest == evidence_digest
                     ):
-                        self._connection.execute("COMMIT")
+                        self._commit()
                         return lease
                 elif (
                     operation == "release"
                     and lease.lifecycle is LeaseLifecycle.RELEASED
                     and not lease.transitions[-1].progress
                 ):
-                    self._connection.execute("COMMIT")
+                    self._commit()
                     return lease
                 elif (
                     operation == "expire"
                     and lease.lifecycle is LeaseLifecycle.EXPIRED
                     and not lease.transitions[-1].progress
                 ):
-                    self._connection.execute("COMMIT")
+                    self._commit()
                     return lease
                 raise TriageExecutionAuthorityError("terminal Lease replay diverges")
             now = _execution_time(self._clock())
@@ -562,7 +626,7 @@ class _TriageExecutionStore:
             ).rowcount
             if changed != 1:
                 raise TriageExecutionAuthorityError("Lease CAS differs")
-            self._connection.execute("COMMIT")
+            self._commit()
             return updated
         except BaseException as exc:
             self._rollback()
@@ -621,7 +685,7 @@ class _TriageExecutionStore:
                 retained = WorkerAttempt.from_canonical_bytes(bytes(successor_row[0]))
                 if retained != expected:
                     raise TriageExecutionAuthorityError("Worker Attempt successor diverges")
-                self._connection.execute("COMMIT")
+                self._commit()
                 return retained
             lease_row = self._connection.execute(
                 "SELECT lease_id FROM triage_work_item_leases WHERE attempt_id=?",
@@ -659,7 +723,7 @@ class _TriageExecutionStore:
                 raise TriageExecutionAuthorityError("predecessor Lease is not terminal")
             self._require_current_attempt(previous)
             self._insert_attempt(batch_id, expected, actor)
-            self._connection.execute("COMMIT")
+            self._commit()
             return expected
         except BaseException as exc:
             self._rollback()
@@ -748,6 +812,15 @@ class _TriageExecutionStore:
                 predecessor = attempts.get(attempt.previous_attempt_id)
                 if (
                     predecessor is None
+                    or predecessor.ordinal + 1 != attempt.ordinal
+                    or predecessor.work_item_id != attempt.work_item_id
+                    or predecessor.work_item_version_id
+                    != attempt.work_item_version_id
+                    or predecessor.work_item_version_digest
+                    != attempt.work_item_version_digest
+                    or predecessor.retrieval_context_digest
+                    != attempt.retrieval_context_digest
+                    or predecessor.priority_digest != attempt.priority_digest
                     or predecessor.canonical_digest
                     != attempt.previous_attempt_digest
                     or attempt_batches.get(attempt.previous_attempt_id) != str(row[1])
@@ -914,13 +987,13 @@ def open_triage_execution_authority(
     if path.is_symlink():
         raise TriageExecutionAuthorityError("authority database path cannot be a symlink")
     try:
-        _EventStoreBase._secure_directory(path.parent)
+        _secure_directory(path.parent)
     except Exception as exc:
         raise TriageExecutionAuthorityError("authority directory differs") from exc
     existed = path.exists()
     if existed:
         try:
-            _EventStoreBase._validate_owned_file(path)
+            _validate_owned_file(path)
         except Exception as exc:
             raise TriageExecutionAuthorityError("authority database file differs") from exc
     lock_path = path.with_name(path.name + ".writer.lock")
@@ -928,7 +1001,7 @@ def open_triage_execution_authority(
         raise TriageExecutionAuthorityError("writer lock path cannot be a symlink")
     if lock_path.exists():
         try:
-            _EventStoreBase._validate_owned_file(lock_path)
+            _validate_owned_file(lock_path)
         except Exception as exc:
             raise TriageExecutionAuthorityError("writer lock file differs") from exc
     descriptor = os.open(
@@ -961,7 +1034,7 @@ def open_triage_execution_authority(
         )
         if not existed:
             os.chmod(path, 0o600)
-        _EventStoreBase._validate_owned_file(path)
+        _validate_owned_file(path)
         connection.execute("PRAGMA foreign_keys=ON")
         mode = str(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
         if mode != "wal":

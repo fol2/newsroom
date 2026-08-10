@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import importlib.util
 import sqlite3
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event, current_thread
 
 import pytest
 
-from newsroom.authority._triage_execution_store import (
+from newsroom.increment6._execution_store import (
     TriageExecutionAuthorityError,
     _TriageExecutionStore,
     _open_on_connection,
@@ -18,6 +20,7 @@ from newsroom.authority.auth import (
     StaticAuthenticator,
     StaticPrincipal,
 )
+from newsroom.authority.canonical import canonical_json_bytes
 from newsroom.authority.types import UtcTimestamp
 from newsroom.increment6.execution import (
     ExecutionBatch,
@@ -162,6 +165,51 @@ def _insert_attempt_direct(
     )
 
 
+def _insert_attempt_values_direct(
+    connection: sqlite3.Connection,
+    batch_id: str,
+    values: dict[str, object],
+    *,
+    canonical_digest: str,
+    actor: str,
+) -> None:
+    raw = canonical_json_bytes(values)
+    recorded_at = "2042-03-12T10:00:00.000000Z"
+    connection.execute(
+        "INSERT INTO triage_worker_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            values["attempt_id"],
+            batch_id,
+            values["work_item_id"],
+            values["work_item_version_id"],
+            values["work_item_version_digest"],
+            values["retrieval_context_digest"],
+            values["priority_digest"],
+            values["ordinal"],
+            values["previous_attempt_id"],
+            values["previous_attempt_digest"],
+            values["semantic_request_key"],
+            raw,
+            canonical_digest,
+            actor,
+            _TriageExecutionStore._event_id(canonical_digest, actor, recorded_at),
+            recorded_at,
+        ),
+    )
+
+
+def _with_ordinal(attempt: WorkerAttempt, ordinal: int) -> WorkerAttempt:
+    identity = (
+        f"{attempt.schema_identity}|{attempt.semantic_request_digest}|{ordinal}|"
+        f"{attempt.previous_attempt_id}|{attempt.previous_attempt_digest}"
+    )
+    return replace(
+        attempt,
+        attempt_id=str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+        ordinal=ordinal,
+    )
+
+
 def test_batch_and_attempt_exact_replay_divergence_and_stale_absent_no_write(
     tmp_path: Path,
 ) -> None:
@@ -242,6 +290,25 @@ def test_batch_and_attempt_exact_replay_divergence_and_stale_absent_no_write(
     assert version.canonical_digest == batch.members[0].work_item_version_digest
 
 
+def test_attempt_replay_is_bound_to_the_exact_retained_batch(tmp_path: Path) -> None:
+    _, _, _, authority, _, version, batch, attempt = _fixture(tmp_path)
+    other_batch = _distinct_batch(version, policy_version="replay-other-batch-v20")
+    authority.register_batch(batch, proof=PROOF)
+    authority.register_batch(other_batch, proof=PROOF)
+    authority.register_attempt(batch.batch_id, attempt, proof=PROOF)
+
+    with pytest.raises(TriageExecutionAuthorityError, match="Batch"):
+        authority.register_attempt(other_batch.batch_id, attempt, proof=PROOF)
+    with pytest.raises(TriageExecutionAuthorityError, match="Batch"):
+        authority.register_attempt(
+            "00000000-0000-0000-0000-000000000000", attempt, proof=PROOF
+        )
+
+
+def test_execution_contract_remains_the_sole_public_execution_module() -> None:
+    assert importlib.util.find_spec("newsroom.authority.triage_execution_system") is None
+
+
 def test_attempt_insert_guard_requires_terminal_same_batch_predecessor(
     tmp_path: Path,
 ) -> None:
@@ -268,6 +335,184 @@ def test_attempt_insert_guard_requires_terminal_same_batch_predecessor(
     assert connection.execute(
         "SELECT count(*) FROM triage_worker_attempts WHERE ordinal=2"
     ).fetchone() == (0,)
+
+
+def test_attempt_insert_guard_rejects_ordinal_gap_and_cross_lineage(
+    tmp_path: Path,
+) -> None:
+    connection, _, _, authority, _, _, batch, attempt = _fixture(tmp_path)
+    authority.register_batch(batch, proof=PROOF)
+    authority.register_attempt(batch.batch_id, attempt, proof=PROOF)
+    lease = authority.claim(attempt.attempt_id, proof=PROOF)
+    authority.release(lease.lease_id, proof=PROOF)
+    actor = str(
+        connection.execute(
+            "SELECT actor_identity_digest FROM triage_worker_attempts WHERE attempt_id=?",
+            (attempt.attempt_id,),
+        ).fetchone()[0]
+    )
+    successor = WorkerAttempt.create(
+        member=batch.members[0],
+        ordinal=2,
+        previous_attempt=attempt,
+        worker_kind=FixtureWorkerKind.REPLAY,
+        worker_version="direct-guard-v20",
+        input_digest=_digest(997),
+    )
+
+    gap = _with_ordinal(successor, 3)
+    with pytest.raises(sqlite3.DatabaseError, match="Batch membership"):
+        _insert_attempt_values_direct(
+            connection,
+            batch.batch_id,
+            gap.canonical_value(),
+            canonical_digest=gap.canonical_digest,
+            actor=actor,
+        )
+
+    connection.execute("DROP TRIGGER retained_execution_batch_update")
+    batch_values = batch.canonical_value()
+    divergent_member = dict(batch_values["members"][0])
+    divergent_member["retrieval_context_digest"] = _digest(996)
+    batch_values["members"].append(divergent_member)
+    connection.execute(
+        "UPDATE triage_execution_batches SET member_count=?,canonical_bytes=? WHERE batch_id=?",
+        (2, canonical_json_bytes(batch_values), batch.batch_id),
+    )
+    cross_lineage = successor.canonical_value()
+    cross_lineage["retrieval_context_digest"] = divergent_member[
+        "retrieval_context_digest"
+    ]
+    with pytest.raises(sqlite3.DatabaseError, match="Batch membership"):
+        _insert_attempt_values_direct(
+            connection,
+            batch.batch_id,
+            cross_lineage,
+            canonical_digest=_digest(995),
+            actor=actor,
+        )
+
+
+def test_reopen_rejects_bypassed_attempt_ordinal_gap(tmp_path: Path) -> None:
+    connection, retrieval, authenticator, authority, now, _, batch, attempt = _fixture(
+        tmp_path
+    )
+    authority.register_batch(batch, proof=PROOF)
+    authority.register_attempt(batch.batch_id, attempt, proof=PROOF)
+    lease = authority.claim(attempt.attempt_id, proof=PROOF)
+    authority.release(lease.lease_id, proof=PROOF)
+    successor = WorkerAttempt.create(
+        member=batch.members[0],
+        ordinal=2,
+        previous_attempt=attempt,
+        worker_kind=FixtureWorkerKind.REPLAY,
+        worker_version="reopen-gap-v20",
+        input_digest=_digest(994),
+    )
+    gap = _with_ordinal(successor, 3)
+    actor = str(
+        connection.execute(
+            "SELECT actor_identity_digest FROM triage_worker_attempts WHERE attempt_id=?",
+            (attempt.attempt_id,),
+        ).fetchone()[0]
+    )
+    connection.execute("DROP TRIGGER triage_worker_attempt_coherence")
+    _insert_attempt_values_direct(
+        connection,
+        batch.batch_id,
+        gap.canonical_value(),
+        canonical_digest=gap.canonical_digest,
+        actor=actor,
+    )
+
+    with pytest.raises(TriageExecutionAuthorityError, match="predecessor chain"):
+        _open_on_connection(
+            connection,
+            retrieval_authority=retrieval,
+            authenticator=authenticator,
+            clock=lambda: now[0],
+        )
+
+
+def test_same_store_concurrent_failure_cannot_steal_the_claim_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection, retrieval, authenticator, authority, now, _, batch, attempt = _fixture(
+        tmp_path
+    )
+    authority.register_batch(batch, proof=PROOF)
+    authority.register_attempt(batch.batch_id, attempt, proof=PROOF)
+    authority.close()
+    connection.close()
+    connection = sqlite3.connect(
+        tmp_path / "execution-authority.sqlite3",
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    connection.execute("PRAGMA foreign_keys=ON")
+    authority = _open_on_connection(
+        connection,
+        retrieval_authority=retrieval,
+        authenticator=authenticator,
+        clock=lambda: now[0],
+    )
+    store = authority._TriageExecutionAuthority__store
+    owner_inside_transaction = Event()
+    release_owner = Event()
+
+    def blocking_recorded_at() -> str:
+        if current_thread().name.startswith("claim-owner"):
+            owner_inside_transaction.set()
+            assert release_owner.wait(5)
+        return now[0].to_text()
+
+    store._recorded_at = blocking_recorded_at
+    original_begin = _TriageExecutionStore._begin
+    contender_at_begin = Event()
+
+    def observed_begin(self: _TriageExecutionStore) -> None:
+        if current_thread().name.startswith("claim-contender"):
+            contender_at_begin.set()
+        original_begin(self)
+
+    monkeypatch.setattr(_TriageExecutionStore, "_begin", observed_begin)
+    with (
+        ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="claim-owner"
+        ) as owner_executor,
+        ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="claim-contender"
+        ) as contender_executor,
+    ):
+        owner = owner_executor.submit(
+            lambda: authority.claim(attempt.attempt_id, proof=PROOF)
+        )
+        assert owner_inside_transaction.wait(5)
+        contender = contender_executor.submit(
+            lambda: authority.claim(attempt.attempt_id, proof=OTHER_PROOF)
+        )
+        assert contender_at_begin.wait(5)
+        release_owner.set()
+        lease = owner.result(timeout=5)
+        with pytest.raises(TriageExecutionAuthorityError, match="owner"):
+            contender.result(timeout=5)
+
+    assert connection.execute(
+        "SELECT lease_id,lifecycle FROM triage_work_item_leases WHERE attempt_id=?",
+        (attempt.attempt_id,),
+    ).fetchall() == [(lease.lease_id, "CLAIMED")]
+    connection.close()
+
+
+def test_store_does_not_rollback_an_external_transaction(tmp_path: Path) -> None:
+    connection, _, _, authority, _, _, batch, _ = _fixture(tmp_path)
+    connection.execute("BEGIN")
+
+    with pytest.raises(TriageExecutionAuthorityError, match="active transaction"):
+        authority.register_batch(batch, proof=PROOF)
+
+    assert connection.in_transaction
+    connection.execute("ROLLBACK")
 
 
 def test_claim_lost_response_completion_terminal_replay_and_restart(
