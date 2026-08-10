@@ -11,6 +11,17 @@ from dataclasses import replace
 
 import pytest
 
+from newsroom.authority._event_hypothesis_system import (
+    EventHypothesisAuthority as PrivateAuthority,
+)
+from newsroom.authority._event_hypothesis_system import (
+    _compose_event_hypothesis_authority_for_test,
+    _creation_event_id,
+    _HypothesisStore,
+    _require_exact_proposal_authorisation,
+    _require_exact_proposal_provenance,
+    _version_event_id,
+)
 from newsroom.authority.auth import (
     AuthenticationProof,
     StaticAuthenticator,
@@ -25,16 +36,6 @@ from newsroom.authority.triage_disposition_migrations import (
     TRIAGE_DISPOSITION_MIGRATION_STATEMENTS,
 )
 from newsroom.authority.types import UtcTimestamp
-from newsroom.increment6._hypothesis_store import (
-    EventHypothesisAuthority as PrivateAuthority,
-)
-from newsroom.increment6._hypothesis_store import (
-    _creation_event_id,
-    _HypothesisStore,
-    _require_exact_proposal_authorisation,
-    _require_exact_proposal_provenance,
-    _version_event_id,
-)
 from newsroom.increment6.dispositions import (
     _FINDING_SET_SCHEMA_VERSION,
     DispositionAuthority,
@@ -44,7 +45,6 @@ from newsroom.increment6.dispositions import (
 )
 from newsroom.increment6.hypotheses import (
     EVENT_HYPOTHESIS,
-    EventHypothesisAuthority,
     HypothesisContractError,
     open_event_hypothesis_authority,
 )
@@ -181,7 +181,82 @@ def _open(fixture):
         authenticator,
         lambda: UtcTimestamp.parse("2042-01-01T00:00:00.000000Z"),
     )
-    return EventHypothesisAuthority(PrivateAuthority(store, lambda: None))
+    from newsroom.increment6.hypotheses import _compose_event_hypothesis_authority
+
+    return _compose_event_hypothesis_authority(
+        _compose_event_hypothesis_authority_for_test(store, lambda: None)
+    )
+
+
+def test_private_authority_construction_is_token_gated_and_store_exact(
+    tmp_path,
+) -> None:
+    fixture = _authority_fixture(tmp_path)
+    store = _HypothesisStore(fixture[0], fixture[1], fixture[2], UtcTimestamp.now)
+    with pytest.raises(HypothesisContractError):
+        PrivateAuthority(object(), store, lambda: None)
+    with pytest.raises(HypothesisContractError):
+        _compose_event_hypothesis_authority_for_test(object(), lambda: None)
+
+
+def test_public_system_seam_exports_only_opener_and_closes_raw_on_wrap_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.authority import _event_hypothesis_system as private_system
+    from newsroom.authority import event_hypothesis_system
+    from newsroom.increment6 import hypotheses
+
+    assert event_hypothesis_system.__all__ == ["open_event_hypothesis_authority_system"]
+    assert not hasattr(event_hypothesis_system, "EventHypothesisAuthoritySystem")
+
+    closed: list[bool] = []
+
+    class Raw:
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(
+        private_system.EventHypothesisAuthority,
+        "open",
+        classmethod(lambda cls, *args, **kwargs: Raw()),
+    )
+    monkeypatch.setattr(
+        hypotheses,
+        "_compose_event_hypothesis_authority",
+        lambda authority: (_ for _ in ()).throw(RuntimeError("wrap failed")),
+    )
+    with pytest.raises(RuntimeError, match="wrap failed"):
+        event_hypothesis_system.open_event_hypothesis_authority_system(
+            tmp_path / "unused.sqlite",
+            retrieval_authority=object(),
+            authenticator=object(),
+        )
+    assert closed == [True]
+
+    monkeypatch.setattr(
+        hypotheses,
+        "_compose_event_hypothesis_authority",
+        lambda authority: object(),
+    )
+    with pytest.raises(HypothesisContractError, match="forged facade"):
+        event_hypothesis_system.open_event_hypothesis_authority_system(
+            tmp_path / "unused.sqlite",
+            retrieval_authority=object(),
+            authenticator=object(),
+        )
+    assert closed == [True, True]
+
+    monkeypatch.setattr(
+        event_hypothesis_system,
+        "open_event_hypothesis_authority_system",
+        lambda *args, **kwargs: object(),
+    )
+    with pytest.raises(HypothesisContractError, match="forged facade"):
+        open_event_hypothesis_authority(
+            tmp_path / "unused.sqlite",
+            retrieval_authority=object(),
+            authenticator=object(),
+        )
 
 
 def _selection_for(relationship: str):

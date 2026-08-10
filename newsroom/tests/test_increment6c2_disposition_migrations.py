@@ -25,6 +25,10 @@ from newsroom.authority.triage_disposition_migrations import (
     triage_disposition_backup_paths,
 )
 
+from .graphiti_adapter_4d_migration_helpers import (
+    drop_empty_v22_relationship_schema,
+)
+
 
 def _open(path: str | Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path, isolation_level=None)
@@ -39,6 +43,7 @@ def _fresh(path: str | Path = ":memory:") -> sqlite3.Connection:
 
 
 def _downgrade_to_v18(connection: sqlite3.Connection) -> None:
+    drop_empty_v22_relationship_schema(connection)
     connection.execute("PRAGMA foreign_keys=OFF")
     guard = connection.execute(
         "SELECT sql FROM sqlite_master WHERE name='immutable_authority_migrations_delete'"
@@ -60,8 +65,9 @@ def _downgrade_to_v18(connection: sqlite3.Connection) -> None:
 
 def test_fresh_v19_history_fingerprint_guards_and_integrity_are_exact() -> None:
     connection = _fresh()
-    assert SCHEMA_VERSION == 21 and TRIAGE_DISPOSITION_SCHEMA_VERSION == 19
-    assert EXPECTED_MIGRATION_HISTORY[-3] == (
+    assert TRIAGE_DISPOSITION_SCHEMA_VERSION == 19
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    assert EXPECTED_MIGRATION_HISTORY[TRIAGE_DISPOSITION_SCHEMA_VERSION - 1] == (
         19,
         TRIAGE_DISPOSITION_MIGRATION_NAME,
         TRIAGE_DISPOSITION_MIGRATION_CHECKSUM,
@@ -109,7 +115,7 @@ def test_exact_v18_backup_upgrade_reuse_and_tamper_fail_closed(tmp_path: Path) -
         connection, triage_disposition_backup_paths(database)[0]
     ) == receipt
     apply_pending_migrations(connection, applied_at="2042-03-12T10:00:01Z")
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     backup, digest = triage_disposition_backup_paths(database)
     assert backup.is_file() and digest.is_file()
     connection.close()
@@ -147,7 +153,7 @@ def test_v19_injected_failure_restores_exact_v18_and_v20_is_rejected(
     ).fetchall() == []
 
     newer = _open(":memory:")
-    newer.execute("PRAGMA user_version=22")
+    newer.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
     with pytest.raises(sqlite3.DatabaseError, match="newer"):
         apply_pending_migrations(newer, applied_at="2042-03-12T10:00:00Z")
 
@@ -221,7 +227,10 @@ def test_v19_checksum_and_schema_fingerprint_are_literal_release_pins() -> None:
     assert TRIAGE_DISPOSITION_MIGRATION_CHECKSUM == (
         "sha256:d5f9702d359836e3b564ba1cadbad27e5fc17ba79e5155e2b34382ec30681177"
     )
-    assert EXPECTED_MIGRATION_HISTORY[-3][2] == TRIAGE_DISPOSITION_MIGRATION_CHECKSUM
+    assert (
+        EXPECTED_MIGRATION_HISTORY[TRIAGE_DISPOSITION_SCHEMA_VERSION - 1][2]
+        == TRIAGE_DISPOSITION_MIGRATION_CHECKSUM
+    )
 
 
 def test_exact_v18_apply_without_prepared_backup_preserves_history_and_schema(

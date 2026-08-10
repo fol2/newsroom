@@ -21,6 +21,10 @@ from newsroom.authority.triage_work_item_migrations import (
     triage_work_item_backup_paths,
 )
 
+from .graphiti_adapter_4d_migration_helpers import (
+    drop_empty_v22_relationship_schema,
+)
+
 
 def _open(path: str | Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path, isolation_level=None)
@@ -31,12 +35,13 @@ def _open(path: str | Path) -> sqlite3.Connection:
 def test_current_schema_retains_exact_v18_and_is_integral() -> None:
     connection = _open(":memory:")
     apply_pending_migrations(connection, applied_at="2042-03-12T10:00:00Z")
-    assert SCHEMA_VERSION == 21 and TRIAGE_WORK_ITEM_SCHEMA_VERSION == 18
+    assert TRIAGE_WORK_ITEM_SCHEMA_VERSION == 18
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
     assert connection.execute(
         "SELECT version,name,checksum FROM authority_migrations ORDER BY version"
     ).fetchall() == list(EXPECTED_MIGRATION_HISTORY)
-    assert EXPECTED_MIGRATION_HISTORY[-4] == (
+    assert EXPECTED_MIGRATION_HISTORY[TRIAGE_WORK_ITEM_SCHEMA_VERSION - 1] == (
         18,
         TRIAGE_WORK_ITEM_MIGRATION_NAME,
         TRIAGE_WORK_ITEM_MIGRATION_CHECKSUM,
@@ -93,6 +98,7 @@ def test_exact_v17_upgrade_retains_pre_v18_backup(tmp_path: Path) -> None:
     database = tmp_path / "authority.sqlite3"
     connection = _open(database)
     apply_pending_migrations(connection, applied_at="2042-03-12T10:00:00Z")
+    drop_empty_v22_relationship_schema(connection)
     connection.execute("PRAGMA foreign_keys=OFF")
     delete_guard = connection.execute(
         "SELECT sql FROM sqlite_master WHERE name='immutable_authority_migrations_delete'"
@@ -123,12 +129,12 @@ def test_exact_v17_upgrade_retains_pre_v18_backup(tmp_path: Path) -> None:
     apply_pending_migrations(connection, applied_at="2042-03-12T10:00:01Z")
     backup, digest = triage_work_item_backup_paths(database)
     assert backup.is_file() and digest.is_file()
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_newer_schema_and_injected_v18_failure_fail_closed() -> None:
     newer = _open(":memory:")
-    newer.execute("PRAGMA user_version=22")
+    newer.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
     with pytest.raises(sqlite3.DatabaseError, match="newer"):
         apply_pending_migrations(newer, applied_at="2042-03-12T10:00:00Z")
 
