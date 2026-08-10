@@ -12,24 +12,25 @@ from scripts.sdlc.contracts import (
 )
 from scripts.sdlc.validate_contract import main as validate_main
 
-
 REPO_ROOT = Path(__file__).parents[2]
 
 
 def test_accepted_contract_loads_and_references_exact_source_files() -> None:
     contract = load_contract(REPO_ROOT)
 
-    assert contract.contract_version == "sdlc-v2.4"
+    assert contract.contract_version == "sdlc-v2.5"
     assert contract.classifier_version == "sdlc-risk-v1"
     assert contract.data["status"] == "accepted"
     assert contract.source_path == REPO_ROOT / ".sdlc" / "gates.toml"
     assert contract.data["acceptance_record"] == (
-        "docs/specs/sdlc/2026-08-02-sdlc-v2.4-owner-budget-amendment.md"
+        "docs/specs/sdlc/2026-08-10-sdlc-v2.5-core-sharding-amendment.md"
     )
     assert contract.unknown_path_risk == "R3_EXTERNAL_SERVICE_SECURITY"
 
 
-def test_every_gate_lane_resolves_and_all_hard_timeouts_are_below_four_minutes() -> None:
+def test_every_gate_lane_resolves_and_all_hard_timeouts_are_below_four_minutes() -> (
+    None
+):
     contract = load_contract(REPO_ROOT)
     lanes = contract.data["lanes"]
 
@@ -66,6 +67,19 @@ def test_every_gate_lane_resolves_and_all_hard_timeouts_are_below_four_minutes()
     }
     assert lanes["decision"] == {"always_reports": True, "hard_timeout_seconds": 20}
     assert lanes["core"]["hard_timeout_seconds"] == 220
+    assert lanes["core"] == {
+        "bootstrap_once": True,
+        "shard_count": 4,
+        "partition": "sha256_node_id_balanced",
+        "workers_per_shard": 4,
+        "distribution": "worksteal",
+        "max_worker_restart": 0,
+        "per_shard_hard_timeout_seconds": 220,
+        "reducer_single_canonical_receipt": True,
+        "run_full_suite_when_p95_below_seconds": 35,
+        "hard_timeout_seconds": 220,
+        "required": True,
+    }
     assert lanes["service"]["hard_timeout_seconds"] == 220
     assert lanes["merge_group"]["hard_timeout_seconds"] == 220
     assert lanes["science"]["per_shard_hard_timeout_seconds"] == 220
@@ -172,5 +186,5 @@ def test_contract_validation_cli_emits_a_small_typed_summary(
     output = capsys.readouterr().out
 
     assert '"status":"PASS"' in output
-    assert '"contract_version":"sdlc-v2.4"' in output
+    assert '"contract_version":"sdlc-v2.5"' in output
     assert "R4_RELEASE_OPERATIONAL" in output

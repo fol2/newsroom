@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
 import json
-from pathlib import Path
 import stat
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 import pytest
 
@@ -15,12 +15,13 @@ from scripts.sdlc.shadow_decision import (
     ShadowDecisionError,
     aggregate_shadow_decision,
     failure_shadow_decision,
-    main as decision_main,
     validate_shadow_decision,
+)
+from scripts.sdlc.shadow_decision import (
+    main as decision_main,
 )
 from scripts.sdlc.shadow_lane import ShadowLaneError
 from scripts.sdlc.workflow_event import WorkflowEvent
-
 
 REPOSITORY_ID = 1153895518
 RUN_ID = 123
@@ -133,7 +134,9 @@ class _Receipt:
     run_attempt: int = RUN_ATTEMPT
     consumer_job_id: str = "decision"
     consumer_runner_environment: str = "github-hosted"
-    workflow_ref: str = "fol2/newsroom/.github/workflows/evidence.yml@refs/pull/10/merge"
+    workflow_ref: str = (
+        "fol2/newsroom/.github/workflows/evidence.yml@refs/pull/10/merge"
+    )
     workflow_sha: str = "a" * 40
     event_name: str = "pull_request"
     event_sha: str = "b" * 40
@@ -225,7 +228,9 @@ def _lane(
         if lane_id == "core"
         else (_gate("service-neo4j", "tests"),)
     )
-    number = artifact_id if artifact_id is not None else (100 if lane_id == "core" else 101)
+    number = (
+        artifact_id if artifact_id is not None else (100 if lane_id == "core" else 101)
+    )
     return _Lane(
         lane_id=lane_id,
         receipt=_Receipt(
@@ -267,7 +272,9 @@ def _patch_lane_validator(monkeypatch: pytest.MonkeyPatch, *lanes: _Lane) -> Non
     monkeypatch.setattr(decision_module, "validate_shadow_lane_record", validate)
 
 
-def test_core_only_pass_is_exact_and_replayable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_core_only_pass_is_exact_and_replayable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     route = _route()
     core = _lane("core", route)
     _patch_lane_validator(monkeypatch, core)
@@ -284,8 +291,36 @@ def test_core_only_pass_is_exact_and_replayable(monkeypatch: pytest.MonkeyPatch)
     assert decision.result_reason == "PASS:decision"
     assert decision.first_failure is None
     assert decision.totals.test_count == 2
-    assert decision.totals.execution_max_ms == 1000
-    assert validate_shadow_decision(decision.as_dict(), contract=_contract()) == decision
+    assert decision.totals.execution_max_ms == 500
+    assert (
+        validate_shadow_decision(decision.as_dict(), contract=_contract()) == decision
+    )
+
+
+def test_concurrent_core_gates_use_critical_path_not_duration_sum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _route()
+    core = _lane(
+        "core",
+        route,
+        gates=(
+            _gate("source-integrity", "source", execution_ms=60_000),
+            _gate("core-deterministic", "tests", execution_ms=200_000),
+        ),
+    )
+    _patch_lane_validator(monkeypatch, core)
+
+    decision = aggregate_shadow_decision(
+        context=_context(),
+        event=_event(),
+        core=core,  # type: ignore[arg-type]
+        service=None,
+        contract=_contract(),
+    )
+
+    assert decision.result == "PASS"
+    assert decision.totals.execution_max_ms == 200_000
 
 
 def test_service_is_required_exactly_when_route_requires_it(
@@ -358,9 +393,16 @@ def test_route_event_context_and_identity_conflicts_fail_closed(
     duplicate_service = replace(
         _lane("service", route),
         lane_identity=core.lane_identity,
-        replay=replace(_lane("service", route).replay, replay_identity=core.replay.replay_identity),
-        receipt=replace(_lane("service", route).receipt, receipt_identity=core.receipt.receipt_identity),
-        telemetry=replace(_lane("service", route).telemetry, job_id=core.telemetry.job_id),
+        replay=replace(
+            _lane("service", route).replay, replay_identity=core.replay.replay_identity
+        ),
+        receipt=replace(
+            _lane("service", route).receipt,
+            receipt_identity=core.receipt.receipt_identity,
+        ),
+        telemetry=replace(
+            _lane("service", route).telemetry, job_id=core.telemetry.job_id
+        ),
     )
     _patch_lane_validator(monkeypatch, core, duplicate_service)
     with pytest.raises(ShadowDecisionError, match="lane_identity_duplicate"):
@@ -455,7 +497,11 @@ def test_strict_record_rejects_tampering(monkeypatch: pytest.MonkeyPatch) -> Non
     core = _lane("core", route)
     _patch_lane_validator(monkeypatch, core)
     decision = aggregate_shadow_decision(
-        context=_context(), event=_event(), core=core, service=None, contract=_contract()  # type: ignore[arg-type]
+        context=_context(),
+        event=_event(),
+        core=core,
+        service=None,
+        contract=_contract(),  # type: ignore[arg-type]
     )
 
     for field, value, reason in (
@@ -482,7 +528,9 @@ def test_typed_failure_record_is_content_addressed() -> None:
     assert decision.event is None
     assert decision.lanes == ()
     assert decision.first_failure is not None
-    assert validate_shadow_decision(decision.as_dict(), contract=_contract()) == decision
+    assert (
+        validate_shadow_decision(decision.as_dict(), contract=_contract()) == decision
+    )
 
     with pytest.raises(ShadowDecisionError, match="decision_job"):
         failure_shadow_decision(context=_context(job_id="core"), code="bad")
@@ -498,7 +546,9 @@ def test_cli_always_emits_typed_failure_for_invalid_lane(
     core = tmp_path / "core.json"
     context.write_text(json.dumps(_context().as_dict()), encoding="utf-8")
     event.write_text(json.dumps(_event().as_dict()), encoding="utf-8")
-    core.write_text(json.dumps({"lane_identity": "sha256:" + "0" * 64}), encoding="utf-8")
+    core.write_text(
+        json.dumps({"lane_identity": "sha256:" + "0" * 64}), encoding="utf-8"
+    )
 
     def reject(*_args, **_kwargs):
         raise ShadowLaneError("lane_identity")
@@ -506,42 +556,47 @@ def test_cli_always_emits_typed_failure_for_invalid_lane(
     monkeypatch.setattr(decision_module, "validate_shadow_lane_record", reject)
     output = tmp_path / "decision.json"
     monkeypatch.setattr(decision_module, "load_contract", lambda _root: _contract())
-    assert decision_main(
-        (
-            "--repo-root",
-            str(tmp_path),
-            "--context",
-            str(context),
-            "--event",
-            str(event),
-            "--core",
-            str(core),
-            "--output",
-            "decision.json",
+    assert (
+        decision_main(
+            (
+                "--repo-root",
+                str(tmp_path),
+                "--context",
+                str(context),
+                "--event",
+                str(event),
+                "--core",
+                str(core),
+                "--output",
+                "decision.json",
+            )
         )
-    ) == 0
+        == 0
+    )
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["result"] == "EVIDENCE_MISMATCH"
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert capsys.readouterr().out
 
     original = output.read_bytes()
-    assert decision_main(
-        (
-            "--repo-root",
-            str(tmp_path),
-            "--context",
-            str(context),
-            "--event",
-            str(event),
-            "--core",
-            str(core),
-            "--output",
-            "decision.json",
+    assert (
+        decision_main(
+            (
+                "--repo-root",
+                str(tmp_path),
+                "--context",
+                str(context),
+                "--event",
+                str(event),
+                "--core",
+                str(core),
+                "--output",
+                "decision.json",
+            )
         )
-    ) == 2
+        == 2
+    )
     assert output.read_bytes() == original
-
 
 
 def test_service_lanes_must_share_workflow_creation_time(
@@ -599,25 +654,27 @@ def test_cli_contract_failure_after_context_is_typed(
 
     monkeypatch.setattr(decision_module, "load_contract", reject_contract)
     output = tmp_path / "decision.json"
-    assert decision_main(
-        (
-            "--repo-root",
-            str(tmp_path),
-            "--context",
-            str(context),
-            "--event",
-            "missing-event.json",
-            "--core",
-            "missing-core.json",
-            "--output",
-            "decision.json",
+    assert (
+        decision_main(
+            (
+                "--repo-root",
+                str(tmp_path),
+                "--context",
+                str(context),
+                "--event",
+                "missing-event.json",
+                "--core",
+                "missing-core.json",
+                "--output",
+                "decision.json",
+            )
         )
-    ) == 0
+        == 0
+    )
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["result"] == "EVIDENCE_MISMATCH"
     assert payload["result_reason"] == "EVIDENCE_MISMATCH:decision:invalid-input"
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
-
 
 
 def test_direct_failure_summary_must_match_top_level_decision(
@@ -657,7 +714,6 @@ def test_direct_failure_summary_must_match_top_level_decision(
     )
     with pytest.raises(ShadowDecisionError, match="failure_record"):
         replace(typed, first_failure=changed)
-
 
 
 def test_consumer_runner_environment_must_match_decision_context(

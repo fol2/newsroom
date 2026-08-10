@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import json
 import os
-from pathlib import Path
 import re
 import sys
 import tempfile
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
 from .artifact_envelope import (
     ArtifactProvenanceError,
@@ -31,7 +31,6 @@ from .workflow_event import (
     WorkflowEvidenceError,
     validate_workflow_event,
 )
-
 
 SCHEMA_VERSION = "newsroom.sdlc.shadow-decision.v1"
 POLICY_VERSION = "sdlc-shadow-decision-v1"
@@ -380,7 +379,9 @@ def _normalize_lanes(
     route = normalized_core.receipt.route
     if route.service_required != (service is not None):
         raise ShadowDecisionError(
-            "service_lane_missing" if route.service_required else "service_lane_unexpected"
+            "service_lane_missing"
+            if route.service_required
+            else "service_lane_unexpected"
         )
     lanes = [normalized_core]
     if service is not None:
@@ -421,14 +422,15 @@ def _totals(lanes: tuple[ShadowLaneRecord, ...]) -> DecisionTotals:
         ),
         execution_max_ms=max(
             (
-                sum(item.execution_ms for item in lane.receipt.gate_decisions)
+                max(
+                    (item.execution_ms for item in lane.receipt.gate_decisions),
+                    default=0,
+                )
                 for lane in lanes
             ),
             default=0,
         ),
-        finalize_max_ms=max(
-            (lane.telemetry.finalize_ms for lane in lanes), default=0
-        ),
+        finalize_max_ms=max((lane.telemetry.finalize_ms for lane in lanes), default=0),
         test_count=sum(item.test_count for item in decisions),
         failure_count=sum(item.failure_count for item in decisions),
         error_count=sum(item.error_count for item in decisions),
@@ -452,7 +454,7 @@ def _gate_failure(lane: ShadowLaneRecord) -> FailureSummary | None:
     failed = [item for item in lane.receipt.gate_decisions if item.result != "PASS"]
     if not failed:
         return None
-    selected = sorted(
+    selected = min(
         failed,
         key=lambda item: (
             -_RESULT_PRECEDENCE[item.result],
@@ -460,7 +462,7 @@ def _gate_failure(lane: ShadowLaneRecord) -> FailureSummary | None:
             item.phase,
             item.result_reason,
         ),
-    )[0]
+    )
     return _failure(
         lane.lane_id,
         selected.gate_id,
@@ -487,7 +489,14 @@ def _derive_result(
                     f"ENVIRONMENT_ERROR:{lane.lane_id}:job-conclusion",
                 )
             )
-        execution = sum(item.execution_ms for item in lane.receipt.gate_decisions)
+        # The core reducer's synthetic execution already binds parallel source /
+        # shard critical-path time plus its sequential reduction time. Taking
+        # the maximum retains that complete lifecycle without double-charging
+        # the separately retained source decision.
+        execution = max(
+            (item.execution_ms for item in lane.receipt.gate_decisions),
+            default=0,
+        )
         if execution > lane_budget_ms:
             failures.append(
                 _failure(
@@ -520,7 +529,7 @@ def _derive_result(
         )
     if not failures:
         return "PASS", "PASS:decision", None
-    selected = sorted(
+    selected = min(
         failures,
         key=lambda item: (
             -_RESULT_PRECEDENCE[item.result],
@@ -529,7 +538,7 @@ def _derive_result(
             item.phase,
             item.result_reason,
         ),
-    )[0]
+    )
     return (
         selected.result,
         f"{selected.result}:decision:{selected.lane_id}:{selected.gate_id}:{selected.phase}",
@@ -562,9 +571,7 @@ def _build(
         "event": None if event is None else event.as_dict(),
         "lanes": [lane.as_dict() for lane in lanes],
         "totals": totals.as_dict(),
-        "first_failure": (
-            None if first_failure is None else first_failure.as_dict()
-        ),
+        "first_failure": (None if first_failure is None else first_failure.as_dict()),
     }
     return ShadowDecision(
         result,
@@ -628,9 +635,7 @@ def failure_shadow_decision(
         raise ShadowDecisionError("failure_result")
     suffix = _identifier(code, "failure_code")
     reason = f"{selected}:decision:{suffix}"
-    first = _failure(
-        "decision", "decision-input", "validation", selected, reason
-    )
+    first = _failure("decision", "decision-input", "validation", selected, reason)
     return _build(
         result=selected,
         reason=reason,
@@ -644,7 +649,10 @@ def failure_shadow_decision(
 
 def _parse_failure(value: object) -> FailureSummary:
     item = _mapping(value, "first_failure")
-    if frozenset(item) != _FAILURE_KEYS or item.get("schema_version") != FAILURE_SCHEMA_VERSION:
+    if (
+        frozenset(item) != _FAILURE_KEYS
+        or item.get("schema_version") != FAILURE_SCHEMA_VERSION
+    ):
         raise ShadowDecisionError("failure_shape")
     fingerprint = item.get("first_failure_fingerprint")
     return FailureSummary(
@@ -661,7 +669,10 @@ def _parse_failure(value: object) -> FailureSummary:
 
 def _parse_totals(value: object) -> DecisionTotals:
     item = _mapping(value, "totals")
-    if frozenset(item) != _TOTAL_KEYS or item.get("schema_version") != TOTALS_SCHEMA_VERSION:
+    if (
+        frozenset(item) != _TOTAL_KEYS
+        or item.get("schema_version") != TOTALS_SCHEMA_VERSION
+    ):
         raise ShadowDecisionError("totals_shape")
     return DecisionTotals(
         *(
@@ -715,8 +726,7 @@ def validate_shadow_decision(
         raise ShadowDecisionError("lanes")
     try:
         lanes = tuple(
-            validate_shadow_lane_record(value, contract=contract)
-            for value in raw_lanes
+            validate_shadow_lane_record(value, contract=contract) for value in raw_lanes
         )
     except ShadowLaneError as exc:
         raise ShadowDecisionError("lanes") from exc
@@ -737,9 +747,7 @@ def validate_shadow_decision(
             context=context,
             event=event,
             core=next(lane for lane in lanes if lane.lane_id == "core"),
-            service=next(
-                (lane for lane in lanes if lane.lane_id == "service"), None
-            ),
+            service=next((lane for lane in lanes if lane.lane_id == "service"), None),
             contract=contract,
         )
         if normalized != lanes:
@@ -865,7 +873,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         try:
             context = _context_from_mapping(_load_json(root, arguments.context))
-        except (ArtifactProvenanceError, ShadowDecisionError) as exc:
+        except (ArtifactProvenanceError, ShadowDecisionError):
             print("EVIDENCE_MISMATCH:shadow-decision:context", file=sys.stderr)
             return 2
         try:
@@ -920,7 +928,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
-        code = str(exc) if isinstance(exc, ShadowDecisionError) and str(exc) else type(exc).__name__
+        code = (
+            str(exc)
+            if isinstance(exc, ShadowDecisionError) and str(exc)
+            else type(exc).__name__
+        )
         print(f"EVIDENCE_MISMATCH:shadow-decision:{code}", file=sys.stderr)
         return 2
 

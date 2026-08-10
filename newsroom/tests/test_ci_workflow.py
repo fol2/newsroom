@@ -134,8 +134,18 @@ def test_legacy_authority_and_projection_workflows_are_manual_only() -> None:
 def test_sdlc_workflow_retains_dynamic_complete_evidence_topology() -> None:
     workflow = _load(EVIDENCE_PATH)
     jobs = workflow["jobs"]
-    assert {"route", "core", "service", "decision"} <= set(jobs)
-    assert jobs["core"]["needs"] == ["route"]
+    assert {"route", "source", "core_shard", "core", "service", "decision"} <= set(
+        jobs
+    )
+    assert jobs["source"]["needs"] == ["route"]
+    assert jobs["core_shard"]["needs"] == ["route"]
+    assert jobs["core_shard"]["strategy"]["matrix"]["shard"] == ["0", "1", "2", "3"]
+    assert jobs["core"]["needs"] == ["route", "source", "core_shard"]
+    assert jobs["core"]["if"] == "always() && needs.route.result == 'success'"
+    assert all(
+        "scripts.sdlc.workflow_lane execute " not in str(step.get("run", ""))
+        for step in _steps(jobs["core"])
+    )
     assert jobs["service"]["needs"] == ["route"]
     assert jobs["service"]["if"] == (
         "needs.route.result == 'success' && "
@@ -145,8 +155,9 @@ def test_sdlc_workflow_retains_dynamic_complete_evidence_topology() -> None:
     assert jobs["decision"]["if"] == "always()"
 
     rendered = EVIDENCE_PATH.read_text(encoding="utf-8")
-    assert "python -m scripts.sdlc.workflow_lane execute" in rendered
-    assert "--lane core" in rendered
+    assert "python -m scripts.sdlc.workflow_lane execute-source" in rendered
+    assert "python -m scripts.sdlc.workflow_lane execute-core-shard" in rendered
+    assert rendered.count("python -m scripts.sdlc.workflow_lane reduce-core") == 1
     assert "--lane service" in rendered
     assert "service_required" in rendered
     assert ".sdlc-run/core" in rendered

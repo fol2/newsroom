@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
-from pathlib import Path
 import tomllib
-from typing import Any, Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 
 class ContractError(ValueError):
@@ -94,7 +95,9 @@ class SdlcContract:
     @property
     def path_groups(self) -> Mapping[str, tuple[str, ...]]:
         raw = _mapping(self.classification["paths"], "classification.paths")
-        return {name: tuple(str(item) for item in values) for name, values in raw.items()}
+        return {
+            name: tuple(str(item) for item in values) for name, values in raw.items()
+        }
 
     @property
     def risk_rank(self) -> Mapping[str, int]:
@@ -137,7 +140,10 @@ def validate_contract_data(
         raise ContractError("unsupported SDLC contract schema")
     if data.get("status") != "accepted":
         raise ContractError("SDLC contract is not accepted")
-    if not isinstance(data.get("contract_version"), str) or not data["contract_version"]:
+    if (
+        not isinstance(data.get("contract_version"), str)
+        or not data["contract_version"]
+    ):
         raise ContractError("contract_version is required")
 
     global_config = _mapping(data.get("global"), "global")
@@ -174,7 +180,10 @@ def validate_contract_data(
         if gate_id in gate_ids:
             raise ContractError(f"duplicate gate id: {gate_id}")
         gate_ids.add(gate_id)
-        if gate_id != gate_name and (gate_name, gate_id) != ("science-shard", "science-*"):
+        if gate_id != gate_name and (gate_name, gate_id) != (
+            "science-shard",
+            "science-*",
+        ):
             raise ContractError(f"gate.{gate_name}.id differs from its table name")
         lane_name = gate.get("lane")
         if not isinstance(lane_name, str) or lane_name not in lanes:
@@ -198,6 +207,25 @@ def validate_contract_data(
         )
         if timeout > lane_limit:
             raise ContractError(f"lanes.{lane_name} exceeds the aggregate lane timeout")
+    core = _mapping(lanes.get("core"), "lanes.core")
+    if (
+        core.get("shard_count") != 4
+        or core.get("partition") != "sha256_node_id_balanced"
+        or core.get("workers_per_shard") != 4
+        or core.get("distribution") != "worksteal"
+        or core.get("max_worker_restart") != 0
+        or core.get("reducer_single_canonical_receipt") is not True
+    ):
+        raise ContractError(
+            "lanes.core sharding contract differs from the accepted topology"
+        )
+    shard_timeout = _positive_int(
+        core.get("per_shard_hard_timeout_seconds"),
+        "lanes.core.per_shard_hard_timeout_seconds",
+        below=_MAX_HARD_TIMEOUT_SECONDS,
+    )
+    if shard_timeout != command_limit:
+        raise ContractError("lanes.core shard timeout differs from the command timeout")
     science = _mapping(lanes.get("science"), "lanes.science")
     _positive_int(
         science.get("per_shard_hard_timeout_seconds"),
@@ -265,10 +293,10 @@ def validate_contract_data(
     if owner.get("review_net_executable_lines_trigger") != review.get(
         "net_executable_lines_trigger"
     ):
-        raise ContractError("accepted executable-line trigger differs from change_review")
-    if owner.get("review_changed_files_trigger") != review.get(
-        "changed_files_trigger"
-    ):
+        raise ContractError(
+            "accepted executable-line trigger differs from change_review"
+        )
+    if owner.get("review_changed_files_trigger") != review.get("changed_files_trigger"):
         raise ContractError("accepted changed-file trigger differs from change_review")
     for owner_key, strategy_key in (
         ("selector_shadow_calendar_days", "selector_shadow_calendar_days"),
@@ -288,7 +316,10 @@ def validate_contract_data(
         raise ContractError("accepted budget amendment date is missing")
     if owner.get("hard_budget_multiplier") != 2:
         raise ContractError("accepted hard-budget multiplier must be two")
-    if owner.get("prewarmed_runner_evaluation_permitted_after_measured_slo_failure") is not True:
+    if (
+        owner.get("prewarmed_runner_evaluation_permitted_after_measured_slo_failure")
+        is not True
+    ):
         raise ContractError("accepted runner evaluation policy is missing")
     if owner.get("critical_main_failure_pauses_merges") is not True:
         raise ContractError("critical main failure must pause merges")
@@ -310,11 +341,7 @@ def validate_contract_data(
             ),
             (
                 "route schema",
-                str(
-                    _mapping(data.get("evidence"), "evidence").get(
-                        "route_schema", ""
-                    )
-                ),
+                str(_mapping(data.get("evidence"), "evidence").get("route_schema", "")),
             ),
         ):
             path = _repository_file(root, relative, label=label)

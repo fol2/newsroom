@@ -1,10 +1,10 @@
 schema_version = "newsroom.sdlc.gates.v1"
-contract_version = "sdlc-v2.4"
+contract_version = "sdlc-v2.5"
 status = "accepted"
 owner = "fol2"
 canonical_language = "English"
 specification = "docs/specs/sdlc/high-performance-evidence-sdlc.md"
-acceptance_record = "docs/specs/sdlc/2026-08-02-sdlc-v2.4-owner-budget-amendment.md"
+acceptance_record = "docs/specs/sdlc/2026-08-10-sdlc-v2.5-core-sharding-amendment.md"
 issue = 98
 
 [global]
@@ -193,6 +193,13 @@ clustering = [
 
 [lanes.core]
 bootstrap_once = true
+shard_count = 4
+partition = "sha256_node_id_balanced"
+workers_per_shard = 4
+distribution = "worksteal"
+max_worker_restart = 0
+per_shard_hard_timeout_seconds = 220
+reducer_single_canonical_receipt = true
 run_full_suite_when_p95_below_seconds = 35
 hard_timeout_seconds = 220
 required = true
