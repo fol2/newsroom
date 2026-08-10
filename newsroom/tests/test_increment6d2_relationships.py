@@ -6,10 +6,17 @@ from dataclasses import replace
 
 import pytest
 
+from newsroom.authority.canonical import canonical_json_bytes
 from newsroom.increment6.hypotheses import (
     EventHypothesis,
     EventHypothesisVersion,
     HypothesisSourceBinding,
+)
+from newsroom.increment6.outcomes import (
+    CanonicalOutcome,
+    ReasonBasisClass,
+    ReasonCode,
+    StructuredReason,
 )
 from newsroom.increment6.proposals import HypothesisRelationship
 from newsroom.increment6.relationships import (
@@ -21,9 +28,8 @@ from newsroom.increment6.relationships import (
     HypothesisVersionBinding,
     RelationshipAssessment,
     RelationshipContractError,
-    RelationshipDecision,
-    RelationshipDecisionReason,
     assess_relationships,
+    verify_relationship_assessment_replay,
 )
 
 D1 = "sha256:" + "1" * 64
@@ -34,18 +40,22 @@ def _version(
     seed: int,
     *,
     relationship: HypothesisRelationship = HypothesisRelationship.NO_ADEQUATE_PRIOR_MATCH,
+    source_count: int = 1,
 ) -> EventHypothesisVersion:
     proposal_id = str(uuid.UUID(int=seed))
     hypothesis = EventHypothesis.allocate(proposal_id, f"local-{seed}")
-    source = HypothesisSourceBinding(
-        D1,
-        D2,
-        D1,
-        D2,
-        str(uuid.UUID(int=seed + 100)),
-        D1,
-        str(uuid.UUID(int=seed + 200)),
-        D2,
+    sources = tuple(
+        HypothesisSourceBinding(
+            "sha256:" + f"{seed * 32 + index:064x}",
+            D2,
+            D1,
+            D2,
+            str(uuid.UUID(int=seed * 1000 + index + 100)),
+            D1,
+            str(uuid.UUID(int=seed * 1000 + index + 500)),
+            D2,
+        )
+        for index in range(source_count)
     )
     return EventHypothesisVersion(
         str(uuid.uuid5(uuid.UUID(hypothesis.hypothesis_id), "version:1")),
@@ -67,7 +77,7 @@ def _version(
         D1,
         str(uuid.UUID(int=seed + 500)),
         D2,
-        (source,),
+        sources,
         D1,
         str(uuid.UUID(int=seed + 600)),
         "2042-01-01T00:00:00.000000Z",
@@ -98,41 +108,41 @@ def _evidence(
     ("scores", "decision", "reason"),
     [
         (
-            {"same_state_score": 80},
-            RelationshipDecision.REL_SAME_STATE,
-            RelationshipDecisionReason.SAME_STATE_THRESHOLD_MET,
+            {"score": 59, "same_state_score": 80},
+            CanonicalOutcome.REL_SAME_STATE,
+            ReasonCode.REL_SAME_STATE,
         ),
         (
-            {"development_score": 75},
-            RelationshipDecision.REL_DEVELOPMENT_OF,
-            RelationshipDecisionReason.DEVELOPMENT_THRESHOLD_MET,
+            {"score": 59, "development_score": 75},
+            CanonicalOutcome.REL_DEVELOPMENT_OF,
+            ReasonCode.REL_DEVELOPMENT,
         ),
         (
-            {"correction_reversal_score": 80},
-            RelationshipDecision.REL_CORRECTION_REVERSAL_OF,
-            RelationshipDecisionReason.CORRECTION_REVERSAL_THRESHOLD_MET,
+            {"score": 59, "correction_reversal_score": 80},
+            CanonicalOutcome.REL_CORRECTION_REVERSAL_OF,
+            ReasonCode.REL_CORRECTION_REVERSAL,
         ),
         (
-            {"related_distinct_score": 60},
-            RelationshipDecision.REL_RELATED_DISTINCT,
-            RelationshipDecisionReason.RELATED_DISTINCT_THRESHOLD_MET,
+            {"score": 59, "related_distinct_score": 60},
+            CanonicalOutcome.REL_RELATED_DISTINCT,
+            ReasonCode.REL_RELATED_DISTINCT,
         ),
         (
             {"score": 59},
-            RelationshipDecision.REL_NO_ADEQUATE_PRIOR_MATCH,
-            RelationshipDecisionReason.COMPLETE_SET_NO_ADEQUATE_MATCH,
+            CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH,
+            ReasonCode.REL_NO_ADEQUATE_PRIOR_MATCH,
         ),
         (
             {"score": 60},
-            RelationshipDecision.REL_UNCERTAIN,
-            RelationshipDecisionReason.ADEQUATE_MATCH_CLASSIFICATION_UNCERTAIN,
+            CanonicalOutcome.REL_UNCERTAIN,
+            ReasonCode.REL_UNCERTAIN,
         ),
     ],
 )
 def test_six_separate_decisions_and_closed_reason_matrix(
     scores: dict[str, int],
-    decision: RelationshipDecision,
-    reason: RelationshipDecisionReason,
+    decision: CanonicalOutcome,
+    reason: ReasonCode,
 ) -> None:
     subject, comparator = _binding(1), _binding(2)
     result = assess_relationships(
@@ -141,9 +151,24 @@ def test_six_separate_decisions_and_closed_reason_matrix(
         (_evidence(subject, comparator, **scores),),
     )
     assert result.decision is decision
-    assert result.reason is reason
+    assert result.reason is not None
+    assert type(result.reason) is StructuredReason
+    assert result.reason.code is reason
+    assert result.reason.basis is ReasonBasisClass.DETERMINISTIC_POLICY
+    reference_types = {item.reference_type for item in result.reason.references}
+    assert reference_types == {
+        "COMPARATOR_MANIFEST",
+        "POLICY_EVIDENCE",
+        "SUBJECT_VERSION",
+        *(
+            ()
+            if decision is CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH
+            else ("COMPARATOR_VERSION",)
+        ),
+    }
+    assert all(item.digest is not None for item in result.reason.references)
     assert reason in RELATIONSHIP_DECISION_REASON[decision]
-    if decision is RelationshipDecision.REL_NO_ADEQUATE_PRIOR_MATCH:
+    if decision is CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH:
         assert result.comparator is None
     else:
         assert result.comparator == comparator
@@ -152,7 +177,7 @@ def test_six_separate_decisions_and_closed_reason_matrix(
         HYPOTHESIS_RELATIONSHIP_DECISION
         == "newsroom.increment6.hypothesis-relationship-decision.v1"
     )
-    assert {item.value for item in RelationshipDecision} == {
+    assert {item.value for item in RELATIONSHIP_DECISION_REASON} == {
         "REL_SAME_STATE",
         "REL_DEVELOPMENT_OF",
         "REL_CORRECTION_REVERSAL_OF",
@@ -187,6 +212,60 @@ def test_exact_version_source_actor_comparator_and_disposition_binding() -> None
     assessment = assess_relationships(binding, manifest, (evidence,))
     assert assessment.comparator_manifest_digest == manifest.canonical_digest
 
+    verified = verify_relationship_assessment_replay(
+        assessment.canonical_bytes,
+        subject_version=version,
+        comparator_versions=(_version(30),),
+        evidence=(evidence.canonical_bytes,),
+    )
+    assert verified == assessment
+
+
+def test_plain_parser_is_structural_but_public_replay_verifier_rejects_semantic_tamper() -> (
+    None
+):
+    subject_version, comparator_version = _version(31), _version(32)
+    subject = HypothesisVersionBinding.from_version(subject_version)
+    comparator = HypothesisVersionBinding.from_version(comparator_version)
+    evidence = _evidence(subject, comparator, same_state_score=80)
+    assessment = assess_relationships(
+        subject, ComparatorSetManifest.complete((comparator,)), (evidence,)
+    )
+    tampered = json.loads(assessment.canonical_bytes)
+    tampered["decision"] = CanonicalOutcome.REL_DEVELOPMENT_OF.value
+    tampered["reason"]["code"] = ReasonCode.REL_DEVELOPMENT.value
+    tampered_raw = canonical_json_bytes(tampered)
+
+    assert (
+        RelationshipAssessment.from_canonical_bytes(tampered_raw).decision
+        is CanonicalOutcome.REL_DEVELOPMENT_OF
+    )
+    with pytest.raises(RelationshipContractError, match="verified replay"):
+        verify_relationship_assessment_replay(
+            tampered_raw,
+            subject_version=subject_version,
+            comparator_versions=(comparator_version,),
+            evidence=(evidence.canonical_bytes,),
+        )
+
+    tampered = json.loads(assessment.canonical_bytes)
+    tampered["evidence_digest"] = D2
+    with pytest.raises(RelationshipContractError, match="verified replay"):
+        verify_relationship_assessment_replay(
+            canonical_json_bytes(tampered),
+            subject_version=subject_version,
+            comparator_versions=(comparator_version,),
+            evidence=(evidence.canonical_bytes,),
+        )
+
+    with pytest.raises(RelationshipContractError, match="binding"):
+        verify_relationship_assessment_replay(
+            assessment.canonical_bytes,
+            subject_version=subject_version,
+            comparator_versions=(_version(33),),
+            evidence=(evidence.canonical_bytes,),
+        )
+
 
 def test_threshold_edges_precedence_tie_permutation_and_replay() -> None:
     subject, a, b = _binding(4), _binding(5), _binding(6)
@@ -196,7 +275,7 @@ def test_threshold_edges_precedence_tie_permutation_and_replay() -> None:
         subject, b, score=70, correction_reversal_score=80, development_score=99
     )
     result = assess_relationships(subject, manifest, (ea, eb))
-    assert result.decision is RelationshipDecision.REL_CORRECTION_REVERSAL_OF
+    assert result.decision is CanonicalOutcome.REL_CORRECTION_REVERSAL_OF
     assert result.comparator == b
     assert result == assess_relationships(subject, manifest, (eb, ea))
 
@@ -236,7 +315,7 @@ def test_false_merge_split_and_temporal_correction_precedence() -> None:
             ),
         ),
     )
-    assert distinct.decision is RelationshipDecision.REL_RELATED_DISTINCT
+    assert distinct.decision is CanonicalOutcome.REL_RELATED_DISTINCT
     correction = assess_relationships(
         subject,
         manifest,
@@ -246,7 +325,7 @@ def test_false_merge_split_and_temporal_correction_precedence() -> None:
             ),
         ),
     )
-    assert correction.decision is RelationshipDecision.REL_CORRECTION_REVERSAL_OF
+    assert correction.decision is CanonicalOutcome.REL_CORRECTION_REVERSAL_OF
 
 
 @pytest.mark.parametrize(
@@ -269,7 +348,7 @@ def test_partial_or_unavailable_comparator_sets_never_become_uncertain_or_positi
 def test_empty_complete_set_is_no_match_and_manifest_integrity_is_strict() -> None:
     subject, comparator = _binding(10), _binding(11)
     result = assess_relationships(subject, ComparatorSetManifest.complete(()), ())
-    assert result.decision is RelationshipDecision.REL_NO_ADEQUATE_PRIOR_MATCH
+    assert result.decision is CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH
     with pytest.raises(RelationshipContractError):
         ComparatorSetManifest.complete((comparator, comparator))
     with pytest.raises(RelationshipContractError):
@@ -301,17 +380,33 @@ def test_empty_complete_set_is_no_match_and_manifest_integrity_is_strict() -> No
 def test_legal_maximum_comparator_producer_round_trips() -> None:
     from newsroom.increment6 import relationships as module
 
-    subject = _binding(1000)
+    subject_version = _version(1000, source_count=32)
+    comparator_versions = tuple(
+        _version(seed, source_count=32)
+        for seed in range(1001, 1001 + module.MAX_COMPARATORS)
+    )
+    subject = HypothesisVersionBinding.from_version(subject_version)
     comparators = tuple(
-        _binding(seed) for seed in range(1001, 1001 + module.MAX_COMPARATORS)
+        HypothesisVersionBinding.from_version(version)
+        for version in comparator_versions
     )
     manifest = ComparatorSetManifest.complete(comparators)
     evidence = tuple(
         _evidence(subject, comparator, score=59) for comparator in comparators
     )
     result = assess_relationships(subject, manifest, evidence)
-    assert result.decision is RelationshipDecision.REL_NO_ADEQUATE_PRIOR_MATCH
+    assert result.decision is CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH
     assert RelationshipAssessment.from_canonical_bytes(result.canonical_bytes) == result
+    assert len(result.canonical_bytes) < module.MAX_RELATIONSHIP_CANONICAL_BYTES
+    assert (
+        verify_relationship_assessment_replay(
+            result.canonical_bytes,
+            subject_version=subject_version,
+            comparator_versions=comparator_versions,
+            evidence=tuple(item.canonical_bytes for item in evidence),
+        )
+        == result
+    )
 
 
 def test_integer_only_scores_bounds_and_no_effects() -> None:

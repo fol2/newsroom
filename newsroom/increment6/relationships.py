@@ -23,6 +23,13 @@ from newsroom.increment6.hypotheses import (
     EventHypothesisVersion,
     HypothesisSourceBinding,
 )
+from newsroom.increment6.outcomes import (
+    CanonicalOutcome,
+    ReasonBasisClass,
+    ReasonCode,
+    ReasonReference,
+    StructuredReason,
+)
 
 HYPOTHESIS_RELATIONSHIP_DECISION = (
     "newsroom.increment6.hypothesis-relationship-decision.v1"
@@ -40,51 +47,32 @@ _UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 _MAX_JSON_DEPTH = 24
-_MAX_JSON_NODES = 32768
+_MAX_SOURCE_BINDINGS = 32
+_SOURCE_BINDING_MAX_NODES = 9
+_VERSION_BINDING_MAX_NODES = 6 + (_MAX_SOURCE_BINDINGS * _SOURCE_BINDING_MAX_NODES)
+# A maximum assessment contains a subject, all comparator bindings in its
+# manifest, a selected comparator replica, and bounded structured-reason data.
+_MAX_JSON_NODES = 2_048 + ((MAX_COMPARATORS + 2) * _VERSION_BINDING_MAX_NODES)
 
 
 class RelationshipContractError(ValueError):
     """A relationship value or replay failed closed."""
 
 
-class RelationshipDecision(StrEnum):
-    REL_SAME_STATE = "REL_SAME_STATE"
-    REL_DEVELOPMENT_OF = "REL_DEVELOPMENT_OF"
-    REL_CORRECTION_REVERSAL_OF = "REL_CORRECTION_REVERSAL_OF"
-    REL_RELATED_DISTINCT = "REL_RELATED_DISTINCT"
-    REL_NO_ADEQUATE_PRIOR_MATCH = "REL_NO_ADEQUATE_PRIOR_MATCH"
-    REL_UNCERTAIN = "REL_UNCERTAIN"
-
-
-class RelationshipDecisionReason(StrEnum):
-    SAME_STATE_THRESHOLD_MET = "SAME_STATE_THRESHOLD_MET"
-    DEVELOPMENT_THRESHOLD_MET = "DEVELOPMENT_THRESHOLD_MET"
-    CORRECTION_REVERSAL_THRESHOLD_MET = "CORRECTION_REVERSAL_THRESHOLD_MET"
-    RELATED_DISTINCT_THRESHOLD_MET = "RELATED_DISTINCT_THRESHOLD_MET"
-    COMPLETE_SET_NO_ADEQUATE_MATCH = "COMPLETE_SET_NO_ADEQUATE_MATCH"
-    ADEQUATE_MATCH_CLASSIFICATION_UNCERTAIN = "ADEQUATE_MATCH_CLASSIFICATION_UNCERTAIN"
-
-
 RELATIONSHIP_DECISION_REASON = MappingProxyType(
     {
-        RelationshipDecision.REL_SAME_STATE: frozenset(
-            {RelationshipDecisionReason.SAME_STATE_THRESHOLD_MET}
+        CanonicalOutcome.REL_SAME_STATE: frozenset({ReasonCode.REL_SAME_STATE}),
+        CanonicalOutcome.REL_DEVELOPMENT_OF: frozenset({ReasonCode.REL_DEVELOPMENT}),
+        CanonicalOutcome.REL_CORRECTION_REVERSAL_OF: frozenset(
+            {ReasonCode.REL_CORRECTION_REVERSAL}
         ),
-        RelationshipDecision.REL_DEVELOPMENT_OF: frozenset(
-            {RelationshipDecisionReason.DEVELOPMENT_THRESHOLD_MET}
+        CanonicalOutcome.REL_RELATED_DISTINCT: frozenset(
+            {ReasonCode.REL_RELATED_DISTINCT}
         ),
-        RelationshipDecision.REL_CORRECTION_REVERSAL_OF: frozenset(
-            {RelationshipDecisionReason.CORRECTION_REVERSAL_THRESHOLD_MET}
+        CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH: frozenset(
+            {ReasonCode.REL_NO_ADEQUATE_PRIOR_MATCH}
         ),
-        RelationshipDecision.REL_RELATED_DISTINCT: frozenset(
-            {RelationshipDecisionReason.RELATED_DISTINCT_THRESHOLD_MET}
-        ),
-        RelationshipDecision.REL_NO_ADEQUATE_PRIOR_MATCH: frozenset(
-            {RelationshipDecisionReason.COMPLETE_SET_NO_ADEQUATE_MATCH}
-        ),
-        RelationshipDecision.REL_UNCERTAIN: frozenset(
-            {RelationshipDecisionReason.ADEQUATE_MATCH_CLASSIFICATION_UNCERTAIN}
-        ),
+        CanonicalOutcome.REL_UNCERTAIN: frozenset({ReasonCode.REL_UNCERTAIN}),
     }
 )
 
@@ -247,7 +235,7 @@ class HypothesisVersionBinding(_NoEffect):
         if (
             type(self.source_bindings) is not tuple
             or not self.source_bindings
-            or len(self.source_bindings) > 32
+            or len(self.source_bindings) > _MAX_SOURCE_BINDINGS
             or any(
                 type(item) is not HypothesisSourceBinding
                 for item in self.source_bindings
@@ -317,7 +305,11 @@ class HypothesisVersionBinding(_NoEffect):
         }
         item = _exact(value, fields, "Version binding")
         sources = item["source_bindings"]
-        if type(sources) is not list or not sources or len(sources) > 32:
+        if (
+            type(sources) is not list
+            or not sources
+            or len(sources) > _MAX_SOURCE_BINDINGS
+        ):
             raise RelationshipContractError("source_bindings must be an array")
         return _normalise(
             lambda: cls(
@@ -509,8 +501,8 @@ class RelationshipAssessment(_NoEffect):
     status: AssessmentStatus
     subject: HypothesisVersionBinding
     comparator_manifest: ComparatorSetManifest
-    decision: RelationshipDecision | None
-    reason: RelationshipDecisionReason | None
+    decision: CanonicalOutcome | None
+    reason: StructuredReason | None
     comparator: HypothesisVersionBinding | None
     score: int | None
     evidence_digest: str | None
@@ -543,17 +535,18 @@ class RelationshipAssessment(_NoEffect):
                     "complete assessment fields are incomplete"
                 )
             if (
-                type(self.decision) is not RelationshipDecision
-                or type(self.reason) is not RelationshipDecisionReason
+                type(self.decision) is not CanonicalOutcome
+                or type(self.reason) is not StructuredReason
             ):
                 raise RelationshipContractError("decision and reason must be exact")
-            if self.reason not in RELATIONSHIP_DECISION_REASON[self.decision]:
+            if (
+                self.decision not in RELATIONSHIP_DECISION_REASON
+                or self.reason.code not in RELATIONSHIP_DECISION_REASON[self.decision]
+            ):
                 raise RelationshipContractError("reason is outside the decision family")
             _score(self.score, "assessment score")
             _digest(self.evidence_digest, "evidence_digest")
-            pairwise = (
-                self.decision is not RelationshipDecision.REL_NO_ADEQUATE_PRIOR_MATCH
-            )
+            pairwise = self.decision is not CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH
             if pairwise != (self.comparator is not None):
                 raise RelationshipContractError(
                     "decision comparator binding is inconsistent"
@@ -581,7 +574,9 @@ class RelationshipAssessment(_NoEffect):
                 "subject": self.subject.canonical_value,
                 "comparator_manifest": self.comparator_manifest.canonical_value,
                 "decision": None if self.decision is None else self.decision.value,
-                "reason": None if self.reason is None else self.reason.value,
+                "reason": None
+                if self.reason is None
+                else self.reason.canonical_value(),
                 "comparator": None
                 if self.comparator is None
                 else self.comparator.canonical_value,
@@ -606,6 +601,12 @@ class RelationshipAssessment(_NoEffect):
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
+        """Parse a structurally valid receipt without claiming verified replay.
+
+        Call :func:`verify_relationship_assessment_replay` with the exact live
+        Hypothesis Versions and canonical evidence before relying on policy
+        semantics.
+        """
         fields = {
             "schema_version",
             "status",
@@ -631,10 +632,10 @@ class RelationshipAssessment(_NoEffect):
                 ComparatorSetManifest.from_value(item["comparator_manifest"]),
                 None
                 if item["decision"] is None
-                else RelationshipDecision(item["decision"]),  # type: ignore[arg-type]
+                else CanonicalOutcome(item["decision"]),  # type: ignore[arg-type]
                 None
                 if item["reason"] is None
-                else RelationshipDecisionReason(item["reason"]),  # type: ignore[arg-type]
+                else StructuredReason.from_mapping(item["reason"]),
                 None
                 if item["comparator"] is None
                 else HypothesisVersionBinding.from_value(item["comparator"]),
@@ -646,37 +647,97 @@ class RelationshipAssessment(_NoEffect):
 
 
 _PRECEDENCE = {
-    RelationshipDecision.REL_CORRECTION_REVERSAL_OF: 0,
-    RelationshipDecision.REL_DEVELOPMENT_OF: 1,
-    RelationshipDecision.REL_SAME_STATE: 2,
-    RelationshipDecision.REL_RELATED_DISTINCT: 3,
+    CanonicalOutcome.REL_CORRECTION_REVERSAL_OF: 0,
+    CanonicalOutcome.REL_DEVELOPMENT_OF: 1,
+    CanonicalOutcome.REL_SAME_STATE: 2,
+    CanonicalOutcome.REL_RELATED_DISTINCT: 3,
 }
 
 
 def _classify(
     evidence: ComparatorEvidence,
-) -> tuple[RelationshipDecision, RelationshipDecisionReason] | None:
+) -> CanonicalOutcome | None:
     if evidence.correction_reversal_score >= CORRECTION_REVERSAL_THRESHOLD:
-        return (
-            RelationshipDecision.REL_CORRECTION_REVERSAL_OF,
-            RelationshipDecisionReason.CORRECTION_REVERSAL_THRESHOLD_MET,
-        )
+        return CanonicalOutcome.REL_CORRECTION_REVERSAL_OF
     if evidence.development_score >= DEVELOPMENT_THRESHOLD:
-        return (
-            RelationshipDecision.REL_DEVELOPMENT_OF,
-            RelationshipDecisionReason.DEVELOPMENT_THRESHOLD_MET,
-        )
+        return CanonicalOutcome.REL_DEVELOPMENT_OF
     if evidence.same_state_score >= SAME_STATE_THRESHOLD:
-        return (
-            RelationshipDecision.REL_SAME_STATE,
-            RelationshipDecisionReason.SAME_STATE_THRESHOLD_MET,
-        )
+        return CanonicalOutcome.REL_SAME_STATE
     if evidence.related_distinct_score >= RELATED_DISTINCT_THRESHOLD:
-        return (
-            RelationshipDecision.REL_RELATED_DISTINCT,
-            RelationshipDecisionReason.RELATED_DISTINCT_THRESHOLD_MET,
-        )
+        return CanonicalOutcome.REL_RELATED_DISTINCT
     return None
+
+
+_REASON_EXPLANATIONS = MappingProxyType(
+    {
+        CanonicalOutcome.REL_SAME_STATE: (
+            "The exact comparator met the same-state policy threshold."
+        ),
+        CanonicalOutcome.REL_DEVELOPMENT_OF: (
+            "The exact comparator met the development policy threshold."
+        ),
+        CanonicalOutcome.REL_CORRECTION_REVERSAL_OF: (
+            "The exact comparator met the correction or reversal policy threshold."
+        ),
+        CanonicalOutcome.REL_RELATED_DISTINCT: (
+            "The exact comparator met the related-distinct policy threshold."
+        ),
+        CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH: (
+            "The complete comparator set contained no adequate prior match."
+        ),
+        CanonicalOutcome.REL_UNCERTAIN: (
+            "The best adequate comparator did not meet a semantic threshold."
+        ),
+    }
+)
+
+
+def _structured_reason(
+    decision: CanonicalOutcome,
+    *,
+    subject: HypothesisVersionBinding,
+    manifest: ComparatorSetManifest,
+    evidence_digest: str,
+    comparator: HypothesisVersionBinding | None,
+) -> StructuredReason:
+    references = [
+        ReasonReference(
+            reference_type="COMPARATOR_MANIFEST",
+            identifier=manifest.canonical_digest,
+            digest=manifest.canonical_digest,
+        ),
+        ReasonReference(
+            reference_type="POLICY_EVIDENCE",
+            identifier=decision.value,
+            digest=evidence_digest,
+        ),
+        ReasonReference(
+            reference_type="SUBJECT_VERSION",
+            identifier=subject.version_id,
+            digest=subject.version_digest,
+        ),
+    ]
+    if comparator is not None:
+        references.append(
+            ReasonReference(
+                reference_type="COMPARATOR_VERSION",
+                identifier=comparator.version_id,
+                digest=comparator.version_digest,
+            )
+        )
+    references.sort(
+        key=lambda item: (item.reference_type, item.identifier, item.digest or "")
+    )
+    reason_code = next(iter(RELATIONSHIP_DECISION_REASON[decision]))
+    return _normalise(
+        lambda: StructuredReason(
+            code=reason_code,
+            basis=ReasonBasisClass.DETERMINISTIC_POLICY,
+            references=tuple(references),
+            explanation=_REASON_EXPLANATIONS[decision],
+        ),
+        "relationship reason construction failed",
+    )
 
 
 def assess_relationships(
@@ -740,43 +801,63 @@ def assess_relationships(
     evidence_digest = digest_bytes(
         _canonical([item.canonical_value for item in ordered_evidence], "evidence set")
     )
+    classified_evidence = tuple((item, _classify(item)) for item in ordered_evidence)
     adequate = tuple(
-        item for item in ordered_evidence if item.score >= ADEQUATE_MATCH_THRESHOLD
+        (item, classification)
+        for item, classification in classified_evidence
+        if item.score >= ADEQUATE_MATCH_THRESHOLD or classification is not None
     )
     if not adequate:
+        decision = CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH
         return RelationshipAssessment(
             AssessmentStatus.COMPLETE,
             subject,
             comparator_manifest,
-            RelationshipDecision.REL_NO_ADEQUATE_PRIOR_MATCH,
-            RelationshipDecisionReason.COMPLETE_SET_NO_ADEQUATE_MATCH,
+            decision,
+            _structured_reason(
+                decision,
+                subject=subject,
+                manifest=comparator_manifest,
+                evidence_digest=evidence_digest,
+                comparator=None,
+            ),
             None,
             0,
             evidence_digest,
         )
     classified = tuple(
-        (classification[0], classification[1], item)
-        for item in adequate
-        if (classification := _classify(item)) is not None
+        (classification, item)
+        for item, classification in adequate
+        if classification is not None
     )
     if not classified:
-        best = min(adequate, key=lambda item: (-item.score, item.comparator.version_id))
+        best = min(
+            (item for item, _ in adequate),
+            key=lambda item: (-item.score, item.comparator.version_id),
+        )
+        decision = CanonicalOutcome.REL_UNCERTAIN
         return RelationshipAssessment(
             AssessmentStatus.COMPLETE,
             subject,
             comparator_manifest,
-            RelationshipDecision.REL_UNCERTAIN,
-            RelationshipDecisionReason.ADEQUATE_MATCH_CLASSIFICATION_UNCERTAIN,
+            decision,
+            _structured_reason(
+                decision,
+                subject=subject,
+                manifest=comparator_manifest,
+                evidence_digest=evidence_digest,
+                comparator=best.comparator,
+            ),
             best.comparator,
             best.score,
             evidence_digest,
         )
-    decision, reason, selected = min(
+    decision, selected = min(
         classified,
         key=lambda item: (
             _PRECEDENCE[item[0]],
-            -item[2].score,
-            item[2].comparator.version_id,
+            -item[1].score,
+            item[1].comparator.version_id,
         ),
     )
     return RelationshipAssessment(
@@ -784,11 +865,87 @@ def assess_relationships(
         subject,
         comparator_manifest,
         decision,
-        reason,
+        _structured_reason(
+            decision,
+            subject=subject,
+            manifest=comparator_manifest,
+            evidence_digest=evidence_digest,
+            comparator=selected.comparator,
+        ),
         selected.comparator,
         selected.score,
         evidence_digest,
     )
+
+
+def verify_relationship_assessment_replay(
+    raw: bytes,
+    *,
+    subject_version: EventHypothesisVersion,
+    comparator_versions: tuple[EventHypothesisVersion, ...],
+    evidence: tuple[bytes, ...],
+) -> RelationshipAssessment:
+    """Rebind exact Versions, rerun policy, and verify a canonical receipt.
+
+    ``RelationshipAssessment.from_canonical_bytes`` is deliberately only a
+    structural parser.  This verifier is the public semantic replay boundary:
+    it reconstructs every binding from exact 6D1 Version values, parses each
+    canonical policy input, reruns the deterministic policy, and requires both
+    canonical bytes and digest to match.
+    """
+    parsed = RelationshipAssessment.from_canonical_bytes(raw)
+    if type(subject_version) is not EventHypothesisVersion:
+        raise RelationshipContractError(
+            "verified replay subject requires an exact Hypothesis Version"
+        )
+    if (
+        type(comparator_versions) is not tuple
+        or len(comparator_versions) > MAX_COMPARATORS
+        or any(type(item) is not EventHypothesisVersion for item in comparator_versions)
+    ):
+        raise RelationshipContractError(
+            "verified replay comparators require a bounded exact Version tuple"
+        )
+    if (
+        type(evidence) is not tuple
+        or len(evidence) > MAX_COMPARATORS
+        or any(type(item) is not bytes for item in evidence)
+    ):
+        raise RelationshipContractError(
+            "verified replay evidence requires bounded canonical byte values"
+        )
+
+    rebound_subject = HypothesisVersionBinding.from_version(subject_version)
+    rebound_comparators = tuple(
+        sorted(
+            (
+                HypothesisVersionBinding.from_version(version)
+                for version in comparator_versions
+            ),
+            key=lambda item: item.version_id,
+        )
+    )
+    rebound_manifest = ComparatorSetManifest(
+        parsed.comparator_manifest.status, rebound_comparators
+    )
+    if (
+        rebound_subject != parsed.subject
+        or rebound_manifest != parsed.comparator_manifest
+    ):
+        raise RelationshipContractError(
+            "verified replay binding differs from the canonical receipt"
+        )
+    rebound_evidence = tuple(
+        ComparatorEvidence.from_canonical_bytes(item) for item in evidence
+    )
+    replayed = assess_relationships(rebound_subject, rebound_manifest, rebound_evidence)
+    if replayed.canonical_bytes != raw or replayed.canonical_digest != digest_bytes(
+        raw
+    ):
+        raise RelationshipContractError(
+            "verified replay differs from the canonical relationship assessment"
+        )
+    return replayed
 
 
 __all__ = [
@@ -806,7 +963,6 @@ __all__ = [
     "HypothesisVersionBinding",
     "RelationshipAssessment",
     "RelationshipContractError",
-    "RelationshipDecision",
-    "RelationshipDecisionReason",
     "assess_relationships",
+    "verify_relationship_assessment_replay",
 ]
