@@ -1,47 +1,76 @@
 # Authority-store conformance harness
 
 `newsroom/tests/authority_store_conformance.py` is a repository-owned,
-test-only kernel for the remaining Increment 6 persistence atoms.  It has no
-production imports and no store schema knowledge.  A persistence PR supplies a
-small adapter implementing `AuthorityStoreAdapter`, returns an
-`AuthorityStoreFixture`, and declares only the invariant families that its
-store can exercise:
+test-only kernel for the remaining Increment 6 persistence atoms. It imports no
+production code and knows no product schema. A persistence PR supplies a small
+`AuthorityStoreAdapter` which translates the generic primitive operations to
+its test store:
 
 ```python
 class MyStoreAdapter:
     name = "my-store"
-    supported_cases = CASE_INVENTORY
+    applicability = {case: Applicability.required() for case in CASE_INVENTORY}
 
-    def build_fixture(self) -> AuthorityStoreFixture: ...
-    def exercise_case(self, case, fixture) -> ConformanceEvidence: ...
+    def reset(self): ...
+    def put(self, command, *, lose_response=False): ...
+    def replay(self, command): ...
+    def observe(self, record_id): ...
+    def load(self, record_id): ...
+    def list_history(self): ...
+    def set_upstream_head(self, authority, value): ...
+    def current_use(self, record_id): ...
+    def tamper(self, record_id, kind): ...
+    def reopen(self, *, migrate): ...
+    def rollback(self, command): ...
 
 report = assert_conformant(MyStoreAdapter())
 ```
 
-`run_conformance` executes the fixed `CASE_INVENTORY` order.  Unsupported
-families are recorded as `skipped`; declared families must provide typed
-observations and receive a stable `FailureCode` on failure.  `report.render()`
-is value-independent and deterministic for CI artefacts.
+The adapter must expose real state transitions and observable persisted state.
+It does not provide expected values, success booleans or per-case evidence.
+The kernel owns the fixed commands, sequencing, mutations and normative
+assertions. It proves that a row is absent before a write, observes retention,
+changes heads, tampers stored forms, attempts same-predecessor writes, rolls a
+transaction back and reopens the store. A constant, no-store adapter therefore
+does not conform merely by returning self-consistent values.
 
-The inventory covers:
+## Exhaustive applicability
 
-| Case | Required observation |
+`applicability` is an exhaustive manifest: every member of `CASE_INVENTORY`
+must be present. Normally use `Applicability.required()`. A structurally
+inapplicable family needs both a stable reason and a reviewed waiver reference:
+
+```python
+applicability = {case: Applicability.required() for case in CASE_INVENTORY}
+applicability[CaseId.RESTART_MIGRATION] = Applicability.waived(
+    reason="store is ephemeral and has no reopen boundary",
+    waiver_reference="issue:NNN#reviewed-waiver",
+)
+```
+
+A missing family, blank reason or blank reference is `ADAPTER_PROTOCOL` and
+fails the report. Valid skips render deterministically with both `waiver=` and
+`reason=` so CI cannot hide an omitted invariant family.
+
+## Kernel-owned scenarios
+
+| Case | Normative sequence and assertion |
 | --- | --- |
-| `fresh_replay` | fresh and exact replay results |
-| `fresh_reopen` | fresh and reopened results |
-| `representation_binding` | canonical bytes, scalar/identity columns and linked rows |
-| `request_binding` | actor, request, idempotency and CAS predecessor |
-| `lost_response_replay` | retained-result replay, retained-integrity validation and no unrelated currentness |
-| `historical_read` | retained value identity, digest and provenance |
-| `current_use_revalidation` | every required upstream head and changed-head rejection |
-| `tamper_rejection` | adapter-named direct SQL, linked-row and self-consistent mutations |
-| `competing_writers` | deterministic competing-writer outcome |
-| `transaction_rollback` | clean rollback boundary |
-| `restart_migration` | restart and migration/reopen parity |
+| `fresh_replay` | absent → write → retained exact replay |
+| `fresh_reopen` | write → reopen → validated equal load |
+| `representation_binding` | observe exact canonical bytes, scalar/identity columns and linked rows |
+| `request_binding` | observe exact actor, request, idempotency and CAS predecessor |
+| `lost_response_replay` | retain before lost response, replay despite changed use-time heads, reject retained tamper |
+| `historical_read` | load/list retained value, then reject identity, digest and provenance mutations |
+| `current_use_revalidation` | accept matching heads and reject each required head independently after change |
+| `tamper_rejection` | reject direct canonical, linked-row and self-consistent offline rewrites |
+| `competing_writers` | accept one same-predecessor writer and reject the other without retention |
+| `transaction_rollback` | observe no row or history after rollback |
+| `restart_migration` | retain validated value and representation across restart and migration/reopen |
 
-The focused test module contains deliberately broken in-memory adapters for
-replay, reopen, canonical/scalar and linked-row representations, and historical
-reads.  They are fixtures for the harness itself, not examples of any product
-store and are intentionally not coupled to PR #380.  A store adapter belongs in
-its persistence PR's test tree; this kernel does not change authority runtime
-behaviour, migrations, tables or public APIs.
+Adapters translate product exceptions to `IntegrityViolation`, `WriteConflict`
+and `LostResponse` at this test seam. The focused stateful in-memory fixture
+injects defects into store behaviour rather than evidence records and proves
+stable family-specific `FailureCode` classification. Store adapters remain in
+their persistence PR test trees; this harness changes no production authority
+behaviour, migrations, tables or public runtime APIs.

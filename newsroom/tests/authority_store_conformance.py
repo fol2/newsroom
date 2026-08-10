@@ -1,22 +1,20 @@
-"""Generic, adapter-driven authority-store conformance checks.
+"""Test-only authority-store conformance kernel.
 
-This module is deliberately test-only.  A persistence implementation supplies a
-small adapter and declares the invariant families it can exercise; the kernel
-then compares typed observations in a fixed order and emits stable failure
-codes.  Store-specific schemas, names and operations remain in the adapter.
+Adapters expose store operations and observable persisted state.  The kernel,
+not the adapter, owns the commands, scenario order and normative assertions.
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+import hashlib
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
 
 class CaseId(str, Enum):
-    """Invariant families understood by the reusable harness."""
-
     FRESH_REPLAY = "fresh_replay"
     FRESH_REOPEN = "fresh_reopen"
     REPRESENTATION_BINDING = "representation_binding"
@@ -30,8 +28,6 @@ class CaseId(str, Enum):
     RESTART_MIGRATION = "restart_migration"
 
 
-# The order is part of the protocol: reports and focused CI output must not
-# depend on set/dict iteration order in an adapter.
 CASE_INVENTORY: tuple[CaseId, ...] = (
     CaseId.FRESH_REPLAY,
     CaseId.FRESH_REOPEN,
@@ -48,8 +44,6 @@ CASE_INVENTORY: tuple[CaseId, ...] = (
 
 
 class FailureCode(str, Enum):
-    """Stable machine-readable failure classifications."""
-
     ADAPTER_PROTOCOL = "adapter_protocol"
     ADAPTER_ERROR = "adapter_error"
     REPLAY_MISMATCH = "replay_mismatch"
@@ -71,120 +65,164 @@ class OutcomeStatus(str, Enum):
     FAIL = "fail"
 
 
-@dataclass(frozen=True)
-class AuthorityStoreRepresentation:
-    """The mutually-bound persisted forms returned by an adapter."""
+class TamperKind(str, Enum):
+    CANONICAL = "canonical"
+    SCALAR = "scalar"
+    IDENTITY = "identity"
+    LINKED_ROW = "linked_row"
+    DIGEST = "digest"
+    PROVENANCE = "provenance"
+    OFFLINE_REWRITE = "offline_rewrite"
 
+
+class StoreOperationError(Exception):
+    """Base exception translated by a store adapter at the test seam."""
+
+
+class IntegrityViolation(StoreOperationError):
+    pass
+
+
+class WriteConflict(StoreOperationError):
+    pass
+
+
+class LostResponse(StoreOperationError):
+    pass
+
+
+@dataclass(frozen=True)
+class Applicability:
+    supported: bool
+    reason: str | None = None
+    waiver_reference: str | None = None
+
+    @classmethod
+    def required(cls) -> Applicability:
+        return cls(supported=True)
+
+    @classmethod
+    def waived(cls, *, reason: str, waiver_reference: str) -> Applicability:
+        return cls(False, reason, waiver_reference)
+
+
+@dataclass(frozen=True)
+class WriteCommand:
+    record_id: str
     canonical_bytes: bytes
     scalar_columns: Mapping[str, Any]
     identity_columns: Mapping[str, Any]
     linked_rows: tuple[Mapping[str, Any], ...]
+    actor: str
+    request: str
+    idempotency: str
+    cas_predecessor: str
+    required_upstream_heads: tuple[tuple[str, str], ...]
+
+
+def _normalise(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _normalise(item) for key, item in sorted(value.items())}
+    if isinstance(value, tuple):
+        return [_normalise(item) for item in value]
+    if isinstance(value, bytes):
+        return value.hex()
+    return value
+
+
+def _command_digest(command: WriteCommand) -> str:
+    material = json.dumps(
+        _normalise(
+            {
+                "record_id": command.record_id,
+                "canonical_bytes": command.canonical_bytes,
+                "scalar_columns": command.scalar_columns,
+                "identity_columns": command.identity_columns,
+                "linked_rows": command.linked_rows,
+                "actor": command.actor,
+                "request": command.request,
+                "idempotency": command.idempotency,
+                "cas_predecessor": command.cas_predecessor,
+                "required_upstream_heads": command.required_upstream_heads,
+            }
+        ),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(material).hexdigest()
 
 
 @dataclass(frozen=True)
-class AuthorityStoreBinding:
-    """Opaque values that must bind an accepted write to its caller/request."""
+class StoredAuthorityState:
+    record_id: str
+    canonical_bytes: bytes
+    scalar_columns: Mapping[str, Any]
+    identity_columns: Mapping[str, Any]
+    linked_rows: tuple[Mapping[str, Any], ...]
+    actor: str
+    request: str
+    idempotency: str
+    cas_predecessor: str
+    required_upstream_heads: tuple[tuple[str, str], ...]
+    digest: str
+    provenance: str
 
-    actor: Any
-    request: Any
-    idempotency: Any
-    cas_predecessor: Any
+    @classmethod
+    def from_command(cls, command: WriteCommand) -> StoredAuthorityState:
+        return cls(
+            record_id=command.record_id,
+            canonical_bytes=command.canonical_bytes,
+            scalar_columns=command.scalar_columns,
+            identity_columns=command.identity_columns,
+            linked_rows=command.linked_rows,
+            actor=command.actor,
+            request=command.request,
+            idempotency=command.idempotency,
+            cas_predecessor=command.cas_predecessor,
+            required_upstream_heads=command.required_upstream_heads,
+            digest=_command_digest(command),
+            provenance=command.request,
+        )
 
 
 @dataclass(frozen=True)
-class HistoricalAuthorityValue:
-    """A retained value and the identity/digest/provenance that authenticates it."""
-
-    identity: Any
-    digest: Any
-    provenance: Any
+class AuthorityValue:
+    record_id: str
     value: Any
+    digest: str
+    provenance: str
 
-
-@dataclass(frozen=True)
-class CurrentUseExpectation:
-    """Upstream authority heads that a current-use read must revalidate."""
-
-    upstream_heads: tuple[Any, ...]
-    rejected_after_head_change: bool = True
-
-
-@dataclass(frozen=True)
-class TamperExpectation:
-    """Named mutation probes supplied by an adapter (names are not interpreted)."""
-
-    mutation_kinds: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class LifecycleExpectation:
-    """Deterministic transaction and restart outcomes expected from a store."""
-
-    competing_writers_deterministic: bool = True
-    rollback_clean: bool = True
-    restart_reopen: bool = True
-    migration_reopen: bool = True
-
-
-@dataclass(frozen=True)
-class AuthorityStoreFixture:
-    """Adapter-owned expected values for the cases it declares."""
-
-    representation: AuthorityStoreRepresentation | None = None
-    binding: AuthorityStoreBinding | None = None
-    historical_values: tuple[HistoricalAuthorityValue, ...] | None = None
-    current_use: CurrentUseExpectation | None = None
-    tamper: TamperExpectation | None = None
-    lifecycle: LifecycleExpectation | None = None
-    # A lost response is a retained-result replay.  It must not acquire an
-    # unrelated use-time currentness check merely because the response was lost.
-    lost_response_use_currentness: bool = False
-
-
-_UNSET = object()
-
-
-@dataclass(frozen=True)
-class LifecycleEvidence:
-    competing_writers_deterministic: bool | None = None
-    rollback_clean: bool | None = None
-    restart_reopen: bool | None = None
-    migration_reopen: bool | None = None
-
-
-@dataclass(frozen=True)
-class ConformanceEvidence:
-    """One adapter exercise result, with opaque values kept out of the kernel."""
-
-    fresh_result: Any = _UNSET
-    replay_result: Any = _UNSET
-    reopened_result: Any = _UNSET
-    representation: AuthorityStoreRepresentation | None = None
-    binding: AuthorityStoreBinding | None = None
-    lost_response_result: Any = _UNSET
-    lost_response_integrity_validated: bool | None = None
-    lost_response_used_currentness: bool | None = None
-    historical_values: tuple[HistoricalAuthorityValue, ...] | None = None
-    current_use_checked_heads: tuple[Any, ...] | None = None
-    current_use_rejected_after_head_change: bool | None = None
-    tamper_rejected: Mapping[str, bool] | None = None
-    lifecycle: LifecycleEvidence | None = None
+    @classmethod
+    def from_command(cls, command: WriteCommand) -> AuthorityValue:
+        return cls(
+            record_id=command.record_id,
+            value=command.scalar_columns["value"],
+            digest=_command_digest(command),
+            provenance=command.request,
+        )
 
 
 @runtime_checkable
 class AuthorityStoreAdapter(Protocol):
-    """Minimal adapter protocol implemented by a store-specific test fixture."""
+    """Primitive store operations required by the generic scenario kernel."""
 
     name: str
-    supported_cases: Collection[CaseId | str]
+    applicability: Mapping[CaseId, Applicability]
 
-    def build_fixture(self) -> AuthorityStoreFixture:
-        """Return expected values for the declared cases."""
-
-    def exercise_case(
-        self, case: CaseId, fixture: AuthorityStoreFixture
-    ) -> ConformanceEvidence:
-        """Execute one deterministic case and return typed observations."""
+    def reset(self) -> None: ...
+    def put(
+        self, command: WriteCommand, *, lose_response: bool = False
+    ) -> AuthorityValue: ...
+    def replay(self, command: WriteCommand) -> AuthorityValue: ...
+    def observe(self, record_id: str) -> StoredAuthorityState | None: ...
+    def load(self, record_id: str) -> AuthorityValue: ...
+    def list_history(self) -> tuple[AuthorityValue, ...]: ...
+    def set_upstream_head(self, authority: str, value: str) -> None: ...
+    def current_use(self, record_id: str) -> AuthorityValue: ...
+    def tamper(self, record_id: str, kind: TamperKind) -> None: ...
+    def reopen(self, *, migrate: bool) -> None: ...
+    def rollback(self, command: WriteCommand) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -199,12 +237,13 @@ class CaseOutcome:
     case: CaseId
     status: OutcomeStatus
     failures: tuple[ConformanceFailure, ...] = ()
+    waiver_reason: str | None = None
+    waiver_reference: str | None = None
 
 
 @dataclass(frozen=True)
 class ConformanceReport:
     adapter_name: str
-    supported_cases: tuple[CaseId, ...]
     outcomes: tuple[CaseOutcome, ...]
     protocol_failures: tuple[ConformanceFailure, ...] = ()
 
@@ -219,34 +258,32 @@ class ConformanceReport:
         return not self.failures
 
     def render(self) -> tuple[str, ...]:
-        """Render stable, value-independent lines suitable for CI artefacts."""
-
         lines = [f"adapter={self.adapter_name}"]
         lines.extend(
-            f"protocol failure code={failure.code.value}"
+            f"protocol failure code={failure.code.value} detail={failure.detail}"
             for failure in self.protocol_failures
         )
-        lines.extend(
-            f"case={outcome.case.value} status={outcome.status.value}"
-            + (
-                " codes=" + ",".join(failure.code.value for failure in outcome.failures)
-                if outcome.failures
-                else ""
-            )
-            for outcome in self.outcomes
-        )
+        for outcome in self.outcomes:
+            line = f"case={outcome.case.value} status={outcome.status.value}"
+            if outcome.failures:
+                line += " codes=" + ",".join(
+                    failure.code.value for failure in outcome.failures
+                )
+            if outcome.status is OutcomeStatus.SKIPPED:
+                line += (
+                    f" waiver={outcome.waiver_reference} reason={outcome.waiver_reason}"
+                )
+            lines.append(line)
         return tuple(lines)
 
 
 class AuthorityStoreConformanceError(AssertionError):
-    """Raised by :func:`assert_conformant` with deterministic report lines."""
-
     def __init__(self, report: ConformanceReport) -> None:
         self.report = report
         super().__init__("\n".join(report.render()))
 
 
-_CASE_FAILURES: dict[CaseId, FailureCode] = {
+_CASE_FAILURES = {
     CaseId.FRESH_REPLAY: FailureCode.REPLAY_MISMATCH,
     CaseId.FRESH_REOPEN: FailureCode.REOPEN_MISMATCH,
     CaseId.REPRESENTATION_BINDING: FailureCode.REPRESENTATION_MISMATCH,
@@ -261,337 +298,400 @@ _CASE_FAILURES: dict[CaseId, FailureCode] = {
 }
 
 
-def _case_failure(case: CaseId, detail: str) -> ConformanceFailure:
-    return ConformanceFailure(case=case, code=_CASE_FAILURES[case], detail=detail)
+class _CaseFailed(AssertionError):
+    pass
 
 
-def _check_case(
-    case: CaseId,
-    fixture: AuthorityStoreFixture,
-    evidence: ConformanceEvidence,
-) -> tuple[ConformanceFailure, ...]:
-    """Check one case without interpreting adapter-specific values."""
+def _require(condition: bool, detail: str) -> None:
+    if not condition:
+        raise _CaseFailed(detail)
 
-    failures: list[ConformanceFailure] = []
-    if case is CaseId.FRESH_REPLAY:
-        if evidence.fresh_result is _UNSET or evidence.replay_result is _UNSET:
-            failures.append(
-                _case_failure(case, "fresh and replay results are required")
-            )
-        elif evidence.fresh_result != evidence.replay_result:
-            failures.append(_case_failure(case, "fresh and replay results differ"))
-    elif case is CaseId.FRESH_REOPEN:
-        if evidence.fresh_result is _UNSET or evidence.reopened_result is _UNSET:
-            failures.append(
-                _case_failure(case, "fresh and reopened results are required")
-            )
-        elif evidence.fresh_result != evidence.reopened_result:
-            failures.append(_case_failure(case, "fresh and reopened results differ"))
-    elif case is CaseId.REPRESENTATION_BINDING:
-        expected = fixture.representation
-        actual = evidence.representation
-        if expected is None or actual is None:
-            failures.append(
-                _case_failure(case, "expected and observed representation are required")
-            )
-        elif actual != expected:
-            failures.append(
-                _case_failure(
-                    case, "canonical, scalar, identity or linked forms differ"
-                )
-            )
-    elif case is CaseId.REQUEST_BINDING:
-        if fixture.binding is None or evidence.binding is None:
-            failures.append(
-                _case_failure(
-                    case, "expected and observed request bindings are required"
-                )
-            )
-        elif evidence.binding != fixture.binding:
-            failures.append(
-                _case_failure(case, "actor/request/idempotency/CAS binding differs")
-            )
-    elif case is CaseId.LOST_RESPONSE_REPLAY:
-        if evidence.fresh_result is _UNSET or evidence.lost_response_result is _UNSET:
-            failures.append(
-                _case_failure(
-                    case, "fresh and lost-response replay results are required"
-                )
-            )
-        elif evidence.fresh_result != evidence.lost_response_result:
-            failures.append(
-                _case_failure(case, "lost-response replay differs from retained result")
-            )
-        if evidence.lost_response_integrity_validated is not True:
-            failures.append(
-                _case_failure(case, "retained integrity was not revalidated")
-            )
-        if evidence.lost_response_used_currentness is None:
-            failures.append(
-                _case_failure(case, "lost-response currentness observation is required")
-            )
-        elif (
-            evidence.lost_response_used_currentness
-            != fixture.lost_response_use_currentness
-        ):
-            failures.append(
-                _case_failure(
-                    case, "lost-response replay applied unrelated currentness"
-                )
-            )
-    elif case is CaseId.HISTORICAL_READ:
-        if fixture.historical_values is None or evidence.historical_values is None:
-            failures.append(
-                _case_failure(
-                    case, "expected and observed historical values are required"
-                )
-            )
-        elif evidence.historical_values != fixture.historical_values:
-            failures.append(
-                _case_failure(case, "historical identity/digest/provenance differs")
-            )
-    elif case is CaseId.CURRENT_USE_REVALIDATION:
-        expected = fixture.current_use
-        if expected is None or evidence.current_use_checked_heads is None:
-            failures.append(
-                _case_failure(case, "expected and observed upstream heads are required")
-            )
-        elif evidence.current_use_checked_heads != expected.upstream_heads:
-            failures.append(
-                _case_failure(case, "not every required upstream head was checked")
-            )
-        if (
-            expected is not None
-            and evidence.current_use_rejected_after_head_change
-            != expected.rejected_after_head_change
-        ):
-            failures.append(
-                _case_failure(case, "changed upstream head was not rejected")
-            )
-    elif case is CaseId.TAMPER_REJECTION:
-        expected = fixture.tamper
-        actual = evidence.tamper_rejected
-        if expected is None or actual is None:
-            failures.append(
-                _case_failure(case, "expected and observed tamper probes are required")
-            )
-        elif set(actual) != set(expected.mutation_kinds) or any(
-            actual.get(kind) is not True for kind in expected.mutation_kinds
-        ):
-            failures.append(
-                _case_failure(case, "a declared tamper mutation was accepted")
-            )
-    elif case is CaseId.COMPETING_WRITERS:
-        expected = fixture.lifecycle
-        actual = evidence.lifecycle
-        if (
-            expected is None
-            or actual is None
-            or actual.competing_writers_deterministic
-            != expected.competing_writers_deterministic
-        ):
-            failures.append(
-                _case_failure(case, "competing-writer outcome is not deterministic")
-            )
-    elif case is CaseId.TRANSACTION_ROLLBACK:
-        expected = fixture.lifecycle
-        actual = evidence.lifecycle
-        if (
-            expected is None
-            or actual is None
-            or actual.rollback_clean != expected.rollback_clean
-        ):
-            failures.append(_case_failure(case, "rollback did not leave a clean store"))
-    elif case is CaseId.RESTART_MIGRATION:
-        expected = fixture.lifecycle
-        actual = evidence.lifecycle
-        if (
-            expected is None
-            or actual is None
-            or actual.restart_reopen != expected.restart_reopen
-            or actual.migration_reopen != expected.migration_reopen
-        ):
-            failures.append(_case_failure(case, "restart or migration reopen differs"))
-    return tuple(failures)
+
+def _expect_exception(exception: type[Exception], operation: Any, detail: str) -> None:
+    try:
+        operation()
+    except exception:
+        return
+    except Exception as exc:
+        raise _CaseFailed(f"{detail}; raised {type(exc).__name__}") from exc
+    raise _CaseFailed(detail)
+
+
+def _command(
+    record_id: str = "record-1", predecessor: str = "record-0", value: str = "alpha"
+) -> WriteCommand:
+    return WriteCommand(
+        record_id=record_id,
+        canonical_bytes=(f'{{"value":"{value}"}}').encode(),
+        scalar_columns={"value": value, "version": 1},
+        identity_columns={"record_id": record_id, "authority": "fixture"},
+        linked_rows=(
+            {"child_id": f"child-{record_id}", "record_id": record_id, "ordinal": 0},
+        ),
+        actor="actor-1",
+        request=f"request-{record_id}",
+        idempotency=f"idempotency-{record_id}",
+        cas_predecessor=predecessor,
+        required_upstream_heads=(
+            ("authority", "authority-head-1"),
+            ("policy", "policy-head-1"),
+        ),
+    )
+
+
+def _seed_heads(adapter: AuthorityStoreAdapter, command: WriteCommand) -> None:
+    for authority, head in command.required_upstream_heads:
+        adapter.set_upstream_head(authority, head)
+
+
+def _fresh_replay(adapter: AuthorityStoreAdapter) -> None:
+    command = _command()
+    adapter.reset()
+    _require(adapter.observe(command.record_id) is None, "record existed before write")
+    expected = AuthorityValue.from_command(command)
+    _require(adapter.put(command) == expected, "fresh write result is not normative")
+    _require(adapter.replay(command) == expected, "exact replay result differs")
+    _require(adapter.observe(command.record_id) is not None, "write retained no state")
+
+
+def _fresh_reopen(adapter: AuthorityStoreAdapter) -> None:
+    command = _command()
+    adapter.reset()
+    adapter.put(command)
+    adapter.reopen(migrate=False)
+    _require(
+        adapter.load(command.record_id) == AuthorityValue.from_command(command),
+        "reopened load differs",
+    )
+
+
+def _representation(adapter: AuthorityStoreAdapter) -> None:
+    command = _command()
+    adapter.reset()
+    adapter.put(command)
+    _require(
+        adapter.observe(command.record_id)
+        == StoredAuthorityState.from_command(command),
+        "persisted canonical/scalar/identity/linked representation differs",
+    )
+
+
+def _request_binding(adapter: AuthorityStoreAdapter) -> None:
+    command = _command()
+    adapter.reset()
+    adapter.put(command)
+    state = adapter.observe(command.record_id)
+    _require(state is not None, "persisted state is absent")
+    _require(
+        (state.actor, state.request, state.idempotency, state.cas_predecessor)
+        == (
+            command.actor,
+            command.request,
+            command.idempotency,
+            command.cas_predecessor,
+        ),
+        "actor/request/idempotency/CAS predecessor differs",
+    )
+
+
+def _lost_response(adapter: AuthorityStoreAdapter) -> None:
+    command = _command()
+    adapter.reset()
+    _seed_heads(adapter, command)
+    _expect_exception(
+        LostResponse,
+        lambda: adapter.put(command, lose_response=True),
+        "lost response was not simulated after retention",
+    )
+    _require(
+        adapter.observe(command.record_id) is not None, "lost response retained no row"
+    )
+    for authority, _ in command.required_upstream_heads:
+        adapter.set_upstream_head(authority, "changed-after-write")
+    _require(
+        adapter.replay(command) == AuthorityValue.from_command(command),
+        "replay imposed use-time currentness",
+    )
+    adapter.reset()
+    _expect_exception(
+        LostResponse,
+        lambda: adapter.put(command, lose_response=True),
+        "lost response was not simulated",
+    )
+    adapter.tamper(command.record_id, TamperKind.DIGEST)
+    _expect_exception(
+        IntegrityViolation,
+        lambda: adapter.replay(command),
+        "replay accepted corrupt retained integrity",
+    )
+
+
+def _historical(adapter: AuthorityStoreAdapter) -> None:
+    first = _command()
+    second = _command("record-2", "record-1", "beta")
+    expected_first = AuthorityValue.from_command(first)
+    for tamper in (TamperKind.IDENTITY, TamperKind.DIGEST, TamperKind.PROVENANCE):
+        adapter.reset()
+        adapter.put(first)
+        adapter.put(second)
+        _require(
+            adapter.load(first.record_id) == expected_first, "historical load differs"
+        )
+        _require(
+            expected_first in adapter.list_history(),
+            "historical list omitted retained value",
+        )
+        adapter.tamper(first.record_id, tamper)
+        _expect_exception(
+            IntegrityViolation,
+            lambda: adapter.load(first.record_id),
+            f"historical load accepted {tamper.value} tamper",
+        )
+        _expect_exception(
+            IntegrityViolation,
+            adapter.list_history,
+            f"historical list accepted {tamper.value} tamper",
+        )
+
+
+def _current_use(adapter: AuthorityStoreAdapter) -> None:
+    command = _command()
+    for changed_authority, _ in command.required_upstream_heads:
+        adapter.reset()
+        _seed_heads(adapter, command)
+        adapter.put(command)
+        _require(
+            adapter.current_use(command.record_id)
+            == AuthorityValue.from_command(command),
+            "valid current-use read differs",
+        )
+        adapter.set_upstream_head(changed_authority, "changed")
+        _expect_exception(
+            IntegrityViolation,
+            lambda: adapter.current_use(command.record_id),
+            f"changed {changed_authority} head was accepted",
+        )
+
+
+def _tamper_rejection(adapter: AuthorityStoreAdapter) -> None:
+    command = _command()
+    for tamper in (
+        TamperKind.CANONICAL,
+        TamperKind.LINKED_ROW,
+        TamperKind.OFFLINE_REWRITE,
+    ):
+        adapter.reset()
+        adapter.put(command)
+        adapter.tamper(command.record_id, tamper)
+        _expect_exception(
+            IntegrityViolation,
+            lambda: adapter.load(command.record_id),
+            f"{tamper.value} mutation was accepted",
+        )
+
+
+def _competing_writers(adapter: AuthorityStoreAdapter) -> None:
+    first = _command("record-a", "record-0", "alpha")
+    second = _command("record-b", "record-0", "beta")
+    adapter.reset()
+    adapter.put(first)
+    _expect_exception(
+        WriteConflict,
+        lambda: adapter.put(second),
+        "second same-predecessor writer was accepted",
+    )
+    _require(adapter.observe(first.record_id) is not None, "winning write disappeared")
+    _require(adapter.observe(second.record_id) is None, "losing write was retained")
+
+
+def _rollback(adapter: AuthorityStoreAdapter) -> None:
+    command = _command()
+    adapter.reset()
+    adapter.rollback(command)
+    _require(
+        adapter.observe(command.record_id) is None, "rolled-back row remains visible"
+    )
+    _require(adapter.list_history() == (), "rolled-back row remains in history")
+
+
+def _restart_migration(adapter: AuthorityStoreAdapter) -> None:
+    command = _command()
+    expected = AuthorityValue.from_command(command)
+    adapter.reset()
+    adapter.put(command)
+    adapter.reopen(migrate=False)
+    _require(
+        adapter.load(command.record_id) == expected, "restart/reopen changed value"
+    )
+    adapter.reopen(migrate=True)
+    _require(
+        adapter.load(command.record_id) == expected, "migration/reopen changed value"
+    )
+    _require(
+        adapter.observe(command.record_id)
+        == StoredAuthorityState.from_command(command),
+        "migration/reopen changed persisted representation",
+    )
+
+
+_SCENARIOS = {
+    CaseId.FRESH_REPLAY: _fresh_replay,
+    CaseId.FRESH_REOPEN: _fresh_reopen,
+    CaseId.REPRESENTATION_BINDING: _representation,
+    CaseId.REQUEST_BINDING: _request_binding,
+    CaseId.LOST_RESPONSE_REPLAY: _lost_response,
+    CaseId.HISTORICAL_READ: _historical,
+    CaseId.CURRENT_USE_REVALIDATION: _current_use,
+    CaseId.TAMPER_REJECTION: _tamper_rejection,
+    CaseId.COMPETING_WRITERS: _competing_writers,
+    CaseId.TRANSACTION_ROLLBACK: _rollback,
+    CaseId.RESTART_MIGRATION: _restart_migration,
+}
 
 
 def _adapter_name(adapter: object) -> str:
-    value = getattr(adapter, "name", None)
-    return value if isinstance(value, str) and value else type(adapter).__name__
+    name = getattr(adapter, "name", None)
+    return name if isinstance(name, str) and name else type(adapter).__name__
 
 
-def _normalise_supported(
+def _manifest(
     adapter: object,
-) -> tuple[tuple[CaseId, ...], tuple[ConformanceFailure, ...]]:
-    raw = getattr(adapter, "supported_cases", None)
-    if raw is None:
-        return (), (
-            ConformanceFailure(
-                case=None,
-                code=FailureCode.ADAPTER_PROTOCOL,
-                detail="supported_cases is required",
-            ),
-        )
-    supported: set[CaseId] = set()
+) -> tuple[dict[CaseId, Applicability], tuple[ConformanceFailure, ...]]:
+    raw = getattr(adapter, "applicability", None)
     failures: list[ConformanceFailure] = []
-    try:
-        values = tuple(raw)
-    except TypeError:
-        return (), (
+    if not isinstance(raw, Mapping):
+        return {}, (
             ConformanceFailure(
-                case=None,
-                code=FailureCode.ADAPTER_PROTOCOL,
-                detail="supported_cases must be iterable",
+                None, FailureCode.ADAPTER_PROTOCOL, "applicability mapping is required"
             ),
         )
-    for value in values:
-        try:
-            supported.add(value if isinstance(value, CaseId) else CaseId(value))
-        except (TypeError, ValueError):
+    manifest: dict[CaseId, Applicability] = {}
+    for case in CASE_INVENTORY:
+        entry = raw.get(case)
+        if entry is None:
             failures.append(
                 ConformanceFailure(
-                    case=None,
-                    code=FailureCode.ADAPTER_PROTOCOL,
-                    detail=f"unknown supported case: {value!s}",
+                    case,
+                    FailureCode.ADAPTER_PROTOCOL,
+                    f"applicability missing {case.value}",
                 )
             )
-    ordered = tuple(case for case in CASE_INVENTORY if case in supported)
-    return ordered, tuple(failures)
+            continue
+        if not isinstance(entry, Applicability):
+            failures.append(
+                ConformanceFailure(
+                    case,
+                    FailureCode.ADAPTER_PROTOCOL,
+                    f"invalid applicability for {case.value}",
+                )
+            )
+            continue
+        if entry.supported and (
+            entry.reason is not None or entry.waiver_reference is not None
+        ):
+            failures.append(
+                ConformanceFailure(
+                    case,
+                    FailureCode.ADAPTER_PROTOCOL,
+                    f"supported case {case.value} must not declare waiver metadata",
+                )
+            )
+        if not entry.supported and (
+            not (entry.reason or "").strip()
+            or not (entry.waiver_reference or "").strip()
+        ):
+            failures.append(
+                ConformanceFailure(
+                    case,
+                    FailureCode.ADAPTER_PROTOCOL,
+                    f"waived case {case.value} requires reason and waiver reference",
+                )
+            )
+        manifest[case] = entry
+    unknown = sorted(str(key) for key in raw if key not in CASE_INVENTORY)
+    for key in unknown:
+        failures.append(
+            ConformanceFailure(
+                None, FailureCode.ADAPTER_PROTOCOL, f"unknown applicability case {key}"
+            )
+        )
+    return manifest, tuple(failures)
 
 
 def run_conformance(adapter: AuthorityStoreAdapter) -> ConformanceReport:
-    """Run all declared invariant families in deterministic inventory order."""
+    """Execute fixed scenarios in inventory order against primitive operations."""
 
-    adapter_name = _adapter_name(adapter)
-    supported, protocol_failures = _normalise_supported(adapter)
-    if not protocol_failures and not supported:
-        protocol_failures = (
+    name = _adapter_name(adapter)
+    manifest, protocol_failures = _manifest(adapter)
+    required_methods = (
+        "reset",
+        "put",
+        "replay",
+        "observe",
+        "load",
+        "list_history",
+        "set_upstream_head",
+        "current_use",
+        "tamper",
+        "reopen",
+        "rollback",
+    )
+    missing = tuple(
+        method
+        for method in required_methods
+        if not callable(getattr(adapter, method, None))
+    )
+    if missing:
+        protocol_failures += (
             ConformanceFailure(
-                case=None,
-                code=FailureCode.ADAPTER_PROTOCOL,
-                detail="at least one supported case is required",
+                None,
+                FailureCode.ADAPTER_PROTOCOL,
+                "missing operations: " + ",".join(missing),
             ),
         )
     if protocol_failures:
         return ConformanceReport(
-            adapter_name=adapter_name,
-            supported_cases=supported,
-            outcomes=tuple(
-                CaseOutcome(case=case, status=OutcomeStatus.SKIPPED)
-                for case in CASE_INVENTORY
-            ),
-            protocol_failures=protocol_failures,
-        )
-
-    build_fixture = getattr(adapter, "build_fixture", None)
-    exercise_case = getattr(adapter, "exercise_case", None)
-    if not callable(build_fixture) or not callable(exercise_case):
-        return ConformanceReport(
-            adapter_name=adapter_name,
-            supported_cases=supported,
-            outcomes=tuple(
-                CaseOutcome(case=case, status=OutcomeStatus.SKIPPED)
-                for case in CASE_INVENTORY
-            ),
-            protocol_failures=(
-                ConformanceFailure(
-                    case=None,
-                    code=FailureCode.ADAPTER_PROTOCOL,
-                    detail="build_fixture and exercise_case are required",
-                ),
-            ),
-        )
-
-    try:
-        fixture = build_fixture()
-    except Exception as exc:  # noqa: BLE001 - classify adapter failures deterministically
-        return ConformanceReport(
-            adapter_name=adapter_name,
-            supported_cases=supported,
-            outcomes=tuple(
-                CaseOutcome(case=case, status=OutcomeStatus.SKIPPED)
-                for case in CASE_INVENTORY
-            ),
-            protocol_failures=(
-                ConformanceFailure(
-                    case=None,
-                    code=FailureCode.ADAPTER_ERROR,
-                    detail=f"build_fixture raised {type(exc).__name__}",
-                ),
-            ),
-        )
-    if not isinstance(fixture, AuthorityStoreFixture):
-        return ConformanceReport(
-            adapter_name=adapter_name,
-            supported_cases=supported,
-            outcomes=tuple(
-                CaseOutcome(case=case, status=OutcomeStatus.SKIPPED)
-                for case in CASE_INVENTORY
-            ),
-            protocol_failures=(
-                ConformanceFailure(
-                    case=None,
-                    code=FailureCode.ADAPTER_PROTOCOL,
-                    detail="build_fixture must return AuthorityStoreFixture",
-                ),
-            ),
+            name,
+            tuple(CaseOutcome(case, OutcomeStatus.SKIPPED) for case in CASE_INVENTORY),
+            protocol_failures,
         )
 
     outcomes: list[CaseOutcome] = []
     for case in CASE_INVENTORY:
-        if case not in supported:
-            outcomes.append(CaseOutcome(case=case, status=OutcomeStatus.SKIPPED))
+        applicability = manifest[case]
+        if not applicability.supported:
+            outcomes.append(
+                CaseOutcome(
+                    case,
+                    OutcomeStatus.SKIPPED,
+                    waiver_reason=applicability.reason,
+                    waiver_reference=applicability.waiver_reference,
+                )
+            )
             continue
         try:
-            evidence = exercise_case(case, fixture)
-        except Exception as exc:  # noqa: BLE001 - classify adapter failures deterministically
-            outcomes.append(
-                CaseOutcome(
-                    case=case,
-                    status=OutcomeStatus.FAIL,
-                    failures=(
-                        ConformanceFailure(
-                            case=case,
-                            code=FailureCode.ADAPTER_ERROR,
-                            detail=f"exercise_case raised {type(exc).__name__}",
-                        ),
-                    ),
-                )
+            _SCENARIOS[case](adapter)
+        except _CaseFailed as exc:
+            failure = ConformanceFailure(case, _CASE_FAILURES[case], str(exc))
+            outcomes.append(CaseOutcome(case, OutcomeStatus.FAIL, (failure,)))
+        except StoreOperationError as exc:
+            failure = ConformanceFailure(
+                case,
+                _CASE_FAILURES[case],
+                f"unexpected store rejection {type(exc).__name__}",
             )
-            continue
-        if not isinstance(evidence, ConformanceEvidence):
-            outcomes.append(
-                CaseOutcome(
-                    case=case,
-                    status=OutcomeStatus.FAIL,
-                    failures=(
-                        ConformanceFailure(
-                            case=case,
-                            code=FailureCode.ADAPTER_PROTOCOL,
-                            detail="exercise_case must return ConformanceEvidence",
-                        ),
-                    ),
-                )
+            outcomes.append(CaseOutcome(case, OutcomeStatus.FAIL, (failure,)))
+        except Exception as exc:  # noqa: BLE001 - classify adapter failures
+            failure = ConformanceFailure(
+                case, FailureCode.ADAPTER_ERROR, f"scenario raised {type(exc).__name__}"
             )
-            continue
-        failures = _check_case(case, fixture, evidence)
-        outcomes.append(
-            CaseOutcome(
-                case=case,
-                status=OutcomeStatus.FAIL if failures else OutcomeStatus.PASS,
-                failures=failures,
-            )
-        )
-    return ConformanceReport(
-        adapter_name=adapter_name,
-        supported_cases=supported,
-        outcomes=tuple(outcomes),
-    )
+            outcomes.append(CaseOutcome(case, OutcomeStatus.FAIL, (failure,)))
+        else:
+            outcomes.append(CaseOutcome(case, OutcomeStatus.PASS))
+    return ConformanceReport(name, tuple(outcomes))
 
 
 def assert_conformant(adapter: AuthorityStoreAdapter) -> ConformanceReport:
-    """Run the harness and raise with the deterministic report if it fails."""
-
     report = run_conformance(adapter)
     if not report.passed:
         raise AuthorityStoreConformanceError(report)
@@ -600,23 +700,22 @@ def assert_conformant(adapter: AuthorityStoreAdapter) -> ConformanceReport:
 
 __all__ = [
     "CASE_INVENTORY",
+    "Applicability",
     "AuthorityStoreAdapter",
-    "AuthorityStoreBinding",
     "AuthorityStoreConformanceError",
-    "AuthorityStoreFixture",
-    "AuthorityStoreRepresentation",
+    "AuthorityValue",
     "CaseId",
     "CaseOutcome",
-    "ConformanceEvidence",
     "ConformanceFailure",
     "ConformanceReport",
-    "CurrentUseExpectation",
     "FailureCode",
-    "HistoricalAuthorityValue",
-    "LifecycleEvidence",
-    "LifecycleExpectation",
+    "IntegrityViolation",
+    "LostResponse",
     "OutcomeStatus",
-    "TamperExpectation",
+    "StoredAuthorityState",
+    "TamperKind",
+    "WriteCommand",
+    "WriteConflict",
     "assert_conformant",
     "run_conformance",
 ]
