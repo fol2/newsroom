@@ -31,12 +31,12 @@ def _open(path: str | Path) -> sqlite3.Connection:
 def test_current_schema_retains_exact_v18_and_is_integral() -> None:
     connection = _open(":memory:")
     apply_pending_migrations(connection, applied_at="2042-03-12T10:00:00Z")
-    assert SCHEMA_VERSION == 20 and TRIAGE_WORK_ITEM_SCHEMA_VERSION == 18
+    assert SCHEMA_VERSION == 21 and TRIAGE_WORK_ITEM_SCHEMA_VERSION == 18
     assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
     assert connection.execute(
         "SELECT version,name,checksum FROM authority_migrations ORDER BY version"
     ).fetchall() == list(EXPECTED_MIGRATION_HISTORY)
-    assert EXPECTED_MIGRATION_HISTORY[-3] == (
+    assert EXPECTED_MIGRATION_HISTORY[-4] == (
         18,
         TRIAGE_WORK_ITEM_MIGRATION_NAME,
         TRIAGE_WORK_ITEM_MIGRATION_CHECKSUM,
@@ -99,6 +99,9 @@ def test_exact_v17_upgrade_retains_pre_v18_backup(tmp_path: Path) -> None:
     ).fetchone()[0]
     connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
     for table in (
+        "event_hypothesis_heads_v2",
+        "event_hypothesis_versions_v2",
+        "event_hypotheses_v2",
         "triage_work_item_leases",
         "triage_worker_attempts",
         "triage_execution_batches",
@@ -120,12 +123,12 @@ def test_exact_v17_upgrade_retains_pre_v18_backup(tmp_path: Path) -> None:
     apply_pending_migrations(connection, applied_at="2042-03-12T10:00:01Z")
     backup, digest = triage_work_item_backup_paths(database)
     assert backup.is_file() and digest.is_file()
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 20
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
 
 
 def test_newer_schema_and_injected_v18_failure_fail_closed() -> None:
     newer = _open(":memory:")
-    newer.execute("PRAGMA user_version=21")
+    newer.execute("PRAGMA user_version=22")
     with pytest.raises(sqlite3.DatabaseError, match="newer"):
         apply_pending_migrations(newer, applied_at="2042-03-12T10:00:00Z")
 

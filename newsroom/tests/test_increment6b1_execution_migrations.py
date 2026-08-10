@@ -46,6 +46,9 @@ def _downgrade_to_v19(connection: sqlite3.Connection) -> None:
         "WHERE name='immutable_authority_migrations_delete'"
     ).fetchone()[0]
     connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+    connection.execute("DROP TABLE event_hypothesis_heads_v2")
+    connection.execute("DROP TABLE event_hypothesis_versions_v2")
+    connection.execute("DROP TABLE event_hypotheses_v2")
     for trigger in (
         "triage_execution_batch_coherence",
         "triage_worker_attempt_coherence",
@@ -62,7 +65,7 @@ def _downgrade_to_v19(connection: sqlite3.Connection) -> None:
     connection.execute("DROP TABLE triage_work_item_leases")
     connection.execute("DROP TABLE triage_worker_attempts")
     connection.execute("DROP TABLE triage_execution_batches")
-    connection.execute("DELETE FROM authority_migrations WHERE version=20")
+    connection.execute("DELETE FROM authority_migrations WHERE version>=20")
     connection.execute(guard)
     connection.execute("PRAGMA user_version=19")
     connection.execute("PRAGMA foreign_keys=ON")
@@ -70,8 +73,8 @@ def _downgrade_to_v19(connection: sqlite3.Connection) -> None:
 
 def test_fresh_v20_history_fingerprint_and_exact_three_table_allocation() -> None:
     connection = _fresh()
-    assert SCHEMA_VERSION == TRIAGE_EXECUTION_SCHEMA_VERSION == 20
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+    assert SCHEMA_VERSION == 21 and TRIAGE_EXECUTION_SCHEMA_VERSION == 20
+    assert EXPECTED_MIGRATION_HISTORY[-2] == (
         20,
         TRIAGE_EXECUTION_MIGRATION_NAME,
         TRIAGE_EXECUTION_MIGRATION_CHECKSUM,
@@ -107,9 +110,9 @@ def test_v20_literal_predecessor_pins_are_exact() -> None:
         "sha256:6eb04f981f650bbb4956f148d11f1656bcd2b7c510117db96602dd9d83ab9bd3"
     )
     assert EXPECTED_SCHEMA_FINGERPRINT == (
-        "sha256:36a7c9910775ede9c29113a43e08bba261a5a98c4fab5225dd2cae9448689389"
+        "sha256:d314d06118a25f8a32a0f9d8acb1af5383abd6b30be682cb5f65943ae15c213f"
     )
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+    assert EXPECTED_MIGRATION_HISTORY[-2] == (
         20,
         "triage_execution_authority_v20",
         "sha256:6eb04f981f650bbb4956f148d11f1656bcd2b7c510117db96602dd9d83ab9bd3",
@@ -127,7 +130,7 @@ def test_exact_v19_backup_upgrade_reuse_and_tamper_fail_closed(
     receipt = prepare_triage_execution_backup(connection, backup)
     assert prepare_triage_execution_backup(connection, backup) == receipt
     apply_pending_migrations(connection, applied_at="2042-03-12T10:00:01Z")
-    assert connection.execute("PRAGMA user_version").fetchone() == (20,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (21,)
     assert backup.is_file() and digest.is_file()
 
     digest.write_text("sha256:" + "0" * 64 + "\n", encoding="ascii")
@@ -161,6 +164,6 @@ def test_injected_v20_failure_rolls_back_exact_v19_and_v21_rejects(
     ).fetchall() == []
 
     newer = _open(":memory:")
-    newer.execute("PRAGMA user_version=21")
+    newer.execute("PRAGMA user_version=22")
     with pytest.raises(sqlite3.DatabaseError, match="newer"):
         apply_pending_migrations(newer, applied_at="2042-03-12T10:00:00Z")
