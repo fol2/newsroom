@@ -132,9 +132,20 @@ from .triage_work_item_migrations import (
     require_triage_work_item_backup,
     triage_work_item_backup_paths,
 )
+from .triage_disposition_migrations import (
+    TRIAGE_DISPOSITION_MIGRATION,
+    TRIAGE_DISPOSITION_MIGRATION_CHECKSUM,
+    TRIAGE_DISPOSITION_MIGRATION_NAME,
+    TRIAGE_DISPOSITION_MIGRATION_STATEMENTS,
+    TRIAGE_DISPOSITION_SCHEMA_VERSION,
+    TriageDispositionBackupReceipt,
+    prepare_triage_disposition_backup,
+    require_triage_disposition_backup,
+    triage_disposition_backup_paths,
+)
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = TRIAGE_WORK_ITEM_SCHEMA_VERSION
+SCHEMA_VERSION = TRIAGE_DISPOSITION_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -573,10 +584,15 @@ def schema_fingerprint(conn: sqlite3.Connection) -> str:
 
 def prepare_pending_migration_backup(
     conn: sqlite3.Connection,
-) -> EvaluationHandoffBackupReceipt | TriageWorkItemBackupReceipt | None:
+) -> (
+    EvaluationHandoffBackupReceipt
+    | TriageWorkItemBackupReceipt
+    | TriageDispositionBackupReceipt
+    | None
+):
     """Prepare the exact retained backup required by a checked predecessor."""
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if version not in {16, 17}:
+    if version not in {16, 17, 18}:
         return None
     database_path = next(
         str(row[2])
@@ -590,8 +606,11 @@ def prepare_pending_migration_backup(
     if version == 16:
         backup_path, _ = evaluation_handoff_backup_paths(database_path)
         return prepare_evaluation_handoff_backup(conn, backup_path)
-    backup_path, _ = triage_work_item_backup_paths(database_path)
-    return prepare_triage_work_item_backup(conn, backup_path)
+    if version == 17:
+        backup_path, _ = triage_work_item_backup_paths(database_path)
+        return prepare_triage_work_item_backup(conn, backup_path)
+    backup_path, _ = triage_disposition_backup_paths(database_path)
+    return prepare_triage_disposition_backup(conn, backup_path)
 
 
 def apply_migration(
@@ -887,7 +906,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_evaluation_handoff_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-2],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-3],
                 )
             for statement in EVALUATION_HANDOFF_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -922,7 +941,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_work_item_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-1],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-2],
                 )
             for statement in TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -937,6 +956,40 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                 ),
             )
             current = TRIAGE_WORK_ITEM_SCHEMA_VERSION
+        if current == TRIAGE_WORK_ITEM_SCHEMA_VERSION:
+            if 0 < starting_version < TRIAGE_WORK_ITEM_SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version={TRIAGE_WORK_ITEM_SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+                database_path = next(
+                    str(row[2])
+                    for row in conn.execute("PRAGMA database_list").fetchall()
+                    if row[1] == "main"
+                )
+                if not database_path:
+                    raise sqlite3.DatabaseError(
+                        "existing multihop upgrade requires a file-backed database"
+                    )
+                backup_path, _ = triage_disposition_backup_paths(database_path)
+                prepare_triage_disposition_backup(conn, backup_path)
+                conn.execute("BEGIN EXCLUSIVE")
+            if starting_version != 0:
+                require_triage_disposition_backup(
+                    conn,
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-1],
+                )
+            for statement in TRIAGE_DISPOSITION_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    TRIAGE_DISPOSITION_SCHEMA_VERSION,
+                    TRIAGE_DISPOSITION_MIGRATION_NAME,
+                    TRIAGE_DISPOSITION_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = TRIAGE_DISPOSITION_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -964,6 +1017,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     GRAPHITI_ADAPTER_MIGRATION,
     EVALUATION_HANDOFF_MIGRATION,
     TRIAGE_WORK_ITEM_MIGRATION,
+    TRIAGE_DISPOSITION_MIGRATION,
 )
 
 
@@ -1060,5 +1114,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         TRIAGE_WORK_ITEM_SCHEMA_VERSION,
         TRIAGE_WORK_ITEM_MIGRATION_NAME,
         TRIAGE_WORK_ITEM_MIGRATION_CHECKSUM,
+    ),
+    (
+        TRIAGE_DISPOSITION_SCHEMA_VERSION,
+        TRIAGE_DISPOSITION_MIGRATION_NAME,
+        TRIAGE_DISPOSITION_MIGRATION_CHECKSUM,
     ),
 )

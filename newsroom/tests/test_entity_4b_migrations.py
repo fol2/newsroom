@@ -118,7 +118,7 @@ def test_current_schema_retains_exact_v14_history_tables_and_view(
     conn = sqlite3.connect(state.database)
     try:
         assert ENTITY_AUTHORITY_SCHEMA_VERSION == 14
-        assert SCHEMA_VERSION == 18
+        assert SCHEMA_VERSION == 19
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(conn) == EXPECTED_SCHEMA_FINGERPRINT
         assert conn.execute(
