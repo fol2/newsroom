@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from types import MappingProxyType
 from typing import Self
 
@@ -19,6 +21,14 @@ from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
 )
+from newsroom.authority.models import CommandDefinition
+from newsroom.authority.policy import (
+    CommandRegistry,
+    PayloadGoldenVector,
+    PayloadSchemaContract,
+    PayloadSchemaRegistry,
+)
+from newsroom.authority.types import PayloadMode, TrustScope, UtcTimestamp
 from newsroom.increment6.hypotheses import (
     EventHypothesisVersion,
     HypothesisSourceBinding,
@@ -34,6 +44,13 @@ from newsroom.increment6.outcomes import (
 HYPOTHESIS_RELATIONSHIP_DECISION = (
     "newsroom.increment6.hypothesis-relationship-decision.v1"
 )
+RELATIONSHIP_COMMAND_TYPE = "increment6.relationship-decision.retain"
+RELATIONSHIP_AGGREGATE_TYPE = "event_hypothesis_relationship_decision"
+RELATIONSHIP_EVENT_TYPE = "event_hypothesis_relationship_decision_retained"
+RELATIONSHIP_COMMAND_DEFINITION_VERSION = "relationship-command-v1"
+RELATIONSHIP_PAYLOAD_CONTRACT_VERSION = "relationship-schema-v1"
+RELATIONSHIP_PAYLOAD_CANONICALIZER_VERSION = "relationship-canonical-json-v1"
+RELATIONSHIP_REQUIRED_SCOPE = "authority.relationship.retain"
 MAX_RELATIONSHIP_CANONICAL_BYTES = 16_777_216
 MAX_COMPARATORS = 256
 ADEQUATE_MATCH_THRESHOLD = 60
@@ -646,6 +663,218 @@ class RelationshipAssessment(_NoEffect):
         )
 
 
+_FACADE_TOKEN = object()
+
+
+class EventHypothesisRelationshipAuthority:
+    """Narrow public facade over the private checked v22 authority."""
+
+    __slots__ = ("__authority",)
+
+    def __init__(self, token: object, authority: object) -> None:
+        from newsroom.increment6._hypothesis_relationship_store import (
+            EventHypothesisRelationshipAuthority as PrivateAuthority,
+        )
+
+        if token is not _FACADE_TOKEN or type(authority) is not PrivateAuthority:
+            raise RelationshipContractError(
+                "relationship authority facade requires the exact private authority"
+            )
+        self.__authority = authority
+
+    def retain(self, *args: object, **kwargs: object) -> RelationshipAssessment:
+        return _normalise(
+            lambda: self.__authority.retain(*args, **kwargs),
+            "relationship retention failed",
+        )  # type: ignore[attr-defined,no-any-return]
+
+    create_or_replay = retain
+
+    def load(self, decision_id: str) -> RelationshipAssessment:
+        return _normalise(
+            lambda: self.__authority.load(decision_id),
+            "relationship load failed",
+        )  # type: ignore[attr-defined,no-any-return]
+
+    def history(self) -> tuple[RelationshipAssessment, ...]:
+        return _normalise(self.__authority.history, "relationship history failed")  # type: ignore[attr-defined,no-any-return]
+
+    def current(self, decision_id: str, *, proof: object) -> RelationshipAssessment:
+        return _normalise(
+            lambda: self.__authority.current(decision_id, proof=proof),
+            "relationship currentness failed",
+        )  # type: ignore[attr-defined,no-any-return]
+
+    require_current = current
+
+    def close(self) -> None:
+        _normalise(self.__authority.close, "relationship authority close failed")  # type: ignore[attr-defined]
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+def open_event_hypothesis_relationship_authority(
+    database: str | Path,
+    *,
+    retrieval_authority: object,
+    authenticator: object,
+    authorizer: object,
+    command_registry: CommandRegistry,
+    payload_schemas: PayloadSchemaRegistry,
+    clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
+    busy_timeout_ms: int = 5000,
+) -> EventHypothesisRelationshipAuthority:
+    """Open the checked v22 relationship authority."""
+    from newsroom.increment6._hypothesis_relationship_store import (
+        open_relationship_authority,
+    )
+
+    return _normalise(
+        lambda: EventHypothesisRelationshipAuthority(
+            _FACADE_TOKEN,
+            open_relationship_authority(
+                database,
+                retrieval_authority=retrieval_authority,  # type: ignore[arg-type]
+                authenticator=authenticator,
+                authorizer=authorizer,
+                command_registry=command_registry,
+                payload_schemas=payload_schemas,
+                clock=clock,
+                busy_timeout_ms=busy_timeout_ms,
+            ),
+        ),
+        "relationship authority open failed",
+    )
+
+
+def _relationship_payload_canonicalizer(value: object) -> bytes:
+    raw = _canonical(value, "relationship command payload")
+    assessment = RelationshipAssessment.from_canonical_bytes(raw)
+    if assessment.status is not AssessmentStatus.COMPLETE:
+        raise RelationshipContractError(
+            "relationship command payload must be a complete assessment"
+        )
+    return assessment.canonical_bytes
+
+
+def relationship_payload_contract() -> PayloadSchemaContract:
+    digest = "sha256:" + "0" * 64
+    source = HypothesisSourceBinding(
+        digest,
+        digest,
+        digest,
+        digest,
+        "00000000-0000-4000-8000-000000000001",
+        digest,
+        "00000000-0000-4000-8000-000000000002",
+        digest,
+    )
+    subject = HypothesisVersionBinding(
+        "00000000-0000-4000-8000-000000000003",
+        "00000000-0000-5000-8000-000000000004",
+        digest,
+        digest,
+        (source,),
+    )
+    golden = assess_relationships(
+        subject, ComparatorSetManifest.complete(()), ()
+    ).canonical_value
+    return PayloadSchemaContract(
+        schema_version=HYPOTHESIS_RELATIONSHIP_DECISION,
+        payload_mode=PayloadMode.INLINE,
+        contract_version=RELATIONSHIP_PAYLOAD_CONTRACT_VERSION,
+        canonicalizer_implementation_version=(
+            RELATIONSHIP_PAYLOAD_CANONICALIZER_VERSION
+        ),
+        canonicalizer=_relationship_payload_canonicalizer,
+        golden_vectors=(
+            PayloadGoldenVector(
+                name="complete-no-match",
+                input_identity="relationship-assessment:no-match",
+                value=golden,
+                expected_bytes=_relationship_payload_canonicalizer(golden),
+            ),
+        ),
+    )
+
+
+def relationship_command_definition() -> CommandDefinition:
+    contract = relationship_payload_contract()
+    return CommandDefinition(
+        command_type=RELATIONSHIP_COMMAND_TYPE,
+        definition_version=RELATIONSHIP_COMMAND_DEFINITION_VERSION,
+        aggregate_type=RELATIONSHIP_AGGREGATE_TYPE,
+        event_type=RELATIONSHIP_EVENT_TYPE,
+        event_schema_version=1,
+        payload_mode=PayloadMode.INLINE,
+        payload_schema_version=contract.schema_version,
+        payload_schema_contract_version=contract.contract_version,
+        payload_schema_contract_digest=contract.contract_digest,
+        payload_canonicalizer_version=contract.canonicalizer_implementation_version,
+        trust_scope=TrustScope.ADMITTED,
+        security_scope="authority.relationship",
+        retention_scope="authority.audit",
+        required_scope=RELATIONSHIP_REQUIRED_SCOPE,
+        max_inline_bytes=MAX_RELATIONSHIP_CANONICAL_BYTES,
+    )
+
+
+def merge_relationship_authority_registries(
+    command_registry: CommandRegistry,
+    payload_schemas: PayloadSchemaRegistry,
+) -> tuple[CommandRegistry, PayloadSchemaRegistry]:
+    definition = relationship_command_definition()
+    definitions = list(command_registry.definitions())
+    matches = [
+        item
+        for item in definitions
+        if (item.command_type, item.definition_version)
+        == (definition.command_type, definition.definition_version)
+    ]
+    if matches and matches[0].digest != definition.digest:
+        raise RelationshipContractError("relationship command identity conflicts")
+    if not matches:
+        definitions.append(definition)
+    current_commands = {
+        item.command_type: (
+            RELATIONSHIP_COMMAND_DEFINITION_VERSION
+            if item.command_type == RELATIONSHIP_COMMAND_TYPE
+            else command_registry.resolve(item.command_type).definition_version
+        )
+        for item in definitions
+    }
+    contract = relationship_payload_contract()
+    contracts = list(payload_schemas.contracts())
+    matches_schema = [
+        item
+        for item in contracts
+        if (item.schema_version, item.payload_mode, item.contract_version)
+        == (contract.schema_version, contract.payload_mode, contract.contract_version)
+    ]
+    if matches_schema and matches_schema[0].contract_digest != contract.contract_digest:
+        raise RelationshipContractError("relationship payload identity conflicts")
+    if not matches_schema:
+        contracts.append(contract)
+    current_schemas = {
+        (item.schema_version, item.payload_mode): (
+            RELATIONSHIP_PAYLOAD_CONTRACT_VERSION
+            if item.schema_version == HYPOTHESIS_RELATIONSHIP_DECISION
+            else payload_schemas.resolve(
+                item.schema_version, item.payload_mode
+            ).contract_version
+        )
+        for item in contracts
+    }
+    return (
+        CommandRegistry(definitions, current_versions=current_commands),
+        PayloadSchemaRegistry(contracts, current_versions=current_schemas),
+    )
+
+
 _PRECEDENCE = {
     CanonicalOutcome.REL_CORRECTION_REVERSAL_OF: 0,
     CanonicalOutcome.REL_DEVELOPMENT_OF: 1,
@@ -955,14 +1184,21 @@ __all__ = [
     "HYPOTHESIS_RELATIONSHIP_DECISION",
     "MAX_RELATIONSHIP_CANONICAL_BYTES",
     "RELATED_DISTINCT_THRESHOLD",
+    "RELATIONSHIP_COMMAND_TYPE",
     "RELATIONSHIP_DECISION_REASON",
+    "RELATIONSHIP_EVENT_TYPE",
     "SAME_STATE_THRESHOLD",
     "AssessmentStatus",
     "ComparatorEvidence",
     "ComparatorSetManifest",
+    "EventHypothesisRelationshipAuthority",
     "HypothesisVersionBinding",
     "RelationshipAssessment",
     "RelationshipContractError",
     "assess_relationships",
+    "merge_relationship_authority_registries",
+    "open_event_hypothesis_relationship_authority",
+    "relationship_command_definition",
+    "relationship_payload_contract",
     "verify_relationship_assessment_replay",
 ]
