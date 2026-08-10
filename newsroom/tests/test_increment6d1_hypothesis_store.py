@@ -33,7 +33,13 @@ from newsroom.increment6._hypothesis_store import (
     _HypothesisStore,
     _version_event_id,
 )
-from newsroom.increment6.dispositions import ProposalDispositionStore
+from newsroom.increment6.dispositions import (
+    _FINDING_SET_SCHEMA_VERSION,
+    DispositionAuthority,
+    ProposalDisposition,
+    ProposalDispositionStore,
+    ProposalValidationFinding,
+)
 from newsroom.increment6.hypotheses import (
     EVENT_HYPOTHESIS,
     EventHypothesisAuthority,
@@ -462,6 +468,153 @@ def test_direct_scalar_tamper_is_detected_by_current_and_reopen(tmp_path) -> Non
         ("sha256:" + "f" * 64,),
     )
     with pytest.raises(HypothesisContractError):
+        _open(fixture)
+
+
+def test_self_consistent_disposition_retarget_fails_reopen(tmp_path) -> None:
+    fixture = _authority_fixture(tmp_path)
+    connection = fixture[0]
+    authority = _open(fixture)
+    valid = authority.retain(fixture[4], fixture[5], proof=fixture[3])
+    authority.close()
+    old_disposition = ProposalDisposition.from_canonical_bytes(
+        bytes(
+            connection.execute(
+                "SELECT canonical_bytes FROM triage_proposal_dispositions"
+            ).fetchone()[0]
+        )
+    )
+    old_finding = ProposalValidationFinding.from_canonical_bytes(
+        bytes(
+            connection.execute(
+                "SELECT canonical_bytes FROM triage_proposal_validation_findings"
+            ).fetchone()[0]
+        )
+    )
+
+    assert old_disposition.route_binding.hypothesis is not None
+    forged_hypothesis = replace(
+        old_disposition.route_binding.hypothesis,
+        summary="Self-consistent forged summary",
+    )
+    forged_route = replace(
+        old_disposition.route_binding,
+        hypothesis=forged_hypothesis,
+    )
+    forged_route_digest = digest_bytes(
+        canonical_json_bytes(forged_route.canonical_value())
+    )
+    finding_identity = old_finding._identity_value()
+    finding_identity["evidence_reference_digest"] = forged_route_digest
+    forged_finding_id = digest_bytes(canonical_json_bytes(finding_identity))
+    forged_finding = replace(
+        old_finding,
+        finding_id=forged_finding_id,
+        evidence_reference_digest=forged_route_digest,
+    )
+    forged_finding_set_digest = digest_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": _FINDING_SET_SCHEMA_VERSION,
+                "proposal_content_identity": forged_finding.proposal_content_identity,
+                "validator_input_binding": forged_finding.validator_input.canonical_value(),
+                "finding_ids": [forged_finding.finding_id],
+                "authority": DispositionAuthority.NONE.value,
+            }
+        )
+    )
+    disposition_identity = old_disposition._identity_value()
+    disposition_identity.update(
+        finding_set_digest=forged_finding_set_digest,
+        route_binding=forged_route.canonical_value(),
+        route_binding_digest=forged_route_digest,
+    )
+    forged_disposition_id = digest_bytes(canonical_json_bytes(disposition_identity))
+    forged_disposition = replace(
+        old_disposition,
+        disposition_id=forged_disposition_id,
+        finding_set_digest=forged_finding_set_digest,
+        route_binding=forged_route,
+        route_binding_digest=forged_route_digest,
+    )
+    forged_bindings = _HypothesisStore._bindings((forged_disposition,))
+    forged_event_id = _version_event_id(
+        valid.hypothesis_id,
+        valid.ordinal,
+        valid.previous_version_digest,
+        valid.proposal_canonical_digest,
+        valid.proposal_local_id,
+        valid.target_version_digest,
+        forged_bindings,
+        valid.actor_identity_digest,
+        valid.recorded_at,
+    )
+    forged_version = replace(
+        valid,
+        source_bindings=forged_bindings,
+        authority_event_id=forged_event_id,
+    )
+
+    affected_tables = (
+        "'triage_proposal_validation_findings',"
+        "'triage_proposal_dispositions',"
+        "'event_hypothesis_versions_v2',"
+        "'event_hypothesis_heads_v2'"
+    )
+    triggers = connection.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' "
+        f"AND tbl_name IN ({affected_tables}) ORDER BY name"
+    ).fetchall()
+    connection.execute("PRAGMA foreign_keys=OFF")
+    connection.execute("BEGIN")
+    for name, _ in triggers:
+        connection.execute(f'DROP TRIGGER "{name}"')
+    connection.execute(
+        "UPDATE triage_proposal_validation_findings SET "
+        "finding_id=?,finding_set_digest=?,canonical_bytes=?,canonical_digest=? "
+        "WHERE finding_id=?",
+        (
+            forged_finding.finding_id,
+            forged_finding_set_digest,
+            forged_finding.canonical_bytes,
+            digest_bytes(forged_finding.canonical_bytes),
+            old_finding.finding_id,
+        ),
+    )
+    connection.execute(
+        "UPDATE triage_proposal_dispositions SET "
+        "disposition_id=?,finding_set_digest=?,finding_id=?,canonical_bytes=?,canonical_digest=? "
+        "WHERE disposition_id=?",
+        (
+            forged_disposition.disposition_id,
+            forged_finding_set_digest,
+            forged_finding.finding_id,
+            forged_disposition.canonical_bytes,
+            digest_bytes(forged_disposition.canonical_bytes),
+            old_disposition.disposition_id,
+        ),
+    )
+    connection.execute(
+        "UPDATE event_hypothesis_versions_v2 SET "
+        "authority_event_id=?,canonical_bytes=?,canonical_digest=? WHERE version_id=?",
+        (
+            forged_version.authority_event_id,
+            forged_version.canonical_bytes,
+            forged_version.canonical_digest,
+            forged_version.version_id,
+        ),
+    )
+    connection.execute(
+        "UPDATE event_hypothesis_heads_v2 SET version_digest=? WHERE version_id=?",
+        (forged_version.canonical_digest, forged_version.version_id),
+    )
+    for _, statement in triggers:
+        connection.execute(statement)
+    connection.execute("COMMIT")
+    connection.execute("PRAGMA foreign_keys=ON")
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    with pytest.raises(HypothesisContractError, match="exact Proposal group"):
         _open(fixture)
 
 
@@ -1113,8 +1266,9 @@ _SINGLE_INTEGRITY_MUTATIONS = (
 )
 
 
+@pytest.mark.parametrize("shard", range(4))
 def test_retained_single_version_integrity_mutations_fail_current_and_reopen(
-    tmp_path,
+    tmp_path, shard: int
 ) -> None:
     fixture = _authority_fixture(tmp_path)
     seed = _open(fixture)
@@ -1123,6 +1277,8 @@ def test_retained_single_version_integrity_mutations_fail_current_and_reopen(
     for index, (trigger, statement, parameters) in enumerate(
         _SINGLE_INTEGRITY_MUTATIONS
     ):
+        if index % 4 != shard:
+            continue
         database = tmp_path / f"retained-{index}.sqlite3"
         copied = sqlite3.connect(database, isolation_level=None)
         fixture[0].backup(copied)
@@ -1196,8 +1352,9 @@ _CHAIN_INTEGRITY_MUTATIONS = (
 )
 
 
+@pytest.mark.parametrize("shard", range(2))
 def test_retained_chain_gaps_and_noncontiguous_links_fail_closed(
-    tmp_path,
+    tmp_path, shard: int
 ) -> None:
     fixture = _authority_fixture(tmp_path)
     seed = _open(fixture)
@@ -1212,6 +1369,8 @@ def test_retained_chain_gaps_and_noncontiguous_links_fail_closed(
     last = seed.retain(raw, source, proof=fixture[3], expected_target_version=first)
     seed.close()
     for index, (trigger, statement) in enumerate(_CHAIN_INTEGRITY_MUTATIONS):
+        if index % 2 != shard:
+            continue
         database = tmp_path / f"chain-{index}.sqlite3"
         copied = sqlite3.connect(database, isolation_level=None)
         fixture[0].backup(copied)

@@ -36,7 +36,9 @@ from newsroom.increment6.hypotheses import (
 )
 from newsroom.increment6.proposals import (
     HypothesisRelationship,
+    LeadRecommendation,
     ProposalRoute,
+    ProposedHypothesis,
     TriageProposal,
 )
 from newsroom.increment6.work_items import RetrievalContextAuthority
@@ -59,6 +61,27 @@ _ALLOWED_ROUTES = {
     ProposalRoute.DEVELOPMENT_CANDIDATE,
     ProposalRoute.CORRECTION_CANDIDATE,
 }
+
+
+def _require_exact_proposal_authorisation(
+    disposition: ProposalDisposition,
+    recommendation: LeadRecommendation,
+    proposed: ProposedHypothesis,
+    proposal: TriageProposal,
+    proposal_digest: str,
+) -> None:
+    if (
+        disposition.judgement is not DispositionJudgement.ACCEPT
+        or disposition.route not in _ALLOWED_ROUTES
+        or disposition.proposal_id != proposal.proposal_id
+        or disposition.proposal_content_identity != proposal.content_identity
+        or disposition.proposal_canonical_digest != proposal_digest
+        or disposition.route_binding.hypothesis != proposed
+        or disposition.decision_lead_id != recommendation.decision_lead_id
+    ):
+        raise HypothesisContractError(
+            "disposition does not authorise the exact Proposal group"
+        )
 
 
 def _secure_directory(path: Path) -> None:
@@ -334,19 +357,13 @@ class _HypothesisStore:
             for value, recommendation in zip(
                 retained_values, recommendations, strict=True
             ):
-                hypothesis = value.route_binding.hypothesis
-                if (
-                    value.judgement is not DispositionJudgement.ACCEPT
-                    or value.route not in _ALLOWED_ROUTES
-                    or value.proposal_id != proposal.proposal_id
-                    or value.proposal_content_identity != proposal.content_identity
-                    or value.proposal_canonical_digest != digest_bytes(proposal_bytes)
-                    or hypothesis != proposed
-                    or value.decision_lead_id != recommendation.decision_lead_id
-                ):
-                    raise HypothesisContractError(
-                        "disposition does not authorise the exact Proposal group"
-                    )
+                _require_exact_proposal_authorisation(
+                    value,
+                    recommendation,
+                    proposed,
+                    proposal,
+                    digest_bytes(proposal_bytes),
+                )
             actors = {
                 value.validator_input.authenticated_context_identity
                 for value in retained_values
@@ -754,6 +771,8 @@ class _HypothesisStore:
                 for r in recs
             ):
                 raise HypothesisContractError("retained Proposal retargeted")
+            proposed = recs[0].hypothesis
+            assert proposed is not None
             if tuple(r.decision_lead_id for r in recs) != tuple(
                 binding.decision_lead_id for binding in value.source_bindings
             ):
@@ -761,7 +780,9 @@ class _HypothesisStore:
                     "retained Proposal group coverage differs"
                 )
             retained_bindings: list[HypothesisSourceBinding] = []
-            for binding in value.source_bindings:
+            for binding, recommendation in zip(
+                value.source_bindings, recs, strict=True
+            ):
                 disposition_row = self._connection.execute(
                     "SELECT canonical_bytes FROM triage_proposal_dispositions WHERE disposition_id=?",
                     (binding.disposition_id,),
@@ -772,6 +793,13 @@ class _HypothesisStore:
                     )
                 disposition = ProposalDisposition.from_canonical_bytes(
                     bytes(disposition_row[0])
+                )
+                _require_exact_proposal_authorisation(
+                    disposition,
+                    recommendation,
+                    proposed,
+                    proposal,
+                    value.proposal_canonical_digest,
                 )
                 retained_bindings.extend(self._bindings((disposition,)))
                 if (
