@@ -6,17 +6,20 @@ from pathlib import Path
 from newsroom.authority.evaluation_handoff_migrations import (
     EVALUATION_HANDOFF_SCHEMA_VERSION,
 )
+from newsroom.authority.event_hypothesis_migrations import (
+    EVENT_HYPOTHESIS_SCHEMA_VERSION,
+)
 from newsroom.authority.graphiti_adapter_migrations import (
     GRAPHITI_ADAPTER_SCHEMA_VERSION,
-)
-from newsroom.authority.triage_work_item_migrations import (
-    TRIAGE_WORK_ITEM_SCHEMA_VERSION,
 )
 from newsroom.authority.triage_disposition_migrations import (
     TRIAGE_DISPOSITION_SCHEMA_VERSION,
 )
 from newsroom.authority.triage_execution_migrations import (
     TRIAGE_EXECUTION_SCHEMA_VERSION,
+)
+from newsroom.authority.triage_work_item_migrations import (
+    TRIAGE_WORK_ITEM_SCHEMA_VERSION,
 )
 
 
@@ -40,6 +43,14 @@ def downgrade_empty_graphiti_adapter_schema_to_v15(database: Path) -> None:
         ).fetchone()
         assert delete_trigger is not None and delete_trigger[0]
         conn.execute("DROP TRIGGER immutable_authority_migrations_delete")
+
+        if current >= EVENT_HYPOTHESIS_SCHEMA_VERSION:
+            for table in (
+                "event_hypothesis_heads_v2",
+                "event_hypothesis_versions_v2",
+                "event_hypotheses_v2",
+            ):
+                conn.execute(f'DROP TABLE "{table}"')
 
         if current >= TRIAGE_EXECUTION_SCHEMA_VERSION:
             for table in (

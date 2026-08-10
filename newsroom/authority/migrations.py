@@ -58,6 +58,17 @@ from .evaluation_handoff_migrations import (
     prepare_evaluation_handoff_backup,
     require_evaluation_handoff_backup,
 )
+from .event_hypothesis_migrations import (
+    EVENT_HYPOTHESIS_MIGRATION,
+    EVENT_HYPOTHESIS_MIGRATION_CHECKSUM,
+    EVENT_HYPOTHESIS_MIGRATION_NAME,
+    EVENT_HYPOTHESIS_MIGRATION_STATEMENTS,
+    EVENT_HYPOTHESIS_SCHEMA_VERSION,
+    EventHypothesisBackupReceipt,
+    event_hypothesis_backup_paths,
+    prepare_event_hypothesis_backup,
+    require_event_hypothesis_backup,
+)
 from .extraction_migrations import (
     EXTRACTION_AUTHORITY_MIGRATION,
     EXTRACTION_AUTHORITY_MIGRATION_CHECKSUM,
@@ -121,17 +132,6 @@ from .source_registry_migrations import (
     SOURCE_REGISTRY_MIGRATION_STATEMENTS,
     SOURCE_REGISTRY_SCHEMA_VERSION,
 )
-from .triage_work_item_migrations import (
-    TRIAGE_WORK_ITEM_MIGRATION,
-    TRIAGE_WORK_ITEM_MIGRATION_CHECKSUM,
-    TRIAGE_WORK_ITEM_MIGRATION_NAME,
-    TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS,
-    TRIAGE_WORK_ITEM_SCHEMA_VERSION,
-    TriageWorkItemBackupReceipt,
-    prepare_triage_work_item_backup,
-    require_triage_work_item_backup,
-    triage_work_item_backup_paths,
-)
 from .triage_disposition_migrations import (
     TRIAGE_DISPOSITION_MIGRATION,
     TRIAGE_DISPOSITION_MIGRATION_CHECKSUM,
@@ -154,9 +154,20 @@ from .triage_execution_migrations import (
     require_triage_execution_backup,
     triage_execution_backup_paths,
 )
+from .triage_work_item_migrations import (
+    TRIAGE_WORK_ITEM_MIGRATION,
+    TRIAGE_WORK_ITEM_MIGRATION_CHECKSUM,
+    TRIAGE_WORK_ITEM_MIGRATION_NAME,
+    TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS,
+    TRIAGE_WORK_ITEM_SCHEMA_VERSION,
+    TriageWorkItemBackupReceipt,
+    prepare_triage_work_item_backup,
+    require_triage_work_item_backup,
+    triage_work_item_backup_paths,
+)
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = TRIAGE_EXECUTION_SCHEMA_VERSION
+SCHEMA_VERSION = EVENT_HYPOTHESIS_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -600,11 +611,12 @@ def prepare_pending_migration_backup(
     | TriageWorkItemBackupReceipt
     | TriageDispositionBackupReceipt
     | TriageExecutionBackupReceipt
+    | EventHypothesisBackupReceipt
     | None
 ):
     """Prepare the exact retained backup required by a checked predecessor."""
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if version not in {16, 17, 18, 19}:
+    if version not in {16, 17, 18, 19, 20}:
         return None
     database_path = next(
         str(row[2])
@@ -624,8 +636,11 @@ def prepare_pending_migration_backup(
     if version == 18:
         backup_path, _ = triage_disposition_backup_paths(database_path)
         return prepare_triage_disposition_backup(conn, backup_path)
-    backup_path, _ = triage_execution_backup_paths(database_path)
-    return prepare_triage_execution_backup(conn, backup_path)
+    if version == 19:
+        backup_path, _ = triage_execution_backup_paths(database_path)
+        return prepare_triage_execution_backup(conn, backup_path)
+    backup_path, _ = event_hypothesis_backup_paths(database_path)
+    return prepare_event_hypothesis_backup(conn, backup_path)
 
 
 def apply_migration(
@@ -921,7 +936,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_evaluation_handoff_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-4],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-5],
                 )
             for statement in EVALUATION_HANDOFF_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -956,7 +971,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_work_item_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-3],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-4],
                 )
             for statement in TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -990,7 +1005,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_disposition_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-2],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-3],
                 )
             for statement in TRIAGE_DISPOSITION_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1024,7 +1039,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_execution_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-1],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-2],
                 )
             for statement in TRIAGE_EXECUTION_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1039,6 +1054,39 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                 ),
             )
             current = TRIAGE_EXECUTION_SCHEMA_VERSION
+        if current == TRIAGE_EXECUTION_SCHEMA_VERSION:
+            if 0 < starting_version < TRIAGE_EXECUTION_SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version={TRIAGE_EXECUTION_SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+                database_path = next(
+                    str(row[2])
+                    for row in conn.execute("PRAGMA database_list")
+                    if row[1] == "main"
+                )
+                if not database_path:
+                    raise sqlite3.DatabaseError(
+                        "existing multihop upgrade requires a file-backed database"
+                    )
+                backup_path, _ = event_hypothesis_backup_paths(database_path)
+                prepare_event_hypothesis_backup(conn, backup_path)
+                conn.execute("BEGIN EXCLUSIVE")
+            if starting_version != 0:
+                require_event_hypothesis_backup(
+                    conn, expected_history=EXPECTED_MIGRATION_HISTORY[:-1]
+                )
+            for statement in EVENT_HYPOTHESIS_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    EVENT_HYPOTHESIS_SCHEMA_VERSION,
+                    EVENT_HYPOTHESIS_MIGRATION_NAME,
+                    EVENT_HYPOTHESIS_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = EVENT_HYPOTHESIS_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -1068,6 +1116,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     TRIAGE_WORK_ITEM_MIGRATION,
     TRIAGE_DISPOSITION_MIGRATION,
     TRIAGE_EXECUTION_MIGRATION,
+    EVENT_HYPOTHESIS_MIGRATION,
 )
 
 
@@ -1174,5 +1223,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         TRIAGE_EXECUTION_SCHEMA_VERSION,
         TRIAGE_EXECUTION_MIGRATION_NAME,
         TRIAGE_EXECUTION_MIGRATION_CHECKSUM,
+    ),
+    (
+        EVENT_HYPOTHESIS_SCHEMA_VERSION,
+        EVENT_HYPOTHESIS_MIGRATION_NAME,
+        EVENT_HYPOTHESIS_MIGRATION_CHECKSUM,
     ),
 )

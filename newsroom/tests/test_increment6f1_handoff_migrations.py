@@ -77,6 +77,9 @@ def _downgrade_empty_v17_to_v16(connection: sqlite3.Connection) -> None:
     ).fetchone()[0]
     connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
     for table in (
+        "event_hypothesis_heads_v2",
+        "event_hypothesis_versions_v2",
+        "event_hypotheses_v2",
         "triage_work_item_leases",
         "triage_worker_attempts",
         "triage_execution_batches",
@@ -108,8 +111,8 @@ def _downgrade_empty_v17_to_v16(connection: sqlite3.Connection) -> None:
 def test_fresh_v17_schema_history_fingerprint_and_integrity_are_exact() -> None:
     connection = _fresh()
     try:
-        assert SCHEMA_VERSION == 20 and EVALUATION_HANDOFF_SCHEMA_VERSION == 17
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert SCHEMA_VERSION == 21 and EVALUATION_HANDOFF_SCHEMA_VERSION == 17
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
         assert connection.execute(
             "SELECT version,name,checksum FROM authority_migrations "
             "ORDER BY version"
@@ -174,7 +177,7 @@ def test_exact_v16_upgrade_requires_and_retains_exact_backup_digest(
             ).fetchall() == retained_v16_history
         finally:
             backup_connection.close()
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
         assert connection.execute(
             "SELECT version,name,checksum FROM authority_migrations "
             "WHERE version<=16 ORDER BY version"
@@ -197,7 +200,7 @@ def test_multihop_existing_upgrade_checkpoints_v16_backup_before_v17(
             connection, applied_at="2042-03-12T10:00:01.000000Z"
         )
         backup, digest_path = evaluation_handoff_backup_paths(database)
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
         assert backup.is_file()
         assert digest_path.is_file()
         backup_connection = _open(backup)
@@ -270,7 +273,7 @@ def test_standard_sqlite_connection_backup_preflight_leaves_no_transaction(
         apply_pending_migrations(
             connection, applied_at="2042-03-12T10:00:01.000000Z"
         )
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
     finally:
         connection.close()
 
