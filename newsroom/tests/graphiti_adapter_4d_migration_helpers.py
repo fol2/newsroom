@@ -9,6 +9,9 @@ from newsroom.authority.evaluation_handoff_migrations import (
 from newsroom.authority.event_hypothesis_migrations import (
     EVENT_HYPOTHESIS_SCHEMA_VERSION,
 )
+from newsroom.authority.event_hypothesis_relationship_migrations import (
+    EVENT_HYPOTHESIS_RELATIONSHIP_SCHEMA_VERSION,
+)
 from newsroom.authority.graphiti_adapter_migrations import (
     GRAPHITI_ADAPTER_SCHEMA_VERSION,
 )
@@ -21,6 +24,26 @@ from newsroom.authority.triage_execution_migrations import (
 from newsroom.authority.triage_work_item_migrations import (
     TRIAGE_WORK_ITEM_SCHEMA_VERSION,
 )
+
+
+def drop_empty_v22_relationship_schema(connection: sqlite3.Connection) -> None:
+    """Remove only the empty additive v22 relationship schema."""
+
+    if (
+        connection.execute("PRAGMA user_version").fetchone()[0]
+        < EVENT_HYPOTHESIS_RELATIONSHIP_SCHEMA_VERSION
+    ):
+        return
+    assert connection.execute(
+        "SELECT COUNT(*) FROM event_hypothesis_relationship_decisions"
+    ).fetchone() == (0,)
+    for trigger in (
+        "retained_event_hypothesis_relationship_delete",
+        "immutable_event_hypothesis_relationship_update",
+        "event_hypothesis_relationship_coherence",
+    ):
+        connection.execute(f'DROP TRIGGER "{trigger}"')
+    connection.execute("DROP TABLE event_hypothesis_relationship_decisions")
 
 
 def downgrade_empty_graphiti_adapter_schema_to_v15(database: Path) -> None:
@@ -43,6 +66,8 @@ def downgrade_empty_graphiti_adapter_schema_to_v15(database: Path) -> None:
         ).fetchone()
         assert delete_trigger is not None and delete_trigger[0]
         conn.execute("DROP TRIGGER immutable_authority_migrations_delete")
+
+        drop_empty_v22_relationship_schema(conn)
 
         if current >= EVENT_HYPOTHESIS_SCHEMA_VERSION:
             for table in (

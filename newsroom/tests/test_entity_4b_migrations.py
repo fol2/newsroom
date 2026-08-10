@@ -18,15 +18,11 @@ from newsroom.authority.migrations import (
     schema_fingerprint,
 )
 from newsroom.authority.persistence import AuthoritySchemaError
-from newsroom.authority.extraction_system import (
-    open_governed_extraction_authority_system,
-)
 
 from .editorial_relation_4c_migration_helpers import (
     downgrade_empty_editorial_relation_schema_to_v14,
 )
 from .extraction_4a_helpers import open_extraction_system, seed_extraction_fixture
-
 
 ENTITY_TABLES = {
     "canonical_entities",
@@ -118,7 +114,6 @@ def test_current_schema_retains_exact_v14_history_tables_and_view(
     conn = sqlite3.connect(state.database)
     try:
         assert ENTITY_AUTHORITY_SCHEMA_VERSION == 14
-        assert SCHEMA_VERSION == 21
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(conn) == EXPECTED_SCHEMA_FINGERPRINT
         assert conn.execute(

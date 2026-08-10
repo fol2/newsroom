@@ -34,7 +34,6 @@ from .graphiti_adapter_4d_migration_helpers import (
     downgrade_empty_graphiti_adapter_schema_to_v15,
 )
 
-
 GRAPHITI_ADAPTER_TABLES = {
     "graphiti_adapter_attempt_heads",
     "graphiti_adapter_attempt_replays",
@@ -76,7 +75,6 @@ def test_fresh_schema_v16_history_policies_tables_and_triggers_are_exact(
     conn = sqlite3.connect(state.database)
     try:
         assert GRAPHITI_ADAPTER_SCHEMA_VERSION == 16
-        assert SCHEMA_VERSION == 21
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(conn) == EXPECTED_SCHEMA_FINGERPRINT
         assert conn.execute(

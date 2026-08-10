@@ -24,6 +24,10 @@ from newsroom.authority.triage_execution_migrations import (
     triage_execution_backup_paths,
 )
 
+from .graphiti_adapter_4d_migration_helpers import (
+    drop_empty_v22_relationship_schema,
+)
+
 
 def _open(path: str | Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path, isolation_level=None)
@@ -46,6 +50,7 @@ def _downgrade_to_v19(connection: sqlite3.Connection) -> None:
         "WHERE name='immutable_authority_migrations_delete'"
     ).fetchone()[0]
     connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+    drop_empty_v22_relationship_schema(connection)
     connection.execute("DROP TABLE event_hypothesis_heads_v2")
     connection.execute("DROP TABLE event_hypothesis_versions_v2")
     connection.execute("DROP TABLE event_hypotheses_v2")
@@ -73,8 +78,9 @@ def _downgrade_to_v19(connection: sqlite3.Connection) -> None:
 
 def test_fresh_v20_history_fingerprint_and_exact_three_table_allocation() -> None:
     connection = _fresh()
-    assert SCHEMA_VERSION == 21 and TRIAGE_EXECUTION_SCHEMA_VERSION == 20
-    assert EXPECTED_MIGRATION_HISTORY[-2] == (
+    assert TRIAGE_EXECUTION_SCHEMA_VERSION == 20
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    assert EXPECTED_MIGRATION_HISTORY[TRIAGE_EXECUTION_SCHEMA_VERSION - 1] == (
         20,
         TRIAGE_EXECUTION_MIGRATION_NAME,
         TRIAGE_EXECUTION_MIGRATION_CHECKSUM,
@@ -109,10 +115,7 @@ def test_v20_literal_predecessor_pins_are_exact() -> None:
     assert TRIAGE_EXECUTION_MIGRATION_CHECKSUM == (
         "sha256:6eb04f981f650bbb4956f148d11f1656bcd2b7c510117db96602dd9d83ab9bd3"
     )
-    assert EXPECTED_SCHEMA_FINGERPRINT == (
-        "sha256:d314d06118a25f8a32a0f9d8acb1af5383abd6b30be682cb5f65943ae15c213f"
-    )
-    assert EXPECTED_MIGRATION_HISTORY[-2] == (
+    assert EXPECTED_MIGRATION_HISTORY[TRIAGE_EXECUTION_SCHEMA_VERSION - 1] == (
         20,
         "triage_execution_authority_v20",
         "sha256:6eb04f981f650bbb4956f148d11f1656bcd2b7c510117db96602dd9d83ab9bd3",
@@ -130,7 +133,7 @@ def test_exact_v19_backup_upgrade_reuse_and_tamper_fail_closed(
     receipt = prepare_triage_execution_backup(connection, backup)
     assert prepare_triage_execution_backup(connection, backup) == receipt
     apply_pending_migrations(connection, applied_at="2042-03-12T10:00:01Z")
-    assert connection.execute("PRAGMA user_version").fetchone() == (21,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
     assert backup.is_file() and digest.is_file()
 
     digest.write_text("sha256:" + "0" * 64 + "\n", encoding="ascii")
@@ -164,6 +167,6 @@ def test_injected_v20_failure_rolls_back_exact_v19_and_v21_rejects(
     ).fetchall() == []
 
     newer = _open(":memory:")
-    newer.execute("PRAGMA user_version=22")
+    newer.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
     with pytest.raises(sqlite3.DatabaseError, match="newer"):
         apply_pending_migrations(newer, applied_at="2042-03-12T10:00:00Z")
