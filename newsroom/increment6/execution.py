@@ -1655,7 +1655,7 @@ __all__ = [
 # The only public v20 authority composition seam.  Importing here preserves the
 # phase-one value types above while keeping the trusted SQLite implementation
 # private to ``newsroom.authority``.
-from newsroom.authority._triage_execution_store import (  # noqa: E402
+from newsroom.authority.triage_execution_system import (  # noqa: E402
     TriageExecutionAuthority,
     TriageExecutionAuthorityError,
     open_triage_execution_authority,
