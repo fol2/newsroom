@@ -40,6 +40,8 @@ _OWNER_RISKS = frozenset({"R4_RELEASE_OPERATIONAL"})
 _SAFE_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\x00-\x1f\x7f]{1,48}Z")
+_SUCCESSFUL_STEP_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
+_CORE_SHARD_NAMES = tuple(f"core-shard-{index}" for index in range(6))
 _RECORD_KEYS = frozenset(
     {
         "schema_version",
@@ -333,9 +335,9 @@ def _telemetry_jobs(
         and isinstance(job.get("name"), str)
         and str(job["name"]).startswith("core-shard-")
     ]
-    expected = {f"core-shard-{index}" for index in range(4)}
+    expected = set(_CORE_SHARD_NAMES)
     if (
-        len(matrix) != 4
+        len(matrix) != len(_CORE_SHARD_NAMES)
         or {job["name"] for job in matrix} != expected
         or any(job.get("name") == "core_shard" for job in jobs if isinstance(job, dict))
         or any(
@@ -362,6 +364,76 @@ def _telemetry_jobs(
     return {**value, "jobs": [*jobs, dependency]}
 
 
+def _normalise_stale_completed_jobs(
+    value: object,
+    *,
+    job_names: frozenset[str],
+) -> object:
+    jobs = value.get("jobs") if isinstance(value, dict) else None
+    if not isinstance(jobs, list):
+        return value
+    normalised: list[object] = []
+    for raw_job in jobs:
+        if not isinstance(raw_job, dict) or raw_job.get("name") not in job_names:
+            normalised.append(raw_job)
+            continue
+        if not {"status", "conclusion", "completed_at"}.issubset(raw_job) or (
+            raw_job.get("status"),
+            raw_job.get("conclusion"),
+            raw_job.get("completed_at"),
+        ) != ("in_progress", None, None):
+            normalised.append(raw_job)
+            continue
+        steps = raw_job.get("steps")
+        if not isinstance(steps, list) or not steps:
+            raise WorkflowEvidenceError("stale_job_steps")
+        completed_steps: list[tuple[str, datetime]] = []
+        seen_names: set[str] = set()
+        complete_job_count = 0
+        complete_job_completed: datetime | None = None
+        for raw_step in steps:
+            if not isinstance(raw_step, dict):
+                raise WorkflowEvidenceError("stale_job_step")
+            name = _text(raw_step.get("name"), "stale_job_step_name", maximum=256)
+            if name in seen_names:
+                raise WorkflowEvidenceError("stale_job_step_duplicate")
+            seen_names.add(name)
+            if raw_step.get("status") != "completed":
+                raise WorkflowEvidenceError("stale_job_step_incomplete")
+            conclusion = raw_step.get("conclusion")
+            if conclusion not in _SUCCESSFUL_STEP_CONCLUSIONS:
+                raise WorkflowEvidenceError("stale_job_step_conclusion")
+            completed_steps.append(
+                _workflow_timestamp(
+                    raw_step.get("completed_at"),
+                    "stale_job_step_completed_at",
+                )
+            )
+            if name == "Complete job":
+                complete_job_count += 1
+                if conclusion != "success":
+                    raise WorkflowEvidenceError("stale_job_complete_conclusion")
+                complete_job_completed = completed_steps[-1][1]
+        if complete_job_count != 1:
+            raise WorkflowEvidenceError("stale_job_complete_step")
+        latest_step = max(completed_steps, key=lambda item: item[1])
+        if (
+            not isinstance(steps[-1], dict)
+            or steps[-1].get("name") != "Complete job"
+            or complete_job_completed != latest_step[1]
+        ):
+            raise WorkflowEvidenceError("stale_job_complete_order")
+        normalised.append(
+            {
+                **raw_job,
+                "status": "completed",
+                "conclusion": "success",
+                "completed_at": latest_step[0],
+            }
+        )
+    return {**value, "jobs": normalised}
+
+
 def verify_shadow_lane(
     *,
     repo_root: str | Path,
@@ -384,8 +456,18 @@ def verify_shadow_lane(
     run_event = _event_name(run.get("event"))
     run_created_at = _timestamp(run.get("created_at"))
     try:
-        jobs = _telemetry_jobs(
+        normalised_jobs = _normalise_stale_completed_jobs(
             transport.jobs,
+            job_names=frozenset(
+                {
+                    policy.producer_job_id,
+                    *policy.ready_after_jobs,
+                    *_CORE_SHARD_NAMES,
+                }
+            ),
+        )
+        jobs = _telemetry_jobs(
+            normalised_jobs,
             policy=policy,
             run_id=transport.replay.run_id,
             run_attempt=transport.replay.run_attempt,

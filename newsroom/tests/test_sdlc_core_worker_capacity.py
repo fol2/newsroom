@@ -34,7 +34,7 @@ def _write_fragment_set(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    directory_order: tuple[int, ...] = (0, 1, 2, 3),
+    directory_order: tuple[int, ...] = (0, 1, 2, 3, 4, 5),
 ) -> tuple[Path, object, object, dict[str, object]]:
     fragments = tmp_path / "fragments"
     fragments.mkdir(parents=True)
@@ -55,7 +55,7 @@ def _write_fragment_set(
         "head_tree_sha": context.evaluated_tree_sha,
         "clustering_required": False,
     }
-    files = tuple(f"newsroom/tests/test_{index}.py" for index in range(4))
+    files = tuple(f"newsroom/tests/test_{index}.py" for index in range(6))
     nodes = tuple(f"{path}::test_{index}" for index, path in enumerate(files))
     shards = lane_module._core_node_shards(nodes)
     spec = SimpleNamespace(
@@ -103,7 +103,7 @@ def _write_fragment_set(
             "evaluated_tree_sha": context.evaluated_tree_sha,
             "route_digest": lane_module.sha256_identity(route),
             "shard_index": shard_index,
-            "shard_count": 4,
+            "shard_count": 6,
             "file_inventory": list(files),
             "file_inventory_digest": lane_module.sha256_identity(list(files)),
             "node_inventory": list(nodes),
@@ -192,7 +192,7 @@ def _patch_core_shard_execution(
         "head_tree_sha": context.evaluated_tree_sha,
         "clustering_required": False,
     }
-    files = tuple(f"newsroom/tests/test_{index}.py" for index in range(4))
+    files = tuple(f"newsroom/tests/test_{index}.py" for index in range(6))
     nodes = tuple(f"{path}::test_{index}" for index, path in enumerate(files))
     spec = SimpleNamespace(
         as_dict=lambda: {"schema_version": "test-command-spec"},
@@ -404,7 +404,7 @@ def _run_reducer_fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     source_elapsed_ms: int,
-    shard_elapsed_ms: tuple[int, int, int, int],
+    shard_elapsed_ms: tuple[int, int, int, int, int, int],
     reducer_elapsed_ms: int,
     load_elapsed_ms: int | None = None,
     output_elapsed_ms: int | None = None,
@@ -539,10 +539,10 @@ def _run_reducer_fixture(
     return json.loads(aggregate_path.read_text(encoding="utf-8")), order
 
 
-def test_core_lane_uses_four_persistent_worksteal_workers(
+def test_core_lane_uses_two_persistent_worksteal_workers(
     tmp_path: Path,
 ) -> None:
-    assert lane_module._CORE_WORKER_COUNT == 4
+    assert lane_module._CORE_WORKER_COUNT == 2
     assert lane_module._CORE_DISTRIBUTION == "worksteal"
 
     command = lane_module._core_worker_command(
@@ -551,7 +551,7 @@ def test_core_lane_uses_four_persistent_worksteal_workers(
     )
 
     worker_flag = command.index("-n")
-    assert command[worker_flag + 1] == "4"
+    assert command[worker_flag + 1] == "2"
     assert "--dist=worksteal" in command
     assert "--max-worker-restart=0" in command
     assert command.count("xdist.plugin") == 1
@@ -564,7 +564,7 @@ import importlib
 import scripts.sdlc.workflow_lane as lane
 reloaded = importlib.reload(lane)
 assert reloaded is lane
-assert reloaded._CORE_WORKER_COUNT == 4
+assert reloaded._CORE_WORKER_COUNT == 2
 assert reloaded._CORE_DISTRIBUTION == 'worksteal'
 assert reloaded._CORE_TESTS == ('newsroom/tests',)
 """
@@ -590,7 +590,7 @@ def test_core_node_partition_is_deterministic_complete_unique_and_balanced() -> 
     flattened = tuple(node for shard in first for node in shard)
 
     assert first == second
-    assert len(first) == 4
+    assert len(first) == 6
     assert tuple(sorted(flattened)) == tuple(sorted(nodes))
     assert len(flattened) == len(set(flattened))
     assert max(map(len, first)) - min(map(len, first)) == 1
@@ -669,7 +669,7 @@ def test_core_shard_command_has_fixed_scheduler_and_no_caller_file_surface(
     )
 
     assert command.count("xdist.plugin") == 1
-    assert command[command.index("-n") + 1] == "4"
+    assert command[command.index("-n") + 1] == "2"
     assert "--dist=worksteal" in command
     assert "--max-worker-restart=0" in command
     assert "newsroom/tests" not in command
@@ -721,7 +721,7 @@ def test_core_shard_spec_binds_full_inventory_and_assigned_node_ids() -> None:
 def test_core_shard_child_recomputes_bound_inventory_before_pytest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    nodes = tuple(f"newsroom/tests/test_{index}.py::test_{index}" for index in range(4))
+    nodes = tuple(f"newsroom/tests/test_{index}.py::test_{index}" for index in range(6))
     selected = lane_module._core_node_shards(nodes)[0]
     monkeypatch.setattr(
         lane_module, "_collect_core_node_ids", lambda _root, **_kwargs: nodes
@@ -742,11 +742,11 @@ def test_core_shard_child_recomputes_bound_inventory_before_pytest(
 @pytest.mark.parametrize(
     ("results", "expected"),
     [
-        (("PASS",) * 4, "PASS"),
-        (("FAIL", "PASS", "PASS", "PASS"), "FAIL"),
-        (("FAIL", "BUDGET_EXCEEDED", "PASS", "PASS"), "BUDGET_EXCEEDED"),
-        (("FAIL", "ENVIRONMENT_ERROR", "PASS", "PASS"), "ENVIRONMENT_ERROR"),
-        (("FAIL", "EVIDENCE_MISMATCH", "PASS", "PASS"), "EVIDENCE_MISMATCH"),
+        (("PASS",) * 6, "PASS"),
+        (("FAIL", *("PASS",) * 5), "FAIL"),
+        (("FAIL", "BUDGET_EXCEEDED", *("PASS",) * 4), "BUDGET_EXCEEDED"),
+        (("FAIL", "ENVIRONMENT_ERROR", *("PASS",) * 4), "ENVIRONMENT_ERROR"),
+        (("FAIL", "EVIDENCE_MISMATCH", *("PASS",) * 4), "EVIDENCE_MISMATCH"),
     ],
 )
 def test_core_reducer_preserves_typed_outcome_precedence(
@@ -758,11 +758,11 @@ def test_core_reducer_preserves_typed_outcome_precedence(
 @pytest.mark.parametrize(
     ("results", "junit_outcomes", "expected"),
     [
-        (("PASS",) * 4, ("PASS", "FAIL", "PASS", "PASS"), "FAIL"),
-        (("PASS", "FAIL", "PASS", "PASS"), ("PASS",) * 4, "FAIL"),
+        (("PASS",) * 6, ("PASS", "FAIL", *("PASS",) * 4), "FAIL"),
+        (("PASS", "FAIL", *("PASS",) * 4), ("PASS",) * 6, "FAIL"),
         (
-            ("PASS", "BUDGET_EXCEEDED", "PASS", "PASS"),
-            ("PASS", "FAIL", "PASS", "PASS"),
+            ("PASS", "BUDGET_EXCEEDED", *("PASS",) * 4),
+            ("PASS", "FAIL", *("PASS",) * 4),
             "BUDGET_EXCEEDED",
         ),
     ],
@@ -807,7 +807,7 @@ def test_reducer_uses_source_shard_critical_path_plus_sequential_elapsed(
         tmp_path,
         monkeypatch,
         source_elapsed_ms=60_000,
-        shard_elapsed_ms=(200_000, 180_000, 170_000, 160_000),
+        shard_elapsed_ms=(200_000, 180_000, 170_000, 160_000, 150_000, 140_000),
         reducer_elapsed_ms=19_000,
     )
 
@@ -821,6 +821,8 @@ def test_reducer_uses_source_shard_critical_path_plus_sequential_elapsed(
         180_000,
         170_000,
         160_000,
+        150_000,
+        140_000,
     ]
     assert accounting["reducer_lifecycle_ms"] == 19_000
     assert accounting["critical_path_ms"] == 219_000
@@ -852,7 +854,7 @@ def test_reducer_critical_path_boundary_emits_valid_immutable_outcome(
         tmp_path,
         monkeypatch,
         source_elapsed_ms=219_500,
-        shard_elapsed_ms=(1, 1, 1, 1),
+        shard_elapsed_ms=(1, 1, 1, 1, 1, 1),
         reducer_elapsed_ms=reducer_elapsed_ms,
     )
 
@@ -877,7 +879,7 @@ def test_slow_reducer_is_typed_budget_exceeded_from_before_input_loading(
             tmp_path,
             monkeypatch,
             source_elapsed_ms=1,
-            shard_elapsed_ms=(1, 1, 1, 1),
+            shard_elapsed_ms=(1, 1, 1, 1, 1, 1),
             reducer_elapsed_ms=220_001,
         )
 
@@ -895,7 +897,7 @@ def test_reducer_stops_after_a_load_crosses_its_deadline(
             tmp_path,
             monkeypatch,
             source_elapsed_ms=1,
-            shard_elapsed_ms=(1, 1, 1, 1),
+            shard_elapsed_ms=(1, 1, 1, 1, 1, 1),
             reducer_elapsed_ms=1,
             load_elapsed_ms=220_001,
         )
@@ -910,7 +912,7 @@ def test_reducer_output_time_is_bound_and_cannot_publish_pass(
         tmp_path,
         monkeypatch,
         source_elapsed_ms=1,
-        shard_elapsed_ms=(1, 1, 1, 1),
+        shard_elapsed_ms=(1, 1, 1, 1, 1, 1),
         reducer_elapsed_ms=219_999,
         output_elapsed_ms=220_001,
     )
@@ -966,7 +968,7 @@ def test_core_fragment_binds_contract_lock_toolchain_and_exact_inventory(
         "head_tree_sha": context.evaluated_tree_sha,
         "clustering_required": False,
     }
-    files = tuple(f"newsroom/tests/test_{index}.py" for index in range(4))
+    files = tuple(f"newsroom/tests/test_{index}.py" for index in range(6))
     nodes = tuple(f"{path}::test_{index}" for index, path in enumerate(files))
     spec = SimpleNamespace(
         as_dict=lambda: {"schema_version": "test-command-spec"},
@@ -1126,7 +1128,7 @@ def test_collection_time_tracked_mutation_prevents_fragment_publication(
         "head_tree_sha": context.evaluated_tree_sha,
         "clustering_required": False,
     }
-    nodes = tuple(f"newsroom/tests/test_{index}.py::test_{index}" for index in range(4))
+    nodes = tuple(f"newsroom/tests/test_{index}.py::test_{index}" for index in range(6))
 
     def collect(_root: Path, **_kwargs: object) -> tuple[str, ...]:
         tracked.write_text("mutated during collection\n", encoding="utf-8")
@@ -1551,7 +1553,7 @@ def test_fragment_loader_is_input_order_deterministic_and_validates_bindings(
     fragments, contract, context, route = _write_fragment_set(
         tmp_path,
         monkeypatch,
-        directory_order=(3, 2, 1, 0),
+        directory_order=(5, 4, 3, 2, 1, 0),
     )
 
     loaded = lane_module._load_core_fragments(
@@ -1567,6 +1569,8 @@ def test_fragment_loader_is_input_order_deterministic_and_validates_bindings(
         1,
         2,
         3,
+        4,
+        5,
     )
 
 
@@ -1725,7 +1729,7 @@ def test_reducer_rejects_self_consistent_junit_outside_assigned_union(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fragments, contract, context, route = _write_fragment_set(tmp_path, monkeypatch)
-    for index in range(4):
+    for index in range(6):
         path = fragments / f"input-{index}" / "fragment.json"
         _rewrite_fragment_as_pass(path)
         _write_bound_junit(path)
@@ -1897,9 +1901,9 @@ def test_fragment_loader_rejects_duplicate_and_noncanonical_fragments(
 
 def test_reducer_rejects_missing_or_extra_fragment_count() -> None:
     with pytest.raises(WorkflowLaneError, match="core_fragment_count"):
-        lane_module._reduced_core_outcome(("PASS",) * 3)
-    with pytest.raises(WorkflowLaneError, match="core_fragment_count"):
         lane_module._reduced_core_outcome(("PASS",) * 5)
+    with pytest.raises(WorkflowLaneError, match="core_fragment_count"):
+        lane_module._reduced_core_outcome(("PASS",) * 7)
 
 
 def test_fragment_loader_rejects_missing_and_extra_artifact_inputs(
@@ -1907,24 +1911,24 @@ def test_fragment_loader_rejects_missing_and_extra_artifact_inputs(
 ) -> None:
     fragments = tmp_path / "fragments"
     fragments.mkdir()
-    for index in range(4):
+    for index in range(6):
         directory = fragments / f"shard-{index}"
         directory.mkdir()
         (directory / "fragment.json").write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr(
         lane_module,
         "_core_test_files",
-        lambda _root: tuple(f"newsroom/tests/test_{index}.py" for index in range(4)),
+        lambda _root: tuple(f"newsroom/tests/test_{index}.py" for index in range(6)),
     )
     monkeypatch.setattr(
         lane_module,
         "_collect_core_node_ids",
         lambda _root, **_kwargs: tuple(
-            f"newsroom/tests/test_{index}.py::test_{index}" for index in range(4)
+            f"newsroom/tests/test_{index}.py::test_{index}" for index in range(6)
         ),
     )
 
-    (fragments / "shard-3" / "fragment.json").unlink()
+    (fragments / "shard-5" / "fragment.json").unlink()
     with pytest.raises(WorkflowLaneError, match="core_fragment_count"):
         lane_module._load_core_fragments(
             root=tmp_path,
@@ -1934,7 +1938,7 @@ def test_fragment_loader_rejects_missing_and_extra_artifact_inputs(
             route={},
         )
 
-    (fragments / "shard-3" / "fragment.json").write_text("{}\n", encoding="utf-8")
+    (fragments / "shard-5" / "fragment.json").write_text("{}\n", encoding="utf-8")
     (fragments / "unexpected").write_text("extra", encoding="utf-8")
     with pytest.raises(WorkflowLaneError, match="core_fragment_count"):
         lane_module._load_core_fragments(

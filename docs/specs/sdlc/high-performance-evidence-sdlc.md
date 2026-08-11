@@ -17,14 +17,14 @@ Newsroom will replace increment-by-increment CI accumulation with an evidence-or
 
 A machine gate is a bounded decision over an exact change, environment and evidence contract. It either produces a reproducible typed decision inside its budget or fails closed. Its timeout does not grow whenever repository scope grows.
 
-The normal pull-request path has one always-reporting decision workflow with parallel source-integrity, four-way deterministic-core and conditional service work:
+The normal pull-request path has one always-reporting decision workflow with parallel source-integrity, six-way deterministic-core and conditional service work:
 
-1. a core topology for routing, concurrent source integrity and four deterministic repository-test shards, followed by one canonical reducer;
+1. a core topology for routing, concurrent source integrity and six deterministic repository-test shards, followed by one canonical reducer;
 2. a Neo4j service lane when the exact change affects the graph adapter, projection-authority integration, graph migrations, service compatibility, credentials, workflow service setup or qualifying GraphRAG behaviour.
 
 One decision-validated exact-head SDLC core receipt is the canonical complete deterministic evidence. Pull-request and merge-queue core/decision receipts are content-addressed, transport-verified evidence-only artifacts, not signed attestations. The isolated signed-closeout job remains limited to exact-main, service-required manual runs and supplies the Tier-M attestation. Fast CI and manually dispatched legacy diagnostics are compatibility signals only; Tier S adds only the affected lanes selected by the route. The change has one feature-complete stop and one review at that stop.
 
-The complete deterministic inventory remains blocking. Its stable node-ID inventory is divided into four complete, duplicate-free balanced shards because a single runner no longer fits the unchanged 220-second envelope. Test-impact analysis remains in observe mode and cannot replace this complete evidence until repository-specific shadow controls demonstrate that it preserves defect detection.
+The complete deterministic inventory remains blocking. Its stable node-ID inventory is divided into six complete, duplicate-free balanced shards because the four-shard topology retained only 0-8 seconds of headroom and exceeded the unchanged 220-second envelope after D-wave growth. Test-impact analysis remains in observe mode and cannot replace this complete evidence until repository-specific shadow controls demonstrate that it preserves defect detection.
 
 Deep mutation, fuzz, compatibility, flake, performance and recovery work runs as independent scientific shards outside the interactive path. Each shard has its own 220-second hard budget; a large experiment is many content-addressed shards, not one unbounded job.
 
@@ -302,7 +302,7 @@ Shape:
 4. install pinned Python and pinned uv in each isolated exact-head job;
 5. restore an exact lock/toolchain-keyed cache;
 6. run `route`;
-7. run source integrity and four independently watched deterministic shards concurrently;
+7. run source integrity and six independently watched deterministic shards concurrently;
 8. prove each shard producer's tracked tree after collection and again before
    fragment publication, and prove the source producer after execution and at
    publication;

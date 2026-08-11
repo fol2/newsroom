@@ -146,7 +146,77 @@ def _core_matrix_jobs() -> list[dict[str, object]]:
             "status": "completed",
             "completed_at": f"2026-07-22T12:00:0{index + 1}Z",
         }
-        for index in range(4)
+        for index in range(6)
+    ]
+
+
+def _completed_job(
+    name: str,
+    *,
+    completed_at: str,
+    started_at: str = "2026-07-22T12:00:00.000Z",
+    steps: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    return {
+        "id": 800 + len(name),
+        "name": name,
+        "run_id": RUN_ID,
+        "run_attempt": RUN_ATTEMPT,
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "steps": steps or [],
+    }
+
+
+def _stuck_completed_job(
+    name: str,
+    *,
+    completed_at: str,
+    started_at: str = "2026-07-22T12:00:00.000Z",
+    steps: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    completed_steps = list(steps or [])
+    completed_steps.append(
+        {
+            "name": "Complete job",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": completed_at,
+            "completed_at": completed_at,
+        }
+    )
+    job = _completed_job(
+        name,
+        completed_at=completed_at,
+        started_at=started_at,
+        steps=completed_steps,
+    )
+    job.update(status="in_progress", conclusion=None, completed_at=None)
+    return job
+
+
+def _producer_steps(
+    bootstrap_name: str,
+    *,
+    bootstrap_at: str,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "name": bootstrap_name,
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-22T12:00:06.000Z",
+            "completed_at": bootstrap_at,
+        },
+        {
+            "name": "Finalize evidence",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-22T12:00:40.000Z",
+            "completed_at": "2026-07-22T12:00:41.000Z",
+        },
     ]
 
 
@@ -259,7 +329,7 @@ def test_verify_shadow_lane_composes_replay_telemetry_and_receipt(
         "run_id": RUN_ID,
         "run_attempt": RUN_ATTEMPT,
         "status": "completed",
-        "completed_at": "2026-07-22T12:00:04Z",
+        "completed_at": "2026-07-22T12:00:06Z",
     }
     assert calls["measure"][1]["job_name"] == "core"  # type: ignore[index]
     assert calls["measure"][1]["ready_after_job_names"] == (  # type: ignore[index]
@@ -293,7 +363,7 @@ def test_core_telemetry_rejects_noncanonical_matrix_dependencies(
     elif fault == "duplicate":
         jobs.append(dict(jobs[0]))
     elif fault == "extra":
-        jobs.append({**jobs[0], "name": "core-shard-4"})
+        jobs.append({**jobs[0], "name": "core-shard-6"})
     elif fault == "wrong-run":
         jobs[0]["run_id"] = RUN_ID + 1
     elif fault == "wrong-attempt":
@@ -378,6 +448,267 @@ def test_service_lane_uses_exact_service_policy(
     assert calls["measure"]["ready_after_job_names"] == ("route",)  # type: ignore[index]
     assert calls["measure"]["bootstrap_end_step"] == "Wait for authenticated Neo4j"  # type: ignore[index]
     assert calls["verify"]["expected_job_id"] == "service"  # type: ignore[index]
+
+
+def test_service_telemetry_normalises_exact_stuck_completed_producer_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _Receipt(
+        _Metadata(name=ARTIFACT_NAME.replace("-core-", "-service-")),
+        route=_Route(
+            risk_tier="R3_EXTERNAL_SERVICE_SECURITY",
+            service_required=True,
+        ),
+        producer_job_id="service",
+        gate_decisions=(_GateDecision("service-neo4j", "tests"),),
+    )
+    replay = _replay(artifact_name=receipt.metadata.name)
+    service = _stuck_completed_job(
+        "service",
+        started_at="2026-07-22T12:00:05.000Z",
+        completed_at="2026-07-22T12:00:42.000Z",
+        steps=_producer_steps(
+            "Wait for authenticated Neo4j",
+            bootstrap_at="2026-07-22T12:00:10.000Z",
+        ),
+    )
+    jobs = {
+        "jobs": [
+            _completed_job("route", completed_at="2026-07-22T12:00:04.000Z"),
+            service,
+        ]
+    }
+    transport = SimpleNamespace(
+        replay=replay,
+        run={"event": "pull_request", "created_at": "2026-07-22T12:00:00.000Z"},
+        jobs=jobs,
+        metadata={},
+        artifact_root=tmp_path / "artifact",
+        archive_path=tmp_path / "artifact.zip",
+    )
+    monkeypatch.setattr(lane_module, "load_verified_transport", lambda _root: transport)
+    monkeypatch.setattr(lane_module, "verify_artifact", lambda **_kwargs: receipt)
+    _patch_receipt_validator(monkeypatch, receipt)
+
+    record = verify_shadow_lane(
+        repo_root=tmp_path,
+        bundle_root=tmp_path / "bundle",
+        lane_id="service",
+        decision_context=SimpleNamespace(job_id="decision"),  # type: ignore[arg-type]
+        contract=SimpleNamespace(repo_root=tmp_path),  # type: ignore[arg-type]
+    )
+
+    assert record.telemetry.job_conclusion == "success"
+    assert record.telemetry.job_completed_at == "2026-07-22T12:00:42.000Z"
+    assert service["status"] == "in_progress"
+    assert service["completed_at"] is None
+
+
+def test_core_ready_after_normalises_exact_stuck_dependencies_and_shard_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _Receipt(_Metadata())
+    replay = _replay()
+    shards = [
+        _completed_job(
+            f"core-shard-{index}",
+            completed_at=f"2026-07-22T12:00:0{index + 4}.000Z",
+        )
+        for index in range(6)
+    ]
+    shards[5] = _stuck_completed_job(
+        "core-shard-5",
+        completed_at="2026-07-22T12:00:11.000Z",
+        steps=[
+            {
+                "name": "Run shard",
+                "status": "completed",
+                "conclusion": "success",
+                "started_at": "2026-07-22T12:00:04.000Z",
+                "completed_at": "2026-07-22T12:00:08.000Z",
+            }
+        ],
+    )
+    core = _stuck_completed_job(
+        "core",
+        started_at="2026-07-22T12:00:12.000Z",
+        completed_at="2026-07-22T12:00:42.000Z",
+        steps=_producer_steps(
+            "Sync locked environment",
+            bootstrap_at="2026-07-22T12:00:15.000Z",
+        ),
+    )
+    route = _stuck_completed_job(
+        "route",
+        completed_at="2026-07-22T12:00:03.000Z",
+    )
+    source = _stuck_completed_job(
+        "source",
+        completed_at="2026-07-22T12:00:02.000Z",
+    )
+    jobs = {
+        "jobs": [
+            route,
+            source,
+            *shards,
+            core,
+        ]
+    }
+    transport = SimpleNamespace(
+        replay=replay,
+        run={"event": "pull_request", "created_at": "2026-07-22T12:00:00.000Z"},
+        jobs=jobs,
+        metadata={},
+        artifact_root=tmp_path / "artifact",
+        archive_path=tmp_path / "artifact.zip",
+    )
+    monkeypatch.setattr(lane_module, "load_verified_transport", lambda _root: transport)
+    monkeypatch.setattr(lane_module, "verify_artifact", lambda **_kwargs: receipt)
+    _patch_receipt_validator(monkeypatch, receipt)
+
+    record = verify_shadow_lane(
+        repo_root=tmp_path,
+        bundle_root=tmp_path / "bundle",
+        lane_id="core",
+        decision_context=SimpleNamespace(job_id="decision"),  # type: ignore[arg-type]
+        contract=SimpleNamespace(repo_root=tmp_path),  # type: ignore[arg-type]
+    )
+
+    assert record.telemetry.ready_at == "2026-07-22T12:00:11.000Z"
+    assert record.telemetry.job_completed_at == "2026-07-22T12:00:42.000Z"
+    assert shards[5]["status"] == "in_progress"
+    assert shards[5]["completed_at"] is None
+    assert core["status"] == "in_progress"
+    assert core["completed_at"] is None
+    assert route["status"] == "in_progress"
+    assert route["completed_at"] is None
+    assert source["status"] == "in_progress"
+    assert source["completed_at"] is None
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "empty",
+        "missing-complete",
+        "duplicate-complete",
+        "pending",
+        "failed",
+        "complete-skipped",
+        "missing-conclusion",
+        "bad-completed-at",
+        "duplicate-step",
+        "non-mapping-step",
+        "trailing-step",
+        "complete-before-maximum",
+    ],
+)
+def test_stuck_job_normalisation_rejects_malformed_or_non_success_snapshots(
+    fault: str,
+) -> None:
+    job = _stuck_completed_job(
+        "service",
+        completed_at="2026-07-22T12:00:42.000Z",
+        steps=[
+            {
+                "name": "Finalize evidence",
+                "status": "completed",
+                "conclusion": "success",
+                "completed_at": "2026-07-22T12:00:41.000Z",
+            }
+        ],
+    )
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    if fault == "empty":
+        steps.clear()
+    elif fault == "missing-complete":
+        steps.pop()
+    elif fault == "duplicate-complete":
+        steps.append(dict(steps[-1]))
+    elif fault == "pending":
+        steps[0]["status"] = "in_progress"
+    elif fault == "failed":
+        steps[0]["conclusion"] = "failure"
+    elif fault == "complete-skipped":
+        steps[-1]["conclusion"] = "skipped"
+    elif fault == "missing-conclusion":
+        steps[0].pop("conclusion")
+    elif fault == "bad-completed-at":
+        steps[0]["completed_at"] = None
+    elif fault == "duplicate-step":
+        steps.append(dict(steps[0]))
+    elif fault == "non-mapping-step":
+        steps.append("not-a-step")
+    elif fault == "trailing-step":
+        steps.append(
+            {
+                "name": "Post Complete job",
+                "status": "completed",
+                "conclusion": "success",
+                "completed_at": "2026-07-22T12:00:43.000Z",
+            }
+        )
+    else:
+        steps[0]["completed_at"] = "2026-07-22T12:00:43.000Z"
+
+    with pytest.raises(WorkflowEvidenceError, match="stale_job"):
+        lane_module._normalise_stale_completed_jobs(
+            {"jobs": [job]},
+            job_names=frozenset({"service"}),
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "conclusion", "completed_at"),
+    [
+        ("queued", None, None),
+        ("in_progress", "success", None),
+        ("in_progress", None, "2026-07-22T12:00:42.000Z"),
+        ("completed", None, None),
+    ],
+)
+def test_job_normalisation_does_not_reinterpret_any_other_top_level_state(
+    status: str,
+    conclusion: str | None,
+    completed_at: str | None,
+) -> None:
+    job = _stuck_completed_job(
+        "service",
+        completed_at="2026-07-22T12:00:42.000Z",
+    )
+    job.update(
+        status=status,
+        conclusion=conclusion,
+        completed_at=completed_at,
+    )
+
+    normalised = lane_module._normalise_stale_completed_jobs(
+        {"jobs": [job]},
+        job_names=frozenset({"service"}),
+    )
+
+    assert normalised == {"jobs": [job]}
+
+
+@pytest.mark.parametrize("missing", ["conclusion", "completed_at"])
+def test_job_normalisation_requires_the_complete_top_level_stale_triple(
+    missing: str,
+) -> None:
+    job = _stuck_completed_job(
+        "service",
+        completed_at="2026-07-22T12:00:42.000Z",
+    )
+    job.pop(missing)
+
+    normalised = lane_module._normalise_stale_completed_jobs(
+        {"jobs": [job]},
+        job_names=frozenset({"service"}),
+    )
+
+    assert normalised == {"jobs": [job]}
 
 
 @pytest.mark.parametrize(

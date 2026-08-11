@@ -193,9 +193,9 @@ clustering = [
 
 [lanes.core]
 bootstrap_once = true
-shard_count = 4
+shard_count = 6
 partition = "sha256_node_id_balanced"
-workers_per_shard = 4
+workers_per_shard = 2
 distribution = "worksteal"
 max_worker_restart = 0
 per_shard_hard_timeout_seconds = 220
