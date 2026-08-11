@@ -331,6 +331,9 @@ def test_lane_and_decision_artifacts_are_compact_immutable_and_attempt_scoped() 
 
 
 def test_core_shards_are_exact_inputs_to_one_canonical_core_artifact() -> None:
+    source_upload = _step("source", "Upload source fragment")
+    assert source_upload["if"] == "always()"
+    assert source_upload["with"]["path"] == ".sdlc-run/source-fragment"
     shard_upload = _step("core_shard", "Upload canonical core fragment")
     assert shard_upload["if"] == "always()"
     assert shard_upload["with"]["name"] == (

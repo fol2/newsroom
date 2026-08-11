@@ -345,6 +345,12 @@ def _telemetry_jobs(
         )
     ):
         raise WorkflowEvidenceError("ready_after_job")
+    matrix_conclusions = tuple(job.get("conclusion") for job in matrix)
+    if any(
+        type(conclusion) is not str or conclusion not in {"success", "failure"}
+        for conclusion in matrix_conclusions
+    ):
+        raise WorkflowEvidenceError("ready_after_job")
     completed_at = max(
         (
             _workflow_timestamp(job.get("completed_at"), "ready_after_job_completed_at")
@@ -357,9 +363,49 @@ def _telemetry_jobs(
         "run_id": run_id,
         "run_attempt": run_attempt,
         "status": "completed",
+        "conclusion": ("failure" if "failure" in matrix_conclusions else "success"),
         "completed_at": completed_at,
     }
     return {**value, "jobs": [*jobs, dependency]}
+
+
+def _verify_core_dependency_results(
+    jobs_value: object, *, policy: LanePolicy, receipt: ArtifactReceipt
+) -> None:
+    if policy.lane_id != "core":
+        return
+    payload = _mapping(jobs_value, "jobs_mapping")
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, list):
+        raise ShadowLaneError("producer_result")
+
+    def unique(name: str) -> Mapping[str, object]:
+        matches = [
+            item for item in jobs if isinstance(item, dict) and item.get("name") == name
+        ]
+        if len(matches) != 1:
+            raise ShadowLaneError("producer_result")
+        return matches[0]
+
+    decisions = {
+        (item.gate_id, item.phase): item.result for item in receipt.gate_decisions
+    }
+    try:
+        source_result = decisions[("source-integrity", "source")]
+        core_result = decisions[("core-deterministic", "tests")]
+    except KeyError as exc:
+        raise ShadowLaneError("producer_result") from exc
+    source_conclusion = unique("source").get("conclusion")
+    matrix_conclusion = unique("core_shard").get("conclusion")
+    if (
+        type(source_conclusion) is not str
+        or source_conclusion not in {"success", "failure"}
+        or type(matrix_conclusion) is not str
+        or matrix_conclusion not in {"success", "failure"}
+        or (source_conclusion == "success") is not (source_result == "PASS")
+        or (matrix_conclusion == "failure" and core_result == "PASS")
+    ):
+        raise ShadowLaneError("producer_result")
 
 
 def verify_shadow_lane(
@@ -415,6 +461,7 @@ def verify_shadow_lane(
         )
     except ArtifactReceiptError as exc:
         raise ShadowLaneError("artifact_receipt") from exc
+    _verify_core_dependency_results(jobs, policy=policy, receipt=receipt)
     lane_identity = sha256_identity(
         _identity_values(
             lane_id=policy.lane_id,

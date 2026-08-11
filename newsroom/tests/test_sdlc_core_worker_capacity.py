@@ -370,6 +370,56 @@ def _passing_report() -> str:
     )
 
 
+def _published_fragment(lifecycle_field: str, result: str) -> dict[str, object]:
+    core = lifecycle_field == "shard_lifecycle"
+    gate_id = "core-deterministic" if core else "source-integrity"
+    phase = "tests" if core else "source"
+    returncode = 0 if result == "PASS" else (1 if result == "FAIL" else None)
+    reason = f"{result}:{gate_id}:{phase}"
+    if result == "FAIL":
+        reason += ":exit=1"
+    run = CommandRun(
+        "sha256:" + "c" * 64,
+        GateRunResult(
+            gate_id,
+            phase,
+            result,
+            reason,
+            returncode,
+            1,
+            "",
+            "",
+            False,
+            False,
+        ),
+    )
+    body: dict[str, object] = {
+        "schema_version": (
+            lane_module._CORE_FRAGMENT_SCHEMA
+            if core
+            else lane_module._SOURCE_FRAGMENT_SCHEMA
+        ),
+        "command_run": run.as_dict(),
+        lifecycle_field: {
+            "schema_version": (
+                lane_module._CORE_SHARD_LIFECYCLE_SCHEMA
+                if core
+                else lane_module._SOURCE_LIFECYCLE_SCHEMA
+            ),
+            "elapsed_ms": 1,
+            "timeout_ms": 220_000,
+            "result": result,
+        },
+    }
+    fragment_keys = (
+        lane_module._CORE_FRAGMENT_KEYS if core else lane_module._SOURCE_FRAGMENT_KEYS
+    )
+    body.update(
+        {key: None for key in fragment_keys - body.keys() - {"fragment_identity"}}
+    )
+    return {**body, "fragment_identity": lane_module._fragment_identity(body)}
+
+
 def _initialise_tracked_file(tmp_path: Path) -> tuple[Path, str]:
     tracked = tmp_path / "tracked.txt"
     tracked.write_text("accepted\n", encoding="utf-8")
@@ -1524,6 +1574,177 @@ def test_true_shard_timeout_discards_well_formed_partial_junit(
     assert fragment["junit_summary"] is None
     assert fragment["report_digest"] is None
     assert not (tmp_path / "artifacts/core-fragment/pytest.xml").exists()
+
+
+@pytest.mark.parametrize(
+    ("command", "lifecycle_field", "result", "expected_status"),
+    (
+        ("execute-core-shard", "shard_lifecycle", "PASS", 0),
+        ("execute-core-shard", "shard_lifecycle", "FAIL", 1),
+        ("execute-core-shard", "shard_lifecycle", "BUDGET_EXCEEDED", 124),
+        ("execute-source", "source_lifecycle", "EVIDENCE_MISMATCH", 1),
+        ("execute-source", "source_lifecycle", "BUDGET_EXCEEDED", 124),
+    ),
+)
+def test_published_fragment_result_determines_producer_cli_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    lifecycle_field: str,
+    result: str,
+    expected_status: int,
+) -> None:
+    fragment = _published_fragment(lifecycle_field, result)
+    monkeypatch.setattr(
+        lane_module,
+        "load_contract",
+        lambda _root: SimpleNamespace(data=_contract_data()),
+    )
+    core = command == "execute-core-shard"
+    monkeypatch.setattr(
+        lane_module,
+        "execute_core_shard" if core else "execute_source_fragment",
+        lambda **_kwargs: fragment,
+    )
+    arguments = (
+        command,
+        "--repo-root",
+        str(tmp_path),
+        "--route",
+        "route.json",
+        *(("--shard-index", "0") if core else ()),
+        "--artifact-root",
+        "artifact",
+    )
+
+    assert lane_module.main(arguments) == expected_status
+    assert json.loads(capsys.readouterr().out) == fragment
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ("missing-required", "extra-field", "wrong-timeout", "result-mismatch"),
+)
+def test_malformed_published_fragment_fails_closed_before_cli_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fault: str,
+) -> None:
+    fragment = _published_fragment("shard_lifecycle", "PASS")
+    if fault == "missing-required":
+        fragment.pop("route_digest")
+    elif fault == "extra-field":
+        fragment["unexpected"] = None
+    elif fault == "wrong-timeout":
+        lifecycle = dict(fragment["shard_lifecycle"])  # type: ignore[arg-type]
+        lifecycle["timeout_ms"] = 1
+        fragment["shard_lifecycle"] = lifecycle
+    else:
+        command = dict(fragment["command_run"])  # type: ignore[arg-type]
+        gate_run = dict(command["gate_run"])  # type: ignore[arg-type]
+        gate_run.update(
+            result="FAIL",
+            result_reason="FAIL:core-deterministic:tests:exit=1",
+            returncode=1,
+        )
+        command["gate_run"] = gate_run
+        fragment["command_run"] = command
+    unsigned = dict(fragment)
+    unsigned.pop("fragment_identity")
+    fragment["fragment_identity"] = lane_module._fragment_identity(unsigned)
+    monkeypatch.setattr(
+        lane_module,
+        "load_contract",
+        lambda _root: SimpleNamespace(data=_contract_data()),
+    )
+    monkeypatch.setattr(lane_module, "execute_core_shard", lambda **_kwargs: fragment)
+
+    assert (
+        lane_module.main(
+            (
+                "execute-core-shard",
+                "--repo-root",
+                str(tmp_path),
+                "--route",
+                "route.json",
+                "--shard-index",
+                "0",
+                "--artifact-root",
+                "artifact",
+            )
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("EVIDENCE_MISMATCH:workflow-lane:")
+
+
+def test_core_cli_returns_budget_after_durable_fragment_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _patch_core_shard_execution(
+        tmp_path,
+        monkeypatch,
+        result="BUDGET_EXCEEDED",
+        report_payload=None,
+    )
+    monkeypatch.setattr(lane_module, "_deadline_elapsed_ms", lambda _deadline: 219_950)
+
+    assert (
+        lane_module.main(
+            (
+                "execute-core-shard",
+                "--repo-root",
+                str(tmp_path),
+                "--route",
+                "route.json",
+                "--shard-index",
+                "0",
+                "--artifact-root",
+                "artifacts/core-fragment",
+            )
+        )
+        == 124
+    )
+    persisted = json.loads(
+        (tmp_path / "artifacts/core-fragment/fragment.json").read_text(encoding="utf-8")
+    )
+    assert json.loads(capsys.readouterr().out) == persisted
+
+
+def test_source_cli_returns_budget_after_durable_fragment_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _patch_source_execution(tmp_path, monkeypatch)
+    monkeypatch.setattr(lane_module, "_deadline_elapsed_ms", lambda _deadline: 220_001)
+
+    assert (
+        lane_module.main(
+            (
+                "execute-source",
+                "--repo-root",
+                str(tmp_path),
+                "--route",
+                "route.json",
+                "--artifact-root",
+                "artifacts/source-fragment",
+            )
+        )
+        == 124
+    )
+    persisted = json.loads(
+        (tmp_path / "artifacts/source-fragment/source-fragment.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert json.loads(capsys.readouterr().out) == persisted
 
 
 def test_product_result_without_junit_fails_closed_as_evidence_mismatch(
