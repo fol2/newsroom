@@ -762,6 +762,58 @@ def test_public_relationship_system_closes_raw_when_facade_wrapping_fails(
     assert closed == [True, True]
 
 
+class _OpeningSignal(BaseException):
+    pass
+
+
+class _ClosingSignal(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("failure", ("post-super", "command-service"))
+@pytest.mark.parametrize("error_type", (RuntimeError, _OpeningSignal))
+def test_open_failure_after_store_acquisition_closes_once_and_allows_retry(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    error_type: type[BaseException],
+) -> None:
+    from newsroom.authority import _event_hypothesis_relationship_system as private
+
+    seed = _seed_location(tmp_path / f"{failure}-{error_type.__name__}")
+    error = error_type("opening failed")
+    closed: list[object] = []
+    original_close = private._RelationshipEventStore.close
+
+    def close_then_fail(store) -> None:
+        closed.append(store)
+        original_close(store)
+        raise _ClosingSignal("closing failed")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(private._RelationshipEventStore, "close", close_then_fail)
+        if failure == "post-super":
+            scoped.setattr(
+                private,
+                "_HypothesisStore",
+                lambda *args, **kwargs: (_ for _ in ()).throw(error),
+            )
+        else:
+            scoped.setattr(
+                private,
+                "CommandService",
+                lambda *args, **kwargs: (_ for _ in ()).throw(error),
+            )
+        with pytest.raises(error_type) as caught:
+            private.open_relationship_authority(**_open_arguments(seed))
+
+        assert caught.value is error
+        assert len(closed) == 1
+
+    corrected = private.open_relationship_authority(**_open_arguments(seed))
+    corrected.close()
+
+
 @pytest.mark.parametrize(
     "outcome",
     (

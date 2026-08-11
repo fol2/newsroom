@@ -289,17 +289,24 @@ class _RelationshipEventStore(_EventAuthorityStore):
             busy_timeout_ms=busy_timeout_ms,
             clock=clock,
         )
-        with self._hypothesis_rows():
-            self._hypotheses = _HypothesisStore(
-                self._connection, retrieval_authority, authenticator, clock
-            )
-        self._command_service: CommandService | None = None
-        with self._lock, self._transaction():
-            self._adopt()
+        try:
+            with self._hypothesis_rows():
+                self._hypotheses = _HypothesisStore(
+                    self._connection, retrieval_authority, authenticator, clock
+                )
+            self._command_service: CommandService | None = None
+            with self._lock, self._transaction():
+                self._adopt()
+                try:
+                    self._verify_relationships()
+                finally:
+                    self._release()
+        except BaseException:
             try:
-                self._verify_relationships()
-            finally:
-                self._release()
+                self.close()
+            except BaseException:  # noqa: BLE001, S110 - preserve opening failure
+                pass
+            raise
 
     def _acquire_writer_lock(self) -> None:
         lock_path = self.path.with_name(self.path.name + ".writer.lock")
@@ -811,28 +818,37 @@ def _compose_relationship_authority(
         if unlocked_for_test
         else _RelationshipEventStore
     )
-    store = store_class(
-        _STORE_TOKEN,
-        Path(database),
-        issuer=issuer,
-        command_registry=merged_commands,
-        payload_schemas=merged_schemas,
-        retrieval_authority=retrieval_authority,
-        authenticator=authenticator,
-        clock=clock,
-        busy_timeout_ms=busy_timeout_ms,
-    )
-    service = CommandService(
-        registry=merged_commands,
-        payload_schemas=merged_schemas,
-        authenticator=authenticator,
-        authorizer=authorizer,
-        committed_lookup=store,
-        clock=clock,
-        _issuer=issuer,
-    )
-    store.bind_command_service(service)
-    return EventHypothesisRelationshipAuthority(_STORE_TOKEN, store)
+    store: _RelationshipEventStore | None = None
+    try:
+        store = store_class(
+            _STORE_TOKEN,
+            Path(database),
+            issuer=issuer,
+            command_registry=merged_commands,
+            payload_schemas=merged_schemas,
+            retrieval_authority=retrieval_authority,
+            authenticator=authenticator,
+            clock=clock,
+            busy_timeout_ms=busy_timeout_ms,
+        )
+        service = CommandService(
+            registry=merged_commands,
+            payload_schemas=merged_schemas,
+            authenticator=authenticator,
+            authorizer=authorizer,
+            committed_lookup=store,
+            clock=clock,
+            _issuer=issuer,
+        )
+        store.bind_command_service(service)
+        return EventHypothesisRelationshipAuthority(_STORE_TOKEN, store)
+    except BaseException:
+        if store is not None:
+            try:
+                store.close()
+            except BaseException:  # noqa: BLE001, S110 - preserve opening failure
+                pass
+        raise
 
 
 def open_relationship_authority(
