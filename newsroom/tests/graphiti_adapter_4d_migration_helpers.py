@@ -6,6 +6,12 @@ from pathlib import Path
 from newsroom.authority.evaluation_handoff_migrations import (
     EVALUATION_HANDOFF_SCHEMA_VERSION,
 )
+from newsroom.authority.event_hypothesis_lineage_migrations import (
+    EVENT_HYPOTHESIS_LINEAGE_MIGRATION_CHECKSUM,
+    EVENT_HYPOTHESIS_LINEAGE_MIGRATION_NAME,
+    EVENT_HYPOTHESIS_LINEAGE_MIGRATION_STATEMENTS,
+    EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION,
+)
 from newsroom.authority.event_hypothesis_migrations import (
     EVENT_HYPOTHESIS_SCHEMA_VERSION,
 )
@@ -28,9 +34,115 @@ from newsroom.authority.triage_work_item_migrations import (
 )
 
 
+def drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
+    """Remove an exact, empty v23 lineage schema atomically."""
+    savepoint = "checked_empty_v23_lineage_downgrade"
+    lineage_tables = (
+        "event_hypothesis_lineage",
+        "event_hypothesis_lineage_heads",
+    )
+    lineage_triggers = (
+        "event_hypothesis_lineage_head_update_guard",
+        "event_hypothesis_lineage_head_insert_guard",
+        "retained_event_hypothesis_lineage_delete",
+        "immutable_event_hypothesis_lineage_update",
+        "event_hypothesis_lineage_coherence",
+    )
+    history_guard = "immutable_authority_migrations_delete"
+    connection.execute(f"SAVEPOINT {savepoint}")
+    try:
+        user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        maximum_history_version = connection.execute(
+            "SELECT MAX(version) FROM authority_migrations"
+        ).fetchone()[0]
+        if maximum_history_version != user_version:
+            raise sqlite3.DatabaseError("v23 schema version/history mismatch")
+        if user_version < EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION:
+            connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return
+        if user_version != EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION:
+            raise sqlite3.DatabaseError("downgrade requires exact schema v23")
+        history = connection.execute(
+            "SELECT name,checksum FROM authority_migrations WHERE version=?",
+            (EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION,),
+        ).fetchone()
+        if history != (
+            EVENT_HYPOTHESIS_LINEAGE_MIGRATION_NAME,
+            EVENT_HYPOTHESIS_LINEAGE_MIGRATION_CHECKSUM,
+        ):
+            raise sqlite3.DatabaseError(
+                "downgrade requires exact v23 migration history"
+            )
+        required_objects = {("table", table, table) for table in lineage_tables} | {
+            (
+                "trigger",
+                trigger,
+                "event_hypothesis_lineage_heads"
+                if "head_" in trigger
+                else "event_hypothesis_lineage",
+            )
+            for trigger in lineage_triggers
+        }
+        required_objects.add(("trigger", history_guard, "authority_migrations"))
+        names = tuple(name for _, name, _ in required_objects)
+        lineage_names = (*lineage_tables, *lineage_triggers)
+        present_objects = set(
+            connection.execute(
+                "SELECT type,name,tbl_name FROM sqlite_master "
+                f"WHERE name IN ({','.join('?' for _ in names)})",
+                names,
+            ).fetchall()
+        )
+        if present_objects != required_objects:
+            raise sqlite3.DatabaseError("downgrade requires exact v23 lineage schema")
+        lineage_sql = {
+            " ".join(str(row[0]).split())
+            for row in connection.execute(
+                f"SELECT sql FROM sqlite_master WHERE name IN ({','.join('?' for _ in lineage_names)})",
+                lineage_names,
+            )
+        }
+        expected_lineage_sql = {
+            " ".join(statement.split())
+            for statement in EVENT_HYPOTHESIS_LINEAGE_MIGRATION_STATEMENTS
+        }
+        if lineage_sql != expected_lineage_sql:
+            raise sqlite3.DatabaseError("downgrade requires exact v23 lineage SQL")
+        if any(
+            connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone() != (0,)
+            for table in lineage_tables
+        ):
+            raise sqlite3.DatabaseError("v23 lineage tables must be empty")
+        guard = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (history_guard,),
+        ).fetchone()[0]
+
+        connection.execute(f'DROP TRIGGER "{history_guard}"')
+        for trigger in lineage_triggers:
+            connection.execute(f'DROP TRIGGER "{trigger}"')
+        for table in reversed(lineage_tables):
+            connection.execute(f'DROP TABLE "{table}"')
+        connection.execute(
+            "DELETE FROM authority_migrations WHERE version=?",
+            (EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION,),
+        )
+        connection.execute(guard)
+        connection.execute(
+            f"PRAGMA user_version={EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION - 1}"
+        )
+    except Exception:
+        connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    else:
+        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
 def drop_empty_v22_relationship_schema(connection: sqlite3.Connection) -> None:
     """Remove an exact, empty v22 relationship schema atomically."""
 
+    drop_empty_v23_lineage_schema(connection)
     savepoint = "checked_empty_v22_relationship_downgrade"
     relationship_table = "event_hypothesis_relationship_decisions"
     relationship_triggers = (
