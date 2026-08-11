@@ -535,8 +535,39 @@ def _request_binding_field(adapter: AuthorityStoreAdapter, field_name: str) -> N
 
 
 def _request_binding(adapter: AuthorityStoreAdapter) -> None:
+    command = _command()
+    record_id = command.record_id
+    location, baseline_handle = _new_handle(adapter)
+    try:
+        baseline = baseline_handle.submit(command)
+        initial = _snapshot(baseline_handle, record_id)
+    finally:
+        baseline_handle.close()
+    previous_handle = baseline_handle
     for field_name in _REQUEST_BINDING_FIELDS:
-        _request_binding_field(adapter, field_name)
+        handle = adapter.open_handle(location)
+        _require(handle is not previous_handle, "request binding reused prior handle")
+        try:
+            divergent = replace(command, **{field_name: f"different-{field_name}"})
+            _expect_exception(
+                BindingConflict,
+                lambda h=handle, c=divergent: h.submit(c),
+                f"divergent {field_name} was accepted",
+            )
+            _require(_snapshot(handle, record_id) == initial, "rejection mutated state")
+            _require(handle.submit(command) == baseline, "exact replay changed value")
+            _require(_snapshot(handle, record_id) == initial, "replay mutated state")
+        finally:
+            handle.close()
+        previous_handle = handle
+    reopened = adapter.open_handle(location)
+    _require(reopened is not previous_handle, "final reopen reused prior handle")
+    try:
+        _require(_snapshot(reopened, record_id) == initial, "final reopen differs")
+        _require(reopened.submit(command) == baseline, "final replay changed value")
+        _require(_snapshot(reopened, record_id) == initial, "final replay mutated")
+    finally:
+        reopened.close()
 
 
 def _lost_response(adapter: AuthorityStoreAdapter) -> None:

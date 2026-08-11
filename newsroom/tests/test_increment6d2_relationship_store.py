@@ -5,7 +5,7 @@ import os
 import sqlite3
 import uuid
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar
 
@@ -21,14 +21,19 @@ from newsroom.authority.event_hypothesis_relationship_migrations import (
     EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION,
 )
 from newsroom.authority.migrations import (
+    EXPECTED_MIGRATION_HISTORY,
+    EXPECTED_SCHEMA_FINGERPRINT,
     SCHEMA_VERSION,
     apply_pending_migrations,
     prepare_pending_migration_backup,
+    schema_fingerprint,
 )
 from newsroom.authority.persistence import AuthoritySchemaError
 from newsroom.authority.types import UtcTimestamp
 from newsroom.checks.policy import merge_discovery_check_authority_registries
 from newsroom.discovery.policy import merge_discovery_signal_lead_registries
+from newsroom.increment5._retrieval_context_core import _evidence_digest
+from newsroom.increment5.retrieval_context import RetrievalContextJournal
 from newsroom.increment6.dispositions import ProposalDispositionStore
 from newsroom.increment6.outcomes import (
     CanonicalNextAction,
@@ -184,6 +189,19 @@ def _assessment(subject, comparator, outcome: str = "REL_UNCERTAIN", salt: int =
 _SEED_CACHE = None
 
 
+def _seed_cache_state(cache) -> tuple[int, int, int] | None:
+    return None if cache is None else (id(cache), len(cache), len(cache[3]))
+
+
+def _without_projection_evidence(receipt):
+    evidence = _evidence_digest(
+        (), receipt.authority_evidence, receipt.items, receipt.exclusions, receipt.no_match, receipt.truncated,
+    )
+    reason = "NONE" if receipt.reason is None else receipt.reason.value
+    identity = "|".join((receipt.request_digest, receipt.outcome.value, reason, evidence))
+    return replace(receipt, projection_evidence=(), context_id=str(uuid.uuid5(uuid.NAMESPACE_URL, identity)))
+
+
 def _seed_location(root: Path, *, subjects: int = 6):
     global _SEED_CACHE
     root.mkdir(mode=0o700)
@@ -205,11 +223,20 @@ def _seed_location(root: Path, *, subjects: int = 6):
             append,
         )
     inputs = branch_inputs.__wrapped__(root)
-    builder, _, _, _, _, request, receipt, _ = _retained_complete_context(
+    _, _, _, _, _, request, receipt, _ = _retained_complete_context(
         root, inputs, name="relationship-authority"
     )
+    receipt = _without_projection_evidence(receipt)
+    journal = RetrievalContextJournal(root / "context-relationship-slim.sqlite")
+    retained, replayed = (
+        journal.execute(idempotency_key=request.idempotency_key,
+                        request_digest=request.request_digest, producer=lambda _: receipt)
+        for _ in range(2)
+    )
+    assert retained.canonical_bytes == replayed.canonical_bytes == receipt.canonical_bytes
+    assert not receipt.projection_evidence and receipt.authority_evidence is not None and receipt.outcome.value == "COMPLETE" and len(receipt.items) == 1
     retrieval = RetrievalContextAuthority(
-        builder.journal.path, {request.request_digest: (request, receipt)}
+        journal.path, {request.request_digest: (request, receipt)}
     )
     decisions = []
     with open_discovery_system(database) as discovery:
@@ -363,6 +390,61 @@ def _seed_location(root: Path, *, subjects: int = 6):
         authorizer,
         upstream_advances,
     )
+
+
+@dataclass(frozen=True)
+class _AdapterSeedSnapshot:
+    database_bytes: bytes
+    seed_tail: tuple[object, ...]
+
+    def clone(self, root: Path):
+        root.mkdir(mode=0o700)
+        database = root / "relationship-authority.sqlite3"
+        database.touch(mode=0o600, exist_ok=False)
+        database.write_bytes(self.database_bytes)
+        return (self.seed_tail[0], database, *self.seed_tail[1:])
+
+
+def _assert_current_empty_relationship_store(connection: sqlite3.Connection) -> None:
+    assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+    history = "SELECT version,name,checksum FROM authority_migrations ORDER BY version"
+    assert tuple(connection.execute(history)) == EXPECTED_MIGRATION_HISTORY
+    assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert connection.execute(
+        "SELECT count(*) FROM event_hypothesis_relationship_decisions"
+    ).fetchone() == (0,)
+
+
+def _adapter_seed_snapshot(root: Path) -> _AdapterSeedSnapshot:
+    global _SEED_CACHE
+    global_cache = _SEED_CACHE
+    global_state = _seed_cache_state(global_cache)
+    _SEED_CACHE = None
+    try:
+        seed = _seed_location(root, subjects=1)
+        built = _SEED_CACHE
+        if built is None or _seed_cache_state(built)[1:] != (8, 1):
+            raise ValueError("relationship adapter seed snapshot shape")
+        connection = sqlite3.connect(seed[1], isolation_level=None)
+        try:
+            connection.execute("PRAGMA foreign_keys=ON")
+            prepare_pending_migration_backup(connection)
+            apply_pending_migrations(
+                connection, applied_at="2042-01-02T00:00:00.000000Z"
+            )
+            _assert_current_empty_relationship_store(connection)
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            connection.close()
+        return _AdapterSeedSnapshot(
+            database_bytes=seed[1].read_bytes(),
+            seed_tail=(built[1], built[2], (built[3][0], built[2]), *built[4:]),
+        )
+    finally:
+        _SEED_CACHE = global_cache
+        if _seed_cache_state(_SEED_CACHE) != global_state:
+            raise AssertionError("global relationship seed cache changed")
 
 
 def _open_arguments(seed) -> dict[str, object]:
@@ -919,7 +1001,13 @@ def test_factory_lock_facade_and_self_consistent_rewrite_fail_closed(
 
 
 class _Location:
-    def __init__(self, seed) -> None:
+    def __init__(
+        self,
+        seed,
+        *,
+        subject_indices: tuple[int, ...] | None = None,
+        comparator_indices: tuple[int, ...] | None = None,
+    ) -> None:
         self.seed = seed
         ids = (
             "record-1",
@@ -929,8 +1017,12 @@ class _Location:
             "record-rollback-normal",
             "record-rollback-abort",
         )
-        self.subjects = dict(zip(ids, seed[3], strict=True))
-        self.subjects["record-b"] = self.subjects["record-a"]
+        subjects = seed[3] if subject_indices is None else tuple(seed[3][index] for index in subject_indices)
+        self.subjects = dict(zip(ids, subjects, strict=True))
+        if subject_indices is None:
+            self.subjects["record-b"] = self.subjects["record-a"]
+        comparators = (seed[2],) * len(ids) if comparator_indices is None else tuple(seed[3][index] for index in comparator_indices)
+        self.comparators = dict(zip(ids, comparators, strict=True))
 
 
 def _generic(
@@ -1009,7 +1101,11 @@ def _binding_assessment(location: _Location, command: WriteCommand):
     subject = HypothesisVersionBinding.from_version(
         location.subjects[command.record_id]
     )
-    comparator = HypothesisVersionBinding.from_version(location.seed[2])
+    comparator = HypothesisVersionBinding.from_version(
+        location.comparators[command.record_id]
+    )
+    if subject.version_id == comparator.version_id:
+        raise RelationshipContractError("conformance subject and comparator collide")
     evidence = ComparatorEvidence(
         subject,
         comparator,
@@ -1332,12 +1428,19 @@ class _Adapter:
     applicability: ClassVar = {
         case: Applicability.required() for case in CASE_INVENTORY
     }
+    _subject_indices = (0, 1, 0, 0, 0, 1)
+    _comparator_indices = (1, 0, 1, 1, 1, 0)
 
     def __init__(self, root: Path) -> None:
         self.root = root
+        self.seed_snapshot = _adapter_seed_snapshot(root / "capacity-2-seed")
 
     def create_location(self) -> _Location:
-        return _Location(_seed_location(self.root / str(uuid.uuid4())))
+        return _Location(
+            self.seed_snapshot.clone(self.root / str(uuid.uuid4())),
+            subject_indices=self._subject_indices,
+            comparator_indices=self._comparator_indices,
+        )
 
     def open_handle(self, location: _Location, *, migrate: bool = False) -> _Handle:
         if migrate:
@@ -1353,7 +1456,34 @@ class _Adapter:
 
 
 def test_real_store_passes_all_required_conformance_cases(tmp_path) -> None:
-    report = run_conformance(_Adapter(tmp_path))
+    global_cache = _SEED_CACHE
+    global_state = _seed_cache_state(global_cache)
+    if global_state is not None:
+        assert global_state[1:] == (8, 6)
+    adapter = _Adapter(tmp_path)
+    snapshot = adapter.seed_snapshot
+    first = adapter.create_location()
+    second = adapter.create_location()
+    assert adapter.seed_snapshot is snapshot
+    assert len(first.seed[3]) == len(second.seed[3]) == 2
+    assert first.seed[1] != second.seed[1]
+    assert first.seed[1].read_bytes() == second.seed[1].read_bytes()
+    assert {item.seed[1].stat().st_mode & 0o777 for item in (first, second)} == {0o600}
+    assert tuple(first.subjects.values()) == tuple(
+        first.seed[3][index] for index in (0, 1, 0, 0, 0, 1)
+    )
+    assert tuple(first.comparators.values()) == tuple(
+        first.seed[3][index] for index in (1, 0, 1, 1, 1, 0)
+    )
+    for record_id, subject in first.subjects.items():
+        assert subject.version_id != first.comparators[record_id].version_id
+    connection = sqlite3.connect(first.seed[1])
+    _assert_current_empty_relationship_store(connection)
+    connection.close()
+    assert _seed_cache_state(_SEED_CACHE) == global_state
+    report = run_conformance(adapter)
+    assert adapter.seed_snapshot is snapshot
+    assert _seed_cache_state(_SEED_CACHE) == global_state
     assert report.passed, repr(report.failures)
     assert tuple(item.case for item in report.outcomes) == CASE_INVENTORY
     assert all(item.status.value == "pass" for item in report.outcomes)
@@ -1470,7 +1600,12 @@ def test_migrate_flag_executes_real_v21_through_v22_to_current_path(
     adapter = _Adapter(tmp_path)
     location = adapter.create_location()
     connection = sqlite3.connect(location.seed[1])
+    _assert_current_empty_relationship_store(connection)
+    connection.close()
+    _downgrade_checked_v22_to_v21(location.seed[1])
+    connection = sqlite3.connect(location.seed[1])
     assert connection.execute("PRAGMA user_version").fetchone() == (21,)
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()
     sentinel = object()
     monkeypatch.setattr(
@@ -1479,15 +1614,12 @@ def test_migrate_flag_executes_real_v21_through_v22_to_current_path(
     )
     assert adapter.open_handle(location, migrate=True) is sentinel
     connection = sqlite3.connect(location.seed[1])
-    assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+    _assert_current_empty_relationship_store(connection)
     migration = EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION
     assert connection.execute(
         "SELECT name,checksum FROM authority_migrations WHERE version=?",
         (migration.version,),
     ).fetchone() == (migration.name, migration.checksum)
-    assert connection.execute(
-        "SELECT count(*) FROM event_hypothesis_relationship_decisions"
-    ).fetchone() == (0,)
     connection.close()
 
 

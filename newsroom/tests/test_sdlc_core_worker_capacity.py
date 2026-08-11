@@ -802,20 +802,84 @@ def test_core_shard_child_recomputes_bound_inventory_before_pytest(
         for index in range(EXPECTED_CORE_SHARD_COUNT)
     )
     selected = lane_module._core_node_shards(nodes)[0]
-    monkeypatch.setattr(
-        lane_module, "_collect_core_node_ids", lambda _root, **_kwargs: nodes
-    )
+    report = tmp_path / "pytest.xml"
+    inventory_path = tmp_path / "node-inventory.json"
+    lane_module._private_write(inventory_path, list(nodes))
+    observed: dict[str, object] = {}
 
-    with pytest.raises(WorkflowLaneError, match="core_shard_inventory"):
+    def no_recollection(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("bound inventory must not be recollected")
+
+    def run(*args: object, **kwargs: object) -> object:
+        observed["command"] = args[0]
+        observed["environment"] = kwargs["env"]
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(lane_module, "_collect_core_node_ids", no_recollection)
+    monkeypatch.setattr(
+        lane_module,
+        "_core_test_files",
+        lambda _root: tuple(node.split("::")[0] for node in nodes),
+    )
+    monkeypatch.setattr(lane_module.subprocess, "run", run)
+    monkeypatch.setenv(lane_module._CORE_NODE_INVENTORY_PATH_ENV, "ambient-path")
+    monkeypatch.setenv(lane_module._CORE_NODE_INVENTORY_DIGEST_ENV, "ambient-digest")
+
+    assert (
         lane_module.core_shard_tests(
             repo_root=tmp_path,
-            report=tmp_path / "pytest.xml",
+            report=report,
             basetemp=tmp_path / "pytest-temp",
             shard_index=0,
-            node_inventory_digest="sha256:" + "0" * 64,
+            node_inventory_digest=lane_module.sha256_identity(list(nodes)),
             selected_node_ids_digest=lane_module.sha256_identity(list(selected)),
             clustering=False,
         )
+        == 0
+    )
+    environment = observed["environment"]
+    assert isinstance(environment, dict)
+    assert environment[lane_module._CORE_NODE_INVENTORY_PATH_ENV] == str(inventory_path)
+    assert environment[lane_module._CORE_NODE_INVENTORY_DIGEST_ENV] == (
+        lane_module.sha256_identity(list(nodes))
+    )
+    assert len(observed) == 2
+
+    for corruption in ("digest", "selected", "noncanonical", "mode", "symlink"):
+        if inventory_path.exists() or inventory_path.is_symlink():
+            inventory_path.unlink()
+        inventory_path.write_bytes(
+            lane_module.canonical_json_bytes(list(nodes)) + b"\n"
+        )
+        inventory_path.chmod(0o600)
+        if corruption == "noncanonical":
+            inventory_path.write_bytes(inventory_path.read_bytes() + b" ")
+        elif corruption == "mode":
+            inventory_path.chmod(0o644)
+        elif corruption == "symlink":
+            target = tmp_path / "inventory-target.json"
+            target.write_bytes(inventory_path.read_bytes())
+            target.chmod(0o600)
+            inventory_path.unlink()
+            inventory_path.symlink_to(target)
+        with pytest.raises(WorkflowLaneError, match="core_shard_inventory"):
+            lane_module.core_shard_tests(
+                repo_root=tmp_path,
+                report=report,
+                basetemp=tmp_path / "pytest-temp",
+                shard_index=0,
+                node_inventory_digest=(
+                    "sha256:" + "0" * 64
+                    if corruption == "digest"
+                    else lane_module.sha256_identity(list(nodes))
+                ),
+                selected_node_ids_digest=(
+                    "sha256:" + "1" * 64
+                    if corruption == "selected"
+                    else lane_module.sha256_identity(list(selected))
+                ),
+                clustering=False,
+            )
 
 
 @pytest.mark.parametrize(
@@ -1146,6 +1210,7 @@ def test_core_fragment_binds_contract_lock_toolchain_and_exact_inventory(
     unsigned = dict(fragment)
     identity = unsigned.pop("fragment_identity")
     assert identity == lane_module._fragment_identity(unsigned)
+    assert not (tmp_path / "artifacts/core-fragment/node-inventory.json").exists()
 
 
 def test_fragment_provenance_hashes_exact_contract_and_lockfile_bytes() -> None:
@@ -1256,6 +1321,7 @@ def test_collection_time_tracked_mutation_prevents_fragment_publication(
         )
 
     assert not (tmp_path / "artifacts/core-fragment/fragment.json").exists()
+    assert not (tmp_path / "artifacts/core-fragment/node-inventory.json").exists()
 
 
 def test_test_time_tracked_mutation_prevents_fragment_publication(
@@ -1303,6 +1369,7 @@ def test_test_time_tracked_mutation_prevents_fragment_publication(
         )
 
     assert not (tmp_path / "artifacts/core-fragment/fragment.json").exists()
+    assert not (tmp_path / "artifacts/core-fragment/node-inventory.json").exists()
 
 
 def test_collection_subprocess_timeout_is_typed_and_publishes_no_fragment(

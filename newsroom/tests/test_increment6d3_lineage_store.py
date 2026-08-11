@@ -1725,116 +1725,70 @@ def test_d3_shared_cache_run_uid_isolation_and_incomplete_stage_rebuild(
     assert first_root != second_root
 
 
-def test_ten_core_shard_probe_selections_derive_exact_template_subsets() -> None:
-    shard_probe_ids = (
-        (
-            "historical_read-digest-reopened-read",
-            "historical_read-identity-reopened-list",
-            "historical_read-retained-list",
-            "lost_response_replay",
-            "request_binding-actor",
-        ),
-        (
-            "historical_read-digest-reopened-list",
-            "historical_read-retained-read",
-        ),
-        (
-            "representation_binding-scalar",
-            "tamper_rejection-canonical",
-            "tamper_rejection-offline_rewrite",
-            "transaction_rollback-normal",
-        ),
-        (
-            "current_use_revalidation-authority",
-            "historical_read-provenance-reopened-read",
-        ),
-        (
-            "fresh_reopen-digest",
-            "historical_read-provenance-fresh-read",
-            "transaction_rollback-abort",
-        ),
-        (
-            "fresh_reopen-persistence",
-            "historical_read-identity-reopened-read",
-            "request_binding-request",
-        ),
-        (
-            "fresh_replay-submission",
-            "historical_read-identity-fresh-list",
-            "historical_read-provenance-fresh-list",
-            "historical_read-provenance-reopened-list",
-            "restart_migration-restart",
-        ),
-        (
-            "current_use_revalidation-policy",
-            "fresh_replay-replay",
-            "representation_binding-canonical",
-            "representation_binding-identity",
-            "representation_binding-retained",
-            "restart_migration-migrate",
-            "tamper_rejection-linked_row",
-        ),
-        (
-            "historical_read-digest-fresh-read",
-            "historical_read-identity-fresh-read",
-            "request_binding-cas_predecessor",
-        ),
-        (
-            "competing_writers",
-            "historical_read-digest-fresh-list",
-            "representation_binding-linked_row",
-            "request_binding-idempotency",
-        ),
+def _bound_or_collected_core_inventory() -> tuple[str, ...]:
+    inventory_path = os.environ.get(sdlc_lane._CORE_NODE_INVENTORY_PATH_ENV)
+    inventory_digest = os.environ.get(sdlc_lane._CORE_NODE_INVENTORY_DIGEST_ENV)
+    if (inventory_path is None) != (inventory_digest is None):
+        raise ValueError("incomplete bound core inventory")
+    return (
+        sdlc_lane._collect_core_node_ids(REPO_ROOT)
+        if inventory_path is None
+        else sdlc_lane._load_core_node_inventory(
+            REPO_ROOT, inventory_path, inventory_digest
+        )
     )
+
+
+def test_ten_core_shard_probe_selections_derive_exact_template_subsets() -> None:
     prefix = (
         "newsroom/tests/test_increment6d3_lineage_store.py::"
         "test_real_v23_store_passes_required_conformance_probe"
     )
-    actual_probe_ids = tuple(
+    inventory = _bound_or_collected_core_inventory()
+    shards = sdlc_lane._core_node_shards(inventory)
+    probe_ids_by_shard = tuple(
         tuple(
             node_id[len(prefix) + 1 : -1]
             for node_id in shard
             if node_id.startswith(f"{prefix}[")
         )
-        for shard in sdlc_lane._core_node_shards(
-            sdlc_lane._collect_core_node_ids(REPO_ROOT)
+        for shard in shards
+    )
+    flattened = tuple(probe_id for shard in probe_ids_by_shard for probe_id in shard)
+    assert len(flattened) == len(set(flattened))
+    assert frozenset(flattened) == _EXPECTED_PROBE_IDS
+
+    probes = {probe.probe_id: probe for probe in _CONFORMANCE_PROBES}
+    records_by_case = {
+        CaseId.HISTORICAL_READ: ("record-1", "record-2"),
+        CaseId.COMPETING_WRITERS: ("record-a", "record-b"),
+        CaseId.TRANSACTION_ROLLBACK: (
+            "record-rollback-normal",
+            "record-rollback-abort",
+        ),
+        CaseId.TAMPER_REJECTION: ("record-1", "record-b"),
+    }
+    selected = tuple(_selected_shared_template_keys(tuple(shard)) for shard in shards)
+    expected = tuple(
+        tuple(
+            key
+            for key in _SHARED_CONFORMANCE_TEMPLATE_KEYS
+            if key
+            in {
+                records_by_case.get(probes[probe_id].case, ("record-1",))
+                for probe_id in probe_ids
+            }
         )
+        if probe_ids
+        else _SHARED_CONFORMANCE_TEMPLATE_KEYS
+        for probe_ids in probe_ids_by_shard
     )
-    assert actual_probe_ids == shard_probe_ids
-    selected = tuple(
-        _selected_shared_template_keys(
-            tuple(f"{prefix}[{probe_id}]" for probe_id in probe_ids)
-        )
-        for probe_ids in shard_probe_ids
-    )
-    assert tuple(map(len, selected)) == (2, 1, 3, 2, 3, 2, 2, 2, 2, 3)
-    assert selected == (
-        (("record-1",), ("record-1", "record-2")),
-        (("record-1", "record-2"),),
-        (
-            ("record-1",),
-            ("record-1", "record-b"),
-            ("record-rollback-normal", "record-rollback-abort"),
-        ),
-        (("record-1",), ("record-1", "record-2")),
-        (
-            ("record-1",),
-            ("record-1", "record-2"),
-            ("record-rollback-normal", "record-rollback-abort"),
-        ),
-        (("record-1",), ("record-1", "record-2")),
-        (("record-1",), ("record-1", "record-2")),
-        (("record-1",), ("record-1", "record-b")),
-        (("record-1",), ("record-1", "record-2")),
-        (
-            ("record-1",),
-            ("record-1", "record-2"),
-            ("record-a", "record-b"),
-        ),
-    )
+    assert selected == expected
 
 
-def test_whole_module_selection_is_conservative_and_unknown_probe_fails() -> None:
+def test_whole_module_selection_is_conservative_and_unknown_probe_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     module = "newsroom/tests/test_increment6d3_lineage_store.py"
     assert _selected_shared_template_keys((module,)) == (
         _SHARED_CONFORMANCE_TEMPLATE_KEYS
@@ -1842,6 +1796,14 @@ def test_whole_module_selection_is_conservative_and_unknown_probe_fails() -> Non
     probe = "test_real_v23_store_passes_required_conformance_probe"
     with pytest.raises(ValueError, match="unknown exact d3 conformance probe"):
         _selected_shared_template_keys((f"{module}::{probe}[unknown-probe]",))
+
+    monkeypatch.setenv(
+        sdlc_lane._CORE_NODE_INVENTORY_PATH_ENV,
+        os.fspath(tmp_path / "missing.json"),
+    )
+    monkeypatch.delenv(sdlc_lane._CORE_NODE_INVENTORY_DIGEST_ENV, raising=False)
+    with pytest.raises(ValueError, match="incomplete bound core inventory"):
+        _bound_or_collected_core_inventory()
 
 
 @pytest.mark.parametrize(
