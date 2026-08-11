@@ -17,7 +17,11 @@ from newsroom.authority._event_hypothesis_relationship_system import (
 )
 from newsroom.authority.auth import AuthenticationProof, StaticAuthorizer
 from newsroom.authority.canonical import canonical_json_bytes
+from newsroom.authority.event_hypothesis_relationship_migrations import (
+    EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION,
+)
 from newsroom.authority.migrations import (
+    SCHEMA_VERSION,
     apply_pending_migrations,
     prepare_pending_migration_backup,
 )
@@ -1408,7 +1412,9 @@ def test_named_upstreams_advance_distinct_real_authority_heads(tmp_path) -> None
     assert snapshots[1][0][1] != snapshots[1][1][1]
 
 
-def test_migrate_flag_executes_the_real_v21_to_v22_path(tmp_path, monkeypatch) -> None:
+def test_migrate_flag_executes_real_v21_through_v22_to_current_path(
+    tmp_path, monkeypatch
+) -> None:
     adapter = _Adapter(tmp_path)
     location = adapter.create_location()
     connection = sqlite3.connect(location.seed[1])
@@ -1421,7 +1427,12 @@ def test_migrate_flag_executes_the_real_v21_to_v22_path(tmp_path, monkeypatch) -
     )
     assert adapter.open_handle(location, migrate=True) is sentinel
     connection = sqlite3.connect(location.seed[1])
-    assert connection.execute("PRAGMA user_version").fetchone() == (22,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+    migration = EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION
+    assert connection.execute(
+        "SELECT name,checksum FROM authority_migrations WHERE version=?",
+        (migration.version,),
+    ).fetchone() == (migration.name, migration.checksum)
     assert connection.execute(
         "SELECT count(*) FROM event_hypothesis_relationship_decisions"
     ).fetchone() == (0,)

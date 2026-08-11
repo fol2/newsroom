@@ -43,6 +43,9 @@ from ._event_store import _EventAuthorityStore
 
 _TOKEN = object()
 _LINEAGE_AGGREGATE_DOMAIN = b"newsroom.event-hypothesis-lineage.aggregate.v1"
+_VERIFY_RETAINED_RELATIONSHIP_INTEGRITY = (
+    EventHypothesisRelationshipReadPort.verify_retained_integrity_in_transaction
+)
 
 
 def _lineage_aggregate_id(lineage_id: str) -> AggregateId:
@@ -143,27 +146,36 @@ class _LineageStore(_EventAuthorityStore):
             busy_timeout_ms=busy_timeout_ms,
             clock=clock,
         )
-        self._port = _create_event_hypothesis_relationship_read_port(
-            self._connection,
-            retrieval_authority=retrieval_authority,
-            authenticator=authenticator,
-            command_registry=merged_commands,
-            payload_schemas=merged_schemas,
-            clock=clock,
-        )
-        if type(self._port) is not EventHypothesisRelationshipReadPort:
-            raise HypothesisLineageContractError("lineage relationship port differs")
-        self._service = CommandService(
-            registry=merged_commands,
-            payload_schemas=merged_schemas,
-            authenticator=authenticator,
-            authorizer=authorizer,
-            committed_lookup=self,
-            clock=clock,
-            _issuer=issuer,
-        )
-        with self._lock, self._transaction():
-            self._verify()
+        try:
+            self._port = _create_event_hypothesis_relationship_read_port(
+                self._connection,
+                retrieval_authority=retrieval_authority,
+                authenticator=authenticator,
+                command_registry=merged_commands,
+                payload_schemas=merged_schemas,
+                clock=clock,
+            )
+            if type(self._port) is not EventHypothesisRelationshipReadPort:
+                raise HypothesisLineageContractError(
+                    "lineage relationship port differs"
+                )
+            self._service = CommandService(
+                registry=merged_commands,
+                payload_schemas=merged_schemas,
+                authenticator=authenticator,
+                authorizer=authorizer,
+                committed_lookup=self,
+                clock=clock,
+                _issuer=issuer,
+            )
+            with self._lock, self._transaction():
+                self._verify()
+        except BaseException:
+            try:
+                self.close()
+            except BaseException:  # noqa: BLE001, S110 - preserve opening failure
+                pass
+            raise
 
     @staticmethod
     def _command(
@@ -179,7 +191,32 @@ class _LineageStore(_EventAuthorityStore):
 
     def _row(self, lineage_id: str) -> sqlite3.Row:
         row = self._connection.execute(
-            "SELECT l.*,e.event_type,e.event_schema_version,e.aggregate_type,e.aggregate_id,e.aggregate_version,e.recorded_at AS event_recorded_at,e.command_id,e.command_definition_version,e.command_definition_digest,c.command_type,c.expected_aggregate_version,c.idempotency_key,c.committed_at,p.payload_bytes,p.payload_digest,p.mode,p.schema_version,p.schema_contract_version,p.schema_contract_digest,p.canonicalizer_implementation_version,a.principal_id,a.credential_binding_digest FROM event_hypothesis_lineage l JOIN ledger_events e ON e.event_id=l.authority_event_id JOIN authority_commands c ON c.command_id=e.command_id JOIN authority_payloads p ON p.payload_id=e.payload_id JOIN authentication_contexts a ON a.authentication_context_id=c.authentication_context_id WHERE l.lineage_id=?",
+            "SELECT l.*,e.event_type,e.event_schema_version,e.aggregate_type,"
+            "e.aggregate_id,e.aggregate_version,e.recorded_at AS event_recorded_at,"
+            "e.command_id,e.command_definition_version,e.command_definition_digest,"
+            "c.command_type,c.aggregate_type AS command_aggregate_type,"
+            "c.aggregate_id AS command_aggregate_id,c.expected_aggregate_version,"
+            "c.idempotency_key,c.result_digest,c.result_bytes,c.committed_at,"
+            "v.aggregate_type AS version_aggregate_type,"
+            "v.aggregate_id AS version_aggregate_id,"
+            "v.aggregate_version AS retained_aggregate_version,"
+            "g.aggregate_type AS head_aggregate_type,"
+            "g.aggregate_id AS head_aggregate_id,g.current_version,"
+            "r.canonical_bytes AS request_bytes,p.payload_bytes,p.payload_digest,"
+            "p.mode,p.schema_version,p.schema_contract_version,"
+            "p.schema_contract_digest,p.canonicalizer_implementation_version,"
+            "a.principal_id,a.credential_binding_digest "
+            "FROM event_hypothesis_lineage l "
+            "JOIN ledger_events e ON e.event_id=l.authority_event_id "
+            "JOIN authority_commands c ON c.command_id=e.command_id "
+            "JOIN authority_aggregate_versions v ON v.command_id=c.command_id "
+            "JOIN authority_aggregates g ON g.aggregate_type=v.aggregate_type "
+            "AND g.aggregate_id=v.aggregate_id "
+            "JOIN authorization_requests r "
+            "ON r.request_digest=c.authorization_request_digest "
+            "JOIN authority_payloads p ON p.payload_id=e.payload_id "
+            "JOIN authentication_contexts a ON a.authentication_context_id="
+            "c.authentication_context_id WHERE l.lineage_id=?",
             (lineage_id,),
         ).fetchone()
         if row is None or type(row) is not sqlite3.Row:
@@ -195,6 +232,11 @@ class _LineageStore(_EventAuthorityStore):
         contract = self._payload_schemas.resolve(
             definition.payload_schema_version, definition.payload_mode
         )
+        aggregate_id = str(_lineage_aggregate_id(receipt.lineage_id))
+        result = self._decode_result(
+            bytes(row["result_bytes"]), str(row["result_digest"]), replayed=False
+        )
+        request = self._decode_canonical(bytes(row["request_bytes"]))
         target = receipt.reversal_target
         expected = {
             "lineage_id": receipt.lineage_id,
@@ -212,8 +254,30 @@ class _LineageStore(_EventAuthorityStore):
             str(row["event_type"]) != LINEAGE_EVENT_TYPE
             or int(row["event_schema_version"]) != 1
             or str(row["aggregate_type"]) != LINEAGE_AGGREGATE_TYPE
-            or str(row["aggregate_id"]) != str(row["authority_aggregate_id"])
+            or any(
+                str(row[key]) != aggregate_id
+                for key in (
+                    "authority_aggregate_id",
+                    "aggregate_id",
+                    "command_aggregate_id",
+                    "version_aggregate_id",
+                    "head_aggregate_id",
+                )
+            )
+            or any(
+                str(row[key]) != LINEAGE_AGGREGATE_TYPE
+                for key in (
+                    "command_aggregate_type",
+                    "version_aggregate_type",
+                    "head_aggregate_type",
+                )
+            )
             or int(row["aggregate_version"]) != 1
+            or int(row["retained_aggregate_version"]) != 1
+            or int(row["current_version"]) != 1
+            or result.aggregate_id != aggregate_id
+            or not isinstance(request, dict)
+            or request.get("aggregate_id") != aggregate_id
             or str(row["command_type"]) != LINEAGE_COMMAND_TYPE
             or int(row["expected_aggregate_version"]) != 0
             or str(row["idempotency_key"]) != receipt.lineage_id
@@ -286,6 +350,7 @@ class _LineageStore(_EventAuthorityStore):
         )
 
     def _verify(self) -> None:
+        _VERIFY_RETAINED_RELATIONSHIP_INTEGRITY(self._port)
         self._validate_relational_invariants(self._connection)
         self._validate_immutable_records(self._connection)
         self._validate_registry_coverage(self._connection)
@@ -465,6 +530,7 @@ class _LineageStore(_EventAuthorityStore):
     def rollback_scope(self, operation: Callable[[object], None]) -> None:
         try:
             with self._lock, self._transaction():
+                self._verify()
                 operation(_LineageTransaction(self))
                 raise _Rollback()
         except _Rollback:

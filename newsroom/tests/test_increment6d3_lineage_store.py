@@ -58,6 +58,137 @@ def _seed(tmp_path):
     return seed, args, receipt
 
 
+class _OpeningSignal(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("failure", ("port", "service", "verify"))
+def test_post_super_open_failure_releases_writer_for_corrected_retry(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from newsroom.authority import _event_hypothesis_lineage_system as private
+
+    _, args, _ = _seed(tmp_path)
+    with monkeypatch.context() as scoped:
+        if failure == "port":
+            scoped.setattr(
+                private,
+                "_create_event_hypothesis_relationship_read_port",
+                lambda *args, **kwargs: (_ for _ in ()).throw(_OpeningSignal()),
+            )
+        elif failure == "service":
+            scoped.setattr(
+                private,
+                "CommandService",
+                lambda *args, **kwargs: (_ for _ in ()).throw(_OpeningSignal()),
+            )
+        else:
+            scoped.setattr(
+                private._LineageStore,
+                "_verify",
+                lambda self: (_ for _ in ()).throw(_OpeningSignal()),
+            )
+        with pytest.raises(_OpeningSignal):
+            open_event_hypothesis_lineage_authority(**args)
+
+    corrected = open_event_hypothesis_lineage_authority(**args)
+    corrected.close()
+
+
+def _rewrite_retained_relationship_evidence(database) -> None:
+    connection = sqlite3.connect(database, isolation_level=None)
+    trigger_sql = str(
+        connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?",
+            ("immutable_event_hypothesis_relationship_update",),
+        ).fetchone()[0]
+    )
+    row = connection.execute(
+        "SELECT decision_id,assessment_bytes,evidence_bytes "
+        "FROM event_hypothesis_relationship_decisions"
+    ).fetchone()
+    assessment = d2.RelationshipAssessment.from_canonical_bytes(bytes(row[1]))
+    values = d2.json.loads(bytes(row[2]))
+    evidence = tuple(d2.ComparatorEvidence.from_value(value) for value in values)
+    tampered = replace(evidence[0], score=evidence[0].score + 1)
+    rewritten_evidence = (tampered, *evidence[1:])
+    rewritten = d2.assess_relationships(
+        assessment.subject,
+        assessment.comparator_manifest,
+        rewritten_evidence,
+    )
+    connection.execute("DROP TRIGGER immutable_event_hypothesis_relationship_update")
+    connection.execute(
+        "UPDATE event_hypothesis_relationship_decisions SET "
+        "decision_id=?,decision=?,assessment_bytes=?,assessment_digest=?,"
+        "evidence_bytes=?,evidence_digest=? WHERE decision_id=?",
+        (
+            rewritten.canonical_digest,
+            rewritten.decision.value,
+            rewritten.canonical_bytes,
+            rewritten.canonical_digest,
+            d2.canonical_json_bytes(
+                [item.canonical_value for item in rewritten_evidence]
+            ),
+            rewritten.evidence_digest,
+            str(row[0]),
+        ),
+    )
+    connection.execute(trigger_sql)
+    connection.close()
+
+
+def test_empty_lineage_verifies_retained_relationship_history(tmp_path) -> None:
+    (tmp_path / "clean").mkdir()
+    seed, args, _ = _seed(tmp_path / "clean")
+    authority = open_event_hypothesis_lineage_authority(**args)
+    try:
+        assert authority.history() == ()
+        assert authority.current_heads(proof=seed[0][3]) == ()
+    finally:
+        authority.close()
+
+    (tmp_path / "pre-open-tamper").mkdir()
+    _, tampered_args, _ = _seed(tmp_path / "pre-open-tamper")
+    _rewrite_retained_relationship_evidence(tampered_args["database"])
+    with pytest.raises(ValueError, match="relationship|lineage"):
+        open_event_hypothesis_lineage_authority(**tampered_args)
+
+
+def test_open_lineage_reads_reverify_retained_relationship_history(tmp_path) -> None:
+    seed, args, _ = _seed(tmp_path)
+    authority = open_event_hypothesis_lineage_authority(**args)
+    try:
+        _rewrite_retained_relationship_evidence(args["database"])
+        with pytest.raises(ValueError, match="relationship|lineage"):
+            authority.history()
+        with pytest.raises(ValueError, match="relationship|lineage"):
+            authority.current_heads(proof=seed[0][3])
+    finally:
+        authority.close()
+
+
+def test_rollback_scope_reverifies_retained_relationship_history(tmp_path) -> None:
+    from newsroom.authority._event_hypothesis_lineage_system import (
+        _open_unlocked_lineage_authority_for_test,
+    )
+
+    _, args, _ = _seed(tmp_path)
+    authority = _open_unlocked_lineage_authority_for_test(**args)
+    observed: list[tuple[HypothesisLineageReceipt, ...]] = []
+    try:
+        authority.rollback_scope(
+            lambda transaction: observed.append(transaction.history())
+        )
+        assert observed == [()]
+
+        _rewrite_retained_relationship_evidence(args["database"])
+        with pytest.raises(ValueError, match="relationship|lineage"):
+            authority.rollback_scope(lambda transaction: transaction.history())
+    finally:
+        authority.close()
+
+
 def test_retain_replay_reopen_and_guarded_heads(tmp_path) -> None:
     seed, args, receipt = _seed(tmp_path)
     authority = open_event_hypothesis_lineage_authority(**args)
@@ -108,6 +239,101 @@ def test_retain_replay_reopen_and_guarded_heads(tmp_path) -> None:
     )
     connection.close()
     with pytest.raises((AuthoritySchemaError, ValueError), match="heads|lineage"):
+        open_event_hypothesis_lineage_authority(**args)
+
+
+def test_trigger_preserving_fk_clean_aggregate_rewrite_fails_closed(
+    tmp_path,
+) -> None:
+    from newsroom.authority._event_hypothesis_lineage_system import (
+        _lineage_aggregate_id,
+    )
+
+    seed, args, receipt = _seed(tmp_path)
+    authority = open_event_hypothesis_lineage_authority(**args)
+    authority.retain(receipt.canonical_bytes, proof=seed[0][3])
+    authority.close()
+
+    connection = sqlite3.connect(seed[1], isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    expected = str(_lineage_aggregate_id(receipt.lineage_id))
+    rewritten = str(uuid.uuid4())
+    lineage = connection.execute(
+        "SELECT * FROM event_hypothesis_lineage WHERE lineage_id=?",
+        (receipt.lineage_id,),
+    ).fetchone()
+    event = connection.execute(
+        "SELECT * FROM ledger_events WHERE event_id=?",
+        (lineage["authority_event_id"],),
+    ).fetchone()
+    command = connection.execute(
+        "SELECT * FROM authority_commands WHERE command_id=?",
+        (event["command_id"],),
+    ).fetchone()
+    version = connection.execute(
+        "SELECT * FROM authority_aggregate_versions WHERE command_id=?",
+        (event["command_id"],),
+    ).fetchone()
+    aggregate = connection.execute(
+        "SELECT * FROM authority_aggregates WHERE aggregate_type=? AND aggregate_id=?",
+        (event["aggregate_type"], expected),
+    ).fetchone()
+    triggers = connection.execute(
+        "SELECT name,sql FROM sqlite_schema WHERE type='trigger' ORDER BY name"
+    ).fetchall()
+
+    def rewritten_row(row: sqlite3.Row, **changes: object) -> tuple[object, ...]:
+        return tuple(
+            changes.get(key, row[key])
+            for key in row.keys()  # noqa: SIM118
+        )
+
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("BEGIN IMMEDIATE")
+    connection.execute("PRAGMA defer_foreign_keys=ON")
+    connection.execute(
+        "CREATE UNIQUE INDEX aggregate_rewrite_gate "
+        "ON authority_aggregates(aggregate_type) "
+        "WHERE aggregate_type='event_hypothesis_lineage'"
+    )
+    connection.execute(
+        "INSERT OR REPLACE INTO authority_aggregates VALUES(?,?,?,?,?)",
+        rewritten_row(aggregate, aggregate_id=rewritten),
+    )
+    connection.execute(
+        "INSERT OR REPLACE INTO authority_aggregate_versions VALUES(?,?,?,?,?,?,?)",
+        rewritten_row(version, aggregate_id=rewritten),
+    )
+    connection.execute(
+        "INSERT OR REPLACE INTO ledger_events VALUES("
+        + ",".join("?" for _ in event.keys())  # noqa: SIM118
+        + ")",
+        rewritten_row(event, aggregate_id=rewritten),
+    )
+    connection.execute(
+        "INSERT OR REPLACE INTO event_hypothesis_lineage VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        rewritten_row(lineage, authority_aggregate_id=rewritten),
+    )
+    connection.execute("DROP INDEX aggregate_rewrite_gate")
+    connection.execute("COMMIT")
+
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert (
+        connection.execute(
+            "SELECT name,sql FROM sqlite_schema WHERE type='trigger' ORDER BY name"
+        ).fetchall()
+        == triggers
+    )
+    assert command["aggregate_id"] == expected
+    assert expected.encode() in bytes(command["result_bytes"])
+    request = connection.execute(
+        "SELECT canonical_bytes FROM authorization_requests WHERE request_digest=?",
+        (command["authorization_request_digest"],),
+    ).fetchone()
+    assert expected.encode() in bytes(request[0])
+    connection.close()
+
+    with pytest.raises((AuthoritySchemaError, ValueError), match="aggregate|lineage"):
         open_event_hypothesis_lineage_authority(**args)
 
 
