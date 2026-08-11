@@ -158,6 +158,11 @@ PINNED_MIGRATION_HISTORY: tuple[HistoryRow, ...] = (
         "event_hypothesis_relationship_authority_v22",
         "sha256:e59eb222a95e2901ccaae29ce1b9e8eded797306e9796718a6d2c4fa505a6636",
     ),
+    (
+        23,
+        "event_hypothesis_lineage_authority_v23",
+        "sha256:6c24d402f246f4e82a49a9772d70677d922282aae3b6dde93c62c0ef9b1b7a72",
+    ),
 )
 
 

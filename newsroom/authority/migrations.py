@@ -58,6 +58,17 @@ from .evaluation_handoff_migrations import (
     prepare_evaluation_handoff_backup,
     require_evaluation_handoff_backup,
 )
+from .event_hypothesis_lineage_migrations import (
+    EVENT_HYPOTHESIS_LINEAGE_MIGRATION,
+    EVENT_HYPOTHESIS_LINEAGE_MIGRATION_CHECKSUM,
+    EVENT_HYPOTHESIS_LINEAGE_MIGRATION_NAME,
+    EVENT_HYPOTHESIS_LINEAGE_MIGRATION_STATEMENTS,
+    EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION,
+    EventHypothesisLineageBackupReceipt,
+    event_hypothesis_lineage_backup_paths,
+    prepare_event_hypothesis_lineage_backup,
+    require_event_hypothesis_lineage_backup,
+)
 from .event_hypothesis_migrations import (
     EVENT_HYPOTHESIS_MIGRATION,
     EVENT_HYPOTHESIS_MIGRATION_CHECKSUM,
@@ -178,7 +189,7 @@ from .triage_work_item_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = EVENT_HYPOTHESIS_RELATIONSHIP_SCHEMA_VERSION
+SCHEMA_VERSION = EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -624,11 +635,12 @@ def prepare_pending_migration_backup(
     | TriageExecutionBackupReceipt
     | EventHypothesisBackupReceipt
     | EventHypothesisRelationshipBackupReceipt
+    | EventHypothesisLineageBackupReceipt
     | None
 ):
     """Prepare the exact retained backup required by a checked predecessor."""
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if version not in {16, 17, 18, 19, 20, 21}:
+    if version not in {16, 17, 18, 19, 20, 21, 22}:
         return None
     database_path = next(
         str(row[2])
@@ -654,8 +666,11 @@ def prepare_pending_migration_backup(
     if version == 20:
         backup_path, _ = event_hypothesis_backup_paths(database_path)
         return prepare_event_hypothesis_backup(conn, backup_path)
-    backup_path, _ = event_hypothesis_relationship_backup_paths(database_path)
-    return prepare_event_hypothesis_relationship_backup(conn, backup_path)
+    if version == 21:
+        backup_path, _ = event_hypothesis_relationship_backup_paths(database_path)
+        return prepare_event_hypothesis_relationship_backup(conn, backup_path)
+    backup_path, _ = event_hypothesis_lineage_backup_paths(database_path)
+    return prepare_event_hypothesis_lineage_backup(conn, backup_path)
 
 
 def apply_migration(
@@ -951,7 +966,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_evaluation_handoff_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-6],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-7],
                 )
             for statement in EVALUATION_HANDOFF_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -986,7 +1001,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_work_item_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-5],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-6],
                 )
             for statement in TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1020,7 +1035,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_disposition_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-4],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-5],
                 )
             for statement in TRIAGE_DISPOSITION_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1054,7 +1069,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_execution_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-3],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-4],
                 )
             for statement in TRIAGE_EXECUTION_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1087,7 +1102,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                 conn.execute("BEGIN EXCLUSIVE")
             if starting_version != 0:
                 require_event_hypothesis_backup(
-                    conn, expected_history=EXPECTED_MIGRATION_HISTORY[:-2]
+                    conn, expected_history=EXPECTED_MIGRATION_HISTORY[:-3]
                 )
             for statement in EVENT_HYPOTHESIS_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1122,7 +1137,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                 conn.execute("BEGIN EXCLUSIVE")
             if starting_version != 0:
                 require_event_hypothesis_relationship_backup(
-                    conn, expected_history=EXPECTED_MIGRATION_HISTORY[:-1]
+                    conn, expected_history=EXPECTED_MIGRATION_HISTORY[:-2]
                 )
             for statement in EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1137,6 +1152,45 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                 ),
             )
             current = EVENT_HYPOTHESIS_RELATIONSHIP_SCHEMA_VERSION
+        if current == EVENT_HYPOTHESIS_RELATIONSHIP_SCHEMA_VERSION:
+            if 0 < starting_version < EVENT_HYPOTHESIS_RELATIONSHIP_SCHEMA_VERSION:
+                conn.execute(
+                    f"PRAGMA user_version={EVENT_HYPOTHESIS_RELATIONSHIP_SCHEMA_VERSION}"
+                )
+                conn.execute("COMMIT")
+                database_path = next(
+                    str(row[2])
+                    for row in conn.execute("PRAGMA database_list")
+                    if row[1] == "main"
+                )
+                if not database_path:
+                    raise sqlite3.DatabaseError(
+                        "existing multihop upgrade requires a file-backed database"
+                    )
+                backup_path, _ = event_hypothesis_lineage_backup_paths(database_path)
+                prepare_event_hypothesis_lineage_backup(conn, backup_path)
+                conn.execute("BEGIN EXCLUSIVE")
+            if starting_version != 0:
+                predecessor_history = tuple(
+                    (record.version, record.name, record.checksum)
+                    for record in MIGRATIONS
+                    if record.version <= EVENT_HYPOTHESIS_RELATIONSHIP_SCHEMA_VERSION
+                )
+                require_event_hypothesis_lineage_backup(
+                    conn, expected_history=predecessor_history
+                )
+            for statement in EVENT_HYPOTHESIS_LINEAGE_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) VALUES(?,?,?,?)",
+                (
+                    EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION,
+                    EVENT_HYPOTHESIS_LINEAGE_MIGRATION_NAME,
+                    EVENT_HYPOTHESIS_LINEAGE_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -1168,6 +1222,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     TRIAGE_EXECUTION_MIGRATION,
     EVENT_HYPOTHESIS_MIGRATION,
     EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION,
+    EVENT_HYPOTHESIS_LINEAGE_MIGRATION,
 )
 
 
@@ -1284,5 +1339,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         EVENT_HYPOTHESIS_RELATIONSHIP_SCHEMA_VERSION,
         EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION_NAME,
         EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION_CHECKSUM,
+    ),
+    (
+        EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION,
+        EVENT_HYPOTHESIS_LINEAGE_MIGRATION_NAME,
+        EVENT_HYPOTHESIS_LINEAGE_MIGRATION_CHECKSUM,
     ),
 )

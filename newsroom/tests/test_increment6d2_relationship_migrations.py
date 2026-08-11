@@ -7,6 +7,9 @@ import pytest
 
 from newsroom.authority import migrations
 from newsroom.authority.canonical import digest_canonical
+from newsroom.authority.event_hypothesis_lineage_migrations import (
+    EVENT_HYPOTHESIS_LINEAGE_PREDECESSOR_FINGERPRINT,
+)
 from newsroom.authority.event_hypothesis_relationship_migrations import (
     EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION_CHECKSUM,
     EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION_NAME,
@@ -24,6 +27,9 @@ from newsroom.authority.migrations import (
     apply_pending_migrations,
     schema_fingerprint,
 )
+from newsroom.tests.graphiti_adapter_4d_migration_helpers import (
+    drop_empty_v23_lineage_schema,
+)
 
 
 def _open(path: str | Path = ":memory:") -> sqlite3.Connection:
@@ -35,6 +41,7 @@ def _open(path: str | Path = ":memory:") -> sqlite3.Connection:
 def _fresh(path: str | Path = ":memory:") -> sqlite3.Connection:
     connection = _open(path)
     apply_pending_migrations(connection, applied_at="2042-01-01T00:00:00.000000Z")
+    drop_empty_v23_lineage_schema(connection)
     return connection
 
 
@@ -62,9 +69,9 @@ def test_fresh_v22_has_exact_single_table_history_and_pins() -> None:
     )
     assert (
         EXPECTED_SCHEMA_FINGERPRINT
-        == "sha256:2118fa893fb7fd2911bbde3056b79b1d0e26ccd6903e1c4228616f342898eaad"
+        == "sha256:c341333cf54d724bb4d2092bb9da81e9f3a434ddb03e6ddc14a51fdf2c6c1b52"
     )
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+    assert EXPECTED_MIGRATION_HISTORY[-2] == (
         22,
         EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION_NAME,
         EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION_CHECKSUM,
@@ -81,7 +88,10 @@ def test_fresh_v22_has_exact_single_table_history_and_pins() -> None:
     assert connection.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'event_hypothesis_relationship%'"
     ).fetchall() == [("event_hypothesis_relationship_decisions",)]
-    assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
+    assert (
+        schema_fingerprint(connection)
+        == EVENT_HYPOTHESIS_LINEAGE_PREDECESSOR_FINGERPRINT
+    )
 
 
 def test_v22_migration_pin_detects_one_byte_statement_drift() -> None:
@@ -127,7 +137,7 @@ def test_exact_v21_backup_upgrade_and_injected_rollback(
     )
     monkeypatch.undo()
     apply_pending_migrations(connection, applied_at="2042-01-01T00:00:01.000000Z")
-    assert connection.execute("PRAGMA user_version").fetchone() == (22,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (23,)
 
 
 def test_standard_sqlite_connection_v22_backup_gate_closes_implicit_transaction(
@@ -146,17 +156,17 @@ def test_standard_sqlite_connection_v22_backup_gate_closes_implicit_transaction(
 
         apply_pending_migrations(connection, applied_at="2042-01-01T00:00:01.000000Z")
 
-        assert connection.execute("PRAGMA user_version").fetchone() == (22,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (23,)
     finally:
         connection.close()
 
 
-def test_v21_backup_required_and_v23_fails_closed(tmp_path: Path) -> None:
+def test_v21_backup_required_and_v24_fails_closed(tmp_path: Path) -> None:
     connection = _fresh(tmp_path / "authority.sqlite3")
     _downgrade_to_v21(connection)
     with pytest.raises(EventHypothesisRelationshipBackupError, match="prepared backup"):
         apply_pending_migrations(connection, applied_at="2042-01-01T00:00:01.000000Z")
     newer = _open()
-    newer.execute("PRAGMA user_version=23")
+    newer.execute("PRAGMA user_version=24")
     with pytest.raises(sqlite3.DatabaseError, match="newer"):
         apply_pending_migrations(newer, applied_at="2042-01-01T00:00:00.000000Z")

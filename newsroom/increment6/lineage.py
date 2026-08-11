@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Self
 
 from newsroom.authority.canonical import (
@@ -20,6 +22,14 @@ from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
 )
+from newsroom.authority.models import CommandDefinition
+from newsroom.authority.policy import (
+    CommandRegistry,
+    PayloadGoldenVector,
+    PayloadSchemaContract,
+    PayloadSchemaRegistry,
+)
+from newsroom.authority.types import PayloadMode, TrustScope, UtcTimestamp
 from newsroom.increment6.hypotheses import EventHypothesisVersion
 from newsroom.increment6.outcomes import CanonicalOutcome
 from newsroom.increment6.relationships import (
@@ -32,6 +42,14 @@ from newsroom.increment6.relationships import (
 )
 
 HYPOTHESIS_LINEAGE = "newsroom.increment6.hypothesis-lineage.v1"
+LINEAGE_COMMAND_TYPE = "increment6.hypothesis-lineage.retain"
+LINEAGE_AGGREGATE_TYPE = "event_hypothesis_lineage"
+LINEAGE_EVENT_TYPE = "event_hypothesis_lineage_retained"
+LINEAGE_COMMAND_DEFINITION_VERSION = "lineage-command-v1"
+LINEAGE_PAYLOAD_CONTRACT_VERSION = "lineage-schema-v1"
+LINEAGE_PAYLOAD_CANONICALIZER_VERSION = "lineage-canonical-json-v1"
+LINEAGE_REQUIRED_SCOPE = "authority.hypothesis-lineage.retain"
+
 HYPOTHESIS_CONSOLIDATION = "HYPOTHESIS_CONSOLIDATION"
 HYPOTHESIS_SPLIT = "HYPOTHESIS_SPLIT"
 HYPOTHESIS_REVERSAL_LINEAGE = "HYPOTHESIS_REVERSAL_LINEAGE"
@@ -83,6 +101,48 @@ def _normalise[T](operation: object, message: str) -> T:
         raise
     except Exception as exc:
         raise HypothesisLineageContractError(message) from exc
+
+
+def _normalise_exact[T](operation: object, message: str, expected: type[T]) -> T:
+    value = _normalise(operation, message)
+    if type(value) is not expected:
+        raise HypothesisLineageContractError(message)
+    if expected is HypothesisLineageReceipt:
+        return _normalise(
+            lambda: HypothesisLineageReceipt.from_canonical_bytes(
+                value.canonical_bytes
+            ),
+            message,
+        )  # type: ignore[return-value,union-attr]
+    return value
+
+
+def _normalise_tuple[T](
+    operation: object, message: str, expected: type[T]
+) -> tuple[T, ...]:
+    value = _normalise(operation, message)
+    if type(value) is not tuple or any(type(item) is not expected for item in value):
+        raise HypothesisLineageContractError(message)
+    if expected is HypothesisLineageReceipt:
+        return _normalise(
+            lambda: tuple(
+                HypothesisLineageReceipt.from_canonical_bytes(item.canonical_bytes)
+                for item in value
+            ),
+            message,
+        )  # type: ignore[return-value,union-attr]
+    if expected is HypothesisLineageHead:
+        return _normalise(
+            lambda: tuple(
+                HypothesisLineageHead(
+                    HypothesisLineageNodeBinding.from_value(item.node.canonical_value),
+                    item.generation,
+                )
+                for item in value
+            ),
+            message,
+        )  # type: ignore[return-value,union-attr]
+    return value
 
 
 def _uuid(value: object, field: str) -> str:
@@ -1417,11 +1477,239 @@ def replay_hypothesis_lineage(
     return _normalise(replay, "lineage replay failed")
 
 
+def _lineage_payload_canonicalizer(value: object) -> bytes:
+    raw = _canonical(value, "lineage command payload")
+    return HypothesisLineageReceipt.from_canonical_bytes(raw).canonical_bytes
+
+
+def _lineage_golden_receipt() -> HypothesisLineageReceipt:
+    digest = "sha256:" + "0" * 64
+    inputs = (
+        HypothesisLineageNodeBinding(
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-5000-8000-000000000011",
+            digest,
+        ),
+        HypothesisLineageNodeBinding(
+            "00000000-0000-4000-8000-000000000002",
+            "00000000-0000-5000-8000-000000000012",
+            digest,
+        ),
+    )
+    output = HypothesisLineageNodeBinding(
+        "00000000-0000-4000-8000-000000000003",
+        "00000000-0000-5000-8000-000000000013",
+        digest,
+    )
+    evidence = tuple(
+        HypothesisLineageEvidenceBinding(
+            digest, output.version_id, item.version_id, CanonicalOutcome.REL_SAME_STATE
+        )
+        for item in inputs
+    )
+    relationship = HypothesisLineageRelationshipBinding(
+        digest, CanonicalOutcome.REL_SAME_STATE, output, digest, digest, evidence
+    )
+    return HypothesisLineageReceipt._build(
+        HypothesisLineageKind.CONSOLIDATION, 0, inputs, (output,), (relationship,)
+    )
+
+
+def lineage_payload_contract() -> PayloadSchemaContract:
+    golden = _lineage_golden_receipt()
+    return PayloadSchemaContract(
+        schema_version=HYPOTHESIS_LINEAGE,
+        payload_mode=PayloadMode.INLINE,
+        contract_version=LINEAGE_PAYLOAD_CONTRACT_VERSION,
+        canonicalizer_implementation_version=LINEAGE_PAYLOAD_CANONICALIZER_VERSION,
+        canonicalizer=_lineage_payload_canonicalizer,
+        golden_vectors=(
+            PayloadGoldenVector(
+                "consolidation",
+                "lineage:consolidation",
+                golden.canonical_value,
+                golden.canonical_bytes,
+            ),
+        ),
+    )
+
+
+def lineage_command_definition() -> CommandDefinition:
+    contract = lineage_payload_contract()
+    return CommandDefinition(
+        command_type=LINEAGE_COMMAND_TYPE,
+        definition_version=LINEAGE_COMMAND_DEFINITION_VERSION,
+        aggregate_type=LINEAGE_AGGREGATE_TYPE,
+        event_type=LINEAGE_EVENT_TYPE,
+        event_schema_version=1,
+        payload_mode=PayloadMode.INLINE,
+        payload_schema_version=contract.schema_version,
+        payload_schema_contract_version=contract.contract_version,
+        payload_schema_contract_digest=contract.contract_digest,
+        payload_canonicalizer_version=contract.canonicalizer_implementation_version,
+        trust_scope=TrustScope.ADMITTED,
+        security_scope="authority.hypothesis-lineage",
+        retention_scope="authority.audit",
+        required_scope=LINEAGE_REQUIRED_SCOPE,
+        max_inline_bytes=MAX_LINEAGE_CANONICAL_BYTES,
+    )
+
+
+def merge_lineage_authority_registries(
+    command_registry: CommandRegistry, payload_schemas: PayloadSchemaRegistry
+) -> tuple[CommandRegistry, PayloadSchemaRegistry]:
+    definition = lineage_command_definition()
+    definitions = list(command_registry.definitions())
+    matches = [
+        item
+        for item in definitions
+        if (item.command_type, item.definition_version)
+        == (definition.command_type, definition.definition_version)
+    ]
+    if matches and matches[0].digest != definition.digest:
+        raise HypothesisLineageContractError("lineage command identity conflicts")
+    if not matches:
+        definitions.append(definition)
+    current_commands = {
+        item.command_type: (
+            LINEAGE_COMMAND_DEFINITION_VERSION
+            if item.command_type == LINEAGE_COMMAND_TYPE
+            else command_registry.resolve(item.command_type).definition_version
+        )
+        for item in definitions
+    }
+    contract = lineage_payload_contract()
+    contracts = list(payload_schemas.contracts())
+    schema_matches = [
+        item
+        for item in contracts
+        if (item.schema_version, item.payload_mode, item.contract_version)
+        == (contract.schema_version, contract.payload_mode, contract.contract_version)
+    ]
+    if schema_matches and schema_matches[0].contract_digest != contract.contract_digest:
+        raise HypothesisLineageContractError("lineage payload identity conflicts")
+    if not schema_matches:
+        contracts.append(contract)
+    current_schemas = {
+        (item.schema_version, item.payload_mode): (
+            LINEAGE_PAYLOAD_CONTRACT_VERSION
+            if item.schema_version == HYPOTHESIS_LINEAGE
+            else payload_schemas.resolve(
+                item.schema_version, item.payload_mode
+            ).contract_version
+        )
+        for item in contracts
+    }
+    return CommandRegistry(
+        definitions, current_versions=current_commands
+    ), PayloadSchemaRegistry(contracts, current_versions=current_schemas)
+
+
+_FACADE_TOKEN = object()
+
+
+class EventHypothesisLineageAuthority:
+    """Narrow public facade over checked v23 lineage authority."""
+
+    __slots__ = ("__authority",)
+
+    def __init__(self, token: object, authority: object) -> None:
+        if token is not _FACADE_TOKEN:
+            raise HypothesisLineageContractError(
+                "lineage authority construction is private"
+            )
+        self.__authority = authority
+
+    def retain(
+        self, receipt_bytes: bytes, *, proof: object
+    ) -> HypothesisLineageReceipt:
+        return _normalise_exact(
+            lambda: self.__authority.retain(receipt_bytes, proof=proof),
+            "lineage retention failed",
+            HypothesisLineageReceipt,
+        )  # type: ignore[attr-defined,no-any-return]
+
+    create_or_replay = retain
+
+    def load(self, lineage_id: str) -> HypothesisLineageReceipt:
+        return _normalise_exact(
+            lambda: self.__authority.load(lineage_id),
+            "lineage load failed",
+            HypothesisLineageReceipt,
+        )  # type: ignore[attr-defined,no-any-return]
+
+    def history(self) -> tuple[HypothesisLineageReceipt, ...]:
+        return _normalise_tuple(
+            self.__authority.history, "lineage history failed", HypothesisLineageReceipt
+        )  # type: ignore[attr-defined,no-any-return]
+
+    def current_heads(self, *, proof: object) -> tuple[HypothesisLineageHead, ...]:
+        return _normalise_tuple(
+            lambda: self.__authority.current_heads(proof=proof),
+            "lineage current heads failed",
+            HypothesisLineageHead,
+        )  # type: ignore[attr-defined,no-any-return]
+
+    def close(self) -> None:
+        _normalise(self.__authority.close, "lineage authority close failed")  # type: ignore[attr-defined]
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+def _compose_event_hypothesis_lineage_authority(
+    authority: object,
+) -> EventHypothesisLineageAuthority:
+    return EventHypothesisLineageAuthority(_FACADE_TOKEN, authority)
+
+
+def open_event_hypothesis_lineage_authority(
+    database: str | Path,
+    *,
+    retrieval_authority: object,
+    authenticator: object,
+    authorizer: object,
+    command_registry: CommandRegistry,
+    payload_schemas: PayloadSchemaRegistry,
+    clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
+    busy_timeout_ms: int = 5000,
+) -> EventHypothesisLineageAuthority:
+    from newsroom.authority.event_hypothesis_lineage_system import (
+        open_event_hypothesis_lineage_authority_system,
+    )
+
+    authority = _normalise(
+        lambda: open_event_hypothesis_lineage_authority_system(
+            database,
+            retrieval_authority=retrieval_authority,
+            authenticator=authenticator,
+            authorizer=authorizer,
+            command_registry=command_registry,
+            payload_schemas=payload_schemas,
+            clock=clock,
+            busy_timeout_ms=busy_timeout_ms,
+        ),
+        "lineage authority open failed",
+    )
+    if type(authority) is not EventHypothesisLineageAuthority:
+        raise HypothesisLineageContractError(
+            "lineage authority opener returned a forged facade"
+        )
+    return authority
+
+
 __all__ = [
     "HYPOTHESIS_CONSOLIDATION",
     "HYPOTHESIS_LINEAGE",
     "HYPOTHESIS_REVERSAL_LINEAGE",
     "HYPOTHESIS_SPLIT",
+    "LINEAGE_AGGREGATE_TYPE",
+    "LINEAGE_COMMAND_TYPE",
+    "LINEAGE_EVENT_TYPE",
+    "LINEAGE_REQUIRED_SCOPE",
     "MAX_LINEAGE_CANONICAL_BYTES",
     "MAX_LINEAGE_COMPARATOR_EVIDENCE",
     "MAX_LINEAGE_INPUTS",
@@ -1429,6 +1717,7 @@ __all__ = [
     "MAX_LINEAGE_RELATIONSHIP_BINDINGS",
     "MAX_LINEAGE_REPLAY_NODES",
     "MAX_LINEAGE_REPLAY_RECEIPTS",
+    "EventHypothesisLineageAuthority",
     "HypothesisLineageContractError",
     "HypothesisLineageEdge",
     "HypothesisLineageEvidenceBinding",
@@ -1440,6 +1729,10 @@ __all__ = [
     "HypothesisLineageRelationshipProof",
     "HypothesisLineageReplay",
     "HypothesisLineageTarget",
+    "lineage_command_definition",
+    "lineage_payload_contract",
+    "merge_lineage_authority_registries",
+    "open_event_hypothesis_lineage_authority",
     "replay_hypothesis_lineage",
     "verify_hypothesis_lineage_receipt",
 ]

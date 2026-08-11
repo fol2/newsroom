@@ -58,6 +58,14 @@ def test_increment6_authority_systems_are_cold_import_order_independent() -> Non
             "newsroom.authority.event_hypothesis_relationship_system",
             "newsroom.increment6.relationships",
         ),
+        (
+            "newsroom.increment6.lineage",
+            "newsroom.authority.event_hypothesis_lineage_system",
+        ),
+        (
+            "newsroom.authority.event_hypothesis_lineage_system",
+            "newsroom.increment6.lineage",
+        ),
     )
     for first, second in orders:
         subprocess.run(

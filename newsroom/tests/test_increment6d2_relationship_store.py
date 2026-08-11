@@ -110,7 +110,12 @@ def _independent_version(fixture, label: str):
 
 
 def _downgrade_checked_v22_to_v21(database: Path) -> None:
+    from newsroom.tests.graphiti_adapter_4d_migration_helpers import (
+        drop_empty_v23_lineage_schema,
+    )
+
     target = sqlite3.connect(database, isolation_level=None)
+    drop_empty_v23_lineage_schema(target)
     target.execute("PRAGMA foreign_keys=OFF")
     guard = target.execute(
         "SELECT sql FROM sqlite_master WHERE name='immutable_authority_migrations_delete'"
