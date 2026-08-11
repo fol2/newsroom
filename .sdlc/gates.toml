@@ -4,7 +4,7 @@ status = "accepted"
 owner = "fol2"
 canonical_language = "English"
 specification = "docs/specs/sdlc/high-performance-evidence-sdlc.md"
-acceptance_record = "docs/specs/sdlc/2026-08-10-sdlc-v2.5-core-sharding-amendment.md"
+acceptance_record = "docs/specs/sdlc/2026-08-11-sdlc-v2.5-ten-shard-capacity-amendment.md"
 issue = 98
 
 [global]
@@ -193,9 +193,9 @@ clustering = [
 
 [lanes.core]
 bootstrap_once = true
-shard_count = 4
+shard_count = 10
 partition = "sha256_node_id_balanced"
-workers_per_shard = 4
+workers_per_shard = 2
 distribution = "worksteal"
 max_worker_restart = 0
 per_shard_hard_timeout_seconds = 220

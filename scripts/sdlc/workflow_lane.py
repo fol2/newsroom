@@ -115,8 +115,8 @@ _SERVICE_CONFIGURATION = {
     "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
 }
 _CORE_TESTS = ("newsroom/tests",)
-_CORE_WORKER_COUNT = 4
-_CORE_SHARD_COUNT = 4
+_CORE_WORKER_COUNT = 2
+_CORE_SHARD_COUNT = 10
 _CORE_DISTRIBUTION = "worksteal"
 _CORE_FRAGMENT_SCHEMA = "newsroom.sdlc.core-shard-fragment.v1"
 _CORE_SHARD_LIFECYCLE_SCHEMA = "newsroom.sdlc.core-shard-lifecycle.v1"

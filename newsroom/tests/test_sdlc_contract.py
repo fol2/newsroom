@@ -4,7 +4,9 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+import yaml
 
+import scripts.sdlc.workflow_lane as lane_module
 from scripts.sdlc.contracts import (
     ContractError,
     load_contract,
@@ -23,7 +25,7 @@ def test_accepted_contract_loads_and_references_exact_source_files() -> None:
     assert contract.data["status"] == "accepted"
     assert contract.source_path == REPO_ROOT / ".sdlc" / "gates.toml"
     assert contract.data["acceptance_record"] == (
-        "docs/specs/sdlc/2026-08-10-sdlc-v2.5-core-sharding-amendment.md"
+        "docs/specs/sdlc/2026-08-11-sdlc-v2.5-ten-shard-capacity-amendment.md"
     )
     assert contract.unknown_path_risk == "R3_EXTERNAL_SERVICE_SECURITY"
 
@@ -69,9 +71,9 @@ def test_every_gate_lane_resolves_and_all_hard_timeouts_are_below_four_minutes()
     assert lanes["core"]["hard_timeout_seconds"] == 220
     assert lanes["core"] == {
         "bootstrap_once": True,
-        "shard_count": 4,
+        "shard_count": 10,
         "partition": "sha256_node_id_balanced",
-        "workers_per_shard": 4,
+        "workers_per_shard": 2,
         "distribution": "worksteal",
         "max_worker_restart": 0,
         "per_shard_hard_timeout_seconds": 220,
@@ -83,6 +85,33 @@ def test_every_gate_lane_resolves_and_all_hard_timeouts_are_below_four_minutes()
     assert lanes["service"]["hard_timeout_seconds"] == 220
     assert lanes["merge_group"]["hard_timeout_seconds"] == 220
     assert lanes["science"]["per_shard_hard_timeout_seconds"] == 220
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/evidence.yml").read_text(encoding="utf-8")
+    )
+    workflow_shards = workflow["jobs"]["core_shard"]["strategy"]["matrix"]["shard"]
+    assert workflow_shards == list(range(lanes["core"]["shard_count"]))
+    assert lanes["core"]["shard_count"] == lane_module._CORE_SHARD_COUNT
+
+
+@pytest.mark.parametrize("worker_count", (1, 3, 4))
+def test_unaccepted_core_worker_counts_fail_closed(worker_count: int) -> None:
+    contract = load_contract(REPO_ROOT)
+    data = deepcopy(contract.data)
+    data["lanes"]["core"]["workers_per_shard"] = worker_count
+
+    with pytest.raises(ContractError, match="accepted topology"):
+        validate_contract_data(data)
+
+
+def test_unaccepted_core_shard_counts_fail_closed() -> None:
+    contract = load_contract(REPO_ROOT)
+
+    for shard_count in (6, 8, 12):
+        data = deepcopy(contract.data)
+        data["lanes"]["core"]["shard_count"] = shard_count
+
+        with pytest.raises(ContractError, match="accepted topology"):
+            validate_contract_data(data)
 
 
 def test_four_minute_ceiling_and_owner_multiplier_are_fail_closed() -> None:
