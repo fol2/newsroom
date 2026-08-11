@@ -694,6 +694,15 @@ class _EventHypothesisRelationshipReadAuthority:
 
         return self.__read(value)
 
+    def verify_retained_integrity_in_transaction(self) -> None:
+        def verify() -> None:
+            _verify_relationship_reads_in_transaction(
+                self.__connection, self.__hypotheses, *self.__registries
+            )
+            _verify_relationship_event_coverage(self.__connection)
+
+        return self.__read(verify)
+
     def require_retained_receipt_in_transaction(
         self, assessment_digest: str
     ) -> RetainedRelationshipDecisionReceipt:

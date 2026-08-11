@@ -861,6 +861,13 @@ class EventHypothesisRelationshipReadPort:
             )
         self.__authority = authority
 
+    def verify_retained_integrity_in_transaction(self) -> None:
+        return _normalise_exact(
+            self.__authority.verify_retained_integrity_in_transaction,
+            "retained relationship integrity transaction read failed",
+            type(None),
+        )
+
     def require_retained_receipt_in_transaction(
         self, assessment_digest: str
     ) -> RetainedRelationshipDecisionReceipt:
