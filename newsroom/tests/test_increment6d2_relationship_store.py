@@ -539,6 +539,7 @@ def test_read_port_is_narrow_token_gated_and_requires_its_bound_transaction(
         if callable(value) and not name.startswith("_")
     }
     assert public_methods == {
+        "verify_retained_integrity_in_transaction",
         "require_retained_receipt_in_transaction",
         "require_retained_version_in_transaction",
         "require_current_version_in_transaction",
@@ -550,6 +551,8 @@ def test_read_port_is_narrow_token_gated_and_requires_its_bound_transaction(
         assert not hasattr(port, "history")
         assert not hasattr(port, "connection")
         assert not hasattr(port, "transaction")
+        with pytest.raises(RelationshipContractError, match="active checked"):
+            port.verify_retained_integrity_in_transaction()
         with pytest.raises(RelationshipContractError, match="active checked"):
             port.require_retained_receipt_in_transaction(
                 retained.canonical_digest
@@ -567,6 +570,8 @@ def test_read_port_is_narrow_token_gated_and_requires_its_bound_transaction(
         wrong.execute("BEGIN")
         try:
             with pytest.raises(RelationshipContractError, match="active checked"):
+                port.verify_retained_integrity_in_transaction()
+            with pytest.raises(RelationshipContractError, match="active checked"):
                 port.require_retained_receipt_in_transaction(
                     retained.canonical_digest
                 )
@@ -577,6 +582,7 @@ def test_read_port_is_narrow_token_gated_and_requires_its_bound_transaction(
 
         connection.execute("BEGIN IMMEDIATE")
         changes = connection.total_changes
+        assert port.verify_retained_integrity_in_transaction() is None
         receipt = port.require_retained_receipt_in_transaction(
             retained.canonical_digest
         )
@@ -630,6 +636,7 @@ def test_read_port_retained_reads_survive_version_advance_but_current_fails(
     try:
         connection.execute("BEGIN IMMEDIATE")
         changes = connection.total_changes
+        assert port.verify_retained_integrity_in_transaction() is None
         receipt = port.require_retained_receipt_in_transaction(
             retained.canonical_digest
         )
@@ -695,6 +702,8 @@ def test_read_port_rejects_self_consistent_retained_evidence_rewrite(
     try:
         checked.execute("BEGIN IMMEDIATE")
         changes = checked.total_changes
+        with pytest.raises(RelationshipContractError):
+            port.verify_retained_integrity_in_transaction()
         with pytest.raises(RelationshipContractError):
             port.require_retained_receipt_in_transaction(
                 tampered_assessment.canonical_digest
