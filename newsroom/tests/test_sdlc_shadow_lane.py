@@ -53,6 +53,7 @@ class _Route:
 class _GateDecision:
     gate_id: str
     phase: str
+    result: str = "PASS"
 
 
 @dataclass(frozen=True)
@@ -144,9 +145,59 @@ def _core_matrix_jobs() -> list[dict[str, object]]:
             "run_id": RUN_ID,
             "run_attempt": RUN_ATTEMPT,
             "status": "completed",
+            "conclusion": "success",
             "completed_at": f"2026-07-22T12:00:0{index + 1}Z",
         }
         for index in range(4)
+    ]
+
+
+def _github_core_jobs(
+    *, matrix_conclusion: str = "success", source_conclusion: str = "success"
+) -> list[dict[str, object]]:
+    matrix = _core_matrix_jobs()
+    matrix[0]["conclusion"] = matrix_conclusion
+    return [
+        *matrix,
+        {
+            "name": "route",
+            "run_id": RUN_ID,
+            "run_attempt": RUN_ATTEMPT,
+            "status": "completed",
+            "conclusion": "success",
+            "completed_at": "2026-07-22T12:00:01Z",
+        },
+        {
+            "name": "source",
+            "run_id": RUN_ID,
+            "run_attempt": RUN_ATTEMPT,
+            "status": "completed",
+            "conclusion": source_conclusion,
+            "completed_at": "2026-07-22T12:00:05Z",
+        },
+        {
+            "id": 789,
+            "name": "core",
+            "run_id": RUN_ID,
+            "run_attempt": RUN_ATTEMPT,
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-22T12:00:06Z",
+            "completed_at": "2026-07-22T12:00:42Z",
+            "steps": [
+                {
+                    "name": "Sync locked environment",
+                    "status": "completed",
+                    "completed_at": "2026-07-22T12:00:10Z",
+                },
+                {
+                    "name": "Finalize evidence",
+                    "status": "completed",
+                    "started_at": "2026-07-22T12:00:40Z",
+                    "completed_at": "2026-07-22T12:00:41Z",
+                },
+            ],
+        },
     ]
 
 
@@ -218,7 +269,7 @@ def test_verify_shadow_lane_composes_replay_telemetry_and_receipt(
     transport = SimpleNamespace(
         replay=replay,
         run={"event": "pull_request", "created_at": telemetry.workflow_created_at},
-        jobs={"jobs": _core_matrix_jobs()},
+        jobs={"jobs": _github_core_jobs()},
         metadata={"id": ARTIFACT_ID},
         artifact_root=tmp_path / "artifact",
         archive_path=tmp_path / "artifact.zip",
@@ -259,6 +310,7 @@ def test_verify_shadow_lane_composes_replay_telemetry_and_receipt(
         "run_id": RUN_ID,
         "run_attempt": RUN_ATTEMPT,
         "status": "completed",
+        "conclusion": "success",
         "completed_at": "2026-07-22T12:00:04Z",
     }
     assert calls["measure"][1]["job_name"] == "core"  # type: ignore[index]
@@ -268,6 +320,67 @@ def test_verify_shadow_lane_composes_replay_telemetry_and_receipt(
     assert calls["measure"][1]["bootstrap_end_step"] == "Sync locked environment"  # type: ignore[index]
     assert calls["verify"]["expected_job_id"] == "core"  # type: ignore[index]
     assert validate_shadow_lane_record(record.as_dict(), contract=contract) == record
+
+
+@pytest.mark.parametrize(
+    (
+        "matrix_conclusion",
+        "source_conclusion",
+        "source_result",
+        "core_result",
+        "rejected",
+    ),
+    (
+        ("failure", "success", "PASS", "BUDGET_EXCEEDED", False),
+        ("success", "failure", "EVIDENCE_MISMATCH", "EVIDENCE_MISMATCH", False),
+        ("failure", "success", "PASS", "PASS", True),
+        ("success", "failure", "PASS", "PASS", True),
+    ),
+)
+def test_terminal_failed_dependency_requires_matching_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    matrix_conclusion: str,
+    source_conclusion: str,
+    source_result: str,
+    core_result: str,
+    rejected: bool,
+) -> None:
+    receipt = _Receipt(
+        _Metadata(),
+        gate_decisions=(
+            _GateDecision("source-integrity", "source", source_result),
+            _GateDecision("core-deterministic", "tests", core_result),
+        ),
+    )
+    transport = SimpleNamespace(
+        replay=_replay(),
+        run={"event": "pull_request", "created_at": "2026-07-22T12:00:00.000Z"},
+        jobs={
+            "jobs": _github_core_jobs(
+                matrix_conclusion=matrix_conclusion,
+                source_conclusion=source_conclusion,
+            )
+        },
+        metadata={"id": ARTIFACT_ID},
+        artifact_root=tmp_path / "artifact",
+        archive_path=tmp_path / "artifact.zip",
+    )
+    monkeypatch.setattr(lane_module, "load_verified_transport", lambda _root: transport)
+    monkeypatch.setattr(lane_module, "verify_artifact", lambda **_kwargs: receipt)
+    _patch_receipt_validator(monkeypatch, receipt)
+    call = lambda: verify_shadow_lane(
+        repo_root=tmp_path,
+        bundle_root=tmp_path / "bundle",
+        lane_id="core",
+        decision_context=SimpleNamespace(job_id="decision"),  # type: ignore[arg-type]
+        contract=SimpleNamespace(repo_root=tmp_path),  # type: ignore[arg-type]
+    )
+    if rejected:
+        with pytest.raises(ShadowLaneError, match="producer_result"):
+            call()
+    else:
+        call()
 
 
 def test_core_telemetry_ready_dependencies_match_the_reducer_topology() -> None:
@@ -280,7 +393,15 @@ def test_core_telemetry_ready_dependencies_match_the_reducer_topology() -> None:
 
 @pytest.mark.parametrize(
     "fault",
-    ["missing", "duplicate", "extra", "wrong-run", "wrong-attempt", "incomplete"],
+    [
+        "missing",
+        "duplicate",
+        "extra",
+        "wrong-run",
+        "wrong-attempt",
+        "wrong-conclusion",
+        "incomplete",
+    ],
 )
 def test_core_telemetry_rejects_noncanonical_matrix_dependencies(
     tmp_path: Path,
@@ -298,6 +419,8 @@ def test_core_telemetry_rejects_noncanonical_matrix_dependencies(
         jobs[0]["run_id"] = RUN_ID + 1
     elif fault == "wrong-attempt":
         jobs[0]["run_attempt"] = RUN_ATTEMPT + 1
+    elif fault == "wrong-conclusion":
+        jobs[0]["conclusion"] = "cancelled"
     else:
         jobs[0]["status"] = "in_progress"
     replay = _replay()

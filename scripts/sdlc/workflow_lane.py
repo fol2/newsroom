@@ -143,6 +143,23 @@ _FRAGMENT_PROVENANCE_KEYS = frozenset(
         "toolchain_digest",
     }
 )
+_CORE_FRAGMENT_KEYS = (
+    frozenset(
+        "schema_version run_id run_attempt job_id evaluated_sha evaluated_tree_sha "  # noqa: SIM905
+        "route_digest shard_index shard_count file_inventory file_inventory_digest "
+        "node_inventory node_inventory_digest selected_node_ids selected_node_ids_digest "
+        "command_spec command_run shard_lifecycle junit_summary report_digest "
+        "fragment_identity".split()
+    )
+    | _FRAGMENT_PROVENANCE_KEYS
+)
+_SOURCE_FRAGMENT_KEYS = (
+    frozenset(
+        "schema_version run_id run_attempt job_id evaluated_sha evaluated_tree_sha "  # noqa: SIM905
+        "route_digest command_spec command_run source_lifecycle fragment_identity".split()
+    )
+    | _FRAGMENT_PROVENANCE_KEYS
+)
 _CACHE_KEY_ENV = "NEWSROOM_SDLC_CACHE_KEY"
 _CACHE_HIT_ENV = "NEWSROOM_SDLC_CACHE_HIT"
 _MAX_CACHE_KEY_CHARS = 512
@@ -1201,6 +1218,63 @@ def _lifecycle_result(result: str, *, elapsed_ms: int, timeout_ms: int) -> str:
     if result == "BUDGET_EXCEEDED" or elapsed_ms > timeout_ms:
         return "BUDGET_EXCEEDED"
     return result
+
+
+def _producer_exit_status(
+    fragment: object,
+    *,
+    fragment_schema: str,
+    lifecycle_field: str,
+    lifecycle_schema: str,
+    gate_id: str,
+    phase: str,
+    fragment_keys: frozenset[str],
+    expected_timeout_ms: int,
+) -> int:
+    if type(fragment) is not dict:
+        raise WorkflowLaneError("producer_fragment")
+    if frozenset(fragment) != fragment_keys:
+        raise WorkflowLaneError("producer_fragment_shape")
+    schema = fragment.get("schema_version")
+    if type(schema) is not str or schema != fragment_schema:
+        raise WorkflowLaneError("producer_fragment_schema")
+    identity = fragment.get("fragment_identity")
+    unsigned = dict(fragment)
+    unsigned.pop("fragment_identity", None)
+    if type(identity) is not str or identity != _fragment_identity(unsigned):
+        raise WorkflowLaneError("producer_fragment_identity")
+    try:
+        command = _validate_command_run(fragment.get("command_run"))
+    except ArtifactReceiptError as exc:
+        raise WorkflowLaneError("producer_fragment_run") from exc
+    gate_run = command["gate_run"]
+    if gate_run["gate_id"] != gate_id or gate_run["phase"] != phase:
+        raise WorkflowLaneError("producer_fragment_run_identity")
+    lifecycle = fragment.get(lifecycle_field)
+    if type(lifecycle) is not dict:
+        raise WorkflowLaneError("producer_fragment_lifecycle")
+    if (
+        set(lifecycle) != {"schema_version", "elapsed_ms", "timeout_ms", "result"}
+        or type(lifecycle.get("schema_version")) is not str
+        or type(lifecycle.get("elapsed_ms")) is not int
+        or type(lifecycle.get("timeout_ms")) is not int
+        or type(lifecycle.get("result")) is not str
+    ):
+        raise WorkflowLaneError("producer_fragment_lifecycle")
+    validated = _validate_shard_lifecycle(
+        lifecycle,
+        command_result=str(gate_run["result"]),
+        command_execution_ms=int(gate_run["execution_ms"]),
+        timeout_ms=expected_timeout_ms,
+        schema_version=lifecycle_schema,
+        error="producer_fragment_lifecycle",
+    )
+    result = str(validated["result"])
+    if result == "PASS":
+        return 0
+    if result == "BUDGET_EXCEEDED":
+        return 124
+    return 1
 
 
 def _shard_lifecycle(
@@ -2414,8 +2488,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 shard_index=arguments.shard_index,
                 artifact_root=arguments.artifact_root,
             )
+            status = _producer_exit_status(
+                fragment,
+                fragment_schema=_CORE_FRAGMENT_SCHEMA,
+                lifecycle_field="shard_lifecycle",
+                lifecycle_schema=_CORE_SHARD_LIFECYCLE_SCHEMA,
+                gate_id="core-deterministic",
+                phase="tests",
+                fragment_keys=_CORE_FRAGMENT_KEYS,
+                expected_timeout_ms=_core_timeout_ms(
+                    load_contract(arguments.repo_root)
+                ),
+            )
             sys.stdout.buffer.write(canonical_json_bytes(fragment) + b"\n")
-            return 0
+            return status
         if arguments.command == "core-shard-tests":
             return core_shard_tests(
                 repo_root=arguments.repo_root,
@@ -2432,8 +2518,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 route_path=arguments.route,
                 artifact_root=arguments.artifact_root,
             )
+            status = _producer_exit_status(
+                fragment,
+                fragment_schema=_SOURCE_FRAGMENT_SCHEMA,
+                lifecycle_field="source_lifecycle",
+                lifecycle_schema=_SOURCE_LIFECYCLE_SCHEMA,
+                gate_id="source-integrity",
+                phase="source",
+                fragment_keys=_SOURCE_FRAGMENT_KEYS,
+                expected_timeout_ms=_core_timeout_ms(
+                    load_contract(arguments.repo_root)
+                ),
+            )
             sys.stdout.buffer.write(canonical_json_bytes(fragment) + b"\n")
-            return 0
+            return status
         if arguments.command == "reduce-core":
             result = reduce_core_lane(
                 repo_root=arguments.repo_root,
