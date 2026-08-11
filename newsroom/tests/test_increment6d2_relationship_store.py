@@ -12,9 +12,11 @@ from typing import ClassVar
 import pytest
 
 from newsroom.authority._event_hypothesis_relationship_system import (
+    _create_event_hypothesis_relationship_read_port,
     _open_unlocked_relationship_authority_for_test,
 )
 from newsroom.authority.auth import AuthenticationProof, StaticAuthorizer
+from newsroom.authority.canonical import canonical_json_bytes
 from newsroom.authority.migrations import (
     apply_pending_migrations,
     prepare_pending_migration_backup,
@@ -33,8 +35,11 @@ from newsroom.increment6.relationships import (
     ComparatorEvidence,
     ComparatorSetManifest,
     EventHypothesisRelationshipAuthority,
+    EventHypothesisRelationshipReadPort,
     HypothesisVersionBinding,
+    RelationshipAssessment,
     RelationshipContractError,
+    RetainedRelationshipDecisionReceipt,
     assess_relationships,
     open_event_hypothesis_relationship_authority,
     relationship_command_definition,
@@ -370,6 +375,335 @@ def _open(seed):
 
 def _open_unlocked_for_test(seed):
     return _open_unlocked_relationship_authority_for_test(**_open_arguments(seed))
+
+
+def _read_port(seed):
+    connection = sqlite3.connect(
+        seed[1], isolation_level=None, check_same_thread=False
+    )
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=FULL")
+    port = _create_event_hypothesis_relationship_read_port(
+        connection,
+        retrieval_authority=seed[0][1],
+        authenticator=seed[0][2],
+        command_registry=seed[4],
+        payload_schemas=seed[5],
+        clock=lambda: UtcTimestamp.parse("2042-01-02T00:00:00.000000Z"),
+    )
+    return connection, port
+
+
+def _advance_relationship_subject(seed):
+    connection = sqlite3.connect(seed[1], isolation_level=None)
+    connection.execute("PRAGMA foreign_keys=ON")
+    fixture = (connection, *seed[0][1:])
+    proposal, dispositions = seed[7]["authority"]
+    authority = hypothesis_helpers._open(fixture)
+    try:
+        return authority.retain(
+            proposal,
+            dispositions,
+            proof=seed[0][3],
+            expected_target_version=seed[3][0],
+        )
+    finally:
+        authority.close()
+        connection.close()
+
+
+def test_retained_receipt_requires_exact_canonical_evidence_and_policy_replay(
+    tmp_path,
+) -> None:
+    seed = _seed_location(tmp_path / "receipt-contract")
+    subject = HypothesisVersionBinding.from_version(seed[3][0])
+    comparators = tuple(
+        sorted(
+            (
+                HypothesisVersionBinding.from_version(seed[2]),
+                HypothesisVersionBinding.from_version(seed[3][1]),
+            ),
+            key=lambda item: item.version_id,
+        )
+    )
+    evidence = tuple(
+        ComparatorEvidence(subject, comparator, 80, 0, 0, 80, 0)
+        for comparator in comparators
+    )
+    assessment = assess_relationships(
+        subject, ComparatorSetManifest.complete(comparators), evidence
+    )
+    receipt = RetainedRelationshipDecisionReceipt(assessment, evidence)
+    assert receipt.assessment == assessment
+    assert receipt.evidence == evidence
+    assert not receipt.authorises_persistence
+    assert not receipt.creates_lineage
+
+    with pytest.raises(RelationshipContractError):
+        RetainedRelationshipDecisionReceipt(
+            object.__new__(RelationshipAssessment), ()
+        )
+
+    class SameInt(int):
+        pass
+
+    class SameStr(str):
+        pass
+
+    for field, value in (
+        ("score", SameInt(assessment.score)),
+        ("evidence_digest", SameStr(assessment.evidence_digest)),
+    ):
+        malformed = RelationshipAssessment.from_canonical_bytes(
+            assessment.canonical_bytes
+        )
+        object.__setattr__(malformed, field, value)
+        with pytest.raises(RelationshipContractError, match="not exact"):
+            RetainedRelationshipDecisionReceipt(malformed, evidence)
+
+    with pytest.raises(RelationshipContractError, match="canonical order"):
+        RetainedRelationshipDecisionReceipt(assessment, tuple(reversed(evidence)))
+    with pytest.raises(RelationshipContractError, match="canonical order"):
+        RetainedRelationshipDecisionReceipt(assessment, evidence[:-1])
+    with pytest.raises(RelationshipContractError, match="identity differs"):
+        RetainedRelationshipDecisionReceipt(
+            assessment, (replace(evidence[0], score=79), evidence[1])
+        )
+
+    forged_assessment = RelationshipAssessment.from_canonical_bytes(
+        assessment.canonical_bytes
+    )
+    object.__setattr__(forged_assessment, "score", assessment.score - 1)
+    with pytest.raises(RelationshipContractError, match="policy replay differs"):
+        RetainedRelationshipDecisionReceipt(forged_assessment, evidence)
+
+    class ForgedReceipt(RetainedRelationshipDecisionReceipt):
+        pass
+
+    with pytest.raises(RelationshipContractError, match="exact type"):
+        ForgedReceipt(assessment, evidence)
+    with pytest.raises((AttributeError, TypeError)):
+        receipt.evidence = ()  # type: ignore[misc]
+
+
+def test_historical_facade_returns_exact_receipt_without_currentness(
+    tmp_path,
+) -> None:
+    seed = _seed_location(tmp_path / "historical-receipt")
+    assessment, evidence_bytes = _assessment(seed[3][0], seed[2])
+    evidence = tuple(
+        ComparatorEvidence.from_canonical_bytes(item) for item in evidence_bytes
+    )
+    authority = _open(seed)
+    retained = authority.retain(
+        assessment.canonical_bytes,
+        evidence_bytes,
+        proof=seed[0][3],
+    )
+    assert authority.load(retained.canonical_digest) == retained
+    assert authority.load_retained_receipt(
+        retained.canonical_digest
+    ) == RetainedRelationshipDecisionReceipt(retained, evidence)
+    authority.close()
+
+    _advance_relationship_subject(seed)
+    reopened = _open(seed)
+    try:
+        assert reopened.load_retained_receipt(
+            retained.canonical_digest
+        ) == RetainedRelationshipDecisionReceipt(retained, evidence)
+        with pytest.raises(RelationshipContractError):
+            reopened.current(retained.canonical_digest, proof=seed[0][3])
+    finally:
+        reopened.close()
+
+
+def test_read_port_is_narrow_token_gated_and_requires_its_bound_transaction(
+    tmp_path,
+) -> None:
+    seed = _seed_location(tmp_path / "read-port")
+    assessment, evidence = _assessment(seed[3][0], seed[2])
+    authority = _open(seed)
+    retained = authority.retain(
+        assessment.canonical_bytes, evidence, proof=seed[0][3]
+    )
+    authority.close()
+
+    with pytest.raises(RelationshipContractError, match="authority-private"):
+        EventHypothesisRelationshipReadPort(object(), object())
+    public_methods = {
+        name
+        for name, value in vars(EventHypothesisRelationshipReadPort).items()
+        if callable(value) and not name.startswith("_")
+    }
+    assert public_methods == {
+        "require_retained_receipt_in_transaction",
+        "require_retained_version_in_transaction",
+        "require_current_version_in_transaction",
+    }
+
+    connection, port = _read_port(seed)
+    try:
+        assert not hasattr(port, "retain")
+        assert not hasattr(port, "history")
+        assert not hasattr(port, "connection")
+        assert not hasattr(port, "transaction")
+        with pytest.raises(RelationshipContractError, match="active checked"):
+            port.require_retained_receipt_in_transaction(
+                retained.canonical_digest
+            )
+        with pytest.raises(RelationshipContractError, match="active checked"):
+            port.require_retained_version_in_transaction(
+                retained.subject.version_id
+            )
+        with pytest.raises(RelationshipContractError, match="active checked"):
+            port.require_current_version_in_transaction(
+                retained.subject.version_id, proof=seed[0][3]
+            )
+
+        wrong = sqlite3.connect(seed[1], isolation_level=None)
+        wrong.execute("BEGIN")
+        try:
+            with pytest.raises(RelationshipContractError, match="active checked"):
+                port.require_retained_receipt_in_transaction(
+                    retained.canonical_digest
+                )
+            assert wrong.in_transaction
+        finally:
+            wrong.execute("ROLLBACK")
+            wrong.close()
+
+        connection.execute("BEGIN IMMEDIATE")
+        changes = connection.total_changes
+        receipt = port.require_retained_receipt_in_transaction(
+            retained.canonical_digest
+        )
+        retained_version = port.require_retained_version_in_transaction(
+            retained.subject.version_id
+        )
+        comparator_version = port.require_retained_version_in_transaction(
+            seed[2].version_id
+        )
+        current_version = port.require_current_version_in_transaction(
+            retained.subject.version_id, proof=seed[0][3]
+        )
+        assert receipt.assessment == retained
+        assert retained_version == seed[3][0]
+        assert comparator_version == seed[2]
+        assert current_version == seed[3][0]
+        assert connection.in_transaction
+        assert connection.total_changes == changes
+        connection.execute("ROLLBACK")
+
+        connection.execute("BEGIN")
+        try:
+            with pytest.raises(RelationshipContractError, match="idle checked"):
+                _create_event_hypothesis_relationship_read_port(
+                    connection,
+                    retrieval_authority=seed[0][1],
+                    authenticator=seed[0][2],
+                    command_registry=seed[4],
+                    payload_schemas=seed[5],
+                )
+            assert connection.in_transaction
+        finally:
+            connection.execute("ROLLBACK")
+    finally:
+        connection.close()
+
+
+def test_read_port_retained_reads_survive_version_advance_but_current_fails(
+    tmp_path,
+) -> None:
+    seed = _seed_location(tmp_path / "retained-current")
+    assessment, evidence = _assessment(seed[3][0], seed[2])
+    authority = _open(seed)
+    retained = authority.retain(
+        assessment.canonical_bytes, evidence, proof=seed[0][3]
+    )
+    authority.close()
+    _advance_relationship_subject(seed)
+
+    connection, port = _read_port(seed)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        changes = connection.total_changes
+        receipt = port.require_retained_receipt_in_transaction(
+            retained.canonical_digest
+        )
+        historical = port.require_retained_version_in_transaction(
+            retained.subject.version_id
+        )
+        assert receipt.assessment == retained
+        assert historical == seed[3][0]
+        with pytest.raises(RelationshipContractError):
+            port.require_current_version_in_transaction(
+                retained.subject.version_id, proof=seed[0][3]
+            )
+        assert connection.in_transaction
+        assert connection.total_changes == changes
+        connection.execute("ROLLBACK")
+    finally:
+        connection.close()
+
+
+def test_read_port_rejects_self_consistent_retained_evidence_rewrite(
+    tmp_path,
+) -> None:
+    seed = _seed_location(tmp_path / "retained-evidence-tamper")
+    assessment, evidence_bytes = _assessment(seed[3][0], seed[2])
+    authority = _open(seed)
+    retained = authority.retain(
+        assessment.canonical_bytes,
+        evidence_bytes,
+        proof=seed[0][3],
+    )
+    authority.close()
+
+    original_evidence = ComparatorEvidence.from_canonical_bytes(evidence_bytes[0])
+    tampered_evidence = replace(original_evidence, score=61)
+    tampered_assessment = assess_relationships(
+        assessment.subject,
+        assessment.comparator_manifest,
+        (tampered_evidence,),
+    )
+    stored_evidence = canonical_json_bytes([tampered_evidence.canonical_value])
+    connection = sqlite3.connect(seed[1], isolation_level=None)
+    connection.execute("PRAGMA foreign_keys=OFF")
+    connection.execute(
+        "DROP TRIGGER immutable_event_hypothesis_relationship_update"
+    )
+    connection.execute(
+        "UPDATE event_hypothesis_relationship_decisions SET "
+        "decision_id=?,decision=?,assessment_bytes=?,assessment_digest=?,"
+        "evidence_bytes=?,evidence_digest=? WHERE decision_id=?",
+        (
+            tampered_assessment.canonical_digest,
+            tampered_assessment.decision.value,
+            tampered_assessment.canonical_bytes,
+            tampered_assessment.canonical_digest,
+            stored_evidence,
+            tampered_assessment.evidence_digest,
+            retained.canonical_digest,
+        ),
+    )
+    connection.close()
+
+    checked, port = _read_port(seed)
+    try:
+        checked.execute("BEGIN IMMEDIATE")
+        changes = checked.total_changes
+        with pytest.raises(RelationshipContractError):
+            port.require_retained_receipt_in_transaction(
+                tampered_assessment.canonical_digest
+            )
+        assert checked.in_transaction
+        assert checked.total_changes == changes
+        checked.execute("ROLLBACK")
+    finally:
+        checked.close()
 
 
 def test_public_relationship_system_closes_raw_when_facade_wrapping_fails(

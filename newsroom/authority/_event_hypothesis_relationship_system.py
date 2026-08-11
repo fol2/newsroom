@@ -18,14 +18,19 @@ from newsroom.authority.policy import CommandRegistry, PayloadSchemaRegistry
 from newsroom.authority.service import CommandService
 from newsroom.authority.types import AggregateId, UtcTimestamp
 from newsroom.increment6.dispositions import ProposalDispositionStore
+from newsroom.increment6.hypotheses import EventHypothesisVersion
 from newsroom.increment6.relationships import (
     RELATIONSHIP_AGGREGATE_TYPE,
     RELATIONSHIP_COMMAND_TYPE,
     RELATIONSHIP_EVENT_TYPE,
     AssessmentStatus,
     ComparatorEvidence,
+    EventHypothesisRelationshipReadPort,
     RelationshipAssessment,
     RelationshipContractError,
+    RetainedRelationshipDecisionReceipt,
+    _compose_event_hypothesis_relationship_read_port,
+    _digest,
     merge_relationship_authority_registries,
     verify_relationship_assessment_replay,
 )
@@ -36,6 +41,7 @@ from ._event_hypothesis_system import _HypothesisStore
 from ._event_store import _EventAuthorityStore
 
 _STORE_TOKEN = object()
+_READ_AUTHORITY_TOKEN = object()
 
 
 def _evidence_bytes(values: tuple[bytes, ...]) -> tuple[bytes, tuple[bytes, ...]]:
@@ -60,6 +66,198 @@ def _decode_evidence(raw: bytes) -> tuple[bytes, ...]:
         raise
     except Exception as exc:
         raise RelationshipContractError("retained evidence differs") from exc
+
+
+@contextmanager
+def _transaction_hypothesis_rows(connection: sqlite3.Connection):
+    row_factory = connection.row_factory
+    connection.row_factory = None
+    try:
+        yield
+    finally:
+        connection.row_factory = row_factory
+
+
+def _require_checked_connection(
+    connection: sqlite3.Connection, *, active: bool
+) -> None:
+    state = "active" if active else "idle"
+    if type(connection) is not sqlite3.Connection or (
+        connection.isolation_level is not None
+        or connection.in_transaction is not active
+        or connection.row_factory is not sqlite3.Row
+    ):
+        raise RelationshipContractError(
+            f"relationship read requires an exact {state} checked connection"
+        )
+    try:
+        settings = (
+            connection.execute("PRAGMA foreign_keys").fetchone()[0],
+            str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower(),
+            connection.execute("PRAGMA synchronous").fetchone()[0],
+        )
+    except Exception as exc:
+        raise RelationshipContractError(
+            "relationship checked connection cannot be inspected"
+        ) from exc
+    if settings != (1, "wal", 2):
+        raise RelationshipContractError(
+            "relationship checked connection settings differ"
+        )
+
+
+def _relationship_row(
+    connection: sqlite3.Connection, assessment_digest: str
+) -> sqlite3.Row:
+    _digest(assessment_digest, "assessment_digest")
+    row = connection.execute(
+        "SELECT r.*,e.event_type,e.event_schema_version,e.aggregate_type,"
+        "e.aggregate_id,e.aggregate_version,e.recorded_at AS event_recorded_at,"
+        "e.command_id,e.command_definition_version,e.command_definition_digest,"
+        "c.command_type,c.expected_aggregate_version,c.idempotency_key,"
+        "c.committed_at,p.payload_bytes,p.payload_digest,p.mode,p.schema_version,"
+        "p.schema_contract_version,p.schema_contract_digest,"
+        "p.canonicalizer_implementation_version,a.principal_id,"
+        "a.credential_binding_digest FROM event_hypothesis_relationship_decisions r "
+        "JOIN ledger_events e ON e.event_id=r.authority_event_id "
+        "JOIN authority_commands c ON c.command_id=e.command_id "
+        "JOIN authority_payloads p ON p.payload_id=e.payload_id "
+        "JOIN authentication_contexts a ON a.authentication_context_id="
+        "c.authentication_context_id WHERE r.decision_id=?",
+        (assessment_digest,),
+    ).fetchone()
+    if row is None:
+        raise RelationshipContractError("unknown relationship decision")
+    if type(row) is not sqlite3.Row:
+        raise RelationshipContractError("relationship checked row shape differs")
+    return row
+
+
+def _load_retained_relationship_receipt_in_transaction(
+    connection: sqlite3.Connection,
+    hypotheses: _HypothesisStore,
+    command_registry: CommandRegistry,
+    payload_schemas: PayloadSchemaRegistry,
+    assessment_digest: str,
+) -> RetainedRelationshipDecisionReceipt:
+    if not connection.in_transaction:
+        raise RelationshipContractError(
+            "retained relationship receipt requires an active transaction"
+        )
+    row = _relationship_row(connection, assessment_digest)
+    assessment = RelationshipAssessment.from_canonical_bytes(
+        bytes(row["assessment_bytes"])
+    )
+    evidence_bytes = _decode_evidence(bytes(row["evidence_bytes"]))
+    evidence = tuple(
+        ComparatorEvidence.from_canonical_bytes(item) for item in evidence_bytes
+    )
+    with _transaction_hypothesis_rows(connection):
+        subject = hypotheses.require_retained_version_in_transaction(
+            str(row["subject_version_id"])
+        )
+        comparators = tuple(
+            hypotheses.require_retained_version_in_transaction(item.version_id)
+            for item in assessment.comparator_manifest.comparators
+        )
+    verified = verify_relationship_assessment_replay(
+        assessment.canonical_bytes,
+        subject_version=subject,
+        comparator_versions=comparators,
+        evidence=evidence_bytes,
+    )
+    selected = verified.comparator
+    expected = {
+        "decision_id": verified.canonical_digest,
+        "subject_hypothesis_id": verified.subject.hypothesis_id,
+        "subject_version_id": verified.subject.version_id,
+        "subject_version_digest": verified.subject.version_digest,
+        "comparator_manifest_bytes": verified.comparator_manifest.canonical_bytes,
+        "comparator_manifest_digest": verified.comparator_manifest_digest,
+        "selected_comparator_hypothesis_id": None
+        if selected is None
+        else selected.hypothesis_id,
+        "selected_comparator_version_id": None
+        if selected is None
+        else selected.version_id,
+        "selected_comparator_version_digest": None
+        if selected is None
+        else selected.version_digest,
+        "decision": verified.decision.value,
+        "assessment_bytes": verified.canonical_bytes,
+        "assessment_digest": verified.canonical_digest,
+        "evidence_digest": verified.evidence_digest,
+    }
+    if any(row[key] != value for key, value in expected.items()):
+        raise RelationshipContractError("retained relationship decision differs")
+    definition = command_registry.resolve(RELATIONSHIP_COMMAND_TYPE)
+    contract = payload_schemas.resolve(
+        definition.payload_schema_version, definition.payload_mode
+    )
+    if (
+        str(row["event_type"]) != RELATIONSHIP_EVENT_TYPE
+        or int(row["event_schema_version"]) != 1
+        or str(row["aggregate_type"]) != RELATIONSHIP_AGGREGATE_TYPE
+        or str(row["aggregate_id"]) != str(row["authority_aggregate_id"])
+        or int(row["aggregate_version"]) != 1
+        or str(row["command_type"]) != RELATIONSHIP_COMMAND_TYPE
+        or int(row["expected_aggregate_version"]) != 0
+        or str(row["idempotency_key"]) != verified.subject.version_id
+        or bytes(row["payload_bytes"]) != verified.canonical_bytes
+        or str(row["payload_digest"]) != verified.canonical_digest
+        or str(row["command_definition_version"])
+        != definition.definition_version
+        or str(row["command_definition_digest"]) != definition.digest
+        or str(row["mode"]) != definition.payload_mode.value
+        or str(row["schema_version"]) != contract.schema_version
+        or str(row["schema_contract_version"]) != contract.contract_version
+        or str(row["schema_contract_digest"]) != contract.contract_digest
+        or str(row["canonicalizer_implementation_version"])
+        != contract.canonicalizer_implementation_version
+        or _RelationshipEventStore._actor_identity(row) != str(row["actor_identity_digest"])
+        or str(row["recorded_at"]) != str(row["event_recorded_at"])
+        or str(row["recorded_at"]) != str(row["committed_at"])
+        or digest_bytes(bytes(row["evidence_bytes"])) != verified.evidence_digest
+    ):
+        raise RelationshipContractError("relationship authority graph differs")
+    UtcTimestamp.parse(str(row["recorded_at"]))
+    return RetainedRelationshipDecisionReceipt(verified, evidence)
+
+
+def _verify_relationship_event_coverage(connection: sqlite3.Connection) -> None:
+    mismatch = connection.execute(
+        "SELECT r.decision_id FROM event_hypothesis_relationship_decisions r "
+        "LEFT JOIN ledger_events e ON e.event_id=r.authority_event_id "
+        "WHERE e.event_id IS NULL OR e.event_type!=? UNION ALL "
+        "SELECT e.event_id FROM ledger_events e LEFT JOIN "
+        "event_hypothesis_relationship_decisions r ON r.authority_event_id=e.event_id "
+        "WHERE e.event_type=? AND r.decision_id IS NULL LIMIT 1",
+        (RELATIONSHIP_EVENT_TYPE, RELATIONSHIP_EVENT_TYPE),
+    ).fetchone()
+    if mismatch is not None:
+        raise AuthoritySchemaError("relationship event coverage differs")
+
+
+def _verify_relationship_reads_in_transaction(
+    connection: sqlite3.Connection,
+    hypotheses: _HypothesisStore,
+    command_registry: CommandRegistry,
+    payload_schemas: PayloadSchemaRegistry,
+) -> None:
+    if not connection.in_transaction:
+        raise RelationshipContractError(
+            "relationship verification requires an active transaction"
+        )
+    with _transaction_hypothesis_rows(connection):
+        hypotheses._verify()
+    rows = connection.execute(
+        "SELECT decision_id FROM "
+        "event_hypothesis_relationship_decisions ORDER BY decision_id"
+    )
+    for row in rows:
+        _load_retained_relationship_receipt_in_transaction(
+            connection, hypotheses, command_registry, payload_schemas, str(row[0])
+        )
 
 
 class _RelationshipEventStore(_EventAuthorityStore):
@@ -123,12 +321,8 @@ class _RelationshipEventStore(_EventAuthorityStore):
 
     @contextmanager
     def _hypothesis_rows(self):
-        row_factory = self._connection.row_factory
-        self._connection.row_factory = None
-        try:
+        with _transaction_hypothesis_rows(self._connection):
             yield
-        finally:
-            self._connection.row_factory = row_factory
 
     def _adopt(self) -> None:
         self._hypotheses.adopt_active_transaction()
@@ -168,113 +362,29 @@ class _RelationshipEventStore(_EventAuthorityStore):
         )
 
     def _row(self, decision_id: str) -> sqlite3.Row:
-        row = self._connection.execute(
-            "SELECT r.*,e.event_type,e.event_schema_version,e.aggregate_type,"
-            "e.aggregate_id,e.aggregate_version,e.recorded_at AS event_recorded_at,"
-            "e.command_id,e.command_definition_version,e.command_definition_digest,"
-            "c.command_type,c.expected_aggregate_version,c.idempotency_key,"
-            "c.committed_at,p.payload_bytes,p.payload_digest,p.mode,p.schema_version,"
-            "p.schema_contract_version,p.schema_contract_digest,"
-            "p.canonicalizer_implementation_version,a.principal_id,"
-            "a.credential_binding_digest FROM event_hypothesis_relationship_decisions r "
-            "JOIN ledger_events e ON e.event_id=r.authority_event_id "
-            "JOIN authority_commands c ON c.command_id=e.command_id "
-            "JOIN authority_payloads p ON p.payload_id=e.payload_id "
-            "JOIN authentication_contexts a ON a.authentication_context_id="
-            "c.authentication_context_id WHERE r.decision_id=?",
-            (decision_id,),
-        ).fetchone()
-        if row is None:
-            raise RelationshipContractError("unknown relationship decision")
-        return row
+        return _relationship_row(self._connection, decision_id)
+
+    def _load_receipt(
+        self, assessment_digest: str
+    ) -> RetainedRelationshipDecisionReceipt:
+        return _load_retained_relationship_receipt_in_transaction(
+            self._connection,
+            self._hypotheses,
+            self._command_registry,
+            self._payload_schemas,
+            assessment_digest,
+        )
 
     def _load_row(self, decision_id: str) -> RelationshipAssessment:
-        row = self._row(decision_id)
-        assessment = RelationshipAssessment.from_canonical_bytes(
-            bytes(row["assessment_bytes"])
-        )
-        evidence = _decode_evidence(bytes(row["evidence_bytes"]))
-        with self._hypothesis_rows():
-            subject = self._hypotheses.require_retained_version_in_transaction(
-                str(row["subject_version_id"])
-            )
-            comparators = tuple(
-                self._hypotheses.require_retained_version_in_transaction(item.version_id)
-                for item in assessment.comparator_manifest.comparators
-            )
-        verified = verify_relationship_assessment_replay(
-            assessment.canonical_bytes,
-            subject_version=subject,
-            comparator_versions=comparators,
-            evidence=evidence,
-        )
-        selected = verified.comparator
-        expected = {
-            "decision_id": verified.canonical_digest,
-            "subject_hypothesis_id": verified.subject.hypothesis_id,
-            "subject_version_id": verified.subject.version_id,
-            "subject_version_digest": verified.subject.version_digest,
-            "comparator_manifest_bytes": verified.comparator_manifest.canonical_bytes,
-            "comparator_manifest_digest": verified.comparator_manifest_digest,
-            "selected_comparator_hypothesis_id": None
-            if selected is None
-            else selected.hypothesis_id,
-            "selected_comparator_version_id": None
-            if selected is None
-            else selected.version_id,
-            "selected_comparator_version_digest": None
-            if selected is None
-            else selected.version_digest,
-            "decision": verified.decision.value,
-            "assessment_bytes": verified.canonical_bytes,
-            "assessment_digest": verified.canonical_digest,
-            "evidence_digest": verified.evidence_digest,
-        }
-        if any(row[key] != value for key, value in expected.items()):
-            raise RelationshipContractError("retained relationship decision differs")
-        definition = self._command_registry.resolve(RELATIONSHIP_COMMAND_TYPE)
-        contract = self._payload_schemas.resolve(
-            definition.payload_schema_version, definition.payload_mode
-        )
-        if (
-            str(row["event_type"]) != RELATIONSHIP_EVENT_TYPE
-            or int(row["event_schema_version"]) != 1
-            or str(row["aggregate_type"]) != RELATIONSHIP_AGGREGATE_TYPE
-            or str(row["aggregate_id"]) != str(row["authority_aggregate_id"])
-            or int(row["aggregate_version"]) != 1
-            or str(row["command_type"]) != RELATIONSHIP_COMMAND_TYPE
-            or int(row["expected_aggregate_version"]) != 0
-            or str(row["idempotency_key"]) != verified.subject.version_id
-            or bytes(row["payload_bytes"]) != verified.canonical_bytes
-            or str(row["payload_digest"]) != verified.canonical_digest
-            or str(row["command_definition_version"]) != definition.definition_version
-            or str(row["command_definition_digest"]) != definition.digest
-            or str(row["mode"]) != definition.payload_mode.value
-            or str(row["schema_version"]) != contract.schema_version
-            or str(row["schema_contract_version"]) != contract.contract_version
-            or str(row["schema_contract_digest"]) != contract.contract_digest
-            or str(row["canonicalizer_implementation_version"])
-            != contract.canonicalizer_implementation_version
-            or self._actor_identity(row) != str(row["actor_identity_digest"])
-            or str(row["recorded_at"]) != str(row["event_recorded_at"])
-            or str(row["recorded_at"]) != str(row["committed_at"])
-            or digest_bytes(bytes(row["evidence_bytes"])) != verified.evidence_digest
-        ):
-            raise RelationshipContractError("relationship authority graph differs")
-        UtcTimestamp.parse(str(row["recorded_at"]))
-        return verified
+        return self._load_receipt(decision_id).assessment
 
     def _verify_relationships(self) -> None:
-        with self._hypothesis_rows():
-            self._hypotheses._verify()
-        ids = [
-            str(row[0])
-            for row in self._connection.execute(
-                "SELECT decision_id FROM event_hypothesis_relationship_decisions ORDER BY decision_id"
-            )
-        ]
-        for decision_id in ids:
-            self._load_row(decision_id)
+        _verify_relationship_reads_in_transaction(
+            self._connection,
+            self._hypotheses,
+            self._command_registry,
+            self._payload_schemas,
+        )
         self._validate_relational_invariants(self._connection)
 
     @staticmethod
@@ -424,6 +534,13 @@ class _RelationshipEventStore(_EventAuthorityStore):
     def load(self, decision_id: str) -> RelationshipAssessment:
         return self._read(lambda: self._load_row(decision_id))  # type: ignore[return-value]
 
+    def load_retained_receipt(
+        self, assessment_digest: str
+    ) -> RetainedRelationshipDecisionReceipt:
+        return self._read(
+            lambda: self._load_receipt(assessment_digest)
+        )  # type: ignore[return-value]
+
     def history(self) -> tuple[RelationshipAssessment, ...]:
         def values() -> tuple[RelationshipAssessment, ...]:
             return tuple(
@@ -514,6 +631,11 @@ class EventHypothesisRelationshipAuthority:
     def load(self, decision_id: str) -> RelationshipAssessment:
         return self.__store.load(decision_id)
 
+    def load_retained_receipt(
+        self, assessment_digest: str
+    ) -> RetainedRelationshipDecisionReceipt:
+        return self.__store.load_retained_receipt(assessment_digest)
+
     def history(self) -> tuple[RelationshipAssessment, ...]:
         return self.__store.history()
 
@@ -534,6 +656,127 @@ class EventHypothesisRelationshipAuthority:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+class _EventHypothesisRelationshipReadAuthority:
+    """Private transaction-bound authority backing the narrow public read port."""
+
+    __slots__ = ("__connection", "__hypotheses", "__registries")
+
+    def __init__(
+        self,
+        token: object,
+        connection: sqlite3.Connection,
+        hypotheses: _HypothesisStore,
+        command_registry: CommandRegistry,
+        payload_schemas: PayloadSchemaRegistry,
+    ) -> None:
+        if token is not _READ_AUTHORITY_TOKEN or hypotheses._connection is not connection:
+            raise RelationshipContractError(
+                "relationship read authority construction is private"
+            )
+        self.__connection = connection
+        self.__hypotheses = hypotheses
+        self.__registries = (command_registry, payload_schemas)
+
+    def __read[T](self, operation: Callable[[], T]) -> T:
+        _require_checked_connection(self.__connection, active=True)
+        self.__hypotheses.adopt_active_transaction()
+        try:
+            return operation()
+        finally:
+            self.__hypotheses.release_active_transaction()
+
+    def __version[T](self, operation: Callable[[], T]) -> T:
+        def value() -> T:
+            with _transaction_hypothesis_rows(self.__connection):
+                return operation()
+
+        return self.__read(value)
+
+    def require_retained_receipt_in_transaction(
+        self, assessment_digest: str
+    ) -> RetainedRelationshipDecisionReceipt:
+        def value() -> RetainedRelationshipDecisionReceipt:
+            _verify_relationship_reads_in_transaction(
+                self.__connection, self.__hypotheses, *self.__registries
+            )
+            _verify_relationship_event_coverage(self.__connection)
+            return _load_retained_relationship_receipt_in_transaction(
+                self.__connection,
+                self.__hypotheses,
+                *self.__registries,
+                assessment_digest,
+            )
+
+        return self.__read(value)
+
+    def require_retained_version_in_transaction(
+        self, version_id: str
+    ) -> EventHypothesisVersion:
+        return self.__version(
+            lambda: self.__hypotheses.require_retained_version_in_transaction(version_id)
+        )
+
+    def require_current_version_in_transaction(
+        self, version_id: str, *, proof: AuthenticationProof
+    ) -> EventHypothesisVersion:
+        return self.__version(
+            lambda: self.__hypotheses.require_current_version_in_transaction(
+                version_id, proof=proof
+            )
+        )
+
+
+def _create_event_hypothesis_relationship_read_port(
+    connection: sqlite3.Connection,
+    *,
+    retrieval_authority: RetrievalContextAuthority,
+    authenticator: object,
+    command_registry: CommandRegistry,
+    payload_schemas: PayloadSchemaRegistry,
+    clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
+) -> EventHypothesisRelationshipReadPort:
+    """Bind the private owner reads to one exact idle checked connection."""
+
+    try:
+        _require_checked_connection(connection, active=False)
+        if (
+            type(retrieval_authority) is not RetrievalContextAuthority
+            or type(command_registry) is not CommandRegistry
+            or type(payload_schemas) is not PayloadSchemaRegistry
+            or not callable(clock)
+        ):
+            raise RelationshipContractError(
+                "relationship read-port factory collaborators differ"
+            )
+        merged_commands, merged_schemas = merge_relationship_authority_registries(
+            command_registry, payload_schemas
+        )
+        with _transaction_hypothesis_rows(connection):
+            hypotheses = _HypothesisStore(
+                connection, retrieval_authority, authenticator, clock
+            )
+        _require_checked_connection(connection, active=False)
+        private = _EventHypothesisRelationshipReadAuthority(
+            _READ_AUTHORITY_TOKEN,
+            connection,
+            hypotheses,
+            merged_commands,
+            merged_schemas,
+        )
+        port = _compose_event_hypothesis_relationship_read_port(private)
+        if type(port) is not EventHypothesisRelationshipReadPort:
+            raise RelationshipContractError(
+                "relationship read-port factory returned a forged port"
+            )
+        return port
+    except RelationshipContractError:
+        raise
+    except Exception as exc:
+        raise RelationshipContractError(
+            "relationship read-port factory failed closed"
+        ) from exc
 
 
 def _compose_relationship_authority(
