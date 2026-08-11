@@ -39,6 +39,7 @@ from .command_spec import (
 from .contracts import ContractError, SdlcContract, load_contract
 from .emit_evidence import (
     EvidenceError,
+    _validate_junit,
     _validate_route,
     build_gate_evidence,
     canonical_json_bytes,
@@ -115,8 +116,8 @@ _SERVICE_CONFIGURATION = {
     "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
 }
 _CORE_TESTS = ("newsroom/tests",)
-_CORE_WORKER_COUNT = 4
-_CORE_SHARD_COUNT = 4
+_CORE_WORKER_COUNT = 2
+_CORE_SHARD_COUNT = 10
 _CORE_DISTRIBUTION = "worksteal"
 _CORE_FRAGMENT_SCHEMA = "newsroom.sdlc.core-shard-fragment.v1"
 _CORE_SHARD_LIFECYCLE_SCHEMA = "newsroom.sdlc.core-shard-lifecycle.v1"
@@ -1270,6 +1271,18 @@ def _producer_exit_status(
         error="producer_fragment_lifecycle",
     )
     result = str(validated["result"])
+    if fragment_schema == _CORE_FRAGMENT_SCHEMA:
+        try:
+            junit = _validate_junit(fragment.get("junit_summary"))
+        except EvidenceError as exc:
+            raise WorkflowLaneError("producer_fragment_junit") from exc
+        if result in {"PASS", "FAIL"}:
+            if junit is None:
+                raise WorkflowLaneError("producer_fragment_junit_required")
+        elif junit is not None:
+            raise WorkflowLaneError("producer_fragment_junit_unexpected")
+        if result == "PASS" and junit is not None and junit["outcome"] == "FAIL":
+            return 1
     if result == "PASS":
         return 0
     if result == "BUDGET_EXCEEDED":

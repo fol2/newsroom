@@ -1,11 +1,11 @@
 schema_version = "newsroom.sdlc.gates.v1"
-contract_version = "sdlc-v2.5"
+contract_version = "sdlc-v2.6"
 status = "accepted"
 owner = "fol2"
 canonical_language = "English"
 specification = "docs/specs/sdlc/high-performance-evidence-sdlc.md"
-acceptance_record = "docs/specs/sdlc/2026-08-10-sdlc-v2.5-core-sharding-amendment.md"
-issue = 98
+acceptance_record = "docs/specs/sdlc/2026-08-11-sdlc-v2.6-measured-core-budget-amendment.md"
+issue = 415
 
 [global]
 gate_command_timeout_seconds = 220
@@ -43,7 +43,7 @@ lane = "core"
 id = "core-deterministic"
 p50_target_seconds = 15
 p95_target_seconds = 35
-hard_timeout_seconds = 220
+hard_timeout_seconds = 330
 blocking = true
 lane = "core"
 
@@ -193,15 +193,17 @@ clustering = [
 
 [lanes.core]
 bootstrap_once = true
-shard_count = 4
+shard_count = 10
 partition = "sha256_node_id_balanced"
-workers_per_shard = 4
+workers_per_shard = 2
 distribution = "worksteal"
 max_worker_restart = 0
-per_shard_hard_timeout_seconds = 220
+per_shard_hard_timeout_seconds = 330
+per_shard_warning_seconds = 300
+critical_path_warning_seconds = 300
 reducer_single_canonical_receipt = true
 run_full_suite_when_p95_below_seconds = 35
-hard_timeout_seconds = 220
+hard_timeout_seconds = 330
 required = true
 
 [lanes.service]
@@ -228,6 +230,8 @@ hard_timeout_seconds = 20
 
 [test_strategy]
 full_suite_blocking_default = true
+individual_testcase_hard_timeout_seconds = 90
+individual_testcase_warning_seconds = 75
 full_suite_p95_threshold_seconds = 35
 warm_bootstrap_p95_threshold_seconds = 10
 selector_initial_mode = "observe"

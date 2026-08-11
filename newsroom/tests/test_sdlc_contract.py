@@ -4,7 +4,9 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+import yaml
 
+import scripts.sdlc.workflow_lane as lane_module
 from scripts.sdlc.contracts import (
     ContractError,
     load_contract,
@@ -18,25 +20,32 @@ REPO_ROOT = Path(__file__).parents[2]
 def test_accepted_contract_loads_and_references_exact_source_files() -> None:
     contract = load_contract(REPO_ROOT)
 
-    assert contract.contract_version == "sdlc-v2.5"
+    assert contract.contract_version == "sdlc-v2.6"
     assert contract.classifier_version == "sdlc-risk-v1"
     assert contract.data["status"] == "accepted"
     assert contract.source_path == REPO_ROOT / ".sdlc" / "gates.toml"
     assert contract.data["acceptance_record"] == (
-        "docs/specs/sdlc/2026-08-10-sdlc-v2.5-core-sharding-amendment.md"
+        "docs/specs/sdlc/2026-08-11-sdlc-v2.6-measured-core-budget-amendment.md"
     )
     assert contract.unknown_path_risk == "R3_EXTERNAL_SERVICE_SECURITY"
 
 
-def test_every_gate_lane_resolves_and_all_hard_timeouts_are_below_four_minutes() -> (
-    None
-):
+@pytest.mark.parametrize("version", ("sdlc-v2.5", "sdlc-v2.7"))
+def test_unaccepted_contract_version_fails_closed(version: str) -> None:
+    data = deepcopy(load_contract(REPO_ROOT).data)
+    data["contract_version"] = version
+
+    with pytest.raises(ContractError, match="contract version"):
+        validate_contract_data(data)
+
+
+def test_every_gate_lane_resolves_and_core_budget_is_below_six_minutes() -> None:
     contract = load_contract(REPO_ROOT)
     lanes = contract.data["lanes"]
 
     for gate in contract.data["gate"].values():
         assert gate["lane"] in lanes
-        assert 0 < gate["hard_timeout_seconds"] < 240
+        assert 0 < gate["hard_timeout_seconds"] < 360
     assert contract.data["global"] == {
         "gate_command_timeout_seconds": 220,
         "lane_execution_timeout_seconds": 220,
@@ -59,38 +68,120 @@ def test_every_gate_lane_resolves_and_all_hard_timeouts_are_below_four_minutes()
     } == {
         "route": 20,
         "source-integrity": 60,
-        "core-deterministic": 220,
+        "core-deterministic": 330,
         "service-neo4j": 220,
         "merge-exact": 220,
         "science-shard": 220,
         "evidence-finalize": 20,
     }
     assert lanes["decision"] == {"always_reports": True, "hard_timeout_seconds": 20}
-    assert lanes["core"]["hard_timeout_seconds"] == 220
+    assert lanes["core"]["hard_timeout_seconds"] == 330
     assert lanes["core"] == {
         "bootstrap_once": True,
-        "shard_count": 4,
+        "shard_count": 10,
         "partition": "sha256_node_id_balanced",
-        "workers_per_shard": 4,
+        "workers_per_shard": 2,
         "distribution": "worksteal",
         "max_worker_restart": 0,
-        "per_shard_hard_timeout_seconds": 220,
+        "per_shard_hard_timeout_seconds": 330,
+        "per_shard_warning_seconds": 300,
+        "critical_path_warning_seconds": 300,
         "reducer_single_canonical_receipt": True,
         "run_full_suite_when_p95_below_seconds": 35,
-        "hard_timeout_seconds": 220,
+        "hard_timeout_seconds": 330,
         "required": True,
     }
     assert lanes["service"]["hard_timeout_seconds"] == 220
     assert lanes["merge_group"]["hard_timeout_seconds"] == 220
     assert lanes["science"]["per_shard_hard_timeout_seconds"] == 220
+    assert contract.data["test_sizes"]["science"]["shard_hard_timeout_seconds"] == 220
+    assert (
+        contract.data["test_strategy"]["individual_testcase_hard_timeout_seconds"] == 90
+    )
+    assert contract.data["test_strategy"]["individual_testcase_warning_seconds"] == 75
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/evidence.yml").read_text(encoding="utf-8")
+    )
+    workflow_shards = workflow["jobs"]["core_shard"]["strategy"]["matrix"]["shard"]
+    assert workflow_shards == list(range(lanes["core"]["shard_count"]))
+    assert lanes["core"]["shard_count"] == lane_module._CORE_SHARD_COUNT
 
 
-def test_four_minute_ceiling_and_owner_multiplier_are_fail_closed() -> None:
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    (
+        ("global", "gate_command_timeout_seconds", 219),
+        ("global", "gate_command_timeout_seconds", 221),
+        ("global", "lane_execution_timeout_seconds", 219),
+        ("global", "lane_execution_timeout_seconds", 221),
+        ("global", "finalization_timeout_seconds", 19),
+        ("global", "finalization_timeout_seconds", 21),
+        ("gate.core-deterministic", "hard_timeout_seconds", 329),
+        ("gate.core-deterministic", "hard_timeout_seconds", 331),
+        ("lanes.core", "per_shard_hard_timeout_seconds", 329),
+        ("lanes.core", "per_shard_hard_timeout_seconds", 331),
+        ("lanes.core", "hard_timeout_seconds", 329),
+        ("lanes.core", "hard_timeout_seconds", 331),
+        ("lanes.core", "per_shard_warning_seconds", 299),
+        ("lanes.core", "per_shard_warning_seconds", 301),
+        ("lanes.core", "critical_path_warning_seconds", 299),
+        ("lanes.core", "critical_path_warning_seconds", 301),
+        ("test_strategy", "individual_testcase_hard_timeout_seconds", 89),
+        ("test_strategy", "individual_testcase_hard_timeout_seconds", 91),
+        ("test_strategy", "individual_testcase_warning_seconds", 74),
+        ("test_strategy", "individual_testcase_warning_seconds", 76),
+        ("lanes.service", "hard_timeout_seconds", 219),
+        ("lanes.service", "hard_timeout_seconds", 221),
+        ("lanes.merge_group", "hard_timeout_seconds", 219),
+        ("lanes.merge_group", "hard_timeout_seconds", 221),
+        ("lanes.science", "per_shard_hard_timeout_seconds", 219),
+        ("lanes.science", "per_shard_hard_timeout_seconds", 221),
+        ("test_sizes.science", "shard_hard_timeout_seconds", 219),
+        ("test_sizes.science", "shard_hard_timeout_seconds", 221),
+        ("lanes.decision", "hard_timeout_seconds", 19),
+        ("lanes.decision", "hard_timeout_seconds", 21),
+    ),
+)
+def test_repository_timing_boundaries_are_caller_invariant(
+    section: str, field: str, value: int
+) -> None:
+    data = deepcopy(load_contract(REPO_ROOT).data)
+    table = data
+    for part in section.split("."):
+        table = table[part]
+    table[field] = value
+
+    with pytest.raises(ContractError):
+        validate_contract_data(data)
+
+
+@pytest.mark.parametrize("worker_count", (1, 3, 4))
+def test_unaccepted_core_worker_counts_fail_closed(worker_count: int) -> None:
+    contract = load_contract(REPO_ROOT)
+    data = deepcopy(contract.data)
+    data["lanes"]["core"]["workers_per_shard"] = worker_count
+
+    with pytest.raises(ContractError, match="accepted topology"):
+        validate_contract_data(data)
+
+
+def test_unaccepted_core_shard_counts_fail_closed() -> None:
+    contract = load_contract(REPO_ROOT)
+
+    for shard_count in (6, 8, 12):
+        data = deepcopy(contract.data)
+        data["lanes"]["core"]["shard_count"] = shard_count
+
+        with pytest.raises(ContractError, match="accepted topology"):
+            validate_contract_data(data)
+
+
+def test_fixed_core_ceiling_and_owner_multiplier_are_fail_closed() -> None:
     contract = load_contract(REPO_ROOT)
 
     oversized = deepcopy(contract.data)
-    oversized["gate"]["core-deterministic"]["hard_timeout_seconds"] = 240
-    with pytest.raises(ContractError, match="below 240"):
+    oversized["gate"]["core-deterministic"]["hard_timeout_seconds"] = 331
+    with pytest.raises(ContractError, match="below 331"):
         validate_contract_data(oversized)
 
     wrong_owner_multiplier = deepcopy(contract.data)
@@ -186,5 +277,5 @@ def test_contract_validation_cli_emits_a_small_typed_summary(
     output = capsys.readouterr().out
 
     assert '"status":"PASS"' in output
-    assert '"contract_version":"sdlc-v2.5"' in output
+    assert '"contract_version":"sdlc-v2.6"' in output
     assert "R4_RELEASE_OPERATIONAL" in output

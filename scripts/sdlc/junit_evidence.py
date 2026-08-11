@@ -18,7 +18,7 @@ SCHEMA_VERSION = "newsroom.sdlc.junit-summary.v1"
 _MAX_REPORTS = 32
 _MAX_REPORT_BYTES = 16 * 1024 * 1024
 _MAX_TESTS = 100_000
-_MAX_TEST_SECONDS = Decimal("60")
+_MAX_TEST_SECONDS = Decimal("90")
 _MAX_FIELD_CHARS = 262_144
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 

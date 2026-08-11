@@ -56,6 +56,8 @@ def _copy_contract(root: Path) -> None:
         "docs/specs/sdlc/2026-07-30-sdlc-v2.3-owner-budget-amendment.md",
         "docs/specs/sdlc/2026-08-02-sdlc-v2.4-owner-budget-amendment.md",
         "docs/specs/sdlc/2026-08-10-sdlc-v2.5-core-sharding-amendment.md",
+        "docs/specs/sdlc/2026-08-11-sdlc-v2.5-ten-shard-capacity-amendment.md",
+        "docs/specs/sdlc/2026-08-11-sdlc-v2.6-measured-core-budget-amendment.md",
     )
     for relative in paths:
         target = root / relative

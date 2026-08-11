@@ -420,7 +420,34 @@ def _fresh_replay(adapter: AuthorityStoreAdapter) -> None:
     )
 
 
-def _fresh_reopen(adapter: AuthorityStoreAdapter) -> None:
+def _fresh_submission(adapter: AuthorityStoreAdapter) -> None:
+    command = _command()
+    _, handle = _new_handle(adapter)
+    before_history = handle.history()
+    _require(handle.observe(command.record_id) is None, "record existed before write")
+    expected = AuthorityValue.from_command(command)
+    _require(handle.submit(command) == expected, "fresh submission result differs")
+    after_fresh = _snapshot(handle, command.record_id)
+    _require(
+        len(after_fresh[1]) == len(before_history) + 1,
+        "fresh submission did not append once",
+    )
+
+
+def _exact_replay(adapter: AuthorityStoreAdapter) -> None:
+    command = _command()
+    _, handle = _new_handle(adapter)
+    expected = AuthorityValue.from_command(command)
+    handle.submit(command)
+    after_fresh = _snapshot(handle, command.record_id)
+    _require(handle.submit(command) == expected, "exact replay result differs")
+    _require(
+        _snapshot(handle, command.record_id) == after_fresh,
+        "exact replay changed state or append-only history",
+    )
+
+
+def _fresh_reopen_persistence(adapter: AuthorityStoreAdapter) -> None:
     command = _command()
     location, handle = _new_handle(adapter)
     expected = AuthorityValue.from_command(command)
@@ -437,10 +464,38 @@ def _fresh_reopen(adapter: AuthorityStoreAdapter) -> None:
         _snapshot(reopened, command.record_id) == snapshot,
         "reopen changed state or history",
     )
+
+
+def _fresh_reopen_digest(adapter: AuthorityStoreAdapter) -> None:
     _assert_tampers_rejected(adapter, (TamperKind.DIGEST,))
 
 
-def _representation(adapter: AuthorityStoreAdapter) -> None:
+def _fresh_reopen(adapter: AuthorityStoreAdapter) -> None:
+    _fresh_reopen_persistence(adapter)
+    _fresh_reopen_digest(adapter)
+
+
+_REPRESENTATION_TAMPERS = (
+    TamperKind.SCALAR,
+    TamperKind.CANONICAL,
+    TamperKind.IDENTITY,
+    TamperKind.LINKED_ROW,
+)
+_REQUEST_BINDING_FIELDS = ("actor", "request", "idempotency", "cas_predecessor")
+_HISTORICAL_TAMPERS = (
+    TamperKind.IDENTITY,
+    TamperKind.DIGEST,
+    TamperKind.PROVENANCE,
+)
+_CURRENT_USE_AUTHORITIES = ("authority", "policy")
+_TAMPER_REJECTION_TAMPERS = (
+    TamperKind.CANONICAL,
+    TamperKind.LINKED_ROW,
+    TamperKind.OFFLINE_REWRITE,
+)
+
+
+def _representation_retained(adapter: AuthorityStoreAdapter) -> None:
     command = _command()
     _, handle = _new_handle(adapter)
     handle.submit(command)
@@ -448,33 +503,40 @@ def _representation(adapter: AuthorityStoreAdapter) -> None:
         handle.observe(command.record_id) == StoredAuthorityState.from_command(command),
         "persisted representation differs",
     )
-    _assert_tampers_rejected(
-        adapter,
-        (
-            TamperKind.SCALAR,
-            TamperKind.CANONICAL,
-            TamperKind.IDENTITY,
-            TamperKind.LINKED_ROW,
-        ),
+
+
+def _representation_tamper(adapter: AuthorityStoreAdapter, kind: TamperKind) -> None:
+    _require(kind in _REPRESENTATION_TAMPERS, "unknown representation tamper probe")
+    _assert_tampers_rejected(adapter, (kind,))
+
+
+def _representation(adapter: AuthorityStoreAdapter) -> None:
+    _representation_retained(adapter)
+    for kind in _REPRESENTATION_TAMPERS:
+        _representation_tamper(adapter, kind)
+
+
+def _request_binding_field(adapter: AuthorityStoreAdapter, field_name: str) -> None:
+    _require(field_name in _REQUEST_BINDING_FIELDS, "unknown request binding probe")
+    command = _command()
+    _, handle = _new_handle(adapter)
+    handle.submit(command)
+    before = _snapshot(handle, command.record_id)
+    divergent = replace(command, **{field_name: f"different-{field_name}"})
+    _expect_exception(
+        BindingConflict,
+        lambda: handle.submit(divergent),
+        f"divergent {field_name} binding was accepted",
+    )
+    _require(
+        _snapshot(handle, command.record_id) == before,
+        f"divergent {field_name} changed state or history",
     )
 
 
 def _request_binding(adapter: AuthorityStoreAdapter) -> None:
-    command = _command()
-    for field_name in ("actor", "request", "idempotency", "cas_predecessor"):
-        _, handle = _new_handle(adapter)
-        handle.submit(command)
-        before = _snapshot(handle, command.record_id)
-        divergent = replace(command, **{field_name: f"different-{field_name}"})
-        _expect_exception(
-            BindingConflict,
-            lambda divergent=divergent, handle=handle: handle.submit(divergent),
-            f"divergent {field_name} binding was accepted",
-        )
-        _require(
-            _snapshot(handle, command.record_id) == before,
-            f"divergent {field_name} changed state or history",
-        )
+    for field_name in _REQUEST_BINDING_FIELDS:
+        _request_binding_field(adapter, field_name)
 
 
 def _lost_response(adapter: AuthorityStoreAdapter) -> None:
@@ -506,69 +568,128 @@ def _lost_response(adapter: AuthorityStoreAdapter) -> None:
     )
 
 
-def _historical(adapter: AuthorityStoreAdapter) -> None:
+def _historical_fixture(adapter: AuthorityStoreAdapter, kind: TamperKind):
+    _require(kind in _HISTORICAL_TAMPERS, "unknown historical tamper probe")
+    first = _command()
+    second = _command("record-2", "record-1", "beta")
+    location, handle = _new_handle(adapter)
+    handle.submit(first)
+    handle.submit(second)
+    handle.tamper(first.record_id, kind)
+    return first, location, handle
+
+
+def _historical_retained_operation(
+    adapter: AuthorityStoreAdapter, *, listing: bool
+) -> None:
     first = _command()
     second = _command("record-2", "record-1", "beta")
     expected = AuthorityValue.from_command(first)
-    for kind in (TamperKind.IDENTITY, TamperKind.DIGEST, TamperKind.PROVENANCE):
-        location, handle = _new_handle(adapter)
-        handle.submit(first)
-        handle.submit(second)
-        _require(handle.read(first.record_id) == expected, "historical load differs")
+    _, handle = _new_handle(adapter)
+    handle.submit(first)
+    handle.submit(second)
+    if listing:
         _require(
             expected in handle.list_history(),
             "historical list omitted retained value",
         )
-        handle.tamper(first.record_id, kind)
-        _expect_exception(
-            IntegrityViolation,
-            lambda handle=handle: handle.read(first.record_id),
-            f"fresh historical read accepted {kind.value} mutation",
-        )
-        _expect_exception(
-            IntegrityViolation,
-            handle.list_history,
-            f"fresh historical list accepted {kind.value} mutation",
-        )
+    else:
+        _require(handle.read(first.record_id) == expected, "historical load differs")
+
+
+def _historical_tamper_operation(
+    adapter: AuthorityStoreAdapter,
+    kind: TamperKind,
+    *,
+    reopened: bool,
+    listing: bool,
+) -> None:
+    first, location, handle = _historical_fixture(adapter, kind)
+    checked = handle
+    if reopened:
+        _expect_historical_corruption(handle, first, kind, False, listing)
         handle.close()
-        reopened = adapter.open_handle(location)
-        _require(reopened is not handle, "historical reopen returned original handle")
-        _expect_exception(
-            IntegrityViolation,
-            lambda reopened=reopened: reopened.read(first.record_id),
-            f"reopened historical read accepted {kind.value} mutation",
-        )
-        _expect_exception(
-            IntegrityViolation,
-            reopened.list_history,
-            f"reopened historical list accepted {kind.value} mutation",
-        )
+        checked = adapter.open_handle(location)
+        _require(checked is not handle, "historical reopen returned original handle")
+    _expect_historical_corruption(checked, first, kind, reopened, listing)
+
+
+def _expect_historical_corruption(
+    handle: AuthorityStoreHandle,
+    command: WriteCommand,
+    kind: TamperKind,
+    reopened: bool,
+    listing: bool,
+) -> None:
+    operation = (
+        handle.list_history if listing else lambda: handle.read(command.record_id)
+    )
+    phase = "reopened" if reopened else "fresh"
+    noun = "list" if listing else "read"
+    _expect_exception(
+        IntegrityViolation,
+        operation,
+        f"{phase} historical {noun} accepted {kind.value} mutation",
+    )
+
+
+def _historical_tamper(adapter: AuthorityStoreAdapter, kind: TamperKind) -> None:
+    first = _command()
+    second = _command("record-2", "record-1", "beta")
+    expected = AuthorityValue.from_command(first)
+    location, handle = _new_handle(adapter)
+    handle.submit(first)
+    handle.submit(second)
+    _require(handle.read(first.record_id) == expected, "historical load differs")
+    _require(
+        expected in handle.list_history(), "historical list omitted retained value"
+    )
+    handle.tamper(first.record_id, kind)
+    _expect_historical_corruption(handle, first, kind, False, False)
+    _expect_historical_corruption(handle, first, kind, False, True)
+    handle.close()
+    reopened = adapter.open_handle(location)
+    _require(reopened is not handle, "historical reopen returned original handle")
+    _expect_historical_corruption(reopened, first, kind, True, False)
+    _expect_historical_corruption(reopened, first, kind, True, True)
+
+
+def _historical(adapter: AuthorityStoreAdapter) -> None:
+    for kind in _HISTORICAL_TAMPERS:
+        _historical_tamper(adapter, kind)
+
+
+def _current_use_authority(adapter: AuthorityStoreAdapter, authority: str) -> None:
+    _require(authority in _CURRENT_USE_AUTHORITIES, "unknown current-use probe")
+    command = _command()
+    _, handle = _new_handle(adapter)
+    _seed_heads(handle, command)
+    handle.submit(command)
+    _require(
+        handle.current_use(command.record_id) == AuthorityValue.from_command(command),
+        "valid current-use read differs",
+    )
+    handle.set_upstream_head(authority, "changed")
+    _expect_exception(
+        IntegrityViolation,
+        lambda: handle.current_use(command.record_id),
+        f"changed {authority} head was accepted",
+    )
 
 
 def _current_use(adapter: AuthorityStoreAdapter) -> None:
-    command = _command()
-    for changed_authority, _ in command.required_upstream_heads:
-        _, handle = _new_handle(adapter)
-        _seed_heads(handle, command)
-        handle.submit(command)
-        _require(
-            handle.current_use(command.record_id)
-            == AuthorityValue.from_command(command),
-            "valid current-use read differs",
-        )
-        handle.set_upstream_head(changed_authority, "changed")
-        _expect_exception(
-            IntegrityViolation,
-            lambda handle=handle: handle.current_use(command.record_id),
-            f"changed {changed_authority} head was accepted",
-        )
+    for authority in _CURRENT_USE_AUTHORITIES:
+        _current_use_authority(adapter, authority)
+
+
+def _tamper_rejection_kind(adapter: AuthorityStoreAdapter, kind: TamperKind) -> None:
+    _require(kind in _TAMPER_REJECTION_TAMPERS, "unknown tamper rejection probe")
+    _assert_tampers_rejected(adapter, (kind,))
 
 
 def _tamper_rejection(adapter: AuthorityStoreAdapter) -> None:
-    _assert_tampers_rejected(
-        adapter,
-        (TamperKind.CANONICAL, TamperKind.LINKED_ROW, TamperKind.OFFLINE_REWRITE),
-    )
+    for kind in _TAMPER_REJECTION_TAMPERS:
+        _tamper_rejection_kind(adapter, kind)
 
 
 def _competing_writers(adapter: AuthorityStoreAdapter) -> None:
@@ -626,7 +747,7 @@ def _competing_writers(adapter: AuthorityStoreAdapter) -> None:
     )
 
 
-def _rollback(adapter: AuthorityStoreAdapter) -> None:
+def _rollback_sequence(adapter: AuthorityStoreAdapter) -> None:
     location, handle = _new_handle(adapter)
     before_history = handle.history()
     normal_command = _command("record-rollback-normal")
@@ -734,7 +855,71 @@ def _rollback(adapter: AuthorityStoreAdapter) -> None:
     )
 
 
-def _restart_migration(adapter: AuthorityStoreAdapter) -> None:
+def _rollback_kind(adapter: AuthorityStoreAdapter, *, abort: bool) -> None:
+    location, handle = _new_handle(adapter)
+    before_history = handle.history()
+    label = "abort" if abort else "normal"
+    command = _command(f"record-rollback-{label}")
+    invocations = 0
+    inspection_complete = False
+    sentinel = _RollbackInspectionAbort()
+
+    def operation(scope: RollbackScope) -> None:
+        nonlocal invocations, inspection_complete
+        invocations += 1
+        _require(invocations == 1, f"{label} rollback scope invoked callback twice")
+        scope.submit(command)
+        _require(
+            scope.observe(command.record_id)
+            == StoredAuthorityState.from_command(command),
+            f"{label} rollback scope cannot observe submitted state",
+        )
+        _require(
+            scope.history() == before_history + (AuthorityValue.from_command(command),),
+            f"{label} rollback scope history did not append exactly once",
+        )
+        inspection_complete = True
+        if abort:
+            raise sentinel
+
+    rethrown = False
+    try:
+        handle.rollback_scope(operation)
+    except Exception as exc:
+        if abort and exc is sentinel:
+            rethrown = True
+        elif isinstance(exc, _CaseFailed):
+            raise
+        else:
+            raise _CaseFailed(
+                f"{label} rollback scope raised {type(exc).__name__}"
+            ) from exc
+    _require(invocations == 1, f"{label} rollback scope skipped kernel callback")
+    _require(inspection_complete, f"{label} rollback scope swallowed inspection")
+    if abort:
+        _require(rethrown, "abort rollback scope swallowed kernel sentinel")
+    _require(
+        handle.observe(command.record_id) is None,
+        f"{label} rolled-back row remains visible on same handle",
+    )
+    _require(
+        handle.history() == before_history,
+        f"{label} rollback changed same-handle append-only history",
+    )
+    handle.close()
+    reopened = adapter.open_handle(location)
+    _require(reopened is not handle, "post-rollback reopen returned original handle")
+    _require(
+        reopened.observe(command.record_id) is None,
+        f"rolled-back row remains visible after reopen: {command.record_id}",
+    )
+    _require(
+        reopened.history() == before_history,
+        "rollback changed reopened append-only history",
+    )
+
+
+def _restart_or_migrate(adapter: AuthorityStoreAdapter, *, migrate: bool) -> None:
     command = _command()
     location, original = _new_handle(adapter)
     original.submit(command)
@@ -750,6 +935,8 @@ def _restart_migration(adapter: AuthorityStoreAdapter) -> None:
         _snapshot(restarted, command.record_id) == expected_snapshot,
         "restart changed state or history",
     )
+    if not migrate:
+        return
     restarted.close()
     migrated = adapter.open_handle(location, migrate=True)
     _require(migrated is not restarted, "migration returned prior handle")
@@ -762,6 +949,10 @@ def _restart_migration(adapter: AuthorityStoreAdapter) -> None:
     )
 
 
+def _restart_migration(adapter: AuthorityStoreAdapter) -> None:
+    _restart_or_migrate(adapter, migrate=True)
+
+
 _SCENARIOS = {
     CaseId.FRESH_REPLAY: _fresh_replay,
     CaseId.FRESH_REOPEN: _fresh_reopen,
@@ -772,7 +963,7 @@ _SCENARIOS = {
     CaseId.CURRENT_USE_REVALIDATION: _current_use,
     CaseId.TAMPER_REJECTION: _tamper_rejection,
     CaseId.COMPETING_WRITERS: _competing_writers,
-    CaseId.TRANSACTION_ROLLBACK: _rollback,
+    CaseId.TRANSACTION_ROLLBACK: _rollback_sequence,
     CaseId.RESTART_MIGRATION: _restart_migration,
 }
 
