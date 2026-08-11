@@ -30,6 +30,7 @@ from newsroom.increment6.relationships import (
     RelationshipContractError,
     RetainedRelationshipDecisionReceipt,
     _compose_event_hypothesis_relationship_read_port,
+    _digest,
     merge_relationship_authority_registries,
     verify_relationship_assessment_replay,
 )
@@ -80,59 +81,35 @@ def _transaction_hypothesis_rows(connection: sqlite3.Connection):
 def _require_checked_connection(
     connection: sqlite3.Connection, *, active: bool
 ) -> None:
-    if (
-        type(connection) is not sqlite3.Connection
-        or connection.isolation_level is not None
+    state = "active" if active else "idle"
+    if type(connection) is not sqlite3.Connection or (
+        connection.isolation_level is not None
         or connection.in_transaction is not active
         or connection.row_factory is not sqlite3.Row
     ):
-        state = "active" if active else "idle"
         raise RelationshipContractError(
             f"relationship read requires an exact {state} checked connection"
         )
     try:
-        checked = (
-            int(connection.execute("PRAGMA foreign_keys").fetchone()[0]) == 1,
-            str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
-            == "wal",
-            int(connection.execute("PRAGMA synchronous").fetchone()[0]) == 2,
+        settings = (
+            connection.execute("PRAGMA foreign_keys").fetchone()[0],
+            str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower(),
+            connection.execute("PRAGMA synchronous").fetchone()[0],
         )
     except Exception as exc:
         raise RelationshipContractError(
             "relationship checked connection cannot be inspected"
         ) from exc
-    if not all(checked):
+    if settings != (1, "wal", 2):
         raise RelationshipContractError(
             "relationship checked connection settings differ"
         )
 
 
-def _relationship_actor_identity(row: sqlite3.Row) -> str:
-    return digest_bytes(
-        canonical_json_bytes(
-            {
-                "principal_id": str(row["principal_id"]),
-                "credential_binding_digest": str(row["credential_binding_digest"]),
-            }
-        )
-    )
-
-
 def _relationship_row(
     connection: sqlite3.Connection, assessment_digest: str
 ) -> sqlite3.Row:
-    if (
-        type(assessment_digest) is not str
-        or len(assessment_digest) != 71
-        or not assessment_digest.startswith("sha256:")
-        or any(
-            character not in "0123456789abcdef"
-            for character in assessment_digest[7:]
-        )
-    ):
-        raise RelationshipContractError(
-            "assessment_digest must be a canonical SHA-256 digest"
-        )
+    _digest(assessment_digest, "assessment_digest")
     row = connection.execute(
         "SELECT r.*,e.event_type,e.event_schema_version,e.aggregate_type,"
         "e.aggregate_id,e.aggregate_version,e.recorded_at AS event_recorded_at,"
@@ -237,7 +214,7 @@ def _load_retained_relationship_receipt_in_transaction(
         or str(row["schema_contract_digest"]) != contract.contract_digest
         or str(row["canonicalizer_implementation_version"])
         != contract.canonicalizer_implementation_version
-        or _relationship_actor_identity(row) != str(row["actor_identity_digest"])
+        or _RelationshipEventStore._actor_identity(row) != str(row["actor_identity_digest"])
         or str(row["recorded_at"]) != str(row["event_recorded_at"])
         or str(row["recorded_at"]) != str(row["committed_at"])
         or digest_bytes(bytes(row["evidence_bytes"])) != verified.evidence_digest
@@ -248,20 +225,16 @@ def _load_retained_relationship_receipt_in_transaction(
 
 
 def _verify_relationship_event_coverage(connection: sqlite3.Connection) -> None:
-    orphan = connection.execute(
+    mismatch = connection.execute(
         "SELECT r.decision_id FROM event_hypothesis_relationship_decisions r "
         "LEFT JOIN ledger_events e ON e.event_id=r.authority_event_id "
-        "WHERE e.event_id IS NULL OR e.event_type!=? LIMIT 1",
-        (RELATIONSHIP_EVENT_TYPE,),
-    ).fetchone()
-    uncovered = connection.execute(
+        "WHERE e.event_id IS NULL OR e.event_type!=? UNION ALL "
         "SELECT e.event_id FROM ledger_events e LEFT JOIN "
-        "event_hypothesis_relationship_decisions r "
-        "ON r.authority_event_id=e.event_id WHERE e.event_type=? "
-        "AND r.decision_id IS NULL LIMIT 1",
-        (RELATIONSHIP_EVENT_TYPE,),
+        "event_hypothesis_relationship_decisions r ON r.authority_event_id=e.event_id "
+        "WHERE e.event_type=? AND r.decision_id IS NULL LIMIT 1",
+        (RELATIONSHIP_EVENT_TYPE, RELATIONSHIP_EVENT_TYPE),
     ).fetchone()
-    if orphan is not None or uncovered is not None:
+    if mismatch is not None:
         raise AuthoritySchemaError("relationship event coverage differs")
 
 
@@ -277,20 +250,13 @@ def _verify_relationship_reads_in_transaction(
         )
     with _transaction_hypothesis_rows(connection):
         hypotheses._verify()
-    assessment_digests = tuple(
-        str(row[0])
-        for row in connection.execute(
-            "SELECT decision_id FROM "
-            "event_hypothesis_relationship_decisions ORDER BY decision_id"
-        )
+    rows = connection.execute(
+        "SELECT decision_id FROM "
+        "event_hypothesis_relationship_decisions ORDER BY decision_id"
     )
-    for assessment_digest in assessment_digests:
+    for row in rows:
         _load_retained_relationship_receipt_in_transaction(
-            connection,
-            hypotheses,
-            command_registry,
-            payload_schemas,
-            assessment_digest,
+            connection, hypotheses, command_registry, payload_schemas, str(row[0])
         )
 
 
@@ -386,7 +352,14 @@ class _RelationshipEventStore(_EventAuthorityStore):
 
     @staticmethod
     def _actor_identity(row: sqlite3.Row) -> str:
-        return _relationship_actor_identity(row)
+        return digest_bytes(
+            canonical_json_bytes(
+                {
+                    "principal_id": str(row["principal_id"]),
+                    "credential_binding_digest": str(row["credential_binding_digest"]),
+                }
+            )
+        )
 
     def _row(self, decision_id: str) -> sqlite3.Row:
         return _relationship_row(self._connection, decision_id)
@@ -688,12 +661,7 @@ class EventHypothesisRelationshipAuthority:
 class _EventHypothesisRelationshipReadAuthority:
     """Private transaction-bound authority backing the narrow public read port."""
 
-    __slots__ = (
-        "__command_registry",
-        "__connection",
-        "__hypotheses",
-        "__payload_schemas",
-    )
+    __slots__ = ("__connection", "__hypotheses", "__registries")
 
     def __init__(
         self,
@@ -703,21 +671,13 @@ class _EventHypothesisRelationshipReadAuthority:
         command_registry: CommandRegistry,
         payload_schemas: PayloadSchemaRegistry,
     ) -> None:
-        if (
-            token is not _READ_AUTHORITY_TOKEN
-            or type(connection) is not sqlite3.Connection
-            or type(hypotheses) is not _HypothesisStore
-            or hypotheses._connection is not connection
-            or type(command_registry) is not CommandRegistry
-            or type(payload_schemas) is not PayloadSchemaRegistry
-        ):
+        if token is not _READ_AUTHORITY_TOKEN or hypotheses._connection is not connection:
             raise RelationshipContractError(
                 "relationship read authority construction is private"
             )
         self.__connection = connection
         self.__hypotheses = hypotheses
-        self.__command_registry = command_registry
-        self.__payload_schemas = payload_schemas
+        self.__registries = (command_registry, payload_schemas)
 
     def __read[T](self, operation: Callable[[], T]) -> T:
         _require_checked_connection(self.__connection, active=True)
@@ -727,22 +687,25 @@ class _EventHypothesisRelationshipReadAuthority:
         finally:
             self.__hypotheses.release_active_transaction()
 
+    def __version[T](self, operation: Callable[[], T]) -> T:
+        def value() -> T:
+            with _transaction_hypothesis_rows(self.__connection):
+                return operation()
+
+        return self.__read(value)
+
     def require_retained_receipt_in_transaction(
         self, assessment_digest: str
     ) -> RetainedRelationshipDecisionReceipt:
         def value() -> RetainedRelationshipDecisionReceipt:
             _verify_relationship_reads_in_transaction(
-                self.__connection,
-                self.__hypotheses,
-                self.__command_registry,
-                self.__payload_schemas,
+                self.__connection, self.__hypotheses, *self.__registries
             )
             _verify_relationship_event_coverage(self.__connection)
             return _load_retained_relationship_receipt_in_transaction(
                 self.__connection,
                 self.__hypotheses,
-                self.__command_registry,
-                self.__payload_schemas,
+                *self.__registries,
                 assessment_digest,
             )
 
@@ -751,24 +714,18 @@ class _EventHypothesisRelationshipReadAuthority:
     def require_retained_version_in_transaction(
         self, version_id: str
     ) -> EventHypothesisVersion:
-        def value() -> EventHypothesisVersion:
-            with _transaction_hypothesis_rows(self.__connection):
-                return self.__hypotheses.require_retained_version_in_transaction(
-                    version_id
-                )
-
-        return self.__read(value)
+        return self.__version(
+            lambda: self.__hypotheses.require_retained_version_in_transaction(version_id)
+        )
 
     def require_current_version_in_transaction(
         self, version_id: str, *, proof: AuthenticationProof
     ) -> EventHypothesisVersion:
-        def value() -> EventHypothesisVersion:
-            with _transaction_hypothesis_rows(self.__connection):
-                return self.__hypotheses.require_current_version_in_transaction(
-                    version_id, proof=proof
-                )
-
-        return self.__read(value)
+        return self.__version(
+            lambda: self.__hypotheses.require_current_version_in_transaction(
+                version_id, proof=proof
+            )
+        )
 
 
 def _create_event_hypothesis_relationship_read_port(

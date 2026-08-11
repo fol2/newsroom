@@ -122,6 +122,13 @@ def _normalise[T](operation: object, message: str) -> T:
         raise RelationshipContractError(message) from exc
 
 
+def _normalise_exact[T](operation: object, message: str, expected: type[T]) -> T:
+    value = _normalise(operation, message)
+    if type(value) is not expected:
+        raise RelationshipContractError(f"{message}: forged value")
+    return value
+
+
 def _digest(value: object, field: str) -> str:
     if type(value) is not str or _DIGEST.fullmatch(value) is None:
         raise RelationshipContractError(f"{field} must be a canonical SHA-256 digest")
@@ -675,69 +682,59 @@ class RetainedRelationshipDecisionReceipt(_NoEffect):
             raise RelationshipContractError(
                 "retained relationship receipt requires the exact type"
             )
-        if (
-            type(self.assessment) is not RelationshipAssessment
-            or self.assessment.status is not AssessmentStatus.COMPLETE
-        ):
+        if type(self.assessment) is not RelationshipAssessment:
             raise RelationshipContractError(
                 "retained relationship receipt requires an exact complete assessment"
             )
-        if (
-            type(self.evidence) is not tuple
-            or len(self.evidence) > MAX_COMPARATORS
-            or any(type(item) is not ComparatorEvidence for item in self.evidence)
+        if type(self.evidence) is not tuple or len(self.evidence) > MAX_COMPARATORS or (
+            any(type(item) is not ComparatorEvidence for item in self.evidence)
         ):
             raise RelationshipContractError(
                 "retained relationship evidence must be a bounded exact tuple"
             )
 
-        canonical_assessment = RelationshipAssessment.from_canonical_bytes(
+        assessment = RelationshipAssessment.from_canonical_bytes(
             self.assessment.canonical_bytes
         )
-        canonical_evidence = tuple(
+        evidence = tuple(
             ComparatorEvidence.from_canonical_bytes(item.canonical_bytes)
             for item in self.evidence
         )
         if (
-            canonical_assessment != self.assessment
-            or canonical_evidence != self.evidence
+            assessment.status is not AssessmentStatus.COMPLETE
+            or type(self.assessment.score) is not type(assessment.score)
+            or type(self.assessment.evidence_digest)
+            is not type(assessment.evidence_digest)
+            or assessment != self.assessment
+            or evidence != self.evidence
         ):
             raise RelationshipContractError(
                 "retained relationship receipt values are not exact"
             )
-
-        evidence_ids = tuple(
-            item.comparator.version_id for item in canonical_evidence
-        )
+        evidence_ids = tuple(item.comparator.version_id for item in evidence)
         manifest_ids = tuple(
-            item.version_id
-            for item in canonical_assessment.comparator_manifest.comparators
+            item.version_id for item in assessment.comparator_manifest.comparators
         )
-        if (
-            evidence_ids != manifest_ids
-            or evidence_ids != tuple(sorted(set(evidence_ids)))
+        if evidence_ids != manifest_ids or evidence_ids != tuple(
+            sorted(set(evidence_ids))
         ):
             raise RelationshipContractError(
                 "retained relationship evidence is not complete canonical order"
             )
         evidence_bytes = _canonical(
-            [item.canonical_value for item in canonical_evidence],
+            [item.canonical_value for item in evidence],
             "retained relationship evidence set",
         )
-        if digest_bytes(evidence_bytes) != canonical_assessment.evidence_digest:
+        if digest_bytes(evidence_bytes) != assessment.evidence_digest:
             raise RelationshipContractError(
                 "retained relationship evidence-set identity differs"
             )
-
         replayed = assess_relationships(
-            canonical_assessment.subject,
-            canonical_assessment.comparator_manifest,
-            canonical_evidence,
+            assessment.subject, assessment.comparator_manifest, evidence
         )
-        if (
-            replayed != canonical_assessment
-            or replayed.canonical_bytes != canonical_assessment.canonical_bytes
-            or replayed.canonical_digest != canonical_assessment.canonical_digest
+        if replayed != assessment or (
+            replayed.canonical_bytes != assessment.canonical_bytes
+            or replayed.canonical_digest != assessment.canonical_digest
         ):
             raise RelationshipContractError(
                 "retained relationship policy replay differs"
@@ -778,15 +775,11 @@ class EventHypothesisRelationshipAuthority:
     ) -> RetainedRelationshipDecisionReceipt:
         """Read one verified historical receipt without a currentness claim."""
 
-        receipt = _normalise(
+        return _normalise_exact(
             lambda: self.__authority.load_retained_receipt(assessment_digest),
             "retained relationship receipt load failed",
+            RetainedRelationshipDecisionReceipt,
         )
-        if type(receipt) is not RetainedRelationshipDecisionReceipt:
-            raise RelationshipContractError(
-                "retained relationship receipt load returned a forged value"
-            )
-        return receipt
 
     def history(self) -> tuple[RelationshipAssessment, ...]:
         return _normalise(self.__authority.history, "relationship history failed")  # type: ignore[attr-defined,no-any-return]
@@ -871,47 +864,33 @@ class EventHypothesisRelationshipReadPort:
     def require_retained_receipt_in_transaction(
         self, assessment_digest: str
     ) -> RetainedRelationshipDecisionReceipt:
-        receipt = _normalise(
+        return _normalise_exact(
             lambda: self.__authority.require_retained_receipt_in_transaction(
                 assessment_digest
             ),
             "retained relationship receipt transaction read failed",
+            RetainedRelationshipDecisionReceipt,
         )
-        if type(receipt) is not RetainedRelationshipDecisionReceipt:
-            raise RelationshipContractError(
-                "retained relationship receipt transaction read returned a forged value"
-            )
-        return receipt
 
     def require_retained_version_in_transaction(
         self, version_id: str
     ) -> EventHypothesisVersion:
-        version = _normalise(
-            lambda: self.__authority.require_retained_version_in_transaction(
-                version_id
-            ),
+        return _normalise_exact(
+            lambda: self.__authority.require_retained_version_in_transaction(version_id),
             "retained Hypothesis Version transaction read failed",
+            EventHypothesisVersion,
         )
-        if type(version) is not EventHypothesisVersion:
-            raise RelationshipContractError(
-                "retained Hypothesis Version transaction read returned a forged value"
-            )
-        return version
 
     def require_current_version_in_transaction(
         self, version_id: str, *, proof: object
     ) -> EventHypothesisVersion:
-        version = _normalise(
+        return _normalise_exact(
             lambda: self.__authority.require_current_version_in_transaction(
                 version_id, proof=proof
             ),
             "current Hypothesis Version transaction read failed",
+            EventHypothesisVersion,
         )
-        if type(version) is not EventHypothesisVersion:
-            raise RelationshipContractError(
-                "current Hypothesis Version transaction read returned a forged value"
-            )
-        return version
 
 
 def _compose_event_hypothesis_relationship_read_port(

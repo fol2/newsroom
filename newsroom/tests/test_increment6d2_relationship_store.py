@@ -441,6 +441,28 @@ def test_retained_receipt_requires_exact_canonical_evidence_and_policy_replay(
     assert not receipt.authorises_persistence
     assert not receipt.creates_lineage
 
+    with pytest.raises(RelationshipContractError):
+        RetainedRelationshipDecisionReceipt(
+            object.__new__(RelationshipAssessment), ()
+        )
+
+    class SameInt(int):
+        pass
+
+    class SameStr(str):
+        pass
+
+    for field, value in (
+        ("score", SameInt(assessment.score)),
+        ("evidence_digest", SameStr(assessment.evidence_digest)),
+    ):
+        malformed = RelationshipAssessment.from_canonical_bytes(
+            assessment.canonical_bytes
+        )
+        object.__setattr__(malformed, field, value)
+        with pytest.raises(RelationshipContractError, match="not exact"):
+            RetainedRelationshipDecisionReceipt(malformed, evidence)
+
     with pytest.raises(RelationshipContractError, match="canonical order"):
         RetainedRelationshipDecisionReceipt(assessment, tuple(reversed(evidence)))
     with pytest.raises(RelationshipContractError, match="canonical order"):
