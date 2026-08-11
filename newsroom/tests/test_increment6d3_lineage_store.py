@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
+import scripts.sdlc.workflow_lane as sdlc_lane
 from newsroom.authority.auth import StaticAuthorizer
 from newsroom.authority.persistence import AuthoritySchemaError
 from newsroom.increment6.lineage import (
@@ -20,6 +22,8 @@ from newsroom.increment6.relationships import (
 )
 from newsroom.tests import test_increment6d2_relationship_store as d2
 from newsroom.tests import test_increment6d3_lineage as d3
+
+REPO_ROOT = Path(__file__).parents[2]
 
 
 def _seed(tmp_path):
@@ -545,11 +549,23 @@ def test_reversal_target_retarget_fails_closed(tmp_path) -> None:
         merge_relationship_authority_registries,
     )
 
-    seed, args, _ = _seed(tmp_path)
+    cached_seed = d2._SEED_CACHE
+    d2._SEED_CACHE = None
+    try:
+        seed = d2._seed_location(tmp_path / "reversal-store", subjects=3)
+    finally:
+        d2._SEED_CACHE = cached_seed
+    args = d2._open_arguments(seed)
+    args["authorizer"] = _seed_authorizer()
+    commands, schemas = merge_relationship_authority_registries(
+        args["command_registry"], args["payload_schemas"]
+    )
+    commands, schemas = merge_lineage_authority_registries(commands, schemas)
+    checked_args = {**args, "command_registry": commands, "payload_schemas": schemas}
     source = seed[3][0]
     outputs = (seed[3][1], seed[3][2])
     split_proofs = []
-    relationship = open_event_hypothesis_relationship_authority(**args)
+    relationship = open_event_hypothesis_relationship_authority(**checked_args)
     try:
         for output in outputs:
             comparators = tuple(
@@ -577,53 +593,50 @@ def test_reversal_target_retarget_fails_closed(tmp_path) -> None:
         outputs=outputs,
         relationship_proofs=tuple(split_proofs),
     )
-    authority = open_event_hypothesis_lineage_authority(**args)
-    authority.retain(split.canonical_bytes, proof=seed[0][3])
-    authority.close()
-
-    connection = sqlite3.connect(seed[1], isolation_level=None)
-    upstream = d2.hypothesis_helpers._open((connection, *seed[0][1:]))
-    proposal, dispositions = seed[7]["authority"]
-    try:
-        restored = upstream.retain(
-            proposal,
-            dispositions,
-            proof=seed[0][3],
-            expected_target_version=source,
-        )
-    finally:
-        upstream.close()
-        connection.close()
-
-    commands, schemas = merge_relationship_authority_registries(
-        args["command_registry"], args["payload_schemas"]
-    )
-    commands, schemas = merge_lineage_authority_registries(commands, schemas)
-    checked_args = {**args, "command_registry": commands, "payload_schemas": schemas}
-    comparators = tuple(sorted(outputs, key=lambda item: item.version_id))
-    assessment, evidence = d3._decision(
-        restored, comparators, CanonicalOutcome.REL_CORRECTION_REVERSAL_OF
-    )
-    relationship = open_event_hypothesis_relationship_authority(**checked_args)
-    try:
-        relationship.retain(
-            assessment.canonical_bytes,
-            tuple(item.canonical_bytes for item in evidence),
-            proof=seed[0][3],
-        )
-    finally:
-        relationship.close()
-    reversal = HypothesisLineageReceipt.reversal(
-        expected_generation=1,
-        target=split,
-        outputs=(restored,),
-        relationship_proofs=(
-            HypothesisLineageRelationshipProof.from_assessment(assessment, evidence),
-        ),
-    )
     authority = open_event_hypothesis_lineage_authority(**checked_args)
-    authority.retain(reversal.canonical_bytes, proof=seed[0][3])
-    authority.close()
+    try:
+        authority.retain(split.canonical_bytes, proof=seed[0][3])
+
+        connection = sqlite3.connect(seed[1], isolation_level=None)
+        upstream = d2.hypothesis_helpers._open((connection, *seed[0][1:]))
+        proposal, dispositions = seed[7]["authority"]
+        try:
+            restored = upstream.retain(
+                proposal,
+                dispositions,
+                proof=seed[0][3],
+                expected_target_version=source,
+            )
+        finally:
+            upstream.close()
+            connection.close()
+
+        comparators = tuple(sorted(outputs, key=lambda item: item.version_id))
+        assessment, evidence = d3._decision(
+            restored, comparators, CanonicalOutcome.REL_CORRECTION_REVERSAL_OF
+        )
+        relationship = d2._open_unlocked_relationship_authority_for_test(**checked_args)
+        try:
+            relationship.retain(
+                assessment.canonical_bytes,
+                tuple(item.canonical_bytes for item in evidence),
+                proof=seed[0][3],
+            )
+        finally:
+            relationship.close()
+        reversal = HypothesisLineageReceipt.reversal(
+            expected_generation=1,
+            target=split,
+            outputs=(restored,),
+            relationship_proofs=(
+                HypothesisLineageRelationshipProof.from_assessment(
+                    assessment, evidence
+                ),
+            ),
+        )
+        authority.retain(reversal.canonical_bytes, proof=seed[0][3])
+    finally:
+        authority.close()
 
     connection = sqlite3.connect(seed[1], isolation_level=None)
     connection.execute("PRAGMA foreign_keys=OFF")
@@ -700,8 +713,13 @@ def test_second_public_writer_fails_closed_until_first_closes(tmp_path) -> None:
 # #384 adapter: command-field encodings live in retained D2 evidence and every
 # observable record/history value is reconstructed through a real v23 receipt.
 import json
+import os
+import subprocess
+import sys
 import uuid
-from dataclasses import replace
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import ClassVar
 
@@ -712,7 +730,12 @@ from newsroom.increment6.relationships import (
     assess_relationships,
 )
 from newsroom.tests.authority_store_conformance import (
+    _CURRENT_USE_AUTHORITIES,
+    _HISTORICAL_TAMPERS,
+    _REPRESENTATION_TAMPERS,
+    _REQUEST_BINDING_FIELDS,
     _SCENARIOS,
+    _TAMPER_REJECTION_TAMPERS,
     CASE_INVENTORY,
     Applicability,
     AuthorityValue,
@@ -723,9 +746,84 @@ from newsroom.tests.authority_store_conformance import (
     StoredAuthorityState,
     TamperKind,
     WriteCommand,
+    _current_use_authority,
+    _exact_replay,
+    _fresh_reopen_digest,
+    _fresh_reopen_persistence,
+    _fresh_submission,
+    _historical_retained_operation,
+    _historical_tamper_operation,
+    _representation_retained,
+    _representation_tamper,
+    _request_binding_field,
+    _restart_or_migrate,
+    _rollback_kind,
+    _rollback_sequence,
+    _tamper_rejection_kind,
 )
 
 _CONFORMANCE_TEMPLATES: dict[tuple[str, ...], tuple[bytes, tuple]] = {}
+_CONFORMANCE_BASE_CAPACITY = 6
+_CONFORMANCE_BASE_SNAPSHOT: tuple[bytes, tuple] | None = None
+_XDIST_SHARED_CACHE_ACTIVE = False
+_SHARED_CONFORMANCE_TEMPLATE_KEYS = (
+    ("record-1",),
+    ("record-1", "record-2"),
+    ("record-1", "record-b"),
+    ("record-a", "record-b"),
+    ("record-rollback-normal", "record-rollback-abort"),
+)
+_CONFORMANCE_RECORDS_BY_CASE = {
+    CaseId.HISTORICAL_READ: ("record-1", "record-2"),
+    CaseId.COMPETING_WRITERS: ("record-a", "record-b"),
+    CaseId.TRANSACTION_ROLLBACK: (
+        "record-rollback-normal",
+        "record-rollback-abort",
+    ),
+    CaseId.TAMPER_REJECTION: ("record-1", "record-b"),
+}
+
+
+def _records_for_conformance_case(case: CaseId) -> tuple[str, ...]:
+    return _CONFORMANCE_RECORDS_BY_CASE.get(case, ("record-1",))
+
+
+def _validated_template_subset(
+    template_keys: object,
+) -> tuple[tuple[str, ...], ...]:
+    if not isinstance(template_keys, tuple) or not template_keys:
+        raise ValueError("d3 shared cache template subset")
+    if any(not isinstance(key, tuple) for key in template_keys):
+        raise ValueError("d3 shared cache template subset")
+    expected = tuple(
+        key for key in _SHARED_CONFORMANCE_TEMPLATE_KEYS if key in template_keys
+    )
+    if expected != template_keys or len(expected) != len(set(expected)):
+        raise ValueError("d3 shared cache template subset")
+    return expected
+
+
+def _clone_conformance_base(root: Path) -> tuple:
+    global _CONFORMANCE_BASE_SNAPSHOT
+    if _CONFORMANCE_BASE_SNAPSHOT is None:
+        d2._SEED_CACHE = None
+        build_root = root.parent / f"base-{uuid.uuid4()}"
+        seed = d2._seed_location(
+            build_root,
+            subjects=_CONFORMANCE_BASE_CAPACITY,
+        )
+        assert len(seed[3]) == _CONFORMANCE_BASE_CAPACITY
+        connection = sqlite3.connect(seed[1], isolation_level=None)
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        connection.close()
+        _CONFORMANCE_BASE_SNAPSHOT = (seed[1].read_bytes(), seed)
+    payload, template_seed = _CONFORMANCE_BASE_SNAPSHOT
+    assert len(template_seed[3]) == _CONFORMANCE_BASE_CAPACITY
+    root.mkdir(mode=0o700)
+    database = root / "relationship-authority.sqlite3"
+    database.write_bytes(payload)
+    database.chmod(0o600)
+    return (template_seed[0], database, *template_seed[2:])
 
 
 class _ConformanceLocation:
@@ -766,6 +864,118 @@ def _seed_conformance_relationships(location: _ConformanceLocation) -> None:
             )
     finally:
         relationship.close()
+
+
+def _build_conformance_template(root: Path, records: tuple[str, ...]):
+    location = _ConformanceLocation(_clone_conformance_base(root), records)
+    _seed_conformance_relationships(location)
+    connection = sqlite3.connect(location.seed[1], isolation_level=None)
+    assert connection.execute(
+        "SELECT COUNT(*) FROM event_hypothesis_relationship_decisions"
+    ).fetchone() == (len(records),)
+    assert connection.execute(
+        "SELECT COUNT(*) FROM event_hypothesis_lineage"
+    ).fetchone() == (0,)
+    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    connection.close()
+    return (location.seed[1].read_bytes(), location.seed)
+
+
+def _prepare_shared_conformance_cache(
+    artifact_root: Path,
+    template_keys: tuple[tuple[str, ...], ...],
+) -> dict[str, object]:
+    global _CONFORMANCE_BASE_SNAPSHOT
+    selected = _validated_template_subset(template_keys)
+    artifact_root.mkdir(mode=0o700, exist_ok=True)
+    d2._SEED_CACHE = None
+    _CONFORMANCE_BASE_SNAPSHOT = None
+    _CONFORMANCE_TEMPLATES.clear()
+    _clone_conformance_base(artifact_root / "base-clone")
+    for index, records in enumerate(selected):
+        _CONFORMANCE_TEMPLATES[records] = _build_conformance_template(
+            artifact_root / f"template-{index}", records
+        )
+    return {
+        "artifact_root": artifact_root,
+        "capacity": _CONFORMANCE_BASE_CAPACITY,
+        "template_keys": selected,
+        "d2_seed_cache": d2._SEED_CACHE,
+        "base_snapshot": _CONFORMANCE_BASE_SNAPSHOT,
+        "templates": dict(_CONFORMANCE_TEMPLATES),
+    }
+
+
+def _install_shared_conformance_cache(
+    bundle: object,
+    *,
+    expected_template_keys: tuple[tuple[str, ...], ...],
+    hydrate_root: Path | None = None,
+) -> None:
+    global _CONFORMANCE_BASE_SNAPSHOT, _XDIST_SHARED_CACHE_ACTIVE
+    selected = _validated_template_subset(expected_template_keys)
+    if not isinstance(bundle, dict):
+        raise TypeError("d3 shared cache bundle")
+    if set(bundle) != {
+        "artifact_root",
+        "base_snapshot",
+        "capacity",
+        "d2_seed_cache",
+        "template_keys",
+        "templates",
+    }:
+        raise ValueError("d3 shared cache bundle fields")
+    if bundle.get("capacity") != _CONFORMANCE_BASE_CAPACITY:
+        raise ValueError("d3 shared cache capacity")
+    if bundle.get("template_keys") != selected:
+        raise ValueError("d3 shared cache template keys")
+    seed_cache = bundle.get("d2_seed_cache")
+    base_snapshot = bundle.get("base_snapshot")
+    templates = bundle.get("templates")
+    artifact_root = bundle.get("artifact_root")
+    if not isinstance(artifact_root, Path) or not artifact_root.is_absolute():
+        raise ValueError("d3 shared cache artifact root")
+    if not isinstance(seed_cache, tuple) or len(seed_cache) != 8:
+        raise ValueError("d3 shared cache seed")
+    if len(seed_cache[3]) != _CONFORMANCE_BASE_CAPACITY:
+        raise ValueError("d3 shared cache seed capacity")
+    if not isinstance(base_snapshot, tuple) or len(base_snapshot) != 2:
+        raise ValueError("d3 shared cache base snapshot")
+    if len(base_snapshot[1][3]) != _CONFORMANCE_BASE_CAPACITY:
+        raise ValueError("d3 shared cache base capacity")
+    if not isinstance(templates, dict) or tuple(templates) != selected:
+        raise ValueError("d3 shared cache templates")
+    for records, template in templates.items():
+        if (
+            records not in selected
+            or not isinstance(template, tuple)
+            or len(template) != 2
+            or not isinstance(template[0], bytes)
+            or len(template[1][3]) != _CONFORMANCE_BASE_CAPACITY
+        ):
+            raise ValueError("d3 shared cache template")
+    seeds = (base_snapshot[1], *(template[1] for template in templates.values()))
+    paths = [seed[1] for seed in seeds]
+    retrieval = seed_cache[1][1]
+    paths.append(retrieval._path)
+    if any(
+        not isinstance(path, Path)
+        or not path.is_absolute()
+        or not path.is_relative_to(artifact_root)
+        for path in paths
+    ):
+        raise ValueError("d3 shared cache ancillary path")
+    if hydrate_root is not None:
+        hydrate_root.mkdir(mode=0o700)
+        hydrated_retrieval = hydrate_root / retrieval._path.name
+        hydrated_retrieval.write_bytes(retrieval._path.read_bytes())
+        hydrated_retrieval.chmod(0o600)
+        retrieval._path = hydrated_retrieval
+    d2._SEED_CACHE = seed_cache
+    _CONFORMANCE_BASE_SNAPSHOT = base_snapshot
+    _CONFORMANCE_TEMPLATES.clear()
+    _CONFORMANCE_TEMPLATES.update(templates)
+    _XDIST_SHARED_CACHE_ACTIVE = hydrate_root is not None
 
 
 def _conformance_domain(location: _ConformanceLocation, command: WriteCommand):
@@ -1144,6 +1354,17 @@ def _seed_authorizer():
     )
 
 
+def _conformance_template(root: Path, records: tuple[str, ...]) -> tuple[bytes, tuple]:
+    template = _CONFORMANCE_TEMPLATES.get(records)
+    if template is not None:
+        return template
+    if _XDIST_SHARED_CACHE_ACTIVE:
+        raise ValueError("xdist d3 shared cache template miss")
+    template = _build_conformance_template(root, records)
+    _CONFORMANCE_TEMPLATES[records] = template
+    return template
+
+
 class _LineageAdapter:
     name = "lineage-v23-real"
     applicability: ClassVar = {
@@ -1152,47 +1373,19 @@ class _LineageAdapter:
 
     def __init__(self, root: Path, case: CaseId) -> None:
         self.root = root
-        self.records = {
-            CaseId.HISTORICAL_READ: ("record-1", "record-2"),
-            CaseId.COMPETING_WRITERS: ("record-a", "record-b"),
-            CaseId.TRANSACTION_ROLLBACK: (
-                "record-rollback-normal",
-                "record-rollback-abort",
-            ),
-            CaseId.TAMPER_REJECTION: ("record-1", "record-b"),
-        }.get(case, ("record-1",))
+        self.records = _records_for_conformance_case(case)
 
     def create_location(self):
-        template = _CONFORMANCE_TEMPLATES.get(self.records)
-        if template is None:
-            d2._SEED_CACHE = None
-            subjects = len(self.records) + (4 if "record-2" in self.records else 2)
-            location = _ConformanceLocation(
-                d2._seed_location(self.root / str(uuid.uuid4()), subjects=subjects),
-                self.records,
-            )
-            _seed_conformance_relationships(location)
-            connection = sqlite3.connect(location.seed[1], isolation_level=None)
-            assert connection.execute(
-                "SELECT COUNT(*) FROM event_hypothesis_relationship_decisions"
-            ).fetchone() == (len(self.records),)
-            assert connection.execute(
-                "SELECT COUNT(*) FROM event_hypothesis_lineage"
-            ).fetchone() == (0,)
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            connection.close()
-            template = (location.seed[1].read_bytes(), location.seed)
-            _CONFORMANCE_TEMPLATES[self.records] = template
-        else:
-            root = self.root / str(uuid.uuid4())
-            root.mkdir(mode=0o700)
-            database = root / "relationship-authority.sqlite3"
-            database.write_bytes(template[0])
-            database.chmod(0o600)
-            template_seed = template[1]
-            location = _ConformanceLocation(
-                (template_seed[0], database, *template_seed[2:]), self.records
-            )
+        template = _conformance_template(self.root / str(uuid.uuid4()), self.records)
+        root = self.root / str(uuid.uuid4())
+        root.mkdir(mode=0o700)
+        database = root / "relationship-authority.sqlite3"
+        database.write_bytes(template[0])
+        database.chmod(0o600)
+        template_seed = template[1]
+        location = _ConformanceLocation(
+            (template_seed[0], database, *template_seed[2:]), self.records
+        )
         return location
 
     def open_handle(self, location, *, migrate: bool = False):
@@ -1217,8 +1410,532 @@ class _LineageAdapter:
         return _ConformanceHandle(location)
 
 
-@pytest.mark.parametrize("case", CASE_INVENTORY, ids=lambda case: case.value)
-def test_real_v23_store_passes_required_conformance_case(tmp_path, case) -> None:
-    adapter = _LineageAdapter(tmp_path, case)
-    assert adapter.applicability[case] == Applicability.required()
-    _SCENARIOS[case](adapter)
+@dataclass(frozen=True)
+class _ConformanceProbe:
+    probe_id: str
+    case: CaseId
+    operation: Callable[[object], None]
+
+
+_CONFORMANCE_PROBES = (
+    _ConformanceProbe(
+        "fresh_replay-submission",
+        CaseId.FRESH_REPLAY,
+        _fresh_submission,
+    ),
+    _ConformanceProbe(
+        "fresh_replay-replay",
+        CaseId.FRESH_REPLAY,
+        _exact_replay,
+    ),
+    _ConformanceProbe(
+        "fresh_reopen-persistence",
+        CaseId.FRESH_REOPEN,
+        _fresh_reopen_persistence,
+    ),
+    _ConformanceProbe(
+        "fresh_reopen-digest",
+        CaseId.FRESH_REOPEN,
+        _fresh_reopen_digest,
+    ),
+    _ConformanceProbe(
+        "representation_binding-retained",
+        CaseId.REPRESENTATION_BINDING,
+        _representation_retained,
+    ),
+    *(
+        _ConformanceProbe(
+            f"representation_binding-{kind.value}",
+            CaseId.REPRESENTATION_BINDING,
+            partial(_representation_tamper, kind=kind),
+        )
+        for kind in _REPRESENTATION_TAMPERS
+    ),
+    *(
+        _ConformanceProbe(
+            f"request_binding-{field_name}",
+            CaseId.REQUEST_BINDING,
+            partial(_request_binding_field, field_name=field_name),
+        )
+        for field_name in _REQUEST_BINDING_FIELDS
+    ),
+    _ConformanceProbe(
+        CaseId.LOST_RESPONSE_REPLAY.value,
+        CaseId.LOST_RESPONSE_REPLAY,
+        _SCENARIOS[CaseId.LOST_RESPONSE_REPLAY],
+    ),
+    *(
+        _ConformanceProbe(
+            f"historical_read-{kind.value}-{phase}-{noun}",
+            CaseId.HISTORICAL_READ,
+            partial(
+                _historical_tamper_operation,
+                kind=kind,
+                reopened=reopened,
+                listing=listing,
+            ),
+        )
+        for kind in _HISTORICAL_TAMPERS
+        for phase, reopened in (("fresh", False), ("reopened", True))
+        for noun, listing in (
+            ("read", False),
+            ("list", True),
+        )
+    ),
+    *(
+        _ConformanceProbe(
+            f"historical_read-retained-{noun}",
+            CaseId.HISTORICAL_READ,
+            partial(_historical_retained_operation, listing=listing),
+        )
+        for noun, listing in (("read", False), ("list", True))
+    ),
+    *(
+        _ConformanceProbe(
+            f"current_use_revalidation-{authority}",
+            CaseId.CURRENT_USE_REVALIDATION,
+            partial(_current_use_authority, authority=authority),
+        )
+        for authority in _CURRENT_USE_AUTHORITIES
+    ),
+    *(
+        _ConformanceProbe(
+            f"tamper_rejection-{kind.value}",
+            CaseId.TAMPER_REJECTION,
+            partial(_tamper_rejection_kind, kind=kind),
+        )
+        for kind in _TAMPER_REJECTION_TAMPERS
+    ),
+    _ConformanceProbe(
+        CaseId.COMPETING_WRITERS.value,
+        CaseId.COMPETING_WRITERS,
+        _SCENARIOS[CaseId.COMPETING_WRITERS],
+    ),
+    *(
+        _ConformanceProbe(
+            f"transaction_rollback-{label}",
+            CaseId.TRANSACTION_ROLLBACK,
+            operation,
+        )
+        for label, operation in (
+            ("normal", partial(_rollback_kind, abort=False)),
+            ("abort", _rollback_sequence),
+        )
+    ),
+    _ConformanceProbe(
+        "restart_migration-restart",
+        CaseId.RESTART_MIGRATION,
+        partial(_restart_or_migrate, migrate=False),
+    ),
+    _ConformanceProbe(
+        "restart_migration-migrate",
+        CaseId.RESTART_MIGRATION,
+        partial(_restart_or_migrate, migrate=True),
+    ),
+)
+
+
+def _selected_shared_template_keys(
+    arguments: tuple[str, ...],
+) -> tuple[tuple[str, ...], ...]:
+    probe_function = "test_real_v23_store_passes_required_conformance_probe"
+    probes = {probe.probe_id: probe for probe in _CONFORMANCE_PROBES}
+    selected_cases: set[CaseId] = set()
+    conservative = False
+    saw_d3 = False
+    for argument in arguments:
+        if "test_increment6d3_lineage_store.py" not in argument:
+            continue
+        saw_d3 = True
+        tail = argument.split("test_increment6d3_lineage_store.py", 1)[1]
+        if not tail.startswith("::"):
+            conservative = True
+            continue
+        node = tail[2:]
+        if not node.startswith(probe_function):
+            continue
+        suffix = node[len(probe_function) :]
+        if not suffix:
+            conservative = True
+            continue
+        if not suffix.startswith("[") or not suffix.endswith("]"):
+            raise ValueError("unknown exact d3 conformance probe")
+        probe_id = suffix[1:-1]
+        probe = probes.get(probe_id)
+        if probe is None:
+            raise ValueError("unknown exact d3 conformance probe")
+        selected_cases.add(probe.case)
+    if not saw_d3:
+        raise ValueError("d3 conformance selection missing")
+    if conservative or not selected_cases:
+        return _SHARED_CONFORMANCE_TEMPLATE_KEYS
+    required = {_records_for_conformance_case(case) for case in selected_cases}
+    selected = tuple(
+        key for key in _SHARED_CONFORMANCE_TEMPLATE_KEYS if key in required
+    )
+    return _validated_template_subset(selected)
+
+
+_EXPECTED_PROBE_IDS = frozenset(
+    {
+        "fresh_replay-submission",
+        "fresh_replay-replay",
+        "fresh_reopen-persistence",
+        "fresh_reopen-digest",
+        "representation_binding-retained",
+        "representation_binding-scalar",
+        "representation_binding-canonical",
+        "representation_binding-identity",
+        "representation_binding-linked_row",
+        "request_binding-actor",
+        "request_binding-request",
+        "request_binding-idempotency",
+        "request_binding-cas_predecessor",
+        "lost_response_replay",
+        "historical_read-retained-read",
+        "historical_read-retained-list",
+        "historical_read-identity-fresh-read",
+        "historical_read-identity-fresh-list",
+        "historical_read-identity-reopened-read",
+        "historical_read-identity-reopened-list",
+        "historical_read-digest-fresh-read",
+        "historical_read-digest-fresh-list",
+        "historical_read-digest-reopened-read",
+        "historical_read-digest-reopened-list",
+        "historical_read-provenance-fresh-read",
+        "historical_read-provenance-fresh-list",
+        "historical_read-provenance-reopened-read",
+        "historical_read-provenance-reopened-list",
+        "current_use_revalidation-authority",
+        "current_use_revalidation-policy",
+        "tamper_rejection-canonical",
+        "tamper_rejection-linked_row",
+        "tamper_rejection-offline_rewrite",
+        "competing_writers",
+        "transaction_rollback-normal",
+        "transaction_rollback-abort",
+        "restart_migration-restart",
+        "restart_migration-migrate",
+    }
+)
+
+
+def test_real_v23_conformance_probe_inventory_is_exact_and_unique() -> None:
+    probe_ids = tuple(probe.probe_id for probe in _CONFORMANCE_PROBES)
+    assert len(probe_ids) == len(set(probe_ids))
+    assert frozenset(probe_ids) == _EXPECTED_PROBE_IDS
+    assert {probe.case for probe in _CONFORMANCE_PROBES} == set(CASE_INVENTORY)
+
+
+def test_real_v23_conformance_base_is_immutable_max_capacity(tmp_path) -> None:
+    first = _clone_conformance_base(tmp_path / "first")
+    assert _CONFORMANCE_BASE_SNAPSHOT is not None
+    payload, template_seed = _CONFORMANCE_BASE_SNAPSHOT
+    assert len(first[3]) == _CONFORMANCE_BASE_CAPACITY == 6
+    assert len(template_seed[3]) == _CONFORMANCE_BASE_CAPACITY
+
+    first[1].write_bytes(b"local clone mutation")
+    second = _clone_conformance_base(tmp_path / "second")
+    assert second[1] != first[1]
+    assert second[1].read_bytes() == payload
+    assert len(second[3]) == _CONFORMANCE_BASE_CAPACITY
+
+
+class _FakeSharedD3:
+    def __init__(self, marker: Path) -> None:
+        self.marker = marker
+        self.installed: list[object] = []
+
+    def _prepare_shared_conformance_cache(
+        self, artifact: Path, template_keys: tuple[tuple[str, ...], ...]
+    ) -> dict[str, object]:
+        with self.marker.open("ab") as stream:
+            stream.write(b"x")
+        ancillary = artifact / "context.sqlite"
+        ancillary.write_bytes(b"context")
+        return {"fake": 1, "template_keys": template_keys}
+
+    def _install_shared_conformance_cache(
+        self,
+        bundle: object,
+        *,
+        expected_template_keys: tuple[tuple[str, ...], ...],
+        hydrate_root: Path | None = None,
+    ) -> None:
+        assert bundle == {"fake": 1, "template_keys": expected_template_keys}
+        assert hydrate_root is None
+        self.installed.append(bundle)
+
+
+def test_d3_shared_cache_has_one_producer_across_four_processes(tmp_path) -> None:
+    root = tmp_path / "shared"
+    marker = tmp_path / "producers"
+    script = """
+from pathlib import Path
+import sys
+from newsroom.tests import conftest as cache
+
+class Fake:
+    def _prepare_shared_conformance_cache(self, artifact, template_keys):
+        with Path(sys.argv[3]).open("ab") as stream:
+            stream.write(b"x")
+        (artifact / "context.sqlite").write_bytes(b"context")
+        return {"fake": 1, "template_keys": template_keys}
+    def _install_shared_conformance_cache(self, bundle, *, expected_template_keys):
+        assert bundle == {"fake": 1, "template_keys": expected_template_keys}
+
+cache._ensure_d3_cache(Path(sys.argv[1]), sys.argv[2], Fake())
+"""
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                script,
+                os.fspath(root),
+                "run-shared",
+                os.fspath(marker),
+            ]
+        )
+        for _ in range(4)
+    ]
+    assert [process.wait(timeout=30) for process in processes] == [0, 0, 0, 0]
+    assert marker.read_bytes() == b"x"
+    assert len(tuple(root.glob("artifact-*"))) == 1
+
+
+def test_d3_shared_cache_run_uid_isolation_and_incomplete_stage_rebuild(
+    tmp_path,
+) -> None:
+    from newsroom.tests import conftest as cache
+
+    marker = tmp_path / "producers"
+    first_root = tmp_path / "run-one"
+    first_root.mkdir(mode=0o700)
+    partial = first_root / "bundle-incomplete.stage"
+    partial.write_bytes(b"partial")
+    partial.chmod(0o600)
+    cache._ensure_d3_cache(first_root, "run-one", _FakeSharedD3(marker))
+    second_root = tmp_path / "run-two"
+    cache._ensure_d3_cache(second_root, "run-two", _FakeSharedD3(marker))
+
+    assert marker.read_bytes() == b"xx"
+    assert (first_root / "manifest.json").is_file()
+    assert (second_root / "manifest.json").is_file()
+    assert first_root != second_root
+
+
+def _bound_or_collected_core_inventory() -> tuple[str, ...]:
+    inventory_path = os.environ.get(sdlc_lane._CORE_NODE_INVENTORY_PATH_ENV)
+    inventory_digest = os.environ.get(sdlc_lane._CORE_NODE_INVENTORY_DIGEST_ENV)
+    if (inventory_path is None) != (inventory_digest is None):
+        raise ValueError("incomplete bound core inventory")
+    return (
+        sdlc_lane._collect_core_node_ids(REPO_ROOT)
+        if inventory_path is None
+        else sdlc_lane._load_core_node_inventory(
+            REPO_ROOT, inventory_path, inventory_digest
+        )
+    )
+
+
+def test_ten_core_shard_probe_selections_derive_exact_template_subsets() -> None:
+    prefix = (
+        "newsroom/tests/test_increment6d3_lineage_store.py::"
+        "test_real_v23_store_passes_required_conformance_probe"
+    )
+    inventory = _bound_or_collected_core_inventory()
+    shards = sdlc_lane._core_node_shards(inventory)
+    probe_ids_by_shard = tuple(
+        tuple(
+            node_id[len(prefix) + 1 : -1]
+            for node_id in shard
+            if node_id.startswith(f"{prefix}[")
+        )
+        for shard in shards
+    )
+    flattened = tuple(probe_id for shard in probe_ids_by_shard for probe_id in shard)
+    assert len(flattened) == len(set(flattened))
+    assert frozenset(flattened) == _EXPECTED_PROBE_IDS
+
+    probes = {probe.probe_id: probe for probe in _CONFORMANCE_PROBES}
+    records_by_case = {
+        CaseId.HISTORICAL_READ: ("record-1", "record-2"),
+        CaseId.COMPETING_WRITERS: ("record-a", "record-b"),
+        CaseId.TRANSACTION_ROLLBACK: (
+            "record-rollback-normal",
+            "record-rollback-abort",
+        ),
+        CaseId.TAMPER_REJECTION: ("record-1", "record-b"),
+    }
+    selected = tuple(_selected_shared_template_keys(tuple(shard)) for shard in shards)
+    expected = tuple(
+        tuple(
+            key
+            for key in _SHARED_CONFORMANCE_TEMPLATE_KEYS
+            if key
+            in {
+                records_by_case.get(probes[probe_id].case, ("record-1",))
+                for probe_id in probe_ids
+            }
+        )
+        if probe_ids
+        else _SHARED_CONFORMANCE_TEMPLATE_KEYS
+        for probe_ids in probe_ids_by_shard
+    )
+    assert selected == expected
+
+
+def test_whole_module_selection_is_conservative_and_unknown_probe_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = "newsroom/tests/test_increment6d3_lineage_store.py"
+    assert _selected_shared_template_keys((module,)) == (
+        _SHARED_CONFORMANCE_TEMPLATE_KEYS
+    )
+    probe = "test_real_v23_store_passes_required_conformance_probe"
+    with pytest.raises(ValueError, match="unknown exact d3 conformance probe"):
+        _selected_shared_template_keys((f"{module}::{probe}[unknown-probe]",))
+
+    monkeypatch.setenv(
+        sdlc_lane._CORE_NODE_INVENTORY_PATH_ENV,
+        os.fspath(tmp_path / "missing.json"),
+    )
+    monkeypatch.delenv(sdlc_lane._CORE_NODE_INVENTORY_DIGEST_ENV, raising=False)
+    with pytest.raises(ValueError, match="incomplete bound core inventory"):
+        _bound_or_collected_core_inventory()
+
+
+@pytest.mark.parametrize(
+    "template_keys",
+    (
+        (),
+        (("record-1",), ("record-1",)),
+        (("record-1", "record-2"), ("record-1",)),
+        (("record-unknown",),),
+        (*_SHARED_CONFORMANCE_TEMPLATE_KEYS, ("record-unknown",)),
+    ),
+    ids=("missing", "duplicate", "reordered", "unknown", "superset"),
+)
+def test_d3_template_subset_contract_fails_closed(template_keys) -> None:
+    with pytest.raises(ValueError, match="d3 shared cache template subset"):
+        _validated_template_subset(template_keys)
+
+
+def test_expected_template_subset_mismatch_fails_before_unpickle(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.tests import conftest as cache
+
+    root = tmp_path / "mismatch"
+    selected = (("record-1",),)
+    cache._ensure_d3_cache(
+        root,
+        "run-mismatch",
+        _FakeSharedD3(tmp_path / "producer-mismatch"),
+        template_keys=selected,
+    )
+    monkeypatch.setattr(
+        cache.pickle,
+        "loads",
+        lambda _: (_ for _ in ()).throw(AssertionError("unpickle called")),
+    )
+    with pytest.raises(ValueError, match="d3 cache manifest contract"):
+        cache._load_d3_cache(root, (("record-1", "record-2"),))
+
+
+def test_xdist_template_miss_fails_closed_and_serial_miss_builds(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = sys.modules[__name__]
+    records = ("record-1",)
+    monkeypatch.setattr(module, "_CONFORMANCE_TEMPLATES", {})
+    monkeypatch.setattr(module, "_XDIST_SHARED_CACHE_ACTIVE", True)
+    with pytest.raises(ValueError, match="xdist d3 shared cache template miss"):
+        _conformance_template(tmp_path / "xdist", records)
+
+    expected = (b"template", ("seed",))
+    monkeypatch.setattr(module, "_XDIST_SHARED_CACHE_ACTIVE", False)
+    monkeypatch.setattr(module, "_build_conformance_template", lambda *_: expected)
+    assert _conformance_template(tmp_path / "serial", records) == expected
+    assert _CONFORMANCE_TEMPLATES == {records: expected}
+
+
+@pytest.mark.parametrize(
+    "corruption", ("digest", "mode", "symlink", "capacity", "template")
+)
+def test_published_d3_shared_cache_corruption_fails_closed(
+    tmp_path, corruption: str
+) -> None:
+    from newsroom.tests import conftest as cache
+
+    root = tmp_path / corruption
+    marker = tmp_path / f"producer-{corruption}"
+    fake = _FakeSharedD3(marker)
+    cache._ensure_d3_cache(root, f"run-{corruption}", fake)
+    bundle = root / "bundle.pickle"
+    manifest_path = root / "manifest.json"
+    if corruption == "digest":
+        bundle.write_bytes(bundle.read_bytes() + b"tamper")
+    elif corruption == "mode":
+        bundle.chmod(0o644)
+    elif corruption == "symlink":
+        target = tmp_path / "symlink-target"
+        target.write_bytes(bundle.read_bytes())
+        target.chmod(0o600)
+        bundle.unlink()
+        bundle.symlink_to(target)
+    else:
+        manifest = json.loads(manifest_path.read_bytes())
+        if corruption == "capacity":
+            manifest["capacity"] = 5
+        else:
+            manifest["template_keys"] = [["record-corrupt"]]
+        manifest_path.write_bytes(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        manifest_path.chmod(0o600)
+    with pytest.raises(ValueError, match="d3 cache|unsafe d3 cache"):
+        cache._ensure_d3_cache(root, f"run-{corruption}", fake)
+    assert marker.read_bytes() == b"x"
+
+
+@pytest.mark.parametrize("corruption", ("capacity", "keys", "templates"))
+def test_d3_shared_bundle_contract_corruption_fails_closed(
+    tmp_path, corruption: str
+) -> None:
+    _clone_conformance_base(tmp_path / "base")
+    assert d2._SEED_CACHE is not None
+    assert _CONFORMANCE_BASE_SNAPSHOT is not None
+    template = _CONFORMANCE_BASE_SNAPSHOT
+    bundle = {
+        "artifact_root": tmp_path,
+        "capacity": _CONFORMANCE_BASE_CAPACITY,
+        "template_keys": _SHARED_CONFORMANCE_TEMPLATE_KEYS,
+        "d2_seed_cache": d2._SEED_CACHE,
+        "base_snapshot": _CONFORMANCE_BASE_SNAPSHOT,
+        "templates": {
+            records: template for records in _SHARED_CONFORMANCE_TEMPLATE_KEYS
+        },
+    }
+    if corruption == "capacity":
+        bundle["capacity"] = 5
+    elif corruption == "keys":
+        bundle["template_keys"] = (("record-corrupt",),)
+    else:
+        bundle["templates"] = {("record-corrupt",): template}
+    with pytest.raises(ValueError, match="d3 shared cache"):
+        _install_shared_conformance_cache(
+            bundle, expected_template_keys=_SHARED_CONFORMANCE_TEMPLATE_KEYS
+        )
+
+
+@pytest.mark.parametrize(
+    "probe",
+    _CONFORMANCE_PROBES,
+    ids=lambda probe: probe.probe_id,
+)
+def test_real_v23_store_passes_required_conformance_probe(tmp_path, probe) -> None:
+    adapter = _LineageAdapter(tmp_path, probe.case)
+    assert adapter.applicability[probe.case] == Applicability.required()
+    probe.operation(adapter)

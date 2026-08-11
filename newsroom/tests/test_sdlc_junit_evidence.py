@@ -173,7 +173,16 @@ def test_normalized_duplicate_report_path_is_rejected(tmp_path: Path) -> None:
         summarize_junit(tmp_path, ("results.xml", "./results.xml"))
 
 
-@pytest.mark.parametrize("duration", ["-1", "NaN", "Infinity", "60.001", "1e999999"])
+def test_testcase_at_ninety_second_boundary_is_accepted(tmp_path: Path) -> None:
+    _write(tmp_path, "results.xml", _suite(_case("boundary", time="90")))
+
+    summary = summarize_junit(tmp_path, ("results.xml",))
+
+    assert summary.test_count == 1
+    assert summary.duration_ms == 90_000
+
+
+@pytest.mark.parametrize("duration", ["-1", "NaN", "Infinity", "90.001", "1e999999"])
 def test_invalid_or_oversized_duration_is_rejected(
     tmp_path: Path,
     duration: str,

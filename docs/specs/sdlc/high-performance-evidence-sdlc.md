@@ -1,15 +1,15 @@
 # High-performance evidence SDLC
 
 - Role: Normative target specification
-- Status: Accepted — amended by the owner on 2026-08-10
+- Status: Accepted — amended by the owner on 2026-08-11
 - Owner: fol2
 - Canonical language: English
 - Date: 2026-07-21
 - Specification ID: `SDLC-V2`
-- Contract version: `sdlc-v2.5`
+- Contract version: `sdlc-v2.6`
 - Related issue: #98
 - Related active product work: #96 / PR #97
-- Current owner amendment: `docs/specs/sdlc/2026-08-10-sdlc-v2.5-core-sharding-amendment.md`
+- Current owner amendment: `docs/specs/sdlc/2026-08-11-sdlc-v2.6-measured-core-budget-amendment.md`
 
 ## 1. Decision
 
@@ -17,14 +17,14 @@ Newsroom will replace increment-by-increment CI accumulation with an evidence-or
 
 A machine gate is a bounded decision over an exact change, environment and evidence contract. It either produces a reproducible typed decision inside its budget or fails closed. Its timeout does not grow whenever repository scope grows.
 
-The normal pull-request path has one always-reporting decision workflow with parallel source-integrity, four-way deterministic-core and conditional service work:
+The normal pull-request path has one always-reporting decision workflow with parallel source-integrity, ten-way deterministic-core and conditional service work:
 
-1. a core topology for routing, concurrent source integrity and four deterministic repository-test shards, followed by one canonical reducer;
+1. a core topology for routing, concurrent source integrity and ten deterministic repository-test shards, followed by one canonical reducer;
 2. a Neo4j service lane when the exact change affects the graph adapter, projection-authority integration, graph migrations, service compatibility, credentials, workflow service setup or qualifying GraphRAG behaviour.
 
 One decision-validated exact-head SDLC core receipt is the canonical complete deterministic evidence. Pull-request and merge-queue core/decision receipts are content-addressed, transport-verified evidence-only artifacts, not signed attestations. The isolated signed-closeout job remains limited to exact-main, service-required manual runs and supplies the Tier-M attestation. Fast CI and manually dispatched legacy diagnostics are compatibility signals only; Tier S adds only the affected lanes selected by the route. The change has one feature-complete stop and one review at that stop.
 
-The complete deterministic inventory remains blocking. Its stable node-ID inventory is divided into four complete, duplicate-free balanced shards because a single runner no longer fits the unchanged 220-second envelope. Test-impact analysis remains in observe mode and cannot replace this complete evidence until repository-specific shadow controls demonstrate that it preserves defect detection.
+The complete deterministic inventory remains blocking. Its stable node-ID inventory is divided into ten complete, duplicate-free balanced shards. The six-shard/two-worker D-wave checkpoint carried 551–552 nodes per shard and left five shards at 219.770–219.921 seconds with typed budget outcomes; ten shards reduce that fixed inventory to 330–331 nodes per shard without changing the complete evidence topology. The measured amendment sets the core testcase boundary to 90 seconds and the core shard/reducer critical-path boundary to 330 seconds; 75-second testcase and 300-second shard/critical-path warnings retain visible debt. Test-impact analysis remains in observe mode and cannot replace this complete evidence until repository-specific shadow controls demonstrate that it preserves defect detection.
 
 Deep mutation, fuzz, compatibility, flake, performance and recovery work runs as independent scientific shards outside the interactive path. Each shard has its own 220-second hard budget; a large experiment is many content-addressed shards, not one unbounded job.
 
@@ -137,13 +137,13 @@ A deterministic classification of changed paths and semantic surfaces that contr
 
 All gate and lane durations below start after runner allocation.
 
-The 2026-08-02 owner amendment doubles every `sdlc-v2.3` hard command, lane, shard and finalisation ceiling for all risk tiers. It does not double the p50/p95 performance targets, relax required evidence, reduce test coverage or alter risk routing. The unchanged targets continue to expose performance regression; the doubled values control only typed `BUDGET_EXCEEDED` enforcement. The watchdog retains a strict upper bound below 240 seconds.
+The 2026-08-02 owner amendment doubles every `sdlc-v2.3` hard command, lane, shard and finalisation ceiling for all risk tiers. It does not double the p50/p95 performance targets, relax required evidence, reduce test coverage or alter risk routing. The unchanged targets continue to expose performance regression; the doubled values control only typed `BUDGET_EXCEEDED` enforcement. The watchdog retains a strict upper bound below 240 seconds. The subsequent v2.6 measured-core amendment makes 330 seconds the sole core command/lane exception; the global non-core command and lane defaults remain 220 seconds, and service, merge, science and finalisation boundaries remain unchanged.
 
 | Gate | p50 | p95 | hard command timeout | Lane |
 |---|---:|---:|---:|---|
 | `route` | 1 s | 2 s | 20 s | core |
 | `source-integrity` | 3 s | 8 s | 60 s | core |
-| `core-deterministic` | 15 s | 35 s | 220 s | core |
+| `core-deterministic` | 15 s | 35 s | 330 s | core |
 | `service-neo4j` | 25 s | 50 s | 220 s | service |
 | `merge-exact` | 20 s | 50 s | 220 s | merge group |
 | each `science-*` shard | 20 s | 50 s | 220 s | science |
@@ -151,7 +151,7 @@ The 2026-08-02 owner amendment doubles every `sdlc-v2.3` hard command, lane, sha
 
 Aggregate execution rules:
 
-- core-lane repository-owned execution hard deadline: 220 seconds;
+- core-lane repository-owned execution hard deadline: 330 seconds;
 - core-lane execution is `max(source lifecycle, maximum shard lifecycle) +
   reducer lifecycle`, with source timed from pre-preparation, each shard timed
   from pre-collection and the reducer timed from pre-input-loading through
@@ -302,7 +302,7 @@ Shape:
 4. install pinned Python and pinned uv in each isolated exact-head job;
 5. restore an exact lock/toolchain-keyed cache;
 6. run `route`;
-7. run source integrity and four independently watched deterministic shards concurrently;
+7. run source integrity and ten independently watched deterministic shards concurrently;
 8. prove each shard producer's tracked tree after collection and again before
    fragment publication, and prove the source producer after execution and at
    publication;
@@ -390,7 +390,7 @@ Canonical output shape:
 ```json
 {
   "schema_version": "newsroom.sdlc.route.v1",
-  "contract_version": "sdlc-v2.5",
+  "contract_version": "sdlc-v2.6",
   "base_sha": "0000000000000000000000000000000000000000",
   "head_sha": "1111111111111111111111111111111111111111",
   "base_tree_sha": "2222222222222222222222222222222222222222",

@@ -232,23 +232,36 @@ def test_environment_error_does_not_echo_command_or_exception_message() -> None:
 
 def test_deadline_and_configured_budget_cannot_be_raised() -> None:
     contract = load_contract(REPO_ROOT)
-    assert start_lane_deadline(contract, "route").timeout_ms == 220_000
+    assert start_lane_deadline(contract, "route").timeout_ms == 330_000
+    assert LaneDeadline.start(330).timeout_ms == 330_000
+    assert (
+        _run_gate_command(
+            gate_id="core-deterministic",
+            phase="boundary",
+            argv=("/usr/bin/true",),
+            deadline=LaneDeadline.start(330),
+            command_timeout_seconds=330,
+            termination_grace_seconds=0.1,
+        ).result
+        == "PASS"
+    )
 
-    with pytest.raises(GateRunError, match="below 240"):
-        LaneDeadline(0, 240_000)
+    with pytest.raises(GateRunError, match="at most 330"):
+        LaneDeadline(0, 330_001)
     with pytest.raises(GateRunError, match="accepted lane timeout"):
         run_configured_gate(
             contract=contract,
-            gate_id="route",
+            gate_id="service-neo4j",
             phase="oversized",
             argv=_python("pass"),
-            deadline=LaneDeadline.start(239),
+            deadline=LaneDeadline.start(330),
         )
 
 
 def test_invalid_budget_identifier_and_output_limit_are_rejected() -> None:
-    with pytest.raises(GateRunError, match="below 240"):
-        LaneDeadline.start(240)
+    for timeout in (330.001, 330.5, 330.999):
+        with pytest.raises(GateRunError, match="at most 330"):
+            LaneDeadline.start(timeout)
     with pytest.raises(GateRunError, match="unsupported characters"):
         _run_gate_command(
             gate_id="bad:gate",
@@ -265,6 +278,19 @@ def test_invalid_budget_identifier_and_output_limit_are_rejected() -> None:
             deadline=LaneDeadline.start(2),
             command_timeout_seconds=1,
             output_limit_bytes=1_048_577,
+        )
+
+
+@pytest.mark.parametrize("timeout", (330.001, 330.5, 330.999))
+def test_command_timeout_cannot_exceed_exact_core_maximum(timeout: float) -> None:
+    with pytest.raises(GateRunError, match="at most 330"):
+        _run_gate_command(
+            gate_id="core-deterministic",
+            phase="unit",
+            argv=("/usr/bin/true",),
+            deadline=LaneDeadline.start(330),
+            command_timeout_seconds=timeout,
+            termination_grace_seconds=0.1,
         )
     with pytest.raises(GateRunError, match="five seconds"):
         _run_gate_command(

@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,7 @@ from .command_spec import (
 from .contracts import ContractError, SdlcContract, load_contract
 from .emit_evidence import (
     EvidenceError,
+    _validate_junit,
     _validate_route,
     build_gate_evidence,
     canonical_json_bytes,
@@ -115,8 +117,11 @@ _SERVICE_CONFIGURATION = {
     "NEWSROOM_NEO4J_URI": "bolt://localhost:7687",
 }
 _CORE_TESTS = ("newsroom/tests",)
-_CORE_WORKER_COUNT = 4
-_CORE_SHARD_COUNT = 4
+_CORE_WORKER_COUNT = 2
+_CORE_SHARD_COUNT = 10
+_CORE_NODE_INVENTORY_FILE = "node-inventory.json"
+_CORE_NODE_INVENTORY_PATH_ENV = "NEWSROOM_SDLC_CORE_NODE_INVENTORY_PATH"
+_CORE_NODE_INVENTORY_DIGEST_ENV = "NEWSROOM_SDLC_CORE_NODE_INVENTORY_DIGEST"
 _CORE_DISTRIBUTION = "worksteal"
 _CORE_FRAGMENT_SCHEMA = "newsroom.sdlc.core-shard-fragment.v1"
 _CORE_SHARD_LIFECYCLE_SCHEMA = "newsroom.sdlc.core-shard-lifecycle.v1"
@@ -1014,6 +1019,58 @@ def _collect_core_node_ids(
     return values
 
 
+def _core_node_inventory_path(report: Path) -> Path:
+    return report.with_name(_CORE_NODE_INVENTORY_FILE)
+
+
+def _load_core_node_inventory(
+    root: Path, value: str | Path, expected_digest: object
+) -> tuple[str, ...]:
+    try:
+        candidate = Path(value)
+        absolute = candidate if candidate.is_absolute() else root / candidate
+        metadata = os.lstat(absolute)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise WorkflowLaneError("core_shard_inventory")
+        loaded = _load_json(root, value)
+        if type(loaded) is not list or any(type(item) is not str for item in loaded):
+            raise WorkflowLaneError("core_shard_inventory")
+        inventory = tuple(loaded)
+        files = frozenset(_core_test_files(root))
+        if (
+            not inventory
+            or inventory != tuple(sorted(inventory))
+            or len(inventory) != len(set(inventory))
+            or any(node_id.split("::", 1)[0] not in files for node_id in inventory)
+            or expected_digest != sha256_identity(list(inventory))
+        ):
+            raise WorkflowLaneError("core_shard_inventory")
+    except (OSError, WorkflowLaneError) as exc:
+        if str(exc) == "core_shard_inventory":
+            raise
+        raise WorkflowLaneError("core_shard_inventory") from exc
+    return inventory
+
+
+def _remove_core_node_inventory(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+        safe = (
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_uid == os.getuid()
+            and stat.S_IMODE(metadata.st_mode) == 0o600
+        )
+        path.unlink()
+    except OSError as exc:
+        raise WorkflowLaneError("core_shard_inventory_cleanup") from exc
+    if not safe or path.exists() or path.is_symlink():
+        raise WorkflowLaneError("core_shard_inventory_cleanup")
+
+
 def _core_node_shards(node_ids: Sequence[str]) -> tuple[tuple[str, ...], ...]:
     inventory = tuple(sorted(node_ids))
     if not inventory or len(inventory) != len(set(inventory)):
@@ -1270,6 +1327,18 @@ def _producer_exit_status(
         error="producer_fragment_lifecycle",
     )
     result = str(validated["result"])
+    if fragment_schema == _CORE_FRAGMENT_SCHEMA:
+        try:
+            junit = _validate_junit(fragment.get("junit_summary"))
+        except EvidenceError as exc:
+            raise WorkflowLaneError("producer_fragment_junit") from exc
+        if result in {"PASS", "FAIL"}:
+            if junit is None:
+                raise WorkflowLaneError("producer_fragment_junit_required")
+        elif junit is not None:
+            raise WorkflowLaneError("producer_fragment_junit_unexpected")
+        if result == "PASS" and junit is not None and junit["outcome"] == "FAIL":
+            return 1
     if result == "PASS":
         return 0
     if result == "BUDGET_EXCEEDED":
@@ -1429,11 +1498,16 @@ def execute_core_shard(
         basetemp=basetemp,
         clustering=bool(route["clustering_required"]),
     )
-    run = _execute(
-        contract=contract,
-        spec=spec,
-        deadline=deadline,
-    )
+    inventory_path = _core_node_inventory_path(report)
+    _private_write(inventory_path, list(inventory))
+    try:
+        run = _execute(
+            contract=contract,
+            spec=spec,
+            deadline=deadline,
+        )
+    finally:
+        _remove_core_node_inventory(inventory_path)
     shutil.rmtree(basetemp, ignore_errors=True)
     summary = _core_fragment_report_summary(
         repo_root=root,
@@ -2194,7 +2268,8 @@ def core_shard_tests(
         or not basetemp_path.is_relative_to(root)
     ):
         raise WorkflowLaneError("core_shard_command")
-    inventory = _collect_core_node_ids(root)
+    inventory_path = _core_node_inventory_path(report_path)
+    inventory = _load_core_node_inventory(root, inventory_path, node_inventory_digest)
     selected = _core_node_shards(inventory)[shard_index]
     if node_inventory_digest != sha256_identity(
         list(inventory)
@@ -2205,8 +2280,13 @@ def core_shard_tests(
         basetemp=basetemp_path,
         test_files=selected,
     )
+    environment = {
+        **os.environ,
+        _CORE_NODE_INVENTORY_PATH_ENV: os.fspath(inventory_path),
+        _CORE_NODE_INVENTORY_DIGEST_ENV: node_inventory_digest,
+    }
     try:
-        completed = subprocess.run(command, cwd=root, check=False)
+        completed = subprocess.run(command, cwd=root, check=False, env=environment)
     except OSError as exc:
         raise WorkflowLaneError("core_worker_process") from exc
     if completed.returncode or not clustering or shard_index != 0:

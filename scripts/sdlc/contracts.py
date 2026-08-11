@@ -31,7 +31,7 @@ _REQUIRED_RISKS = (
     "R4_RELEASE_OPERATIONAL",
 )
 _INTERACTIVE_LANES = frozenset({"core", "service", "merge_group"})
-_MAX_HARD_TIMEOUT_SECONDS = 240
+_MAX_HARD_TIMEOUT_SECONDS = 331
 
 
 def _mapping(value: object, name: str) -> Mapping[str, Any]:
@@ -140,11 +140,8 @@ def validate_contract_data(
         raise ContractError("unsupported SDLC contract schema")
     if data.get("status") != "accepted":
         raise ContractError("SDLC contract is not accepted")
-    if (
-        not isinstance(data.get("contract_version"), str)
-        or not data["contract_version"]
-    ):
-        raise ContractError("contract_version is required")
+    if data.get("contract_version") != "sdlc-v2.6":
+        raise ContractError("accepted contract version must be sdlc-v2.6")
 
     global_config = _mapping(data.get("global"), "global")
     command_limit = _positive_int(
@@ -162,6 +159,8 @@ def validate_contract_data(
         "global.finalization_timeout_seconds",
         below=_MAX_HARD_TIMEOUT_SECONDS,
     )
+    if (command_limit, lane_limit, finalization_limit) != (220, 220, 20):
+        raise ContractError("global timing differs from the accepted measured budget")
     if global_config.get("required_decision_always_reports") is not True:
         raise ContractError("the required decision must always report")
     if global_config.get("rerun_can_overwrite_required_result") is not False:
@@ -195,8 +194,22 @@ def validate_contract_data(
             f"gate.{gate_name}.hard_timeout_seconds",
             below=_MAX_HARD_TIMEOUT_SECONDS,
         )
-        if timeout > command_limit:
+        if timeout > command_limit and gate_name != "core-deterministic":
             raise ContractError(f"gate.{gate_name} exceeds the global command timeout")
+    accepted_gate_timeouts = {
+        "route": 20,
+        "source-integrity": 60,
+        "core-deterministic": 330,
+        "service-neo4j": 220,
+        "merge-exact": 220,
+        "science-shard": 220,
+        "evidence-finalize": 20,
+    }
+    if {
+        name: _mapping(value, f"gate.{name}").get("hard_timeout_seconds")
+        for name, value in gates.items()
+    } != accepted_gate_timeouts:
+        raise ContractError("gate timing differs from the accepted measured budget")
 
     for lane_name in _INTERACTIVE_LANES:
         lane = _mapping(lanes.get(lane_name), f"lanes.{lane_name}")
@@ -205,13 +218,13 @@ def validate_contract_data(
             f"lanes.{lane_name}.hard_timeout_seconds",
             below=_MAX_HARD_TIMEOUT_SECONDS,
         )
-        if timeout > lane_limit:
+        if timeout > lane_limit and lane_name != "core":
             raise ContractError(f"lanes.{lane_name} exceeds the aggregate lane timeout")
     core = _mapping(lanes.get("core"), "lanes.core")
     if (
-        core.get("shard_count") != 4
+        core.get("shard_count") != 10
         or core.get("partition") != "sha256_node_id_balanced"
-        or core.get("workers_per_shard") != 4
+        or core.get("workers_per_shard") != 2
         or core.get("distribution") != "worksteal"
         or core.get("max_worker_restart") != 0
         or core.get("reducer_single_canonical_receipt") is not True
@@ -224,20 +237,40 @@ def validate_contract_data(
         "lanes.core.per_shard_hard_timeout_seconds",
         below=_MAX_HARD_TIMEOUT_SECONDS,
     )
-    if shard_timeout != command_limit:
-        raise ContractError("lanes.core shard timeout differs from the command timeout")
+    if shard_timeout != 330 or core.get("hard_timeout_seconds") != 330:
+        raise ContractError("lanes.core timeout differs from the accepted core budget")
+    for field in ("per_shard_warning_seconds", "critical_path_warning_seconds"):
+        warning = _positive_int(core.get(field), f"lanes.core.{field}")
+        if warning != 300 or warning >= shard_timeout:
+            raise ContractError(f"lanes.core.{field} differs from the accepted warning")
     science = _mapping(lanes.get("science"), "lanes.science")
-    _positive_int(
+    science_timeout = _positive_int(
         science.get("per_shard_hard_timeout_seconds"),
         "lanes.science.per_shard_hard_timeout_seconds",
         below=_MAX_HARD_TIMEOUT_SECONDS,
     )
+    if (
+        _mapping(lanes.get("service"), "lanes.service").get("hard_timeout_seconds")
+        != 220
+        or _mapping(lanes.get("merge_group"), "lanes.merge_group").get(
+            "hard_timeout_seconds"
+        )
+        != 220
+        or science_timeout != 220
+    ):
+        raise ContractError(
+            "non-core lane timing differs from the accepted measured budget"
+        )
     decision = _mapping(lanes.get("decision"), "lanes.decision")
     decision_timeout = _positive_int(
         decision.get("hard_timeout_seconds"),
         "lanes.decision.hard_timeout_seconds",
         below=_MAX_HARD_TIMEOUT_SECONDS,
     )
+    if decision_timeout != 20:
+        raise ContractError(
+            "lanes.decision timing differs from the accepted measured budget"
+        )
     if decision.get("always_reports") is not True:
         raise ContractError("lanes.decision must always report")
     if decision_timeout > finalization_limit:
@@ -288,6 +321,28 @@ def validate_contract_data(
             )
 
     strategy = _mapping(data.get("test_strategy"), "test_strategy")
+    testcase_limit = _positive_int(
+        strategy.get("individual_testcase_hard_timeout_seconds"),
+        "test_strategy.individual_testcase_hard_timeout_seconds",
+    )
+    testcase_warning = _positive_int(
+        strategy.get("individual_testcase_warning_seconds"),
+        "test_strategy.individual_testcase_warning_seconds",
+    )
+    if (
+        testcase_limit != 90
+        or testcase_warning != 75
+        or testcase_warning >= testcase_limit
+    ):
+        raise ContractError(
+            "test_strategy testcase timing differs from the accepted budget"
+        )
+    test_sizes = _mapping(data.get("test_sizes"), "test_sizes")
+    science_size = _mapping(test_sizes.get("science"), "test_sizes.science")
+    if science_size.get("shard_hard_timeout_seconds") != 220:
+        raise ContractError(
+            "test_sizes.science timing differs from the accepted measured budget"
+        )
     owner = _mapping(data.get("owner_decisions"), "owner_decisions")
     review = _mapping(data.get("change_review"), "change_review")
     if owner.get("review_net_executable_lines_trigger") != review.get(

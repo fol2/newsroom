@@ -294,9 +294,11 @@ def _result(value: object, code: str) -> str:
     return result
 
 
-def _contract_limits(contract: SdlcContract) -> tuple[int, int]:
+def _contract_limits(contract: SdlcContract, lane_id: str) -> tuple[int, int]:
     global_value = _mapping(contract.data.get("global"), "contract_global")
-    lane = global_value.get("lane_execution_timeout_seconds")
+    lanes = _mapping(contract.data.get("lanes"), "contract_lanes")
+    lane_value = _mapping(lanes.get(lane_id), "contract_lane")
+    lane = lane_value.get("hard_timeout_seconds")
     finalize = global_value.get("finalization_timeout_seconds")
     if (
         isinstance(lane, bool)
@@ -476,9 +478,9 @@ def _gate_failure(lane: ShadowLaneRecord) -> FailureSummary | None:
 def _derive_result(
     lanes: tuple[ShadowLaneRecord, ...], *, contract: SdlcContract
 ) -> tuple[str, str, FailureSummary | None]:
-    lane_budget_ms, finalize_budget_ms = _contract_limits(contract)
     failures = [failure for lane in lanes if (failure := _gate_failure(lane))]
     for lane in lanes:
+        lane_budget_ms, finalize_budget_ms = _contract_limits(contract, lane.lane_id)
         if lane.telemetry.job_conclusion != "success":
             failures.append(
                 _failure(

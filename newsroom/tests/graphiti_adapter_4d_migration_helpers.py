@@ -142,7 +142,6 @@ def drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
 def drop_empty_v22_relationship_schema(connection: sqlite3.Connection) -> None:
     """Remove an exact, empty v22 relationship schema atomically."""
 
-    drop_empty_v23_lineage_schema(connection)
     savepoint = "checked_empty_v22_relationship_downgrade"
     relationship_table = "event_hypothesis_relationship_decisions"
     relationship_triggers = (
@@ -152,6 +151,7 @@ def drop_empty_v22_relationship_schema(connection: sqlite3.Connection) -> None:
     )
     connection.execute(f"SAVEPOINT {savepoint}")
     try:
+        drop_empty_v23_lineage_schema(connection)
         user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         maximum_history_version = connection.execute(
             "SELECT MAX(version) FROM authority_migrations"

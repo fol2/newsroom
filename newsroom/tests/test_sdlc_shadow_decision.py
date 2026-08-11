@@ -323,6 +323,36 @@ def test_concurrent_core_gates_use_critical_path_not_duration_sum(
     assert decision.totals.execution_max_ms == 200_000
 
 
+def test_core_and_service_use_their_own_execution_budgets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _route("R3_EXTERNAL_SERVICE_SECURITY")
+    core = _lane(
+        "core",
+        route,
+        gates=(_gate("core-deterministic", "tests", execution_ms=330_000),),
+    )
+    service = _lane(
+        "service",
+        route,
+        gates=(_gate("service-neo4j", "tests", execution_ms=220_001),),
+    )
+    _patch_lane_validator(monkeypatch, core, service)
+
+    decision = aggregate_shadow_decision(
+        context=_context(),
+        event=_event(),
+        core=core,  # type: ignore[arg-type]
+        service=service,  # type: ignore[arg-type]
+        contract=_contract(),
+    )
+
+    assert decision.result == "BUDGET_EXCEEDED"
+    assert decision.first_failure is not None
+    assert decision.first_failure.lane_id == "service"
+    assert decision.first_failure.phase == "execution"
+
+
 def test_service_is_required_exactly_when_route_requires_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -445,7 +475,7 @@ def test_gate_failure_required_skip_and_budget_precedence(
         route,
         gates=(
             _gate("source-integrity", "source", result="FAIL"),
-            _gate("core-deterministic", "tests", execution_ms=221_000),
+            _gate("core-deterministic", "tests", execution_ms=331_000),
         ),
     )
     _patch_lane_validator(monkeypatch, over_budget)

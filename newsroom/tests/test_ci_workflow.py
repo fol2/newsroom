@@ -139,7 +139,18 @@ def test_sdlc_workflow_retains_dynamic_complete_evidence_topology() -> None:
     )
     assert jobs["source"]["needs"] == ["route"]
     assert jobs["core_shard"]["needs"] == ["route"]
-    assert jobs["core_shard"]["strategy"]["matrix"]["shard"] == ["0", "1", "2", "3"]
+    assert jobs["core_shard"]["strategy"]["matrix"]["shard"] == [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+    ]
     assert jobs["core"]["needs"] == ["route", "source", "core_shard"]
     assert jobs["core"]["if"] == "always() && needs.route.result == 'success'"
     assert all(
