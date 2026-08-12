@@ -19,6 +19,14 @@ from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
 )
+from newsroom.authority.models import CommandDefinition
+from newsroom.authority.policy import (
+    CommandRegistry,
+    PayloadGoldenVector,
+    PayloadSchemaContract,
+    PayloadSchemaRegistry,
+)
+from newsroom.authority.types import PayloadMode, TrustScope
 from newsroom.increment6.candidates import StoryCandidateVersion
 from newsroom.increment6.handoffs import (
     Acknowledgement,
@@ -33,6 +41,9 @@ from newsroom.increment6.work_items import SupplementalDiscoveryReentry
 EVALUATION_FEEDBACK = "newsroom.increment6.evaluation-feedback.v1"
 RECONCILIATION_OBLIGATION = "newsroom.increment6.reconciliation-obligation.v1"
 RECONCILIATION_DISPOSITION = "newsroom.increment6.reconciliation-disposition.v1"
+HANDOFF_ACCEPTANCE_SNAPSHOT = "newsroom.increment6.handoff-acceptance-snapshot.v25"
+EVALUATION_FEEDBACK_COMMAND_TYPE = "evaluation-feedback.reconcile"
+EVALUATION_FEEDBACK_COMMAND_SCHEMA = "newsroom.increment6.evaluation-feedback-command.v25"
 MAX_FEEDBACK_CANONICAL_BYTES = 1_048_576
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
@@ -303,6 +314,332 @@ def _enum(kind, value: object, field: str):
         return kind(value)
     except ValueError as exc:
         raise FeedbackContractError(f"{field} is not an exact enum value") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class HandoffAcceptanceSnapshot:
+    """Full Handoff graph observed, not originated, by v25 acceptance."""
+
+    schema_identity: ClassVar[str] = HANDOFF_ACCEPTANCE_SNAPSHOT
+    handoff_id: str
+    candidate_version_id: str
+    governing_manifest_digest: str
+    sink_id: str
+    observed_max_attempts: int
+    transport_state: HandoffState
+    attempts: tuple[HandoffAttempt, ...]
+    acknowledgements: tuple[Acknowledgement, ...]
+    retry_exhausted: bool
+    ambiguity_reason: str | None
+    evaluation_only: bool
+    publication_authority: bool
+    evidence_authority: bool
+    observation_semantics: str = "observed_at_v25_acceptance_not_registration_provenance"
+
+    @_total("invalid Handoff acceptance snapshot")
+    def __post_init__(self) -> None:
+        _require(type(self) is HandoffAcceptanceSnapshot, "snapshot must be exact")
+        handoff = Handoff(
+            handoff_id=self.handoff_id,
+            candidate_version_id=self.candidate_version_id,
+            governing_manifest_digest=self.governing_manifest_digest,
+            sink_id=self.sink_id,
+            max_attempts=self.observed_max_attempts,
+            state=self.transport_state,
+            attempts=self.attempts,
+            acknowledgements=self.acknowledgements,
+            retry_exhausted=self.retry_exhausted,
+            ambiguity_reason=self.ambiguity_reason,
+            evaluation_only=self.evaluation_only,
+            publication_authority=self.publication_authority,
+            evidence_authority=self.evidence_authority,
+        )
+        _require(
+            handoff.state is HandoffState.ACKNOWLEDGED,
+            "snapshot requires accepted Handoff transport state",
+        )
+        _require(
+            self.observation_semantics
+            == "observed_at_v25_acceptance_not_registration_provenance",
+            "snapshot observation semantics differ",
+        )
+        _ = self.canonical_bytes
+
+    @classmethod
+    def observe(cls, handoff: Handoff) -> Self:
+        if type(handoff) is not Handoff:
+            raise FeedbackContractError("snapshot Handoff must be exact")
+        return cls(
+            handoff_id=handoff.handoff_id,
+            candidate_version_id=handoff.candidate_version_id,
+            governing_manifest_digest=handoff.governing_manifest_digest,
+            sink_id=handoff.sink_id,
+            observed_max_attempts=handoff.max_attempts,
+            transport_state=handoff.state,
+            attempts=handoff.attempts,
+            acknowledgements=handoff.acknowledgements,
+            retry_exhausted=handoff.retry_exhausted,
+            ambiguity_reason=handoff.ambiguity_reason,
+            evaluation_only=handoff.evaluation_only,
+            publication_authority=handoff.publication_authority,
+            evidence_authority=handoff.evidence_authority,
+        )
+
+    @property
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "acknowledgements": [
+                {
+                    "acknowledgement_id": item.acknowledgement_id,
+                    "attempt_id": item.attempt_id,
+                    "candidate_version_id": item.candidate_version_id,
+                    "governing_manifest_digest": item.governing_manifest_digest,
+                    "handoff_id": item.handoff_id,
+                    "outcome": item.outcome.value,
+                    "response_digest": item.response_digest,
+                    "sink_id": item.sink_id,
+                }
+                for item in self.acknowledgements
+            ],
+            "ambiguity_reason": self.ambiguity_reason,
+            "attempts": [
+                {
+                    "ambiguous": item.ambiguous,
+                    "attempt_id": item.attempt_id,
+                    "attempt_number": item.attempt_number,
+                    "handoff_id": item.handoff_id,
+                    "persisted_before_send": item.persisted_before_send,
+                    "semantic_idempotency_key": item.semantic_idempotency_key,
+                    "sent": item.sent,
+                }
+                for item in self.attempts
+            ],
+            "candidate_version_id": self.candidate_version_id,
+            "evaluation_only": self.evaluation_only,
+            "evidence_authority": self.evidence_authority,
+            "governing_manifest_digest": self.governing_manifest_digest,
+            "handoff_id": self.handoff_id,
+            "observation_semantics": self.observation_semantics,
+            "observed_max_attempts": self.observed_max_attempts,
+            "publication_authority": self.publication_authority,
+            "retry_exhausted": self.retry_exhausted,
+            "sink_id": self.sink_id,
+            "transport_state": self.transport_state.value,
+        }
+
+    @property
+    def canonical_bytes(self) -> bytes:
+        return _document(HANDOFF_ACCEPTANCE_SNAPSHOT, "snapshot", self.canonical_value)
+
+    @property
+    def canonical_digest(self) -> str:
+        return digest_bytes(self.canonical_bytes)
+
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> Self:
+        fields = set(cls.__dataclass_fields__) - {"schema_identity"}
+        value = _decode_document(raw, HANDOFF_ACCEPTANCE_SNAPSHOT, "snapshot", fields)
+        try:
+            attempts = tuple(HandoffAttempt(**item) for item in value["attempts"])
+            acknowledgements = tuple(
+                Acknowledgement(
+                    **{**item, "outcome": AcknowledgementOutcome(item["outcome"])}
+                )
+                for item in value["acknowledgements"]
+            )
+            result = cls(
+                **{
+                    **value,
+                    "transport_state": HandoffState(value["transport_state"]),
+                    "attempts": attempts,
+                    "acknowledgements": acknowledgements,
+                }
+            )
+        except FeedbackContractError:
+            raise
+        except Exception as exc:
+            raise FeedbackContractError("Handoff acceptance snapshot replay failed") from exc
+        if result.canonical_bytes != raw:
+            raise FeedbackContractError("Handoff acceptance snapshot replay differs")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationFeedbackAcceptance:
+    feedback: EvaluationFeedback
+    obligation: ReconciliationObligation
+    handoff_snapshot: HandoffAcceptanceSnapshot
+
+
+def _feedback_command_canonicalizer(value: object) -> bytes:
+    if type(value) is not dict or set(value) != {
+        "operation",
+        "feedback",
+        "obligation",
+        "handoff_acceptance_snapshot",
+        "disposition",
+    }:
+        raise FeedbackContractError("Feedback command fields differ")
+    if value["operation"] not in {"accept", "append_disposition"}:
+        raise FeedbackContractError("Feedback command operation differs")
+    return canonical_json_bytes(value)
+
+
+_FEEDBACK_COMMAND_VECTOR_VALUE = {
+    "disposition": None,
+    "feedback": None,
+    "handoff_acceptance_snapshot": None,
+    "obligation": None,
+    "operation": "accept",
+}
+_FEEDBACK_COMMAND_VECTOR_BYTES = canonical_json_bytes(_FEEDBACK_COMMAND_VECTOR_VALUE)
+
+
+def _feedback_payload_contract() -> PayloadSchemaContract:
+    return PayloadSchemaContract(
+        EVALUATION_FEEDBACK_COMMAND_SCHEMA,
+        PayloadMode.INLINE,
+        "evaluation-feedback-command-schema-v25",
+        "evaluation-feedback-command-json-v25",
+        _feedback_command_canonicalizer,
+        (
+            PayloadGoldenVector(
+                "evaluation-feedback-command",
+                "evaluation-feedback:command",
+                _FEEDBACK_COMMAND_VECTOR_VALUE,
+                _FEEDBACK_COMMAND_VECTOR_BYTES,
+            ),
+        ),
+    )
+
+
+def evaluation_feedback_command_definition() -> CommandDefinition:
+    contract = _feedback_payload_contract()
+    return CommandDefinition(
+        command_type=EVALUATION_FEEDBACK_COMMAND_TYPE,
+        definition_version="evaluation-feedback-command-v25",
+        aggregate_type="evaluation_reconciliation",
+        event_type="evaluation_reconciliation_recorded",
+        event_schema_version=25,
+        payload_mode=PayloadMode.INLINE,
+        payload_schema_version=contract.schema_version,
+        payload_schema_contract_version=contract.contract_version,
+        payload_schema_contract_digest=contract.contract_digest,
+        payload_canonicalizer_version=contract.canonicalizer_implementation_version,
+        trust_scope=TrustScope.ADMITTED,
+        security_scope="authority.evaluation-feedback",
+        retention_scope="authority.audit",
+        required_scope="authority.evaluation-feedback.reconcile",
+        max_inline_bytes=MAX_FEEDBACK_CANONICAL_BYTES * 4,
+    )
+
+
+def merge_evaluation_feedback_authority_registries(
+    commands: CommandRegistry, schemas: PayloadSchemaRegistry
+) -> tuple[CommandRegistry, PayloadSchemaRegistry]:
+    definition, contract = evaluation_feedback_command_definition(), _feedback_payload_contract()
+    definitions, contracts = tuple(commands.definitions()), tuple(schemas.contracts())
+    matching_definitions = tuple(
+        item for item in definitions if item.command_type == EVALUATION_FEEDBACK_COMMAND_TYPE
+    )
+    matching_contracts = tuple(
+        item
+        for item in contracts
+        if (item.schema_version, item.payload_mode)
+        == (EVALUATION_FEEDBACK_COMMAND_SCHEMA, PayloadMode.INLINE)
+    )
+    if matching_definitions not in ((), (definition,)) or matching_contracts not in (
+        (),
+        (contract,),
+    ):
+        raise FeedbackContractError("Feedback authority registry conflicts")
+    definitions += () if matching_definitions else (definition,)
+    contracts += () if matching_contracts else (contract,)
+    return (
+        CommandRegistry(
+            definitions,
+            current_versions={
+                item.command_type: (
+                    definition.definition_version
+                    if item.command_type == EVALUATION_FEEDBACK_COMMAND_TYPE
+                    else commands.resolve(item.command_type).definition_version
+                )
+                for item in definitions
+            },
+        ),
+        PayloadSchemaRegistry(
+            contracts,
+            current_versions={
+                (item.schema_version, item.payload_mode): (
+                    contract.contract_version
+                    if (item.schema_version, item.payload_mode)
+                    == (EVALUATION_FEEDBACK_COMMAND_SCHEMA, PayloadMode.INLINE)
+                    else schemas.resolve(item.schema_version, item.payload_mode).contract_version
+                )
+                for item in contracts
+            },
+        ),
+    )
+
+
+_AUTHORITY_TOKEN = object()
+
+
+class EvaluationFeedbackAuthority:
+    """Exact public facade over the server-owned v25 composition root."""
+
+    __slots__ = ("__authority",)
+
+    def __init__(self, token: object, authority: object) -> None:
+        if token is not _AUTHORITY_TOKEN:
+            raise FeedbackContractError("Feedback authority construction is private")
+        object.__setattr__(self, "_EvaluationFeedbackAuthority__authority", authority)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("EvaluationFeedbackAuthority is immutable")
+
+    def accept(
+        self,
+        feedback_bytes: bytes,
+        obligation_bytes: bytes,
+        *,
+        candidate_proof: object,
+    ) -> EvaluationFeedbackAcceptance:
+        value = self.__authority.accept(
+            feedback_bytes, obligation_bytes, candidate_proof=candidate_proof
+        )
+        if type(value) is not EvaluationFeedbackAcceptance:
+            raise FeedbackContractError("Feedback accept returned a forged result")
+        return value
+
+    def append_disposition(
+        self, disposition_bytes: bytes, *, candidate_proof: object
+    ) -> ReconciliationDisposition:
+        value = self.__authority.append_disposition(
+            disposition_bytes, candidate_proof=candidate_proof
+        )
+        if type(value) is not ReconciliationDisposition:
+            raise FeedbackContractError("Disposition append returned a forged result")
+        return value
+
+    def load(self, feedback_id: str) -> EvaluationFeedbackAcceptance:
+        value = self.__authority.load(feedback_id)
+        if type(value) is not EvaluationFeedbackAcceptance:
+            raise FeedbackContractError("Feedback load returned a forged result")
+        return value
+
+    def dispositions(self, obligation_id: str) -> tuple[ReconciliationDisposition, ...]:
+        value = self.__authority.dispositions(obligation_id)
+        if type(value) is not tuple or any(type(item) is not ReconciliationDisposition for item in value):
+            raise FeedbackContractError("Disposition history returned a forged result")
+        return value
+
+    def close(self) -> None:
+        self.__authority.close()
+
+
+def _compose_evaluation_feedback_authority(authority: object) -> EvaluationFeedbackAuthority:
+    return EvaluationFeedbackAuthority(_AUTHORITY_TOKEN, authority)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1156,11 +1493,17 @@ def reconciliation_is_open(
 
 __all__ = [
     "EVALUATION_FEEDBACK",
+    "EVALUATION_FEEDBACK_COMMAND_SCHEMA",
+    "EVALUATION_FEEDBACK_COMMAND_TYPE",
+    "EvaluationFeedbackAcceptance",
+    "EvaluationFeedbackAuthority",
     "EvaluationFeedback",
     "EvaluationFeedbackOutcome",
     "EvaluationFeedbackReason",
     "FeedbackContractError",
     "FeedbackCorrelationOutcome",
+    "HANDOFF_ACCEPTANCE_SNAPSHOT",
+    "HandoffAcceptanceSnapshot",
     "MAX_FEEDBACK_CANONICAL_BYTES",
     "RECONCILIATION_DISPOSITION",
     "RECONCILIATION_OBLIGATION",
@@ -1173,6 +1516,8 @@ __all__ = [
     "correlate_evaluation_feedback",
     "create_evaluation_feedback",
     "create_reconciliation_obligation",
+    "evaluation_feedback_command_definition",
+    "merge_evaluation_feedback_authority_registries",
     "reconciliation_is_open",
     "validate_reconciliation_history",
 ]
