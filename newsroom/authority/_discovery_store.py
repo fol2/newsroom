@@ -1,14 +1,18 @@
 from __future__ import annotations
+# ruff: noqa: I001 - preserve legacy import layout within bounded change
+# fmt: off - preserve legacy layout and bounded addition within the line cap
 
 import sqlite3
 from collections.abc import Mapping
-from typing import Any, Callable, TypeVar
+from threading import get_ident
+from typing import Any
 
 from newsroom.authority._capability import _AuthorizedCommandGrant
 from newsroom.authority._check_store import _CheckAuthorityStore
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
 from newsroom.authority.persistence import AuthorityPersistenceError, AuthoritySchemaError
 from newsroom.authority.types import EventId, PayloadMode, TrustScope, UtcTimestamp
+from newsroom.discovery import _compose_discovery_governing_producer_read_port
 from newsroom.discovery.models import (
     DiscoverySignalRequest,
     GateDecisionRequest,
@@ -36,6 +40,7 @@ from newsroom.discovery.record_models import (
     WatchCondition,
 )
 from newsroom.discovery.types import (
+    DiscoveryContractError,
     DiscoveryIdentifierReuse,
     DiscoverySemanticCollision,
     DiscoverySignalId,
@@ -59,8 +64,6 @@ from ._discovery_decoding import (
     signal_request_from_bytes,
     watch_request_from_bytes,
 )
-
-_Record = TypeVar("_Record")
 
 _SOURCE_OBSERVATION_COMPATIBILITY_COLUMNS = (
     "adapter_policy_id",
@@ -109,6 +112,208 @@ _DISCOVERY_RECORD_SPECS: dict[str, tuple[str, str, TrustScope]] = {
     ),
 }
 
+class _DiscoveryGoverningProducerReader:
+    __slots__ = ("_connection", "_owner")
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+        self._owner = get_ident()
+
+    def _require_transaction(self) -> None:
+        if (
+            get_ident() != self._owner
+            or self._connection.isolation_level is not None
+            or self._connection.row_factory is not sqlite3.Row
+            or not self._connection.in_transaction
+        ):
+            raise DiscoveryContractError("Discovery transaction ownership differs")
+
+    def require_current_governing_producers(
+        self, lead_ids: tuple[NewsLeadId, ...]
+    ) -> tuple[tuple[NewsLead, DiscoverySignal, GateDecision], ...]:
+        self._require_transaction()
+        if (
+            type(lead_ids) is not tuple
+            or not lead_ids
+            or any(type(value) is not NewsLeadId for value in lead_ids)
+            or tuple(str(value) for value in lead_ids)
+            != tuple(sorted({str(value) for value in lead_ids}))
+        ):
+            raise DiscoveryContractError("Lead IDs must be exact ordered unique values")
+        connection = self._connection
+        _validate_discovery_reads_in_transaction(connection)
+        result: list[tuple[NewsLead, DiscoverySignal, GateDecision]] = []
+        for lead_id in lead_ids:
+            lead_row = _DiscoveryAuthorityStore._row(
+                connection, "news_leads", "lead_id", str(lead_id)
+            )
+            lead = _DiscoveryAuthorityStore._lead_from_row(
+                connection, lead_row, replayed=False
+            )
+            signal_row = _DiscoveryAuthorityStore._row(connection, "discovery_signals", "signal_id", str(lead.request.signal_id))
+            signal = _DiscoveryAuthorityStore._signal_from_row(
+                connection, signal_row, replayed=False
+            )
+            gate_row = connection.execute(
+                "SELECT d.* FROM discovery_gate_decision_heads h "
+                "JOIN discovery_gate_decisions d "
+                "ON d.decision_id=h.current_decision_id "
+                "WHERE h.signal_id=?",
+                (str(signal.request.signal_id),),
+            ).fetchone()
+            if gate_row is None:
+                raise DiscoveryStateError("current Gate Decision is not retained")
+            gate = _DiscoveryAuthorityStore._gate_from_row(connection, gate_row, replayed=False)
+            if (
+                lead.request.signal_id != signal.request.signal_id
+                or lead.request.promoting_gate_decision_id != gate.request.decision_id
+                or gate.request.signal_id != signal.request.signal_id
+                or gate.request.outcome is not GateOutcome.PROMOTED_TO_LEAD
+                or lead.request.definition_id != signal.request.definition_id
+                or lead.request.item_id != signal.request.item_id
+                or lead.request.revision_id != signal.request.revision_id
+                or lead.request.representation_id != signal.request.representation_id
+                or lead.request.occurrence_id != signal.request.occurrence_id
+                or lead.request.transition_id != signal.request.transition_id
+                or lead.request.coverage != gate.request.coverage
+                or gate.request.evaluated_definition_version_id
+                != signal.request.definition_version_id
+                or gate.request.evaluated_definition_version_id
+                != lead.request.definition_version_id
+            ):
+                raise DiscoveryVersionConflict("Discovery closure differs from authority")
+            result.append((lead, signal, gate))
+        return tuple(result)
+
+
+def _validate_discovery_reads_in_transaction(connection: sqlite3.Connection) -> None:
+    _DiscoveryAuthorityStore._validate_relational_invariants(connection)
+    _DiscoveryAuthorityStore._validate_immutable_records(object.__new__(_DiscoveryAuthorityStore), connection)
+    for row in connection.execute(
+        "SELECT c.*,p.mode,p.schema_version,p.schema_contract_version,p.schema_contract_digest,"
+        "p.canonicalizer_implementation_version,p.payload_digest,p.payload_bytes,p.object_admission_id,"
+        "e.ledger_seq,e.event_id,e.event_type,e.aggregate_version,e.recorded_at,e.trust_scope,e.correlation_id,"
+        "e.causation_kind,e.causation_identifier,e.causation_external_system,e.authentication_context_id event_auth,e.authorization_request_digest event_request,e.authorization_decision_id event_decision,a.event_type audit_event_type,"
+        "a.detail_digest,a.recorded_at audit_recorded_at,a.authentication_context_id audit_auth,a.authorization_request_digest audit_request,a.authorization_decision_id audit_decision,x.authority_domain,x.principal_id,"
+        "x.canonical_digest auth_digest,r.canonical_record_digest request_record_digest,d.canonical_digest decision_digest "
+        "FROM authority_commands c JOIN authority_payloads p ON p.payload_id=c.payload_id "
+        "JOIN ledger_events e ON e.command_id=c.command_id JOIN authority_audit_events a ON a.command_id=c.command_id "
+        "JOIN authentication_contexts x ON x.authentication_context_id=c.authentication_context_id "
+        "JOIN authorization_requests r ON r.request_digest=c.authorization_request_digest "
+        "JOIN authorization_decisions d ON d.authorization_decision_id=c.authorization_decision_id "
+        "WHERE e.event_type IN (?,?,?,?,?)",
+        tuple(spec[1] for spec in _DISCOVERY_RECORD_SPECS.values()),
+    ):
+        def fields(output: str, source: str, captured: sqlite3.Row = row) -> dict[str, Any]:
+            return dict(zip(output.split(), (captured[key] for key in source.split())))
+
+        payload = fields(
+            "kind schema_version schema_contract_version schema_contract_digest canonicalizer_version digest object_admission_id",
+            "mode schema_version schema_contract_version schema_contract_digest canonicalizer_implementation_version payload_digest object_admission_id",
+        )
+        payload.update(
+            inline_digest=digest_bytes(bytes(row["payload_bytes"])),
+            blob_digest=None,
+            object_class=None,
+            allowed_use=None,
+        )
+        command = fields(
+            "command_type command_definition_version command_definition_digest aggregate_type aggregate_id expected_aggregate_version",
+            "command_type command_definition_version command_definition_digest aggregate_type aggregate_id expected_aggregate_version",
+        )
+        command["payload"] = payload
+        expected_result = {
+            "command_id": str(row["command_id"]),
+            "aggregate_type": str(row["aggregate_type"]),
+            "aggregate_id": str(row["aggregate_id"]),
+            "aggregate_version": int(row["aggregate_version"]),
+            "ledger_seq": int(row["ledger_seq"]),
+            "event_id": str(row["event_id"]),
+        }
+        detail = {key: row[key] for key in "command_type aggregate_id expected_aggregate_version authorization_request_digest idempotency_namespace idempotency_key stable_semantic_request_digest correlation_id causation_kind causation_identifier causation_external_system".split()}  # noqa: SIM905
+        detail.update(
+            operation="COMMAND_COMMIT",
+            definition_digest=row["command_definition_digest"],
+            definition_version=row["command_definition_version"],
+            payload=payload,
+            authentication_context_digest=row["auth_digest"],
+            authorization_request_record_digest=row["request_record_digest"],
+            authorization_decision_digest=row["decision_digest"],
+            replay_of_command_id=None,
+        )
+        if (
+            (spec := _DISCOVERY_RECORD_SPECS.get(row["command_type"])) is None
+            or (row["aggregate_type"], row["event_type"], row["trust_scope"]) != (spec[0], spec[1], spec[2].value)
+            or digest_canonical(command) != row["stable_semantic_request_digest"]
+            or _DiscoveryAuthorityStore._decode_canonical(bytes(row["result_bytes"])) != expected_result
+            or digest_bytes(bytes(row["result_bytes"])) != row["result_digest"]
+            or len({(row["authentication_context_id"], row["authorization_request_digest"], row["authorization_decision_id"]), (row["event_auth"], row["event_request"], row["event_decision"]), (row["audit_auth"], row["audit_request"], row["audit_decision"])}) != 1 or row["committed_at"] != row["recorded_at"]
+            or row["audit_recorded_at"] != row["recorded_at"]
+            or row["audit_event_type"] != row["event_type"]
+            or row["idempotency_namespace"]
+            != digest_canonical(
+                {
+                    "authority_domain": row["authority_domain"],
+                    "principal_id": row["principal_id"],
+                    "command_type": row["command_type"],
+                }
+            )
+            or row["detail_digest"] != digest_canonical(detail)
+        ):
+            raise AuthorityPersistenceError(
+                "Discovery command or audit authority differs"
+            )
+    for row in connection.execute("SELECT * FROM discovery_signals"):
+        record = _DiscoveryAuthorityStore._signal_from_row(
+            connection, row, replayed=False
+        )
+        _DiscoveryAuthorityStore._require_exact_signal_lineage(
+            connection, record.request
+        )
+    for row in connection.execute("SELECT * FROM discovery_gate_decisions"):
+        _DiscoveryAuthorityStore._gate_from_row(connection, row, replayed=False)
+    for row in connection.execute("SELECT * FROM news_leads"):
+        record = _DiscoveryAuthorityStore._lead_from_row(
+            connection, row, replayed=False
+        )
+        _DiscoveryAuthorityStore._require_source_contract_matches_lead(
+            connection, record.request
+        )
+    _DiscoveryAuthorityStore._validate_discovery_heads(connection)
+    _DiscoveryAuthorityStore._validate_discovery_event_coverage(connection)
+    if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+        raise AuthoritySchemaError("Discovery foreign-key integrity differs")
+
+
+def _create_discovery_governing_producer_read_port(
+    connection: sqlite3.Connection,
+):
+    try:
+        if (
+            type(connection) is not sqlite3.Connection
+            or connection.isolation_level is not None
+            or connection.row_factory is not sqlite3.Row
+            or not connection.in_transaction
+            or connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1
+            or str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            != "wal"
+            or connection.execute("PRAGMA synchronous").fetchone()[0] != 2
+        ):
+            raise DiscoveryContractError(
+                "Discovery read-port factory requires an exact active checked connection"
+            )
+        reader = _DiscoveryGoverningProducerReader(connection)
+        return _compose_discovery_governing_producer_read_port(
+            reader.require_current_governing_producers
+        )
+    except DiscoveryContractError:
+        raise
+    except Exception as exc:
+        raise DiscoveryContractError(
+            "Discovery read-port factory failed closed"
+        ) from exc
+
+# fmt: on
 
 class _DiscoveryAuthorityStore(_CheckAuthorityStore):
     """Private single-writer Signal, Gate and Lead authority store."""
