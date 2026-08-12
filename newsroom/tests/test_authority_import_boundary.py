@@ -74,3 +74,16 @@ def test_increment6_authority_systems_are_cold_import_order_independent() -> Non
             capture_output=True,
             text=True,
         )
+
+
+def test_discovery_read_port_is_cold_import_order_independent() -> None:
+    for first, second in (
+        ("newsroom.discovery", "newsroom.authority._discovery_store"),
+        ("newsroom.authority._discovery_store", "newsroom.discovery"),
+    ):
+        subprocess.run(
+            [sys.executable, "-c", f"import {first}; import {second}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )

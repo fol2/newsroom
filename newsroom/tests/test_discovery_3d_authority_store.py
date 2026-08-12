@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
-import sqlite3
 
 import pytest
 
 from newsroom.authority import AuthorityPersistenceError, AuthoritySchemaError
+from newsroom.authority._discovery_store import (
+    _create_discovery_governing_producer_read_port,
+)
 from newsroom.discovery import (
     DecisionTerminality,
+    DiscoveryContractError,
+    DiscoveryGoverningProducerReadPort,
     DiscoverySemanticCollision,
     DiscoverySignalId,
     DiscoveryVersionConflict,
@@ -58,6 +63,268 @@ def _trigger_sql(conn: sqlite3.Connection, name: str) -> str:
     ).fetchone()
     assert row is not None and isinstance(row[0], str)
     return str(row[0])
+
+
+def _transaction_connection(database: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(database, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=FULL")
+    connection.execute("BEGIN IMMEDIATE")
+    return connection
+
+
+def test_governing_producer_read_port_is_private_and_transaction_bound(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    _seed_and_admit(database)
+    with pytest.raises(DiscoveryContractError, match="authority-private"):
+        DiscoveryGoverningProducerReadPort(object(), object())
+
+    connection = _transaction_connection(database)
+    try:
+        port = _create_discovery_governing_producer_read_port(connection)
+        connection.execute("COMMIT")
+        with pytest.raises(DiscoveryContractError, match="transaction"):
+            port.require_current_governing_producers((LEAD_ID,))
+    finally:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        connection.close()
+
+
+def test_governing_producer_read_port_returns_exact_ordered_closure(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.sqlite3"
+    admitted = _seed_and_admit(database)
+    connection = _transaction_connection(database)
+    try:
+        port = _create_discovery_governing_producer_read_port(connection)
+        changes = connection.total_changes
+        assert port.require_current_governing_producers((LEAD_ID,)) == (
+            (admitted.lead, admitted.signal, admitted.gate),
+        )
+        assert connection.in_transaction and connection.total_changes == changes
+        with pytest.raises(DiscoveryContractError):
+            port.require_current_governing_producers((LEAD_ID, LEAD_ID))
+    finally:
+        connection.execute("ROLLBACK")
+        connection.close()
+
+
+def test_governing_producer_read_port_rejects_currentness_and_offline_rewrite(
+    tmp_path: Path,
+) -> None:
+    from newsroom.discovery import TimeValidity
+
+    from .discovery_3d_helpers import reason
+
+    current_db = tmp_path / "current.sqlite3"
+    _seed_and_admit(current_db)
+    hold = replace(
+        exact_gate_request(),
+        decision_id=GateDecisionId.parse(
+            "00000000-0000-4000-8000-000000007096"
+        ),
+        decision_ordinal=2,
+        previous_decision_id=GATE_ID,
+        basis=replace(
+            exact_gate_request().basis,
+            policy_current=False,
+            operationally_executable=False,
+            time_validity=TimeValidity.CURRENT,
+        ),
+        outcome=GateOutcome.OPERATIONAL_HOLD,
+        terminality=DecisionTerminality.PENDING_CONDITION,
+        primary_reason=reason("OPS.POLICY_STALE"),
+        next_action=NextAction(
+            NextActionKind.REVIEW,
+            "REVIEW_STALE_POLICY",
+            owner="discovery-operator",
+            instructions="Revalidate the current deterministic Gate policy.",
+        ),
+        idempotency_key="governing-port-current-gate",
+    )
+    with open_discovery_system(current_db) as system:
+        system.discovery.decide_gate(hold, proof=proof())
+    connection = _transaction_connection(current_db)
+    try:
+        port = _create_discovery_governing_producer_read_port(connection)
+        with pytest.raises(DiscoveryContractError):
+            port.require_current_governing_producers((LEAD_ID,))
+    finally:
+        connection.execute("ROLLBACK")
+        connection.close()
+
+
+    definition_db = tmp_path / "definition.sqlite3"
+    _seed_and_admit(definition_db)
+    with open_discovery_system(definition_db) as system:
+        system.sources.record_definition_version(
+            replace(
+                version_request(),
+                version_id=SourceDefinitionVersionId.parse(
+                    "00000000-0000-4000-8000-000000006205"
+                ),
+                version_number=2,
+                expected_previous_version_id=version_request().version_id,
+                locator="fixture://increment-3d/governing-port-v2",
+                change_reason="Exercise governing-producer currentness.",
+                idempotency_key="governing-port-definition-v2",
+            ),
+            proof=proof(),
+        )
+    connection = _transaction_connection(definition_db)
+    try:
+        port = _create_discovery_governing_producer_read_port(connection)
+        with pytest.raises(DiscoveryContractError):
+            port.require_current_governing_producers((LEAD_ID,))
+    finally:
+        connection.execute("ROLLBACK")
+        connection.close()
+
+    tampered_db = tmp_path / "offline.sqlite3"
+    _seed_and_admit(tampered_db)
+    rewritten = replace(
+        exact_signal_request(), purpose="SELF_CONSISTENT_OFFLINE_REWRITE"
+    )
+    with sqlite3.connect(tampered_db) as connection:
+        triggers = {
+            name: _trigger_sql(connection, name)
+            for name in (
+                "immutable_discovery_signals_update",
+                "immutable_authority_payloads_update",
+                "immutable_ledger_events_update",
+            )
+        }
+        for name in triggers:
+            connection.execute(f"DROP TRIGGER {name}")
+        event = connection.execute(
+            "SELECT authority_event_id FROM discovery_signals WHERE signal_id=?",
+            (str(SIGNAL_ID),),
+        ).fetchone()[0]
+        payload_id = connection.execute(
+            "SELECT payload_id FROM ledger_events WHERE event_id=?", (event,)
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE discovery_signals SET purpose=?,semantic_digest=?,"
+            "canonical_bytes=?,canonical_digest=? WHERE signal_id=?",
+            (
+                rewritten.purpose,
+                rewritten.semantic_digest,
+                rewritten.canonical_bytes,
+                rewritten.digest,
+                str(SIGNAL_ID),
+            ),
+        )
+        connection.execute(
+            "UPDATE authority_payloads SET payload_bytes=?,payload_digest=? "
+            "WHERE payload_id=?",
+            (rewritten.canonical_bytes, rewritten.digest, payload_id),
+        )
+        connection.execute(
+            "UPDATE ledger_events SET payload_digest=? WHERE event_id=?",
+            (rewritten.digest, event),
+        )
+        for sql in triggers.values():
+            connection.execute(sql)
+        connection.commit()
+    connection = _transaction_connection(tampered_db)
+    try:
+        port = _create_discovery_governing_producer_read_port(connection)
+        with pytest.raises(DiscoveryContractError):
+            port.require_current_governing_producers((LEAD_ID,))
+    finally:
+        connection.execute("ROLLBACK")
+        connection.close()
+
+@pytest.mark.parametrize(
+    ("trigger_name", "table", "column", "value"),
+    (
+        (
+            "immutable_authority_commands_update",
+            "authority_commands",
+            "idempotency_key",
+            "offline-command-rewrite",
+        ),
+        (
+            "immutable_authority_commands_update",
+            "authority_commands",
+            "command_type",
+            "offline.bypass",
+        ),
+        (
+            "immutable_authority_audit_events_update",
+            "authority_audit_events",
+            "detail_digest",
+            "sha256:" + "0" * 64,
+        ),
+    ),
+)
+def test_governing_producer_read_port_rejects_command_and_audit_tamper(
+    tmp_path: Path,
+    trigger_name: str,
+    table: str,
+    column: str,
+    value: str,
+) -> None:
+    database = tmp_path / f"{table}.sqlite3"
+    _seed_and_admit(database)
+    with sqlite3.connect(database) as connection:
+        trigger = _trigger_sql(connection, trigger_name)
+        connection.execute(f"DROP TRIGGER {trigger_name}")
+        connection.execute(
+            f"UPDATE {table} SET {column}=? WHERE command_id=("
+            "SELECT command_id FROM ledger_events WHERE event_id=("
+            "SELECT authority_event_id FROM discovery_signals WHERE signal_id=?))",
+            (value, str(SIGNAL_ID)),
+        )
+        connection.execute(trigger)
+        connection.commit()
+    connection = _transaction_connection(database)
+    try:
+        port = _create_discovery_governing_producer_read_port(connection)
+        with pytest.raises(DiscoveryContractError):
+            port.require_current_governing_producers((LEAD_ID,))
+    finally:
+        connection.execute("ROLLBACK")
+        connection.close()
+
+
+def test_governing_producer_read_port_rejects_split_security_binding(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "security-split.sqlite3"
+    _seed_and_admit(database)
+    with sqlite3.connect(database) as connection:
+        trigger = _trigger_sql(connection, "immutable_authority_audit_events_update")
+        connection.execute("DROP TRIGGER immutable_authority_audit_events_update")
+        connection.execute(
+            "UPDATE authority_audit_events SET "
+            "authentication_context_id=(SELECT authentication_context_id FROM "
+            "authority_audit_events WHERE event_type!='discovery.signal.admitted' LIMIT 1),"
+            "authorization_request_digest=(SELECT authorization_request_digest FROM "
+            "authority_audit_events WHERE event_type!='discovery.signal.admitted' LIMIT 1),"
+            "authorization_decision_id=(SELECT authorization_decision_id FROM "
+            "authority_audit_events WHERE event_type!='discovery.signal.admitted' LIMIT 1) "
+            "WHERE command_id=(SELECT command_id FROM ledger_events WHERE event_id=("
+            "SELECT authority_event_id FROM discovery_signals WHERE signal_id=?))",
+            (str(SIGNAL_ID),),
+        )
+        connection.execute(trigger)
+        connection.commit()
+    connection = _transaction_connection(database)
+    try:
+        port = _create_discovery_governing_producer_read_port(connection)
+        with pytest.raises(DiscoveryContractError):
+            port.require_current_governing_producers((LEAD_ID,))
+    finally:
+        connection.execute("ROLLBACK")
+        connection.close()
+
 
 
 def test_signal_gate_lead_authority_replays_and_reopens(tmp_path: Path) -> None:

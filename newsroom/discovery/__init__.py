@@ -62,7 +62,41 @@ from .types import (
     permitted_newness_for_transition,
 )
 
-__all__ = [
+_GOVERNING_PRODUCER_PORT_TOKEN = object()
+
+
+class DiscoveryGoverningProducerReadPort:
+    __slots__ = ("__read",)
+
+    def __init__(self, token: object, read: object) -> None:
+        if token is not _GOVERNING_PRODUCER_PORT_TOKEN or not callable(read):
+            raise DiscoveryContractError("Discovery port is authority-private")
+        self.__read = read
+
+    def require_current_governing_producers(
+        self, lead_ids: tuple[NewsLeadId, ...]
+    ) -> tuple[tuple[NewsLead, DiscoverySignal, GateDecision], ...]:
+        try:
+            result = self.__read(lead_ids)
+            if type(result) is not tuple or any(
+                type(item) is not tuple
+                or len(item) != 3
+                or tuple(map(type, item)) != (NewsLead, DiscoverySignal, GateDecision)
+                for item in result
+            ):
+                raise DiscoveryContractError("Discovery read returned forged records")
+            return result
+        except DiscoveryContractError:
+            raise
+        except Exception as exc:
+            raise DiscoveryContractError("Discovery transaction read failed") from exc
+
+
+def _compose_discovery_governing_producer_read_port(read: object):
+    return DiscoveryGoverningProducerReadPort(_GOVERNING_PRODUCER_PORT_TOKEN, read)
+
+
+__all__ = [  # noqa: RUF022 - preserve established public grouping
     "ACTIVE_INCREMENT_3D_DISPOSITIONS",
     "DecisionTerminality",
     "DiscoveryAuthorityError",
@@ -70,6 +104,7 @@ __all__ = [
     "DiscoveryCurrentActionSource",
     "DiscoveryCurrentPhase",
     "DiscoveryCurrentStatus",
+    "DiscoveryGoverningProducerReadPort",
     "DiscoveryIdentifierReuse",
     "DiscoveryReadPolicy",
     "DiscoverySemanticCollision",
