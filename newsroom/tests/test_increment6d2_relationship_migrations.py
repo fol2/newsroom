@@ -24,6 +24,7 @@ from newsroom.authority.event_hypothesis_relationship_migrations import (
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
     EXPECTED_SCHEMA_FINGERPRINT,
+    SCHEMA_VERSION,
     apply_pending_migrations,
     schema_fingerprint,
 )
@@ -69,9 +70,9 @@ def test_fresh_v22_has_exact_single_table_history_and_pins() -> None:
     )
     assert (
         EXPECTED_SCHEMA_FINGERPRINT
-        == "sha256:c341333cf54d724bb4d2092bb9da81e9f3a434ddb03e6ddc14a51fdf2c6c1b52"
+        == "sha256:abf8430bfd676a9b0e574847cde9375d90aa1e32680725a08b30c0657d567a7c"
     )
-    assert EXPECTED_MIGRATION_HISTORY[-2] == (
+    assert next(item for item in EXPECTED_MIGRATION_HISTORY if item[0] == 22) == (
         22,
         EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION_NAME,
         EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION_CHECKSUM,
@@ -137,7 +138,7 @@ def test_exact_v21_backup_upgrade_and_injected_rollback(
     )
     monkeypatch.undo()
     apply_pending_migrations(connection, applied_at="2042-01-01T00:00:01.000000Z")
-    assert connection.execute("PRAGMA user_version").fetchone() == (23,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
 
 
 def test_standard_sqlite_connection_v22_backup_gate_closes_implicit_transaction(
@@ -156,7 +157,7 @@ def test_standard_sqlite_connection_v22_backup_gate_closes_implicit_transaction(
 
         apply_pending_migrations(connection, applied_at="2042-01-01T00:00:01.000000Z")
 
-        assert connection.execute("PRAGMA user_version").fetchone() == (23,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
     finally:
         connection.close()
 
@@ -167,6 +168,6 @@ def test_v21_backup_required_and_v24_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(EventHypothesisRelationshipBackupError, match="prepared backup"):
         apply_pending_migrations(connection, applied_at="2042-01-01T00:00:01.000000Z")
     newer = _open()
-    newer.execute("PRAGMA user_version=24")
+    newer.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
     with pytest.raises(sqlite3.DatabaseError, match="newer"):
         apply_pending_migrations(newer, applied_at="2042-01-01T00:00:00.000000Z")

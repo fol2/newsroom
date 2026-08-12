@@ -15,7 +15,11 @@ from newsroom.authority.event_hypothesis_lineage_migrations import (
     event_hypothesis_lineage_backup_paths,
     prepare_event_hypothesis_lineage_backup,
 )
-from newsroom.authority.migrations import apply_pending_migrations, schema_fingerprint
+from newsroom.authority.migrations import (
+    SCHEMA_VERSION,
+    apply_pending_migrations,
+    schema_fingerprint,
+)
 from newsroom.tests.graphiti_adapter_4d_migration_helpers import (
     drop_empty_v23_lineage_schema,
 )
@@ -78,7 +82,7 @@ def test_exact_v22_default_connection_backup_upgrade_and_rollback(
     assert connection.execute("PRAGMA user_version").fetchone() == (22,)
     monkeypatch.undo()
     apply_pending_migrations(connection, applied_at="2042-01-02T00:00:00.000000Z")
-    assert connection.execute("PRAGMA user_version").fetchone() == (23,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
 
 
 def test_v22_requires_backup_and_v24_fails_closed(tmp_path: Path) -> None:
@@ -87,7 +91,7 @@ def test_v22_requires_backup_and_v24_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(EventHypothesisLineageBackupError, match="prepared backup"):
         apply_pending_migrations(connection, applied_at="2042-01-02T00:00:00.000000Z")
     newer = sqlite3.connect(":memory:", isolation_level=None)
-    newer.execute("PRAGMA user_version=24")
+    newer.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
     with pytest.raises(sqlite3.DatabaseError, match="newer"):
         apply_pending_migrations(newer, applied_at="2042-01-02T00:00:00.000000Z")
 

@@ -5,6 +5,7 @@ already-decided 6D2 relationship assessments.  They allocate no Version,
 write no authority state, and grant no Candidate, evidence, publication,
 model, provider, egress, or external-effect capability.
 """
+# ruff: noqa: E701 - keep the bounded D3 read-port contract within #401's line cap
 
 from __future__ import annotations
 
@@ -38,6 +39,7 @@ from newsroom.increment6.relationships import (
     ComparatorSetManifest,
     HypothesisVersionBinding,
     RelationshipAssessment,
+    RetainedRelationshipDecisionReceipt,
     assess_relationships,
 )
 
@@ -1660,6 +1662,65 @@ class EventHypothesisLineageAuthority:
         self.close()
 
 
+# fmt: off
+@dataclass(frozen=True, slots=True)
+class HypothesisLineageProducerSnapshot:
+    subject: EventHypothesisVersion
+    receipts: tuple[HypothesisLineageReceipt, ...]
+    initial_heads: tuple[HypothesisLineageHead, ...]
+    versions: tuple[EventHypothesisVersion, ...]
+    relationship_proofs: tuple[HypothesisLineageRelationshipProof, ...]
+    replay: HypothesisLineageReplay
+    subject_active_head: HypothesisLineageHead
+
+    def __post_init__(self) -> None:
+        try:
+            replay = replay_hypothesis_lineage(self.receipts, initial_heads=self.initial_heads,
+                versions=self.versions, relationship_proofs=self.relationship_proofs)
+        except HypothesisLineageContractError: raise
+        except Exception as exc: raise HypothesisLineageContractError("invalid lineage producer snapshot") from exc
+        if (type(self) is not HypothesisLineageProducerSnapshot or type(self.subject) is not EventHypothesisVersion
+            or type(self.replay) is not HypothesisLineageReplay or type(self.subject_active_head) is not HypothesisLineageHead
+            or replay != self.replay or self.subject not in self.versions or self.subject_active_head not in replay.active_heads
+            or self.subject_active_head.node.version_id != self.subject.version_id
+            or self.subject_active_head.node.version_digest != self.subject.canonical_digest):
+            raise HypothesisLineageContractError("lineage producer snapshot differs from its exact subject head")
+
+
+_PRODUCER_PORT_TOKEN = object()
+
+
+class EventHypothesisLineageReadPort:
+    """Token-gated D1/D2/D3 view bound to an active authority transaction."""
+    __slots__ = ("__authority",)
+
+    def __init__(self, token: object, authority: object) -> None:
+        if token is not _PRODUCER_PORT_TOKEN: raise HypothesisLineageContractError("lineage read port is private")
+        self.__authority = authority
+
+    def _call(self, name, *args, expected, **kwargs):
+        message = f"lineage {name} transaction read failed"
+        value = _normalise_exact(lambda: getattr(self.__authority, name)(*args, **kwargs), message, expected)
+        if expected is HypothesisLineageProducerSnapshot:
+            return _normalise(lambda: HypothesisLineageProducerSnapshot(value.subject, value.receipts, value.initial_heads,
+                value.versions, value.relationship_proofs, value.replay, value.subject_active_head), message)
+        return value
+
+    def verify_retained_integrity_in_transaction(self) -> None:
+        return self._call("verify_retained_integrity_in_transaction", expected=type(None))
+
+    def require_current_producers_in_transaction(self, version_id: str, *, proof: object) -> HypothesisLineageProducerSnapshot:
+        return self._call("require_producers_in_transaction", version_id, proof=proof, expected=HypothesisLineageProducerSnapshot)
+
+    def require_retained_relationship_in_transaction(self, assessment_digest: str) -> RetainedRelationshipDecisionReceipt:
+        return self._call("require_retained_relationship_in_transaction", assessment_digest, expected=RetainedRelationshipDecisionReceipt)
+
+
+def _compose_event_hypothesis_lineage_read_port(authority: object) -> EventHypothesisLineageReadPort:
+    return EventHypothesisLineageReadPort(_PRODUCER_PORT_TOKEN, authority)
+# fmt: on
+
+
 def _compose_event_hypothesis_lineage_authority(
     authority: object,
 ) -> EventHypothesisLineageAuthority:
@@ -1718,12 +1779,14 @@ __all__ = [
     "MAX_LINEAGE_REPLAY_NODES",
     "MAX_LINEAGE_REPLAY_RECEIPTS",
     "EventHypothesisLineageAuthority",
+    "EventHypothesisLineageReadPort",
     "HypothesisLineageContractError",
     "HypothesisLineageEdge",
     "HypothesisLineageEvidenceBinding",
     "HypothesisLineageHead",
     "HypothesisLineageKind",
     "HypothesisLineageNodeBinding",
+    "HypothesisLineageProducerSnapshot",
     "HypothesisLineageReceipt",
     "HypothesisLineageRelationshipBinding",
     "HypothesisLineageRelationshipProof",

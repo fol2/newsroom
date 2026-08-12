@@ -35,7 +35,100 @@ from newsroom.authority.triage_work_item_migrations import (
 
 
 def drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
+    """Remove exact empty v24/v23 schemas as one rollback-safe operation."""
+    savepoint = "checked_candidate_lineage_downgrade"
+    connection.execute(f"SAVEPOINT {savepoint}")
+    try:
+        _drop_empty_v23_lineage_schema(connection)
+    except Exception:
+        connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
+def _drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
     """Remove an exact, empty v23 lineage schema atomically."""
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) == 24:
+        candidate_tables = (
+            "story_candidate_heads",
+            "story_candidate_collision_bindings",
+            "story_candidate_admission_receipts_v2",
+        )
+        candidate_triggers = (
+            "candidate_head_update_guard",
+            "candidate_head_insert_guard",
+            "retained_candidate_head",
+            "retained_candidate_collision",
+            "immutable_candidate_collision",
+            "retained_candidate_receipt",
+            "immutable_candidate_receipt",
+        )
+        history = connection.execute(
+            "SELECT name,checksum FROM authority_migrations WHERE version=24"
+        ).fetchone()
+        from newsroom.authority.story_candidate_migrations import (
+            STORY_CANDIDATE_MIGRATION_CHECKSUM,
+            STORY_CANDIDATE_MIGRATION_NAME,
+            STORY_CANDIDATE_MIGRATION_STATEMENTS,
+        )
+
+        required = {("table", name) for name in candidate_tables} | {
+            ("trigger", name) for name in candidate_triggers
+        }
+        present = set(
+            connection.execute(
+                "SELECT type,name FROM sqlite_master WHERE name IN ("
+                + ",".join("?" for _ in required)
+                + ")",
+                tuple(name for _, name in required),
+            ).fetchall()
+        )
+        actual_sql = {
+            " ".join(str(row[0]).split())
+            for row in connection.execute(
+                "SELECT sql FROM sqlite_master WHERE name IN ("
+                + ",".join("?" for _ in required)
+                + ")",
+                tuple(name for _, name in required),
+            )
+        }
+        expected_sql = {
+            " ".join(statement.split())
+            for statement in STORY_CANDIDATE_MIGRATION_STATEMENTS
+        }
+        if (
+            history
+            != (STORY_CANDIDATE_MIGRATION_NAME, STORY_CANDIDATE_MIGRATION_CHECKSUM)
+            or present != required
+            or actual_sql != expected_sql
+        ):
+            raise sqlite3.DatabaseError(
+                "downgrade requires exact empty v24 Candidate schema"
+            )
+        for table in candidate_tables:
+            if connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone() != (0,):
+                raise sqlite3.DatabaseError("v24 Candidate tables must be empty")
+        savepoint_v24 = "checked_empty_v24_candidate_downgrade"
+        connection.execute(f"SAVEPOINT {savepoint_v24}")
+        try:
+            guard = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                "AND name='immutable_authority_migrations_delete'"
+            ).fetchone()[0]
+            connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+            for trigger in candidate_triggers:
+                connection.execute(f'DROP TRIGGER "{trigger}"')
+            for table in candidate_tables:
+                connection.execute(f'DROP TABLE "{table}"')
+            connection.execute("DELETE FROM authority_migrations WHERE version=24")
+            connection.execute(guard)
+            connection.execute("PRAGMA user_version=23")
+            connection.execute(f"RELEASE SAVEPOINT {savepoint_v24}")
+        except Exception:
+            connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint_v24}")
+            connection.execute(f"RELEASE SAVEPOINT {savepoint_v24}")
+            raise
     savepoint = "checked_empty_v23_lineage_downgrade"
     lineage_tables = (
         "event_hypothesis_lineage",

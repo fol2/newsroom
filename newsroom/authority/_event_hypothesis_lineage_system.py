@@ -1,4 +1,5 @@
 """Private checked v23 Event Hypothesis lineage authority."""
+# ruff: noqa: E701,E702 - keep the bounded D3 read-port seam within #401's line cap
 
 from __future__ import annotations
 
@@ -20,11 +21,14 @@ from newsroom.increment6.lineage import (
     LINEAGE_COMMAND_TYPE,
     LINEAGE_EVENT_TYPE,
     EventHypothesisLineageAuthority,
+    EventHypothesisLineageReadPort,
     HypothesisLineageContractError,
     HypothesisLineageHead,
+    HypothesisLineageProducerSnapshot,
     HypothesisLineageReceipt,
     HypothesisLineageRelationshipProof,
     _compose_event_hypothesis_lineage_authority,
+    _compose_event_hypothesis_lineage_read_port,
     lineage_command_definition,
     merge_lineage_authority_registries,
     replay_hypothesis_lineage,
@@ -299,7 +303,7 @@ class _LineageStore(_EventAuthorityStore):
         UtcTimestamp.parse(str(row["recorded_at"]))
         return receipt
 
-    def _full_replay(self, receipts: tuple[HypothesisLineageReceipt, ...]):
+    def _replay_inputs(self, receipts: tuple[HypothesisLineageReceipt, ...]):
         nodes = {
             node.version_id: node
             for receipt in receipts
@@ -334,11 +338,12 @@ class _LineageStore(_EventAuthorityStore):
                 - output_ids
             )
         )
+        return roots, tuple(versions), tuple(proofs)
+
+    def _full_replay(self, receipts: tuple[HypothesisLineageReceipt, ...]):
+        roots, versions, proofs = self._replay_inputs(receipts)
         return replay_hypothesis_lineage(
-            receipts,
-            initial_heads=roots,
-            versions=tuple(versions),
-            relationship_proofs=tuple(proofs),
+            receipts, initial_heads=roots, versions=versions, relationship_proofs=proofs
         )
 
     def _history_rows(self) -> tuple[HypothesisLineageReceipt, ...]:
@@ -349,7 +354,7 @@ class _LineageStore(_EventAuthorityStore):
             )
         )
 
-    def _verify(self) -> None:
+    def _verify(self):
         _VERIFY_RETAINED_RELATIONSHIP_INTEGRITY(self._port)
         self._validate_relational_invariants(self._connection)
         self._validate_immutable_records(self._connection)
@@ -361,7 +366,13 @@ class _LineageStore(_EventAuthorityStore):
         if orphan is not None:
             raise AuthoritySchemaError("lineage event coverage differs")
         history = self._history_rows()
-        replay = self._full_replay(history)
+        roots, versions, proofs = self._replay_inputs(history)
+        replay = replay_hypothesis_lineage(
+            history,
+            initial_heads=roots,
+            versions=versions,
+            relationship_proofs=proofs,
+        )
         verified = replay.history
         actual = tuple(
             (
@@ -399,6 +410,7 @@ class _LineageStore(_EventAuthorityStore):
         )
         if actual != expected:
             raise AuthoritySchemaError("lineage materialised heads differ")
+        return history, roots, versions, proofs, replay
 
     def _rebuild_heads(self, replay: object) -> None:
         from newsroom.increment6.lineage import HypothesisLineageReplay
@@ -671,6 +683,52 @@ def _open_unlocked_lineage_authority_for_test(
         busy_timeout_ms=busy_timeout_ms,
         unlocked=True,
     )
+
+
+# fmt: off
+def _create_event_hypothesis_lineage_read_port(connection: sqlite3.Connection, *,
+    retrieval_authority: RetrievalContextAuthority, authenticator: object, command_registry: CommandRegistry,
+    payload_schemas: PayloadSchemaRegistry, clock: Callable[[], UtcTimestamp] = UtcTimestamp.now):
+    """Compose exact D1/D2/D3 producer reads on the caller's transaction."""
+    if connection.in_transaction: raise HypothesisLineageContractError("Candidate lineage port requires idle open")
+    port = _create_event_hypothesis_relationship_read_port(connection, retrieval_authority=retrieval_authority,
+        authenticator=authenticator, command_registry=command_registry, payload_schemas=payload_schemas, clock=clock)
+    verifier = object.__new__(_LineageStore); verifier._conn = connection; verifier._closed = False; verifier._port = port
+    relationship_commands, relationship_schemas = merge_relationship_authority_registries(command_registry, payload_schemas)
+    verifier._command_registry, verifier._payload_schemas = merge_lineage_authority_registries(relationship_commands, relationship_schemas)
+
+    def verified():
+        if not connection.in_transaction: raise HypothesisLineageContractError("lineage producer transaction is absent")
+        return verifier._verify()
+
+    class _ReadAuthority:
+        def verify_retained_integrity_in_transaction(self) -> None: verified()
+
+        def require_retained_relationship_in_transaction(self, digest: str):
+            verified(); return port.require_retained_receipt_in_transaction(digest)
+
+        def require_producers_in_transaction(self, version_id: str, *, proof: object):
+            receipts, roots, versions, proofs, replay = verified()
+            current = port.require_current_version_in_transaction(version_id, proof=proof)
+            if current.version_id not in {item.version_id for item in versions}:
+                versions += (current,); roots += (HypothesisLineageHead.from_version(current),)
+                replay = replay_hypothesis_lineage(receipts, initial_heads=roots, versions=versions, relationship_proofs=proofs)
+            heads = {head.node.version_id: head for head in replay.active_heads}
+            for head in replay.active_heads:
+                retained = port.require_current_version_in_transaction(head.node.version_id, proof=proof)
+                if retained.canonical_digest != head.node.version_digest: raise HypothesisLineageContractError("Candidate D3 head is stale")
+            subject_head = heads.get(current.version_id)
+            if subject_head is None or subject_head.node.version_digest != current.canonical_digest:
+                raise HypothesisLineageContractError("Candidate D3 head is stale")
+            return HypothesisLineageProducerSnapshot(current, receipts, roots, versions, proofs, replay, subject_head)
+
+    try:
+        result = _compose_event_hypothesis_lineage_read_port(_ReadAuthority())
+        if type(result) is not EventHypothesisLineageReadPort: raise HypothesisLineageContractError("lineage read-port factory is forged")
+        return result
+    except HypothesisLineageContractError: raise
+    except Exception as exc: raise HypothesisLineageContractError("lineage read-port factory failed closed") from exc
+# fmt: on
 
 
 __all__: list[str] = []
