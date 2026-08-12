@@ -12,6 +12,7 @@ from newsroom.authority.canonical import (
     digest_bytes,
 )
 from newsroom.discovery.record_models import DiscoverySignal, GateDecision, NewsLead
+from newsroom.discovery.types import GateOutcome
 from newsroom.increment6.collision import (
     CandidateUseOperation,
     CollisionEligibilityOutcome,
@@ -128,7 +129,10 @@ class _CanonicalFields:
 
     @classmethod
     def from_value(cls, value: object) -> Self:
-        return cls(**_exact(value, set(cls.__dataclass_fields__), cls.__name__))  # type: ignore[arg-type]
+        return _normalise(
+            lambda: cls(**_exact(value, set(cls.__dataclass_fields__), cls.__name__)),  # type: ignore[arg-type]
+            f"{cls.__name__} replay failed",
+        )
 
 
 def _normalise[T](operation: object, message: str) -> T:
@@ -317,6 +321,7 @@ class CandidateLeadSignalBinding(_NoEffect, _CanonicalFields):
     coverage_basis: str
     incomplete: bool
 
+    @_total("invalid Lead/Signal binding")
     def __post_init__(self) -> None:
         _valid(type(self) is CandidateLeadSignalBinding)
         for name in ("lead_id", "signal_id", "lead_event_id", "signal_event_id"):
@@ -351,6 +356,7 @@ class CandidateGoverningStateBinding(_NoEffect, _CanonicalFields):
     admission_ruleset: str
     declared_versions: str
 
+    @_total("invalid governing-state binding")
     def __post_init__(self) -> None:
         if type(self) is not CandidateGoverningStateBinding:
             raise _Error("governing-state binding must be exact")
@@ -363,6 +369,7 @@ class CandidateGoverningState(_NoEffect):
     status: CandidateGoverningStateStatus
     binding: CandidateGoverningStateBinding | None
 
+    @_total("invalid governing state")
     def __post_init__(self) -> None:
         if type(self.status) is not CandidateGoverningStateStatus or (
             self.status is CandidateGoverningStateStatus.COMPLETE
@@ -409,6 +416,7 @@ class CandidateGoverningManifest(_NoEffect):
     governing_state_binding: CandidateGoverningStateBinding
     incomplete: bool
 
+    @_total("invalid governing manifest")
     def __post_init__(self) -> None:
         _valid(type(self) is CandidateGoverningManifest)
         digests = _MANIFEST_DIGESTS.split()
@@ -448,6 +456,13 @@ class CandidateGoverningManifest(_NoEffect):
             _uuid(comparator[0], "relationship_comparator_hypothesis_id")
             _uuid(comparator[1], "relationship_comparator_version_id")
             _digest(comparator[2], "relationship_comparator_version_digest")
+        no_comparator = all(item is None for item in comparator)
+        _valid(
+            no_comparator
+            if self.relationship_status is not AssessmentStatus.COMPLETE
+            or self.relationship_outcome is CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH
+            else not no_comparator
+        )
         _valid(type(self.lineage_generation) is int and self.lineage_generation >= 0)
         _token(self.collision_namespace, "collision_namespace")
         _valid(type(self.governing_state_binding) is CandidateGoverningStateBinding)
@@ -455,16 +470,20 @@ class CandidateGoverningManifest(_NoEffect):
         optional = set(_OPTIONAL_TUPLES.split())
         for name in tuple_fields:
             values = getattr(self, name)
+            exact = type(values) is tuple and all(
+                type(value) is str and value for value in values
+            )
             ordered = (
-                len(set(values)) == len(values)
-                if name == "lineage_history_digests"
-                else values == tuple(sorted(set(values)))
+                (
+                    len(set(values)) == len(values)
+                    if name == "lineage_history_digests"
+                    else values == tuple(sorted(set(values)))
+                )
+                if exact
+                else False
             )
             _require(
-                type(values) is tuple
-                and all(type(value) is str and value for value in values)
-                and (bool(values) or name in optional)
-                and ordered,
+                exact and (bool(values) or name in optional) and ordered,
                 f"invalid {name}",
             )
         for name in digests[1:3] + tuple_fields[:3]:
@@ -601,6 +620,7 @@ class StoryCandidate(_NoEffect, _CanonicalFields):
     authority_event_id: str
     semantic_scope_digest: str
 
+    @_total("invalid Story Candidate")
     def __post_init__(self) -> None:
         _valid(type(self) is StoryCandidate)
         for name in (
@@ -616,6 +636,10 @@ class StoryCandidate(_NoEffect, _CanonicalFields):
         return _document_bytes(
             STORY_CANDIDATE, self.canonical_value(), "Story Candidate"
         )
+
+    @property
+    def canonical_digest(self) -> str:
+        return _hash(self.canonical_bytes)
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
@@ -635,6 +659,7 @@ class StoryCandidateVersion(_NoEffect, _CanonicalFields):
     committed_admission_decision_id: str
     governing_manifest: CandidateGoverningManifest
 
+    @_total("invalid Candidate Version")
     def __post_init__(self) -> None:
         _valid(type(self) is StoryCandidateVersion)
         for name in ("candidate_id", "version_id", "committed_admission_decision_id"):
@@ -695,6 +720,7 @@ class CandidateDistinctScopeProof(_NoEffect, _CanonicalFields):
     comparator_semantic_scope_digest: str
     context_digest: str
 
+    @_total("invalid distinct-scope proof")
     def __post_init__(self) -> None:
         if type(self) is not CandidateDistinctScopeProof:
             raise _Error("distinct-scope proof must be exact")
@@ -716,6 +742,7 @@ class CandidateAdmissionRequest(_NoEffect, _CanonicalFields):
     expected_governing_state_digest: str
     distinct_scope_proof_digest: str | None
 
+    @_total("invalid Candidate Admission request")
     def __post_init__(self) -> None:
         _valid(type(self) is CandidateAdmissionRequest)
         _uuid(self.request_id, "request_id")
@@ -1051,6 +1078,11 @@ def build_candidate_governing_manifest(
             if (
                 str(gate.request.signal_id) != signal_id
                 or gate.request.coverage != lead.request.coverage
+                or gate.request.outcome is not GateOutcome.PROMOTED_TO_LEAD
+                or gate.request.evaluated_definition_version_id
+                != signal.request.definition_version_id
+                or gate.request.evaluated_definition_version_id
+                != lead.request.definition_version_id
             ):
                 raise _Error("promoting Gate differs from Lead lineage")
             # Shared source lineage is exact only when the Lead retains the Signal's source identities.
@@ -1306,6 +1338,8 @@ def _validate_relationship_route(version, assessment) -> None:
         "D1 relationship",
     )
     if assessment.status is not AssessmentStatus.COMPLETE:
+        if assessment.comparator is not None:
+            raise _Error("invalid Candidate contract")
         return
     if assessment.decision is not expected:
         raise _Error("invalid Candidate contract")
@@ -1323,6 +1357,10 @@ def _validate_relationship_route(version, assessment) -> None:
         version.target_version_id,
         version.target_version_digest,
     )
+    if (expected is CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH) != (
+        comparator is None
+    ):
+        raise _Error("invalid Candidate contract")
     if comparator != (None if target == (None, None, None) else target):
         raise _Error("invalid Candidate contract")
 
@@ -1343,7 +1381,7 @@ def build_candidate_distinct_scope_proof(
         pb, cb = p.request.binding, c.request.binding
         context = lambda item: _attrs(item, _CONTEXT.split())
 
-        def collision_matches(manifest, decision):
+        def historical_collision_matches(manifest, decision):
             return _attrs(
                 manifest,
                 "collision_request_digest collision_decision_digest collision_namespace collision_key_digest hypothesis_id hypothesis_version_id hypothesis_version_digest",
@@ -1358,8 +1396,11 @@ def build_candidate_distinct_scope_proof(
 
         _valid(
             not (
-                not collision_matches(proposed_manifest, p)
-                or not collision_matches(v.governing_manifest, c)
+                not historical_collision_matches(proposed_manifest, p)
+                or _attrs(
+                    v.governing_manifest, "collision_namespace collision_key_digest"
+                )
+                != _attrs(cb, "collision_namespace collision_key_digest")
                 or proposed_manifest.relationship_outcome
                 is not CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH
                 or p.outcome is not CollisionEligibilityOutcome.ELIGIBLE
@@ -1385,6 +1426,7 @@ def build_candidate_distinct_scope_proof(
                     == v.governing_manifest.semantic_scope_digest
                 )
                 or (context(pb) != context(cb))
+                or p.trusted_context.context_digest != c.trusted_context.context_digest
             )
         )
         return CandidateDistinctScopeProof(
@@ -1394,7 +1436,7 @@ def build_candidate_distinct_scope_proof(
             v.version_id,
             v.canonical_digest,
             v.governing_manifest.semantic_scope_digest,
-            _project(context(pb)),
+            p.trusted_context.context_digest,
         )
 
     return _normalise(build, "distinct-scope proof failed closed")
@@ -1428,6 +1470,8 @@ def evaluate_candidate_admission(
             or (binding.subject_id != m.hypothesis_id)
             or (binding.subject_version_id != m.hypothesis_version_id)
             or (binding.subject_version_digest != m.hypothesis_version_digest)
+            or (binding.collision_namespace != m.collision_namespace)
+            or (binding.collision_key_digest != m.collision_key_digest)
         )
     )
     current = () if v is None else (v.candidate_id, v.version_id, v.canonical_digest)

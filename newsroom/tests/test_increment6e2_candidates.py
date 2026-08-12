@@ -9,6 +9,13 @@ import pytest
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.types import EventId
 from newsroom.discovery.record_models import DiscoverySignal, GateDecision, NewsLead
+from newsroom.discovery.types import (
+    DecisionTerminality,
+    GateOutcome,
+    NextAction,
+    NextActionKind,
+    TimeValidity,
+)
 from newsroom.increment6 import candidates as candidates_module
 from newsroom.increment6.candidates import (
     CANDIDATE_ADMISSION,
@@ -57,6 +64,7 @@ from newsroom.increment6.relationships import (
     RetainedRelationshipDecisionReceipt,
 )
 from newsroom.tests.discovery_3d_authority_helpers import exact_admission_request
+from newsroom.tests.discovery_3d_helpers import reason
 from newsroom.tests.test_increment6a2_work_items import _id
 from newsroom.tests.test_increment6c2_dispositions import _persisted_disposition_store
 from newsroom.tests.test_increment6d3_lineage import (
@@ -139,6 +147,16 @@ def _manifest(collision, *, incomplete: bool = False) -> CandidateGoverningManif
         collision_key_digest=binding.collision_key_digest,
         governing_state_binding=CandidateGoverningStateBinding(*((D,) * 9)),
         incomplete=incomplete,
+    )
+
+
+def _with_relationship(manifest, outcome):
+    return replace(
+        manifest,
+        relationship_outcome=outcome,
+        relationship_comparator_hypothesis_id="33333333-3333-4333-8333-333333333333",
+        relationship_comparator_version_id="44444444-4444-4444-8444-444444444444",
+        relationship_comparator_version_digest=D,
     )
 
 
@@ -541,9 +559,8 @@ def test_distinct_and_blocked_collision_results_remain_typed(tmp_path) -> None:
         governing_state=_current_state(distinct_manifest),
     )
     assert distinct.outcome is CandidateAdmissionOutcome.BLOCKED
-    related_manifest = replace(
-        distinct_manifest,
-        relationship_outcome=CanonicalOutcome.REL_RELATED_DISTINCT,
+    related_manifest = _with_relationship(
+        distinct_manifest, CanonicalOutcome.REL_RELATED_DISTINCT
     )
     related_binding = replace(
         distinct_collision.request.binding,
@@ -655,7 +672,7 @@ def test_unavailable_and_binding_mismatch_keep_typed_fail_closed_meaning(
 )
 def test_same_state_and_uncertain_are_typed_blocked(tmp_path, outcome) -> None:
     collision = _eligible_current(tmp_path, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
-    manifest = replace(_manifest(collision), relationship_outcome=outcome)
+    manifest = _with_relationship(_manifest(collision), outcome)
     decision = evaluate_candidate_admission(
         request=_request(manifest, None),
         manifest=manifest,
@@ -868,13 +885,24 @@ def test_real_producers_build_exact_governing_manifest(tmp_path) -> None:
         collision_state=CollisionState.OCCUPIED,
         observed_candidate_id=comparator_candidate_id,
     )
+    comparator_admit_binding = replace(
+        comparator_binding,
+        operation=CandidateUseOperation.ADMIT_NEW_CANDIDATE,
+        expected_candidate_id=None,
+    )
+    comparator_admission = replace(
+        collision,
+        request=CurrentCollisionEligibilityRequest(
+            comparator_admit_binding, collision.request.named_request_digest
+        ),
+    )
     comparator_manifest = replace(
         manifest,
         hypothesis_id=comparator_hypothesis,
         hypothesis_version_id=comparator_hypothesis_version,
         hypothesis_version_digest=D,
-        collision_request_digest=comparator_collision.request.request_digest,
-        collision_decision_digest=digest_bytes(comparator_collision.canonical_bytes),
+        collision_request_digest=comparator_admission.request.request_digest,
+        collision_decision_digest=digest_bytes(comparator_admission.canonical_bytes),
         collision_key_digest=comparator_key,
         semantic_scope_digest=comparator_scope,
     )
@@ -893,6 +921,24 @@ def test_real_producers_build_exact_governing_manifest(tmp_path) -> None:
         comparator_collision=comparator_collision,
         comparator_version=comparator_version,
     )
+    assert (
+        comparator_version.governing_manifest.collision_request_digest
+        == comparator_admission.request.request_digest
+        != comparator_collision.request.request_digest
+    )
+    with pytest.raises(CandidateContractError):
+        build_candidate_distinct_scope_proof(
+            proposed_manifest=manifest,
+            proposed_collision=collision,
+            comparator_collision=replace(
+                comparator_collision,
+                trusted_context=replace(
+                    comparator_collision.trusted_context,
+                    authority_scope_id="different-trusted-scope",
+                ),
+            ),
+            comparator_version=comparator_version,
+        )
     with pytest.raises(CandidateContractError):
         build_candidate_distinct_scope_proof(
             proposed_manifest=manifest,
@@ -965,6 +1011,53 @@ def test_real_producers_build_exact_governing_manifest(tmp_path) -> None:
             relationship=relationship,
             collision=collision,
         )
+    hold_basis = replace(
+        gate.request.basis,
+        operationally_executable=False,
+        policy_current=False,
+        time_validity=TimeValidity.CURRENT,
+    )
+    wrong_outcome = replace(
+        gate.request,
+        basis=hold_basis,
+        outcome=GateOutcome.OPERATIONAL_HOLD,
+        terminality=DecisionTerminality.PENDING_CONDITION,
+        primary_reason=reason("OPS.REQUIRED_CONTEXT_UNAVAILABLE"),
+        next_action=NextAction(
+            NextActionKind.WAIT_DEPENDENCY,
+            "WAIT_FOR_REQUIRED_CONTEXT",
+            dependency="fixture-context-authority",
+            instructions="Retain the Signal without creating a Lead.",
+        ),
+        idempotency_key="candidate-gate:wrong-outcome",
+    )
+    for wrong_gate_request in (
+        wrong_outcome,
+        replace(
+            gate.request,
+            evaluated_definition_version_id=type(
+                gate.request.evaluated_definition_version_id
+            ).parse(_id(302)),
+        ),
+    ):
+        wrong_gate = GateDecision(
+            wrong_gate_request,
+            EventId.new(),
+            1,
+            wrong_gate_request.decided_at,
+            wrong_gate_request.digest,
+        )
+        with pytest.raises(CandidateContractError):
+            build_candidate_governing_manifest(
+                hypothesis_version=version,
+                **_lineage_args(version),
+                dispositions=(disposition,),
+                leads=(lead,),
+                signals=(signal,),
+                gates=(wrong_gate,),
+                relationship=relationship,
+                collision=collision,
+            )
     candidate_manifest = disposition.route_binding.candidate_manifest
     assert candidate_manifest is not None
     assert (
@@ -1143,11 +1236,13 @@ def test_candidate_kind_is_version_state_not_candidate_identity(tmp_path) -> Non
             }
         )
     )
-    correction = replace(
-        original,
-        candidate_kind=CandidateManifestKind.CORRECTION,
-        semantic_scope_digest=correction_scope,
-        relationship_outcome=CanonicalOutcome.REL_CORRECTION_REVERSAL_OF,
+    correction = _with_relationship(
+        replace(
+            original,
+            candidate_kind=CandidateManifestKind.CORRECTION,
+            semantic_scope_digest=correction_scope,
+        ),
+        CanonicalOutcome.REL_CORRECTION_REVERSAL_OF,
     )
     assert correction.semantic_scope_digest == original.semantic_scope_digest
 
@@ -1499,3 +1594,105 @@ def test_d2_comparator_must_match_exact_d1_target_version() -> None:
     )
     with pytest.raises(CandidateContractError):
         candidates_module._validate_relationship_route(successor, tampered)
+
+
+def test_evaluator_rejects_collision_namespace_and_key_mismatch(tmp_path) -> None:
+    collision = _eligible_current(tmp_path, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    manifest = _manifest(collision)
+    for field, value in (
+        ("collision_namespace", "different-candidate-namespace"),
+        ("collision_key_digest", "sha256:" + "9" * 64),
+    ):
+        changed_binding = replace(collision.request.binding, **{field: value})
+        changed = replace(
+            collision,
+            request=CurrentCollisionEligibilityRequest(
+                changed_binding, collision.request.named_request_digest
+            ),
+        )
+        receipt_bound = replace(
+            manifest,
+            collision_request_digest=changed.request.request_digest,
+            collision_decision_digest=digest_bytes(changed.canonical_bytes),
+        )
+        with pytest.raises(CandidateContractError):
+            evaluate_candidate_admission(
+                request=_request(receipt_bound, None),
+                manifest=receipt_bound,
+                collision=changed,
+                current_version=None,
+                governing_state=_current_state(receipt_bound),
+            )
+
+
+def test_relationship_comparator_presence_matrix_and_nested_totality(tmp_path) -> None:
+    manifest = _manifest(
+        _eligible_current(tmp_path, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    )
+    comparator = (
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+        D,
+    )
+    invalid = (
+        (AssessmentStatus.INCOMPLETE, None, comparator),
+        (
+            AssessmentStatus.COMPLETE,
+            CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH,
+            comparator,
+        ),
+        (
+            AssessmentStatus.COMPLETE,
+            CanonicalOutcome.REL_DEVELOPMENT_OF,
+            (None, None, None),
+        ),
+    )
+    for status, outcome, values in invalid:
+        with pytest.raises(CandidateContractError):
+            replace(
+                manifest,
+                relationship_status=status,
+                relationship_outcome=outcome,
+                incomplete=status is AssessmentStatus.INCOMPLETE,
+                relationship_comparator_hypothesis_id=values[0],
+                relationship_comparator_version_id=values[1],
+                relationship_comparator_version_digest=values[2],
+            )
+    assert (
+        replace(
+            manifest,
+            relationship_status=AssessmentStatus.INCOMPLETE,
+            relationship_outcome=None,
+            incomplete=True,
+        ).relationship_comparator_hypothesis_id
+        is None
+    )
+    assert (
+        _with_relationship(
+            manifest, CanonicalOutcome.REL_DEVELOPMENT_OF
+        ).relationship_comparator_version_digest
+        == D
+    )
+    value = manifest.canonical_value()
+    for malformed in ({"bad": "element"}, ["bad"]):
+        changed = dict(value)
+        changed["uncertainties"] = [malformed]
+        with pytest.raises(CandidateContractError):
+            CandidateGoverningManifest.from_value(changed)
+        changed["uncertainties"] = value["uncertainties"]
+        changed["lead_signal_bindings"] = [malformed]
+        with pytest.raises(CandidateContractError):
+            CandidateGoverningManifest.from_value(changed)
+
+
+def test_story_candidate_digest_includes_schema_envelope() -> None:
+    candidate = StoryCandidate(
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "66666666-6666-4666-8666-666666666666",
+        "77777777-7777-4777-8777-777777777777",
+        D,
+    )
+    assert candidate.canonical_digest == digest_bytes(candidate.canonical_bytes)
+    replayed = StoryCandidate.from_canonical_bytes(candidate.canonical_bytes)
+    assert replayed.canonical_bytes == candidate.canonical_bytes
+    assert replayed.canonical_digest == candidate.canonical_digest
