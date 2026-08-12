@@ -26,8 +26,11 @@ def _contract_data() -> dict[str, object]:
             "core": {
                 "hard_timeout_seconds": 330,
                 "per_shard_hard_timeout_seconds": 330,
+                "per_shard_warning_seconds": 300,
+                "critical_path_warning_seconds": 300,
             }
         },
+        "test_strategy": {"individual_testcase_warning_seconds": 75},
     }
 
 
@@ -177,6 +180,7 @@ def _patch_core_shard_execution(
     *,
     result: str,
     report_payload: str | None,
+    execution_ms: int = 329_950,
 ) -> None:
     contract = SimpleNamespace(
         repo_root=tmp_path,
@@ -217,7 +221,7 @@ def _patch_core_shard_execution(
             result,
             reason,
             returncode,
-            329_950,
+            execution_ms,
             "",
             "",
             False,
@@ -483,7 +487,7 @@ def _run_reducer_fixture(
     shard_elapsed_ms: tuple[int, int, int, int, int, int],
     reducer_elapsed_ms: int,
     load_elapsed_ms: int | None = None,
-    output_elapsed_ms: int | None = None,
+    output_elapsed_ms: int | tuple[int, ...] | None = None,
 ) -> tuple[dict[str, object], list[str]]:
     fragments_root = tmp_path / "fragments"
     source_root = tmp_path / "source"
@@ -594,11 +598,16 @@ def _run_reducer_fixture(
     monkeypatch.setattr(lane_module, "verify_tracked_checkout", lambda *_args: None)
     if output_elapsed_ms is not None:
         private_write = lane_module._private_write
+        output_times = iter(
+            output_elapsed_ms
+            if isinstance(output_elapsed_ms, tuple)
+            else (output_elapsed_ms,)
+        )
 
         def delayed_output(path: Path, value: object) -> None:
             private_write(path, value)
             if "core-deterministic" in path.parts and path.name == "command-run.json":
-                elapsed["value"] = output_elapsed_ms
+                elapsed["value"] = next(output_times, elapsed["value"])
 
         monkeypatch.setattr(lane_module, "_private_write", delayed_output)
 
@@ -1094,6 +1103,135 @@ def test_reducer_output_time_is_bound_and_cannot_publish_pass(
     assert persisted["gate_run"]["result"] == "BUDGET_EXCEEDED"
 
 
+def test_core_warning_debt_is_retained_without_changing_canonical_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    aggregate, _order = _run_reducer_fixture(
+        tmp_path,
+        monkeypatch,
+        source_elapsed_ms=1,
+        shard_elapsed_ms=(300_001,) + (1,) * (EXPECTED_CORE_SHARD_COUNT - 1),
+        reducer_elapsed_ms=1,
+    )
+
+    assert aggregate["gate_run"]["result"] == "PASS"
+    assert aggregate["gate_run"]["returncode"] == 0
+    warnings = json.loads(aggregate["gate_run"]["stdout"])["warnings"]
+    assert warnings["warning_count"] == 2
+    assert warnings["testcase"]["count"] == 0
+    assert warnings["shard_lifecycle"]["max_subject"] == "core-shard-00"
+    assert warnings["critical_path"]["max_duration_ms"] == 300_002
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "::warning title=SDLC core shard lifecycle warning::1 shard exceeded 300s; max core-shard-00=300001ms",
+        "::warning title=SDLC core critical path warning::critical path exceeded 300s; observed 300002ms",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source_ms", "reducer_ms", "output_times", "expected"),
+    [
+        (1, 299_999, 300_000, ("PASS", 0, 300_001)),
+        (1, 299_999, (300_000, 330_001), ("BUDGET_EXCEEDED", 124, 330_002)),
+        (100_000, 199_999, (200_001, 250_001), ("BUDGET_EXCEEDED", 124, 350_001)),
+    ],
+)
+def test_core_publication_rebinds_warning_and_subsequent_hard_crossing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_ms: int,
+    reducer_ms: int,
+    output_times: int | tuple[int, ...],
+    expected: tuple[str, int, int],
+) -> None:
+    aggregate, _order = _run_reducer_fixture(
+        tmp_path,
+        monkeypatch,
+        source_elapsed_ms=source_ms,
+        shard_elapsed_ms=(1,) * EXPECTED_CORE_SHARD_COUNT,
+        reducer_elapsed_ms=reducer_ms,
+        output_elapsed_ms=output_times,
+    )
+
+    gate_run = aggregate["gate_run"]
+    assert (
+        gate_run["result"],
+        gate_run["returncode"],
+        gate_run["execution_ms"],
+    ) == expected
+    assert json.loads(gate_run["stdout"])["warnings"]["critical_path"]["count"] == (1)
+
+
+def test_core_warning_thresholds_are_strict_and_consumed_from_contract(
+    tmp_path: Path,
+) -> None:
+    report = tmp_path / "reports/pytest.xml"
+    report.parent.mkdir()
+    long_id = "x" * 200_000
+    long_decimal = "75." + ("0" * 50_000) + "1"
+    payload = (
+        '<testsuite><testcase classname="suite" name="at" time="75" />'
+        f'<testcase classname="{long_id}" name="over" time="{long_decimal}" /></testsuite>'
+    )
+    original = tmp_path / "shard.xml"
+    original.write_text(payload, encoding="utf-8")
+    report.write_text(payload, encoding="utf-8")
+    debt = lane_module._core_testcase_warning_debt(report, 75)
+    original.write_text('<testcase time="90.001" />', encoding="utf-8")
+
+    warnings = lane_module._core_warning_summary(
+        contract=SimpleNamespace(data=_contract_data()),
+        lifecycles=[{"elapsed_ms": 300_000}] * EXPECTED_CORE_SHARD_COUNT,
+        testcase_debt=debt,
+        critical_path_ms=300_000,
+    )
+
+    assert warnings["warning_count"] == warnings["testcase"]["count"] == 1
+    expected_subject = (
+        "sha256:" + lane_module.hashlib.sha256(f"{long_id}::over".encode()).hexdigest()
+    )
+    assert warnings["testcase"]["max_subject"] == expected_subject
+    assert warnings["testcase"]["max_duration_ms"] == 75_001
+    assert len(lane_module.canonical_json_bytes(warnings)) < 1024 * 1024
+
+
+@pytest.mark.parametrize("fault", ["missing_threshold", "malformed_junit", "hard_cap"])
+def test_core_warning_evidence_fails_closed(tmp_path: Path, fault: str) -> None:
+    data = _contract_data()
+    report = tmp_path / "pytest.xml"
+    report.write_text("<testsuite>", encoding="utf-8")
+    if fault == "missing_threshold":
+        del data["test_strategy"]
+        report.write_text(
+            '<testsuite><testcase classname="suite" name="test" /></testsuite>',
+            encoding="utf-8",
+        )
+    elif fault == "hard_cap":
+        report.write_text(
+            '<testsuite><testcase classname="suite" name="test" time="90.001" /></testsuite>',
+            encoding="utf-8",
+        )
+
+    with pytest.raises(WorkflowLaneError, match="core_warning_evidence"):
+        if fault == "missing_threshold":
+            lane_module._core_warning_summary(
+                contract=SimpleNamespace(data=data),
+                lifecycles=[{"elapsed_ms": 1}] * EXPECTED_CORE_SHARD_COUNT,
+                testcase_debt=(0, None, None),
+                critical_path_ms=1,
+            )
+        else:
+            lane_module._core_testcase_warning_debt(report, 75)
+
+
+def test_github_warning_output_is_deterministic_and_escaped() -> None:
+    warning = lane_module._github_warning(
+        title="title%,:\n", message="message%\r\nnext"
+    )
+    assert warning == "::warning title=title%25%2C%3A%0A::message%25%0D%0Anext"
+
+
 def test_core_fragment_identity_is_canonical_and_tamper_evident() -> None:
     body = {
         "schema_version": lane_module._CORE_FRAGMENT_SCHEMA,
@@ -1499,6 +1637,64 @@ def test_fragment_finalisation_timeout_overrides_a_product_pass(
     }
     assert fragment["junit_summary"] is None
     assert fragment["report_digest"] is None
+
+
+@pytest.mark.parametrize(
+    ("command_result", "rebind_ms", "expected"),
+    [
+        ("PASS", 300_001, ("PASS", 0, True)),
+        ("PASS", 330_001, ("BUDGET_EXCEEDED", 124, False)),
+        ("ENVIRONMENT_ERROR", 300_001, ("ENVIRONMENT_ERROR", 1, False)),
+    ],
+)
+def test_core_fragment_rebinds_warning_crossed_during_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_result: str,
+    rebind_ms: int,
+    expected: tuple[str, int, bool],
+) -> None:
+    _patch_core_shard_execution(
+        tmp_path,
+        monkeypatch,
+        result=command_result,
+        report_payload=_passing_report(),
+        execution_ms=299_000,
+    )
+    checked_write = lane_module._checked_fragment_write
+    published = iter((300_001, rebind_ms))
+
+    def crossing_write(*args: object) -> int:
+        checked_write(*args)  # type: ignore[arg-type]
+        return 300_000 if args[-1] else next(published, rebind_ms)
+
+    monkeypatch.setattr(lane_module, "_checked_fragment_write", crossing_write)
+    fragment = lane_module.execute_core_shard(
+        repo_root=tmp_path,
+        route_path="route.json",
+        shard_index=0,
+        artifact_root="artifacts/core-fragment",
+    )
+
+    result, returncode, report_retained = expected
+    assert fragment["shard_lifecycle"]["elapsed_ms"] == rebind_ms
+    assert fragment["shard_lifecycle"]["result"] == result
+    assert (
+        lane_module._producer_exit_status(
+            fragment,
+            fragment_schema=lane_module._CORE_FRAGMENT_SCHEMA,
+            lifecycle_field="shard_lifecycle",
+            lifecycle_schema=lane_module._CORE_SHARD_LIFECYCLE_SCHEMA,
+            gate_id="core-deterministic",
+            phase="tests",
+            fragment_keys=lane_module._CORE_FRAGMENT_KEYS,
+            expected_timeout_ms=330_000,
+        )
+        == returncode
+    )
+    assert (fragment["junit_summary"] is not None) is report_retained
+    assert (fragment["report_digest"] is not None) is report_retained
+    assert (tmp_path / "artifacts/core-fragment/pytest.xml").exists() is report_retained
 
 
 def test_fragment_durable_write_time_cannot_publish_a_pass(

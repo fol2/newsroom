@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from decimal import ROUND_CEILING, localcontext
 from pathlib import Path
 
 from .artifact_envelope import (
@@ -49,7 +50,17 @@ from .emit_evidence import (
     sha256_identity,
     verify_tracked_checkout,
 )
-from .junit_evidence import JUnitEvidenceError, JUnitSummary, summarize_junit
+from .junit_evidence import (
+    JUnitEvidenceError,
+    JUnitSummary,
+    summarize_junit,
+)
+from .junit_evidence import (
+    _case_id as _junit_case_id,
+)
+from .junit_evidence import (
+    _duration_seconds as _junit_duration_seconds,
+)
 from .run_gate import (
     GateRunError,
     GateRunResult,
@@ -1376,7 +1387,13 @@ def _publish_lifecycle_fragment(
     deadline: LaneDeadline,
     head_sha: str,
     on_budget: Callable[[], None] | None = None,
+    warning_ms: int | None = None,
 ) -> dict[str, object]:
+    if warning_ms is not None and (
+        not _valid_elapsed_ms(warning_ms) or warning_ms >= deadline.timeout_ms
+    ):
+        raise WorkflowLaneError("core_lifecycle_warning")
+
     def bind(elapsed_ms: int) -> dict[str, object]:
         body[field] = _shard_lifecycle(
             command_result=command_result,
@@ -1402,6 +1419,16 @@ def _publish_lifecycle_fragment(
             on_budget()
         fragment = bind(published_ms)
         write(fragment)
+    elif warning_ms is not None and elapsed_ms <= warning_ms < published_ms:
+        path.unlink()
+        fragment = bind(published_ms)
+        rebound_ms = write(fragment)
+        if rebound_ms > deadline.timeout_ms:
+            path.unlink()
+            if on_budget is not None:
+                on_budget()
+            fragment = bind(rebound_ms)
+            write(fragment)
     return fragment
 
 
@@ -1563,6 +1590,9 @@ def execute_core_shard(
         deadline=deadline,
         head_sha=str(route["head_sha"]),
         on_budget=discard_report,
+        warning_ms=int(
+            contract.data["lanes"]["core"]["per_shard_warning_seconds"] * 1000
+        ),
     )
 
 
@@ -1863,6 +1893,148 @@ def _junit_case_ids(report: Path) -> frozenset[str]:
     return frozenset(values)
 
 
+def _github_warning(*, title: str, message: str) -> str:
+    def escape(value: str, *, property_value: bool = False) -> str:
+        escaped = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        if property_value:
+            escaped = escaped.replace(":", "%3A").replace(",", "%2C")
+        return escaped
+
+    return f"::warning title={escape(title, property_value=True)}::{escape(message)}"
+
+
+def _core_warning_thresholds(contract: SdlcContract) -> tuple[int, int, int]:
+    try:
+        core = contract.data["lanes"]["core"]
+        thresholds = (
+            contract.data["test_strategy"]["individual_testcase_warning_seconds"],
+            core["per_shard_warning_seconds"],
+            core["critical_path_warning_seconds"],
+        )
+        if any(type(item) is not int or item <= 0 for item in thresholds):
+            raise ValueError
+        return thresholds
+    except (KeyError, TypeError, ValueError) as exc:
+        raise WorkflowLaneError("core_warning_evidence") from exc
+
+
+def _core_testcase_warning_debt(
+    report: Path | None, threshold: int
+) -> tuple[int, str | None, int | None]:
+    if report is None:
+        return 0, None, None
+    try:
+        document = ET.parse(report).getroot()
+        cases: dict[str, object] = {}
+        for case in document.iter():
+            if _xml_local_name(case.tag) != "testcase":
+                continue
+            subject = _junit_case_id(case)
+            if subject in cases:
+                raise JUnitEvidenceError("duplicate_testcase")
+            cases[subject] = _junit_duration_seconds(case)
+        slow = [
+            (subject, duration)
+            for subject, duration in cases.items()
+            if duration > threshold
+        ]
+    except (JUnitEvidenceError, OSError, ET.ParseError) as exc:
+        raise WorkflowLaneError("core_warning_evidence") from exc
+    maximum = min(slow, key=lambda item: (-item[1], item[0])) if slow else None
+    if maximum is None:
+        return 0, None, None
+    subject, duration = maximum
+    if len(subject) > 256:
+        subject = "sha256:" + hashlib.sha256(subject.encode("utf-8")).hexdigest()
+    with localcontext() as context:
+        context.prec = max(28, len(duration.as_tuple().digits) + 3)
+        milliseconds = int((duration * 1000).to_integral_value(rounding=ROUND_CEILING))
+    return len(slow), subject, milliseconds
+
+
+def _core_warning_summary(
+    *,
+    contract: SdlcContract,
+    lifecycles: Sequence[Mapping[str, object]],
+    testcase_debt: tuple[int, str | None, int | None],
+    critical_path_ms: int,
+) -> dict[str, object]:
+    try:
+        testcase_threshold, shard_threshold, critical_threshold = (
+            _core_warning_thresholds(contract)
+        )
+        if len(lifecycles) != _CORE_SHARD_COUNT or not _valid_elapsed_ms(
+            critical_path_ms
+        ):
+            raise ValueError
+        shard_values = tuple(item["elapsed_ms"] for item in lifecycles)
+        if not all(_valid_elapsed_ms(item) for item in shard_values):
+            raise ValueError
+        testcase_count, max_testcase, max_testcase_ms = testcase_debt
+        if testcase_count < 0 or (testcase_count == 0) != (max_testcase is None):
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise WorkflowLaneError("core_warning_evidence") from exc
+
+    slow_shards = [
+        (f"core-shard-{index:02d}", elapsed)
+        for index, elapsed in enumerate(shard_values)
+        if elapsed > shard_threshold * 1000
+    ]
+    max_shard = (
+        min(slow_shards, key=lambda item: (-item[1], item[0])) if slow_shards else None
+    )
+    critical_count = int(critical_path_ms > critical_threshold * 1000)
+    return {
+        "schema_version": "newsroom.sdlc.core-warning-summary.v1",
+        "warning_count": testcase_count + len(slow_shards) + critical_count,
+        "testcase": {
+            "count": testcase_count,
+            "threshold_seconds": testcase_threshold,
+            "max_subject": max_testcase,
+            "max_duration_ms": max_testcase_ms,
+        },
+        "shard_lifecycle": {
+            "count": len(slow_shards),
+            "threshold_seconds": shard_threshold,
+            "max_subject": None if max_shard is None else max_shard[0],
+            "max_duration_ms": None if max_shard is None else max_shard[1],
+        },
+        "critical_path": {
+            "count": critical_count,
+            "threshold_seconds": critical_threshold,
+            "max_subject": "core-deterministic" if critical_count else None,
+            "max_duration_ms": critical_path_ms if critical_count else None,
+        },
+    }
+
+
+def _emit_core_warnings(summary: Mapping[str, object]) -> None:
+    testcase = summary["testcase"]
+    shard = summary["shard_lifecycle"]
+    critical = summary["critical_path"]
+    annotations = (
+        (
+            testcase,
+            "SDLC core testcase warning",
+            f"{testcase['count']} testcase(s) exceeded {testcase['threshold_seconds']}s; max {testcase['max_subject']}={testcase['max_duration_ms']}ms",
+        ),
+        (
+            shard,
+            "SDLC core shard lifecycle warning",
+            f"{shard['count']} shard exceeded {shard['threshold_seconds']}s; max {shard['max_subject']}={shard['max_duration_ms']}ms",
+        ),
+        (
+            critical,
+            "SDLC core critical path warning",
+            f"critical path exceeded {critical['threshold_seconds']}s; observed {critical['max_duration_ms']}ms",
+        ),
+    )
+    for details, title, message in annotations:
+        if details["count"]:
+            print(_github_warning(title=title, message=message), file=sys.stderr)
+
+
 def _junit_id_for_node(node_id: str) -> str:
     unparameterised, bracket, parameters = node_id.partition("[")
     parts = unparameterised.split("::")
@@ -1973,6 +2145,7 @@ def reduce_core_lane(
         reports_available = all(
             value["junit_summary"] is not None for value, _ in fragments
         )
+        merged_report: Path | None = None
         for value, report in fragments:
             if value["junit_summary"] is None:
                 continue
@@ -1983,10 +2156,10 @@ def reduce_core_lane(
                 raise WorkflowLaneError("core_fragment_report_inventory")
             _require_deadline(reducer_deadline, "reducer")
         if reports_available:
-            report = reports / "pytest.xml"
+            merged_report = reports / "pytest.xml"
             _merge_junit_reports(
                 root=root,
-                report=report,
+                report=merged_report,
                 shard_reports=[item[1] for item in fragments],
                 expected_count=_CORE_SHARD_COUNT,
                 identity="core",
@@ -1997,8 +2170,12 @@ def reduce_core_lane(
                 for item in _collect_core_node_ids(root, deadline=reducer_deadline)
             )
             _require_deadline(reducer_deadline, "reducer")
-            if _junit_case_ids(report) != expected_all:
+            if _junit_case_ids(merged_report) != expected_all:
                 raise WorkflowLaneError("core_reduced_report_inventory")
+        testcase_threshold, _shard_threshold, _critical_threshold = (
+            _core_warning_thresholds(contract)
+        )
+        testcase_debt = _core_testcase_warning_debt(merged_report, testcase_threshold)
         reduced_outcome = _reduced_core_outcome(
             results,
             summaries=[value["junit_summary"] for value, _report in fragments],
@@ -2037,6 +2214,12 @@ def reduce_core_lane(
                 "shard_lifecycle_ms": shard_ms,
                 "reducer_lifecycle_ms": elapsed_ms,
                 "critical_path_ms": critical_path_ms,
+                "warnings": _core_warning_summary(
+                    contract=contract,
+                    lifecycles=lifecycles,
+                    testcase_debt=testcase_debt,
+                    critical_path_ms=critical_path_ms,
+                ),
             }
             return CommandRun(
                 expected_digest,
@@ -2066,10 +2249,23 @@ def reduce_core_lane(
         staged_ms = publish(aggregate, True)
         aggregate = build(staged_ms, reduced_outcome)
         published_ms = publish(aggregate)
-        if aggregate.gate_run.result in {"PASS", "FAIL"} and published_ms > timeout_ms:
+        for _transition in range(2):
+            rebound = build(published_ms, reduced_outcome)
+            current_warning = json.loads(aggregate.gate_run.stdout)["warnings"][
+                "critical_path"
+            ]["count"]
+            rebound_warning = json.loads(rebound.gate_run.stdout)["warnings"][
+                "critical_path"
+            ]["count"]
+            if (aggregate.gate_run.result, current_warning) == (
+                rebound.gate_run.result,
+                rebound_warning,
+            ):
+                break
             command_path.unlink()
-            aggregate = build(published_ms, reduced_outcome)
-            publish(aggregate)
+            aggregate = rebound
+            published_ms = publish(aggregate)
+        _emit_core_warnings(json.loads(aggregate.gate_run.stdout)["warnings"])
         complete = True
         return LaneExecutionOutput(
             "core",
