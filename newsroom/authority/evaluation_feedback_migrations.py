@@ -1,14 +1,12 @@
 """Checked v25 Evaluation Feedback authority migration and v24 backup gate."""
 
+# fmt: off
+# ruff: noqa: I001
 from __future__ import annotations
-
-from pathlib import Path
 import sqlite3
-
+from pathlib import Path
 from . import story_candidate_migrations as predecessor
 from .canonical import digest_canonical
-
-
 EVALUATION_FEEDBACK_SCHEMA_VERSION = 25
 EVALUATION_FEEDBACK_MIGRATION_NAME = "evaluation_feedback_authority_v25"
 EVALUATION_FEEDBACK_PREDECESSOR_MIGRATION_CHECKSUM = (
@@ -17,18 +15,13 @@ EVALUATION_FEEDBACK_PREDECESSOR_MIGRATION_CHECKSUM = (
 EVALUATION_FEEDBACK_PREDECESSOR_FINGERPRINT = (
     "sha256:abf8430bfd676a9b0e574847cde9375d90aa1e32680725a08b30c0657d567a7c"
 )
-
 EvaluationFeedbackBackupError = predecessor.StoryCandidateBackupError
 EvaluationFeedbackBackupReceipt = predecessor.StoryCandidateBackupReceipt
 EvaluationFeedbackMigrationRecord = predecessor.StoryCandidateMigrationRecord
-
-
 def evaluation_feedback_backup_paths(database: str | Path) -> tuple[Path, Path]:
     source = Path(database)
     backup = source.with_name(source.name + ".pre-v25.sqlite3")
     return backup, backup.with_name(backup.name + ".sha256")
-
-
 def _checked_backup(path: Path, logical: str) -> EvaluationFeedbackBackupReceipt:
     digest_path = path.with_name(path.name + ".sha256")
     digest = predecessor.predecessor._file_digest(path)
@@ -46,8 +39,6 @@ def _checked_backup(path: Path, logical: str) -> EvaluationFeedbackBackupReceipt
     finally:
         target.close()
     return EvaluationFeedbackBackupReceipt(path, digest_path, digest, logical)
-
-
 def prepare_evaluation_feedback_backup(
     connection: sqlite3.Connection, backup_path: Path
 ) -> EvaluationFeedbackBackupReceipt:
@@ -95,8 +86,6 @@ def prepare_evaluation_feedback_backup(
     if connection.in_transaction:
         connection.commit()
     return receipt
-
-
 def require_evaluation_feedback_backup(
     connection: sqlite3.Connection,
     *,
@@ -126,10 +115,7 @@ def require_evaluation_feedback_backup(
     if receipt.backup_digest != row[1] or history != list(expected_history):
         raise EvaluationFeedbackBackupError("prepared backup is not exact v24")
     return receipt
-
-
 _D = "substr({0},1,7)='sha256:' AND length({0})=71 AND substr({0},8) NOT GLOB '*[^0-9a-f]*'"
-
 EVALUATION_FEEDBACK_MIGRATION_STATEMENTS: tuple[str, ...] = (
     f"""CREATE TABLE evaluation_feedback(
         feedback_id TEXT PRIMARY KEY,
@@ -213,7 +199,6 @@ EVALUATION_FEEDBACK_MIGRATION_STATEMENTS: tuple[str, ...] = (
           WHERE p.obligation_id=NEW.obligation_id AND p.outcome='fulfilled')
        BEGIN SELECT RAISE(ABORT,'reconciliation disposition predecessor differs'); END""",
 )
-
 EVALUATION_FEEDBACK_MIGRATION_CHECKSUM = digest_canonical(
     {
         "version": EVALUATION_FEEDBACK_SCHEMA_VERSION,
@@ -226,9 +211,9 @@ EVALUATION_FEEDBACK_MIGRATION = EvaluationFeedbackMigrationRecord(
     EVALUATION_FEEDBACK_MIGRATION_NAME,
     EVALUATION_FEEDBACK_MIGRATION_CHECKSUM,
 )
-
 __all__ = [
     name
     for name in globals()
     if name.startswith(("EVALUATION_", "Evaluation", "evaluation_", "prepare_", "require_"))
 ]
+# fmt: on

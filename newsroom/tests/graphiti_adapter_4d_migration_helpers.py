@@ -56,6 +56,9 @@ def _drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
             EVALUATION_FEEDBACK_MIGRATION_STATEMENTS,
         )
 
+        def normalise_sql(value: str) -> str:
+            return " ".join(value.split()).replace(" IF NOT EXISTS", "")
+
         objects = connection.execute(
             "SELECT type,name,sql FROM sqlite_master WHERE "
             "tbl_name IN ('evaluation_feedback','evaluation_reconciliation_obligations',"
@@ -77,10 +80,20 @@ def _drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
             connection.execute(
                 "SELECT name,checksum FROM authority_migrations WHERE version=25"
             ).fetchone()
-            != (EVALUATION_FEEDBACK_MIGRATION_NAME, EVALUATION_FEEDBACK_MIGRATION_CHECKSUM)
+            != (
+                EVALUATION_FEEDBACK_MIGRATION_NAME,
+                EVALUATION_FEEDBACK_MIGRATION_CHECKSUM,
+            )
             or {str(row[1]) for row in objects} != expected_names
+            or {normalise_sql(str(row[2])) for row in objects}
+            != {
+                normalise_sql(statement)
+                for statement in EVALUATION_FEEDBACK_MIGRATION_STATEMENTS
+            }
         ):
-            raise sqlite3.DatabaseError("downgrade requires exact empty v25 Feedback schema")
+            raise sqlite3.DatabaseError(
+                "downgrade requires exact empty v25 Feedback schema"
+            )
         for table in (
             "evaluation_feedback",
             "evaluation_reconciliation_obligations",

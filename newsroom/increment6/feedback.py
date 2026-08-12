@@ -4,15 +4,16 @@ The records in this module are deliberately evaluation-only.  They perform no
 persistence, Evidence Intake, Candidate mutation, provider, or publication
 effect; the following v25 authority atom owns persistence and effects.
 """
+# fmt: off
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
 import json
 import re
-from typing import ClassVar, Self
 import uuid
+from dataclasses import dataclass
+from enum import Enum
+from typing import ClassVar, Self
 
 from newsroom.authority.canonical import (
     MAX_SAFE_INTEGER,
@@ -36,7 +37,6 @@ from newsroom.increment6.handoffs import (
     HandoffState,
 )
 from newsroom.increment6.work_items import SupplementalDiscoveryReentry
-
 
 EVALUATION_FEEDBACK = "newsroom.increment6.evaluation-feedback.v1"
 RECONCILIATION_OBLIGATION = "newsroom.increment6.reconciliation-obligation.v1"
@@ -305,8 +305,6 @@ def _decode_document(
     if root["schema_version"] != schema:
         raise FeedbackContractError(f"{name} schema identity differs")
     return _exact(root[name], fields, name)
-
-
 def _enum(kind, value: object, field: str):
     if type(value) is not str:
         raise FeedbackContractError(f"{field} is not an exact enum value")
@@ -314,12 +312,9 @@ def _enum(kind, value: object, field: str):
         return kind(value)
     except ValueError as exc:
         raise FeedbackContractError(f"{field} is not an exact enum value") from exc
-
-
 @dataclass(frozen=True, slots=True)
 class HandoffAcceptanceSnapshot:
     """Full Handoff graph observed, not originated, by v25 acceptance."""
-
     schema_identity: ClassVar[str] = HANDOFF_ACCEPTANCE_SNAPSHOT
     handoff_id: str
     candidate_version_id: str
@@ -335,7 +330,6 @@ class HandoffAcceptanceSnapshot:
     publication_authority: bool
     evidence_authority: bool
     observation_semantics: str = "observed_at_v25_acceptance_not_registration_provenance"
-
     @_total("invalid Handoff acceptance snapshot")
     def __post_init__(self) -> None:
         _require(type(self) is HandoffAcceptanceSnapshot, "snapshot must be exact")
@@ -364,7 +358,6 @@ class HandoffAcceptanceSnapshot:
             "snapshot observation semantics differ",
         )
         _ = self.canonical_bytes
-
     @classmethod
     def observe(cls, handoff: Handoff) -> Self:
         if type(handoff) is not Handoff:
@@ -384,7 +377,6 @@ class HandoffAcceptanceSnapshot:
             publication_authority=handoff.publication_authority,
             evidence_authority=handoff.evidence_authority,
         )
-
     @property
     def canonical_value(self) -> dict[str, object]:
         return {
@@ -426,15 +418,12 @@ class HandoffAcceptanceSnapshot:
             "sink_id": self.sink_id,
             "transport_state": self.transport_state.value,
         }
-
     @property
     def canonical_bytes(self) -> bytes:
         return _document(HANDOFF_ACCEPTANCE_SNAPSHOT, "snapshot", self.canonical_value)
-
     @property
     def canonical_digest(self) -> str:
         return digest_bytes(self.canonical_bytes)
-
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
         fields = set(cls.__dataclass_fields__) - {"schema_identity"}
@@ -462,15 +451,27 @@ class HandoffAcceptanceSnapshot:
         if result.canonical_bytes != raw:
             raise FeedbackContractError("Handoff acceptance snapshot replay differs")
         return result
-
-
 @dataclass(frozen=True, slots=True)
 class EvaluationFeedbackAcceptance:
     feedback: EvaluationFeedback
     obligation: ReconciliationObligation
     handoff_snapshot: HandoffAcceptanceSnapshot
-
-
+    def __post_init__(self) -> None:
+        if (
+            type(self) is not EvaluationFeedbackAcceptance
+            or type(self.feedback) is not EvaluationFeedback
+            or type(self.obligation) is not ReconciliationObligation
+            or type(self.handoff_snapshot) is not HandoffAcceptanceSnapshot
+            or self.obligation.feedback_id != self.feedback.feedback_id
+            or self.obligation.feedback_digest != self.feedback.canonical_digest
+            or self.handoff_snapshot.handoff_id != self.feedback.handoff_id
+            or self.handoff_snapshot.candidate_version_id
+            != self.feedback.candidate_version_id
+            or self.handoff_snapshot.governing_manifest_digest
+            != self.feedback.governing_manifest_digest
+            or self.handoff_snapshot.sink_id != self.feedback.sink_id
+        ):
+            raise FeedbackContractError("Feedback acceptance binding differs")
 def _feedback_command_canonicalizer(value: object) -> bytes:
     if type(value) is not dict or set(value) != {
         "operation",
@@ -483,8 +484,6 @@ def _feedback_command_canonicalizer(value: object) -> bytes:
     if value["operation"] not in {"accept", "append_disposition"}:
         raise FeedbackContractError("Feedback command operation differs")
     return canonical_json_bytes(value)
-
-
 _FEEDBACK_COMMAND_VECTOR_VALUE = {
     "disposition": None,
     "feedback": None,
@@ -493,8 +492,6 @@ _FEEDBACK_COMMAND_VECTOR_VALUE = {
     "operation": "accept",
 }
 _FEEDBACK_COMMAND_VECTOR_BYTES = canonical_json_bytes(_FEEDBACK_COMMAND_VECTOR_VALUE)
-
-
 def _feedback_payload_contract() -> PayloadSchemaContract:
     return PayloadSchemaContract(
         EVALUATION_FEEDBACK_COMMAND_SCHEMA,
@@ -511,8 +508,6 @@ def _feedback_payload_contract() -> PayloadSchemaContract:
             ),
         ),
     )
-
-
 def evaluation_feedback_command_definition() -> CommandDefinition:
     contract = _feedback_payload_contract()
     return CommandDefinition(
@@ -532,72 +527,27 @@ def evaluation_feedback_command_definition() -> CommandDefinition:
         required_scope="authority.evaluation-feedback.reconcile",
         max_inline_bytes=MAX_FEEDBACK_CANONICAL_BYTES * 4,
     )
-
-
-def merge_evaluation_feedback_authority_registries(
-    commands: CommandRegistry, schemas: PayloadSchemaRegistry
-) -> tuple[CommandRegistry, PayloadSchemaRegistry]:
+def merge_evaluation_feedback_authority_registries(commands: CommandRegistry, schemas: PayloadSchemaRegistry) -> tuple[CommandRegistry, PayloadSchemaRegistry]:
     definition, contract = evaluation_feedback_command_definition(), _feedback_payload_contract()
     definitions, contracts = tuple(commands.definitions()), tuple(schemas.contracts())
-    matching_definitions = tuple(
-        item for item in definitions if item.command_type == EVALUATION_FEEDBACK_COMMAND_TYPE
-    )
-    matching_contracts = tuple(
-        item
-        for item in contracts
-        if (item.schema_version, item.payload_mode)
-        == (EVALUATION_FEEDBACK_COMMAND_SCHEMA, PayloadMode.INLINE)
-    )
-    if matching_definitions not in ((), (definition,)) or matching_contracts not in (
-        (),
-        (contract,),
-    ):
+    command_matches = tuple(item for item in definitions if item.command_type == EVALUATION_FEEDBACK_COMMAND_TYPE)
+    schema_matches = tuple(item for item in contracts if (item.schema_version, item.payload_mode) == (EVALUATION_FEEDBACK_COMMAND_SCHEMA, PayloadMode.INLINE))
+    if command_matches not in ((), (definition,)) or schema_matches not in ((), (contract,)):
         raise FeedbackContractError("Feedback authority registry conflicts")
-    definitions += () if matching_definitions else (definition,)
-    contracts += () if matching_contracts else (contract,)
-    return (
-        CommandRegistry(
-            definitions,
-            current_versions={
-                item.command_type: (
-                    definition.definition_version
-                    if item.command_type == EVALUATION_FEEDBACK_COMMAND_TYPE
-                    else commands.resolve(item.command_type).definition_version
-                )
-                for item in definitions
-            },
-        ),
-        PayloadSchemaRegistry(
-            contracts,
-            current_versions={
-                (item.schema_version, item.payload_mode): (
-                    contract.contract_version
-                    if (item.schema_version, item.payload_mode)
-                    == (EVALUATION_FEEDBACK_COMMAND_SCHEMA, PayloadMode.INLINE)
-                    else schemas.resolve(item.schema_version, item.payload_mode).contract_version
-                )
-                for item in contracts
-            },
-        ),
-    )
-
+    definitions += () if command_matches else (definition,); contracts += () if schema_matches else (contract,)
+    return (CommandRegistry(definitions, current_versions={item.command_type: (definition.definition_version if item.command_type == EVALUATION_FEEDBACK_COMMAND_TYPE else commands.resolve(item.command_type).definition_version) for item in definitions}),
+        PayloadSchemaRegistry(contracts, current_versions={(item.schema_version, item.payload_mode): (contract.contract_version if (item.schema_version, item.payload_mode) == (EVALUATION_FEEDBACK_COMMAND_SCHEMA, PayloadMode.INLINE) else schemas.resolve(item.schema_version, item.payload_mode).contract_version) for item in contracts}))
 
 _AUTHORITY_TOKEN = object()
-
-
 class EvaluationFeedbackAuthority:
     """Exact public facade over the server-owned v25 composition root."""
-
     __slots__ = ("__authority",)
-
     def __init__(self, token: object, authority: object) -> None:
         if token is not _AUTHORITY_TOKEN:
             raise FeedbackContractError("Feedback authority construction is private")
         object.__setattr__(self, "_EvaluationFeedbackAuthority__authority", authority)
-
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("EvaluationFeedbackAuthority is immutable")
-
     def accept(
         self,
         feedback_bytes: bytes,
@@ -611,7 +561,6 @@ class EvaluationFeedbackAuthority:
         if type(value) is not EvaluationFeedbackAcceptance:
             raise FeedbackContractError("Feedback accept returned a forged result")
         return value
-
     def append_disposition(
         self, disposition_bytes: bytes, *, candidate_proof: object
     ) -> ReconciliationDisposition:
@@ -621,7 +570,6 @@ class EvaluationFeedbackAuthority:
         if type(value) is not ReconciliationDisposition:
             raise FeedbackContractError("Disposition append returned a forged result")
         return value
-
     def load(self, feedback_id: str) -> EvaluationFeedbackAcceptance:
         value = self.__authority.load(feedback_id)
         if type(value) is not EvaluationFeedbackAcceptance:
@@ -640,6 +588,21 @@ class EvaluationFeedbackAuthority:
 
 def _compose_evaluation_feedback_authority(authority: object) -> EvaluationFeedbackAuthority:
     return EvaluationFeedbackAuthority(_AUTHORITY_TOKEN, authority)
+
+
+def open_evaluation_feedback_authority(*args: object, **kwargs: object) -> EvaluationFeedbackAuthority:
+    """Lazy public opener for the checked server-owned v25 composition root."""
+    from newsroom.authority.evaluation_feedback_system import (
+        open_evaluation_feedback_authority_system,
+    )
+
+    value = open_evaluation_feedback_authority_system(*args, **kwargs)
+    if type(value) is not EvaluationFeedbackAuthority:
+        try:
+            value.close()
+        finally:
+            raise FeedbackContractError("Feedback authority opener returned a forged facade")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -1495,18 +1458,18 @@ __all__ = [
     "EVALUATION_FEEDBACK",
     "EVALUATION_FEEDBACK_COMMAND_SCHEMA",
     "EVALUATION_FEEDBACK_COMMAND_TYPE",
+    "HANDOFF_ACCEPTANCE_SNAPSHOT",
+    "MAX_FEEDBACK_CANONICAL_BYTES",
+    "RECONCILIATION_DISPOSITION",
+    "RECONCILIATION_OBLIGATION",
+    "EvaluationFeedback",
     "EvaluationFeedbackAcceptance",
     "EvaluationFeedbackAuthority",
-    "EvaluationFeedback",
     "EvaluationFeedbackOutcome",
     "EvaluationFeedbackReason",
     "FeedbackContractError",
     "FeedbackCorrelationOutcome",
-    "HANDOFF_ACCEPTANCE_SNAPSHOT",
     "HandoffAcceptanceSnapshot",
-    "MAX_FEEDBACK_CANONICAL_BYTES",
-    "RECONCILIATION_DISPOSITION",
-    "RECONCILIATION_OBLIGATION",
     "ReconciliationDisposition",
     "ReconciliationDispositionOutcome",
     "ReconciliationDispositionReason",
@@ -1518,6 +1481,8 @@ __all__ = [
     "create_reconciliation_obligation",
     "evaluation_feedback_command_definition",
     "merge_evaluation_feedback_authority_registries",
+    "open_evaluation_feedback_authority",
     "reconciliation_is_open",
     "validate_reconciliation_history",
 ]
+# fmt: on

@@ -1,4 +1,6 @@
+# ruff: noqa: I001
 from __future__ import annotations
+# fmt: off
 
 import sqlite3
 from collections.abc import Iterable
@@ -47,17 +49,6 @@ from .entity_migrations import (
     ENTITY_AUTHORITY_MIGRATION_STATEMENTS,
     ENTITY_AUTHORITY_SCHEMA_VERSION,
 )
-from .evaluation_handoff_migrations import (
-    EVALUATION_HANDOFF_MIGRATION,
-    EVALUATION_HANDOFF_MIGRATION_CHECKSUM,
-    EVALUATION_HANDOFF_MIGRATION_NAME,
-    EVALUATION_HANDOFF_MIGRATION_STATEMENTS,
-    EVALUATION_HANDOFF_SCHEMA_VERSION,
-    EvaluationHandoffBackupReceipt,
-    evaluation_handoff_backup_paths,
-    prepare_evaluation_handoff_backup,
-    require_evaluation_handoff_backup,
-)
 from .evaluation_feedback_migrations import (
     EVALUATION_FEEDBACK_MIGRATION,
     EVALUATION_FEEDBACK_MIGRATION_CHECKSUM,
@@ -68,6 +59,17 @@ from .evaluation_feedback_migrations import (
     evaluation_feedback_backup_paths,
     prepare_evaluation_feedback_backup,
     require_evaluation_feedback_backup,
+)
+from .evaluation_handoff_migrations import (
+    EVALUATION_HANDOFF_MIGRATION,
+    EVALUATION_HANDOFF_MIGRATION_CHECKSUM,
+    EVALUATION_HANDOFF_MIGRATION_NAME,
+    EVALUATION_HANDOFF_MIGRATION_STATEMENTS,
+    EVALUATION_HANDOFF_SCHEMA_VERSION,
+    EvaluationHandoffBackupReceipt,
+    evaluation_handoff_backup_paths,
+    prepare_evaluation_handoff_backup,
+    require_evaluation_handoff_backup,
 )
 from .event_hypothesis_lineage_migrations import (
     EVENT_HYPOTHESIS_LINEAGE_MIGRATION,
@@ -1436,3 +1438,4 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         EVALUATION_FEEDBACK_MIGRATION_CHECKSUM,
     ),
 )
+# fmt: on

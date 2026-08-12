@@ -12,6 +12,7 @@ from newsroom.authority.migrations import apply_pending_migrations
 
 from .graphiti_adapter_4d_migration_helpers import (
     drop_empty_v22_relationship_schema,
+    drop_empty_v23_lineage_schema,
 )
 
 RELATIONSHIP_TRIGGERS = (
@@ -54,6 +55,21 @@ def test_v22_downgrade_preflight_preserves_state_when_trigger_is_missing(
 
     with pytest.raises(sqlite3.DatabaseError, match="exact v22 relationship schema"):
         drop_empty_v22_relationship_schema(connection)
+
+    assert _retained_state(connection) == before
+
+
+def test_v25_downgrade_preflight_preserves_state_when_trigger_sql_differs() -> None:
+    connection = _fresh()
+    connection.execute("DROP TRIGGER immutable_evaluation_feedback")
+    connection.execute(
+        "CREATE TRIGGER immutable_evaluation_feedback BEFORE UPDATE ON evaluation_feedback "
+        "WHEN 1=1 BEGIN SELECT RAISE(ABORT,'immutable Evaluation Feedback'); END"
+    )
+    before = _retained_state(connection)
+
+    with pytest.raises(sqlite3.DatabaseError, match="exact empty v25 Feedback schema"):
+        drop_empty_v23_lineage_schema(connection)
 
     assert _retained_state(connection) == before
 

@@ -70,7 +70,7 @@ def test_fresh_v22_has_exact_single_table_history_and_pins() -> None:
     )
     assert (
         EXPECTED_SCHEMA_FINGERPRINT
-        == "sha256:abf8430bfd676a9b0e574847cde9375d90aa1e32680725a08b30c0657d567a7c"
+        == "sha256:353900bf5804f0b770489982541f3cff4fd30ea36fc75d19b9c63315d1b6ec06"
     )
     assert next(item for item in EXPECTED_MIGRATION_HISTORY if item[0] == 22) == (
         22,
