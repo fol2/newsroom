@@ -154,6 +154,17 @@ from .source_registry_migrations import (
     SOURCE_REGISTRY_MIGRATION_STATEMENTS,
     SOURCE_REGISTRY_SCHEMA_VERSION,
 )
+from .story_candidate_migrations import (
+    STORY_CANDIDATE_MIGRATION,
+    STORY_CANDIDATE_MIGRATION_CHECKSUM,
+    STORY_CANDIDATE_MIGRATION_NAME,
+    STORY_CANDIDATE_MIGRATION_STATEMENTS,
+    STORY_CANDIDATE_SCHEMA_VERSION,
+    StoryCandidateBackupReceipt,
+    prepare_story_candidate_backup,
+    require_story_candidate_backup,
+    story_candidate_backup_paths,
+)
 from .triage_disposition_migrations import (
     TRIAGE_DISPOSITION_MIGRATION,
     TRIAGE_DISPOSITION_MIGRATION_CHECKSUM,
@@ -189,7 +200,7 @@ from .triage_work_item_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION
+SCHEMA_VERSION = STORY_CANDIDATE_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -636,11 +647,12 @@ def prepare_pending_migration_backup(
     | EventHypothesisBackupReceipt
     | EventHypothesisRelationshipBackupReceipt
     | EventHypothesisLineageBackupReceipt
+    | StoryCandidateBackupReceipt
     | None
 ):
     """Prepare the exact retained backup required by a checked predecessor."""
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if version not in {16, 17, 18, 19, 20, 21, 22}:
+    if version not in {16, 17, 18, 19, 20, 21, 22, 23}:
         return None
     database_path = next(
         str(row[2])
@@ -669,8 +681,11 @@ def prepare_pending_migration_backup(
     if version == 21:
         backup_path, _ = event_hypothesis_relationship_backup_paths(database_path)
         return prepare_event_hypothesis_relationship_backup(conn, backup_path)
-    backup_path, _ = event_hypothesis_lineage_backup_paths(database_path)
-    return prepare_event_hypothesis_lineage_backup(conn, backup_path)
+    if version == 22:
+        backup_path, _ = event_hypothesis_lineage_backup_paths(database_path)
+        return prepare_event_hypothesis_lineage_backup(conn, backup_path)
+    backup_path, _ = story_candidate_backup_paths(database_path)
+    return prepare_story_candidate_backup(conn, backup_path)
 
 
 def apply_migration(
@@ -966,7 +981,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_evaluation_handoff_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-7],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-8],
                 )
             for statement in EVALUATION_HANDOFF_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1001,7 +1016,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_work_item_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-6],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-7],
                 )
             for statement in TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1035,7 +1050,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_disposition_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-5],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-6],
                 )
             for statement in TRIAGE_DISPOSITION_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1069,7 +1084,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_execution_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-4],
+                    expected_history=EXPECTED_MIGRATION_HISTORY[:-5],
                 )
             for statement in TRIAGE_EXECUTION_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1102,7 +1117,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                 conn.execute("BEGIN EXCLUSIVE")
             if starting_version != 0:
                 require_event_hypothesis_backup(
-                    conn, expected_history=EXPECTED_MIGRATION_HISTORY[:-3]
+                    conn, expected_history=EXPECTED_MIGRATION_HISTORY[:-4]
                 )
             for statement in EVENT_HYPOTHESIS_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1137,7 +1152,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                 conn.execute("BEGIN EXCLUSIVE")
             if starting_version != 0:
                 require_event_hypothesis_relationship_backup(
-                    conn, expected_history=EXPECTED_MIGRATION_HISTORY[:-2]
+                    conn, expected_history=EXPECTED_MIGRATION_HISTORY[:-3]
                 )
             for statement in EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1191,6 +1206,31 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                 ),
             )
             current = EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION
+        # fmt: off
+        if current == EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION:
+            if 0 < starting_version < EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version={EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+                database_path = next(str(row[2]) for row in conn.execute("PRAGMA database_list") if row[1] == "main")
+                if not database_path:
+                    raise sqlite3.DatabaseError("existing multihop upgrade requires a file-backed database")
+                backup_path, _ = story_candidate_backup_paths(database_path)
+                prepare_story_candidate_backup(conn, backup_path)
+                conn.execute("BEGIN EXCLUSIVE")
+            if starting_version != 0:
+                require_story_candidate_backup(
+                    conn, expected_history=tuple((r.version, r.name, r.checksum) for r in MIGRATIONS
+                                                 if r.version <= EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION),
+                )
+            for statement in STORY_CANDIDATE_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) VALUES(?,?,?,?)",
+                (STORY_CANDIDATE_SCHEMA_VERSION, STORY_CANDIDATE_MIGRATION_NAME,
+                 STORY_CANDIDATE_MIGRATION_CHECKSUM, applied_at),
+            )
+            current = STORY_CANDIDATE_SCHEMA_VERSION
+        # fmt: on
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
     except Exception:
@@ -1223,6 +1263,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     EVENT_HYPOTHESIS_MIGRATION,
     EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION,
     EVENT_HYPOTHESIS_LINEAGE_MIGRATION,
+    STORY_CANDIDATE_MIGRATION,
 )
 
 
@@ -1344,5 +1385,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         EVENT_HYPOTHESIS_LINEAGE_SCHEMA_VERSION,
         EVENT_HYPOTHESIS_LINEAGE_MIGRATION_NAME,
         EVENT_HYPOTHESIS_LINEAGE_MIGRATION_CHECKSUM,
+    ),
+    (
+        STORY_CANDIDATE_SCHEMA_VERSION,
+        STORY_CANDIDATE_MIGRATION_NAME,
+        STORY_CANDIDATE_MIGRATION_CHECKSUM,
     ),
 )

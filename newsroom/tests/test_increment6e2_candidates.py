@@ -7,7 +7,12 @@ from dataclasses import replace
 import pytest
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
-from newsroom.authority.types import EventId
+from newsroom.authority.policy import (
+    CommandRegistry,
+    PayloadSchemaContract,
+    PayloadSchemaRegistry,
+)
+from newsroom.authority.types import EventId, PayloadMode
 from newsroom.discovery.record_models import DiscoverySignal, GateDecision, NewsLead
 from newsroom.discovery.types import (
     DecisionTerminality,
@@ -37,6 +42,7 @@ from newsroom.increment6.candidates import (
     build_candidate_distinct_scope_proof,
     build_candidate_governing_manifest,
     evaluate_candidate_admission,
+    merge_candidate_authority_registries,
     validate_candidate_first_version,
     validate_candidate_version_successor,
 )
@@ -62,6 +68,8 @@ from newsroom.increment6.proposals import CandidateManifestKind
 from newsroom.increment6.relationships import (
     AssessmentStatus,
     RetainedRelationshipDecisionReceipt,
+    relationship_command_definition,
+    relationship_payload_contract,
 )
 from newsroom.tests.discovery_3d_authority_helpers import exact_admission_request
 from newsroom.tests.discovery_3d_helpers import reason
@@ -84,6 +92,49 @@ from newsroom.tests.test_increment6e1_collision import _decide, _occupied_eviden
 D = "sha256:" + "1" * 64
 HYPOTHESIS_ID = "11111111-1111-4111-8111-111111111111"
 VERSION_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def test_candidate_registry_merge_preserves_upstream_current_versions() -> None:
+    definition = relationship_command_definition()
+    contract = relationship_payload_contract()
+    newer_definition = replace(definition, definition_version="relationship-command-v9")
+    newer_contract = replace(contract, contract_version="relationship-contract-v9")
+    other_mode = PayloadSchemaContract(
+        contract.schema_version,
+        PayloadMode.NO_PAYLOAD,
+        "other-mode-v1",
+        "other-mode-canonicalizer-v1",
+        lambda _: b"",
+        (replace(contract.golden_vectors[0], name="other-mode", expected_bytes=b""),),
+    )
+    commands = CommandRegistry(
+        (definition, newer_definition),
+        current_versions={definition.command_type: definition.definition_version},
+    )
+    schemas = PayloadSchemaRegistry(
+        (contract, newer_contract, other_mode),
+        current_versions={
+            (contract.schema_version, contract.payload_mode): contract.contract_version,
+            (
+                other_mode.schema_version,
+                other_mode.payload_mode,
+            ): other_mode.contract_version,
+        },
+    )
+
+    merged_commands, merged_schemas = merge_candidate_authority_registries(
+        commands, schemas
+    )
+
+    assert merged_commands.resolve(definition.command_type) == definition
+    assert (
+        merged_schemas.resolve(contract.schema_version, contract.payload_mode)
+        == contract
+    )
+    assert (
+        merged_schemas.resolve(other_mode.schema_version, other_mode.payload_mode)
+        == other_mode
+    )
 
 
 def _manifest(collision, *, incomplete: bool = False) -> CandidateGoverningManifest:

@@ -372,6 +372,9 @@ def test_v22_to_v23_preserves_retained_relationship_before_lineage_use(
         apply_pending_migrations,
         prepare_pending_migration_backup,
     )
+    from newsroom.authority.story_candidate_migrations import (
+        story_candidate_backup_paths,
+    )
     from newsroom.tests.graphiti_adapter_4d_migration_helpers import (
         drop_empty_v23_lineage_schema,
     )
@@ -388,9 +391,11 @@ def test_v22_to_v23_preserves_retained_relationship_before_lineage_use(
     assert connection.execute("PRAGMA user_version").fetchone() == (22,)
     for path in event_hypothesis_lineage_backup_paths(seed[1]):
         path.unlink(missing_ok=True)
+    for path in story_candidate_backup_paths(seed[1]):
+        path.unlink(missing_ok=True)
     assert prepare_pending_migration_backup(connection) is not None
     apply_pending_migrations(connection, applied_at="2042-01-03T00:00:00.000000Z")
-    assert connection.execute("PRAGMA user_version").fetchone() == (23,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (24,)
     assert (
         connection.execute(
             "SELECT * FROM event_hypothesis_relationship_decisions ORDER BY decision_id"
@@ -696,6 +701,21 @@ def test_public_facade_normalises_forged_results_and_ordinary_exceptions(
             command_registry=object(),  # type: ignore[arg-type]
             payload_schemas=object(),  # type: ignore[arg-type]
         )
+
+
+def test_candidate_read_port_reconstructs_exact_producer_snapshot() -> None:
+    from newsroom.increment6 import lineage
+
+    class Raw:
+        def require_producers_in_transaction(self, *_: object, **__: object):
+            return object.__new__(lineage.HypothesisLineageProducerSnapshot)
+
+    port = lineage._compose_event_hypothesis_lineage_read_port(Raw())
+    with pytest.raises(
+        lineage.HypothesisLineageContractError,
+        match="lineage require_producers_in_transaction transaction read failed",
+    ):
+        port.require_current_producers_in_transaction("version", proof=object())
 
 
 def test_second_public_writer_fails_closed_until_first_closes(tmp_path) -> None:
@@ -1401,10 +1421,10 @@ class _LineageAdapter:
                 apply_pending_migrations(
                     connection, applied_at="2042-01-03T00:00:00.000000Z"
                 )
-                assert connection.execute("PRAGMA user_version").fetchone() == (23,)
+                assert connection.execute("PRAGMA user_version").fetchone() == (24,)
                 assert connection.execute(
                     "SELECT MAX(version) FROM authority_migrations"
-                ).fetchone() == (23,)
+                ).fetchone() == (24,)
             finally:
                 connection.close()
         return _ConformanceHandle(location)

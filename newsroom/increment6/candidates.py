@@ -1,9 +1,12 @@
+# ruff: noqa: E701,E702,E731,E741 - keep the bounded #401 authority seam compact
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Self
 
 from newsroom.authority.canonical import (
@@ -11,6 +14,14 @@ from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
 )
+from newsroom.authority.models import CommandDefinition
+from newsroom.authority.policy import (
+    CommandRegistry,
+    PayloadGoldenVector,
+    PayloadSchemaContract,
+    PayloadSchemaRegistry,
+)
+from newsroom.authority.types import PayloadMode, TrustScope, UtcTimestamp
 from newsroom.discovery.record_models import DiscoverySignal, GateDecision, NewsLead
 from newsroom.discovery.types import GateOutcome
 from newsroom.increment6.collision import (
@@ -18,6 +29,7 @@ from newsroom.increment6.collision import (
     CollisionEligibilityOutcome,
     CollisionState,
     CurrentCollisionEligibilityDecision,
+    CurrentCollisionEligibilityRequest,
 )
 from newsroom.increment6.dispositions import ProposalDisposition
 from newsroom.increment6.hypotheses import EventHypothesisVersion
@@ -42,7 +54,10 @@ STORY_CANDIDATE = "newsroom.increment6.story-candidate.v1"
 STORY_CANDIDATE_VERSION = "newsroom.increment6.story-candidate-version.v1"
 CANDIDATE_ADMISSION = "newsroom.increment6.candidate-admission.v1"
 CANDIDATE_CURRENT_VERSION = "EXACT_RETAINED_MAX_ORDINAL_HEAD"
+CANDIDATE_COMMAND_TYPE = "increment6.story-candidate.admit"
+CANDIDATE_COMMAND_SCHEMA = "newsroom.increment6.candidate-admission-command.v1"
 MAX_CANDIDATE_CANONICAL_BYTES = 16_777_216
+MAX_CANDIDATE_COMMAND_BYTES = MAX_CANDIDATE_CANONICAL_BYTES
 _UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
@@ -56,7 +71,11 @@ _SOURCE_FIELDS = "definition_id definition_version_id item_id revision_id repres
 _POLICIES = "signal_admission_policy gate_policy duplicate_policy newness_policy time_validity_policy exclusion_policy"
 _CONTEXT = "collision_namespace generation_id query_valid_time serving_time authority_watermark"
 _NO_EFFECTS = "authorises_authority authorises_persistence authorises_external_effect authorises_publication authorises_evidence authorises_egress production_activation_authorised candidate_effect_performed creates_candidate creates_version mutates_current_version"
-_PUBLIC = "STORY_CANDIDATE,STORY_CANDIDATE_VERSION,CANDIDATE_ADMISSION,CANDIDATE_CURRENT_VERSION,CandidateContractError,CandidateAdmissionOutcome,CandidateAdmissionReason,CandidateLeadSignalBinding,CandidateGoverningStateStatus,CandidateGoverningStateBinding,CandidateGoverningState,CandidateGoverningManifest,StoryCandidate,StoryCandidateVersion,CandidateDistinctScopeProof,CandidateAdmissionRequest,CandidateAdmission,build_candidate_governing_manifest,build_candidate_distinct_scope_proof,evaluate_candidate_admission,validate_candidate_first_version,validate_candidate_version_successor"
+_COMMAND_FIELDS = "schema_version request hypothesis_version_id relationship_assessment_digest disposition_ids collision_request comparator_collision_request admission collision_decision comparator_collision_decision effect_identity"
+_EFFECT_FIELDS = (
+    "candidate_id committed_admission_decision_id version_id version_ordinal"
+)
+_PUBLIC = "STORY_CANDIDATE,STORY_CANDIDATE_VERSION,CANDIDATE_ADMISSION,CANDIDATE_CURRENT_VERSION,CANDIDATE_COMMAND_TYPE,CandidateContractError,CandidateAdmissionOutcome,CandidateAdmissionReason,CandidateLeadSignalBinding,CandidateGoverningStateStatus,CandidateGoverningStateBinding,CandidateGoverningState,CandidateGoverningManifest,StoryCandidate,StoryCandidateVersion,CandidateDistinctScopeProof,CandidateAdmissionRequest,CandidateAdmission,StoryCandidateAuthority,build_candidate_governing_manifest,build_candidate_distinct_scope_proof,evaluate_candidate_admission,validate_candidate_first_version,validate_candidate_version_successor,candidate_command_definition,merge_candidate_authority_registries,open_story_candidate_authority"
 _CANDIDATE_ROUTES = {
     "NEW_EVENT_CANDIDATE": CandidateManifestKind.NEW_EVENT,
     "DEVELOPMENT_CANDIDATE": CandidateManifestKind.DEVELOPMENT,
@@ -629,6 +648,16 @@ class StoryCandidate(_NoEffect, _CanonicalFields):
             "authority_event_id",
         ):
             _uuid(getattr(self, name), name)
+        _valid(
+            len(
+                {
+                    self.candidate_id,
+                    self.committed_admission_decision_id,
+                    self.authority_event_id,
+                }
+            )
+            == 3
+        )
         _digest(self.semantic_scope_digest, "semantic_scope_digest")
 
     @property
@@ -664,6 +693,16 @@ class StoryCandidateVersion(_NoEffect, _CanonicalFields):
         _valid(type(self) is StoryCandidateVersion)
         for name in ("candidate_id", "version_id", "committed_admission_decision_id"):
             _uuid(getattr(self, name), name)
+        _valid(
+            len(
+                {
+                    self.candidate_id,
+                    self.version_id,
+                    self.committed_admission_decision_id,
+                }
+            )
+            == 3
+        )
         ordinal = _ordinal(self.ordinal)
         predecessor = _all_or_none(
             (self.previous_version_id, self.previous_version_digest),
@@ -1539,6 +1578,139 @@ def evaluate_candidate_admission(
     if v.governing_manifest.version_material_digest == m.version_material_digest:
         return result(O.DUPLICATE_EQUIVALENT, R.EXACT_MANIFEST_REPLAY)
     return result(O.ADMISSIBLE, R.SUCCESSOR_VERSION_PRE_EFFECT)
+
+
+# fmt: off
+def _candidate_command_canonicalizer(value: object) -> bytes:
+    raw = _normalise(lambda: _json(value), "Candidate command cannot be canonicalised")
+    document = _exact(_decode(raw), set(_COMMAND_FIELDS.split()), "Candidate command")
+    _require(document["schema_version"] == CANDIDATE_COMMAND_SCHEMA, "Candidate command schema differs")
+    request = CandidateAdmissionRequest.from_value(document["request"])
+    collision = CurrentCollisionEligibilityRequest.from_mapping(document["collision_request"])
+    comparator_request = (None if document["comparator_collision_request"] is None
+        else CurrentCollisionEligibilityRequest.from_mapping(document["comparator_collision_request"]))
+    nested = document["admission"], document["collision_decision"], document["effect_identity"]
+    if all(item is None for item in nested):
+        _require(comparator_request is None and document["comparator_collision_decision"] is None
+            and request.collision_request_digest == collision.request_digest, "Candidate pre-effect payload differs")
+        return raw
+    _require(all(item is not None for item in nested), "Candidate effect payload is partial")
+    admission = CandidateAdmission.from_canonical_bytes(_json(document["admission"]))
+    decision = CurrentCollisionEligibilityDecision.from_canonical_bytes(_json(document["collision_decision"]))
+    comparator = (None if document["comparator_collision_decision"] is None
+        else CurrentCollisionEligibilityDecision.from_canonical_bytes(_json(document["comparator_collision_decision"])))
+    effect = _exact(document["effect_identity"], set(_EFFECT_FIELDS.split()), "Candidate effect identity")
+    for name in ("candidate_id", "committed_admission_decision_id", "version_id"): _uuid(effect[name], name)
+    _ordinal(effect["version_ordinal"], "version_ordinal"); dispositions = document["disposition_ids"]
+    _valid(type(dispositions) is list and all(type(item) is str for item in dispositions)
+        and dispositions == sorted(set(dispositions)))
+    manifest = admission.governing_manifest
+    _valid(admission.request == request and decision.request == collision
+        and (comparator is None) == (comparator_request is None)
+        and (comparator is None or comparator.request == comparator_request)
+        and request.collision_request_digest == collision.request_digest
+        and document["hypothesis_version_id"] == manifest.hypothesis_version_id
+        and document["relationship_assessment_digest"] == manifest.relationship_assessment_digest)
+    return raw
+
+
+_CANDIDATE_COMMAND_VECTOR = b'{"admission":null,"collision_decision":null,"collision_request":{"binding":{"authority_watermark":0,"collision_key_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","collision_namespace":"candidate-vector","expected_candidate_id":null,"generation_id":"generation-vector","operation":"ADMIT_NEW_CANDIDATE","query_valid_time":"2042-01-01T00:00:00Z","serving_time":"2042-01-01T00:00:00Z","subject_id":"00000000-0000-4000-8000-000000000001","subject_version_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","subject_version_id":"00000000-0000-4000-8000-000000000001"},"named_request_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"comparator_collision_decision":null,"comparator_collision_request":null,"disposition_ids":[],"effect_identity":null,"hypothesis_version_id":"00000000-0000-4000-8000-000000000001","relationship_assessment_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","request":{"actor_identity_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","collision_request_digest":"sha256:a9617eb9457d3d5f75ce67227dce71b530831bad1adf1325791bee22ccc7e053","distinct_scope_proof_digest":null,"expected_current_ordinal":0,"expected_current_version_digest":null,"expected_current_version_id":null,"expected_governing_state_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","idempotency_key":"candidate:vector","request_id":"00000000-0000-4000-8000-000000000001","semantic_scope_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"schema_version":"newsroom.increment6.candidate-admission-command.v1"}'
+
+
+def _candidate_payload_contract() -> PayloadSchemaContract:
+    value = json.loads(_CANDIDATE_COMMAND_VECTOR)
+    vector = PayloadGoldenVector("candidate-command", "candidate:command", value, _CANDIDATE_COMMAND_VECTOR)
+    return PayloadSchemaContract(CANDIDATE_COMMAND_SCHEMA, PayloadMode.INLINE, "candidate-command-schema-v1",
+        "candidate-command-json-v1", _candidate_command_canonicalizer, (vector,))
+
+
+def candidate_command_definition() -> CommandDefinition:
+    contract = _candidate_payload_contract()
+    return CommandDefinition(command_type=CANDIDATE_COMMAND_TYPE, definition_version="candidate-command-v1",
+        aggregate_type="story_candidate_admission", event_type="story_candidate_admitted", event_schema_version=1,
+        payload_mode=PayloadMode.INLINE, payload_schema_version=contract.schema_version,
+        payload_schema_contract_version=contract.contract_version, payload_schema_contract_digest=contract.contract_digest,
+        payload_canonicalizer_version=contract.canonicalizer_implementation_version, trust_scope=TrustScope.ADMITTED,
+        security_scope="authority.story-candidate", retention_scope="authority.audit",
+        required_scope="authority.story-candidate.admit", max_inline_bytes=MAX_CANDIDATE_COMMAND_BYTES)
+
+
+def merge_candidate_authority_registries(commands: CommandRegistry, schemas: PayloadSchemaRegistry) -> tuple[CommandRegistry, PayloadSchemaRegistry]:
+    definition, contract = candidate_command_definition(), _candidate_payload_contract()
+    definitions, contracts = tuple(commands.definitions()), tuple(schemas.contracts())
+    command_matches = tuple(item for item in definitions if item.command_type == CANDIDATE_COMMAND_TYPE)
+    schema_matches = tuple(item for item in contracts if (item.schema_version, item.payload_mode) == (CANDIDATE_COMMAND_SCHEMA, PayloadMode.INLINE))
+    if command_matches not in ((), (definition,)) or schema_matches not in ((), (contract,)):
+        raise CandidateContractError("Candidate authority registry conflicts")
+    definitions += () if command_matches else (definition,); contracts += () if schema_matches else (contract,)
+    return (CommandRegistry(definitions, current_versions={item.command_type: (definition.definition_version if item.command_type == CANDIDATE_COMMAND_TYPE else commands.resolve(item.command_type).definition_version) for item in definitions}),
+        PayloadSchemaRegistry(contracts, current_versions={(item.schema_version, item.payload_mode): (contract.contract_version if (item.schema_version, item.payload_mode) == (CANDIDATE_COMMAND_SCHEMA, PayloadMode.INLINE) else schemas.resolve(item.schema_version, item.payload_mode).contract_version) for item in contracts}))
+
+
+_FACADE_TOKEN = object()
+
+
+class StoryCandidateAuthority:
+    __slots__ = ("__authority",)
+
+    def __init__(self, token: object, authority: object) -> None:
+        if token is not _FACADE_TOKEN: raise CandidateContractError("Candidate authority construction is private")
+        self.__authority = authority
+
+    def _call(self, name: str, *args: object, expected: type, **kwargs: object):
+        message = f"Candidate {name} returned a forged result"
+        value = _normalise(lambda: getattr(self.__authority, name)(*args, **kwargs), message)
+        _require(type(value) is expected, message); return value
+
+    def admit(self, admission_bytes: bytes, *, collision_request: CurrentCollisionEligibilityRequest,
+        proof: object, comparator_collision_request: CurrentCollisionEligibilityRequest | None = None) -> StoryCandidateVersion:
+        return self._call("admit", admission_bytes, collision_request=collision_request, proof=proof,
+            comparator_collision_request=comparator_collision_request, expected=StoryCandidateVersion)
+
+    def load_version(self, version_id: str) -> StoryCandidateVersion:
+        return self._call("load_version", version_id, expected=StoryCandidateVersion)
+
+    def load_candidate(self, candidate_id: str) -> StoryCandidate:
+        return self._call("load_candidate", candidate_id, expected=StoryCandidate)
+
+    def versions(self, candidate_id: str) -> tuple[StoryCandidateVersion, ...]:
+        value = _normalise(lambda: self.__authority.versions(candidate_id), "Candidate history failed")
+        _require(type(value) is tuple and all(type(item) is StoryCandidateVersion for item in value), "Candidate history is forged")
+        return value
+
+    def current(self, candidate_id: str, *, collision_request: CurrentCollisionEligibilityRequest, proof: object) -> StoryCandidateVersion:
+        return self._call("current", candidate_id, collision_request=collision_request, proof=proof, expected=StoryCandidateVersion)
+
+    require_current = current
+
+    def close(self) -> None: _normalise(self.__authority.close, "Candidate authority close failed")
+    def __enter__(self) -> Self: return self
+    def __exit__(self, *_: object) -> None: self.close()
+
+
+def _compose_story_candidate_authority(authority: object) -> StoryCandidateAuthority:
+    return StoryCandidateAuthority(_FACADE_TOKEN, authority)
+
+
+def open_story_candidate_authority(database: str | Path, *, retrieval_authority: object, authenticator: object,
+    authorizer: object, command_registry: CommandRegistry, payload_schemas: PayloadSchemaRegistry,
+    collision_enforcer: object, clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
+    busy_timeout_ms: int = 5000) -> StoryCandidateAuthority:
+    from newsroom.authority.story_candidate_system import (
+        open_story_candidate_authority_system,
+    )
+    try: result = open_story_candidate_authority_system(database, retrieval_authority=retrieval_authority,
+        authenticator=authenticator, authorizer=authorizer, command_registry=command_registry,
+        payload_schemas=payload_schemas, collision_enforcer=collision_enforcer, clock=clock, busy_timeout_ms=busy_timeout_ms)
+    except CandidateContractError: raise
+    except Exception as exc: raise CandidateContractError("Candidate authority open failed") from exc
+    if type(result) is StoryCandidateAuthority: return result
+    close = getattr(result, "close", None)
+    if callable(close):
+        try: close()
+        except BaseException: pass  # noqa: BLE001, S110 - preserve forged result failure
+    raise CandidateContractError("Candidate authority opener returned forged facade")
+# fmt: on
 
 
 __all__ = tuple(_PUBLIC.split(","))
