@@ -7,14 +7,15 @@ evidence authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from enum import Enum
 import hashlib
 import json
 import re
 import sqlite3
-from typing import Callable, ClassVar
-
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from enum import Enum
+from types import MappingProxyType
+from typing import ClassVar
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _HANDOFF_ID = re.compile(r"handoff:sha256:[0-9a-f]{64}")
@@ -871,14 +872,270 @@ class EvaluationHandoffStore:
         )
 
 
+_READ_PORT_TOKEN = object()
+_READ_AUTHORITY_TOKEN = object()
+_V17_HANDOFF_SCHEMA_OBJECTS = MappingProxyType({
+    "evaluation_handoffs": (
+        "table",
+        "2c6813d712d7eccfad332d2e34d68b0d4e56a0e262b97adbda5f53e7092268f1",
+    ),
+    "evaluation_handoff_attempts": (
+        "table",
+        "ca017cc5e1e3b07b28a0c9a1b14aea1d50009a302c833954be4dbd4466853fd2",
+    ),
+    "evaluation_handoff_acknowledgements": (
+        "table",
+        "28b4c3a6aab9ddc42f838e46c88535ce9f6bfbd1148c7e75e1e36e20e43524ea",
+    ),
+    "evaluation_handoff_identity_guard": (
+        "trigger",
+        "5450391f101c745c450f1b4965baea61ca1c0bc85ffec118ab03e2a306a5bb01",
+    ),
+    "evaluation_handoff_state_guard": (
+        "trigger",
+        "5e3718753787eacbc8629b434428109a10e0a2494399f656c74098c6306efe39",
+    ),
+    "evaluation_handoff_attempt_insert_guard": (
+        "trigger",
+        "82bd709305bd27722ad5113572f58355816d3ad6894939c44ab652a03829b87b",
+    ),
+    "evaluation_handoff_attempt_update_guard": (
+        "trigger",
+        "678e84fb75dbb115c1aed09ef6383541ee9cbc2e5b7d653fc7259a0d56ac315d",
+    ),
+    "retained_evaluation_handoffs_delete": (
+        "trigger",
+        "5a980352651b1571caa5f91c1e6ac49baaec0a2657a9b8c5e83c430373004a37",
+    ),
+    "retained_evaluation_handoff_attempts_delete": (
+        "trigger",
+        "805ceb4c40123eb6512a4a4e0637b097d087e46236c0ce157bc87823cdcd5757",
+    ),
+    "retained_evaluation_handoff_acknowledgements_delete": (
+        "trigger",
+        "77d39cab8aa48876bdc26db96722d4c821e506ad7defd4cec8b2053e2dd1b58c",
+    ),
+    "immutable_evaluation_handoff_acknowledgements_update": (
+        "trigger",
+        "ea06f8702e6520569b4aa9055c8b925b8ec170d84cdd37560ac01fbc5235cbe8",
+    ),
+    "evaluation_handoff_ack_correlation_guard": (
+        "trigger",
+        "834111ae78672954382fc9947bdd31b341680837bd38c34fefb46420732f62c3",
+    ),
+})
+
+
+class EvaluationHandoffReadPort:
+    """Narrow transaction-bound read seam for retained Handoff authority."""
+
+    __slots__ = ("__authority",)
+
+    def __init__(self, token: object, authority: object) -> None:
+        if token is not _READ_PORT_TOKEN:
+            raise HandoffContractError(
+                "Handoff read port construction is authority-private"
+            )
+        object.__setattr__(self, "_EvaluationHandoffReadPort__authority", authority)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("EvaluationHandoffReadPort is immutable")
+
+    def verify_retained_integrity_in_transaction(self) -> None:
+        return self.__call("verify_retained_integrity_in_transaction", None)
+
+    def require_retained_handoff_in_transaction(self, handoff_id: str) -> Handoff:
+        return self.__call(
+            "require_retained_handoff_in_transaction", Handoff, handoff_id
+        )
+
+    def __call(self, name: str, expected: type | None, *args: object):
+        try:
+            value = getattr(self.__authority, name)(*args)
+        except HandoffContractError:
+            raise
+        except Exception as exc:
+            raise HandoffContractError(f"{name} failed closed") from exc
+        if (expected is None and value is not None) or (
+            expected is not None and type(value) is not expected
+        ):
+            raise HandoffContractError(f"{name} returned a forged result")
+        return value
+
+
+def _compose_evaluation_handoff_read_port(
+    authority: object,
+) -> EvaluationHandoffReadPort:
+    return EvaluationHandoffReadPort(_READ_PORT_TOKEN, authority)
+
+
+def _require_handoff_read_connection(
+    connection: sqlite3.Connection, *, active: bool
+) -> None:
+    state = "active" if active else "idle"
+    if (
+        type(connection) is not sqlite3.Connection
+        or connection.isolation_level is not None
+        or connection.row_factory is not sqlite3.Row
+        or connection.in_transaction is not active
+    ):
+        raise HandoffContractError(
+            f"Handoff read requires an exact {state} checked connection"
+        )
+    try:
+        settings = (
+            connection.execute("PRAGMA foreign_keys").fetchone()[0],
+            str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower(),
+            connection.execute("PRAGMA synchronous").fetchone()[0],
+        )
+    except Exception as exc:
+        raise HandoffContractError(
+            "Handoff checked connection cannot be inspected"
+        ) from exc
+    if settings != (1, "wal", 2):
+        raise HandoffContractError("Handoff checked connection settings differ")
+
+
+class _EvaluationHandoffReadAuthority:
+    __slots__ = ("_connection",)
+
+    def __init__(self, token: object, connection: sqlite3.Connection) -> None:
+        if token is not _READ_AUTHORITY_TOKEN:
+            raise HandoffContractError("Handoff read authority construction is private")
+        self._connection = connection
+
+    def __load(self, handoff_id: str) -> Handoff:
+        _matches(handoff_id, _HANDOFF_ID, "handoff_id")
+        return EvaluationHandoffStore._load(self, handoff_id)  # type: ignore[arg-type]
+
+    @staticmethod
+    def _require_schema(actual: object, expected: str) -> bool:
+        return EvaluationHandoffStore._require_schema(actual, expected)
+
+    @staticmethod
+    def __exact_flag(value: object, field: str) -> None:
+        if type(value) is not int or value not in (0, 1):
+            raise HandoffContractError(field)
+
+    def __verify_rows(self) -> tuple[str, ...]:
+        handoff_rows = self._connection.execute(
+            "SELECT handoff_id,schema_identity,max_attempts,retry_exhausted,"
+            "evaluation_only,publication_authority,evidence_authority "
+            "FROM evaluation_handoffs ORDER BY handoff_id"
+        ).fetchall()
+        for row in handoff_rows:
+            self._require_schema(row[1], EVALUATION_HANDOFF)
+            if type(row[2]) is not int or not 1 <= row[2] <= 100:
+                raise HandoffContractError("max_attempts")
+            for index, field in (
+                (3, "retry_exhausted"),
+                (4, "evaluation_only"),
+                (5, "publication_authority"),
+                (6, "evidence_authority"),
+            ):
+                self.__exact_flag(row[index], field)
+        for row in self._connection.execute(
+            "SELECT schema_identity,attempt_number,persisted_before_send,sent,"
+            "ambiguous FROM evaluation_handoff_attempts ORDER BY handoff_id,"
+            "attempt_number"
+        ):
+            self._require_schema(row[0], HANDOFF_ATTEMPT)
+            if type(row[1]) is not int or row[1] < 1:
+                raise HandoffContractError("attempt_number")
+            for index, field in (
+                (2, "persisted_before_send"),
+                (3, "sent"),
+                (4, "ambiguous"),
+            ):
+                self.__exact_flag(row[index], field)
+        for row in self._connection.execute(
+            "SELECT schema_identity FROM evaluation_handoff_acknowledgements "
+            "ORDER BY recorded_handoff_id,acknowledgement_id"
+        ):
+            self._require_schema(row[0], HANDOFF_ACKNOWLEDGEMENT)
+        return tuple(str(row[0]) for row in handoff_rows)
+
+    def __verify_schema_objects(self) -> None:
+        tables = (
+            "evaluation_handoffs",
+            "evaluation_handoff_attempts",
+            "evaluation_handoff_acknowledgements",
+        )
+        rows = self._connection.execute(
+            "SELECT name,type,sql FROM sqlite_master WHERE "
+            "tbl_name IN (?,?,?) AND type IN ('table','trigger')",
+            tables,
+        ).fetchall()
+        actual = {
+            str(row[0]): (
+                str(row[1]),
+                hashlib.sha256(
+                    " ".join(str(row[2]).split()).encode("utf-8")
+                ).hexdigest(),
+            )
+            for row in rows
+        }
+        if actual != _V17_HANDOFF_SCHEMA_OBJECTS:
+            raise HandoffContractError("Handoff retained schema objects differ")
+
+    def verify_retained_integrity_in_transaction(self) -> None:
+        _require_handoff_read_connection(self._connection, active=True)
+        self.__verify_schema_objects()
+        handoff_ids = self.__verify_rows()
+        for handoff_id in handoff_ids:
+            self.__load(handoff_id)
+        attempt_parents = {
+            str(row[0])
+            for row in self._connection.execute(
+                "SELECT DISTINCT handoff_id FROM evaluation_handoff_attempts"
+            )
+        }
+        acknowledgement_parents = {
+            str(row[0])
+            for row in self._connection.execute(
+                "SELECT DISTINCT recorded_handoff_id "
+                "FROM evaluation_handoff_acknowledgements"
+            )
+        }
+        if attempt_parents | acknowledgement_parents > set(handoff_ids):
+            raise HandoffContractError("Handoff retained table coverage differs")
+        if self._connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise HandoffContractError("Handoff foreign keys differ")
+
+    def require_retained_handoff_in_transaction(self, handoff_id: str) -> Handoff:
+        self.verify_retained_integrity_in_transaction()
+        return self.__load(handoff_id)
+
+
+def _create_evaluation_handoff_read_port(
+    connection: sqlite3.Connection,
+) -> EvaluationHandoffReadPort:
+    """Bind exact Handoff reads to one caller-owned transaction."""
+
+    try:
+        _require_handoff_read_connection(connection, active=False)
+        private = _EvaluationHandoffReadAuthority(_READ_AUTHORITY_TOKEN, connection)
+        port = _compose_evaluation_handoff_read_port(private)
+        if type(port) is not EvaluationHandoffReadPort:
+            raise HandoffContractError(
+                "Handoff read-port factory returned a forged port"
+            )
+        return port
+    except HandoffContractError:
+        raise
+    except Exception as exc:
+        raise HandoffContractError("Handoff read-port factory failed closed") from exc
+
+
 __all__ = [
-    "Acknowledgement",
-    "AcknowledgementOutcome",
     "EVALUATION_HANDOFF",
-    "EvaluationHandoffStore",
     "HANDOFF_ACKNOWLEDGEMENT",
     "HANDOFF_ATTEMPT",
     "HANDOFF_TRANSPORT_STATE",
+    "Acknowledgement",
+    "AcknowledgementOutcome",
+    "EvaluationHandoffReadPort",
+    "EvaluationHandoffStore",
     "Handoff",
     "HandoffAttempt",
     "HandoffContractError",
