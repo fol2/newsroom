@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -38,8 +40,10 @@ from newsroom.increment6.candidates import (
     CandidateGoverningStateStatus,
     StoryCandidate,
     StoryCandidateAuthority,
+    StoryCandidateReadPort,
     StoryCandidateVersion,
     _compose_story_candidate_authority,
+    _compose_story_candidate_read_port,
     build_candidate_distinct_scope_proof,
     build_candidate_governing_manifest,
     candidate_command_definition,
@@ -60,6 +64,7 @@ from newsroom.increment6.relationships import merge_relationship_authority_regis
 from newsroom.increment6.work_items import RetrievalContextAuthority
 
 _TOKEN = object()
+_READ_AUTHORITY_TOKEN = object()
 
 
 def _uuid() -> str:
@@ -951,6 +956,172 @@ class _Authority:
 
     def close(self):
         self._store.close()
+
+
+class _StoryCandidateReadAuthority:
+    """Private same-connection adapter for complete v24 retained reads."""
+
+    __slots__ = ("__connection", "__verifier")
+
+    def __init__(
+        self, token: object, connection: sqlite3.Connection, verifier: _CandidateStore
+    ) -> None:
+        if token is not _READ_AUTHORITY_TOKEN or verifier._connection is not connection:
+            raise CandidateContractError(
+                "Candidate read authority construction is private"
+            )
+        self.__connection = connection
+        self.__verifier = verifier
+
+    def __verified(self):
+        _require_candidate_read_connection(self.__connection, active=True)
+        return self.__verifier._verify()
+
+    def verify_retained_integrity_in_transaction(self) -> None:
+        self.__verified()
+
+    def require_retained_candidate_in_transaction(
+        self, candidate_id: str
+    ) -> StoryCandidate:
+        verified = self.__verified()
+        candidates = {
+            candidate.candidate_id: candidate for _, candidate, *_ in verified.values()
+        }
+        try:
+            return candidates[candidate_id]
+        except KeyError as exc:
+            raise CandidateContractError("unknown Candidate") from exc
+
+    def require_retained_version_in_transaction(
+        self, version_id: str
+    ) -> StoryCandidateVersion:
+        verified = self.__verified()
+        versions = {
+            version.version_id: version for *_, version, _, _, _, _ in verified.values()
+        }
+        try:
+            return versions[version_id]
+        except KeyError as exc:
+            raise CandidateContractError("unknown Candidate Version") from exc
+
+    def require_current_head_in_transaction(
+        self, candidate_id: str, *, proof: AuthenticationProof
+    ) -> StoryCandidateVersion:
+        verified = self.__verified()
+        row = self.__connection.execute(
+            "SELECT current_admission_digest,current_version_id,"
+            "current_version_digest FROM "
+            "story_candidate_heads WHERE candidate_id=?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            raise CandidateContractError("unknown Candidate")
+        try:
+            admission, _, version, collision, *_ = verified[str(row[0])]
+        except KeyError as exc:
+            raise CandidateContractError("Candidate head differs") from exc
+        if tuple(row[1:]) != (version.version_id, version.canonical_digest):
+            raise CandidateContractError("Candidate head differs")
+        producers = self.__verifier._producers(admission.governing_manifest, proof)
+        rebuilt = self.__verifier._manifest(producers, collision)
+        if rebuilt != version.governing_manifest:
+            raise CandidateContractError("Candidate current governing material differs")
+        return version
+
+
+def _require_candidate_read_connection(
+    connection: sqlite3.Connection, *, active: bool
+) -> None:
+    state = "active" if active else "idle"
+    if (
+        type(connection) is not sqlite3.Connection
+        or connection.isolation_level is not None
+        or connection.row_factory is not sqlite3.Row
+        or connection.in_transaction is not active
+    ):
+        raise CandidateContractError(
+            f"Candidate read requires an exact {state} checked connection"
+        )
+    try:
+        settings = (
+            connection.execute("PRAGMA foreign_keys").fetchone()[0],
+            str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower(),
+            connection.execute("PRAGMA synchronous").fetchone()[0],
+        )
+    except Exception as exc:
+        raise CandidateContractError(
+            "Candidate checked connection cannot be inspected"
+        ) from exc
+    if settings != (1, "wal", 2):
+        raise CandidateContractError("Candidate checked connection settings differ")
+
+
+def _create_story_candidate_read_port(
+    connection: sqlite3.Connection,
+    *,
+    retrieval_authority: RetrievalContextAuthority,
+    authenticator: object,
+    command_registry: CommandRegistry,
+    payload_schemas: PayloadSchemaRegistry,
+    clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
+) -> StoryCandidateReadPort:
+    """Bind complete Candidate reads to one caller-owned transaction."""
+
+    try:
+        _require_candidate_read_connection(connection, active=False)
+        if (
+            type(retrieval_authority) is not RetrievalContextAuthority
+            or type(command_registry) is not CommandRegistry
+            or type(payload_schemas) is not PayloadSchemaRegistry
+            or not callable(clock)
+        ):
+            raise CandidateContractError(
+                "Candidate read-port factory collaborators differ"
+            )
+        relationship_commands, relationship_schemas = (
+            merge_relationship_authority_registries(command_registry, payload_schemas)
+        )
+        lineage_commands, lineage_schemas = merge_lineage_authority_registries(
+            relationship_commands, relationship_schemas
+        )
+        commands, schemas = merge_candidate_authority_registries(
+            lineage_commands, lineage_schemas
+        )
+        lineage = _create_event_hypothesis_lineage_read_port(
+            connection,
+            retrieval_authority=retrieval_authority,
+            authenticator=authenticator,
+            command_registry=commands,
+            payload_schemas=schemas,
+            clock=clock,
+        )
+        verifier = object.__new__(_CandidateStore)
+        verifier._conn = connection
+        verifier._closed = False
+        verifier._lock = threading.RLock()
+        verifier._command_registry = commands
+        verifier._payload_schemas = schemas
+        verifier._command_service_version = "increment6-candidate-v1"
+        verifier._lineage = lineage
+        verifier._dispositions = ProposalDispositionStore(
+            connection, retrieval_authority, authenticator
+        )
+        private = _StoryCandidateReadAuthority(
+            _READ_AUTHORITY_TOKEN, connection, verifier
+        )
+        port = _compose_story_candidate_read_port(private)
+        if type(port) is not StoryCandidateReadPort:
+            raise CandidateContractError(
+                "Candidate read-port factory returned a forged port"
+            )
+        _require_candidate_read_connection(connection, active=False)
+        return port
+    except CandidateContractError:
+        raise
+    except Exception as exc:
+        raise CandidateContractError(
+            "Candidate read-port factory failed closed"
+        ) from exc
 
 
 def open_story_candidate_authority_system(database: str | Path, **kwargs):

@@ -1,4 +1,3 @@
-# ruff: noqa: E701,E702,E731,E741 - keep the bounded #401 authority seam compact
 from __future__ import annotations
 
 import json
@@ -1648,6 +1647,74 @@ def merge_candidate_authority_registries(commands: CommandRegistry, schemas: Pay
 
 
 _FACADE_TOKEN = object()
+_READ_PORT_TOKEN = object()
+
+
+class StoryCandidateReadPort:
+    """Narrow transaction-bound read seam for retained Candidate authority."""
+
+    __slots__ = ("__authority",)
+
+    def __init__(self, token: object, authority: object) -> None:
+        if token is not _READ_PORT_TOKEN:
+            raise CandidateContractError(
+                "Candidate read port construction is authority-private"
+            )
+        object.__setattr__(self, "_StoryCandidateReadPort__authority", authority)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("StoryCandidateReadPort is immutable")
+
+    def _call(self, name: str, identity: str | None, expected: type):
+        message = f"Candidate {name} returned a forged result"
+        value = _normalise(
+            lambda: getattr(self.__authority, name)(identity)
+            if identity is not None
+            else getattr(self.__authority, name)(),
+            message,
+        )
+        _require(type(value) is expected, message)
+        return value
+
+    def verify_retained_integrity_in_transaction(self) -> None:
+        self._call("verify_retained_integrity_in_transaction", None, type(None))
+
+    def require_retained_candidate_in_transaction(
+        self, candidate_id: str
+    ) -> StoryCandidate:
+        return self._call(
+            "require_retained_candidate_in_transaction",
+            candidate_id,
+            StoryCandidate,
+        )
+
+    def require_retained_version_in_transaction(
+        self, version_id: str
+    ) -> StoryCandidateVersion:
+        return self._call(
+            "require_retained_version_in_transaction",
+            version_id,
+            StoryCandidateVersion,
+        )
+
+    def require_current_head_in_transaction(
+        self, candidate_id: str, *, proof: object
+    ) -> StoryCandidateVersion:
+        message = "Candidate require_current_head_in_transaction returned a forged result"
+        value = _normalise(
+            lambda: self.__authority.require_current_head_in_transaction(
+                candidate_id, proof=proof
+            ),
+            message,
+        )
+        _require(type(value) is StoryCandidateVersion, message)
+        return value
+
+
+def _compose_story_candidate_read_port(authority: object) -> StoryCandidateReadPort:
+    """Private constructor used only by the checked Candidate authority."""
+
+    return StoryCandidateReadPort(_READ_PORT_TOKEN, authority)
 
 
 class StoryCandidateAuthority:
@@ -1713,4 +1780,4 @@ def open_story_candidate_authority(database: str | Path, *, retrieval_authority:
 # fmt: on
 
 
-__all__ = tuple(_PUBLIC.split(","))
+__all__ = tuple(_PUBLIC.split(",")) + ("StoryCandidateReadPort",)
