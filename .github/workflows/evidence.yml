@@ -887,6 +887,8 @@ jobs:
               or increment6_inventory.get('schema_version') != 25
               or increment6_inventory.get('schema_fingerprint')
               != 'sha256:353900bf5804f0b770489982541f3cff4fd30ea36fc75d19b9c63315d1b6ec06'
+              or increment6_inventory.get('migration_history_digest')
+              != 'sha256:bea793377d065d3073e6dfa8d40139fedfd377d5e24d9812d12cdb1ad52e9a0f'
           ):
               raise SystemExit('increment6 closeout inventory differs')
           increment6_claimed = increment6.get('receipt_identity')

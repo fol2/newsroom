@@ -6,7 +6,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from newsroom.authority.canonical import canonical_json_bytes
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
     EXPECTED_SCHEMA_FINGERPRINT,
@@ -73,11 +73,15 @@ class Increment6GCloseoutReceiptError(ValueError):
 
 
 def _inventory() -> dict[str, object]:
+    migration_history_digest = digest_bytes(
+        canonical_json_bytes([list(item) for item in EXPECTED_MIGRATION_HISTORY])
+    )
     return {
         "case_count": len(INCREMENT6G_FINAL_CLOSEOUT_CASES),
         "digest": INCREMENT6G_FINAL_CLOSEOUT_INVENTORY_DIGEST,
         "non_effects": list(INCREMENT6G_FINAL_NON_EFFECTS),
         "requirements": sorted(INCREMENT6_FINAL_REQUIREMENTS),
+        "migration_history_digest": migration_history_digest,
         "schema_version": SCHEMA_VERSION,
         "schema_fingerprint": EXPECTED_SCHEMA_FINGERPRINT,
     }
@@ -165,6 +169,7 @@ def _service_identities(
     return {
         "migration": {
             "history": expected_history,
+            "history_digest": digest_bytes(canonical_json_bytes(expected_history)),
             "schema_fingerprint": EXPECTED_SCHEMA_FINGERPRINT,
             "schema_version": SCHEMA_VERSION,
         },
