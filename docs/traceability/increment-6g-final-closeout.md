@@ -6,11 +6,11 @@
 - **Entry main:** `c52574afcc9725b7ee14edcc8f4aa608a2593ecc`
 - **Entry tree:** `91754aeb76f05fac41b38ad8ef90715b7fe11ba4`
 - **Inventory source:** `newsroom/increment6/closeout.py`
-- **Inventory digest:** `sha256:cb051e71025a2387aa6bdc4e4fca0bc76b414aabaeb2d192b2aa1dd48c81e011`
+- **Inventory digest:** `sha256:afc556ba5785f84eb691af903f24c81ac43d50bbe6c02a3ad23eb08dca8dff5f`
 
 ## Closed boundary
 
-The machine inventory reconciles 58 exact permanent pytest node identities. It
+The machine inventory reconciles 59 exact permanent pytest node identities. It
 binds the complete Increment 6 fixture path from retained Source Revision,
 Signal and Lead authority through Work Item, Retrieval Context, Proposal,
 Disposition, Hypothesis, Relationship, Lineage, Candidate Admission,
@@ -45,7 +45,9 @@ The selected authority cases retain the real public paths:
 - concurrent claim/admission and evaluation Handoff loss, delay, ambiguity and
   retry;
 - mandatory Feedback obligations and reconciliation dispositions which remain
-  visible until a governed terminal state; and
+  visible until a governed terminal state, including the exact sequence where
+  feedback is accepted on Candidate Version N, the Candidate authority advances
+  to N+1, and the retained N obligation is then dispositioned; and
 - Watch Condition and supplemental-discovery re-entry through a new governed
   Work Item.
 
@@ -72,11 +74,13 @@ JUnit properties. Wrong projector credentials and actual tombstone removal are
 separate selected actual-service cases.
 
 `scripts/sdlc/increment6g_closeout_receipt.py` replays the immutable core and
-service transport bundles, validates the PASS decision, checks all 58 selected
+service transport bundles, validates the PASS decision, checks all 59 selected
 outcomes, rejects any lane failure/error, and binds the raw JUnit, lane receipt,
 envelope, transport, replay, selected-test manifest and service identities to
-one exact source head and tree. It checks the tracked checkout before consuming
-evidence and again before emission.
+one exact source head and tree. The isolated signer reconstructs the canonical
+selected-case inventory and its digest before attestation, so the declared
+digest cannot stand in for a changed case mapping. It checks the tracked
+checkout before consuming evidence and again before emission.
 
 The final receipt is included with the decision evidence. Only a successful
 service-required manual run on `refs/heads/main` advances to `signed-closeout`.
