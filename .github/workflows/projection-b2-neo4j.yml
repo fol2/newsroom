@@ -158,6 +158,7 @@ jobs:
             newsroom/tests/test_increment_2d_neo4j_service.py \
             newsroom/tests/test_increment4e_neo4j_service.py \
             newsroom/tests/test_increment5b4_neo4j_service.py \
+            newsroom/tests/test_increment6g_neo4j_service.py \
             --junitxml=projection-b2-b3-c1-complete-retrieval-neo4j-results.xml
 
       - name: Remove disposable credential files
