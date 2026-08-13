@@ -4,7 +4,11 @@ import sqlite3
 import stat
 from pathlib import Path
 
+import pytest
+
+from newsroom.tests import feedback_adapter_fastpath
 from newsroom.tests import test_increment6f2_feedback_store as feedback
+from newsroom.tests.authority_store_conformance import AuthorityValue
 
 
 def test_feedback_template_clones_are_file_and_object_isolated(tmp_path: Path) -> None:
@@ -47,3 +51,35 @@ def test_feedback_template_clones_are_file_and_object_isolated(tmp_path: Path) -
     assert snapshot.database_bytes == template_database_bytes
     assert template_retrieval.read_bytes() == template_retrieval_bytes
     assert second_retrieval.read_bytes() == second_retrieval_bytes
+
+
+def test_feedback_submit_uses_verified_result_and_reads_still_use_facade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    feedback_adapter_fastpath._install(feedback)
+    command = feedback.candidate_fixture._generic("record-1")
+    location = feedback._location(tmp_path / "fastpath", ("record-1",))
+    handle = feedback._Handle(location)
+    root = handle._opened()
+    original_load = root.load
+
+    def reject_redundant_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("write result performed a redundant facade read")
+
+    monkeypatch.setattr(root, "load", reject_redundant_read)
+    monkeypatch.setattr(root, "dispositions", reject_redundant_read)
+    try:
+        assert handle.submit(command) == AuthorityValue.from_command(command)
+
+        calls = 0
+
+        def observed_load(*args: object, **kwargs: object) -> object:
+            nonlocal calls
+            calls += 1
+            return original_load(*args, **kwargs)
+
+        monkeypatch.setattr(root, "load", observed_load)
+        assert handle.observe(command.record_id) is not None
+        assert calls == 1
+    finally:
+        handle.close()
