@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pickle
 import sqlite3
 import uuid
 from collections.abc import Callable
@@ -65,14 +66,15 @@ from newsroom.increment6.relationships import (
     ComparatorSetManifest,
     HypothesisVersionBinding,
     assess_relationships,
+    merge_relationship_authority_registries,
     open_event_hypothesis_relationship_authority,
     relationship_command_definition,
-    merge_relationship_authority_registries,
 )
 from newsroom.tests import test_increment6d1_hypothesis_store as d1
 from newsroom.tests import test_increment6d2_relationship_store as d2
 from newsroom.tests import test_increment6d3_lineage as d3
 from newsroom.tests.authority_store_conformance import (
+    _SCENARIOS,
     CASE_INVENTORY,
     Applicability,
     AuthorityValue,
@@ -84,7 +86,6 @@ from newsroom.tests.authority_store_conformance import (
     StoredAuthorityState,
     TamperKind,
     WriteCommand,
-    _SCENARIOS,
     run_conformance,
 )
 from newsroom.tests.test_increment5c2_named_tool_authority_execution import (
@@ -97,7 +98,6 @@ from newsroom.tests.test_increment5c2_named_tool_authority_execution import (
     executor,
 )
 from newsroom.tests.test_increment6e1_collision import _trusted_context
-
 
 _RECORDS = (
     ("record-1", "alpha"),
@@ -277,12 +277,24 @@ class _SeedSnapshot:
     database_bytes: bytes
     tail: tuple
 
+    def fork(self) -> _SeedSnapshot:
+        return pickle.loads(pickle.dumps(self, protocol=pickle.HIGHEST_PROTOCOL))
+
     def clone(self, root: Path) -> tuple:
         root.mkdir(mode=0o700)
         database = root / "candidate-authority.sqlite3"
         database.write_bytes(self.database_bytes)
         os.chmod(database, 0o600)
-        return (self.tail[0], database, *self.tail[1:])
+        collaborators = pickle.loads(
+            pickle.dumps(self.tail[0], protocol=pickle.HIGHEST_PROTOCOL)
+        )
+        tail = (collaborators, *self.tail[1:])
+        retrieval = tail[0][1]
+        retrieval_path = root / "retrieval-context.sqlite3"
+        retrieval_path.write_bytes(Path(retrieval._path).read_bytes())
+        os.chmod(retrieval_path, 0o600)
+        retrieval._path = retrieval_path
+        return (tail[0], database, *tail[1:])
 
 
 def _seed_snapshot(root: Path) -> _SeedSnapshot:
@@ -298,6 +310,9 @@ def _seed_snapshot(root: Path) -> _SeedSnapshot:
         d2._SEED_CACHE = global_cache
         if d2._seed_cache_state(d2._SEED_CACHE) != global_state:
             raise AssertionError("global relationship seed cache changed")
+
+
+_SHARED_SEED_SNAPSHOT: _SeedSnapshot | None = None
 
 
 def _named_snapshot(
@@ -942,7 +957,9 @@ class _Adapter:
 
     def __init__(self, root: Path) -> None:
         self.root = root
-        self.snapshot = _seed_snapshot(root / "capacity-2-seed")
+        self.snapshot = _SHARED_SEED_SNAPSHOT or _seed_snapshot(
+            root / "capacity-2-seed"
+        )
 
     def create_location(self) -> _Location:
         root = self.root / str(uuid.uuid4())

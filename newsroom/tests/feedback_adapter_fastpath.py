@@ -51,41 +51,53 @@ def _install(feedback: Any) -> None:
         connection = (
             target._connection if transaction is None else target._root._connection
         )
+        cache_key = None
+        if transaction is None:
+            cache_key = (
+                int(connection.execute("PRAGMA data_version").fetchone()[0]),
+                connection.total_changes,
+            )
+            cached = getattr(self, "_verified_commands_cache", None)
+            if cached is not None and cached[0] == cache_key:
+                return cached[1]
         relevant_feedback_ids = {
             str(fixture[0].feedback_id) for fixture in self.location.fixtures.values()
         }
         rows = connection.execute(
-            "SELECT f.feedback_id,o.obligation_id FROM evaluation_feedback f "
+            "SELECT f.feedback_id,o.obligation_id,EXISTS("
+            "SELECT 1 FROM evaluation_reconciliation_dispositions d "
+            "WHERE d.obligation_id=o.obligation_id) FROM evaluation_feedback f "
             "JOIN evaluation_reconciliation_obligations o "
             "ON o.feedback_id=f.feedback_id ORDER BY f.feedback_id"
         ).fetchall()
         values: list[Any] = []
         verified = False
-        for feedback_id, obligation_id in rows:
+        for feedback_id, obligation_id, has_dispositions in rows:
             feedback_id = str(feedback_id)
             obligation_id = str(obligation_id)
             if feedback_id in relevant_feedback_ids:
                 accepted = target.load(feedback_id)
                 values.append(feedback._decoded(accepted.feedback.source_feedback_id))
                 verified = True
-            has_dispositions = connection.execute(
-                "SELECT 1 FROM evaluation_reconciliation_dispositions "
-                "WHERE obligation_id=? LIMIT 1",
-                (obligation_id,),
-            ).fetchone()
-            if has_dispositions is not None:
+            if has_dispositions:
                 for disposition in target.dispositions(obligation_id):
                     try:
-                        values.append(
-                            feedback._decoded(disposition.idempotency_key)
-                        )
+                        values.append(feedback._decoded(disposition.idempotency_key))
                     except KeyError:
                         pass
                 verified = True
         if not verified:
             base_feedback = self.location.base[0]
             target.load(base_feedback.feedback_id)
-        return tuple(values)
+        commands = tuple(values)
+        if transaction is None:
+            post_key = (
+                int(connection.execute("PRAGMA data_version").fetchone()[0]),
+                connection.total_changes,
+            )
+            if post_key == cache_key:
+                self._verified_commands_cache = (post_key, commands)
+        return commands
 
     def submit(self: Any, command: Any, *, lose_response: bool = False) -> Any:
         try:

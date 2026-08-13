@@ -232,9 +232,25 @@ def _submission(location: _Location, command: WriteCommand):
     )
 
 
-def _build_location(tmp_path: Path, records: tuple[str, ...]) -> _Location:
-    tmp_path.mkdir(parents=True)
-    base, args, first_feedback, first_obligation = system_fixture._seed(tmp_path)
+def _build_location(
+    tmp_path: Path,
+    records: tuple[str, ...],
+    *,
+    candidate_seed_snapshot=None,
+    system_seed=None,
+    system_seed_snapshot=None,
+) -> _Location:
+    tmp_path.mkdir(mode=0o700, parents=True)
+    if system_seed is not None:
+        base, args, first_feedback, first_obligation = system_seed
+    elif system_seed_snapshot is None:
+        base, args, first_feedback, first_obligation = system_fixture._seed(
+            tmp_path, candidate_seed_snapshot=candidate_seed_snapshot
+        )
+    else:
+        base, args, first_feedback, first_obligation = system_seed_snapshot.clone(
+            tmp_path
+        )
     candidate = candidate_fixture._Handle(base)
     version = candidate._opened().load_version(str(candidate._row("record-1")[1]))
     actor = first_feedback.actor_identity_digest

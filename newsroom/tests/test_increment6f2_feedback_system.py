@@ -30,8 +30,13 @@ from newsroom.increment6.handoffs import (
 from newsroom.tests import test_increment6e2_candidate_store as candidate_fixture
 
 
-def _seed(tmp_path: Path):
-    adapter = candidate_fixture._Adapter(tmp_path)
+def _seed(tmp_path: Path, *, candidate_seed_snapshot=None):
+    if candidate_seed_snapshot is None:
+        adapter = candidate_fixture._Adapter(tmp_path)
+    else:
+        adapter = candidate_fixture._Adapter.__new__(candidate_fixture._Adapter)
+        adapter.root = tmp_path
+        adapter.snapshot = candidate_seed_snapshot
     location = adapter.create_location()
     handle = adapter.open_handle(location)
     handle.submit(candidate_fixture._generic("record-1"))

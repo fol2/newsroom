@@ -9,6 +9,7 @@ import re
 import sqlite3
 import stat
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ import pytest
 _FORMAT = "newsroom.feedback-conformance-cache.v1"
 _STORE = "test_increment6f2_feedback_store.py"
 _CACHE_TEST = "test_increment6f2_feedback_cache.py"
+_SYSTEM = "test_increment6f2_feedback_system.py"
 _PROBE = "test_real_feedback_store_passes_required_conformance_probe"
 _KEYS = (
     ("record-1",),
@@ -60,6 +62,19 @@ def _safe_file(path: Path) -> os.stat_result:
     return metadata
 
 
+def _safe_source_file(path: Path) -> os.stat_result:
+    metadata = path.lstat()
+    mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or mode & 0o022
+    ):
+        raise ValueError(f"unsafe feedback template source: {path.name}")
+    return metadata
+
+
 def _atomic_write(path: Path, payload: bytes) -> None:
     stage = path.with_name(f"{path.name}.{uuid.uuid4().hex}.stage")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
@@ -85,7 +100,9 @@ def _deepcopy(value: object) -> object:
 
 def _selected(config: pytest.Config) -> bool:
     return any(
-        _STORE in os.fspath(argument) or _CACHE_TEST in os.fspath(argument)
+        _STORE in os.fspath(argument)
+        or _CACHE_TEST in os.fspath(argument)
+        or _SYSTEM in os.fspath(argument)
         for argument in config.invocation_params.args
     )
 
@@ -96,6 +113,8 @@ def _selected_keys(arguments: tuple[str, ...], feedback: Any):
     conservative = False
     found = False
     for argument in arguments:
+        if _SYSTEM in argument:
+            found = True
         if _CACHE_TEST in argument:
             found = True
             selected.add(("record-1",))
@@ -124,6 +143,8 @@ def _selected_keys(arguments: tuple[str, ...], feedback: Any):
         raise ValueError("feedback conformance selection missing")
     if conservative:
         return _KEYS
+    if not selected:
+        return ()
     ordered = tuple(key for key in _KEYS if key in selected)
     return ordered or (("record-1",),)
 
@@ -139,7 +160,7 @@ def _snapshot(location: Any) -> dict[str, object]:
     retrieval = seed_tail[0][1]
     source = retrieval._path
     if not isinstance(source, Path):
-        raise ValueError("feedback retrieval source path")
+        raise TypeError("feedback retrieval source path")
     retrieval_bytes = source.read_bytes()
     retrieval._path = _SENTINEL
     return {
@@ -153,14 +174,93 @@ def _snapshot(location: Any) -> dict[str, object]:
     }
 
 
+@dataclass(frozen=True)
+class _SystemSeedSnapshot:
+    database_bytes: bytes
+    retrieval_bytes: bytes
+    seed_tail: tuple
+    feedback: object
+    obligation: object
+
+    def clone(self, root: Path):
+        from newsroom.tests import (
+            test_increment6e2_candidate_store as candidate_fixture,
+        )
+
+        seed_tail, feedback, obligation = _deepcopy(
+            (self.seed_tail, self.feedback, self.obligation)
+        )
+        collaborators = seed_tail[0]
+        retrieval = collaborators[1]
+        if retrieval._path != _SENTINEL:
+            raise ValueError("feedback system seed retrieval sentinel differs")
+        database = root / "feedback-system-seed.sqlite3"
+        retrieval_path = root / "retrieval-context.sqlite3"
+        _write_private(database, self.database_bytes)
+        _write_private(retrieval_path, self.retrieval_bytes)
+        retrieval._path = retrieval_path
+        seed = (collaborators, database, *seed_tail[1:])
+        location = candidate_fixture._Location(seed, root / "candidate-collisions")
+        args = candidate_fixture._collaborators(seed)
+        args["authorizer"] = _authorizer(args)
+        return location, args, feedback, obligation
+
+
+def _system_seed_snapshot(value: tuple[object, ...]) -> _SystemSeedSnapshot:
+    if len(value) != 4:
+        raise ValueError("feedback system seed shape differs")
+    location, _, feedback, obligation = value
+    seed = location.seed
+    connection = sqlite3.connect(seed[1], isolation_level=None)
+    try:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+    seed_tail = _deepcopy((seed[0], *seed[2:]))
+    retrieval = seed_tail[0][1]
+    source = retrieval._path
+    if not isinstance(source, Path):
+        raise TypeError("feedback system seed retrieval path")
+    _safe_source_file(source)
+    retrieval_bytes = source.read_bytes()
+    retrieval._path = _SENTINEL
+    return _SystemSeedSnapshot(
+        Path(seed[1]).read_bytes(),
+        retrieval_bytes,
+        seed_tail,
+        feedback,
+        obligation,
+    )
+
+
 def _build(selected: tuple[tuple[str, ...], ...], feedback: Any, root: Path):
+    from newsroom.tests import test_increment6e2_candidate_store as candidate_fixture
+    from newsroom.tests import test_increment6f2_feedback_system as system_fixture
+
     feedback._LOCATION_SNAPSHOTS.clear()
+    _safe_directory(root, create=True)
+    candidate_seed_snapshot = candidate_fixture._seed_snapshot(root / "candidate-seed")
+    system_root = root / "system-seed"
+    system_root.mkdir(mode=0o700)
+    system_seed = system_fixture._seed(
+        system_root, candidate_seed_snapshot=candidate_seed_snapshot
+    )
+    system_seed_snapshot = _system_seed_snapshot(system_seed)
     templates = {}
     for index, records in enumerate(selected):
-        location = feedback._build_location(root / f"template-{index}", records)
+        location_args = (
+            {"system_seed": system_seed}
+            if len(selected) == 1
+            else {"system_seed_snapshot": system_seed_snapshot}
+        )
+        location = feedback._build_location(
+            root / f"template-{index}", records, **location_args
+        )
         templates[records] = _snapshot(location)
     return {
+        "candidate_seed": candidate_seed_snapshot,
         "format": _FORMAT,
+        "system_seed": system_seed_snapshot,
         "template_keys": selected,
         "templates": templates,
     }
@@ -177,9 +277,9 @@ def _publish(root: Path, selected, feedback: Any, build_root: Path) -> None:
         "format": _FORMAT,
         "template_keys": [list(key) for key in selected],
     }
-    rendered = json.dumps(
-        manifest, sort_keys=True, separators=(",", ":")
-    ).encode() + b"\n"
+    rendered = (
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
     _atomic_write(root / "manifest.json", rendered)
 
 
@@ -190,9 +290,9 @@ def _load(root: Path, selected):
     _safe_file(bundle_path)
     raw = manifest_path.read_bytes()
     manifest = json.loads(raw)
-    canonical = json.dumps(
-        manifest, sort_keys=True, separators=(",", ":")
-    ).encode() + b"\n"
+    canonical = (
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
     if raw != canonical or set(manifest) != {
         "bundle_digest",
         "bundle_size",
@@ -210,7 +310,7 @@ def _load(root: Path, selected):
         raise ValueError("feedback cache bundle identity differs")
     value = pickle.loads(bundle)
     if not isinstance(value, dict):
-        raise ValueError("feedback cache bundle malformed")
+        raise TypeError("feedback cache bundle malformed")
     return value
 
 
@@ -252,9 +352,9 @@ def _install_clone(feedback: Any) -> None:
         retrieval = collaborators[1]
         source = retrieval._path
         if not isinstance(source, Path):
-            raise ValueError("feedback retrieval template path")
+            raise TypeError("feedback retrieval template path")
         retrieval_path = root / "retrieval-context.sqlite3"
-        _safe_file(source)
+        _safe_source_file(source)
         _write_private(retrieval_path, source.read_bytes())
         retrieval._path = retrieval_path
         seed = (collaborators, database, *seed_tail[1:])
@@ -267,7 +367,13 @@ def _install_clone(feedback: Any) -> None:
 
 
 def _install(value, selected, feedback: Any, hydrate_root: Path) -> None:
-    if set(value) != {"format", "template_keys", "templates"}:
+    if set(value) != {
+        "candidate_seed",
+        "format",
+        "system_seed",
+        "template_keys",
+        "templates",
+    }:
         raise ValueError("feedback cache fields differ")
     if value["format"] != _FORMAT or value["template_keys"] != selected:
         raise ValueError("feedback cache contract differs")
@@ -276,7 +382,22 @@ def _install(value, selected, feedback: Any, hydrate_root: Path) -> None:
         raise ValueError("feedback cache templates differ")
     hydrate_root.mkdir(mode=0o700)
     feedback._LOCATION_SNAPSHOTS.clear()
+    system_seed = value["system_seed"]
+    if not isinstance(system_seed, _SystemSeedSnapshot):
+        raise TypeError("feedback system seed differs")
+    from newsroom.tests import test_increment6f2_feedback_system as system_fixture
+
+    def clone_system_seed(root: Path, *, candidate_seed_snapshot=None):
+        del candidate_seed_snapshot
+        return system_seed.clone(root)
+
+    system_fixture._seed = clone_system_seed
     from newsroom.tests import test_increment6e2_candidate_store as candidate_fixture
+
+    candidate_seed = value["candidate_seed"]
+    if not isinstance(candidate_seed, candidate_fixture._SeedSnapshot):
+        raise TypeError("feedback candidate seed differs")
+    candidate_fixture._SHARED_SEED_SNAPSHOT = candidate_seed
 
     for index, records in enumerate(selected):
         template = templates[records]
@@ -294,7 +415,7 @@ def _install(value, selected, feedback: Any, hydrate_root: Path) -> None:
         if not isinstance(template["database_bytes"], bytes) or not isinstance(
             template["retrieval_bytes"], bytes
         ):
-            raise ValueError("feedback cache template bytes differ")
+            raise TypeError("feedback cache template bytes differ")
         seed_tail = template["seed_tail"]
         if not isinstance(seed_tail, tuple) or not seed_tail:
             raise ValueError("feedback cache seed tail differs")
@@ -356,9 +477,9 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
     _install_clone(feedback)
     worker = getattr(config, "workerinput", None)
-    if not isinstance(worker, dict) or not str(
-        worker.get("workerid", "")
-    ).startswith("gw"):
+    if not isinstance(worker, dict) or not str(worker.get("workerid", "")).startswith(
+        "gw"
+    ):
         return
     run_uid = worker.get("testrunuid")
     if not isinstance(run_uid, str) or _RUN_UID.fullmatch(run_uid) is None:
