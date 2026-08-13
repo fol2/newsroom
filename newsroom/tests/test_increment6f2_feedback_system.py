@@ -397,3 +397,70 @@ def test_generic_envelope_tamper_fails_with_restored_trigger(
     with pytest.raises(FeedbackContractError):
         authority.load(feedback.feedback_id)
     authority.close()
+
+
+@pytest.mark.parametrize("tamper", ("namespace", "result", "causation"))
+def test_retained_namespace_result_and_causation_tamper_fail_closed(
+    tmp_path: Path, tamper: str
+) -> None:
+    location, args, feedback, obligation = _seed(tmp_path)
+    authority = open_evaluation_feedback_authority_system(
+        location.seed[1],
+        retrieval_authority=args["retrieval_authority"],
+        authenticator=args["authenticator"],
+        authorizer=args["authorizer"],
+        command_registry=args["command_registry"],
+        payload_schemas=args["payload_schemas"],
+        clock=args["clock"],
+    )
+    authority.accept(
+        feedback.canonical_bytes,
+        obligation.canonical_bytes,
+        candidate_proof=location.seed[0][3],
+    )
+    connection = authority._EvaluationFeedbackAuthority__authority._connection
+    event_id, command_id = connection.execute(
+        "SELECT e.event_id,e.command_id FROM ledger_events e "
+        "JOIN evaluation_feedback f ON f.authority_event_id=e.event_id "
+        "WHERE f.feedback_id=?",
+        (feedback.feedback_id,),
+    ).fetchone()
+    if tamper in {"namespace", "result"}:
+        trigger_name = "immutable_authority_commands_update"
+        trigger_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name=?", (trigger_name,)
+        ).fetchone()[0]
+        connection.execute(f"DROP TRIGGER {trigger_name}")
+        if tamper == "namespace":
+            connection.execute(
+                "UPDATE authority_commands SET idempotency_namespace=? WHERE command_id=?",
+                ("sha256:" + "f" * 64, command_id),
+            )
+        else:
+            donor = connection.execute(
+                "SELECT result_bytes,result_digest FROM authority_commands "
+                "WHERE command_id!=? AND result_bytes IS NOT NULL LIMIT 1",
+                (command_id,),
+            ).fetchone()
+            assert donor is not None
+            connection.execute(
+                "UPDATE authority_commands SET result_bytes=?,result_digest=? WHERE command_id=?",
+                (*donor, command_id),
+            )
+        connection.execute(trigger_sql)
+    else:
+        trigger_name = "immutable_ledger_events_update"
+        trigger_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name=?", (trigger_name,)
+        ).fetchone()[0]
+        connection.execute(f"DROP TRIGGER {trigger_name}")
+        connection.execute(
+            "UPDATE ledger_events SET causation_kind='EXTERNAL',"
+            "causation_identifier='forged-causation',"
+            "causation_external_system='forged-system' WHERE event_id=?",
+            (event_id,),
+        )
+        connection.execute(trigger_sql)
+    with pytest.raises(FeedbackContractError):
+        authority.load(feedback.feedback_id)
+    authority.close()

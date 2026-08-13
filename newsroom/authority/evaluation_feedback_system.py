@@ -285,7 +285,9 @@ class _EvaluationFeedbackAuthorityRoot:
             "c.authentication_context_id,c.authorization_request_digest,c.authorization_decision_id,"
             "e.authentication_context_id,e.authorization_request_digest,e.authorization_decision_id,"
             "au.authentication_context_id,au.authorization_request_digest,au.authorization_decision_id,"
-            "au.event_type,au.detail_digest,r.operation_type,r.required_scope,d.allowed,d.effective_scopes "
+            "au.event_type,au.detail_digest,r.operation_type,r.required_scope,d.allowed,d.effective_scopes,"
+            "a.authority_domain,c.command_id,c.result_bytes,c.result_digest,e.ledger_seq,"
+            "e.correlation_id,e.causation_kind,e.causation_identifier,e.causation_external_system "
             "FROM ledger_events e JOIN authority_commands c ON c.command_id=e.command_id "
             "JOIN authority_payloads p ON p.payload_id=e.payload_id "
             "JOIN authority_aggregate_versions v ON v.command_id=c.command_id "
@@ -358,6 +360,38 @@ class _EvaluationFeedbackAuthorityRoot:
             or definition.required_scope not in json.loads(bytes(row[46]))
         ):
             raise FeedbackContractError("Feedback authorization envelope differs")
+        if type(row[47]) is not str:
+            raise FeedbackContractError("Feedback authentication authority differs")
+        expected_namespace = digest_canonical({
+            "authority_domain": row[47],
+            "principal_id": str(row[30]),
+            "command_type": definition.command_type,
+        })
+        try:
+            result = self._event_store._decode_result(
+                bytes(row[49]), str(row[50]), replayed=False
+            )
+        except Exception as exc:
+            raise FeedbackContractError("Feedback command result differs") from exc
+        actual_result = (
+            str(result.command_id),
+            result.aggregate_type,
+            str(result.aggregate_id),
+            result.aggregate_version,
+            result.ledger_seq,
+            str(result.event_id),
+        )
+        expected_result = (
+            str(row[48]),
+            definition.aggregate_type,
+            aggregate_id,
+            aggregate_version,
+            int(row[51]),
+            event_id,
+        )
+        causation = tuple(row[53:56])
+        if actual_result != expected_result or causation != (None, None, None):
+            raise FeedbackContractError("Feedback command result or causation differs")
         try:
             value = json.loads(bytes(row[0]))
         except Exception as exc:
@@ -393,11 +427,13 @@ class _EvaluationFeedbackAuthorityRoot:
             "definition_digest": definition.digest, "definition_version": definition.definition_version,
             "payload": payload_identity, "authentication_context_digest": envelope[2],
             "authorization_request_record_digest": envelope[3], "authorization_request_digest": command_triple[1],
-            "authorization_decision_digest": envelope[4], "idempotency_namespace": envelope[0],
+            "authorization_decision_digest": envelope[4], "idempotency_namespace": expected_namespace,
             "idempotency_key": idempotency_key, "stable_semantic_request_digest": stable,
-            "correlation_id": envelope[5], "causation_kind": None, "causation_identifier": None,
-            "causation_external_system": None, "replay_of_command_id": None}
-        if (envelope[1] != stable or envelope[6] != digest_canonical(unsigned)
+            "correlation_id": row[52], "causation_kind": causation[0],
+            "causation_identifier": causation[1], "causation_external_system": causation[2],
+            "replay_of_command_id": None}
+        if (envelope[0] != expected_namespace or envelope[1] != stable
+            or envelope[5] != row[52] or envelope[6] != digest_canonical(unsigned)
             or envelope[7] != definition.trust_scope.value):
             raise FeedbackContractError("Feedback audit envelope differs")
         return value
