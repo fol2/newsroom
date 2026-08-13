@@ -12,14 +12,15 @@ import pytest
 from newsroom.authority.canonical import canonical_json_bytes
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
-    EXPECTED_SCHEMA_FINGERPRINT,
-    SCHEMA_VERSION,
 )
 from newsroom.increment6.closeout import (
     INCREMENT6G_FINAL_CLOSEOUT_CASES,
     INCREMENT6G_FINAL_CLOSEOUT_INVENTORY_DIGEST,
     INCREMENT6G_FINAL_NON_EFFECTS,
+    INCREMENT6G_FINAL_SCHEMA_FINGERPRINT,
+    INCREMENT6G_FINAL_SCHEMA_VERSION,
     Increment6CloseoutLane,
+    increment6g_final_migration_history,
 )
 from newsroom.projection.neo4j import (
     NEO4J_B2_DRIVER_VERSION,
@@ -61,7 +62,12 @@ def _target_properties(head: str, tree: str) -> dict[str, str]:
             INCREMENT6G_FINAL_CLOSEOUT_INVENTORY_DIGEST
         ),
         "increment6g_migration_history_json": canonical_json_bytes(
-            [list(item) for item in EXPECTED_MIGRATION_HISTORY]
+            [
+                list(item)
+                for item in increment6g_final_migration_history(
+                    EXPECTED_MIGRATION_HISTORY
+                )
+            ]
         ).decode("utf-8"),
         "increment6g_neo4j_database": "neo4j",
         "increment6g_neo4j_driver_version": NEO4J_B2_DRIVER_VERSION,
@@ -70,8 +76,8 @@ def _target_properties(head: str, tree: str) -> dict[str, str]:
         "increment6g_neo4j_projector_username": "newsroom_projector",
         "increment6g_neo4j_server_version": NEO4J_B2_SERVER_VERSION,
         "increment6g_non_effects": ",".join(INCREMENT6G_FINAL_NON_EFFECTS),
-        "increment6g_schema_fingerprint": EXPECTED_SCHEMA_FINGERPRINT,
-        "increment6g_schema_version": str(SCHEMA_VERSION),
+        "increment6g_schema_fingerprint": INCREMENT6G_FINAL_SCHEMA_FINGERPRINT,
+        "increment6g_schema_version": str(INCREMENT6G_FINAL_SCHEMA_VERSION),
         "increment6g_service_compatibility_digest": service_compatibility_digest(),
         "increment6g_source_head_sha": head,
         "increment6g_source_tree_sha": tree,
@@ -225,6 +231,24 @@ def test_service_identity_rejects_changed_history_service_and_inventory() -> Non
         tampered[field] = changed
         with pytest.raises(Increment6GCloseoutReceiptError):
             _service_identities(tampered, "a" * 40, "b" * 40)
+
+
+def test_receipt_preserves_v25_prefix_after_an_authorised_future_migration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.sdlc.increment6g_closeout_receipt as receipt_module
+
+    appended = (
+        *EXPECTED_MIGRATION_HISTORY,
+        (26, "future_authorised", "sha256:x"),
+    )
+    monkeypatch.setattr(receipt_module, "SCHEMA_VERSION", 26)
+    monkeypatch.setattr(receipt_module, "EXPECTED_MIGRATION_HISTORY", appended)
+
+    properties = _target_properties("a" * 40, "b" * 40)
+    identity = receipt_module._service_identities(properties, "a" * 40, "b" * 40)
+    assert identity["migration"]["schema_version"] == 25
+    assert len(identity["migration"]["history"]) == 25
 
 
 def test_selected_case_must_be_present_and_pass_without_skip(tmp_path: Path) -> None:

@@ -6,18 +6,21 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import canonical_json_bytes
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
-    EXPECTED_SCHEMA_FINGERPRINT,
     SCHEMA_VERSION,
 )
 from newsroom.increment6.closeout import (
     INCREMENT6_FINAL_REQUIREMENTS,
     INCREMENT6G_FINAL_CLOSEOUT_CASES,
     INCREMENT6G_FINAL_CLOSEOUT_INVENTORY_DIGEST,
+    INCREMENT6G_FINAL_MIGRATION_HISTORY_DIGEST,
     INCREMENT6G_FINAL_NON_EFFECTS,
+    INCREMENT6G_FINAL_SCHEMA_FINGERPRINT,
+    INCREMENT6G_FINAL_SCHEMA_VERSION,
     Increment6CloseoutLane,
+    increment6g_final_migration_history,
 )
 from newsroom.projection.neo4j import (
     NEO4J_B2_DRIVER_VERSION,
@@ -72,18 +75,25 @@ class Increment6GCloseoutReceiptError(ValueError):
     """Raised when the Increment 6 closed-world evidence is not exact."""
 
 
+def _migration_history_prefix() -> tuple[tuple[int, str, str], ...]:
+    if SCHEMA_VERSION < INCREMENT6G_FINAL_SCHEMA_VERSION:
+        raise Increment6GCloseoutReceiptError("migration_history_prefix")
+    try:
+        return increment6g_final_migration_history(EXPECTED_MIGRATION_HISTORY)
+    except RuntimeError as exc:
+        raise Increment6GCloseoutReceiptError("migration_history_prefix") from exc
+
+
 def _inventory() -> dict[str, object]:
-    migration_history_digest = digest_bytes(
-        canonical_json_bytes([list(item) for item in EXPECTED_MIGRATION_HISTORY])
-    )
+    _migration_history_prefix()
     return {
         "case_count": len(INCREMENT6G_FINAL_CLOSEOUT_CASES),
         "digest": INCREMENT6G_FINAL_CLOSEOUT_INVENTORY_DIGEST,
         "non_effects": list(INCREMENT6G_FINAL_NON_EFFECTS),
         "requirements": sorted(INCREMENT6_FINAL_REQUIREMENTS),
-        "migration_history_digest": migration_history_digest,
-        "schema_version": SCHEMA_VERSION,
-        "schema_fingerprint": EXPECTED_SCHEMA_FINGERPRINT,
+        "migration_history_digest": INCREMENT6G_FINAL_MIGRATION_HISTORY_DIGEST,
+        "schema_version": INCREMENT6G_FINAL_SCHEMA_VERSION,
+        "schema_fingerprint": INCREMENT6G_FINAL_SCHEMA_FINGERPRINT,
     }
 
 
@@ -134,14 +144,15 @@ def _service_identities(
         history = json.loads(properties["increment6g_migration_history_json"])
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise Increment6GCloseoutReceiptError("migration_history_json") from exc
-    expected_history = [list(item) for item in EXPECTED_MIGRATION_HISTORY]
+    expected_history = [list(item) for item in _migration_history_prefix()]
     if (
         history != expected_history
         or properties["increment6g_migration_history_json"]
         != canonical_json_bytes(expected_history).decode("utf-8")
-        or SCHEMA_VERSION != 25
-        or properties["increment6g_schema_version"] != "25"
-        or properties["increment6g_schema_fingerprint"] != EXPECTED_SCHEMA_FINGERPRINT
+        or properties["increment6g_schema_version"]
+        != str(INCREMENT6G_FINAL_SCHEMA_VERSION)
+        or properties["increment6g_schema_fingerprint"]
+        != INCREMENT6G_FINAL_SCHEMA_FINGERPRINT
     ):
         raise Increment6GCloseoutReceiptError("migration_identity")
     if (
@@ -169,9 +180,9 @@ def _service_identities(
     return {
         "migration": {
             "history": expected_history,
-            "history_digest": digest_bytes(canonical_json_bytes(expected_history)),
-            "schema_fingerprint": EXPECTED_SCHEMA_FINGERPRINT,
-            "schema_version": SCHEMA_VERSION,
+            "history_digest": INCREMENT6G_FINAL_MIGRATION_HISTORY_DIGEST,
+            "schema_fingerprint": INCREMENT6G_FINAL_SCHEMA_FINGERPRINT,
+            "schema_version": INCREMENT6G_FINAL_SCHEMA_VERSION,
         },
         "service": {
             "compatibility_digest": service_compatibility_digest(),
