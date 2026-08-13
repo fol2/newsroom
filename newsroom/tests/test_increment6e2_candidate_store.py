@@ -422,14 +422,15 @@ def _actor_digest(seed: tuple, actor: str) -> str:
     )
 
 
-def _manifest(location: _Location, version, collision):
+def _manifest(location: _Location, version, collision, registry_extender=None):
     connection = sqlite3.connect(location.seed[1], isolation_level=None)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA journal_mode=WAL")
-    commands, schemas = merge_relationship_authority_registries(
-        location.seed[4], location.seed[5]
-    )
+    commands, schemas = location.seed[4], location.seed[5]
+    if registry_extender is not None:
+        commands, schemas = registry_extender(commands, schemas)
+    commands, schemas = merge_relationship_authority_registries(commands, schemas)
     commands, schemas = merge_lineage_authority_registries(commands, schemas)
     commands, schemas = merge_candidate_authority_registries(commands, schemas)
     lineage = _create_event_hypothesis_lineage_read_port(
@@ -553,7 +554,7 @@ def _admission(location: _Location, command: WriteCommand):
     return admission, collision_request_value
 
 
-def _advance_record_one(location: _Location):
+def _advance_record_one(location: _Location, registry_extender=None):
     previous = location.subjects["record-1"]
     connection = sqlite3.connect(location.seed[1], isolation_level=None)
     try:
@@ -579,6 +580,10 @@ def _advance_record_one(location: _Location):
     )
     assert assessment.decision is CanonicalOutcome.REL_DEVELOPMENT_OF
     args = _collaborators(location.seed)
+    if registry_extender is not None:
+        args["command_registry"], args["payload_schemas"] = registry_extender(
+            args["command_registry"], args["payload_schemas"]
+        )
     commands, schemas = merge_relationship_authority_registries(
         args["command_registry"], args["payload_schemas"]
     )
@@ -601,13 +606,18 @@ def _advance_record_one(location: _Location):
 
 
 class _Handle:
-    def __init__(self, location: _Location) -> None:
+    def __init__(self, location: _Location, registry_extender=None) -> None:
         self.location = location
         self.authority = None
         self.open_error: Exception | None = None
         try:
+            args = _collaborators(location.seed)
+            if registry_extender is not None:
+                args["command_registry"], args["payload_schemas"] = registry_extender(
+                    args["command_registry"], args["payload_schemas"]
+                )
             self.authority = _open_unlocked_story_candidate_authority_for_test(
-                **_collaborators(location.seed), collision_enforcer=_enforcer(location)
+                **args, collision_enforcer=_enforcer(location)
             )
         except Exception as exc:
             if not isinstance(exc, (AuthoritySchemaError, CandidateContractError)):

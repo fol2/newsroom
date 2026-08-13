@@ -556,14 +556,19 @@ class _EvaluationFeedbackAuthorityRoot:
     def _current_correlation(
         self, feedback: EvaluationFeedback, *, candidate_proof: object
     ) -> tuple[object, object, FeedbackCorrelationOutcome]:
-        version = self._candidate.require_retained_version_in_transaction(
-            feedback.candidate_version_id
-        )
+        version, handoff, outcome = self._retained_correlation(feedback)
         current = self._candidate.require_current_head_in_transaction(
             feedback.candidate_id, proof=candidate_proof
         )
         if current.version_id != version.version_id:
             raise FeedbackContractError("fresh feedback requires current Candidate head")
+        return version, handoff, outcome
+    def _retained_correlation(
+        self, feedback: EvaluationFeedback
+    ) -> tuple[object, object, FeedbackCorrelationOutcome]:
+        version = self._candidate.require_retained_version_in_transaction(
+            feedback.candidate_version_id
+        )
         handoff = self._handoff.require_retained_handoff_in_transaction(feedback.handoff_id)
         outcome = correlate_evaluation_feedback(handoff, version, feedback, ())
         return version, handoff, outcome
@@ -695,8 +700,9 @@ class _EvaluationFeedbackAuthorityRoot:
         )
         if rebuilt.canonical_bytes != proposed.canonical_bytes:
             raise FeedbackContractError("disposition derivation differs")
-        _, _, outcome = self._current_correlation(
-            parent.feedback, candidate_proof=candidate_proof
+        _, _, outcome = self._retained_correlation(parent.feedback)
+        self._candidate.require_current_head_in_transaction(
+            parent.feedback.candidate_id, proof=candidate_proof
         )
         if outcome not in {
             FeedbackCorrelationOutcome.READY,

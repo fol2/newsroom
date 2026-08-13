@@ -43,6 +43,29 @@ def _seed(tmp_path: Path, *, candidate_seed_snapshot=None):
     row = handle._row("record-1")
     version = handle._opened().load_version(str(row[1]))
     handle.close()
+    args = candidate_fixture._collaborators(location.seed)
+    feedback, obligation = _feedback_for_version(
+        location,
+        args,
+        version,
+        suffix="v25-test",
+        response_character="4",
+        feedback_request_id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        obligation_request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
+    return location, args, feedback, obligation
+
+
+def _feedback_for_version(
+    location,
+    args,
+    version,
+    *,
+    suffix: str,
+    response_character: str,
+    feedback_request_id: str,
+    obligation_request_id: str,
+):
     store = EvaluationHandoffStore(
         sqlite3.connect(location.seed[1], isolation_level=None)
     )
@@ -50,7 +73,7 @@ def _seed(tmp_path: Path, *, candidate_seed_snapshot=None):
         create_handoff(
             version.version_id,
             version.governing_manifest.canonical_digest,
-            "evaluation-sink:v25-test",
+            f"evaluation-sink:{suffix}",
             max_attempts=3,
         )
     )
@@ -65,11 +88,10 @@ def _seed(tmp_path: Path, *, candidate_seed_snapshot=None):
         governing_manifest_digest=version.governing_manifest.canonical_digest,
         sink_id=handoff.sink_id,
         outcome=AcknowledgementOutcome.ACKNOWLEDGED,
-        response_digest="sha256:" + "4" * 64,
+        response_digest="sha256:" + response_character * 64,
     )
     handoff = store.correlate_acknowledgement(handoff.handoff_id, acknowledgement)
     store._connection.close()
-    args = candidate_fixture._collaborators(location.seed)
     authentication = args["authenticator"].authenticate(
         location.seed[0][3], now=args["clock"]()
     )
@@ -93,21 +115,91 @@ def _seed(tmp_path: Path, *, candidate_seed_snapshot=None):
         attempt=handoff.attempts[0],
         acknowledgement=acknowledgement,
         candidate_version=version,
-        source_feedback_id="evaluation-feedback:v25-test",
+        source_feedback_id=f"evaluation-feedback:{suffix}",
         outcome=EvaluationFeedbackOutcome.ACCEPTED,
         reason=EvaluationFeedbackReason.INTAKE_ACCEPTED,
         detail_digest="sha256:" + "2" * 64,
-        request_id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        request_id=feedback_request_id,
         actor_identity_digest=actor,
-        idempotency_key="feedback:v25-test",
+        idempotency_key=f"feedback:{suffix}",
     )
     obligation = create_reconciliation_obligation(
         feedback,
-        request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        request_id=obligation_request_id,
         actor_identity_digest=actor,
-        idempotency_key="obligation:v25-test",
+        idempotency_key=f"obligation:{suffix}",
     )
-    return location, args, feedback, obligation
+    return feedback, obligation
+
+
+def _advance_candidate_head(location, version):
+    from newsroom.increment6.feedback import (
+        merge_evaluation_feedback_authority_registries,
+    )
+
+    previous, advanced_hypothesis = candidate_fixture._advance_record_one(
+        location, merge_evaluation_feedback_authority_registries
+    )
+    assert advanced_hypothesis.previous_version_id == previous.version_id
+    binding = candidate_fixture.CandidateUseCollisionBinding(
+        advanced_hypothesis.hypothesis_id,
+        advanced_hypothesis.version_id,
+        advanced_hypothesis.canonical_digest,
+        candidate_fixture.CandidateUseOperation.USE_CURRENT_CANDIDATE,
+        version.candidate_id,
+        version.governing_manifest.collision_namespace,
+        version.governing_manifest.collision_key_digest,
+        "retrieval-generation-v2",
+        candidate_fixture.QUERY_VALID,
+        candidate_fixture.SERVING,
+        42,
+    )
+    collision_request, collision = candidate_fixture._named_snapshot(
+        location, binding, occupied_candidate_id=version.candidate_id
+    )
+    manifest = candidate_fixture._manifest(
+        location,
+        advanced_hypothesis,
+        collision,
+        merge_evaluation_feedback_authority_registries,
+    )
+    request = candidate_fixture.CandidateAdmissionRequest(
+        "44444444-4444-4444-8444-444444444444",
+        candidate_fixture._actor_digest(location.seed, "actor-1"),
+        "candidate:feedback-head-advance",
+        version.version_id,
+        version.canonical_digest,
+        version.ordinal,
+        manifest.semantic_scope_digest,
+        collision_request.request_digest,
+        manifest.governing_state_binding.canonical_digest,
+        None,
+    )
+    admission = candidate_fixture.evaluate_candidate_admission(
+        request=request,
+        manifest=manifest,
+        collision=collision,
+        current_version=version,
+        governing_state=candidate_fixture.CandidateGoverningState(
+            candidate_fixture.CandidateGoverningStateStatus.COMPLETE,
+            manifest.governing_state_binding,
+        ),
+    )
+    successor = candidate_fixture._Handle(
+        location, merge_evaluation_feedback_authority_registries
+    )
+    try:
+        advanced = successor._opened().admit(
+            admission.canonical_bytes,
+            collision_request=collision_request,
+            proof=location.seed[0][3],
+        )
+    finally:
+        successor.close()
+    assert advanced.candidate_id == version.candidate_id
+    assert advanced.previous_version_id == version.version_id
+    assert advanced.ordinal == version.ordinal + 1
+    return advanced
 
 
 def test_accept_replay_snapshot_and_direct_tamper_fail_closed(tmp_path: Path) -> None:
@@ -218,6 +310,44 @@ def test_disposition_is_generic_ledger_anchored_and_replay_precedes_ports(
         obligation.canonical_bytes,
         candidate_proof=location.seed[0][3],
     )
+    authority.close()
+    from newsroom.increment6.feedback import (
+        merge_evaluation_feedback_authority_registries,
+    )
+
+    candidate = candidate_fixture._Handle(
+        location, merge_evaluation_feedback_authority_registries
+    )
+    version = candidate._opened().load_version(feedback.candidate_version_id)
+    candidate.close()
+    advanced = _advance_candidate_head(location, version)
+    assert advanced.version_id != feedback.candidate_version_id
+    stale_feedback, stale_obligation = _feedback_for_version(
+        location,
+        args,
+        version,
+        suffix="stale-candidate-version",
+        response_character="5",
+        feedback_request_id="55555555-5555-4555-8555-555555555555",
+        obligation_request_id="66666666-6666-4666-8666-666666666666",
+    )
+    authority = open_evaluation_feedback_authority_system(
+        location.seed[1],
+        retrieval_authority=args["retrieval_authority"],
+        authenticator=args["authenticator"],
+        authorizer=args["authorizer"],
+        command_registry=args["command_registry"],
+        payload_schemas=args["payload_schemas"],
+        clock=args["clock"],
+    )
+    with pytest.raises(
+        FeedbackContractError, match="fresh feedback requires current Candidate head"
+    ):
+        authority.accept(
+            stale_feedback.canonical_bytes,
+            stale_obligation.canonical_bytes,
+            candidate_proof=location.seed[0][3],
+        )
     disposition = append_reconciliation_disposition(
         accepted.obligation,
         (),
@@ -261,18 +391,41 @@ def test_disposition_is_generic_ledger_anchored_and_replay_precedes_ports(
         clock=args["clock"],
     )
     assert reopened.load(feedback.feedback_id) == accepted
-    fulfilled = append_reconciliation_disposition(
+    blocked = append_reconciliation_disposition(
         obligation,
         (disposition,),
-        outcome=ReconciliationDispositionOutcome.FULFILLED,
-        reason=ReconciliationDispositionReason.FEEDBACK_RECORDED,
+        outcome=ReconciliationDispositionOutcome.BLOCKED,
+        reason=ReconciliationDispositionReason.DEPENDENCY_UNAVAILABLE,
         resolution_digest="sha256:" + "7" * 64,
         request_id="22222222-2222-4222-8222-222222222222",
         actor_identity_digest=feedback.actor_identity_digest,
-        idempotency_key="disposition:v25-fulfilled",
+        idempotency_key="disposition:v25-blocked",
         expected_current_disposition_id=disposition.disposition_id,
         expected_current_disposition_digest=disposition.canonical_digest,
         expected_current_ordinal=1,
+    )
+    assert (
+        reopened.append_disposition(
+            blocked.canonical_bytes, candidate_proof=location.seed[0][3]
+        )
+        == blocked
+    )
+    assert (
+        reopened.append_disposition(blocked.canonical_bytes, candidate_proof=object())
+        == blocked
+    )
+    fulfilled = append_reconciliation_disposition(
+        obligation,
+        (disposition, blocked),
+        outcome=ReconciliationDispositionOutcome.FULFILLED,
+        reason=ReconciliationDispositionReason.FEEDBACK_RECORDED,
+        resolution_digest="sha256:" + "8" * 64,
+        request_id="33333333-3333-4333-8333-333333333333",
+        actor_identity_digest=feedback.actor_identity_digest,
+        idempotency_key="disposition:v25-fulfilled",
+        expected_current_disposition_id=blocked.disposition_id,
+        expected_current_disposition_digest=blocked.canonical_digest,
+        expected_current_ordinal=2,
     )
     assert (
         reopened.append_disposition(
@@ -280,19 +433,23 @@ def test_disposition_is_generic_ledger_anchored_and_replay_precedes_ports(
         )
         == fulfilled
     )
+    assert (
+        reopened.append_disposition(fulfilled.canonical_bytes, candidate_proof=object())
+        == fulfilled
+    )
     with pytest.raises(FeedbackContractError, match="terminal"):
         append_reconciliation_disposition(
             obligation,
-            (disposition, fulfilled),
+            (disposition, blocked, fulfilled),
             outcome=ReconciliationDispositionOutcome.UNRESOLVED,
             reason=ReconciliationDispositionReason.AWAITING_RECONCILIATION,
-            resolution_digest="sha256:" + "8" * 64,
-            request_id="33333333-3333-4333-8333-333333333333",
+            resolution_digest="sha256:" + "9" * 64,
+            request_id="77777777-7777-4777-8777-777777777777",
             actor_identity_digest=feedback.actor_identity_digest,
             idempotency_key="disposition:v25-after-terminal",
             expected_current_disposition_id=fulfilled.disposition_id,
             expected_current_disposition_digest=fulfilled.canonical_digest,
-            expected_current_ordinal=2,
+            expected_current_ordinal=3,
         )
     connection = reopened._EvaluationFeedbackAuthority__authority._connection
     trigger = connection.execute(
