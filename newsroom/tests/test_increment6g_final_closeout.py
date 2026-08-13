@@ -15,6 +15,7 @@ from newsroom.increment6.closeout import (
 )
 from scripts.sdlc.workflow_lane import (
     _OPTIONAL_CORE_TEST_IDS,
+    _core_node_shards,
     _repository_service_tests,
 )
 
@@ -47,6 +48,25 @@ def test_closeout_test_functions_are_permanent_repository_tests() -> None:
         function_name = function_name.split("[", 1)[0]
         module = importlib.import_module(module_name)
         assert callable(getattr(module, function_name))
+
+
+def test_expensive_lineage_cases_concentration_is_bounded() -> None:
+    from newsroom.tests.test_increment6d3_lineage_store import (
+        _EXPECTED_PROBE_IDS,
+        _bound_or_collected_core_inventory,
+    )
+
+    prefix = (
+        "newsroom/tests/test_increment6d3_lineage_store.py::"
+        "test_real_v23_store_passes_required_conformance_probe["
+    )
+    shards = _core_node_shards(_bound_or_collected_core_inventory())
+    counts = tuple(
+        sum(node_id.startswith(prefix) for node_id in shard) for shard in shards
+    )
+
+    assert sum(counts) == len(_EXPECTED_PROBE_IDS)
+    assert max(counts) <= 7
 
 
 def test_actual_service_case_is_in_both_permanent_service_routes() -> None:
