@@ -61,6 +61,7 @@ def test_permanent_neo4j_gate_retains_increment5e2_closed_world_receipt() -> Non
     required = (
         "newsroom/tests/test_projection_b2_*.py",
         "newsroom/tests/test_increment5b4_neo4j_service.py",
+        "newsroom/tests/test_increment6g_neo4j_service.py",
         "scripts.sdlc.increment5e2_closeout_receipt actual-service",
         "--service-junit-report projection-b2-b3-c1-complete-retrieval-neo4j-results.xml",
         "--output increment5e2-actual-service-closeout.json",
