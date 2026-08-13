@@ -873,7 +873,7 @@ jobs:
               or {lane.get('lane_id') for lane in increment6_lanes}
               != {'core', 'service'}
               or type(increment6_count) is not int
-              or increment6_count != 58
+              or increment6_count != 59
               or not isinstance(increment6_cases, list)
               or len(increment6_cases) != increment6_count
               or not all(isinstance(item, dict) for item in increment6_cases)
@@ -883,7 +883,7 @@ jobs:
               or len({item.get('test_id') for item in increment6_cases})
               != increment6_count
               or increment6_inventory.get('digest')
-              != 'sha256:cb051e71025a2387aa6bdc4e4fca0bc76b414aabaeb2d192b2aa1dd48c81e011'
+              != 'sha256:afc556ba5785f84eb691af903f24c81ac43d50bbe6c02a3ad23eb08dca8dff5f'
               or increment6_inventory.get('schema_version') != 25
               or increment6_inventory.get('schema_fingerprint')
               != 'sha256:353900bf5804f0b770489982541f3cff4fd30ea36fc75d19b9c63315d1b6ec06'
@@ -891,6 +891,55 @@ jobs:
               != 'sha256:bea793377d065d3073e6dfa8d40139fedfd377d5e24d9812d12cdb1ad52e9a0f'
           ):
               raise SystemExit('increment6 closeout inventory differs')
+          canonical_increment6_cases = []
+          expected_case_fields = {
+              'case_id',
+              'category',
+              'lane',
+              'outcome',
+              'requirements',
+              'test_id',
+          }
+          for item in increment6_cases:
+              requirements = item.get('requirements')
+              if (
+                  set(item) != expected_case_fields
+                  or not isinstance(item.get('category'), str)
+                  or not item.get('category')
+                  or not isinstance(item.get('lane'), str)
+                  or not item.get('lane')
+                  or not isinstance(requirements, list)
+                  or not requirements
+                  or not all(
+                      isinstance(requirement, str) and requirement
+                      for requirement in requirements
+                  )
+                  or requirements != sorted(set(requirements))
+              ):
+                  raise SystemExit('increment6 selected case differs')
+              canonical_increment6_cases.append(
+                  {
+                      'case_id': item['case_id'],
+                      'category': item['category'],
+                      'lane': item['lane'],
+                      'requirements': requirements,
+                      'test_id': item['test_id'],
+                  }
+              )
+          selected_inventory_digest = (
+              'sha256:'
+              + hashlib.sha256(
+                  json.dumps(
+                      canonical_increment6_cases,
+                      ensure_ascii=False,
+                      allow_nan=False,
+                      sort_keys=True,
+                      separators=(',', ':'),
+                  ).encode('utf-8')
+              ).hexdigest()
+          )
+          if selected_inventory_digest != increment6_inventory.get('digest'):
+              raise SystemExit('increment6 selected inventory digest differs')
           increment6_claimed = increment6.get('receipt_identity')
           increment6_unsigned = dict(increment6)
           increment6_unsigned.pop('receipt_identity', None)

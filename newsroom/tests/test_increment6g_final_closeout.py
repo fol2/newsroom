@@ -30,9 +30,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_final_closeout_inventory_is_content_addressed_and_exact() -> None:
     validate_increment6g_final_closeout_inventory()
-    assert len(INCREMENT6G_FINAL_CLOSEOUT_CASES) == 58
+    assert len(INCREMENT6G_FINAL_CLOSEOUT_CASES) == 59
     assert INCREMENT6G_FINAL_CLOSEOUT_INVENTORY_DIGEST == (
-        "sha256:cb051e71025a2387aa6bdc4e4fca0bc76b414aabaeb2d192b2aa1dd48c81e011"
+        "sha256:afc556ba5785f84eb691af903f24c81ac43d50bbe6c02a3ad23eb08dca8dff5f"
     )
     assert {
         requirement
@@ -54,6 +54,19 @@ def test_final_closeout_inventory_is_content_addressed_and_exact() -> None:
         "newsroom.tests.test_increment6f2_feedback_system::"
         "test_accept_replay_snapshot_and_direct_tamper_fail_closed"
     )
+    retained_after_head_advance = next(
+        case
+        for case in INCREMENT6G_FINAL_CLOSEOUT_CASES
+        if case.case_id == "F04_RETAINED_AFTER_HEAD_ADVANCE"
+    )
+    assert retained_after_head_advance.test_id == (
+        "newsroom.tests.test_increment6f2_feedback_system::"
+        "test_disposition_is_generic_ledger_anchored_and_replay_precedes_ports"
+    )
+    assert set(retained_after_head_advance.requirements) == {
+        "COLLISION_CANDIDATE_EQUIVALENT_DISTINCT_ADMISSION",
+        "FEEDBACK_OBLIGATION_RECONCILIATION_VISIBILITY",
+    }
     assert INCREMENT6G_FINAL_NON_EFFECTS == tuple(sorted(INCREMENT6G_FINAL_NON_EFFECTS))
 
 

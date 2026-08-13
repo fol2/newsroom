@@ -399,6 +399,15 @@ INCREMENT6G_FINAL_CLOSEOUT_CASES = tuple(
                 _FAILURE,
             ),
             _case(
+                "F04_RETAINED_AFTER_HEAD_ADVANCE",
+                _F,
+                _D,
+                "test_increment6f2_feedback_system",
+                "test_disposition_is_generic_ledger_anchored_and_replay_precedes_ports",
+                _FEEDBACK,
+                _CANDIDATE,
+            ),
+            _case(
                 "R01_WATCH_EXPIRY",
                 _R,
                 _D,

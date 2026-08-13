@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from newsroom.authority.canonical import canonical_json_bytes
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
 )
@@ -214,6 +214,41 @@ def test_final_receipt_binds_exact_decision_transports_inventory_and_service(
     )
     unsigned = dict(receipt)
     assert unsigned.pop("receipt_identity") == sha256_identity(unsigned)
+
+
+def test_selected_case_mapping_reconstructs_the_declared_inventory_digest() -> None:
+    selected = [
+        {**case.canonical_value(), "outcome": "passed"}
+        for case in INCREMENT6G_FINAL_CLOSEOUT_CASES
+    ]
+
+    def reconstructed_digest(cases: list[dict[str, object]]) -> str:
+        return digest_bytes(
+            canonical_json_bytes(
+                [
+                    {
+                        "case_id": item["case_id"],
+                        "category": item["category"],
+                        "lane": item["lane"],
+                        "requirements": item["requirements"],
+                        "test_id": item["test_id"],
+                    }
+                    for item in cases
+                ]
+            )
+        )
+
+    assert reconstructed_digest(selected) == INCREMENT6G_FINAL_CLOSEOUT_INVENTORY_DIGEST
+    retained = next(
+        item
+        for item in selected
+        if item["case_id"] == "F04_RETAINED_AFTER_HEAD_ADVANCE"
+    )
+    retained["test_id"] = (
+        "newsroom.tests.test_increment6f2_feedback_system::"
+        "test_accept_replay_snapshot_and_direct_tamper_fail_closed"
+    )
+    assert reconstructed_digest(selected) != INCREMENT6G_FINAL_CLOSEOUT_INVENTORY_DIGEST
 
 
 def test_service_identity_rejects_changed_history_service_and_inventory() -> None:
