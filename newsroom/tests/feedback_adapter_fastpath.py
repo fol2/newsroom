@@ -8,6 +8,7 @@ import pytest
 
 _STORE = "test_increment6f2_feedback_store.py"
 _CACHE_TEST = "test_increment6f2_feedback_cache.py"
+_ROLLBACK_RECORDS = ("record-rollback-normal", "record-rollback-abort")
 
 
 def _selected(config: pytest.Config) -> bool:
@@ -15,6 +16,29 @@ def _selected(config: pytest.Config) -> bool:
         _STORE in os.fspath(argument) or _CACHE_TEST in os.fspath(argument)
         for argument in config.invocation_params.args
     )
+
+
+def _install_cache_selection(cache: Any, feedback: Any) -> None:
+    if getattr(cache, "_rollback_template_selection_v1", False):
+        return
+    original = cache._selected_keys
+
+    def selected_keys(arguments: tuple[str, ...], feedback_module: Any):
+        if not any(_CACHE_TEST in argument for argument in arguments):
+            return original(arguments, feedback_module)
+        without_cache_tests = tuple(
+            argument for argument in arguments if _CACHE_TEST not in argument
+        )
+        selected = (
+            original(without_cache_tests, feedback_module)
+            if any(_STORE in argument for argument in without_cache_tests)
+            else ()
+        )
+        required = {*selected, _ROLLBACK_RECORDS}
+        return tuple(key for key in cache._KEYS if key in required)
+
+    cache._selected_keys = selected_keys
+    cache._rollback_template_selection_v1 = True
 
 
 def _install(feedback: Any) -> None:
@@ -119,6 +143,8 @@ def _install(feedback: Any) -> None:
 def pytest_configure(config: pytest.Config) -> None:
     if not _selected(config):
         return
+    from newsroom.tests import feedback_cache_support
     from newsroom.tests import test_increment6f2_feedback_store as feedback
 
+    _install_cache_selection(feedback_cache_support, feedback)
     _install(feedback)

@@ -7,12 +7,26 @@ from pathlib import Path
 import pytest
 
 from newsroom.tests import feedback_adapter_fastpath
+from newsroom.tests import feedback_cache_support
 from newsroom.tests import test_increment6f2_feedback_store as feedback
 from newsroom.tests.authority_store_conformance import AuthorityValue
 
+_ROLLBACK_RECORDS = ("record-rollback-normal", "record-rollback-abort")
+
 
 def test_feedback_template_clones_are_file_and_object_isolated(tmp_path: Path) -> None:
-    records = ("record-1",)
+    selection = (
+        "newsroom/tests/test_increment6f2_feedback_cache.py::"
+        "test_feedback_template_clones_are_file_and_object_isolated",
+        "newsroom/tests/test_increment6f2_feedback_store.py::"
+        "test_real_feedback_store_passes_required_conformance_probe"
+        "[transaction_rollback-abort]",
+    )
+    assert feedback_cache_support._selected_keys(selection, feedback) == (
+        _ROLLBACK_RECORDS,
+    )
+
+    records = _ROLLBACK_RECORDS
     feedback._location(tmp_path / "warm", records)
     first = feedback._location(tmp_path / "first", records)
     second = feedback._location(tmp_path / "second", records)
@@ -57,8 +71,8 @@ def test_feedback_submit_uses_verified_result_and_reads_still_use_facade(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     feedback_adapter_fastpath._install(feedback)
-    command = feedback.candidate_fixture._generic("record-1")
-    location = feedback._location(tmp_path / "fastpath", ("record-1",))
+    command = feedback.candidate_fixture._generic("record-rollback-normal")
+    location = feedback._location(tmp_path / "fastpath", _ROLLBACK_RECORDS)
     handle = feedback._Handle(location)
     root = handle._opened()
     original_load = root.load
