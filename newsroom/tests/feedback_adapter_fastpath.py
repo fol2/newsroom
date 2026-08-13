@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+from typing import Any
+
+import pytest
+
+_STORE = "test_increment6f2_feedback_store.py"
+_CACHE_TEST = "test_increment6f2_feedback_cache.py"
+_ROLLBACK_RECORDS = ("record-rollback-normal", "record-rollback-abort")
+
+
+def _selected(config: pytest.Config) -> bool:
+    return any(
+        _STORE in os.fspath(argument) or _CACHE_TEST in os.fspath(argument)
+        for argument in config.invocation_params.args
+    )
+
+
+def _install_cache_selection(cache: Any, feedback: Any) -> None:
+    if getattr(cache, "_rollback_template_selection_v1", False):
+        return
+    original = cache._selected_keys
+
+    def selected_keys(arguments: tuple[str, ...], feedback_module: Any):
+        if not any(_CACHE_TEST in argument for argument in arguments):
+            return original(arguments, feedback_module)
+        without_cache_tests = tuple(
+            argument for argument in arguments if _CACHE_TEST not in argument
+        )
+        selected = (
+            original(without_cache_tests, feedback_module)
+            if any(_STORE in argument for argument in without_cache_tests)
+            else ()
+        )
+        required = {*selected, _ROLLBACK_RECORDS}
+        return tuple(key for key in cache._KEYS if key in required)
+
+    cache._selected_keys = selected_keys
+    cache._rollback_template_selection_v1 = True
+
+
+def _install(feedback: Any) -> None:
+    handle = feedback._Handle
+    if getattr(handle, "_verified_result_fastpath_v1", False):
+        return
+
+    def _commands(self: Any, transaction: Any = None) -> tuple[Any, ...]:
+        target = transaction or self._opened()
+        connection = (
+            target._connection if transaction is None else target._root._connection
+        )
+        cache_key = None
+        if transaction is None:
+            cache_key = (
+                int(connection.execute("PRAGMA data_version").fetchone()[0]),
+                connection.total_changes,
+            )
+            cached = getattr(self, "_verified_commands_cache", None)
+            if cached is not None and cached[0] == cache_key:
+                return cached[1]
+        relevant_feedback_ids = {
+            str(fixture[0].feedback_id) for fixture in self.location.fixtures.values()
+        }
+        rows = connection.execute(
+            "SELECT f.feedback_id,o.obligation_id,EXISTS("
+            "SELECT 1 FROM evaluation_reconciliation_dispositions d "
+            "WHERE d.obligation_id=o.obligation_id) FROM evaluation_feedback f "
+            "JOIN evaluation_reconciliation_obligations o "
+            "ON o.feedback_id=f.feedback_id ORDER BY f.feedback_id"
+        ).fetchall()
+        values: list[Any] = []
+        verified = False
+        for feedback_id, obligation_id, has_dispositions in rows:
+            feedback_id = str(feedback_id)
+            obligation_id = str(obligation_id)
+            if feedback_id in relevant_feedback_ids:
+                accepted = target.load(feedback_id)
+                values.append(feedback._decoded(accepted.feedback.source_feedback_id))
+                verified = True
+            if has_dispositions:
+                for disposition in target.dispositions(obligation_id):
+                    try:
+                        values.append(feedback._decoded(disposition.idempotency_key))
+                    except KeyError:
+                        pass
+                verified = True
+        if not verified:
+            base_feedback = self.location.base[0]
+            target.load(base_feedback.feedback_id)
+        commands = tuple(values)
+        if transaction is None:
+            post_key = (
+                int(connection.execute("PRAGMA data_version").fetchone()[0]),
+                connection.total_changes,
+            )
+            if post_key == cache_key:
+                self._verified_commands_cache = (post_key, commands)
+        return commands
+
+    def submit(self: Any, command: Any, *, lose_response: bool = False) -> Any:
+        try:
+            if command.record_id in self.location.competing:
+                proposed = self.location.competing[command.record_id]
+                retained_disposition = self._opened().append_disposition(
+                    proposed.canonical_bytes,
+                    candidate_proof=self.location.proof,
+                )
+                retained = feedback._decoded(retained_disposition.idempotency_key)
+            else:
+                proposed_feedback, obligation = feedback._submission(
+                    self.location, command
+                )
+                accepted = self._opened().accept(
+                    proposed_feedback.canonical_bytes,
+                    obligation.canonical_bytes,
+                    candidate_proof=self.location.proof,
+                )
+                retained = feedback._decoded(accepted.feedback.source_feedback_id)
+        except (
+            KeyError,
+            feedback.FeedbackContractError,
+            sqlite3.OperationalError,
+        ) as exc:
+            if feedback._database_locked(exc):
+                raise feedback.BindingConflict(command.record_id) from exc
+            try:
+                retained = next(
+                    (
+                        item
+                        for item in self._commands()
+                        if item.record_id == command.record_id
+                    ),
+                    None,
+                )
+            except Exception as integrity:
+                raise feedback.IntegrityViolation(command.record_id) from integrity
+            if retained is not None:
+                raise feedback.BindingConflict(command.record_id) from exc
+            raise feedback.IntegrityViolation(command.record_id) from exc
+        except Exception as exc:
+            raise feedback.IntegrityViolation(command.record_id) from exc
+        if retained != command:
+            raise feedback.IntegrityViolation(command.record_id)
+        if lose_response:
+            raise feedback.LostResponse(command.record_id)
+        return feedback.AuthorityValue.from_command(retained)
+
+    handle._commands = _commands
+    handle.submit = submit
+    handle._verified_result_fastpath_v1 = True
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    if not _selected(config):
+        return
+    from newsroom.tests import feedback_cache_support
+    from newsroom.tests import test_increment6f2_feedback_store as feedback
+
+    _install_cache_selection(feedback_cache_support, feedback)
+    _install(feedback)

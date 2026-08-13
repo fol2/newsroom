@@ -83,7 +83,7 @@ def test_v24_allocates_only_exact_candidate_tables(tmp_path: Path) -> None:
     migrations.apply_pending_migrations(
         connection, applied_at="2042-01-01T00:00:00.000000Z"
     )
-    assert connection.execute("PRAGMA user_version").fetchone() == (24,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (migrations.SCHEMA_VERSION,)
     assert connection.execute(
         "SELECT name FROM authority_migrations WHERE version=24"
     ).fetchone() == (STORY_CANDIDATE_MIGRATION_NAME,)
@@ -156,7 +156,7 @@ def test_v24_downgrade_preflight_is_non_mutating(tmp_path: Path, failure: str) -
             ("sha256:" + "f" * 64,),
         )
     else:
-        connection.execute("PRAGMA user_version=25")
+        connection.execute("PRAGMA user_version=26")
     damaged = (
         connection.execute("PRAGMA user_version").fetchone(),
         tuple(connection.iterdump()),

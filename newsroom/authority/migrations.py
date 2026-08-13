@@ -1,4 +1,6 @@
+# ruff: noqa: I001
 from __future__ import annotations
+# fmt: off
 
 import sqlite3
 from collections.abc import Iterable
@@ -46,6 +48,17 @@ from .entity_migrations import (
     ENTITY_AUTHORITY_MIGRATION_NAME,
     ENTITY_AUTHORITY_MIGRATION_STATEMENTS,
     ENTITY_AUTHORITY_SCHEMA_VERSION,
+)
+from .evaluation_feedback_migrations import (
+    EVALUATION_FEEDBACK_MIGRATION,
+    EVALUATION_FEEDBACK_MIGRATION_CHECKSUM,
+    EVALUATION_FEEDBACK_MIGRATION_NAME,
+    EVALUATION_FEEDBACK_MIGRATION_STATEMENTS,
+    EVALUATION_FEEDBACK_SCHEMA_VERSION,
+    EvaluationFeedbackBackupReceipt,
+    evaluation_feedback_backup_paths,
+    prepare_evaluation_feedback_backup,
+    require_evaluation_feedback_backup,
 )
 from .evaluation_handoff_migrations import (
     EVALUATION_HANDOFF_MIGRATION,
@@ -200,7 +213,7 @@ from .triage_work_item_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = STORY_CANDIDATE_SCHEMA_VERSION
+SCHEMA_VERSION = EVALUATION_FEEDBACK_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -648,11 +661,12 @@ def prepare_pending_migration_backup(
     | EventHypothesisRelationshipBackupReceipt
     | EventHypothesisLineageBackupReceipt
     | StoryCandidateBackupReceipt
+    | EvaluationFeedbackBackupReceipt
     | None
 ):
     """Prepare the exact retained backup required by a checked predecessor."""
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if version not in {16, 17, 18, 19, 20, 21, 22, 23}:
+    if version not in {16, 17, 18, 19, 20, 21, 22, 23, 24}:
         return None
     database_path = next(
         str(row[2])
@@ -684,8 +698,11 @@ def prepare_pending_migration_backup(
     if version == 22:
         backup_path, _ = event_hypothesis_lineage_backup_paths(database_path)
         return prepare_event_hypothesis_lineage_backup(conn, backup_path)
-    backup_path, _ = story_candidate_backup_paths(database_path)
-    return prepare_story_candidate_backup(conn, backup_path)
+    if version == 23:
+        backup_path, _ = story_candidate_backup_paths(database_path)
+        return prepare_story_candidate_backup(conn, backup_path)
+    backup_path, _ = evaluation_feedback_backup_paths(database_path)
+    return prepare_evaluation_feedback_backup(conn, backup_path)
 
 
 def apply_migration(
@@ -981,7 +998,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_evaluation_handoff_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-8],
+                    expected_history=tuple((r.version, r.name, r.checksum) for r in MIGRATIONS if r.version <= GRAPHITI_ADAPTER_SCHEMA_VERSION),
                 )
             for statement in EVALUATION_HANDOFF_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1016,7 +1033,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_work_item_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-7],
+                    expected_history=tuple((r.version, r.name, r.checksum) for r in MIGRATIONS if r.version <= EVALUATION_HANDOFF_SCHEMA_VERSION),
                 )
             for statement in TRIAGE_WORK_ITEM_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1050,7 +1067,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_disposition_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-6],
+                    expected_history=tuple((r.version, r.name, r.checksum) for r in MIGRATIONS if r.version <= TRIAGE_WORK_ITEM_SCHEMA_VERSION),
                 )
             for statement in TRIAGE_DISPOSITION_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1084,7 +1101,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
             if starting_version != 0:
                 require_triage_execution_backup(
                     conn,
-                    expected_history=EXPECTED_MIGRATION_HISTORY[:-5],
+                    expected_history=tuple((r.version, r.name, r.checksum) for r in MIGRATIONS if r.version <= TRIAGE_DISPOSITION_SCHEMA_VERSION),
                 )
             for statement in TRIAGE_EXECUTION_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1117,7 +1134,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                 conn.execute("BEGIN EXCLUSIVE")
             if starting_version != 0:
                 require_event_hypothesis_backup(
-                    conn, expected_history=EXPECTED_MIGRATION_HISTORY[:-4]
+                    conn, expected_history=tuple((r.version, r.name, r.checksum) for r in MIGRATIONS if r.version <= TRIAGE_EXECUTION_SCHEMA_VERSION)
                 )
             for statement in EVENT_HYPOTHESIS_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1152,7 +1169,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                 conn.execute("BEGIN EXCLUSIVE")
             if starting_version != 0:
                 require_event_hypothesis_relationship_backup(
-                    conn, expected_history=EXPECTED_MIGRATION_HISTORY[:-3]
+                    conn, expected_history=tuple((r.version, r.name, r.checksum) for r in MIGRATIONS if r.version <= EVENT_HYPOTHESIS_SCHEMA_VERSION)
                 )
             for statement in EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION_STATEMENTS:
                 conn.execute(statement)
@@ -1230,6 +1247,29 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                  STORY_CANDIDATE_MIGRATION_CHECKSUM, applied_at),
             )
             current = STORY_CANDIDATE_SCHEMA_VERSION
+        if current == STORY_CANDIDATE_SCHEMA_VERSION:
+            if 0 < starting_version < STORY_CANDIDATE_SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version={STORY_CANDIDATE_SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+                database_path = next(str(row[2]) for row in conn.execute("PRAGMA database_list") if row[1] == "main")
+                if not database_path:
+                    raise sqlite3.DatabaseError("existing multihop upgrade requires a file-backed database")
+                backup_path, _ = evaluation_feedback_backup_paths(database_path)
+                prepare_evaluation_feedback_backup(conn, backup_path)
+                conn.execute("BEGIN EXCLUSIVE")
+            if starting_version != 0:
+                require_evaluation_feedback_backup(
+                    conn, expected_history=tuple((r.version, r.name, r.checksum) for r in MIGRATIONS
+                                                 if r.version <= STORY_CANDIDATE_SCHEMA_VERSION),
+                )
+            for statement in EVALUATION_FEEDBACK_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) VALUES(?,?,?,?)",
+                (EVALUATION_FEEDBACK_SCHEMA_VERSION, EVALUATION_FEEDBACK_MIGRATION_NAME,
+                 EVALUATION_FEEDBACK_MIGRATION_CHECKSUM, applied_at),
+            )
+            current = EVALUATION_FEEDBACK_SCHEMA_VERSION
         # fmt: on
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
@@ -1264,6 +1304,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION,
     EVENT_HYPOTHESIS_LINEAGE_MIGRATION,
     STORY_CANDIDATE_MIGRATION,
+    EVALUATION_FEEDBACK_MIGRATION,
 )
 
 
@@ -1391,4 +1432,10 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         STORY_CANDIDATE_MIGRATION_NAME,
         STORY_CANDIDATE_MIGRATION_CHECKSUM,
     ),
+    (
+        EVALUATION_FEEDBACK_SCHEMA_VERSION,
+        EVALUATION_FEEDBACK_MIGRATION_NAME,
+        EVALUATION_FEEDBACK_MIGRATION_CHECKSUM,
+    ),
 )
+# fmt: on

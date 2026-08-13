@@ -49,6 +49,75 @@ def drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
 
 def _drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
     """Remove an exact, empty v23 lineage schema atomically."""
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) == 25:
+        from newsroom.authority.evaluation_feedback_migrations import (
+            EVALUATION_FEEDBACK_MIGRATION_CHECKSUM,
+            EVALUATION_FEEDBACK_MIGRATION_NAME,
+            EVALUATION_FEEDBACK_MIGRATION_STATEMENTS,
+        )
+
+        def normalise_sql(value: str) -> str:
+            return " ".join(value.split()).replace(" IF NOT EXISTS", "")
+
+        objects = connection.execute(
+            "SELECT type,name,sql FROM sqlite_master WHERE "
+            "tbl_name IN ('evaluation_feedback','evaluation_reconciliation_obligations',"
+            "'evaluation_reconciliation_dispositions') AND type IN ('table','trigger')"
+        ).fetchall()
+        expected_names = {
+            "evaluation_feedback",
+            "evaluation_reconciliation_obligations",
+            "evaluation_reconciliation_dispositions",
+            "immutable_evaluation_feedback",
+            "retained_evaluation_feedback",
+            "immutable_evaluation_obligation",
+            "retained_evaluation_obligation",
+            "immutable_evaluation_disposition",
+            "retained_evaluation_disposition",
+            "evaluation_disposition_predecessor_guard",
+        }
+        if (
+            connection.execute(
+                "SELECT name,checksum FROM authority_migrations WHERE version=25"
+            ).fetchone()
+            != (
+                EVALUATION_FEEDBACK_MIGRATION_NAME,
+                EVALUATION_FEEDBACK_MIGRATION_CHECKSUM,
+            )
+            or {str(row[1]) for row in objects} != expected_names
+            or {normalise_sql(str(row[2])) for row in objects}
+            != {
+                normalise_sql(statement)
+                for statement in EVALUATION_FEEDBACK_MIGRATION_STATEMENTS
+            }
+        ):
+            raise sqlite3.DatabaseError(
+                "downgrade requires exact empty v25 Feedback schema"
+            )
+        for table in (
+            "evaluation_feedback",
+            "evaluation_reconciliation_obligations",
+            "evaluation_reconciliation_dispositions",
+        ):
+            if connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone() != (0,):
+                raise sqlite3.DatabaseError("v25 Feedback tables must be empty")
+        guard = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='immutable_authority_migrations_delete'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+        for object_type, name, _ in objects:
+            if object_type == "trigger":
+                connection.execute(f'DROP TRIGGER "{name}"')
+        for table in (
+            "evaluation_reconciliation_dispositions",
+            "evaluation_reconciliation_obligations",
+            "evaluation_feedback",
+        ):
+            connection.execute(f'DROP TABLE "{table}"')
+        connection.execute("DELETE FROM authority_migrations WHERE version=25")
+        connection.execute(guard)
+        connection.execute("PRAGMA user_version=24")
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) == 24:
         candidate_tables = (
             "story_candidate_heads",
