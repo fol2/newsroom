@@ -8,13 +8,15 @@ import pytest
 from newsroom.authority.canonical import canonical_json_bytes
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
-    EXPECTED_SCHEMA_FINGERPRINT,
     SCHEMA_VERSION,
 )
 from newsroom.increment6.closeout import (
     INCREMENT6G_FINAL_CLOSEOUT_CASES,
     INCREMENT6G_FINAL_CLOSEOUT_INVENTORY_DIGEST,
     INCREMENT6G_FINAL_NON_EFFECTS,
+    INCREMENT6G_FINAL_SCHEMA_FINGERPRINT,
+    INCREMENT6G_FINAL_SCHEMA_VERSION,
+    increment6g_final_migration_history,
 )
 from newsroom.projection.neo4j import (
     NEO4J_B2_DRIVER_VERSION,
@@ -42,22 +44,27 @@ def test_actual_service_increment6g_identity_and_closeout_inventory(
     assert compatibility.server_version == NEO4J_B2_SERVER_VERSION
     assert compatibility.edition == "community"
     assert compatibility.driver_version == NEO4J_B2_DRIVER_VERSION
-    assert SCHEMA_VERSION == 25
-    assert len(EXPECTED_MIGRATION_HISTORY) == 25
-    assert tuple(item[0] for item in EXPECTED_MIGRATION_HISTORY) == tuple(range(1, 26))
+    assert SCHEMA_VERSION >= INCREMENT6G_FINAL_SCHEMA_VERSION
+    history_prefix = increment6g_final_migration_history(
+        EXPECTED_MIGRATION_HISTORY
+    )
 
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     tree = subprocess.check_output(
         ["git", "rev-parse", "HEAD^{tree}"], text=True
     ).strip()
     history = canonical_json_bytes(
-        [list(item) for item in EXPECTED_MIGRATION_HISTORY]
+        [list(item) for item in history_prefix]
     ).decode("utf-8")
 
     record_property("increment6g_source_head_sha", head)
     record_property("increment6g_source_tree_sha", tree)
-    record_property("increment6g_schema_version", str(SCHEMA_VERSION))
-    record_property("increment6g_schema_fingerprint", EXPECTED_SCHEMA_FINGERPRINT)
+    record_property(
+        "increment6g_schema_version", str(INCREMENT6G_FINAL_SCHEMA_VERSION)
+    )
+    record_property(
+        "increment6g_schema_fingerprint", INCREMENT6G_FINAL_SCHEMA_FINGERPRINT
+    )
     record_property("increment6g_migration_history_json", history)
     record_property(
         "increment6g_closeout_inventory_digest",

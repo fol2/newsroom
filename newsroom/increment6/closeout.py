@@ -7,6 +7,7 @@ SDLC receipt reconciles their retained JUnit outcomes.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -49,6 +50,29 @@ INCREMENT6_FINAL_REQUIREMENTS = frozenset(
         "WORK_ITEM_OWNERSHIP_URGENT_DEGRADED_FAIRNESS_STALE",
     }
 )
+
+INCREMENT6G_FINAL_SCHEMA_VERSION = 25
+INCREMENT6G_FINAL_SCHEMA_FINGERPRINT = (
+    "sha256:353900bf5804f0b770489982541f3cff4fd30ea36fc75d19b9c63315d1b6ec06"
+)
+INCREMENT6G_FINAL_MIGRATION_HISTORY_DIGEST = (
+    "sha256:bea793377d065d3073e6dfa8d40139fedfd377d5e24d9812d12cdb1ad52e9a0f"
+)
+
+
+def increment6g_final_migration_history(
+    history: Sequence[tuple[int, str, str]],
+) -> tuple[tuple[int, str, str], ...]:
+    prefix = tuple(history[:INCREMENT6G_FINAL_SCHEMA_VERSION])
+    if (
+        len(prefix) != INCREMENT6G_FINAL_SCHEMA_VERSION
+        or tuple(item[0] for item in prefix)
+        != tuple(range(1, INCREMENT6G_FINAL_SCHEMA_VERSION + 1))
+        or digest_bytes(canonical_json_bytes([list(item) for item in prefix]))
+        != INCREMENT6G_FINAL_MIGRATION_HISTORY_DIGEST
+    ):
+        raise RuntimeError("Increment 6 migration history prefix differs")
+    return prefix
 
 
 @dataclass(frozen=True, slots=True)

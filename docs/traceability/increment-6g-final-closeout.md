@@ -28,6 +28,9 @@ retained migration inventory proves the literal v1-v25 history, every supported
 exact predecessor upgrade, multihop backup identities, exclusive rollback and
 restore/re-upgrade. The actual-service target binds that same current history,
 schema version and schema fingerprint to the evaluated source head and tree.
+Those Increment 6 identities are dedicated frozen constants: permanent future
+service runs validate the exact v1-v25 prefix and permit a later authorised
+migration suffix rather than freezing the repository's current schema at v25.
 
 The selected authority cases retain the real public paths:
 

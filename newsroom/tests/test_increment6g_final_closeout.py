@@ -4,13 +4,19 @@ import importlib
 import re
 from pathlib import Path
 
+import pytest
+
 from newsroom.increment6.closeout import (
     INCREMENT6_FINAL_REQUIREMENTS,
     INCREMENT6G_FINAL_CLOSEOUT_CASES,
     INCREMENT6G_FINAL_CLOSEOUT_INVENTORY_DIGEST,
+    INCREMENT6G_FINAL_MIGRATION_HISTORY_DIGEST,
     INCREMENT6G_FINAL_NON_EFFECTS,
+    INCREMENT6G_FINAL_SCHEMA_FINGERPRINT,
+    INCREMENT6G_FINAL_SCHEMA_VERSION,
     Increment6CloseoutCategory,
     Increment6CloseoutLane,
+    increment6g_final_migration_history,
     validate_increment6g_final_closeout_inventory,
 )
 from scripts.sdlc.workflow_lane import (
@@ -76,6 +82,27 @@ def test_expensive_lineage_cases_concentration_is_bounded() -> None:
 
     assert sum(counts) == len(_EXPECTED_PROBE_IDS)
     assert max(counts) <= 7
+
+
+def test_increment6_closeout_migration_identity_accepts_only_an_exact_prefix() -> None:
+    from newsroom.authority.migrations import EXPECTED_MIGRATION_HISTORY
+
+    prefix = increment6g_final_migration_history(EXPECTED_MIGRATION_HISTORY)
+    assert len(prefix) == INCREMENT6G_FINAL_SCHEMA_VERSION == 25
+    assert INCREMENT6G_FINAL_SCHEMA_FINGERPRINT == (
+        "sha256:353900bf5804f0b770489982541f3cff4fd30ea36fc75d19b9c63315d1b6ec06"
+    )
+    assert INCREMENT6G_FINAL_MIGRATION_HISTORY_DIGEST == (
+        "sha256:bea793377d065d3073e6dfa8d40139fedfd377d5e24d9812d12cdb1ad52e9a0f"
+    )
+
+    appended = (*EXPECTED_MIGRATION_HISTORY, (26, "future_authorised", "sha256:x"))
+    assert increment6g_final_migration_history(appended) == prefix
+
+    changed = list(EXPECTED_MIGRATION_HISTORY)
+    changed[0] = (1, "changed", changed[0][2])
+    with pytest.raises(RuntimeError, match="migration history prefix"):
+        increment6g_final_migration_history(tuple(changed))
 
 
 def test_actual_service_case_is_in_both_permanent_service_routes() -> None:
