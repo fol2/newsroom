@@ -649,6 +649,18 @@ jobs:
             --decision .sdlc-run/decision.json \
             --output .sdlc-run/increment5e2-final-closeout.json
 
+      - name: Build Increment 6G final closeout receipt
+        if: needs.route.outputs.service_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m scripts.sdlc.increment6g_closeout_receipt \
+            --repo-root . \
+            --core-transport-bundle-root .sdlc-run/decision-input/core-transport \
+            --service-transport-bundle-root .sdlc-run/decision-input/service-transport \
+            --decision .sdlc-run/decision.json \
+            --output .sdlc-run/increment6g-final-closeout.json
+
       - name: Upload final decision evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -659,6 +671,7 @@ jobs:
             .sdlc-run/decision-input/collection.json
             .sdlc-run/decision.json
             .sdlc-run/increment5e2-final-closeout.json
+            .sdlc-run/increment6g-final-closeout.json
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
@@ -720,6 +733,10 @@ jobs:
           )
           decision_subject = Path(
               '.sdlc-run/signed-closeout-input/decision.json'
+          )
+          increment6_subject = Path(
+              '.sdlc-run/signed-closeout-input/'
+              'increment6g-final-closeout.json'
           )
 
           def unique_object(pairs):
@@ -829,6 +846,67 @@ jobs:
           if claimed_identity != actual_identity:
               raise SystemExit('closeout receipt self-hash mismatch')
 
+          increment6 = load_subject(increment6_subject, 'increment6 closeout')
+          if (
+              not isinstance(increment6, dict)
+              or increment6.get('schema_version')
+              != 'newsroom.increment6g.final-closeout-receipt.v1'
+              or increment6.get('evaluated_sha') != expected_head
+              or increment6.get('evaluated_tree_sha')
+              != value.get('evaluated_tree_sha')
+              or increment6.get('decision_identity')
+              != value.get('decision_identity')
+          ):
+              raise SystemExit('increment6 closeout identity differs')
+          increment6_lanes = increment6.get('lanes')
+          increment6_inventory = increment6.get('inventory')
+          increment6_cases = increment6.get('selected_cases')
+          increment6_count = (
+              increment6_inventory.get('case_count')
+              if isinstance(increment6_inventory, dict)
+              else None
+          )
+          if (
+              not isinstance(increment6_lanes, list)
+              or len(increment6_lanes) != 2
+              or not all(isinstance(lane, dict) for lane in increment6_lanes)
+              or {lane.get('lane_id') for lane in increment6_lanes}
+              != {'core', 'service'}
+              or type(increment6_count) is not int
+              or increment6_count != 58
+              or not isinstance(increment6_cases, list)
+              or len(increment6_cases) != increment6_count
+              or not all(isinstance(item, dict) for item in increment6_cases)
+              or any(item.get('outcome') != 'passed' for item in increment6_cases)
+              or len({item.get('case_id') for item in increment6_cases})
+              != increment6_count
+              or len({item.get('test_id') for item in increment6_cases})
+              != increment6_count
+              or increment6_inventory.get('digest')
+              != 'sha256:cb051e71025a2387aa6bdc4e4fca0bc76b414aabaeb2d192b2aa1dd48c81e011'
+              or increment6_inventory.get('schema_version') != 25
+              or increment6_inventory.get('schema_fingerprint')
+              != 'sha256:353900bf5804f0b770489982541f3cff4fd30ea36fc75d19b9c63315d1b6ec06'
+              or increment6_inventory.get('migration_history_digest')
+              != 'sha256:bea793377d065d3073e6dfa8d40139fedfd377d5e24d9812d12cdb1ad52e9a0f'
+          ):
+              raise SystemExit('increment6 closeout inventory differs')
+          increment6_claimed = increment6.get('receipt_identity')
+          increment6_unsigned = dict(increment6)
+          increment6_unsigned.pop('receipt_identity', None)
+          increment6_canonical = json.dumps(
+              increment6_unsigned,
+              ensure_ascii=False,
+              allow_nan=False,
+              sort_keys=True,
+              separators=(',', ':'),
+          ).encode('utf-8')
+          increment6_actual = (
+              'sha256:' + hashlib.sha256(increment6_canonical).hexdigest()
+          )
+          if increment6_claimed != increment6_actual:
+              raise SystemExit('increment6 closeout self-hash mismatch')
+
           decision = load_subject(decision_subject, 'decision')
           if (
               not isinstance(decision, dict)
@@ -858,6 +936,7 @@ jobs:
           subject-path: |
             .sdlc-run/signed-closeout-input/decision.json
             .sdlc-run/signed-closeout-input/increment5e2-final-closeout.json
+            .sdlc-run/signed-closeout-input/increment6g-final-closeout.json
 
       - name: Retain attestation bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -327,6 +327,7 @@ def test_lane_and_decision_artifacts_are_compact_immutable_and_attempt_scoped() 
                 ".sdlc-run/decision-input/collection.json",
                 ".sdlc-run/decision.json",
                 ".sdlc-run/increment5e2-final-closeout.json",
+                ".sdlc-run/increment6g-final-closeout.json",
             ]
 
 
@@ -392,6 +393,7 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
     validation = validate["run"]
     for expected in (
         "newsroom.increment5e2.final-closeout-receipt.v1",
+        "newsroom.increment6g.final-closeout-receipt.v1",
         "receipt_identity",
         "evaluated_sha",
         "EXPECTED_HEAD_SHA",
@@ -413,6 +415,7 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
     assert attest["with"]["subject-path"].splitlines() == [
         ".sdlc-run/signed-closeout-input/decision.json",
         (".sdlc-run/signed-closeout-input/increment5e2-final-closeout.json"),
+        ".sdlc-run/signed-closeout-input/increment6g-final-closeout.json",
     ]
     upload = _step("signed-closeout", "Retain attestation bundle")
     assert upload["uses"] == UPLOAD
