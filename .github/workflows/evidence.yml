@@ -883,7 +883,7 @@ jobs:
               or len({item.get('test_id') for item in increment6_cases})
               != increment6_count
               or increment6_inventory.get('digest')
-              != 'sha256:67ae4fdba2d9bda2280896a2e2de38a95a211cfe1f80dd505ccd646cdc2b4b4f'
+              != 'sha256:cb051e71025a2387aa6bdc4e4fca0bc76b414aabaeb2d192b2aa1dd48c81e011'
               or increment6_inventory.get('schema_version') != 25
               or increment6_inventory.get('schema_fingerprint')
               != 'sha256:353900bf5804f0b770489982541f3cff4fd30ea36fc75d19b9c63315d1b6ec06'

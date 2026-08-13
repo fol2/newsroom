@@ -6,7 +6,7 @@
 - **Entry main:** `c52574afcc9725b7ee14edcc8f4aa608a2593ecc`
 - **Entry tree:** `91754aeb76f05fac41b38ad8ef90715b7fe11ba4`
 - **Inventory source:** `newsroom/increment6/closeout.py`
-- **Inventory digest:** `sha256:67ae4fdba2d9bda2280896a2e2de38a95a211cfe1f80dd505ccd646cdc2b4b4f`
+- **Inventory digest:** `sha256:cb051e71025a2387aa6bdc4e4fca0bc76b414aabaeb2d192b2aa1dd48c81e011`
 
 ## Closed boundary
 
@@ -48,6 +48,16 @@ The selected authority cases retain the real public paths:
 
 Rights withdrawal, exact tombstone removal, tamper, unavailable, degraded and
 no-false-success outcomes are retained as explicit fail-closed evidence.
+
+The inherited v17 Handoff record does not immutably prove its original
+registration-time `max_attempts`; #428 owns that later hardening and blocks
+production-equivalent Handoff use. Increment 6 does not use that unanchored
+scalar as authority. The selected feedback-authority case retains the exact
+v25 Handoff acceptance snapshot in the same transaction as accepted feedback,
+then changes only the underlying `max_attempts` value and proves that no new
+feedback, reconciliation disposition or ledger effect is created. Exact replay
+continues to return the retained snapshot. This known limitation therefore
+cannot authorise an Increment 6 effect and is not hidden by the closeout.
 
 ## Actual service and retained receipt
 

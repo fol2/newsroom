@@ -26,7 +26,7 @@ def test_final_closeout_inventory_is_content_addressed_and_exact() -> None:
     validate_increment6g_final_closeout_inventory()
     assert len(INCREMENT6G_FINAL_CLOSEOUT_CASES) == 58
     assert INCREMENT6G_FINAL_CLOSEOUT_INVENTORY_DIGEST == (
-        "sha256:67ae4fdba2d9bda2280896a2e2de38a95a211cfe1f80dd505ccd646cdc2b4b4f"
+        "sha256:cb051e71025a2387aa6bdc4e4fca0bc76b414aabaeb2d192b2aa1dd48c81e011"
     )
     assert {
         requirement
@@ -38,6 +38,15 @@ def test_final_closeout_inventory_is_content_addressed_and_exact() -> None:
     )
     assert {case.lane for case in INCREMENT6G_FINAL_CLOSEOUT_CASES} == set(
         Increment6CloseoutLane
+    )
+    inherited_handoff_boundary = next(
+        case
+        for case in INCREMENT6G_FINAL_CLOSEOUT_CASES
+        if case.case_id == "F03_AUTHORITY"
+    )
+    assert inherited_handoff_boundary.test_id == (
+        "newsroom.tests.test_increment6f2_feedback_system::"
+        "test_accept_replay_snapshot_and_direct_tamper_fail_closed"
     )
     assert INCREMENT6G_FINAL_NON_EFFECTS == tuple(sorted(INCREMENT6G_FINAL_NON_EFFECTS))
 

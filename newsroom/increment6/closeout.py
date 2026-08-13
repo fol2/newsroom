@@ -370,8 +370,9 @@ INCREMENT6G_FINAL_CLOSEOUT_CASES = tuple(
                 _F,
                 _D,
                 "test_increment6f2_feedback_system",
-                "test_disposition_is_generic_ledger_anchored_and_replay_precedes_ports",
+                "test_accept_replay_snapshot_and_direct_tamper_fail_closed",
                 _FEEDBACK,
+                _FAILURE,
             ),
             _case(
                 "R01_WATCH_EXPIRY",
