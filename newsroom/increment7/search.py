@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from ipaddress import ip_address
 from typing import Self
 from urllib.parse import urlsplit
 
@@ -716,6 +717,54 @@ def _domains(value: object) -> tuple[str, ...]:
     return domains
 
 
+def _public_url(value: object) -> str:
+    url = _text(value, "url", 4_096)
+    if (
+        not url.isascii()
+        or any(character.isspace() for character in url)
+        or "\\" in url
+        or re.search(r"%(?![0-9A-F]{2})", url) is not None
+    ):
+        raise SearchContractError("Search result URL is not a bounded public pointer")
+    parts = urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise SearchContractError(
+            "Search result URL is not a bounded public pointer"
+        ) from exc
+    hostname = parts.hostname
+    if (
+        parts.scheme not in {"http", "https"}
+        or not hostname
+        or not url.startswith(f"{parts.scheme}://")
+        or parts.netloc != parts.netloc.lower()
+        or parts.username
+        or parts.password
+        or parts.fragment
+        or (port is not None and not 1 <= port <= 65_535)
+    ):
+        raise SearchContractError("Search result URL is not a bounded public pointer")
+    try:
+        address = ip_address(hostname)
+        if not address.is_global:
+            raise SearchContractError(
+                "Search result URL is not a bounded public pointer"
+            )
+    except ValueError:
+        labels = hostname.split(".")
+        if (
+            hostname != hostname.lower()
+            or len(labels) < 2
+            or any(_DOMAIN_LABEL.fullmatch(label) is None for label in labels)
+            or all(label.isdigit() for label in labels)
+        ):
+            raise SearchContractError(
+                "Search result URL is not a bounded public pointer"
+            )
+    return url
+
+
 _ATTEMPT_FIELDS = (
     "schema_version",
     "attempt_id",
@@ -963,18 +1012,7 @@ class SearchResultReference(_NoEffect):
         _integer(self.rank, "rank", minimum=1)
         _integer(self.page_number, "page_number", minimum=1)
         if self.url is not None:
-            url = _text(self.url, "url", 4_096)
-            parts = urlsplit(url)
-            if (
-                parts.scheme not in {"http", "https"}
-                or not parts.hostname
-                or parts.username
-                or parts.password
-                or parts.fragment
-            ):
-                raise SearchContractError(
-                    "Search result URL is not a bounded public pointer"
-                )
+            _public_url(self.url)
         for field in ("publisher", "title", "snippet", "asserted_date", "result_type"):
             value = getattr(self, field)
             if value is not None:
@@ -1219,6 +1257,11 @@ def validate_search_outcome(
         > request.limits.max_elapsed_seconds
         or outcome.result_count > request.limits.max_results
         or outcome.returned_pages > request.limits.max_pages
+        or (
+            outcome.returned_pages > 0
+            and attempt.page_number + outcome.returned_pages - 1
+            > request.limits.max_pages
+        )
         or outcome.gross_cost_microunits > request.limits.max_gross_cost_microunits
     ):
         raise SearchContractError("Search Outcome exceeds its exact Attempt or budget")
@@ -1252,7 +1295,11 @@ def validate_search_result(
         or result.provider_id != attempt.provider_id
         or result.provider_configuration_digest != attempt.provider_configuration_digest
         or result.rank > outcome.result_count
-        or result.page_number > outcome.returned_pages
+        or not (
+            attempt.page_number
+            <= result.page_number
+            < attempt.page_number + outcome.returned_pages
+        )
         or result.recorded_at < outcome.completed_at
     ):
         raise SearchContractError("Search Result Reference exceeds its exact Outcome")

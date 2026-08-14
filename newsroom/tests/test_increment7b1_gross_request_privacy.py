@@ -317,6 +317,17 @@ def test_provider_alteration_and_rights_limited_retention_are_explicit() -> None
         provider_altered_query='site:gov.uk "policy decisions"',
     )
     result = _result(attempt, altered)
+    for malformed_url in (
+        "https://foo bar.com/report",
+        "https://example.org:99999/report",
+        "https://exa_mple.org/report",
+        "https://example.org/report#fragment",
+        "HTTPS://example.org/report",
+        "https://127.0.0.1/report",
+        "https://example.org/%zz",
+    ):
+        with pytest.raises(SearchContractError, match="public pointer"):
+            replace(result, url=malformed_url)
     with pytest.raises(SearchContractError, match="retention class"):
         replace(result, snippet="Untrusted provider snippet")
     snippet = replace(
@@ -351,6 +362,23 @@ def test_outcome_result_and_review_bind_exact_predecessors_and_budgets() -> None
             outcome,
             result,
             replace(attempt, attempt_id=_id(98)),
+        )
+    page_two_attempt = replace(attempt, page_number=2)
+    page_two_outcome = replace(
+        outcome,
+        attempt_digest=page_two_attempt.digest,
+    )
+    page_two_result = replace(
+        result,
+        outcome_digest=page_two_outcome.digest,
+        page_number=2,
+    )
+    validate_search_result(page_two_outcome, page_two_result, page_two_attempt)
+    with pytest.raises(SearchContractError, match="exact Outcome"):
+        validate_search_result(
+            page_two_outcome,
+            replace(page_two_result, page_number=1),
+            page_two_attempt,
         )
     with pytest.raises(SearchContractError, match="budget"):
         validate_search_outcome(
