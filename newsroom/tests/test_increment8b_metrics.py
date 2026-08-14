@@ -14,6 +14,7 @@ from newsroom.increment8.metrics import (
     REQUIRED_SLICES,
     AblationResult,
     MeasurementStatus,
+    MetricReport,
     MetricReportError,
     PerformanceMeasurement,
     RateMeasurement,
@@ -36,6 +37,13 @@ def _run(kind: RunKind = RunKind.QUALIFICATION):
         component_manifest_digest=_D,
         approved_by_digest="sha256:" + "2" * 64,
         approved_at=_AT,
+        authorised_primary_reviewer_digests=(
+            "sha256:" + "2" * 64,
+            "sha256:" + "6" * 64,
+        ),
+        authorised_secondary_reviewer_digests=("sha256:" + "7" * 64,),
+        authorised_adjudicator_digests=("sha256:" + "8" * 64,),
+        authorised_release_owner_digests=("sha256:" + "9" * 64,),
     )
     epoch = freeze_epoch(
         plan=plan,
@@ -170,7 +178,7 @@ def _report(**changes):
         "metric_code_digest": "sha256:" + "9" * 64,
         "environment_digest": "sha256:" + "a" * 64,
         "sampling_manifest_digest": "sha256:" + "b" * 64,
-        "label_manifest_digest": "sha256:" + "c" * 64,
+        "label_manifest_digest": "sha256:" + "b" * 64,
     }
     values.update(changes)
     return build_metric_report(**values)
@@ -189,6 +197,7 @@ def test_complete_report_is_canonical_bounded_and_non_activating() -> None:
     assert b'"schema_version":"newsroom.increment8.metric-report.v1"' in (
         report.canonical_bytes
     )
+    assert MetricReport.from_canonical_bytes(report.canonical_bytes) == report
 
 
 def test_every_rate_retains_count_denominator_sampling_and_uncertainty() -> None:
@@ -236,6 +245,10 @@ def test_required_slice_failure_and_insufficient_exposure_override_aggregate() -
 def test_zero_tolerance_failure_blocks_report() -> None:
     report = _report(zero_tolerance=_zero(temporal_rewrite=1))
     assert report.zero_tolerance_status is MeasurementStatus.FAIL
+    assert (
+        _report(case_count=1, zero_tolerance=_zero(temporal_rewrite=1)).overall_status
+        is MeasurementStatus.FAIL
+    )
     assert report.overall_status is MeasurementStatus.FAIL
 
 

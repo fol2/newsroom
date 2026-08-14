@@ -12,6 +12,7 @@ from newsroom.authority.increment8_evaluation_migrations import (
     Increment8EvaluationBackupError,
     prepare_increment8_evaluation_backup,
 )
+from newsroom.authority.canonical import digest_bytes
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
     EXPECTED_SCHEMA_FINGERPRINT,
@@ -37,7 +38,6 @@ from newsroom.increment8.evaluation import (
     open_run,
 )
 from newsroom.increment8.readiness import (
-    INCREMENT_8_READINESS,
     INCREMENT_8_READINESS_DIGEST,
     READINESS_CONTRACT_PATH,
 )
@@ -52,7 +52,95 @@ REVIEWER_2 = "sha256:" + "c" * 64
 ADJUDICATOR = "sha256:" + "d" * 64
 T0 = "2026-08-14T12:00:00Z"
 T1 = "2026-08-14T12:01:00Z"
-SLICES = tuple(f"slice-{index:02d}" for index in range(8))
+T2 = "2026-08-14T12:02:00Z"
+T3 = "2026-08-14T12:03:00Z"
+T4 = "2026-08-14T12:04:00Z"
+T5 = "2026-08-14T12:05:00Z"
+
+
+def _plan_kwargs():
+    return {
+        "authorised_primary_reviewer_digests": (REVIEWER_1, REVIEWER_2),
+        "authorised_secondary_reviewer_digests": (REVIEWER_1, REVIEWER_2),
+        "authorised_adjudicator_digests": (ADJUDICATOR,),
+        "authorised_release_owner_digests": (OWNER,),
+    }
+
+
+def _facts(
+    *,
+    geography: str = "GLOBAL",
+    language: str = "EN_GB",
+    urgency: str = "ROUTINE",
+    domains: int = 2,
+    failures: int = 2,
+    candidate: str = "NO_CANDIDATE",
+    transition: str = "UNCHANGED",
+):
+    return {
+        "case_metadata": {
+            "geography": geography,
+            "language": language,
+            "urgency": urgency,
+        },
+        "source_evidence": {"distinct_domain_count": domains},
+        "fixture": {"injected_failure_count": failures},
+        "expected": {
+            "candidate_outcome": candidate,
+            "transition_outcome": transition,
+        },
+    }
+
+
+def _report_bytes(
+    run,
+    *,
+    status: str = "PASS",
+    zero_failures: tuple[str, ...] = (),
+    evidence_manifest_digest: str = D2,
+    slice_counts: dict[str, int] | None = None,
+) -> bytes:
+    from newsroom.increment8.metrics import (
+        REQUIRED_SLICES,
+        RequiredSliceResult,
+        build_metric_report,
+    )
+    from newsroom.tests.test_increment8b_metrics import (
+        _ablations,
+        _contributions,
+        _performance,
+        _rates,
+        _slices,
+        _zero,
+    )
+
+    slices = (
+        _slices()
+        if slice_counts is None
+        else tuple(
+            RequiredSliceResult.build(
+                slice_id=name,
+                completed_cases=slice_counts[name],
+                success_count=slice_counts[name],
+            )
+            for name in REQUIRED_SLICES
+        )
+    )
+    report = build_metric_report(
+        run=run,
+        case_count=120,
+        rates=_rates(fail="candidate_precision" if status == "FAIL" else None),
+        performance=_performance(),
+        slices=slices,
+        zero_tolerance=_zero(**{name: 1 for name in zero_failures}),
+        contributions=_contributions(),
+        ablations=_ablations(),
+        metric_code_digest="sha256:" + "9" * 64,
+        environment_digest="sha256:" + "a" * 64,
+        sampling_manifest_digest=evidence_manifest_digest,
+        label_manifest_digest=evidence_manifest_digest,
+    )
+    return report.canonical_bytes
 
 
 def _database(path: Path) -> sqlite3.Connection:
@@ -67,6 +155,7 @@ def _records(kind: RunKind = RunKind.QUALIFICATION):
         approved_by_digest=OWNER,
         approved_at=T0,
         component_manifest_digest=D1,
+        **_plan_kwargs(),
     )
     epoch = freeze_epoch(
         plan=plan,
@@ -123,9 +212,12 @@ def test_v29_upgrade_fails_without_prepared_backup(tmp_path: Path) -> None:
 def test_plan_binds_exact_pre_measurement_values_and_round_trips() -> None:
     plan, epoch, run = _records()
     assert plan.payload["readiness_digest"] == INCREMENT_8_READINESS_DIGEST
-    assert plan.payload["plan_definition"] == json.loads(
-        READINESS_CONTRACT_PATH.read_bytes()
-    )["payload"]["evaluation_plan"]
+    assert (
+        plan.payload["plan_definition"]
+        == json.loads(READINESS_CONTRACT_PATH.read_bytes())["payload"][
+            "evaluation_plan"
+        ]
+    )
     assert plan.payload["calibration_may_qualify_selected_values"] is False
     assert epoch.payload["frozen"] is True
     assert run.payload["run_kind"] == "QUALIFICATION"
@@ -138,16 +230,16 @@ def test_qualification_cases_are_prospective_and_unreviewable_is_explicit() -> N
         build_case(
             run=run,
             input_manifest_digest=D1,
-            cutoff_at=T0,
-            required_slices=SLICES,
+            cutoff_at=T2,
+            membership_facts=_facts(),
             rights_status=RightsStatus.REVIEWABLE,
             prospective=False,
         )
     case = build_case(
         run=run,
         input_manifest_digest=D1,
-        cutoff_at=T0,
-        required_slices=SLICES,
+        cutoff_at=T2,
+        membership_facts=_facts(),
         rights_status=RightsStatus.UNREVIEWABLE,
         prospective=True,
     )
@@ -167,11 +259,12 @@ def test_independent_review_and_adjudication_are_enforced() -> None:
     case = build_case(
         run=run,
         input_manifest_digest=D1,
-        cutoff_at=T0,
-        required_slices=SLICES,
+        cutoff_at=T2,
+        membership_facts=_facts(urgency="URGENT"),
         rights_status=RightsStatus.REVIEWABLE,
         prospective=True,
         launch_blocker=True,
+        urgent=True,
     )
     primary = build_review_label(
         case=case,
@@ -179,7 +272,7 @@ def test_independent_review_and_adjudication_are_enforced() -> None:
         role=ReviewRole.PRIMARY,
         label="route-a",
         blinded=True,
-        recorded_at=T1,
+        recorded_at=T3,
     )
     same_reviewer = build_review_label(
         case=case,
@@ -187,7 +280,7 @@ def test_independent_review_and_adjudication_are_enforced() -> None:
         role=ReviewRole.SECONDARY,
         label="route-b",
         blinded=True,
-        recorded_at=T1,
+        recorded_at=T3,
     )
     with pytest.raises(EvaluationAuthorityError, match="independent"):
         build_adjudication(
@@ -196,7 +289,7 @@ def test_independent_review_and_adjudication_are_enforced() -> None:
             secondary=same_reviewer,
             adjudicator_identity_digest=ADJUDICATOR,
             final_label="route-a",
-            decided_at=T1,
+            decided_at=T4,
         )
     secondary = build_review_label(
         case=case,
@@ -204,7 +297,7 @@ def test_independent_review_and_adjudication_are_enforced() -> None:
         role=ReviewRole.SECONDARY,
         label="route-b",
         blinded=True,
-        recorded_at=T1,
+        recorded_at=T3,
     )
     adjudication = build_adjudication(
         case=case,
@@ -212,7 +305,7 @@ def test_independent_review_and_adjudication_are_enforced() -> None:
         secondary=secondary,
         adjudicator_identity_digest=ADJUDICATOR,
         final_label="route-a",
-        decided_at=T1,
+        decided_at=T4,
     )
     assert adjudication.payload["primary_label_digest"] == primary.digest
 
@@ -222,25 +315,21 @@ def test_calibration_and_early_stop_never_pass() -> None:
     with pytest.raises(EvaluationAuthorityError, match="release rule"):
         build_release_decision(
             run=calibration,
-            report_digest=D1,
+            report_canonical_bytes=b"not used for a calibration PASS",
+            evidence_manifest_digest=D2,
             verdict=ReleaseVerdict.PASS,
             owner_identity_digest=OWNER,
             decided_at=T1,
-            metrics_passed=True,
-            required_slices_passed=True,
-            zero_tolerance_failure_count=0,
         )
     _, _, qualification = _records()
-    with pytest.raises(EvaluationAuthorityError, match="release rule"):
+    with pytest.raises(EvaluationAuthorityError, match="retained Metric Report"):
         build_release_decision(
             run=qualification,
-            report_digest=D1,
+            report_canonical_bytes=_report_bytes(qualification),
+            evidence_manifest_digest=D2,
             verdict=ReleaseVerdict.PASS,
             owner_identity_digest=OWNER,
             decided_at=T1,
-            metrics_passed=True,
-            required_slices_passed=True,
-            zero_tolerance_failure_count=0,
             early_stopped=True,
         )
 
@@ -258,8 +347,8 @@ def test_append_only_authority_retains_failed_run_and_rejects_mutation(
         case = build_case(
             run=run,
             input_manifest_digest=D1,
-            cutoff_at=T0,
-            required_slices=SLICES,
+            cutoff_at=T2,
+            membership_facts=_facts(),
             rights_status=RightsStatus.REVIEWABLE,
             prospective=True,
         )
@@ -270,18 +359,19 @@ def test_append_only_authority_retains_failed_run_and_rejects_mutation(
             role=ReviewRole.PRIMARY,
             label="route-a",
             blinded=True,
-            recorded_at=T1,
+            recorded_at=T3,
         )
         authority.record_label(label)
+        manifest = authority.evidence_manifest_digest(run.run_id)
         decision = build_release_decision(
             run=run,
-            report_digest=D2,
+            report_canonical_bytes=_report_bytes(
+                run, status="FAIL", evidence_manifest_digest=manifest
+            ),
+            evidence_manifest_digest=manifest,
             verdict=ReleaseVerdict.INCONCLUSIVE,
             owner_identity_digest=OWNER,
-            decided_at=T1,
-            metrics_passed=False,
-            required_slices_passed=False,
-            zero_tolerance_failure_count=0,
+            decided_at=T5,
             early_stopped=True,
         )
         authority.decide_release(decision)
@@ -315,28 +405,34 @@ def test_pass_requires_full_exposure_primary_labels_and_second_review_sample(
         authority.register_plan(plan)
         authority.register_epoch(epoch)
         authority.register_run(run)
-        with pytest.raises(EvaluationAuthorityError, match="corrective readiness"):
-            build_release_decision(
-                run=run,
-                report_digest=D2,
-                verdict=ReleaseVerdict.PASS,
-                owner_identity_digest=OWNER,
-                decided_at=T1,
-                metrics_passed=True,
-                required_slices_passed=True,
-                zero_tolerance_failure_count=0,
-            )
+        manifest = authority.evidence_manifest_digest(run.run_id)
+        candidate = build_release_decision(
+            run=run,
+            report_canonical_bytes=_report_bytes(
+                run, evidence_manifest_digest=manifest
+            ),
+            evidence_manifest_digest=manifest,
+            verdict=ReleaseVerdict.PASS,
+            owner_identity_digest=OWNER,
+            decided_at=T5,
+        )
+        with pytest.raises(EvaluationAuthorityError, match="exposure"):
+            authority.decide_release(candidate)
 
         # The authority gate also rejects a caller that bypasses the public
         # builder and assembles canonical PASS-shaped bytes directly.
+        report_raw = _report_bytes(run, evidence_manifest_digest=manifest)
+        report = json.loads(report_raw)
         direct = ReleaseEvidenceDecision.build(
             {
                 "run_id": run.run_id,
                 "run_digest": run.digest,
-                "report_digest": D2,
+                "report_digest": digest_bytes(report_raw),
+                "metric_report": report,
+                "evidence_manifest_digest": manifest,
                 "verdict": ReleaseVerdict.PASS.value,
                 "owner_identity_digest": OWNER,
-                "decided_at": T1,
+                "decided_at": T5,
                 "metrics_passed": True,
                 "required_slices_passed": True,
                 "zero_tolerance_failure_count": 0,
@@ -344,7 +440,7 @@ def test_pass_requires_full_exposure_primary_labels_and_second_review_sample(
                 "production_activation_authorised": False,
             }
         )
-        with pytest.raises(EvaluationAuthorityError, match="corrective readiness"):
+        with pytest.raises(EvaluationAuthorityError, match="exposure"):
             authority.decide_release(direct)
         assert connection.execute(
             "SELECT COUNT(*) FROM evaluation_release_decisions"
