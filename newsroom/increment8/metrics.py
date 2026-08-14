@@ -338,6 +338,11 @@ class ReviewedCaseOutcome:
             )
         ):
             raise MetricReportError("per-Case outcomes must be boolean")
+        if any(
+            triage_error[name] and not triage_eligible[name]
+            for name in _TRIAGE_ERROR_METRICS
+        ):
+            raise MetricReportError("triage error cannot be marked ineligible")
         findings = _sorted_tokens(
             zero_tolerance_findings, "zero_tolerance_findings", empty=True
         )
@@ -435,7 +440,9 @@ class TriageErrorMeasurement:
         if errors > total:
             raise MetricReportError("triage errors exceed eligible opportunities")
         rate = 0 if total == 0 else errors * 1_000_000 // total
-        exposure_status = MeasurementStatus.PASS
+        exposure_status = (
+            MeasurementStatus.NOT_EVALUATED if total == 0 else MeasurementStatus.PASS
+        )
         payload = {
             "metric_name": name,
             "error_count": errors,

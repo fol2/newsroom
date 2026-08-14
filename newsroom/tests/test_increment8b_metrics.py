@@ -468,6 +468,39 @@ def test_triage_opportunity_count_is_reported_but_not_a_post_hoc_gate() -> None:
         == "MANDATORY_SEPARATE_REPORT_NO_POST_HOC_THRESHOLD"
         for item in report.payload["triage_error_evidence"]
     )
+    empty_report = _report(
+        context=context,
+        case_outcomes=_case_outcomes(context=context, triage_eligible_count=0),
+    )
+    assert empty_report.overall_status is MeasurementStatus.PASS
+    assert all(
+        item["payload"]["exposure_status"] == "NOT_EVALUATED"
+        for item in empty_report.payload["triage_error_evidence"]
+    )
+
+
+def test_triage_error_cannot_be_hidden_as_ineligible() -> None:
+    context = _context()
+    outcome = _case_outcomes(context=context)[0]
+    payload = json.loads(outcome.canonical_bytes)["payload"]
+    case = EvaluationCase.from_canonical_bytes(canonical_json_bytes(payload["case"]))
+    primary = ReviewLabel.from_canonical_bytes(
+        canonical_json_bytes(payload["review_label"])
+    )
+    triage_eligible = dict(outcome.triage_eligible)
+    triage_error = dict(outcome.triage_error)
+    triage_eligible["false_correction"] = False
+    triage_error["false_correction"] = True
+    with pytest.raises(MetricReportError, match="cannot be marked ineligible"):
+        ReviewedCaseOutcome.build(
+            case=case,
+            review_label=primary,
+            metric_eligible=outcome.metric_eligible,
+            metric_success=outcome.metric_success,
+            triage_eligible=triage_eligible,
+            triage_error=triage_error,
+            slice_success=outcome.slice_success,
+        )
 
 
 def test_every_frozen_exposure_minimum_is_enforced() -> None:
