@@ -347,6 +347,7 @@ def test_lane_and_decision_artifacts_are_compact_immutable_and_attempt_scoped() 
                 ".sdlc-run/decision.json",
                 ".sdlc-run/increment5e2-final-closeout.json",
                 ".sdlc-run/increment6g-final-closeout.json",
+                ".sdlc-run/increment7g-final-closeout.json",
             ]
 
 
@@ -413,6 +414,7 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
     for expected in (
         "newsroom.increment5e2.final-closeout-receipt.v1",
         "newsroom.increment6g.final-closeout-receipt.v1",
+        "newsroom.increment7.closeout-receipt.v1",
         "receipt_identity",
         "evaluated_sha",
         "EXPECTED_HEAD_SHA",
@@ -435,6 +437,7 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
         ".sdlc-run/signed-closeout-input/decision.json",
         (".sdlc-run/signed-closeout-input/increment5e2-final-closeout.json"),
         ".sdlc-run/signed-closeout-input/increment6g-final-closeout.json",
+        ".sdlc-run/signed-closeout-input/increment7g-final-closeout.json",
     ]
     upload = _step("signed-closeout", "Retain attestation bundle")
     assert upload["uses"] == UPLOAD
@@ -514,6 +517,16 @@ def test_decision_bootstraps_locked_runtime_before_closeout_receipt() -> None:
     assert names.index("Sync locked closeout environment") < names.index(
         "Build Increment 5E2 final closeout receipt"
     )
+    increment7 = _step("decision", "Build Increment 7G final closeout receipt")
+    assert increment7["if"] == "needs.route.outputs.service_required == 'true'"
+    for expected in (
+        "scripts.sdlc.increment7g_closeout_receipt",
+        "--core-transport-bundle-root .sdlc-run/decision-input/core-transport",
+        "--service-transport-bundle-root .sdlc-run/decision-input/service-transport",
+        "--decision .sdlc-run/decision.json",
+        "--output .sdlc-run/increment7g-final-closeout.json",
+    ):
+        assert expected in increment7["run"]
 
 
 def test_service_boundary_is_exact_authenticated_loopback_and_bounded() -> None:
