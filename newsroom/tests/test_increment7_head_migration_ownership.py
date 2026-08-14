@@ -222,8 +222,11 @@ def test_reserved_additive_schema_suffix_is_checked(
     monkeypatch.setattr(
         authority_migrations,
         "EXPECTED_MIGRATION_HISTORY",
-        authority_migrations.EXPECTED_MIGRATION_HISTORY[:-1]
-        + ((27, "wrong_v27", checksum),),
+        authority_migrations.EXPECTED_MIGRATION_HISTORY[:-2]
+        + (
+            (27, "wrong_v27", checksum),
+            authority_migrations.EXPECTED_MIGRATION_HISTORY[-1],
+        ),
     )
     assert any(
         "reserved v27 name differs" in finding
