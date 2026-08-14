@@ -92,7 +92,9 @@ def _facts(
     }
 
 
-def _report_bytes(run, *, status: str = "PASS") -> bytes:
+def _report_bytes(
+    run, *, status: str = "PASS", zero_failures: tuple[str, ...] = ()
+) -> bytes:
     from newsroom.increment8.metrics import build_metric_report
     from newsroom.tests.test_increment8b_metrics import (
         _ablations,
@@ -109,7 +111,7 @@ def _report_bytes(run, *, status: str = "PASS") -> bytes:
         rates=_rates(fail="candidate_precision" if status == "FAIL" else None),
         performance=_performance(),
         slices=_slices(),
-        zero_tolerance=_zero(),
+        zero_tolerance=_zero(**{name: 1 for name in zero_failures}),
         contributions=_contributions(),
         ablations=_ablations(),
         metric_code_digest="sha256:" + "9" * 64,

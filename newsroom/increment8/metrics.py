@@ -54,15 +54,9 @@ class RoleRecommendation(StrEnum):
     NO_CHANGE = "NO_CHANGE"
 
 
-REQUIRED_SLICES = (
-    "GEOGRAPHY_GLOBAL",
-    "GEOGRAPHY_HONG_KONG",
-    "GEOGRAPHY_UNITED_KINGDOM",
-    "LANGUAGE_EN_GB",
-    "LANGUAGE_MIXED_EN_GB_ZH_HANT_HK",
-    "LANGUAGE_ZH_HANT_HK",
-    "TRANSITION_FAILURE_HEAVY",
-    "URGENCY_URGENT",
+REQUIRED_SLICES = tuple(
+    str(item["slice_id"])
+    for item in INCREMENT_8_READINESS.evaluation_plan["required_slice_manifest"]  # type: ignore[union-attr]
 )
 
 _MINIMUM_METRICS = frozenset(

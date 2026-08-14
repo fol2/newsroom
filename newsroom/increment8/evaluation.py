@@ -278,7 +278,7 @@ def _memberships(
 
 def _verified_metric_report(
     raw: bytes, run: EvaluationRun
-) -> tuple[Mapping[str, object], str, Mapping[str, str]]:
+) -> tuple[Mapping[str, object], str, Mapping[str, object]]:
     if not isinstance(raw, bytes):
         raise EvaluationAuthorityError("Metric Report must be canonical bytes")
     from newsroom.increment8.metrics import (
@@ -295,18 +295,27 @@ def _verified_metric_report(
     if report.run_id != run.run_id or report.payload["run_digest"] != run.digest:
         raise EvaluationAuthorityError("Metric Report Run binding differs")
     document = json.loads(raw.decode("utf-8", errors="strict"))
-    summary = MappingProxyType(
-        {
-            name: str(report.payload[name])
-            for name in (
-                "metric_status",
-                "performance_status",
-                "slice_status",
-                "zero_tolerance_status",
-                "overall_status",
-            )
-        }
-    )
+    zero_document = report.payload["zero_tolerance_evidence"]
+    if not isinstance(zero_document, Mapping):
+        raise EvaluationAuthorityError("Metric Report zero-tolerance evidence differs")
+    zero_payload = zero_document.get("payload")
+    if not isinstance(zero_payload, Mapping) or not isinstance(
+        zero_payload.get("counts"), Mapping
+    ):
+        raise EvaluationAuthorityError("Metric Report zero-tolerance evidence differs")
+    zero_failure_count = sum(zero_payload["counts"].values())  # type: ignore[arg-type]
+    summary_values: dict[str, object] = {
+        name: str(report.payload[name])
+        for name in (
+            "metric_status",
+            "performance_status",
+            "slice_status",
+            "zero_tolerance_status",
+            "overall_status",
+        )
+    }
+    summary_values["zero_tolerance_failure_count"] = zero_failure_count
+    summary = MappingProxyType(summary_values)
     return MappingProxyType(document), report.digest, summary
 
 
@@ -735,9 +744,7 @@ def build_release_decision(
         "decided_at": _timestamp(decided_at, "decided_at"),
         "metrics_passed": report_summary["metric_status"] == "PASS",
         "required_slices_passed": report_summary["slice_status"] == "PASS",
-        "zero_tolerance_failure_count": 0
-        if report_summary["zero_tolerance_status"] == "PASS"
-        else 1,
+        "zero_tolerance_failure_count": report_summary["zero_tolerance_failure_count"],
         "early_stopped": early_stopped,
         "production_activation_authorised": False,
     }
@@ -1309,7 +1316,7 @@ class EvaluationAuthority:
             or decision.payload["required_slices_passed"]
             is not (report_summary["slice_status"] == "PASS")
             or decision.payload["zero_tolerance_failure_count"]
-            != (0 if report_summary["zero_tolerance_status"] == "PASS" else 1)
+            != report_summary["zero_tolerance_failure_count"]
         ):
             raise EvaluationAuthorityError(
                 "decision gates differ from the retained Metric Report"
@@ -1417,6 +1424,7 @@ class EvaluationAuthority:
         required_secondary: set[str] = set()
         reviewable: set[str] = set()
         input_manifests: set[str] = set()
+        case_memberships: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {}
         for case_id, raw, case_digest, rights_status, input_manifest_digest in rows:
             case = EvaluationCase.from_canonical_bytes(bytes(raw))
             facts = _membership_facts(case.payload["membership_facts"])  # type: ignore[arg-type]
@@ -1438,6 +1446,11 @@ class EvaluationAuthority:
                     "qualification exposure repeats an event manifest"
                 )
             input_manifests.add(str(input_manifest_digest))
+            case_memberships[str(case_id)] = (
+                str(case_digest),
+                expected_slices,
+                expected_strata,
+            )
             for slice_name in expected_slices:
                 slice_cases[slice_name].add(str(case_digest))
             for stratum_name in expected_strata:
@@ -1491,6 +1504,36 @@ class EvaluationAuthority:
             target[str(case_id)] = label
         if set(primary) != reviewable:
             raise EvaluationAuthorityError("primary review exposure is incomplete")
+        if len(primary) < minimum:
+            raise EvaluationAuthorityError(
+                "reviewed qualification exposure is insufficient"
+            )
+        reviewed_slice_cases: dict[str, set[str]] = {
+            name: set() for name in slice_manifest
+        }
+        reviewed_stratum_cases: dict[str, set[str]] = {
+            name: set() for name in stratum_manifest
+        }
+        for case_id in primary:
+            case_digest, slices, strata = case_memberships[case_id]
+            for name in slices:
+                reviewed_slice_cases[name].add(case_digest)
+            for name in strata:
+                reviewed_stratum_cases[name].add(case_digest)
+        if any(
+            len(reviewed_slice_cases[name]) < minimum_cases
+            for name, minimum_cases in slice_manifest.items()
+        ):
+            raise EvaluationAuthorityError(
+                "reviewed required-slice exposure is insufficient"
+            )
+        if any(
+            len(reviewed_stratum_cases[name]) < minimum_cases
+            for name, minimum_cases in stratum_manifest.items()
+        ):
+            raise EvaluationAuthorityError(
+                "reviewed Case-stratum exposure is insufficient"
+            )
 
         second_percent = int(
             INCREMENT_8_READINESS.evaluation_plan[

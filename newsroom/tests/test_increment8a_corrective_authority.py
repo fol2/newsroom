@@ -63,6 +63,7 @@ def _populate(
     run,
     *,
     reviewable: bool = True,
+    reviewable_count: int | None = None,
     positive_changed: bool = False,
     ordinary_second_reviews: bool = True,
 ):
@@ -72,6 +73,9 @@ def _populate(
     ordinary_second_count = 0
     for index in range(120):
         urgent = index % 5 == 0
+        is_reviewable = reviewable and (
+            reviewable_count is None or index < reviewable_count
+        )
         case = build_case(
             run=run,
             input_manifest_digest=_digest(index + 100),
@@ -85,14 +89,14 @@ def _populate(
                 transition="CHANGED" if positive_changed else "UNCHANGED",
             ),
             rights_status=(
-                RightsStatus.REVIEWABLE if reviewable else RightsStatus.UNREVIEWABLE
+                RightsStatus.REVIEWABLE if is_reviewable else RightsStatus.UNREVIEWABLE
             ),
             prospective=True,
             urgent=urgent,
         )
         authority.register_case(case)
         cases.append(case)
-        if not reviewable:
+        if not is_reviewable:
             continue
         primary_identity = REVIEWER_1 if index % 2 == 0 else REVIEWER_2
         secondary_identity = (
@@ -386,6 +390,16 @@ def test_all_unreviewable_exposure_cannot_vacuously_pass(tmp_path: Path) -> None
         connection.close()
 
 
+def test_unreviewable_cases_do_not_fill_reviewed_exposure(tmp_path: Path) -> None:
+    connection, authority, run = _registered(tmp_path)
+    try:
+        _populate(authority, run, reviewable_count=2)
+        with pytest.raises(EvaluationAuthorityError, match="reviewed qualification"):
+            authority.decide_release(_pass_candidate(authority, run))
+    finally:
+        connection.close()
+
+
 def test_mandatory_second_reviews_do_not_satisfy_ordinary_sample(
     tmp_path: Path,
 ) -> None:
@@ -473,3 +487,20 @@ def test_report_is_retained_and_reconstructed_not_a_caller_boolean(
             authority.decide_release(contradictory)
     finally:
         connection.close()
+
+
+def test_release_decision_retains_actual_zero_tolerance_failure_count() -> None:
+    _, _, run = _records()
+    decision = build_release_decision(
+        run=run,
+        report_canonical_bytes=_report_bytes(
+            run,
+            status="FAIL",
+            zero_failures=("temporal_rewrite", "rights_breach"),
+        ),
+        evidence_manifest_digest=D1,
+        verdict=ReleaseVerdict.FAIL,
+        owner_identity_digest=OWNER,
+        decided_at=T5,
+    )
+    assert decision.payload["zero_tolerance_failure_count"] == 2
