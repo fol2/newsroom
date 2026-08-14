@@ -216,14 +216,23 @@ def test_purpose_specific_context_and_prospective_route_are_mandatory() -> None:
 
 
 def test_generic_firehose_and_unbounded_amplification_fail_closed() -> None:
-    with pytest.raises(SearchContractError, match="firehose"):
-        _request(rendered_query="UK news")
+    for query in ("UK news", "UK latest news", "politics news", "technology news"):
+        with pytest.raises(SearchContractError, match="firehose"):
+            _request(rendered_query=query)
     with pytest.raises(SearchContractError, match="inconsistent"):
         replace(_limits(), max_retries=4, max_provider_calls=4)
     request = _request()
     attempt = replace(_attempt(request), page_number=3)
     with pytest.raises(SearchContractError, match="exceeds"):
         validate_search_attempt(request, attempt)
+    with pytest.raises(SearchContractError, match="exceeds"):
+        validate_search_attempt(
+            request,
+            replace(
+                _attempt(request),
+                started_at="2026-08-14T00:01:01.000000Z",
+            ),
+        )
 
 
 def test_zero_partial_rate_limit_and_budget_block_remain_distinct() -> None:
@@ -295,6 +304,18 @@ def test_outcome_result_and_review_bind_exact_predecessors_and_budgets() -> None
         )
     with pytest.raises(SearchContractError, match="exact Outcome"):
         validate_search_result(outcome, replace(result, outcome_digest=_D), attempt)
+    with pytest.raises(SearchContractError, match="exact Outcome"):
+        validate_search_result(
+            outcome,
+            result,
+            replace(attempt, attempt_id=_id(98)),
+        )
+    with pytest.raises(SearchContractError, match="budget"):
+        validate_search_outcome(
+            attempt,
+            replace(outcome, completed_at="2026-08-14T00:01:01.000000Z"),
+            request,
+        )
     decision = SearchReviewDecision(
         _id(7),
         (result.result_reference_id,),

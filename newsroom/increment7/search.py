@@ -45,6 +45,39 @@ _UTC = re.compile(
     r"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T"
     r"(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{6}Z\Z"
 )
+_QUERY_WORD = re.compile(r"[A-Za-z0-9]+")
+_BROAD_SCOPE_WORDS = frozenset(
+    {
+        "ai",
+        "asia",
+        "business",
+        "china",
+        "crypto",
+        "economy",
+        "education",
+        "entertainment",
+        "europe",
+        "finance",
+        "global",
+        "health",
+        "hong",
+        "kong",
+        "politics",
+        "science",
+        "sport",
+        "sports",
+        "technology",
+        "tech",
+        "uk",
+        "united",
+        "kingdom",
+        "us",
+        "world",
+    }
+)
+_BROAD_NEWS_WORDS = frozenset(
+    {"breaking", "headlines", "latest", "news", "stories", "today", "updates"}
+)
 
 
 class SearchContractError(ValueError):
@@ -174,6 +207,29 @@ def _timestamp(value: object, field: str) -> str:
     except ValueError as exc:
         raise SearchContractError(f"{field} must be an exact UTC timestamp") from exc
     return value
+
+
+def _seconds_between(start: str, end: str) -> float:
+    parsed_start = datetime.strptime(start, "%Y-%m-%dT%H:%M:%S.%fZ")
+    parsed_end = datetime.strptime(end, "%Y-%m-%dT%H:%M:%S.%fZ")
+    return (parsed_end - parsed_start).total_seconds()
+
+
+def _is_generic_firehose(query: str) -> bool:
+    words = tuple(word.casefold() for word in _QUERY_WORD.findall(query))
+    has_specific_syntax = any(
+        marker in query for marker in ('"', "site:", "domain:", "intitle:")
+    ) or any(character.isdigit() for character in query)
+    broad_only = bool(words) and set(words).issubset(
+        _BROAD_SCOPE_WORDS | _BROAD_NEWS_WORDS
+    )
+    category_firehose = (
+        bool(words)
+        and len(words) <= 5
+        and words[-1] in _BROAD_NEWS_WORDS
+        and any(word in _BROAD_SCOPE_WORDS for word in words[:-1])
+    )
+    return not has_specific_syntax and (broad_only or category_firehose)
 
 
 def _enum[T: StrEnum](kind: type[T], value: object, field: str) -> T:
@@ -523,11 +579,7 @@ class SearchRequest(_NoEffect):
         _token(self.provider_id, "provider_id")
         _token(self.query_template_id, "query_template_id")
         query = _text(self.rendered_query, "rendered_query", MAX_QUERY_BYTES)
-        if " ".join(query.casefold().split()) in {
-            "uk news",
-            "hong kong news",
-            "world news",
-        }:
+        if _is_generic_firehose(query):
             raise SearchContractError("generic search firehose is prohibited")
         object.__setattr__(
             self,
@@ -1099,6 +1151,8 @@ def validate_search_attempt(request: SearchRequest, attempt: SearchAttempt) -> N
         or attempt.retry_ordinal > limits.max_retries
         or attempt.branch_ordinal > limits.max_branches
         or attempt.started_at < request.requested_at
+        or _seconds_between(request.requested_at, attempt.started_at)
+        > limits.max_elapsed_seconds
     ):
         raise SearchContractError("Search Attempt exceeds its exact Request")
 
@@ -1120,6 +1174,8 @@ def validate_search_outcome(
         outcome.attempt_id != attempt.attempt_id
         or outcome.attempt_digest != attempt.digest
         or outcome.completed_at < attempt.started_at
+        or _seconds_between(request.requested_at, outcome.completed_at)
+        > request.limits.max_elapsed_seconds
         or outcome.result_count > request.limits.max_results
         or outcome.returned_pages > request.limits.max_pages
         or outcome.gross_cost_microunits > request.limits.max_gross_cost_microunits
@@ -1146,6 +1202,8 @@ def validate_search_result(
             SearchOutcomeKind.SUCCESS_PARTIAL_TRUNCATED,
             SearchOutcomeKind.PROVIDER_ALTERED_QUERY,
         }
+        or outcome.attempt_id != attempt.attempt_id
+        or outcome.attempt_digest != attempt.digest
         or result.outcome_id != outcome.outcome_id
         or result.outcome_digest != outcome.digest
         or result.provider_id != attempt.provider_id
