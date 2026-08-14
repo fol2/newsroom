@@ -323,7 +323,11 @@ class BoundedSearchReadPort(_NoEffect):
             (request.request_id,),
         ).fetchall()
         retained_by_id = {str(row[0]): (str(row[1]), str(row[2])) for row in retained}
-        if set(retained_by_id) != {str(row[1]) for row in rows}:
+        retained_work_references = {item[0] for item in retained_by_id.values()}
+        if (
+            not {str(row[1]) for row in rows}.issubset(retained_by_id)
+            or {str(row[2]) for row in rows} != retained_work_references
+        ):
             raise SearchAuthorityError("Search retained downstream work differs")
         work_references: set[str] = set()
         for ordinal, row in enumerate(rows, 1):
@@ -676,6 +680,7 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                 raw,
             )
             if not replay:
+                existing_work: frozenset[str] = frozenset()
                 if record.work_reference_digest is not None:
                     existing_work = self._downstream_work_inventory(request)
                     if (
@@ -699,7 +704,10 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                         record.decided_at,
                     ),
                 )
-                if record.work_reference_digest is not None:
+                if (
+                    record.work_reference_digest is not None
+                    and record.work_reference_digest not in existing_work
+                ):
                     work_ordinal = len(existing_work) + 1
                     entry_id = digest_bytes(
                         canonical_json_bytes(

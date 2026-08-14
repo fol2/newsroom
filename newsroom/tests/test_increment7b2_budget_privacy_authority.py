@@ -310,11 +310,17 @@ def test_exact_chain_replays_across_restart_without_provider_authority(
         assert reread == record
         assert record.authorises_provider is False
     assert authority.budget(records[1].request_id).gross_cost_microunits == 100
+    same_work = replace(
+        records[5],
+        review_decision_id=_id(60),
+        decided_at="2026-08-14T00:00:08.000000Z",
+    )
+    assert authority.record_review(same_work.canonical_bytes) == same_work
     with pytest.raises(SearchAuthorityError, match="downstream work budget"):
         authority.record_review(
             replace(
                 records[5],
-                review_decision_id=_id(60),
+                review_decision_id=_id(62),
                 work_reference_digest="sha256:" + "6" * 64,
             ).canonical_bytes
         )
