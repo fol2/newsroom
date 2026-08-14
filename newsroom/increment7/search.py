@@ -1126,10 +1126,10 @@ def validate_search_request(purpose: SearchPurpose, request: SearchRequest) -> N
         raise SearchContractError("prospective audit lacks pre-registered audit route")
 
 
-def _window_seconds(request: SearchRequest) -> int:
+def _window_seconds(request: SearchRequest) -> float:
     start = datetime.strptime(request.window_start, "%Y-%m-%dT%H:%M:%S.%fZ")
     end = datetime.strptime(request.window_end, "%Y-%m-%dT%H:%M:%S.%fZ")
-    return int((end - start).total_seconds())
+    return (end - start).total_seconds()
 
 
 def validate_search_attempt(request: SearchRequest, attempt: SearchAttempt) -> None:
