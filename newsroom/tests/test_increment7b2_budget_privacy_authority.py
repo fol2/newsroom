@@ -502,6 +502,24 @@ def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> No
     records = _record_chain(authority)
     attacker = sqlite3.connect(database, isolation_level=None)
     try:
+        replacement = replace(records[4], title="Altered retained title")
+        with pytest.raises(sqlite3.IntegrityError, match="already retained"):
+            attacker.execute(
+                "INSERT OR REPLACE INTO search_result_references VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    replacement.result_reference_id,
+                    replacement.canonical_bytes,
+                    replacement.digest,
+                    replacement.outcome_id,
+                    replacement.outcome_digest,
+                    replacement.request_id,
+                    replacement.request_digest,
+                    replacement.rank,
+                    replacement.page_number,
+                    replacement.recorded_at,
+                ),
+            )
+        assert authority.result(records[4].result_reference_id) == records[4]
         forged = _attempt(records[1], 70, 2)
         retained_id = _id(71)
         attacker.execute(

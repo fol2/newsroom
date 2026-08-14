@@ -248,6 +248,27 @@ BOUNDED_SEARCH_MIGRATION_STATEMENTS: tuple[str, ...] = (
     ) STRICT""",
     "CREATE UNIQUE INDEX search_budget_outcome_ordinal ON search_budget_ledger(request_id,cumulative_provider_calls) WHERE entry_kind='OUTCOME'",
     "CREATE UNIQUE INDEX search_budget_work_ordinal ON search_budget_ledger(request_id,cumulative_downstream_work_items) WHERE entry_kind='DOWNSTREAM_WORK'",
+    """CREATE TRIGGER insert_once_search_purposes BEFORE INSERT ON search_purposes
+       WHEN EXISTS(SELECT 1 FROM search_purposes WHERE purpose_id=NEW.purpose_id OR purpose_digest=NEW.purpose_digest)
+       BEGIN SELECT RAISE(ABORT,'bounded Search identity already retained'); END""",
+    """CREATE TRIGGER insert_once_search_requests BEFORE INSERT ON search_requests
+       WHEN EXISTS(SELECT 1 FROM search_requests WHERE request_id=NEW.request_id OR request_digest=NEW.request_digest OR budget_reservation_digest=NEW.budget_reservation_digest)
+       BEGIN SELECT RAISE(ABORT,'bounded Search identity already retained'); END""",
+    """CREATE TRIGGER insert_once_search_attempts BEFORE INSERT ON search_attempts
+       WHEN EXISTS(SELECT 1 FROM search_attempts WHERE attempt_id=NEW.attempt_id OR attempt_digest=NEW.attempt_digest OR (request_id=NEW.request_id AND attempt_ordinal=NEW.attempt_ordinal) OR (request_id=NEW.request_id AND variant_ordinal=NEW.variant_ordinal AND language_ordinal=NEW.language_ordinal AND page_number=NEW.page_number AND branch_ordinal=NEW.branch_ordinal AND retry_ordinal=NEW.retry_ordinal))
+       BEGIN SELECT RAISE(ABORT,'bounded Search identity already retained'); END""",
+    """CREATE TRIGGER insert_once_search_outcomes BEFORE INSERT ON search_outcomes
+       WHEN EXISTS(SELECT 1 FROM search_outcomes WHERE outcome_id=NEW.outcome_id OR outcome_digest=NEW.outcome_digest OR attempt_id=NEW.attempt_id)
+       BEGIN SELECT RAISE(ABORT,'bounded Search identity already retained'); END""",
+    """CREATE TRIGGER insert_once_search_result_references BEFORE INSERT ON search_result_references
+       WHEN EXISTS(SELECT 1 FROM search_result_references WHERE result_reference_id=NEW.result_reference_id OR result_digest=NEW.result_digest OR (outcome_id=NEW.outcome_id AND rank=NEW.rank))
+       BEGIN SELECT RAISE(ABORT,'bounded Search identity already retained'); END""",
+    """CREATE TRIGGER insert_once_search_review_decisions BEFORE INSERT ON search_review_decisions
+       WHEN EXISTS(SELECT 1 FROM search_review_decisions WHERE review_decision_id=NEW.review_decision_id OR decision_digest=NEW.decision_digest)
+       BEGIN SELECT RAISE(ABORT,'bounded Search identity already retained'); END""",
+    """CREATE TRIGGER insert_once_search_budget_ledger BEFORE INSERT ON search_budget_ledger
+       WHEN EXISTS(SELECT 1 FROM search_budget_ledger WHERE ledger_entry_id=NEW.ledger_entry_id OR ledger_digest=NEW.ledger_digest OR outcome_id=NEW.outcome_id OR review_decision_id=NEW.review_decision_id OR attempt_id=NEW.attempt_id OR (request_id=NEW.request_id AND work_reference_digest=NEW.work_reference_digest AND NEW.work_reference_digest IS NOT NULL) OR (request_id=NEW.request_id AND entry_kind='OUTCOME' AND NEW.entry_kind='OUTCOME' AND cumulative_provider_calls=NEW.cumulative_provider_calls) OR (request_id=NEW.request_id AND entry_kind='DOWNSTREAM_WORK' AND NEW.entry_kind='DOWNSTREAM_WORK' AND cumulative_downstream_work_items=NEW.cumulative_downstream_work_items))
+       BEGIN SELECT RAISE(ABORT,'bounded Search identity already retained'); END""",
     *tuple(
         f"CREATE TRIGGER immutable_{table} BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT,'immutable bounded Search record'); END"
         for table in (
