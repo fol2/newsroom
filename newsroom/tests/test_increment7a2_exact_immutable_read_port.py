@@ -316,9 +316,7 @@ def test_create_replay_read_port_restart_and_no_effects(tmp_path: Path) -> None:
     item, version, command, snapshot = _create(authority)
     assert authority.apply(command.canonical_bytes) == snapshot
     with pytest.raises(AgendaAuthorityError, match="idempotency binding"):
-        authority.apply(
-            replace(command, command_id=_id(9_999)).canonical_bytes
-        )
+        authority.apply(replace(command, command_id=_id(9_999)).canonical_bytes)
     assert authority.read_port().load(item.agenda_item_id) == snapshot
     assert authority.read_port().versions(item.agenda_item_id) == (version,)
     assert authority.read_port().resolutions(item.agenda_item_id) == ()
@@ -434,10 +432,32 @@ def test_explicit_miss_then_late_occurrence_is_retained_and_terminal() -> None:
         retained_invalid,
         retained_command,
     )
+    forged_payload = replace(
+        retained_invalid,
+        agenda_version_id=_id(9_999),
+        agenda_version_digest="sha256:" + "9" * 64,
+    )
+    immutable_resolution = authority._connection.execute(  # noqa: SLF001
+        "SELECT sql FROM sqlite_master "
+        "WHERE name='immutable_planned_agenda_resolutions'"
+    ).fetchone()[0]
+    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+        "DROP TRIGGER immutable_planned_agenda_resolutions"
+    )
+    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+        "UPDATE planned_agenda_resolutions SET resolution_bytes=?,resolution_digest=? "
+        "WHERE resolution_id=?",
+        (
+            forged_payload.canonical_bytes,
+            forged_payload.digest,
+            retained_invalid.resolution_id,
+        ),
+    )
+    authority._connection.execute(immutable_resolution)  # noqa: SLF001
     authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
         "UPDATE planned_agenda_heads SET current_resolution_digest=?,"
         "current_resolution_ordinal=? WHERE agenda_item_id=?",
-        (retained_invalid.digest, 3, item.agenda_item_id),
+        (forged_payload.digest, 3, item.agenda_item_id),
     )
     with pytest.raises(AgendaAuthorityError, match="replay differs"):
         authority.read_port().resolutions(item.agenda_item_id)

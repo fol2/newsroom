@@ -510,7 +510,8 @@ class PlannedAgendaReadPort(_NoEffect):
     def resolutions(self, agenda_item_id: str) -> tuple[AgendaResolution, ...]:
         _uuid(agenda_item_id, "agenda_item_id")
         rows = self._connection.execute(
-            "SELECT r.resolution_bytes,r.resolution_digest,v.recorded_at "
+            "SELECT r.resolution_bytes,r.resolution_digest,r.agenda_version_id,"
+            "r.agenda_version_digest,v.recorded_at "
             "FROM planned_agenda_resolutions r JOIN planned_agenda_versions v "
             "ON v.agenda_version_id=r.agenda_version_id "
             "AND v.agenda_item_id=r.agenda_item_id "
@@ -527,7 +528,9 @@ class PlannedAgendaReadPort(_NoEffect):
                 resolution.agenda_item_id != agenda_item_id
                 or resolution.resolution_ordinal != ordinal
                 or resolution.digest != stored[1]
-                or resolution.observed_at < stored[2]
+                or resolution.agenda_version_id != stored[2]
+                or resolution.agenda_version_digest != stored[3]
+                or resolution.observed_at < stored[4]
                 or resolution.previous_resolution_digest
                 != (None if previous is None else previous.digest)
                 or (
