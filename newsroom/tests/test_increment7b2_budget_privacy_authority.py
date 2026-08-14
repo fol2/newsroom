@@ -233,9 +233,9 @@ def test_v27_fresh_history_fingerprint_integrity_and_reserved_tables() -> None:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
     apply_pending_migrations(connection, applied_at=_AT)
-    assert SCHEMA_VERSION == 28
+    assert SCHEMA_VERSION == 29
     assert BOUNDED_SEARCH_SCHEMA_VERSION == 27
-    assert EXPECTED_MIGRATION_HISTORY[-2] == (
+    assert EXPECTED_MIGRATION_HISTORY[-3] == (
         27,
         BOUNDED_SEARCH_MIGRATION_NAME,
         BOUNDED_SEARCH_MIGRATION_CHECKSUM,
@@ -285,7 +285,7 @@ def test_v26_upgrade_requires_exact_backup_and_rolls_back_atomically(
     assert schema_fingerprint(connection) == BOUNDED_SEARCH_PREDECESSOR_FINGERPRINT
     monkeypatch.setattr(migrations, "BOUNDED_SEARCH_MIGRATION_STATEMENTS", statements)
     apply_pending_migrations(connection, applied_at=_AT)
-    assert connection.execute("PRAGMA user_version").fetchone() == (28,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (29,)
     restored = sqlite3.connect(f"file:{backup}?mode=ro", uri=True)
     try:
         assert restored.execute("PRAGMA user_version").fetchone() == (26,)
@@ -595,9 +595,7 @@ def test_attempt_concurrency_reconciles_outcome_interval_before_cas(
         limits=replace(_request(purpose).limits, max_concurrent_attempts=1),
     )
     first = _attempt(request)
-    outcome = replace(
-        _outcome(first), completed_at="2026-08-14T00:00:05.000000Z"
-    )
+    outcome = replace(_outcome(first), completed_at="2026-08-14T00:00:05.000000Z")
     authority.record_purpose(purpose.canonical_bytes)
     authority.record_request(request.canonical_bytes)
     authority.record_attempt(first.canonical_bytes)
@@ -677,8 +675,7 @@ def test_result_admission_reconciles_retained_rank_columns(tmp_path: Path) -> No
     try:
         attacker.execute("DROP TRIGGER immutable_search_result_references")
         attacker.execute(
-            "UPDATE search_result_references SET rank=2 "
-            "WHERE result_reference_id=?",
+            "UPDATE search_result_references SET rank=2 WHERE result_reference_id=?",
             (first.result_reference_id,),
         )
         second = _result(attempt, outcome, 88)
@@ -754,9 +751,7 @@ def test_root_identity_inventories_block_deleted_purpose_and_request_replacement
     tmp_path: Path,
 ) -> None:
     purpose_database = tmp_path / "purpose-inventory.sqlite3"
-    purpose_authority = open_bounded_search_authority(
-        purpose_database, applied_at=_AT
-    )
+    purpose_authority = open_bounded_search_authority(purpose_database, applied_at=_AT)
     purpose = _purpose()
     purpose_authority.record_purpose(purpose.canonical_bytes)
     attacker = sqlite3.connect(purpose_database, isolation_level=None)
@@ -773,9 +768,7 @@ def test_root_identity_inventories_block_deleted_purpose_and_request_replacement
         purpose_authority.close()
 
     request_database = tmp_path / "request-inventory.sqlite3"
-    request_authority = open_bounded_search_authority(
-        request_database, applied_at=_AT
-    )
+    request_authority = open_bounded_search_authority(request_database, applied_at=_AT)
     purpose = _purpose()
     request = _request(purpose)
     request_authority.record_purpose(purpose.canonical_bytes)

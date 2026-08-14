@@ -55,6 +55,9 @@ from newsroom.increment7.coverage_authority import (
     validate_coverage_command,
 )
 from newsroom.increment7.search import SearchReviewAction, SearchReviewDecision
+from newsroom.tests.graphiti_adapter_4d_migration_helpers import (
+    drop_empty_v29_local_watch_schema,
+)
 from newsroom.tests.test_increment7b1_gross_request_privacy import (
     _attempt,
     _outcome,
@@ -332,9 +335,10 @@ def test_v28_fresh_create_history_fingerprint_and_reserved_tables() -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert SCHEMA_VERSION == COVERAGE_AUDIT_SCHEMA_VERSION == 28
-    assert EXPECTED_MIGRATION_HISTORY[-1][1] == COVERAGE_AUDIT_MIGRATION_NAME
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 28
+    assert SCHEMA_VERSION == 29
+    assert COVERAGE_AUDIT_SCHEMA_VERSION == 28
+    assert EXPECTED_MIGRATION_HISTORY[-2][1] == COVERAGE_AUDIT_MIGRATION_NAME
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 29
     assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
     assert {
         "coverage_audits",
@@ -352,6 +356,7 @@ def _create_v27(path) -> sqlite3.Connection:
     apply_pending_migrations(connection, applied_at=_APPLIED)
     connection.execute("PRAGMA foreign_keys=OFF")
     connection.execute("BEGIN EXCLUSIVE")
+    drop_empty_v29_local_watch_schema(connection)
     immutable = connection.execute(
         "SELECT sql FROM sqlite_master "
         "WHERE name='immutable_authority_migrations_delete'"
@@ -405,7 +410,7 @@ def test_v27_upgrade_requires_exact_backup_and_preserves_restore_point(
     )
     monkeypatch.setattr(migrations, "COVERAGE_AUDIT_MIGRATION_STATEMENTS", statements)
     apply_pending_migrations(connection, applied_at=_APPLIED)
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 28
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 29
 
     restored = sqlite3.connect(backup, isolation_level=None)
     try:

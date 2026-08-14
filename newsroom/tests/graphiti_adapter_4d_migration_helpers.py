@@ -34,6 +34,72 @@ from newsroom.authority.triage_work_item_migrations import (
 )
 
 
+def drop_empty_v29_local_watch_schema(connection: sqlite3.Connection) -> None:
+    """Remove the exact empty v29 Local Watch suffix atomically."""
+    savepoint = "checked_local_watch_downgrade"
+    connection.execute(f"SAVEPOINT {savepoint}")
+    try:
+        _drop_empty_v29_local_watch_schema(connection)
+    except Exception:
+        connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
+def _drop_empty_v29_local_watch_schema(connection: sqlite3.Connection) -> None:
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) == 29:
+        from newsroom.authority.local_watch_migrations import (
+            LOCAL_WATCH_MIGRATION_CHECKSUM,
+            LOCAL_WATCH_MIGRATION_NAME,
+            LOCAL_WATCH_MIGRATION_STATEMENTS,
+        )
+
+        def normalise_local_watch_sql(value: str) -> str:
+            return " ".join(value.split()).replace(" IF NOT EXISTS", "")
+
+        local_watch_tables = (
+            "event_scoped_local_watches",
+            "event_scoped_local_watch_versions",
+            "event_scoped_local_watch_heads",
+            "event_scoped_local_watch_closures",
+        )
+        placeholders = ",".join("?" for _ in local_watch_tables)
+        objects = connection.execute(
+            f"SELECT type,name,sql FROM sqlite_master WHERE tbl_name IN ({placeholders}) "
+            "AND type IN ('table','trigger','index') AND sql IS NOT NULL",
+            local_watch_tables,
+        ).fetchall()
+        if connection.execute(
+            "SELECT name,checksum FROM authority_migrations WHERE version=29"
+        ).fetchone() != (
+            LOCAL_WATCH_MIGRATION_NAME,
+            LOCAL_WATCH_MIGRATION_CHECKSUM,
+        ) or {normalise_local_watch_sql(str(row[2])) for row in objects} != {
+            normalise_local_watch_sql(statement)
+            for statement in LOCAL_WATCH_MIGRATION_STATEMENTS
+        }:
+            raise sqlite3.DatabaseError(
+                "downgrade requires exact empty v29 Local Watch schema"
+            )
+        for table in local_watch_tables:
+            if connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone() != (0,):
+                raise sqlite3.DatabaseError("v29 Local Watch tables must be empty")
+        guard = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='immutable_authority_migrations_delete'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+        for object_type, name, _ in objects:
+            if object_type == "trigger":
+                connection.execute(f'DROP TRIGGER "{name}"')
+        for table in reversed(local_watch_tables):
+            connection.execute(f'DROP TABLE "{table}"')
+        connection.execute("DELETE FROM authority_migrations WHERE version=29")
+        connection.execute(guard)
+        connection.execute("PRAGMA user_version=28")
+
+
 def drop_empty_v28_coverage_schema(connection: sqlite3.Connection) -> None:
     """Remove the exact empty v28 Coverage Audit suffix atomically."""
     savepoint = "checked_coverage_audit_downgrade"
@@ -48,6 +114,7 @@ def drop_empty_v28_coverage_schema(connection: sqlite3.Connection) -> None:
 
 
 def _drop_empty_v28_coverage_schema(connection: sqlite3.Connection) -> None:
+    _drop_empty_v29_local_watch_schema(connection)
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) == 28:
         from newsroom.authority.coverage_audit_migrations import (
             COVERAGE_AUDIT_MIGRATION_CHECKSUM,
