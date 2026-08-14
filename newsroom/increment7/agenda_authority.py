@@ -493,7 +493,8 @@ class PlannedAgendaReadPort(_NoEffect):
         _uuid(agenda_item_id, "agenda_item_id")
         rows = self._connection.execute(
             "SELECT version_bytes,version_digest,recorded_at,agenda_version_id,"
-            "agenda_item_id,version_ordinal,predecessor_version_digest "
+            "agenda_item_id,version_ordinal,predecessor_version_digest,"
+            "source_revision_id,schedule_status "
             "FROM planned_agenda_versions "
             "WHERE agenda_item_id=? ORDER BY version_ordinal",
             (agenda_item_id,),
@@ -510,6 +511,8 @@ class PlannedAgendaReadPort(_NoEffect):
                 or version.agenda_item_id != stored[4]
                 or version.version_ordinal != stored[5]
                 or version.predecessor_version_digest != stored[6]
+                or version.source_revision_id != stored[7]
+                or version.schedule_status.value != stored[8]
             ):
                 raise AgendaAuthorityError("Planned Agenda Version replay differs")
             if ordinal > 1:
@@ -521,7 +524,9 @@ class PlannedAgendaReadPort(_NoEffect):
         _uuid(agenda_item_id, "agenda_item_id")
         rows = self._connection.execute(
             "SELECT r.resolution_bytes,r.resolution_digest,r.agenda_version_id,"
-            "r.agenda_version_digest,v.version_bytes,v.version_digest,v.recorded_at "
+            "r.agenda_version_digest,v.version_bytes,v.version_digest,v.recorded_at,"
+            "r.resolution_kind,r.evidence_digest,r.confirmation_path_digest,"
+            "r.baseline_evidence_digest,r.successor_version_digest,r.observed_at "
             "FROM planned_agenda_resolutions r JOIN planned_agenda_versions v "
             "ON v.agenda_version_id=r.agenda_version_id "
             "AND v.agenda_item_id=r.agenda_item_id "
@@ -547,6 +552,12 @@ class PlannedAgendaReadPort(_NoEffect):
                 or bound_version.digest != stored[5]
                 or bound_version.recorded_at != stored[6]
                 or resolution.observed_at < bound_version.recorded_at
+                or resolution.kind.value != stored[7]
+                or resolution.evidence_digest != stored[8]
+                or resolution.confirmation_path_digest != stored[9]
+                or resolution.baseline_evidence_digest != stored[10]
+                or resolution.successor_version_digest != stored[11]
+                or resolution.observed_at != stored[12]
                 or resolution.previous_resolution_digest
                 != (None if previous is None else previous.digest)
                 or (
@@ -562,27 +573,33 @@ class PlannedAgendaReadPort(_NoEffect):
     def load(self, agenda_item_id: str) -> PlannedAgendaSnapshot:
         _uuid(agenda_item_id, "agenda_item_id")
         row = self._connection.execute(
-            "SELECT i.item_bytes,i.item_digest,h.current_version_id,"
+            "SELECT i.item_bytes,i.item_digest,i.agenda_kind,i.stable_subject_key,"
+            "i.initial_version_id,i.created_at,h.current_version_id,"
             "h.current_version_digest,"
             "h.current_version_ordinal,h.current_resolution_digest,"
-            "h.current_resolution_ordinal FROM planned_agenda_items i "
+            "h.current_resolution_ordinal,h.updated_at FROM planned_agenda_items i "
             "JOIN planned_agenda_heads h USING(agenda_item_id) WHERE i.agenda_item_id=?",
             (agenda_item_id,),
         ).fetchone()
         if row is None:
             raise AgendaAuthorityError("Planned Agenda Item is absent")
         item = PlannedAgendaItem.from_canonical_bytes(bytes(row[0]))
-        if item.digest != row[1]:
+        if (
+            item.digest != row[1]
+            or item.agenda_kind.value != row[2]
+            or item.stable_subject_key != row[3]
+            or item.created_at != row[5]
+        ):
             raise AgendaAuthorityError("Planned Agenda Item replay differs")
         versions = self.versions(agenda_item_id)
         if not versions:
             raise AgendaAuthorityError("Planned Agenda Version history is empty")
         current = versions[-1]
-        if (
+        if versions[0].agenda_version_id != row[4] or (
             current.agenda_version_id,
             current.digest,
             current.version_ordinal,
-        ) != tuple(row[2:5]):
+        ) != tuple(row[6:9]):
             raise AgendaAuthorityError("Planned Agenda head differs")
         resolutions = self.resolutions(agenda_item_id)
         previous = resolutions[-1] if resolutions else None
@@ -590,7 +607,9 @@ class PlannedAgendaReadPort(_NoEffect):
             None if previous is None else previous.digest,
             len(resolutions),
         )
-        if tuple(row[5:7]) != expected_resolution:
+        if tuple(row[9:11]) != expected_resolution or row[11] != (
+            current.recorded_at if previous is None else previous.observed_at
+        ):
             raise AgendaAuthorityError("Agenda Resolution head differs")
         return PlannedAgendaSnapshot(item, current, resolutions)
 
