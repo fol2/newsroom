@@ -527,7 +527,7 @@ class PlannedAgendaReadPort(_NoEffect):
             "r.agenda_version_digest,v.version_bytes,v.version_digest,v.recorded_at,"
             "r.resolution_kind,r.evidence_digest,r.confirmation_path_digest,"
             "r.baseline_evidence_digest,r.successor_version_digest,r.observed_at "
-            "FROM planned_agenda_resolutions r JOIN planned_agenda_versions v "
+            "FROM planned_agenda_resolutions r LEFT JOIN planned_agenda_versions v "
             "ON v.agenda_version_id=r.agenda_version_id "
             "AND v.agenda_item_id=r.agenda_item_id "
             "AND v.version_digest=r.agenda_version_digest "
@@ -539,6 +539,8 @@ class PlannedAgendaReadPort(_NoEffect):
         )
         previous: AgendaResolution | None = None
         for ordinal, (resolution, stored) in enumerate(zip(resolutions, rows), 1):
+            if stored[4] is None:
+                raise AgendaAuthorityError("Agenda Resolution replay differs")
             bound_version = PlannedAgendaVersion.from_canonical_bytes(bytes(stored[4]))
             if (
                 resolution.agenda_item_id != agenda_item_id
