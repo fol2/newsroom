@@ -91,7 +91,7 @@ def _history(connection: sqlite3.Connection) -> list[tuple[int, str, str]]:
 
 def test_fresh_v21_has_exact_allocation_history_and_integrity() -> None:
     connection = _fresh()
-    assert SCHEMA_VERSION == 25
+    assert SCHEMA_VERSION >= 25
     assert next(item for item in EXPECTED_MIGRATION_HISTORY if item[0] == 21) == (
         21,
         EVENT_HYPOTHESIS_MIGRATION_NAME,

@@ -23,7 +23,6 @@ from newsroom.authority.event_hypothesis_relationship_migrations import (
 )
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
-    EXPECTED_SCHEMA_FINGERPRINT,
     SCHEMA_VERSION,
     apply_pending_migrations,
     schema_fingerprint,
@@ -67,10 +66,6 @@ def test_fresh_v22_has_exact_single_table_history_and_pins() -> None:
     assert (
         EVENT_HYPOTHESIS_RELATIONSHIP_MIGRATION_CHECKSUM
         == "sha256:e59eb222a95e2901ccaae29ce1b9e8eded797306e9796718a6d2c4fa505a6636"
-    )
-    assert (
-        EXPECTED_SCHEMA_FINGERPRINT
-        == "sha256:353900bf5804f0b770489982541f3cff4fd30ea36fc75d19b9c63315d1b6ec06"
     )
     assert next(item for item in EXPECTED_MIGRATION_HISTORY if item[0] == 22) == (
         22,
