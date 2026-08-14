@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -47,6 +47,13 @@ class RightsStatus(StrEnum):
 class ReviewRole(StrEnum):
     PRIMARY = "PRIMARY"
     SECONDARY = "SECONDARY"
+
+
+class HumanAuthorityRole(StrEnum):
+    PRIMARY = "PRIMARY"
+    SECONDARY = "SECONDARY"
+    ADJUDICATOR = "ADJUDICATOR"
+    RELEASE_OWNER = "RELEASE_OWNER"
 
 
 class ReleaseVerdict(StrEnum):
@@ -92,6 +99,237 @@ def _strings(value: Sequence[str], field: str) -> tuple[str, ...]:
     if tuple(sorted(set(result))) != result:
         raise EvaluationAuthorityError(f"{field} must be sorted and unique")
     return result
+
+
+def _parse_timestamp(value: object, field: str) -> datetime:
+    return datetime.fromisoformat(_timestamp(value, field).removesuffix("Z") + "+00:00")
+
+
+def _not_after(earlier: object, later: object, *, boundary: str) -> None:
+    if _parse_timestamp(earlier, boundary) > _parse_timestamp(later, boundary):
+        raise EvaluationAuthorityError(f"{boundary} chronology differs")
+
+
+def _human_authority_manifest(
+    *,
+    primary_reviewers: Sequence[str],
+    secondary_reviewers: Sequence[str],
+    adjudicators: Sequence[str],
+    release_owners: Sequence[str],
+) -> list[dict[str, object]]:
+    by_identity: dict[str, set[str]] = {}
+    inventories = (
+        (HumanAuthorityRole.PRIMARY, primary_reviewers),
+        (HumanAuthorityRole.SECONDARY, secondary_reviewers),
+        (HumanAuthorityRole.ADJUDICATOR, adjudicators),
+        (HumanAuthorityRole.RELEASE_OWNER, release_owners),
+    )
+    for role, identities in inventories:
+        checked = _strings(identities, f"authorised_{role.value.lower()}_digests")
+        for identity in checked:
+            by_identity.setdefault(_digest(identity, "human identity"), set()).add(
+                role.value
+            )
+    minimum_primary = int(
+        INCREMENT_8_READINESS.evaluation_plan["minimum_authorised_primary_reviewers"]
+    )
+    minimum_adjudicators = int(
+        INCREMENT_8_READINESS.evaluation_plan["minimum_authorised_adjudicators"]
+    )
+    if len(set(primary_reviewers)) < minimum_primary:
+        raise EvaluationAuthorityError("authorised primary reviewer minimum differs")
+    if len(set(adjudicators)) < minimum_adjudicators:
+        raise EvaluationAuthorityError("authorised adjudicator minimum differs")
+    return [
+        {
+            "identity_digest": identity,
+            "human": True,
+            "roles": sorted(roles),
+        }
+        for identity, roles in sorted(by_identity.items())
+    ]
+
+
+def _authorised_identities(
+    plan: EvaluationPlan, role: HumanAuthorityRole
+) -> frozenset[str]:
+    manifest = plan.payload.get("authorised_human_manifest")
+    if not isinstance(manifest, list) or not manifest:
+        raise EvaluationAuthorityError("authorised human manifest differs")
+    result: set[str] = set()
+    previous = ""
+    for entry in manifest:
+        if not isinstance(entry, dict) or set(entry) != {
+            "identity_digest",
+            "human",
+            "roles",
+        }:
+            raise EvaluationAuthorityError("authorised human manifest differs")
+        identity = _digest(entry["identity_digest"], "human identity")
+        if identity <= previous or entry["human"] is not True:
+            raise EvaluationAuthorityError("authorised human manifest differs")
+        previous = identity
+        roles = _strings(entry["roles"], "human roles")  # type: ignore[arg-type]
+        if any(
+            item not in {candidate.value for candidate in HumanAuthorityRole}
+            for item in roles
+        ):
+            raise EvaluationAuthorityError("authorised human role differs")
+        if role.value in roles:
+            result.add(identity)
+    return frozenset(result)
+
+
+def _membership_facts(value: Mapping[str, object]) -> dict[str, object]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "case_metadata",
+        "source_evidence",
+        "fixture",
+        "expected",
+    }:
+        raise EvaluationAuthorityError("membership_facts fields differ")
+    case_metadata = value["case_metadata"]
+    source_evidence = value["source_evidence"]
+    fixture = value["fixture"]
+    expected = value["expected"]
+    if not all(
+        isinstance(item, Mapping)
+        for item in (case_metadata, source_evidence, fixture, expected)
+    ):
+        raise EvaluationAuthorityError("membership_facts values must be objects")
+    if set(case_metadata) != {"geography", "language", "urgency"}:
+        raise EvaluationAuthorityError("case_metadata fields differ")
+    if set(source_evidence) != {"distinct_domain_count"}:
+        raise EvaluationAuthorityError("source_evidence fields differ")
+    if set(fixture) != {"injected_failure_count"}:
+        raise EvaluationAuthorityError("fixture fields differ")
+    if set(expected) != {"candidate_outcome", "transition_outcome"}:
+        raise EvaluationAuthorityError("expected fields differ")
+    domains = source_evidence["distinct_domain_count"]
+    failures = fixture["injected_failure_count"]
+    if any(
+        isinstance(item, bool) or not isinstance(item, int) or item < 0
+        for item in (domains, failures)
+    ):
+        raise EvaluationAuthorityError(
+            "membership counts must be non-negative integers"
+        )
+    return {
+        "case_metadata": {
+            "geography": _token(case_metadata["geography"], "geography"),
+            "language": _token(case_metadata["language"], "language"),
+            "urgency": _token(case_metadata["urgency"], "urgency"),
+        },
+        "source_evidence": {"distinct_domain_count": domains},
+        "fixture": {"injected_failure_count": failures},
+        "expected": {
+            "candidate_outcome": _token(
+                expected["candidate_outcome"], "candidate_outcome"
+            ),
+            "transition_outcome": _token(
+                expected["transition_outcome"], "transition_outcome"
+            ),
+        },
+    }
+
+
+def _fact(facts: Mapping[str, object], dotted: str) -> object:
+    current: object = facts
+    for component in dotted.split("."):
+        if not isinstance(current, Mapping) or component not in current:
+            raise EvaluationAuthorityError("membership rule field is absent")
+        current = current[component]
+    return current
+
+
+def _matches(rule: Mapping[str, object], facts: Mapping[str, object]) -> bool:
+    actual = _fact(facts, str(rule["field"]))
+    if rule["operator"] == "EQ":
+        return actual == rule["value"]
+    if rule["operator"] == "GTE":
+        return (
+            isinstance(actual, int)
+            and not isinstance(actual, bool)
+            and actual >= rule["value"]
+        )  # type: ignore[operator]
+    raise EvaluationAuthorityError("membership rule operator differs")
+
+
+def _memberships(
+    facts: Mapping[str, object],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    plan = INCREMENT_8_READINESS.evaluation_plan
+    slices = tuple(
+        sorted(
+            str(item["slice_id"])
+            for item in plan["required_slice_manifest"]  # type: ignore[union-attr]
+            if _matches(item["membership_rule"], facts)  # type: ignore[index]
+        )
+    )
+    strata = tuple(
+        sorted(
+            str(item["stratum_id"])
+            for item in plan["case_strata_manifest"]  # type: ignore[union-attr]
+            if _matches(item["membership_rule"], facts)  # type: ignore[index]
+        )
+    )
+    return slices, strata
+
+
+def _verified_metric_report(
+    raw: bytes, run: EvaluationRun
+) -> tuple[Mapping[str, object], str, Mapping[str, str]]:
+    if not isinstance(raw, bytes):
+        raise EvaluationAuthorityError("Metric Report must be canonical bytes")
+    try:
+        document = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise EvaluationAuthorityError("Metric Report is not canonical JSON") from exc
+    if canonical_json_bytes(document) != raw or not isinstance(document, dict):
+        raise EvaluationAuthorityError("Metric Report is not canonical JSON")
+    if (
+        set(document) != {"schema_version", "payload"}
+        or document["schema_version"] != "newsroom.increment8.metric-report.v1"
+    ):
+        raise EvaluationAuthorityError("Metric Report envelope differs")
+    payload = document["payload"]
+    required = {
+        "run_id",
+        "run_digest",
+        "metric_status",
+        "slice_status",
+        "zero_tolerance_status",
+        "overall_status",
+        "production_activation_authorised",
+        "live_shadow_execution_authorised",
+    }
+    if not isinstance(payload, dict) or not required <= set(payload):
+        raise EvaluationAuthorityError("Metric Report fields differ")
+    if payload["run_id"] != run.run_id or payload["run_digest"] != run.digest:
+        raise EvaluationAuthorityError("Metric Report Run binding differs")
+    allowed_statuses = {"PASS", "FAIL", "NOT_EVALUATED"}
+    summary: dict[str, str] = {}
+    for field in (
+        "metric_status",
+        "slice_status",
+        "zero_tolerance_status",
+        "overall_status",
+    ):
+        value = payload[field]
+        if value not in allowed_statuses:
+            raise EvaluationAuthorityError("Metric Report status differs")
+        summary[field] = str(value)
+    if payload["overall_status"] == "PASS" and any(
+        payload[field] != "PASS"
+        for field in ("metric_status", "slice_status", "zero_tolerance_status")
+    ):
+        raise EvaluationAuthorityError("Metric Report PASS is internally inconsistent")
+    if (
+        payload["production_activation_authorised"] is not False
+        or payload["live_shadow_execution_authorised"] is not False
+    ):
+        raise EvaluationAuthorityError("Metric Report authority boundary differs")
+    return MappingProxyType(document), digest_bytes(raw), MappingProxyType(summary)
 
 
 def _thaw(value: object) -> object:
@@ -245,8 +483,21 @@ class ReleaseEvidenceDecision(_Record):
 
 
 def build_evaluation_plan(
-    *, approved_by_digest: str, approved_at: str, component_manifest_digest: str
+    *,
+    approved_by_digest: str,
+    approved_at: str,
+    component_manifest_digest: str,
+    authorised_primary_reviewer_digests: Sequence[str],
+    authorised_secondary_reviewer_digests: Sequence[str],
+    authorised_adjudicator_digests: Sequence[str],
+    authorised_release_owner_digests: Sequence[str],
 ) -> EvaluationPlan:
+    human_manifest = _human_authority_manifest(
+        primary_reviewers=authorised_primary_reviewer_digests,
+        secondary_reviewers=authorised_secondary_reviewer_digests,
+        adjudicators=authorised_adjudicator_digests,
+        release_owners=authorised_release_owner_digests,
+    )
     payload = {
         "readiness_digest": INCREMENT_8_READINESS_DIGEST,
         "plan_definition": _thaw(INCREMENT_8_READINESS.evaluation_plan),
@@ -255,6 +506,7 @@ def build_evaluation_plan(
         ),
         "approved_by_digest": _digest(approved_by_digest, "approved_by_digest"),
         "approved_at": _timestamp(approved_at, "approved_at"),
+        "authorised_human_manifest": human_manifest,
         "qualification_allowed": True,
         "calibration_may_qualify_selected_values": False,
         "production_activation_authorised": False,
@@ -273,6 +525,11 @@ def freeze_epoch(
 ) -> EvaluationEpoch:
     if not isinstance(plan, EvaluationPlan):
         raise EvaluationAuthorityError("epoch requires a typed plan")
+    reparsed = EvaluationPlan.from_canonical_bytes(plan.canonical_bytes)
+    if reparsed != plan:
+        raise EvaluationAuthorityError("epoch Plan differs")
+    _not_after(plan.payload["approved_at"], cutoff_at, boundary="Plan to Epoch cutoff")
+    _not_after(cutoff_at, opened_at, boundary="Epoch cutoff to open")
     payload = {
         "plan_id": plan.plan_id,
         "plan_digest": plan.digest,
@@ -297,6 +554,10 @@ def open_run(
 ) -> EvaluationRun:
     if not isinstance(epoch, EvaluationEpoch) or not isinstance(kind, RunKind):
         raise EvaluationAuthorityError("run requires typed epoch and kind")
+    reparsed = EvaluationEpoch.from_canonical_bytes(epoch.canonical_bytes)
+    if reparsed != epoch:
+        raise EvaluationAuthorityError("run Epoch differs")
+    _not_after(epoch.payload["opened_at"], started_at, boundary="Epoch to Run")
     payload = {
         "epoch_id": epoch.epoch_id,
         "epoch_digest": epoch.digest,
@@ -313,7 +574,7 @@ def build_case(
     run: EvaluationRun,
     input_manifest_digest: str,
     cutoff_at: str,
-    required_slices: Sequence[str],
+    membership_facts: Mapping[str, object],
     rights_status: RightsStatus,
     prospective: bool,
     launch_blocker: bool = False,
@@ -337,13 +598,18 @@ def build_case(
     ):
         if not isinstance(value, bool):
             raise EvaluationAuthorityError(f"{name} must be boolean")
+    facts = _membership_facts(membership_facts)
+    slices, strata = _memberships(facts)
+    _not_after(run.payload["started_at"], cutoff_at, boundary="Run to Case cutoff")
     payload = {
         "run_id": run.run_id,
         "input_manifest_digest": _digest(
             input_manifest_digest, "input_manifest_digest"
         ),
         "cutoff_at": _timestamp(cutoff_at, "cutoff_at"),
-        "required_slices": list(_strings(required_slices, "required_slices")),
+        "membership_facts": facts,
+        "required_slices": list(slices),
+        "case_strata": list(strata),
         "rights_status": rights_status.value,
         "prospective": prospective,
         "launch_blocker": launch_blocker,
@@ -368,6 +634,7 @@ def build_review_label(
         raise EvaluationAuthorityError("an unreviewable Case cannot be labelled")
     if not isinstance(blinded, bool):
         raise EvaluationAuthorityError("blinded must be boolean")
+    _not_after(case.payload["cutoff_at"], recorded_at, boundary="Case to label")
     payload = {
         "case_id": case.case_id,
         "case_digest": case.digest,
@@ -425,6 +692,12 @@ def build_adjudication(
         secondary.payload["reviewer_identity_digest"],
     }:
         raise EvaluationAuthorityError("adjudicator must be independent")
+    _not_after(
+        primary.payload["recorded_at"], decided_at, boundary="label to adjudication"
+    )
+    _not_after(
+        secondary.payload["recorded_at"], decided_at, boundary="label to adjudication"
+    )
     payload = {
         "case_id": case.case_id,
         "primary_label_digest": primary.digest,
@@ -439,58 +712,45 @@ def build_adjudication(
 def build_release_decision(
     *,
     run: EvaluationRun,
-    report_digest: str,
+    report_canonical_bytes: bytes,
+    evidence_manifest_digest: str,
     verdict: ReleaseVerdict,
     owner_identity_digest: str,
     decided_at: str,
-    metrics_passed: bool,
-    required_slices_passed: bool,
-    zero_tolerance_failure_count: int,
     early_stopped: bool = False,
 ) -> ReleaseEvidenceDecision:
     if not isinstance(run, EvaluationRun) or not isinstance(verdict, ReleaseVerdict):
         raise EvaluationAuthorityError("decision requires typed run and verdict")
-    if (
-        isinstance(zero_tolerance_failure_count, bool)
-        or not isinstance(zero_tolerance_failure_count, int)
-        or zero_tolerance_failure_count < 0
-    ):
-        raise EvaluationAuthorityError(
-            "zero_tolerance_failure_count must be non-negative"
-        )
-    if not all(
-        isinstance(value, bool)
-        for value in (metrics_passed, required_slices_passed, early_stopped)
-    ):
-        raise EvaluationAuthorityError("decision gates must be boolean")
+    if not isinstance(early_stopped, bool):
+        raise EvaluationAuthorityError("early_stopped must be boolean")
+    report, report_digest, report_summary = _verified_metric_report(
+        report_canonical_bytes, run
+    )
+    report_passed = report_summary["overall_status"] == "PASS"
     if verdict is ReleaseVerdict.PASS and (
         run.payload["run_kind"] != RunKind.QUALIFICATION.value
         or early_stopped
-        or not metrics_passed
-        or not required_slices_passed
-        or zero_tolerance_failure_count != 0
+        or not report_passed
     ):
-        raise EvaluationAuthorityError(
-            "PASS differs from the pre-registered release rule"
-        )
-    if verdict is ReleaseVerdict.PASS and not corrective_gate_authorised(
-        CorrectiveGate.QUALIFICATION_EVIDENCE_ACCEPTANCE
-    ):
-        raise EvaluationAuthorityError(
-            "qualification evidence acceptance is blocked by corrective readiness"
-        )
+        raise EvaluationAuthorityError("PASS differs from the retained Metric Report")
     payload = {
         "run_id": run.run_id,
         "run_digest": run.digest,
-        "report_digest": _digest(report_digest, "report_digest"),
+        "report_digest": report_digest,
+        "metric_report": _thaw(report),
+        "evidence_manifest_digest": _digest(
+            evidence_manifest_digest, "evidence_manifest_digest"
+        ),
         "verdict": verdict.value,
         "owner_identity_digest": _digest(
             owner_identity_digest, "owner_identity_digest"
         ),
         "decided_at": _timestamp(decided_at, "decided_at"),
-        "metrics_passed": metrics_passed,
-        "required_slices_passed": required_slices_passed,
-        "zero_tolerance_failure_count": zero_tolerance_failure_count,
+        "metrics_passed": report_summary["metric_status"] == "PASS",
+        "required_slices_passed": report_summary["slice_status"] == "PASS",
+        "zero_tolerance_failure_count": 0
+        if report_summary["zero_tolerance_status"] == "PASS"
+        else 1,
         "early_stopped": early_stopped,
         "production_activation_authorised": False,
     }
@@ -503,19 +763,108 @@ class EvaluationAuthority:
     def __init__(self, connection: sqlite3.Connection) -> None:
         if not isinstance(connection, sqlite3.Connection):
             raise EvaluationAuthorityError("connection must be sqlite3.Connection")
-        connection.execute("PRAGMA foreign_keys=ON")
+        if connection.in_transaction:
+            raise EvaluationAuthorityError("caller-owned transaction is active")
+        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+            raise EvaluationAuthorityError("foreign keys must already be active")
         if connection.execute("PRAGMA user_version").fetchone()[0] < 30:
             raise EvaluationAuthorityError("evaluation authority requires schema v30")
         self._connection = connection
 
-    def _insert(self, sql: str, values: tuple[object, ...]) -> None:
+    def _require_connection_ready(self) -> None:
+        if self._connection.in_transaction:
+            raise EvaluationAuthorityError("caller-owned transaction is active")
+        if self._connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+            raise EvaluationAuthorityError("foreign keys must remain active")
+
+    def _write(self, action: Callable[[], None]) -> None:
+        self._require_connection_ready()
         try:
-            with self._connection:
-                self._connection.execute(sql, values)
+            self._connection.execute("BEGIN IMMEDIATE")
+            action()
+            self._connection.execute("COMMIT")
         except sqlite3.IntegrityError as exc:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
             raise EvaluationAuthorityError(
                 "evaluation authority rejected the record"
             ) from exc
+        except Exception:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+
+    def _insert(self, sql: str, values: tuple[object, ...]) -> None:
+        self._write(lambda: self._connection.execute(sql, values))
+
+    def _plan_for_run(self, run_id: str) -> EvaluationPlan:
+        row = self._connection.execute(
+            "SELECT p.plan_bytes FROM evaluation_plans p "
+            "JOIN evaluation_runs r ON r.plan_id=p.plan_id WHERE r.run_id=?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise EvaluationAuthorityError("Run Plan is absent")
+        return EvaluationPlan.from_canonical_bytes(bytes(row[0]))
+
+    def _run_for_case(self, case_id: str) -> EvaluationRun:
+        row = self._connection.execute(
+            "SELECT r.run_bytes FROM evaluation_runs r "
+            "JOIN evaluation_cases c ON c.run_id=r.run_id WHERE c.case_id=?",
+            (case_id,),
+        ).fetchone()
+        if row is None:
+            raise EvaluationAuthorityError("Case Run is absent")
+        return EvaluationRun.from_canonical_bytes(bytes(row[0]))
+
+    def _require_unsealed(self, run_id: str) -> None:
+        if (
+            self._connection.execute(
+                "SELECT 1 FROM evaluation_release_decisions WHERE run_id=?", (run_id,)
+            ).fetchone()
+            is not None
+        ):
+            raise EvaluationAuthorityError("Run evidence is sealed by its decision")
+
+    def evidence_manifest_digest(self, run_id: str) -> str:
+        self._require_connection_ready()
+        return self._evidence_manifest_digest(run_id)
+
+    def _evidence_manifest_digest(self, run_id: str) -> str:
+        run_row = self._connection.execute(
+            "SELECT run_digest FROM evaluation_runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+        if run_row is None:
+            raise EvaluationAuthorityError("Run is absent")
+        inventory: dict[str, list[str] | str] = {"run_digest": str(run_row[0])}
+        for name, table, digest_column, join in (
+            ("case_digests", "evaluation_cases", "case_digest", "run_id=?"),
+            (
+                "label_digests",
+                "evaluation_labels",
+                "label_digest",
+                "case_id IN (SELECT case_id FROM evaluation_cases WHERE run_id=?)",
+            ),
+            (
+                "adjudication_digests",
+                "evaluation_adjudications",
+                "adjudication_digest",
+                "case_id IN (SELECT case_id FROM evaluation_cases WHERE run_id=?)",
+            ),
+        ):
+            inventory[name] = [
+                str(row[0])
+                for row in self._connection.execute(
+                    f"SELECT {digest_column} FROM {table} WHERE {join} ORDER BY {digest_column}",
+                    (run_id,),
+                )
+            ]
+        return digest_canonical(
+            {
+                "schema_version": "newsroom.increment8.evidence-manifest.v1",
+                "inventory": inventory,
+            }
+        )
 
     @staticmethod
     def _require_record(
@@ -542,6 +891,7 @@ class EvaluationAuthority:
                     "component_manifest_digest",
                     "approved_by_digest",
                     "approved_at",
+                    "authorised_human_manifest",
                     "qualification_allowed",
                     "calibration_may_qualify_selected_values",
                     "production_activation_authorised",
@@ -560,6 +910,23 @@ class EvaluationAuthority:
             or plan.payload["production_activation_authorised"] is not False
         ):
             raise EvaluationAuthorityError("plan authority boundary differs")
+        minimum_primary = int(
+            INCREMENT_8_READINESS.evaluation_plan[
+                "minimum_authorised_primary_reviewers"
+            ]
+        )
+        minimum_adjudicators = int(
+            INCREMENT_8_READINESS.evaluation_plan["minimum_authorised_adjudicators"]
+        )
+        if (
+            len(_authorised_identities(plan, HumanAuthorityRole.PRIMARY))
+            < minimum_primary
+            or len(_authorised_identities(plan, HumanAuthorityRole.ADJUDICATOR))
+            < minimum_adjudicators
+            or not _authorised_identities(plan, HumanAuthorityRole.SECONDARY)
+            or not _authorised_identities(plan, HumanAuthorityRole.RELEASE_OWNER)
+        ):
+            raise EvaluationAuthorityError("authorised human manifest is insufficient")
         self._insert(
             "INSERT INTO evaluation_plans VALUES(?,?,?,?,?,?,?,?)",
             (
@@ -592,7 +959,7 @@ class EvaluationAuthority:
             ),
         )
         plan = self._connection.execute(
-            "SELECT plan_digest FROM evaluation_plans WHERE plan_id=?",
+            "SELECT plan_digest,plan_bytes,approved_at FROM evaluation_plans WHERE plan_id=?",
             (epoch.payload["plan_id"],),
         ).fetchone()
         if (
@@ -601,6 +968,15 @@ class EvaluationAuthority:
             or epoch.payload["frozen"] is not True
         ):
             raise EvaluationAuthorityError("epoch Plan or frozen boundary differs")
+        retained_plan = EvaluationPlan.from_canonical_bytes(bytes(plan[1]))
+        if retained_plan.digest != plan[0]:
+            raise EvaluationAuthorityError("retained Plan identity differs")
+        _not_after(plan[2], epoch.payload["cutoff_at"], boundary="Plan to Epoch cutoff")
+        _not_after(
+            epoch.payload["cutoff_at"],
+            epoch.payload["opened_at"],
+            boundary="Epoch cutoff to open",
+        )
         self._insert(
             "INSERT INTO evaluation_epochs VALUES(?,?,?,?,?,?,?,?)",
             (
@@ -635,6 +1011,24 @@ class EvaluationAuthority:
             or run.payload["production_effect_allowed"] is not False
         ):
             raise EvaluationAuthorityError("run authority boundary differs")
+        epoch_row = self._connection.execute(
+            "SELECT epoch_bytes,epoch_digest,plan_id FROM evaluation_epochs WHERE epoch_id=?",
+            (run.payload["epoch_id"],),
+        ).fetchone()
+        if epoch_row is None:
+            raise EvaluationAuthorityError("Run Epoch is absent")
+        retained_epoch = EvaluationEpoch.from_canonical_bytes(bytes(epoch_row[0]))
+        if (
+            retained_epoch.digest != epoch_row[1]
+            or retained_epoch.digest != run.payload["epoch_digest"]
+            or retained_epoch.payload["plan_id"] != run.payload["plan_id"]
+        ):
+            raise EvaluationAuthorityError("Run Epoch binding differs")
+        _not_after(
+            retained_epoch.payload["opened_at"],
+            run.payload["started_at"],
+            boundary="Epoch to Run",
+        )
         self._insert(
             "INSERT INTO evaluation_runs VALUES(?,?,?,?,?,?,?,?)",
             (
@@ -657,8 +1051,10 @@ class EvaluationAuthority:
                 {
                     "run_id",
                     "input_manifest_digest",
+                    "membership_facts",
                     "cutoff_at",
                     "required_slices",
+                    "case_strata",
                     "rights_status",
                     "prospective",
                     "launch_blocker",
@@ -668,7 +1064,7 @@ class EvaluationAuthority:
             ),
         )
         run = self._connection.execute(
-            "SELECT run_kind FROM evaluation_runs WHERE run_id=?",
+            "SELECT run_kind,run_bytes FROM evaluation_runs WHERE run_id=?",
             (case.payload["run_id"],),
         ).fetchone()
         if run is None:
@@ -680,19 +1076,45 @@ class EvaluationAuthority:
             raise EvaluationAuthorityError("qualification Cases must be prospective")
         if case.payload["rights_status"] not in {item.value for item in RightsStatus}:
             raise EvaluationAuthorityError("Case rights status differs")
-        self._insert(
-            "INSERT INTO evaluation_cases VALUES(?,?,?,?,?,?,?,?)",
-            (
-                case.case_id,
-                case.canonical_bytes,
-                case.digest,
-                case.payload["run_id"],
-                int(case.payload["prospective"]),
-                case.payload["cutoff_at"],
-                case.payload["input_manifest_digest"],
-                case.payload["rights_status"],
-            ),
+        retained_run = EvaluationRun.from_canonical_bytes(bytes(run[1]))
+        _not_after(
+            retained_run.payload["started_at"],
+            case.payload["cutoff_at"],
+            boundary="Run to Case cutoff",
         )
+        facts = _membership_facts(case.payload["membership_facts"])  # type: ignore[arg-type]
+        slices, strata = _memberships(facts)
+        if (
+            tuple(case.payload["required_slices"]) != slices  # type: ignore[arg-type]
+            or tuple(case.payload["case_strata"]) != strata  # type: ignore[arg-type]
+        ):
+            raise EvaluationAuthorityError("Case membership differs from frozen rules")
+
+        def insert_case() -> None:
+            self._require_unsealed(str(case.payload["run_id"]))
+            duplicate = self._connection.execute(
+                "SELECT 1 FROM evaluation_cases WHERE run_id=? AND input_manifest_digest=?",
+                (case.payload["run_id"], case.payload["input_manifest_digest"]),
+            ).fetchone()
+            if duplicate is not None:
+                raise EvaluationAuthorityError(
+                    "Run input manifests must represent distinct events"
+                )
+            self._connection.execute(
+                "INSERT INTO evaluation_cases VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    case.case_id,
+                    case.canonical_bytes,
+                    case.digest,
+                    case.payload["run_id"],
+                    int(case.payload["prospective"]),
+                    case.payload["cutoff_at"],
+                    case.payload["input_manifest_digest"],
+                    case.payload["rights_status"],
+                ),
+            )
+
+        self._write(insert_case)
 
     def record_label(self, label: ReviewLabel) -> None:
         self._require_record(
@@ -711,7 +1133,7 @@ class EvaluationAuthority:
             ),
         )
         case = self._connection.execute(
-            "SELECT case_digest,rights_status FROM evaluation_cases WHERE case_id=?",
+            "SELECT case_digest,rights_status,case_bytes,run_id FROM evaluation_cases WHERE case_id=?",
             (label.payload["case_id"],),
         ).fetchone()
         if case is None or case[0] != label.payload["case_digest"]:
@@ -722,25 +1144,50 @@ class EvaluationAuthority:
             item.value for item in ReviewRole
         } or not isinstance(label.payload["blinded"], bool):
             raise EvaluationAuthorityError("review authority boundary differs")
-        duplicate = self._connection.execute(
-            "SELECT 1 FROM evaluation_labels WHERE case_id=? AND reviewer_identity_digest=?",
-            (label.payload["case_id"], label.payload["reviewer_identity_digest"]),
-        ).fetchone()
-        if duplicate is not None:
-            raise EvaluationAuthorityError("second review must be independent")
-        self._insert(
-            "INSERT INTO evaluation_labels VALUES(?,?,?,?,?,?,?,?)",
-            (
-                label.label_id,
-                label.canonical_bytes,
-                label.digest,
-                label.payload["case_id"],
-                label.payload["reviewer_identity_digest"],
-                label.payload["review_role"],
-                int(label.payload["blinded"]),
-                label.payload["recorded_at"],
-            ),
+        retained_case = EvaluationCase.from_canonical_bytes(bytes(case[2]))
+        _not_after(
+            retained_case.payload["cutoff_at"],
+            label.payload["recorded_at"],
+            boundary="Case to label",
         )
+        plan = self._plan_for_run(str(case[3]))
+        required_role = (
+            HumanAuthorityRole.PRIMARY
+            if label.payload["review_role"] == ReviewRole.PRIMARY.value
+            else HumanAuthorityRole.SECONDARY
+        )
+        if label.payload["reviewer_identity_digest"] not in _authorised_identities(
+            plan, required_role
+        ):
+            raise EvaluationAuthorityError("reviewer is not an authorised human")
+
+        def insert_label() -> None:
+            self._require_unsealed(str(case[3]))
+            duplicate = self._connection.execute(
+                "SELECT reviewer_identity_digest,review_role FROM evaluation_labels WHERE case_id=?",
+                (label.payload["case_id"],),
+            ).fetchall()
+            if any(row[1] == label.payload["review_role"] for row in duplicate):
+                raise EvaluationAuthorityError("a Case may retain one label per role")
+            if any(
+                row[0] == label.payload["reviewer_identity_digest"] for row in duplicate
+            ):
+                raise EvaluationAuthorityError("second review must be independent")
+            self._connection.execute(
+                "INSERT INTO evaluation_labels VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    label.label_id,
+                    label.canonical_bytes,
+                    label.digest,
+                    label.payload["case_id"],
+                    label.payload["reviewer_identity_digest"],
+                    label.payload["review_role"],
+                    int(label.payload["blinded"]),
+                    label.payload["recorded_at"],
+                ),
+            )
+
+        self._write(insert_label)
 
     def record_adjudication(self, adjudication: AdjudicationDecision) -> None:
         self._require_record(
@@ -783,19 +1230,42 @@ class EvaluationAuthority:
             == ReviewLabel.from_canonical_bytes(bytes(secondary[4])).payload["label"]
         ):
             raise EvaluationAuthorityError("adjudication authority boundary differs")
-        self._insert(
-            "INSERT INTO evaluation_adjudications VALUES(?,?,?,?,?,?,?,?)",
-            (
-                adjudication.adjudication_id,
-                adjudication.canonical_bytes,
-                adjudication.digest,
-                adjudication.payload["case_id"],
-                adjudication.payload["primary_label_digest"],
-                adjudication.payload["secondary_label_digest"],
-                adjudication.payload["adjudicator_identity_digest"],
-                adjudication.payload["decided_at"],
-            ),
+        primary_label = ReviewLabel.from_canonical_bytes(bytes(primary[4]))
+        secondary_label = ReviewLabel.from_canonical_bytes(bytes(secondary[4]))
+        _not_after(
+            primary_label.payload["recorded_at"],
+            adjudication.payload["decided_at"],
+            boundary="label to adjudication",
         )
+        _not_after(
+            secondary_label.payload["recorded_at"],
+            adjudication.payload["decided_at"],
+            boundary="label to adjudication",
+        )
+        run = self._run_for_case(str(adjudication.payload["case_id"]))
+        plan = self._plan_for_run(run.run_id)
+        if adjudication.payload[
+            "adjudicator_identity_digest"
+        ] not in _authorised_identities(plan, HumanAuthorityRole.ADJUDICATOR):
+            raise EvaluationAuthorityError("adjudicator is not an authorised human")
+
+        def insert_adjudication() -> None:
+            self._require_unsealed(run.run_id)
+            self._connection.execute(
+                "INSERT INTO evaluation_adjudications VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    adjudication.adjudication_id,
+                    adjudication.canonical_bytes,
+                    adjudication.digest,
+                    adjudication.payload["case_id"],
+                    adjudication.payload["primary_label_digest"],
+                    adjudication.payload["secondary_label_digest"],
+                    adjudication.payload["adjudicator_identity_digest"],
+                    adjudication.payload["decided_at"],
+                ),
+            )
+
+        self._write(insert_adjudication)
 
     def decide_release(self, decision: ReleaseEvidenceDecision) -> None:
         self._require_record(
@@ -806,6 +1276,8 @@ class EvaluationAuthority:
                     "run_id",
                     "run_digest",
                     "report_digest",
+                    "metric_report",
+                    "evidence_manifest_digest",
                     "verdict",
                     "owner_identity_digest",
                     "decided_at",
@@ -829,43 +1301,102 @@ class EvaluationAuthority:
             item.value for item in ReleaseVerdict
         }:
             raise EvaluationAuthorityError("release authority boundary differs")
+        retained_run_row = self._connection.execute(
+            "SELECT run_bytes FROM evaluation_runs WHERE run_id=?",
+            (decision.payload["run_id"],),
+        ).fetchone()
+        if retained_run_row is None:
+            raise EvaluationAuthorityError("decision Run is absent")
+        retained_run = EvaluationRun.from_canonical_bytes(bytes(retained_run_row[0]))
+        report_raw = canonical_json_bytes(decision.payload["metric_report"])
+        _, report_digest, report_summary = _verified_metric_report(
+            report_raw, retained_run
+        )
+        if report_digest != decision.payload["report_digest"]:
+            raise EvaluationAuthorityError("decision Metric Report digest differs")
+        current_manifest = self.evidence_manifest_digest(retained_run.run_id)
+        if current_manifest != decision.payload["evidence_manifest_digest"]:
+            raise EvaluationAuthorityError("decision evidence manifest differs")
+        plan = self._plan_for_run(retained_run.run_id)
+        if decision.payload["owner_identity_digest"] not in _authorised_identities(
+            plan, HumanAuthorityRole.RELEASE_OWNER
+        ):
+            raise EvaluationAuthorityError("release owner is not an authorised human")
+        latest_evidence_at = self._latest_evidence_at(retained_run.run_id)
+        _not_after(
+            latest_evidence_at,
+            decision.payload["decided_at"],
+            boundary="evidence to release decision",
+        )
         if decision.payload["verdict"] == ReleaseVerdict.PASS.value:
-            if not corrective_gate_authorised(
-                CorrectiveGate.QUALIFICATION_EVIDENCE_ACCEPTANCE
-            ):
-                raise EvaluationAuthorityError(
-                    "qualification evidence acceptance is blocked by corrective readiness"
-                )
             if (
                 run[0] != RunKind.QUALIFICATION.value
-                or decision.payload["metrics_passed"] is not True
-                or decision.payload["required_slices_passed"] is not True
-                or decision.payload["zero_tolerance_failure_count"] != 0
+                or report_summary["overall_status"] != "PASS"
+                or report_summary["metric_status"] != "PASS"
+                or report_summary["slice_status"] != "PASS"
+                or report_summary["zero_tolerance_status"] != "PASS"
                 or decision.payload["early_stopped"] is not False
             ):
                 raise EvaluationAuthorityError(
                     "PASS differs from the pre-registered release rule"
                 )
             self._require_pass_exposure(str(decision.payload["run_id"]))
-        self._insert(
-            "INSERT INTO evaluation_release_decisions VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (
-                decision.decision_id,
-                decision.canonical_bytes,
-                decision.digest,
-                decision.payload["run_id"],
-                decision.payload["report_digest"],
-                decision.payload["verdict"],
-                decision.payload["owner_identity_digest"],
-                decision.payload["decided_at"],
-                int(decision.payload["early_stopped"]),
-                0,
-            ),
+            if not corrective_gate_authorised(
+                CorrectiveGate.QUALIFICATION_EVIDENCE_ACCEPTANCE
+            ):
+                raise EvaluationAuthorityError(
+                    "qualification evidence acceptance is blocked by corrective readiness"
+                )
+
+        def insert_decision() -> None:
+            if (
+                self._evidence_manifest_digest(retained_run.run_id)
+                != decision.payload["evidence_manifest_digest"]
+            ):
+                raise EvaluationAuthorityError(
+                    "decision evidence changed before sealing"
+                )
+            self._connection.execute(
+                "INSERT INTO evaluation_release_decisions VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    decision.decision_id,
+                    decision.canonical_bytes,
+                    decision.digest,
+                    decision.payload["run_id"],
+                    decision.payload["report_digest"],
+                    decision.payload["verdict"],
+                    decision.payload["owner_identity_digest"],
+                    decision.payload["decided_at"],
+                    int(decision.payload["early_stopped"]),
+                    0,
+                ),
+            )
+
+        self._write(insert_decision)
+
+    def _latest_evidence_at(self, run_id: str) -> str:
+        values = [
+            str(row[0])
+            for query in (
+                "SELECT started_at FROM evaluation_runs WHERE run_id=?",
+                "SELECT cutoff_at FROM evaluation_cases WHERE run_id=?",
+                "SELECT recorded_at FROM evaluation_labels WHERE case_id IN "
+                "(SELECT case_id FROM evaluation_cases WHERE run_id=?)",
+                "SELECT decided_at FROM evaluation_adjudications WHERE case_id IN "
+                "(SELECT case_id FROM evaluation_cases WHERE run_id=?)",
+            )
+            for row in self._connection.execute(query, (run_id,))
+        ]
+        if not values:
+            raise EvaluationAuthorityError("release evidence inventory is empty")
+        return max(
+            values, key=lambda item: _parse_timestamp(item, "evidence timestamp")
         )
 
     def _require_pass_exposure(self, run_id: str) -> None:
         rows = self._connection.execute(
-            "SELECT case_id,case_bytes,rights_status FROM evaluation_cases WHERE run_id=? ORDER BY case_id",
+            "SELECT case_id,case_bytes,case_digest,rights_status,input_manifest_digest "
+            "FROM evaluation_cases WHERE run_id=? ORDER BY case_id",
             (run_id,),
         ).fetchall()
         exposure = INCREMENT_8_READINESS.evaluation_plan["qualification_exposure"]
@@ -873,15 +1404,42 @@ class EvaluationAuthority:
         if len(rows) < minimum:
             raise EvaluationAuthorityError("qualification exposure is insufficient")
 
-        slice_counts: dict[str, int] = {}
+        slice_manifest = {
+            str(item["slice_id"]): int(item["minimum_completed_cases"])
+            for item in INCREMENT_8_READINESS.evaluation_plan["required_slice_manifest"]  # type: ignore[union-attr]
+        }
+        stratum_manifest = {
+            str(item["stratum_id"]): int(item["minimum_completed_cases"])
+            for item in INCREMENT_8_READINESS.evaluation_plan["case_strata_manifest"]  # type: ignore[union-attr]
+        }
+        slice_cases: dict[str, set[str]] = {name: set() for name in slice_manifest}
+        stratum_cases: dict[str, set[str]] = {name: set() for name in stratum_manifest}
         required_secondary: set[str] = set()
         reviewable: set[str] = set()
-        for case_id, raw, rights_status in rows:
+        input_manifests: set[str] = set()
+        for case_id, raw, case_digest, rights_status, input_manifest_digest in rows:
             case = EvaluationCase.from_canonical_bytes(bytes(raw))
-            if case.case_id != case_id or case.payload["run_id"] != run_id:
+            facts = _membership_facts(case.payload["membership_facts"])  # type: ignore[arg-type]
+            expected_slices, expected_strata = _memberships(facts)
+            if (
+                case.case_id != case_id
+                or case.digest != case_digest
+                or case.payload["run_id"] != run_id
+                or case.payload["rights_status"] != rights_status
+                or case.payload["input_manifest_digest"] != input_manifest_digest
+                or tuple(case.payload["required_slices"]) != expected_slices  # type: ignore[arg-type]
+                or tuple(case.payload["case_strata"]) != expected_strata  # type: ignore[arg-type]
+            ):
                 raise EvaluationAuthorityError("retained Case identity differs")
-            for slice_name in case.payload["required_slices"]:  # type: ignore[union-attr]
-                slice_counts[str(slice_name)] = slice_counts.get(str(slice_name), 0) + 1
+            if input_manifest_digest in input_manifests:
+                raise EvaluationAuthorityError(
+                    "qualification exposure repeats an event manifest"
+                )
+            input_manifests.add(str(input_manifest_digest))
+            for slice_name in expected_slices:
+                slice_cases[slice_name].add(str(case_digest))
+            for stratum_name in expected_strata:
+                stratum_cases[stratum_name].add(str(case_digest))
             if rights_status == RightsStatus.REVIEWABLE.value:
                 reviewable.add(str(case_id))
             if any(
@@ -890,14 +1448,26 @@ class EvaluationAuthority:
             ):
                 required_secondary.add(str(case_id))
 
-        minimum_slices = int(exposure["minimum_completed_required_slices"])  # type: ignore[index]
-        minimum_per_slice = int(
-            INCREMENT_8_READINESS.evaluation_plan["required_slice_minimum_cases"]
-        )
-        if len(slice_counts) < minimum_slices or any(
-            count < minimum_per_slice for count in slice_counts.values()
+        if any(
+            len(slice_cases[name]) < minimum_cases
+            for name, minimum_cases in slice_manifest.items()
         ):
             raise EvaluationAuthorityError("required-slice exposure is insufficient")
+        stratum_exposure = exposure
+        expected_stratum_minima = {
+            "NEGATIVE": int(stratum_exposure["minimum_negative_cases"]),  # type: ignore[index]
+            "UNCHANGED": int(stratum_exposure["minimum_no_change_cases"]),  # type: ignore[index]
+            "FAILURE_HEAVY": int(
+                stratum_exposure["minimum_failure_heavy_cases"]  # type: ignore[index]
+            ),
+        }
+        if expected_stratum_minima != stratum_manifest or any(
+            len(stratum_cases[name]) < minimum_cases
+            for name, minimum_cases in stratum_manifest.items()
+        ):
+            raise EvaluationAuthorityError("Case-stratum exposure is insufficient")
+        if not reviewable:
+            raise EvaluationAuthorityError("reviewable exposure is empty")
 
         labels = self._connection.execute(
             "SELECT case_id,label_bytes,review_role FROM evaluation_labels "
@@ -908,9 +1478,14 @@ class EvaluationAuthority:
         secondary: dict[str, ReviewLabel] = {}
         for case_id, raw, role in labels:
             label = ReviewLabel.from_canonical_bytes(bytes(raw))
-            if label.payload["case_id"] != case_id:
+            if label.payload["case_id"] != case_id or role not in {
+                ReviewRole.PRIMARY.value,
+                ReviewRole.SECONDARY.value,
+            }:
                 raise EvaluationAuthorityError("retained label identity differs")
             target = primary if role == ReviewRole.PRIMARY.value else secondary
+            if str(case_id) in target:
+                raise EvaluationAuthorityError("duplicate same-role label is retained")
             target[str(case_id)] = label
         if set(primary) != reviewable:
             raise EvaluationAuthorityError("primary review exposure is incomplete")
@@ -920,12 +1495,36 @@ class EvaluationAuthority:
                 "ordinary_independent_second_review_percent"
             ]
         )
-        ordinary_minimum = (len(reviewable) * second_percent + 99) // 100
-        if len(secondary) < ordinary_minimum or not required_secondary <= set(
+        ordinary = reviewable - required_secondary
+        ordinary_secondary = ordinary.intersection(secondary)
+        ordinary_minimum = (len(ordinary) * second_percent + 99) // 100
+        if len(ordinary_secondary) < ordinary_minimum or not required_secondary <= set(
             secondary
         ):
             raise EvaluationAuthorityError(
                 "independent second-review exposure is incomplete"
+            )
+        plan = self._plan_for_run(run_id)
+        used_primary = {
+            str(item.payload["reviewer_identity_digest"]) for item in primary.values()
+        }
+        minimum_primary = int(
+            INCREMENT_8_READINESS.evaluation_plan[
+                "minimum_authorised_primary_reviewers"
+            ]
+        )
+        if (
+            len(used_primary) < minimum_primary
+            or not used_primary
+            <= _authorised_identities(plan, HumanAuthorityRole.PRIMARY)
+            or any(
+                item.payload["reviewer_identity_digest"]
+                not in _authorised_identities(plan, HumanAuthorityRole.SECONDARY)
+                for item in secondary.values()
+            )
+        ):
+            raise EvaluationAuthorityError(
+                "authorised reviewer exposure is insufficient"
             )
         adjudicated = {
             str(row[0])
@@ -972,6 +1571,7 @@ __all__ = [
     "EvaluationEpoch",
     "EvaluationPlan",
     "EvaluationRun",
+    "HumanAuthorityRole",
     "ReleaseEvidenceDecision",
     "ReleaseVerdict",
     "ReviewLabel",

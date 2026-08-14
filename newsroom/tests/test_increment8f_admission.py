@@ -14,7 +14,6 @@ from newsroom.increment8.admission import (
     build_qualification_packet,
 )
 from newsroom.increment8.evaluation import (
-    EvaluationAuthorityError,
     ReleaseVerdict,
     build_release_decision,
 )
@@ -126,9 +125,9 @@ def _packet(tmp_path, **changes):
     connection.close()
     report = _report()
     release = build_release_decision(
-        run=_run(), report_digest=report.digest, verdict=ReleaseVerdict.PASS,
-        owner_identity_digest=_D, decided_at=_AT, metrics_passed=True,
-        required_slices_passed=True, zero_tolerance_failure_count=0,
+        run=_run(), report_canonical_bytes=report.canonical_bytes,
+        evidence_manifest_digest=_D, verdict=ReleaseVerdict.PASS,
+        owner_identity_digest=_D, decided_at=_AT,
     )
     capacity = _capacity()
     anchor = _handoff_anchor(
@@ -155,7 +154,7 @@ def _packet(tmp_path, **changes):
 
 
 def test_complete_packet_binds_every_gate_and_admits_only_fixture_operation(tmp_path) -> None:
-    with pytest.raises(EvaluationAuthorityError, match="corrective readiness"):
+    with pytest.raises(AdmissionError, match="corrective readiness"):
         _packet(tmp_path)
 
 

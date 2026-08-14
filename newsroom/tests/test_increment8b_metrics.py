@@ -36,6 +36,13 @@ def _run(kind: RunKind = RunKind.QUALIFICATION):
         component_manifest_digest=_D,
         approved_by_digest="sha256:" + "2" * 64,
         approved_at=_AT,
+        authorised_primary_reviewer_digests=(
+            "sha256:" + "2" * 64,
+            "sha256:" + "6" * 64,
+        ),
+        authorised_secondary_reviewer_digests=("sha256:" + "7" * 64,),
+        authorised_adjudicator_digests=("sha256:" + "8" * 64,),
+        authorised_release_owner_digests=("sha256:" + "9" * 64,),
     )
     epoch = freeze_epoch(
         plan=plan,
