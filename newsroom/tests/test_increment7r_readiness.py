@@ -186,6 +186,11 @@ def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPa
     checksum = "sha256:" + "a" * 64
     monkeypatch.setattr(authority_migrations, "EXPECTED_MIGRATION_HISTORY", authority_migrations.EXPECTED_MIGRATION_HISTORY + ((26, "planned_agenda_authority_v26", checksum),))
     monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 26)
+    monkeypatch.setattr(
+        authority_migrations,
+        "EXPECTED_SCHEMA_FINGERPRINT",
+        "sha256:" + "b" * 64,
+    )
     assert validate_interface_inventory(INCREMENT_7_READINESS) == ()
     monkeypatch.setattr(authority_migrations, "EXPECTED_MIGRATION_HISTORY", authority_migrations.EXPECTED_MIGRATION_HISTORY[:-1] + ((26, "wrong_v26", checksum),))
     assert any("reserved v26 name differs" in finding for finding in validate_interface_inventory(INCREMENT_7_READINESS))
