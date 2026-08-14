@@ -435,6 +435,13 @@ def test_authority_persists_exact_replay_restart_and_rejects_tamper(tmp_path) ->
         )
         == decision
     )
+    with pytest.raises(CoverageAuthorityError, match="Search evidence"):
+        authority.record(
+            command.canonical_bytes,
+            search_evidence=(),
+            provider_qualifications=providers,
+            locality_qualification=locality,
+        )
     port = authority.read_port()
     assert type(port) is CoverageAuditReadPort
     assert port.audit(command.audit.audit_id) == command.audit

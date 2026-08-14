@@ -940,13 +940,35 @@ class CoverageAuditAuthority(CoverageAuditReadPort):
         self._connection.execute("BEGIN IMMEDIATE")
         try:
             replay = self._connection.execute(
-                "SELECT command_bytes,decision_id FROM coverage_gap_decisions "
+                "SELECT command_bytes,decision_id,previous_decision_digest "
+                "FROM coverage_gap_decisions "
                 "WHERE command_id=? OR request_id=? OR idempotency_key=?",
                 (command.command_id, command.request_id, command.idempotency_key),
             ).fetchall()
             if replay:
                 if len(replay) != 1 or bytes(replay[0][0]) != raw:
                     raise CoverageAuthorityError("Coverage command identity collision")
+                predecessor = None
+                if replay[0][2] is not None:
+                    prior = self._connection.execute(
+                        "SELECT decision_bytes FROM coverage_gap_decisions "
+                        "WHERE decision_digest=?",
+                        (replay[0][2],),
+                    ).fetchone()
+                    if prior is None:
+                        raise CoverageAuthorityError(
+                            "Coverage Decision predecessor is absent"
+                        )
+                    predecessor = CoverageGapDecision.from_canonical_bytes(
+                        bytes(prior[0])
+                    )
+                validate_coverage_command(
+                    command,
+                    search_evidence=search_evidence,
+                    provider_qualifications=provider_qualifications,
+                    locality_qualification=locality_qualification,
+                    previous_decision=predecessor,
+                )
                 decision = self._decision(str(replay[0][1]))[0]
                 self._connection.execute("COMMIT")
                 return decision
