@@ -142,6 +142,8 @@ def _result(attempt: SearchAttempt, outcome: SearchOutcome) -> SearchResultRefer
         _id(5),
         outcome.outcome_id,
         outcome.digest,
+        attempt.request_id,
+        attempt.request_digest,
         attempt.provider_id,
         attempt.provider_configuration_digest,
         "provider-result-1",

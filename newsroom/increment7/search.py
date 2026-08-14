@@ -892,6 +892,8 @@ _RESULT_FIELDS = (
     "result_reference_id",
     "outcome_id",
     "outcome_digest",
+    "request_id",
+    "request_digest",
     "provider_id",
     "provider_configuration_digest",
     "provider_result_id",
@@ -916,6 +918,8 @@ class SearchResultReference(_NoEffect):
     result_reference_id: str
     outcome_id: str
     outcome_digest: str
+    request_id: str
+    request_digest: str
     provider_id: str
     provider_configuration_digest: str
     provider_result_id: str | None
@@ -937,9 +941,13 @@ class SearchResultReference(_NoEffect):
     def __post_init__(self) -> None:
         if self.schema_version != SEARCH_RESULT_REFERENCE:
             raise SearchContractError("Search Result Reference schema differs")
-        for field in ("result_reference_id", "outcome_id"):
+        for field in ("result_reference_id", "outcome_id", "request_id"):
             _uuid(getattr(self, field), field)
-        for field in ("outcome_digest", "provider_configuration_digest"):
+        for field in (
+            "outcome_digest",
+            "request_digest",
+            "provider_configuration_digest",
+        ):
             _digest(getattr(self, field), field)
         _token(self.provider_id, "provider_id")
         if self.provider_result_id is not None:
@@ -1231,6 +1239,8 @@ def validate_search_result(
         or outcome.attempt_digest != attempt.digest
         or result.outcome_id != outcome.outcome_id
         or result.outcome_digest != outcome.digest
+        or result.request_id != attempt.request_id
+        or result.request_digest != attempt.request_digest
         or result.provider_id != attempt.provider_id
         or result.provider_configuration_digest != attempt.provider_configuration_digest
         or result.rank > outcome.result_count
@@ -1268,6 +1278,11 @@ def validate_search_review(
         or tuple(item.result_reference_id for item in results)
         != decision.result_reference_ids
         or tuple(item.digest for item in results) != decision.result_reference_digests
+        or any(
+            item.request_id != request.request_id
+            or item.request_digest != request.digest
+            for item in results
+        )
         or decision.decided_at < max(item.recorded_at for item in results)
         or route_for_action[decision.action] not in request.allowed_downstream_routes
     ):
