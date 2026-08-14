@@ -43,28 +43,43 @@ def _chain():
         _AT,
     )
     unit = LocalityCoverageUnit(
-        _id(2),
-        reference.locality_reference_id,
-        reference.digest,
-        LocalityServiceBoundary.CIVIC_AND_PUBLIC_BODIES,
-        ("PUBLIC_BODY_NOTICES", "PUBLIC_MEETINGS"),
-        ("PRIVATE_COMMUNITY_GROUPS",),
-        ("MISSING_SMALL_PUBLISHERS",),
-        LocalityCompletenessClass.BEST_EFFORT_WITH_EXPLICIT_GAPS,
-        "sha256:" + "b" * 64,
-        "sha256:" + "c" * 64,
-        "2026-08-14T00:00:01.000000Z",
+        coverage_unit_id=_id(2),
+        locality_reference_id=reference.locality_reference_id,
+        locality_reference_digest=reference.digest,
+        service_boundary=LocalityServiceBoundary.CIVIC_AND_PUBLIC_BODIES,
+        obligation_scope_digest="sha256:" + "1" * 64,
+        source_class_scope=("PUBLIC_BODY_NOTICES", "PUBLIC_MEETINGS"),
+        population_service_event_scope_digest="sha256:" + "2" * 64,
+        language_scope_digest="sha256:" + "3" * 64,
+        source_role_scope_digest="sha256:" + "4" * 64,
+        portfolio_function_scope_digest="sha256:" + "5" * 64,
+        explicit_exclusions=("PRIVATE_COMMUNITY_GROUPS",),
+        known_gap_codes=("MISSING_SMALL_PUBLISHERS",),
+        completeness_class=LocalityCompletenessClass.BEST_EFFORT_WITH_EXPLICIT_GAPS,
+        rights_basis_digest="sha256:" + "b" * 64,
+        governing_evaluation_version_digest="sha256:" + "6" * 64,
+        operational_profile_digest="sha256:" + "c" * 64,
+        recorded_at="2026-08-14T00:00:01.000000Z",
     )
     proposal = LocalityCoverageProposal(
-        _id(3),
-        unit.coverage_unit_id,
-        unit.digest,
-        LocalityProposalPosture.RESEARCH_ONLY,
-        ("sha256:" + "9" * 64,),
-        ("sha256:" + "d" * 64,),
-        ("MISSING_SMALL_PUBLISHERS",),
-        "sha256:" + "e" * 64,
-        "2026-08-14T00:00:02.000000Z",
+        proposal_id=_id(3),
+        coverage_unit_id=unit.coverage_unit_id,
+        coverage_unit_digest=unit.digest,
+        posture=LocalityProposalPosture.RESEARCH_ONLY,
+        qualification_basis_digests=(
+            "sha256:" + "7" * 64,
+            "sha256:" + "8" * 64,
+        ),
+        provider_decision_digests=("sha256:" + "9" * 64,),
+        proposed_source_reference_digests=("sha256:" + "d" * 64,),
+        permanent_monitoring_rationale_digest="sha256:" + "1" * 64,
+        expected_contribution_digest="sha256:" + "2" * 64,
+        evaluation_design_digest="sha256:" + "3" * 64,
+        alternatives_assessment_digest="sha256:" + "4" * 64,
+        non_selection_consequence_digest="sha256:" + "5" * 64,
+        unresolved_gap_codes=("MISSING_SMALL_PUBLISHERS",),
+        owner_identity_digest="sha256:" + "e" * 64,
+        proposed_at="2026-08-14T00:00:02.000000Z",
     )
     decision = LocalityCoverageDecision(
         _id(4),
@@ -122,6 +137,36 @@ def test_reference_unit_and_proposal_bind_exact_boundaries_and_gaps() -> None:
             proposal,
             replace(decision, assessed_gap_codes=("UNASSESSED_GAP",)),
         )
+
+
+def test_coverage_unit_identity_commits_every_qualified_scope_dimension() -> None:
+    _, unit, *_ = _chain()
+    for field, value in (
+        ("obligation_scope_digest", "sha256:" + "a" * 64),
+        ("population_service_event_scope_digest", "sha256:" + "b" * 64),
+        ("language_scope_digest", "sha256:" + "c" * 64),
+        ("source_role_scope_digest", "sha256:" + "d" * 64),
+        ("portfolio_function_scope_digest", "sha256:" + "e" * 64),
+        ("governing_evaluation_version_digest", "sha256:" + "f" * 64),
+    ):
+        assert replace(unit, **{field: value}).digest != unit.digest
+
+
+def test_proposal_requires_multiple_qualification_bases_and_full_assessment() -> None:
+    _, _, proposal, _ = _chain()
+    with pytest.raises(LocalityQualificationError, match="bounded array"):
+        replace(
+            proposal,
+            qualification_basis_digests=(proposal.qualification_basis_digests[0],),
+        )
+    for field, value in (
+        ("permanent_monitoring_rationale_digest", "sha256:" + "a" * 64),
+        ("expected_contribution_digest", "sha256:" + "b" * 64),
+        ("evaluation_design_digest", "sha256:" + "c" * 64),
+        ("alternatives_assessment_digest", "sha256:" + "d" * 64),
+        ("non_selection_consequence_digest", "sha256:" + "e" * 64),
+    ):
+        assert replace(proposal, **{field: value}).digest != proposal.digest
 
 
 def test_decisions_only_retain_defer_or_reject_and_chain_exactly() -> None:

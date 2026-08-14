@@ -158,8 +158,14 @@ def _strings(
     *,
     required: bool = False,
     digests: bool = False,
+    minimum: int = 0,
 ) -> tuple[str, ...]:
-    if type(value) is not tuple or len(value) > 64 or (required and not value):
+    if (
+        type(value) is not tuple
+        or len(value) > 64
+        or len(value) < minimum
+        or (required and not value)
+    ):
         raise LocalityQualificationError(f"{field} must be a bounded array")
     validator = _digest if digests else _token
     result = tuple(validator(item, field) for item in value)
@@ -296,11 +302,17 @@ _UNIT_FIELDS = (
     "locality_reference_id",
     "locality_reference_digest",
     "service_boundary",
+    "obligation_scope_digest",
     "source_class_scope",
+    "population_service_event_scope_digest",
+    "language_scope_digest",
+    "source_role_scope_digest",
+    "portfolio_function_scope_digest",
     "explicit_exclusions",
     "known_gap_codes",
     "completeness_class",
     "rights_basis_digest",
+    "governing_evaluation_version_digest",
     "operational_profile_digest",
     "recorded_at",
 )
@@ -312,11 +324,17 @@ class LocalityCoverageUnit(_NoEffect):
     locality_reference_id: str
     locality_reference_digest: str
     service_boundary: LocalityServiceBoundary
+    obligation_scope_digest: str
     source_class_scope: tuple[str, ...]
+    population_service_event_scope_digest: str
+    language_scope_digest: str
+    source_role_scope_digest: str
+    portfolio_function_scope_digest: str
     explicit_exclusions: tuple[str, ...]
     known_gap_codes: tuple[str, ...]
     completeness_class: LocalityCompletenessClass
     rights_basis_digest: str
+    governing_evaluation_version_digest: str
     operational_profile_digest: str
     recorded_at: str
     schema_version: str = LOCALITY_COVERAGE_UNIT
@@ -332,6 +350,14 @@ class LocalityCoverageUnit(_NoEffect):
             "service_boundary",
             _enum(LocalityServiceBoundary, self.service_boundary, "service_boundary"),
         )
+        for field in (
+            "obligation_scope_digest",
+            "population_service_event_scope_digest",
+            "language_scope_digest",
+            "source_role_scope_digest",
+            "portfolio_function_scope_digest",
+        ):
+            _digest(getattr(self, field), field)
         for field, required in (
             ("source_class_scope", True),
             ("explicit_exclusions", False),
@@ -350,6 +376,10 @@ class LocalityCoverageUnit(_NoEffect):
             ),
         )
         _digest(self.rights_basis_digest, "rights_basis_digest")
+        _digest(
+            self.governing_evaluation_version_digest,
+            "governing_evaluation_version_digest",
+        )
         _digest(self.operational_profile_digest, "operational_profile_digest")
         _timestamp(self.recorded_at, "recorded_at")
 
@@ -378,8 +408,14 @@ _PROPOSAL_FIELDS = (
     "coverage_unit_id",
     "coverage_unit_digest",
     "posture",
+    "qualification_basis_digests",
     "provider_decision_digests",
     "proposed_source_reference_digests",
+    "permanent_monitoring_rationale_digest",
+    "expected_contribution_digest",
+    "evaluation_design_digest",
+    "alternatives_assessment_digest",
+    "non_selection_consequence_digest",
     "unresolved_gap_codes",
     "owner_identity_digest",
     "proposed_at",
@@ -392,8 +428,14 @@ class LocalityCoverageProposal(_NoEffect):
     coverage_unit_id: str
     coverage_unit_digest: str
     posture: LocalityProposalPosture
+    qualification_basis_digests: tuple[str, ...]
     provider_decision_digests: tuple[str, ...]
     proposed_source_reference_digests: tuple[str, ...]
+    permanent_monitoring_rationale_digest: str
+    expected_contribution_digest: str
+    evaluation_design_digest: str
+    alternatives_assessment_digest: str
+    non_selection_consequence_digest: str
     unresolved_gap_codes: tuple[str, ...]
     owner_identity_digest: str
     proposed_at: str
@@ -411,6 +453,17 @@ class LocalityCoverageProposal(_NoEffect):
             self,
             "posture",
             _enum(LocalityProposalPosture, self.posture, "posture"),
+        )
+        object.__setattr__(
+            self,
+            "qualification_basis_digests",
+            _strings(
+                self.qualification_basis_digests,
+                "qualification_basis_digests",
+                required=True,
+                digests=True,
+                minimum=2,
+            ),
         )
         object.__setattr__(
             self,
@@ -441,6 +494,14 @@ class LocalityCoverageProposal(_NoEffect):
                 required=True,
             ),
         )
+        for field in (
+            "permanent_monitoring_rationale_digest",
+            "expected_contribution_digest",
+            "evaluation_design_digest",
+            "alternatives_assessment_digest",
+            "non_selection_consequence_digest",
+        ):
+            _digest(getattr(self, field), field)
         _digest(self.owner_identity_digest, "owner_identity_digest")
         _timestamp(self.proposed_at, "proposed_at")
 
@@ -456,6 +517,7 @@ class LocalityCoverageProposal(_NoEffect):
     def from_canonical_bytes(cls, raw: bytes) -> Self:
         value = _document(raw, LOCALITY_COVERAGE_PROPOSAL, _PROPOSAL_FIELDS)
         for field in (
+            "qualification_basis_digests",
             "provider_decision_digests",
             "proposed_source_reference_digests",
             "unresolved_gap_codes",
