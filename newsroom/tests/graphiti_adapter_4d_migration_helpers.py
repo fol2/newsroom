@@ -71,7 +71,7 @@ def _drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
         placeholders = ",".join("?" for _ in search_tables)
         objects = connection.execute(
             f"SELECT type,name,sql FROM sqlite_master WHERE tbl_name IN ({placeholders}) "
-            "AND type IN ('table','trigger')",
+            "AND type IN ('table','trigger','index') AND sql IS NOT NULL",
             search_tables,
         ).fetchall()
         if connection.execute(

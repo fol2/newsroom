@@ -119,7 +119,7 @@ def _attempt(request: SearchRequest, value: int = 3, ordinal: int = 1) -> Search
         ordinal,
         1,
         ordinal,
-        ordinal - 1,
+        0,
         ordinal - 1,
         f"2026-08-14T00:00:0{ordinal}.000000Z",
     )
@@ -331,6 +331,23 @@ def test_exact_chain_replays_across_restart_without_provider_authority(
             reopened.record_purpose(
                 replace(records[0], rights_policy_version="rights-v2").canonical_bytes
             )
+        attacker = sqlite3.connect(database, isolation_level=None)
+        try:
+            attacker.execute("DROP TRIGGER retained_search_review_decisions")
+            attacker.execute(
+                "DELETE FROM search_review_decisions WHERE review_decision_id=?",
+                (records[5].review_decision_id,),
+            )
+        finally:
+            attacker.close()
+        with pytest.raises(SearchAuthorityError, match="retained downstream work"):
+            reopened.record_review(
+                replace(
+                    records[5],
+                    review_decision_id=_id(61),
+                    work_reference_digest="sha256:" + "6" * 64,
+                ).canonical_bytes
+            )
     finally:
         reopened.close()
 
@@ -343,7 +360,10 @@ def test_gross_budget_attempt_order_and_result_limits_fail_closed(
     )
     try:
         purpose, request, first, first_outcome, *_ = _record_chain(authority)
-        second = _attempt(request, 13, 2)
+        second = replace(
+            _attempt(request, 13, 2),
+            started_at="2026-08-14T00:00:04.000000Z",
+        )
         authority.record_attempt(second.canonical_bytes)
         over_budget = _outcome(second, 14, 51)
         with pytest.raises(SearchAuthorityError, match="gross budget"):
@@ -352,6 +372,33 @@ def test_gross_budget_attempt_order_and_result_limits_fail_closed(
         gap = replace(second, attempt_id=_id(30), attempt_ordinal=3)
         with pytest.raises(SearchAuthorityError, match="ordinal CAS"):
             authority.record_attempt(gap.canonical_bytes)
+        historical_overlap = replace(
+            second,
+            attempt_id=_id(31),
+            attempt_ordinal=3,
+            variant_ordinal=1,
+            rendered_query_digest=first.rendered_query_digest,
+            page_number=1,
+            retry_ordinal=1,
+            branch_ordinal=0,
+            started_at="2026-08-14T00:00:02.000000Z",
+        )
+        with pytest.raises(SearchAuthorityError, match="ordinal CAS"):
+            authority.record_attempt(historical_overlap.canonical_bytes)
+        authority.record_outcome(_outcome(second, 33, 20).canonical_bytes)
+        repeated_without_retry = replace(
+            second,
+            attempt_id=_id(32),
+            attempt_ordinal=3,
+            variant_ordinal=1,
+            rendered_query_digest=first.rendered_query_digest,
+            page_number=1,
+            retry_ordinal=0,
+            branch_ordinal=0,
+            started_at="2026-08-14T00:00:05.000000Z",
+        )
+        with pytest.raises(SearchAuthorityError, match="ordinal CAS"):
+            authority.record_attempt(repeated_without_retry.canonical_bytes)
         duplicate_rank = replace(
             _result(first, first_outcome, 15),
             result_reference_id=_id(15),
@@ -439,14 +486,14 @@ def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> No
         attacker.execute("DROP TRIGGER immutable_search_budget_ledger")
         attacker.execute(
             "UPDATE search_budget_ledger SET cumulative_gross_cost_microunits=1 "
-            "WHERE request_id=?",
+            "WHERE request_id=? AND entry_kind='OUTCOME'",
             (records[1].request_id,),
         )
         with pytest.raises(SearchAuthorityError, match="retained gross budget"):
             authority.budget(records[1].request_id)
         attacker.execute(
             "UPDATE search_budget_ledger SET cumulative_gross_cost_microunits=100 "
-            "WHERE request_id=?",
+            "WHERE request_id=? AND entry_kind='OUTCOME'",
             (records[1].request_id,),
         )
         attacker.execute("DROP TRIGGER retained_search_budget_ledger")

@@ -249,7 +249,7 @@ class BoundedSearchReadPort(_NoEffect):
             "SELECT outcome_id,request_id,attempt_id,gross_cost_microunits,"
             "cumulative_provider_calls,cumulative_results,"
             "cumulative_gross_cost_microunits,ledger_digest,recorded_at "
-            "FROM search_budget_ledger WHERE request_id=? "
+            "FROM search_budget_ledger WHERE request_id=? AND entry_kind='OUTCOME' "
             "ORDER BY cumulative_provider_calls",
             (request_id,),
         ).fetchall()
@@ -306,6 +306,61 @@ class BoundedSearchReadPort(_NoEffect):
         ):
             raise SearchAuthorityError("Search retained gross budget differs")
         return snapshot
+
+    def _downstream_work_inventory(self, request: SearchRequest) -> frozenset[str]:
+        rows = self._connection.execute(
+            "SELECT ledger_entry_id,review_decision_id,work_reference_digest,"
+            "cumulative_downstream_work_items,ledger_digest,recorded_at "
+            "FROM search_budget_ledger WHERE request_id=? "
+            "AND entry_kind='DOWNSTREAM_WORK' "
+            "ORDER BY cumulative_downstream_work_items",
+            (request.request_id,),
+        ).fetchall()
+        retained = self._connection.execute(
+            "SELECT review_decision_id,work_reference_digest,decided_at "
+            "FROM search_review_decisions WHERE request_id=? "
+            "AND work_reference_digest IS NOT NULL",
+            (request.request_id,),
+        ).fetchall()
+        retained_by_id = {str(row[0]): (str(row[1]), str(row[2])) for row in retained}
+        if set(retained_by_id) != {str(row[1]) for row in rows}:
+            raise SearchAuthorityError("Search retained downstream work differs")
+        work_references: set[str] = set()
+        for ordinal, row in enumerate(rows, 1):
+            decision_id = str(row[1])
+            work_reference, decided_at = retained_by_id[decision_id]
+            expected_entry_id = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "entry_kind": "DOWNSTREAM_WORK",
+                        "request_id": request.request_id,
+                        "review_decision_id": decision_id,
+                    }
+                )
+            )
+            expected_digest = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "cumulative_downstream_work_items": ordinal,
+                        "request_id": request.request_id,
+                        "review_decision_id": decision_id,
+                        "work_reference_digest": work_reference,
+                    }
+                )
+            )
+            if (
+                row[0] != expected_entry_id
+                or row[2] != work_reference
+                or row[3] != ordinal
+                or row[4] != expected_digest
+                or row[5] != decided_at
+                or work_reference in work_references
+            ):
+                raise SearchAuthorityError("Search retained downstream work differs")
+            work_references.add(work_reference)
+        if len(work_references) > request.limits.max_downstream_work_items:
+            raise SearchAuthorityError("Search retained downstream work differs")
+        return frozenset(work_references)
 
 
 class BoundedSearchAuthority(BoundedSearchReadPort):
@@ -427,15 +482,39 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                     "SELECT count(*) FROM search_attempts WHERE request_id=?",
                     (record.request_id,),
                 ).fetchone()[0]
+                latest_started_at = self._connection.execute(
+                    "SELECT max(started_at) FROM search_attempts WHERE request_id=?",
+                    (record.request_id,),
+                ).fetchone()[0]
                 active = self._connection.execute(
                     "SELECT count(*) FROM search_attempts a "
                     "LEFT JOIN search_outcomes o ON o.attempt_id=a.attempt_id "
-                    "WHERE a.request_id=? AND o.outcome_id IS NULL",
-                    (record.request_id,),
+                    "WHERE a.request_id=? AND a.started_at<=? "
+                    "AND (o.outcome_id IS NULL OR o.completed_at>?)",
+                    (record.request_id, record.started_at, record.started_at),
                 ).fetchone()[0]
+                coordinate_retries = self._connection.execute(
+                    "SELECT retry_ordinal FROM search_attempts WHERE request_id=? "
+                    "AND variant_ordinal=? AND language_ordinal=? AND page_number=? "
+                    "AND branch_ordinal=? ORDER BY retry_ordinal",
+                    (
+                        record.request_id,
+                        record.variant_ordinal,
+                        record.language_ordinal,
+                        record.page_number,
+                        record.branch_ordinal,
+                    ),
+                ).fetchall()
                 if (
                     record.attempt_ordinal != count + 1
+                    or (
+                        latest_started_at is not None
+                        and record.started_at < latest_started_at
+                    )
                     or active >= request.limits.max_concurrent_attempts
+                    or tuple(int(row[0]) for row in coordinate_retries)
+                    != tuple(range(len(coordinate_retries)))
+                    or record.retry_ordinal != len(coordinate_retries)
                 ):
                     raise SearchAuthorityError("Search Attempt ordinal CAS differs")
                 self._connection.execute(
@@ -511,15 +590,20 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                     )
                 )
                 self._connection.execute(
-                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         record.outcome_id,
+                        "OUTCOME",
+                        record.outcome_id,
+                        None,
                         request.request_id,
                         attempt.attempt_id,
+                        None,
                         record.gross_cost_microunits,
                         calls,
                         results,
                         cost,
+                        0,
                         ledger_digest,
                         record.completed_at,
                     ),
@@ -593,14 +677,7 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
             )
             if not replay:
                 if record.work_reference_digest is not None:
-                    existing_work = {
-                        str(row[0])
-                        for row in self._connection.execute(
-                            "SELECT work_reference_digest FROM search_review_decisions "
-                            "WHERE request_id=? AND work_reference_digest IS NOT NULL",
-                            (request.request_id,),
-                        ).fetchall()
-                    }
+                    existing_work = self._downstream_work_inventory(request)
                     if (
                         record.work_reference_digest not in existing_work
                         and len(existing_work)
@@ -622,6 +699,48 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                         record.decided_at,
                     ),
                 )
+                if record.work_reference_digest is not None:
+                    work_ordinal = len(existing_work) + 1
+                    entry_id = digest_bytes(
+                        canonical_json_bytes(
+                            {
+                                "entry_kind": "DOWNSTREAM_WORK",
+                                "request_id": request.request_id,
+                                "review_decision_id": record.review_decision_id,
+                            }
+                        )
+                    )
+                    ledger_digest = digest_bytes(
+                        canonical_json_bytes(
+                            {
+                                "cumulative_downstream_work_items": work_ordinal,
+                                "request_id": request.request_id,
+                                "review_decision_id": record.review_decision_id,
+                                "work_reference_digest": record.work_reference_digest,
+                            }
+                        )
+                    )
+                    self._connection.execute(
+                        "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            entry_id,
+                            "DOWNSTREAM_WORK",
+                            None,
+                            record.review_decision_id,
+                            request.request_id,
+                            None,
+                            record.work_reference_digest,
+                            0,
+                            0,
+                            0,
+                            0,
+                            work_ordinal,
+                            ledger_digest,
+                            record.decided_at,
+                        ),
+                    )
+            if record.work_reference_digest is not None:
+                self._downstream_work_inventory(request)
             self._finish()
         except BaseException as exc:
             self._finish(exc)
