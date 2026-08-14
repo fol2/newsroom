@@ -72,9 +72,9 @@ def test_v30_to_v31_requires_exact_backup_and_preserves_prefix(tmp_path) -> None
     receipt = migrations.prepare_pending_migration_backup(connection)
     assert receipt is not None
     migrations.apply_pending_migrations(connection, applied_at=_AT)
-    assert connection.execute("PRAGMA user_version").fetchone() == (31,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (migrations.SCHEMA_VERSION,)
     assert connection.execute(
-        "SELECT version,name FROM authority_migrations ORDER BY version DESC LIMIT 1"
+        "SELECT version,name FROM authority_migrations WHERE version=31"
     ).fetchone() == (31, "increment8_operational_authority_v31")
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()

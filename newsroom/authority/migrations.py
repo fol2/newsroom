@@ -62,6 +62,17 @@ from .increment8_operational_migrations import (
     prepare_increment8_operational_backup,
     require_increment8_operational_backup,
 )
+from .increment8_recovery_migrations import (
+    INCREMENT8_RECOVERY_MIGRATION,
+    INCREMENT8_RECOVERY_MIGRATION_CHECKSUM,
+    INCREMENT8_RECOVERY_MIGRATION_NAME,
+    INCREMENT8_RECOVERY_MIGRATION_STATEMENTS,
+    INCREMENT8_RECOVERY_SCHEMA_VERSION,
+    Increment8RecoveryBackupReceipt,
+    increment8_recovery_backup_paths,
+    prepare_increment8_recovery_backup,
+    require_increment8_recovery_backup,
+)
 from .check_migrations import (
     CHECK_AUTHORITY_MIGRATION,
     CHECK_AUTHORITY_MIGRATION_CHECKSUM,
@@ -279,7 +290,7 @@ from .triage_work_item_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = INCREMENT8_OPERATIONAL_SCHEMA_VERSION
+SCHEMA_VERSION = INCREMENT8_RECOVERY_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -734,11 +745,12 @@ def prepare_pending_migration_backup(
     | LocalWatchBackupReceipt
     | Increment8EvaluationBackupReceipt
     | Increment8OperationalBackupReceipt
+    | Increment8RecoveryBackupReceipt
     | None
 ):
     """Prepare the exact retained backup required by a checked predecessor."""
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if version not in {16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30}:
+    if version not in {16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31}:
         return None
     database_path = next(
         str(row[2])
@@ -791,8 +803,11 @@ def prepare_pending_migration_backup(
     if version == 29:
         backup_path, _ = increment8_evaluation_backup_paths(database_path)
         return prepare_increment8_evaluation_backup(conn, backup_path)
-    backup_path, _ = increment8_operational_backup_paths(database_path)
-    return prepare_increment8_operational_backup(conn, backup_path)
+    if version == 30:
+        backup_path, _ = increment8_operational_backup_paths(database_path)
+        return prepare_increment8_operational_backup(conn, backup_path)
+    backup_path, _ = increment8_recovery_backup_paths(database_path)
+    return prepare_increment8_recovery_backup(conn, backup_path)
 
 
 def apply_migration(
@@ -1498,6 +1513,29 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                  INCREMENT8_OPERATIONAL_MIGRATION_CHECKSUM, applied_at),
             )
             current = INCREMENT8_OPERATIONAL_SCHEMA_VERSION
+        if current == INCREMENT8_OPERATIONAL_SCHEMA_VERSION:
+            if 0 < starting_version < INCREMENT8_OPERATIONAL_SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version={INCREMENT8_OPERATIONAL_SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+                database_path = next(str(row[2]) for row in conn.execute("PRAGMA database_list") if row[1] == "main")
+                if not database_path:
+                    raise sqlite3.DatabaseError("existing multihop upgrade requires a file-backed database")
+                backup_path, _ = increment8_recovery_backup_paths(database_path)
+                prepare_increment8_recovery_backup(conn, backup_path)
+                conn.execute("BEGIN EXCLUSIVE")
+            if starting_version != 0:
+                require_increment8_recovery_backup(
+                    conn, expected_history=tuple((r.version, r.name, r.checksum) for r in MIGRATIONS
+                                                 if r.version <= INCREMENT8_OPERATIONAL_SCHEMA_VERSION),
+                )
+            for statement in INCREMENT8_RECOVERY_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) VALUES(?,?,?,?)",
+                (INCREMENT8_RECOVERY_SCHEMA_VERSION, INCREMENT8_RECOVERY_MIGRATION_NAME,
+                 INCREMENT8_RECOVERY_MIGRATION_CHECKSUM, applied_at),
+            )
+            current = INCREMENT8_RECOVERY_SCHEMA_VERSION
         # fmt: on
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
@@ -1539,6 +1577,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     LOCAL_WATCH_MIGRATION,
     INCREMENT8_EVALUATION_MIGRATION,
     INCREMENT8_OPERATIONAL_MIGRATION,
+    INCREMENT8_RECOVERY_MIGRATION,
 )
 
 
@@ -1700,6 +1739,11 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         INCREMENT8_OPERATIONAL_SCHEMA_VERSION,
         INCREMENT8_OPERATIONAL_MIGRATION_NAME,
         INCREMENT8_OPERATIONAL_MIGRATION_CHECKSUM,
+    ),
+    (
+        INCREMENT8_RECOVERY_SCHEMA_VERSION,
+        INCREMENT8_RECOVERY_MIGRATION_NAME,
+        INCREMENT8_RECOVERY_MIGRATION_CHECKSUM,
     ),
 )
 # fmt: on
