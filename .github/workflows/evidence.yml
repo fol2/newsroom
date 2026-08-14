@@ -1145,8 +1145,8 @@ jobs:
                   'LIVE_MODEL_OR_PROVIDER',
                   'PERMANENT_LOCALITY_ACTIVATION',
                   'PRODUCTION_ACTIVATION',
-                  'PUBLICATION_OR_PUBLIC_EFFECT',
-                  'SHADOW_OR_CANARY',
+                  'PUBLIC_EFFECT',
+                  'SHADOW_EXECUTION',
               ]
               or not isinstance(increment8_cases, list)
               or len(increment8_cases) != 13
