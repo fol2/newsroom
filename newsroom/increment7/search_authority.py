@@ -377,6 +377,51 @@ class BoundedSearchReadPort(_NoEffect):
             raise SearchAuthorityError("Search retained result inventory differs")
         return len(retained)
 
+    def _attempt_inventory(self, request: SearchRequest) -> int:
+        ledger_rows = self._connection.execute(
+            "SELECT ledger_entry_id,attempt_id,ledger_digest,recorded_at "
+            "FROM search_budget_ledger WHERE request_id=? "
+            "AND entry_kind='ATTEMPT_ALLOCATION' ORDER BY attempt_id",
+            (request.request_id,),
+        ).fetchall()
+        retained_rows = self._connection.execute(
+            "SELECT attempt_id,attempt_digest,started_at FROM search_attempts "
+            "WHERE request_id=? ORDER BY attempt_id",
+            (request.request_id,),
+        ).fetchall()
+        retained = {
+            str(row[0]): (str(row[1]), str(row[2])) for row in retained_rows
+        }
+        if {str(row[1]) for row in ledger_rows} != set(retained):
+            raise SearchAuthorityError("Search retained attempt inventory differs")
+        for row in ledger_rows:
+            attempt_id = str(row[1])
+            attempt_digest, started_at = retained[attempt_id]
+            expected_entry_id = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "attempt_id": attempt_id,
+                        "entry_kind": "ATTEMPT_ALLOCATION",
+                    }
+                )
+            )
+            expected_digest = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "attempt_digest": attempt_digest,
+                        "attempt_id": attempt_id,
+                        "request_id": request.request_id,
+                    }
+                )
+            )
+            if (
+                row[0] != expected_entry_id
+                or row[2] != expected_digest
+                or row[3] != started_at
+            ):
+                raise SearchAuthorityError("Search retained attempt inventory differs")
+        return len(retained)
+
     def _downstream_work_inventory(self, request: SearchRequest) -> frozenset[str]:
         rows = self._connection.execute(
             "SELECT ledger_entry_id,review_decision_id,work_reference_digest,"
@@ -597,10 +642,7 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                 "search_attempts", "attempt_id", record.attempt_id, raw
             )
             if not replay:
-                count = self._connection.execute(
-                    "SELECT count(*) FROM search_attempts WHERE request_id=?",
-                    (record.request_id,),
-                ).fetchone()[0]
+                count = self._attempt_inventory(request)
                 latest_started_at = self._connection.execute(
                     "SELECT max(started_at) FROM search_attempts WHERE request_id=?",
                     (record.request_id,),
@@ -653,6 +695,44 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                         record.started_at,
                     ),
                 )
+                entry_id = digest_bytes(
+                    canonical_json_bytes(
+                        {
+                            "attempt_id": record.attempt_id,
+                            "entry_kind": "ATTEMPT_ALLOCATION",
+                        }
+                    )
+                )
+                ledger_digest = digest_bytes(
+                    canonical_json_bytes(
+                        {
+                            "attempt_digest": record.digest,
+                            "attempt_id": record.attempt_id,
+                            "request_id": request.request_id,
+                        }
+                    )
+                )
+                self._connection.execute(
+                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        entry_id,
+                        "ATTEMPT_ALLOCATION",
+                        None,
+                        None,
+                        None,
+                        request.request_id,
+                        record.attempt_id,
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        ledger_digest,
+                        record.started_at,
+                    ),
+                )
+            self._attempt_inventory(request)
             self._finish()
         except BaseException as exc:
             self._finish(exc)

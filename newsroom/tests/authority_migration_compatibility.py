@@ -181,7 +181,7 @@ PINNED_MIGRATION_HISTORY: tuple[HistoryRow, ...] = (
     (
         27,
         "bounded_search_authority_v27",
-        "sha256:0ef8efd5e01c618c142f61b9f92dd4d656796ee2c2748a386d151dce14c9e881",
+        "sha256:65f30823eaa78261d2bd2fcda8ce822dfa4c4ef71771b3c2a888ec7e0b87f1f1",
     ),
 )
 

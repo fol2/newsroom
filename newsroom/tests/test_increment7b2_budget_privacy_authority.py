@@ -569,6 +569,39 @@ def test_result_inventory_blocks_replacement_after_retained_row_deletion(
         authority.close()
 
 
+def test_attempt_inventory_blocks_replacement_after_unresolved_deletion(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "attempt-inventory.sqlite3"
+    authority = open_bounded_search_authority(database, applied_at=_AT)
+    purpose = _purpose()
+    request = _request(purpose)
+    attempt = _attempt(request)
+    authority.record_purpose(purpose.canonical_bytes)
+    authority.record_request(request.canonical_bytes)
+    authority.record_attempt(attempt.canonical_bytes)
+    attacker = sqlite3.connect(database, isolation_level=None)
+    try:
+        attacker.execute("DROP TRIGGER retained_search_attempts")
+        attacker.execute(
+            "DELETE FROM search_attempts WHERE attempt_id=?",
+            (attempt.attempt_id,),
+        )
+        replacement = replace(attempt, attempt_id=_id(83))
+        with pytest.raises(SearchAuthorityError, match="retained attempt inventory"):
+            authority.record_attempt(replacement.canonical_bytes)
+        assert attacker.execute(
+            "SELECT attempt_id FROM search_budget_ledger "
+            "WHERE entry_kind='ATTEMPT_ALLOCATION'"
+        ).fetchall() == [(attempt.attempt_id,)]
+        assert attacker.execute("SELECT count(*) FROM search_attempts").fetchone() == (
+            0,
+        )
+    finally:
+        attacker.close()
+        authority.close()
+
+
 def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> None:
     database = tmp_path / "tamper.sqlite3"
     authority = open_bounded_search_authority(database, applied_at=_AT)
