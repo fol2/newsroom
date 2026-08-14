@@ -771,8 +771,8 @@ class OperationalAuthority:
         if not isinstance(connection, sqlite3.Connection) or connection.in_transaction:
             raise OperationalAuthorityError("authority requires an idle SQLite connection")
         connection.execute("PRAGMA foreign_keys=ON")
-        if connection.execute("PRAGMA user_version").fetchone()[0] != 31:
-            raise OperationalAuthorityError("operational authority requires schema v31")
+        if connection.execute("PRAGMA user_version").fetchone()[0] < 31:
+            raise OperationalAuthorityError("operational authority requires schema v31 or later")
         self._connection = connection
 
     def _insert(self, sql: str, values: tuple[object, ...]) -> None:
