@@ -316,6 +316,24 @@ def test_exact_chain_replays_across_restart_without_provider_authority(
         decided_at="2026-08-14T00:00:08.000000Z",
     )
     assert authority.record_review(same_work.canonical_bytes) == same_work
+    second_request = replace(
+        records[1],
+        request_id=_id(70),
+        budget_reservation_digest="sha256:" + "7" * 64,
+    )
+    second_attempt = _attempt(second_request, 71)
+    second_outcome = _outcome(second_attempt, 72)
+    second_result = _result(second_attempt, second_outcome, 73)
+    second_review = replace(
+        _decision(second_result),
+        review_decision_id=_id(74),
+        work_reference_digest=records[5].work_reference_digest,
+    )
+    authority.record_request(second_request.canonical_bytes)
+    authority.record_attempt(second_attempt.canonical_bytes)
+    authority.record_outcome(second_outcome.canonical_bytes)
+    authority.record_result(second_result.canonical_bytes)
+    assert authority.record_review(second_review.canonical_bytes) == second_review
     with pytest.raises(SearchAuthorityError, match="downstream work budget"):
         authority.record_review(
             replace(
@@ -484,6 +502,27 @@ def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> No
     records = _record_chain(authority)
     attacker = sqlite3.connect(database, isolation_level=None)
     try:
+        forged = _attempt(records[1], 70, 2)
+        retained_id = _id(71)
+        attacker.execute(
+            "INSERT INTO search_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                retained_id,
+                forged.canonical_bytes,
+                forged.digest,
+                forged.request_id,
+                forged.request_digest,
+                forged.attempt_ordinal,
+                forged.variant_ordinal,
+                forged.language_ordinal,
+                forged.page_number,
+                forged.retry_ordinal,
+                forged.branch_ordinal,
+                forged.started_at,
+            ),
+        )
+        with pytest.raises(SearchAuthorityError, match="retained columns"):
+            authority.attempt(retained_id)
         with pytest.raises(sqlite3.IntegrityError, match="immutable"):
             attacker.execute(
                 "UPDATE search_requests SET query_privacy='OTHER' WHERE request_id=?",

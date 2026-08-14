@@ -225,7 +225,7 @@ BOUNDED_SEARCH_MIGRATION_STATEMENTS: tuple[str, ...] = (
         review_decision_id TEXT UNIQUE REFERENCES search_review_decisions(review_decision_id),
         request_id TEXT NOT NULL REFERENCES search_requests(request_id),
         attempt_id TEXT UNIQUE REFERENCES search_attempts(attempt_id),
-        work_reference_digest TEXT UNIQUE CHECK(work_reference_digest IS NULL OR {_D.format('work_reference_digest')}),
+        work_reference_digest TEXT CHECK(work_reference_digest IS NULL OR {_D.format('work_reference_digest')}),
         gross_cost_microunits INTEGER NOT NULL CHECK(gross_cost_microunits>=0),
         cumulative_provider_calls INTEGER NOT NULL CHECK(cumulative_provider_calls BETWEEN 0 AND 1000000),
         cumulative_results INTEGER NOT NULL CHECK(cumulative_results>=0),
@@ -233,6 +233,7 @@ BOUNDED_SEARCH_MIGRATION_STATEMENTS: tuple[str, ...] = (
         cumulative_downstream_work_items INTEGER NOT NULL CHECK(cumulative_downstream_work_items BETWEEN 0 AND 1000000),
         ledger_digest TEXT NOT NULL UNIQUE CHECK({_D.format('ledger_digest')}),
         recorded_at TEXT NOT NULL,
+        UNIQUE(request_id,work_reference_digest),
         CHECK(
             (entry_kind='OUTCOME' AND outcome_id IS NOT NULL AND review_decision_id IS NULL
              AND attempt_id IS NOT NULL AND work_reference_digest IS NULL

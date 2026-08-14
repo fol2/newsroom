@@ -167,7 +167,9 @@ class BoundedSearchReadPort(_NoEffect):
         request = self.request(record.request_id)
         validate_search_attempt(request, record)
         if (
-            record.request_digest != row["request_digest"]
+            record.attempt_id != row["attempt_id"]
+            or record.request_id != row["request_id"]
+            or record.request_digest != row["request_digest"]
             or record.attempt_ordinal != row["attempt_ordinal"]
             or record.variant_ordinal != row["variant_ordinal"]
             or record.language_ordinal != row["language_ordinal"]
@@ -188,7 +190,9 @@ class BoundedSearchReadPort(_NoEffect):
         request = self.request(attempt.request_id)
         validate_search_outcome(attempt, record, request)
         if (
-            record.attempt_digest != row["attempt_digest"]
+            record.outcome_id != row["outcome_id"]
+            or record.attempt_id != row["attempt_id"]
+            or record.attempt_digest != row["attempt_digest"]
             or record.outcome_kind.value != row["outcome_kind"]
             or record.result_count != row["result_count"]
             or record.returned_pages != row["returned_pages"]
@@ -210,7 +214,9 @@ class BoundedSearchReadPort(_NoEffect):
         attempt = self.attempt(outcome.attempt_id)
         validate_search_result(outcome, record, attempt)
         if (
-            record.outcome_digest != row["outcome_digest"]
+            record.result_reference_id != row["result_reference_id"]
+            or record.outcome_id != row["outcome_id"]
+            or record.outcome_digest != row["outcome_digest"]
             or record.request_id != row["request_id"]
             or record.request_digest != row["request_digest"]
             or record.rank != row["rank"]
@@ -234,7 +240,9 @@ class BoundedSearchReadPort(_NoEffect):
         )
         validate_search_review(results, record, request)
         if (
-            request.digest != row["request_digest"]
+            record.review_decision_id != row["review_decision_id"]
+            or request.request_id != row["request_id"]
+            or request.digest != row["request_digest"]
             or record.action.value != row["action"]
             or record.work_reference_digest != row["work_reference_digest"]
             or record.decided_at != row["decided_at"]
