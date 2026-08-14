@@ -539,6 +539,19 @@ class PlannedAgendaVersion(_NoEffect):
             result[name] = value
         return result
 
+    def _assertion_dict(self) -> dict[str, object]:
+        lineage_fields = {
+            "agenda_version_id",
+            "version_ordinal",
+            "predecessor_version_digest",
+            "recorded_at",
+        }
+        return {
+            name: value
+            for name, value in self._dict().items()
+            if name not in lineage_fields
+        }
+
     @property
     def canonical_bytes(self) -> bytes:
         return canonical_json_bytes(self._dict())
@@ -586,7 +599,7 @@ def validate_agenda_successor(
         raise AgendaContractError(
             "Agenda successor does not extend the exact prior Version"
         )
-    if successor.canonical_bytes == prior.canonical_bytes:
+    if successor._assertion_dict() == prior._assertion_dict():
         raise AgendaContractError(
             "Agenda successor must record a substantive source assertion"
         )

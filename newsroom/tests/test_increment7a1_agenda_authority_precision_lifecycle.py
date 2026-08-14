@@ -184,6 +184,15 @@ def test_reschedule_is_an_exact_successor_and_preserves_prior_bytes() -> None:
     assert prior.canonical_bytes == prior_bytes
     assert successor.predecessor_version_digest == prior.digest
 
+    bookkeeping_only = _version(
+        agenda_version_id=_id(22),
+        version_ordinal=2,
+        predecessor_version_digest=prior.digest,
+        recorded_at="2026-08-15T00:00:00.000000Z",
+    )
+    with pytest.raises(AgendaContractError, match="substantive source assertion"):
+        validate_agenda_successor(prior, bookkeeping_only)
+
 
 def test_successor_rejects_cross_item_gap_and_wrong_predecessor() -> None:
     prior = _version()
