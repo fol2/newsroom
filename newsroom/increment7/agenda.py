@@ -143,6 +143,7 @@ def _text(value: object, field: str, *, maximum: int = MAX_TEXT_BYTES) -> str:
         or not value
         or value != value.strip()
         or encoded_size > maximum
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
         raise AgendaContractError(f"{field} must be bounded canonical text")
     return value
@@ -212,7 +213,12 @@ def _load(raw: bytes, schema: str, fields: tuple[str, ...]) -> dict[str, object]
         canonical = canonical_json_bytes(value)
     except AgendaContractError:
         raise
-    except (UnicodeError, json.JSONDecodeError, CanonicalizationError) as exc:
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        CanonicalizationError,
+        RecursionError,
+    ) as exc:
         raise AgendaContractError("Agenda bytes are not canonical JSON") from exc
     if raw != canonical:
         raise AgendaContractError("Agenda bytes are not exact canonical JSON")

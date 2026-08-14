@@ -267,6 +267,8 @@ def test_parser_rejects_noncanonical_duplicate_unknown_and_oversized_values() ->
         PlannedAgendaVersion.from_canonical_bytes(canonical_json_bytes(unknown))
     with pytest.raises(AgendaContractError, match="bounded canonical text"):
         _version(expected_subject="x" * 2049)
+    with pytest.raises(AgendaContractError, match="bounded canonical text"):
+        _version(expected_subject="embedded\ncontrol")
     with pytest.raises(AgendaContractError, match="closed vocabulary"):
         _version(time_precision="WIDENED")
     with pytest.raises(AgendaContractError, match="date-only"):
