@@ -418,7 +418,11 @@ class PlannedAgendaVersion(_NoEffect):
             or self.expectation_path.kind is not AgendaPathKind.EXPECTATION
         ):
             raise AgendaContractError("expectation_path must be an expectation path")
-        paths = tuple(self.occurrence_confirmation_paths)
+        if type(self.occurrence_confirmation_paths) is not tuple:
+            raise AgendaContractError(
+                "occurrence_confirmation_paths must be bounded confirmation paths"
+            )
+        paths = self.occurrence_confirmation_paths
         if (
             not paths
             or len(paths) > MAX_PATHS
@@ -444,12 +448,12 @@ class PlannedAgendaVersion(_NoEffect):
             ("relationship_references", self.relationship_references, MAX_REFERENCES),
             ("uncertainties", self.uncertainties, MAX_UNCERTAINTIES),
         ):
-            normal = tuple(values)
-            if len(normal) > maximum or tuple(sorted(set(normal))) != normal:
+            if type(values) is not tuple or len(values) > maximum:
                 raise AgendaContractError(f"{field} must be unique, sorted and bounded")
-            for value in normal:
+            for value in values:
                 (_digest if field == "relationship_references" else _text)(value, field)
-            object.__setattr__(self, field, normal)
+            if tuple(sorted(set(values))) != values:
+                raise AgendaContractError(f"{field} must be unique, sorted and bounded")
         _timestamp(self.recorded_at, "recorded_at")
 
     def _validate_time(self) -> None:
@@ -483,7 +487,10 @@ class PlannedAgendaVersion(_NoEffect):
                         "exact window requires an ordered UTC end"
                     )
         elif precision is AgendaTimePrecision.DATE_ONLY:
-            if start is None or _DATE.fullmatch(start) is None or end is not None:
+            if start is None or end is not None:
+                raise AgendaContractError("date-only schedule must remain date-only")
+            start = _text(start, "asserted_start", maximum=10)
+            if _DATE.fullmatch(start) is None:
                 raise AgendaContractError("date-only schedule must remain date-only")
             try:
                 datetime.strptime(start, "%Y-%m-%d")

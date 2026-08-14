@@ -276,6 +276,18 @@ def test_parser_rejects_noncanonical_duplicate_unknown_and_oversized_values() ->
         )
     with pytest.raises(AgendaContractError, match="exact UTC timestamp"):
         _version(asserted_start="2026-02-30T11:00:00.000000Z")
+    malformed_references = json.loads(version.canonical_bytes)
+    malformed_references["relationship_references"] = [{}]
+    with pytest.raises(AgendaContractError, match="canonical SHA-256 digest"):
+        PlannedAgendaVersion.from_canonical_bytes(
+            canonical_json_bytes(malformed_references)
+        )
+    with pytest.raises(AgendaContractError, match="bounded canonical text"):
+        _version(
+            time_precision=AgendaTimePrecision.DATE_ONLY,
+            asserted_start=7,
+            asserted_end=None,
+        )
     with pytest.raises(AgendaContractError, match="expectation path"):
         _version(expectation_path=object())
 
