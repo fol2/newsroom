@@ -32,7 +32,7 @@ from newsroom.authority.canonical import (
 )
 
 
-EXPECTED_READINESS_DIGEST = "sha256:f916d3ce257362d04ed92279cbcdfcbe4e6dc1c683f536c74af1151996e034b6"
+EXPECTED_READINESS_DIGEST = "sha256:f38f2899452aa93aa1d1384cefcc8b697f7a497c139214347c9a90d3b70cc489"
 READINESS_CONTRACT_PATH = Path(__file__).with_name("increment7_readiness_v1.json")
 _INTERFACE_MODULES: Mapping[str, ModuleType] = MappingProxyType(
     {

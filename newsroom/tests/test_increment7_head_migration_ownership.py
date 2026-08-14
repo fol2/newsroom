@@ -235,6 +235,17 @@ def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPa
     findings = validate_interface_inventory(INCREMENT_7_READINESS)
     assert "newsroom.authority.migrations: suffix is not contiguous" in findings
 
+    monkeypatch.setattr(
+        authority_migrations,
+        "apply_pending_migrations",
+        lambda connection: None,
+    )
+    findings = validate_interface_inventory(INCREMENT_7_READINESS)
+    assert any(
+        "apply_pending_migrations: signature differs" in item
+        for item in findings
+    )
+
     monkeypatch.delattr(
         authority_migrations,
         "EXPECTED_MIGRATION_HISTORY",
