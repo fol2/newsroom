@@ -156,7 +156,7 @@ def test_v24_downgrade_preflight_is_non_mutating(tmp_path: Path, failure: str) -
             ("sha256:" + "f" * 64,),
         )
     else:
-        connection.execute("PRAGMA user_version=27")
+        connection.execute("PRAGMA user_version=28")
     damaged = (
         connection.execute("PRAGMA user_version").fetchone(),
         tuple(connection.iterdump()),

@@ -476,7 +476,7 @@ def test_core_worker_command_is_pinned_persistent_and_file_scoped(
         basetemp=basetemp,
     )
 
-    assert lane_module._CORE_WORKER_COUNT == 3
+    assert lane_module._CORE_WORKER_COUNT == 2
     assert lane_module._CORE_DISTRIBUTION == "worksteal"
     assert command[:13] == (
         sys.executable,
@@ -489,7 +489,7 @@ def test_core_worker_command_is_pinned_persistent_and_file_scoped(
         "-p",
         "xdist.plugin",
         "-n",
-        "3",
+        "2",
         "--dist=worksteal",
         "--max-worker-restart=0",
     )

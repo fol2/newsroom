@@ -148,7 +148,7 @@ def _core_matrix_jobs() -> list[dict[str, object]]:
             "conclusion": "success",
             "completed_at": f"2026-07-22T12:00:{index + 1:02d}Z",
         }
-        for index in range(10)
+        for index in range(12)
     ]
 
 
@@ -252,13 +252,13 @@ def _github_core_jobs(
             "run_attempt": RUN_ATTEMPT,
             "status": "completed",
             "conclusion": "success",
-            "started_at": "2026-07-22T12:00:10Z",
+            "started_at": "2026-07-22T12:00:13Z",
             "completed_at": "2026-07-22T12:00:42Z",
             "steps": [
                 {
                     "name": "Sync locked environment",
                     "status": "completed",
-                    "completed_at": "2026-07-22T12:00:11Z",
+                    "completed_at": "2026-07-22T12:00:14Z",
                 },
                 {
                     "name": "Finalize evidence",
@@ -381,7 +381,7 @@ def test_verify_shadow_lane_composes_replay_telemetry_and_receipt(
         "run_attempt": RUN_ATTEMPT,
         "status": "completed",
         "conclusion": "success",
-        "completed_at": "2026-07-22T12:00:10Z",
+        "completed_at": "2026-07-22T12:00:12Z",
     }
     assert calls["measure"][1]["job_name"] == "core"  # type: ignore[index]
     assert calls["measure"][1]["ready_after_job_names"] == (  # type: ignore[index]
@@ -484,7 +484,7 @@ def test_core_telemetry_rejects_noncanonical_matrix_dependencies(
     elif fault == "duplicate":
         jobs.append(dict(jobs[0]))
     elif fault == "extra":
-        jobs.append({**jobs[0], "name": "core-shard-10"})
+        jobs.append({**jobs[0], "name": "core-shard-12"})
     elif fault == "wrong-run":
         jobs[0]["run_id"] = RUN_ID + 1
     elif fault == "wrong-attempt":
@@ -639,10 +639,10 @@ def test_core_ready_after_normalises_exact_stuck_dependencies_and_shard_snapshot
             f"core-shard-{index}",
             completed_at=f"2026-07-22T12:00:{index + 4:02d}.000Z",
         )
-        for index in range(10)
+        for index in range(12)
     ]
-    shards[9] = _stuck_completed_job(
-        "core-shard-9",
+    shards[11] = _stuck_completed_job(
+        "core-shard-11",
         completed_at="2026-07-22T12:00:15.000Z",
         steps=[
             {
@@ -701,8 +701,8 @@ def test_core_ready_after_normalises_exact_stuck_dependencies_and_shard_snapshot
 
     assert record.telemetry.ready_at == "2026-07-22T12:00:15.000Z"
     assert record.telemetry.job_completed_at == "2026-07-22T12:00:42.000Z"
-    assert shards[9]["status"] == "in_progress"
-    assert shards[9]["completed_at"] is None
+    assert shards[11]["status"] == "in_progress"
+    assert shards[11]["completed_at"] is None
     assert core["status"] == "in_progress"
     assert core["completed_at"] is None
     assert route["status"] == "in_progress"

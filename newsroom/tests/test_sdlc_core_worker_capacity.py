@@ -15,7 +15,7 @@ from scripts.sdlc.run_gate import GateRunResult
 from scripts.sdlc.workflow_lane import WorkflowLaneError
 
 REPO_ROOT = Path(__file__).parents[2]
-EXPECTED_CORE_SHARD_COUNT = 10
+EXPECTED_CORE_SHARD_COUNT = 12
 
 
 def _contract_data() -> dict[str, object]:
@@ -624,10 +624,10 @@ def _run_reducer_fixture(
     return json.loads(aggregate_path.read_text(encoding="utf-8")), order
 
 
-def test_core_lane_uses_three_persistent_worksteal_workers(
+def test_core_lane_uses_two_persistent_worksteal_workers(
     tmp_path: Path,
 ) -> None:
-    assert lane_module._CORE_WORKER_COUNT == 3
+    assert lane_module._CORE_WORKER_COUNT == 2
     assert lane_module._CORE_DISTRIBUTION == "worksteal"
 
     command = lane_module._core_worker_command(
@@ -636,7 +636,7 @@ def test_core_lane_uses_three_persistent_worksteal_workers(
     )
 
     worker_flag = command.index("-n")
-    assert command[worker_flag + 1] == "3"
+    assert command[worker_flag + 1] == "2"
     assert "--dist=worksteal" in command
     assert "--max-worker-restart=0" in command
     assert command.count("xdist.plugin") == 1
@@ -649,7 +649,7 @@ import importlib
 import scripts.sdlc.workflow_lane as lane
 reloaded = importlib.reload(lane)
 assert reloaded is lane
-assert reloaded._CORE_WORKER_COUNT == 3
+assert reloaded._CORE_WORKER_COUNT == 2
 assert reloaded._CORE_DISTRIBUTION == 'worksteal'
 assert reloaded._CORE_TESTS == ('newsroom/tests',)
 """
@@ -754,7 +754,7 @@ def test_core_shard_command_has_fixed_scheduler_and_no_caller_file_surface(
     )
 
     assert command.count("xdist.plugin") == 1
-    assert command[command.index("-n") + 1] == "3"
+    assert command[command.index("-n") + 1] == "2"
     assert "--dist=worksteal" in command
     assert "--max-worker-restart=0" in command
     assert "newsroom/tests" not in command
@@ -807,8 +807,10 @@ def test_core_shard_child_recomputes_bound_inventory_before_pytest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     nodes = tuple(
-        f"newsroom/tests/test_{index}.py::test_{index}"
-        for index in range(EXPECTED_CORE_SHARD_COUNT)
+        sorted(
+            f"newsroom/tests/test_{index}.py::test_{index}"
+            for index in range(EXPECTED_CORE_SHARD_COUNT)
+        )
     )
     selected = lane_module._core_node_shards(nodes)[0]
     report = tmp_path / "pytest.xml"
@@ -895,10 +897,19 @@ def test_core_shard_child_recomputes_bound_inventory_before_pytest(
     ("results", "expected"),
     [
         (("PASS",) * EXPECTED_CORE_SHARD_COUNT, "PASS"),
-        (("FAIL", *("PASS",) * 9), "FAIL"),
-        (("FAIL", "BUDGET_EXCEEDED", *("PASS",) * 8), "BUDGET_EXCEEDED"),
-        (("FAIL", "ENVIRONMENT_ERROR", *("PASS",) * 8), "ENVIRONMENT_ERROR"),
-        (("FAIL", "EVIDENCE_MISMATCH", *("PASS",) * 8), "EVIDENCE_MISMATCH"),
+        (("FAIL", *("PASS",) * (EXPECTED_CORE_SHARD_COUNT - 1)), "FAIL"),
+        (
+            ("FAIL", "BUDGET_EXCEEDED", *("PASS",) * (EXPECTED_CORE_SHARD_COUNT - 2)),
+            "BUDGET_EXCEEDED",
+        ),
+        (
+            ("FAIL", "ENVIRONMENT_ERROR", *("PASS",) * (EXPECTED_CORE_SHARD_COUNT - 2)),
+            "ENVIRONMENT_ERROR",
+        ),
+        (
+            ("FAIL", "EVIDENCE_MISMATCH", *("PASS",) * (EXPECTED_CORE_SHARD_COUNT - 2)),
+            "EVIDENCE_MISMATCH",
+        ),
     ],
 )
 def test_core_reducer_preserves_typed_outcome_precedence(
@@ -912,17 +923,21 @@ def test_core_reducer_preserves_typed_outcome_precedence(
     [
         (
             ("PASS",) * EXPECTED_CORE_SHARD_COUNT,
-            ("PASS", "FAIL", *("PASS",) * 8),
+            ("PASS", "FAIL", *("PASS",) * (EXPECTED_CORE_SHARD_COUNT - 2)),
             "FAIL",
         ),
         (
-            ("PASS", "FAIL", *("PASS",) * 8),
+            ("PASS", "FAIL", *("PASS",) * (EXPECTED_CORE_SHARD_COUNT - 2)),
             ("PASS",) * EXPECTED_CORE_SHARD_COUNT,
             "FAIL",
         ),
         (
-            ("PASS", "BUDGET_EXCEEDED", *("PASS",) * 8),
-            ("PASS", "FAIL", *("PASS",) * 8),
+            (
+                "PASS",
+                "BUDGET_EXCEEDED",
+                *("PASS",) * (EXPECTED_CORE_SHARD_COUNT - 2),
+            ),
+            ("PASS", "FAIL", *("PASS",) * (EXPECTED_CORE_SHARD_COUNT - 2)),
             "BUDGET_EXCEEDED",
         ),
     ],
@@ -978,6 +993,8 @@ def test_reducer_uses_source_shard_critical_path_plus_sequential_elapsed(
             120_000,
             110_000,
             100_000,
+            90_000,
+            80_000,
         ),
         reducer_elapsed_ms=19_000,
     )
@@ -998,6 +1015,8 @@ def test_reducer_uses_source_shard_critical_path_plus_sequential_elapsed(
         120_000,
         110_000,
         100_000,
+        90_000,
+        80_000,
     ]
     assert accounting["reducer_lifecycle_ms"] == 19_000
     assert accounting["critical_path_ms"] == 219_000
@@ -2517,9 +2536,9 @@ def test_fragment_loader_rejects_duplicate_and_noncanonical_fragments(
 
 def test_reducer_rejects_missing_or_extra_fragment_count() -> None:
     with pytest.raises(WorkflowLaneError, match="core_fragment_count"):
-        lane_module._reduced_core_outcome(("PASS",) * 9)
+        lane_module._reduced_core_outcome(("PASS",) * (EXPECTED_CORE_SHARD_COUNT - 1))
     with pytest.raises(WorkflowLaneError, match="core_fragment_count"):
-        lane_module._reduced_core_outcome(("PASS",) * 11)
+        lane_module._reduced_core_outcome(("PASS",) * (EXPECTED_CORE_SHARD_COUNT + 1))
 
 
 def test_fragment_loader_rejects_missing_and_extra_artifact_inputs(
@@ -2548,7 +2567,8 @@ def test_fragment_loader_rejects_missing_and_extra_artifact_inputs(
         ),
     )
 
-    (fragments / "shard-9" / "fragment.json").unlink()
+    last_fragment = fragments / f"shard-{EXPECTED_CORE_SHARD_COUNT - 1}" / "fragment.json"
+    last_fragment.unlink()
     with pytest.raises(WorkflowLaneError, match="core_fragment_count"):
         lane_module._load_core_fragments(
             root=tmp_path,
@@ -2558,7 +2578,7 @@ def test_fragment_loader_rejects_missing_and_extra_artifact_inputs(
             route={},
         )
 
-    (fragments / "shard-9" / "fragment.json").write_text("{}\n", encoding="utf-8")
+    last_fragment.write_text("{}\n", encoding="utf-8")
     (fragments / "unexpected").write_text("extra", encoding="utf-8")
     with pytest.raises(WorkflowLaneError, match="core_fragment_count"):
         lane_module._load_core_fragments(
