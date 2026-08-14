@@ -639,7 +639,14 @@ def validate_locality_coverage_chain(
         LocalityCoverageDecision | tuple[LocalityCoverageDecision, ...] | None
     ) = None,
     *,
-    provider_qualifications: tuple[tuple[ProviderProposal, ProviderDecision], ...],
+    provider_qualifications: tuple[
+        tuple[
+            ProviderProposal,
+            ProviderDecision,
+            tuple[ProviderDecision, ...],
+        ],
+        ...,
+    ],
 ) -> None:
     if any(
         type(value) is not kind
@@ -659,19 +666,29 @@ def validate_locality_coverage_chain(
     for qualification in provider_qualifications:
         if (
             type(qualification) is not tuple
-            or len(qualification) != 2
+            or len(qualification) != 3
             or type(qualification[0]) is not ProviderProposal
             or type(qualification[1]) is not ProviderDecision
+            or type(qualification[2]) is not tuple
+            or any(type(item) is not ProviderDecision for item in qualification[2])
         ):
             raise LocalityQualificationError(
                 "locality chain requires exact Provider Decisions"
             )
         try:
-            validate_provider_decision(*qualification)
+            validate_provider_decision(
+                qualification[0],
+                qualification[1],
+                qualification[2] or None,
+            )
         except ProviderQualificationError as exc:
             raise LocalityQualificationError(
                 "locality Provider Decision basis differs"
             ) from exc
+        if qualification[1].decided_at > proposal.proposed_at:
+            raise LocalityQualificationError(
+                "locality Provider Decision chronology differs"
+            )
         provider_decision_digests.append(qualification[1].digest)
     if tuple(sorted(set(provider_decision_digests))) != tuple(
         provider_decision_digests

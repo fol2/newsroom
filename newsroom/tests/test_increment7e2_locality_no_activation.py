@@ -40,7 +40,9 @@ def _id(value: int) -> str:
     return str(uuid.UUID(int=value, version=4))
 
 
-def _provider_qualifications() -> tuple[tuple[ProviderProposal, ProviderDecision], ...]:
+def _provider_qualifications() -> tuple[
+    tuple[ProviderProposal, ProviderDecision, tuple[ProviderDecision, ...]], ...
+]:
     provider = ProviderProposal(
         _id(90),
         "fixture-provider-locality",
@@ -72,7 +74,7 @@ def _provider_qualifications() -> tuple[tuple[ProviderProposal, ProviderDecision
         ("CURRENT_POSTURE_RETAINED",),
         "2026-08-14T00:00:00.500000Z",
     )
-    return ((provider, decision),)
+    return ((provider, decision, ()),)
 
 
 def _validate(*args: object) -> None:
@@ -203,6 +205,40 @@ def test_reference_unit_and_proposal_bind_exact_boundaries_and_gaps() -> None:
             unit,
             fabricated,
             replace(decision, proposal_digest=fabricated.digest),
+        )
+
+
+def test_provider_successor_ancestry_and_locality_chronology_are_exact() -> None:
+    reference, unit, proposal, decision = _chain()
+    provider, first, _ = _provider_qualifications()[0]
+    successor = replace(
+        first,
+        decision_id=_id(92),
+        supersedes_decision_digest=first.digest,
+        decided_at="2026-08-14T00:00:01.500000Z",
+    )
+    bound_proposal = replace(
+        proposal, provider_decision_digests=(successor.digest,)
+    )
+    bound_decision = replace(decision, proposal_digest=bound_proposal.digest)
+    validate_locality_coverage_chain(
+        reference,
+        unit,
+        bound_proposal,
+        bound_decision,
+        provider_qualifications=((provider, successor, (first,)),),
+    )
+    late = replace(successor, decided_at="2026-08-14T00:00:02.500000Z")
+    late_proposal = replace(
+        proposal, provider_decision_digests=(late.digest,)
+    )
+    with pytest.raises(LocalityQualificationError, match="chronology"):
+        validate_locality_coverage_chain(
+            reference,
+            unit,
+            late_proposal,
+            replace(decision, proposal_digest=late_proposal.digest),
+            provider_qualifications=((provider, late, (first,)),),
         )
 
 
