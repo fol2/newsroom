@@ -602,6 +602,57 @@ def test_attempt_inventory_blocks_replacement_after_unresolved_deletion(
         authority.close()
 
 
+def test_root_identity_inventories_block_deleted_purpose_and_request_replacement(
+    tmp_path: Path,
+) -> None:
+    purpose_database = tmp_path / "purpose-inventory.sqlite3"
+    purpose_authority = open_bounded_search_authority(
+        purpose_database, applied_at=_AT
+    )
+    purpose = _purpose()
+    purpose_authority.record_purpose(purpose.canonical_bytes)
+    attacker = sqlite3.connect(purpose_database, isolation_level=None)
+    try:
+        attacker.execute("DROP TRIGGER retained_search_purposes")
+        attacker.execute(
+            "DELETE FROM search_purposes WHERE purpose_id=?", (purpose.purpose_id,)
+        )
+        replacement = replace(purpose, rights_policy_version="rights-v2")
+        with pytest.raises(SearchAuthorityError, match="retained purpose inventory"):
+            purpose_authority.record_purpose(replacement.canonical_bytes)
+    finally:
+        attacker.close()
+        purpose_authority.close()
+
+    request_database = tmp_path / "request-inventory.sqlite3"
+    request_authority = open_bounded_search_authority(
+        request_database, applied_at=_AT
+    )
+    purpose = _purpose()
+    request = _request(purpose)
+    request_authority.record_purpose(purpose.canonical_bytes)
+    request_authority.record_request(request.canonical_bytes)
+    attacker = sqlite3.connect(request_database, isolation_level=None)
+    try:
+        attacker.execute("DROP TRIGGER retained_search_requests")
+        attacker.execute(
+            "DELETE FROM search_requests WHERE request_id=?", (request.request_id,)
+        )
+        replacement = replace(
+            request,
+            rendered_query='site:gov.uk "different decision"',
+            query_variants=(
+                'site:gov.uk "different decision"',
+                'site:gov.uk "different announcement"',
+            ),
+        )
+        with pytest.raises(SearchAuthorityError, match="retained request inventory"):
+            request_authority.record_request(replacement.canonical_bytes)
+    finally:
+        attacker.close()
+        request_authority.close()
+
+
 def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> None:
     database = tmp_path / "tamper.sqlite3"
     authority = open_bounded_search_authority(database, applied_at=_AT)

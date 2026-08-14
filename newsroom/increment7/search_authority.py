@@ -422,6 +422,91 @@ class BoundedSearchReadPort(_NoEffect):
                 raise SearchAuthorityError("Search retained attempt inventory differs")
         return len(retained)
 
+    def _purpose_inventory(self) -> None:
+        ledger_rows = self._connection.execute(
+            "SELECT ledger_entry_id,purpose_id,ledger_digest,recorded_at "
+            "FROM search_budget_ledger WHERE entry_kind='PURPOSE_ALLOCATION' "
+            "ORDER BY purpose_id"
+        ).fetchall()
+        retained_rows = self._connection.execute(
+            "SELECT purpose_id,purpose_digest,created_at FROM search_purposes "
+            "ORDER BY purpose_id"
+        ).fetchall()
+        retained = {
+            str(row[0]): (str(row[1]), str(row[2])) for row in retained_rows
+        }
+        if {str(row[1]) for row in ledger_rows} != set(retained):
+            raise SearchAuthorityError("Search retained purpose inventory differs")
+        for row in ledger_rows:
+            purpose_id = str(row[1])
+            purpose_digest, created_at = retained[purpose_id]
+            expected_entry_id = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "entry_kind": "PURPOSE_ALLOCATION",
+                        "purpose_id": purpose_id,
+                    }
+                )
+            )
+            expected_digest = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "purpose_digest": purpose_digest,
+                        "purpose_id": purpose_id,
+                    }
+                )
+            )
+            if (
+                row[0] != expected_entry_id
+                or row[2] != expected_digest
+                or row[3] != created_at
+            ):
+                raise SearchAuthorityError("Search retained purpose inventory differs")
+
+    def _request_inventory(self, purpose: SearchPurpose) -> None:
+        ledger_rows = self._connection.execute(
+            "SELECT ledger_entry_id,request_id,ledger_digest,recorded_at "
+            "FROM search_budget_ledger WHERE purpose_id=? "
+            "AND entry_kind='REQUEST_ALLOCATION' ORDER BY request_id",
+            (purpose.purpose_id,),
+        ).fetchall()
+        retained_rows = self._connection.execute(
+            "SELECT request_id,request_digest,requested_at FROM search_requests "
+            "WHERE purpose_id=? ORDER BY request_id",
+            (purpose.purpose_id,),
+        ).fetchall()
+        retained = {
+            str(row[0]): (str(row[1]), str(row[2])) for row in retained_rows
+        }
+        if {str(row[1]) for row in ledger_rows} != set(retained):
+            raise SearchAuthorityError("Search retained request inventory differs")
+        for row in ledger_rows:
+            request_id = str(row[1])
+            request_digest, requested_at = retained[request_id]
+            expected_entry_id = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "entry_kind": "REQUEST_ALLOCATION",
+                        "request_id": request_id,
+                    }
+                )
+            )
+            expected_digest = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "purpose_id": purpose.purpose_id,
+                        "request_digest": request_digest,
+                        "request_id": request_id,
+                    }
+                )
+            )
+            if (
+                row[0] != expected_entry_id
+                or row[2] != expected_digest
+                or row[3] != requested_at
+            ):
+                raise SearchAuthorityError("Search retained request inventory differs")
+
     def _downstream_work_inventory(self, request: SearchRequest) -> frozenset[str]:
         rows = self._connection.execute(
             "SELECT ledger_entry_id,review_decision_id,work_reference_digest,"
@@ -574,6 +659,7 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
         record = SearchPurpose.from_canonical_bytes(raw)
         self._begin()
         try:
+            self._purpose_inventory()
             replay = self._exact_replay(
                 "search_purposes", "purpose_id", record.purpose_id, raw
             )
@@ -589,6 +675,44 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                         record.created_at,
                     ),
                 )
+                entry_id = digest_bytes(
+                    canonical_json_bytes(
+                        {
+                            "entry_kind": "PURPOSE_ALLOCATION",
+                            "purpose_id": record.purpose_id,
+                        }
+                    )
+                )
+                ledger_digest = digest_bytes(
+                    canonical_json_bytes(
+                        {
+                            "purpose_digest": record.digest,
+                            "purpose_id": record.purpose_id,
+                        }
+                    )
+                )
+                self._connection.execute(
+                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        entry_id,
+                        "PURPOSE_ALLOCATION",
+                        record.purpose_id,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        ledger_digest,
+                        record.created_at,
+                    ),
+                )
+            self._purpose_inventory()
             self._finish()
         except BaseException as exc:
             self._finish(exc)
@@ -602,6 +726,7 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
         try:
             purpose = self.purpose(record.purpose_id)
             validate_search_request(purpose, record)
+            self._request_inventory(purpose)
             replay = self._exact_replay(
                 "search_requests", "request_id", record.request_id, raw
             )
@@ -625,6 +750,45 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                         record.requested_at,
                     ),
                 )
+                entry_id = digest_bytes(
+                    canonical_json_bytes(
+                        {
+                            "entry_kind": "REQUEST_ALLOCATION",
+                            "request_id": record.request_id,
+                        }
+                    )
+                )
+                ledger_digest = digest_bytes(
+                    canonical_json_bytes(
+                        {
+                            "purpose_id": purpose.purpose_id,
+                            "request_digest": record.digest,
+                            "request_id": record.request_id,
+                        }
+                    )
+                )
+                self._connection.execute(
+                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        entry_id,
+                        "REQUEST_ALLOCATION",
+                        purpose.purpose_id,
+                        None,
+                        None,
+                        None,
+                        record.request_id,
+                        None,
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        ledger_digest,
+                        record.requested_at,
+                    ),
+                )
+            self._request_inventory(purpose)
             self._finish()
         except BaseException as exc:
             self._finish(exc)
@@ -713,10 +877,11 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                     )
                 )
                 self._connection.execute(
-                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         entry_id,
                         "ATTEMPT_ALLOCATION",
+                        None,
                         None,
                         None,
                         None,
@@ -789,10 +954,11 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                     )
                 )
                 self._connection.execute(
-                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         record.outcome_id,
                         "OUTCOME",
+                        None,
                         record.outcome_id,
                         None,
                         None,
@@ -866,10 +1032,11 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                     )
                 )
                 self._connection.execute(
-                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         entry_id,
                         "RESULT_REFERENCE",
+                        None,
                         outcome.outcome_id,
                         record.result_reference_id,
                         None,
@@ -955,10 +1122,11 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                     )
                 )
                 self._connection.execute(
-                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         review_entry_id,
                         "REVIEW_DECISION",
+                        None,
                         None,
                         None,
                         record.review_decision_id,
@@ -999,10 +1167,11 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                         )
                     )
                     self._connection.execute(
-                        "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             entry_id,
                             "DOWNSTREAM_WORK",
+                            None,
                             None,
                             None,
                             record.review_decision_id,
