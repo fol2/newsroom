@@ -391,7 +391,7 @@ def test_disposition_is_generic_ledger_anchored_and_replay_precedes_ports(
     assert disposition.obligation_id == accepted.obligation.obligation_id
 
 
-def test_disposition_restart_chain_is_terminal_and_tamper_evident(
+def test_disposition_restart_chain_is_terminal(
     _generic_disposition_state,
 ) -> None:
     location, args, feedback, obligation, accepted, disposition = (
@@ -467,6 +467,22 @@ def test_disposition_restart_chain_is_terminal_and_tamper_evident(
             expected_current_disposition_digest=fulfilled.canonical_digest,
             expected_current_ordinal=3,
         )
+    reopened.close()
+
+
+def test_disposition_tamper_is_evident(
+    _generic_disposition_state,
+) -> None:
+    location, args, feedback, _, _, disposition = _generic_disposition_state
+    reopened = open_evaluation_feedback_authority_system(
+        location.seed[1],
+        retrieval_authority=args["retrieval_authority"],
+        authenticator=args["authenticator"],
+        authorizer=args["authorizer"],
+        command_registry=args["command_registry"],
+        payload_schemas=args["payload_schemas"],
+        clock=args["clock"],
+    )
     connection = reopened._EvaluationFeedbackAuthority__authority._connection
     trigger = connection.execute(
         "SELECT sql FROM sqlite_master WHERE name='immutable_evaluation_feedback'"
@@ -474,7 +490,7 @@ def test_disposition_restart_chain_is_terminal_and_tamper_evident(
     event = connection.execute(
         "SELECT authority_event_id,recorded_at FROM "
         "evaluation_reconciliation_dispositions WHERE disposition_id=?",
-        (fulfilled.disposition_id,),
+        (disposition.disposition_id,),
     ).fetchone()
     connection.execute("DROP TRIGGER immutable_evaluation_feedback")
     connection.execute(
