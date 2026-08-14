@@ -12,6 +12,7 @@ from newsroom.increment7.closeout import (
     INCREMENT7G_FINAL_CLOSEOUT_CASES,
     Increment7CloseoutLane,
 )
+from newsroom.authority.migrations import EXPECTED_MIGRATION_HISTORY
 from newsroom.tests.test_increment6g_closeout_receipt import (
     _RawReport,
     _clean_clone,
@@ -169,3 +170,19 @@ def test_receipt_rejects_a_failed_selected_case(tmp_path, monkeypatch) -> None:
             service_transport_bundle_root=tmp_path / "service",
             decision_path=decision_path,
         )
+
+
+def test_receipt_preserves_the_v29_prefix_after_a_future_migration(
+    monkeypatch,
+) -> None:
+    import scripts.sdlc.increment7g_closeout_receipt as receipt_module
+
+    monkeypatch.setattr(receipt_module, "SCHEMA_VERSION", 30)
+    monkeypatch.setattr(
+        receipt_module,
+        "EXPECTED_MIGRATION_HISTORY",
+        (*EXPECTED_MIGRATION_HISTORY, (30, "future_authorised", "sha256:x")),
+    )
+    inventory = receipt_module._inventory()
+    assert inventory["schema_version"] == 29
+    assert inventory["digest"] == INCREMENT7_FINAL_CLOSEOUT_INVENTORY_DIGEST

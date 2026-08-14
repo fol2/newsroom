@@ -7,7 +7,6 @@ from pathlib import Path
 
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
-    EXPECTED_SCHEMA_FINGERPRINT,
     SCHEMA_VERSION,
 )
 from newsroom.increment7.closeout import (
@@ -46,10 +45,7 @@ class Increment7GCloseoutReceiptError(ValueError):
 
 
 def _inventory() -> dict[str, object]:
-    if (
-        SCHEMA_VERSION != INCREMENT7_FINAL_SCHEMA_VERSION
-        or EXPECTED_SCHEMA_FINGERPRINT != INCREMENT7_FINAL_SCHEMA_FINGERPRINT
-    ):
+    if SCHEMA_VERSION < INCREMENT7_FINAL_SCHEMA_VERSION:
         raise Increment7GCloseoutReceiptError("schema_identity")
     try:
         increment7_final_migration_history(EXPECTED_MIGRATION_HISTORY)
