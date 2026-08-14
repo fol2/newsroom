@@ -809,6 +809,34 @@ def test_outcome_and_dependent_replays_reconcile_retained_budget_entry(
         authority.close()
 
 
+def test_no_work_review_reconciles_other_retained_downstream_work(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "review-downstream-inventory.sqlite3"
+    authority = open_bounded_search_authority(database, applied_at=_AT)
+    records = _record_chain(authority)
+    no_work = replace(
+        records[5],
+        review_decision_id=_id(86),
+        action=SearchReviewAction.NO_WORK,
+        work_reference_digest=None,
+        reason_codes=("NO_ADDITIONAL_WORK",),
+        decided_at="2026-08-14T00:00:08.000000Z",
+    )
+    authority.record_review(no_work.canonical_bytes)
+    attacker = sqlite3.connect(database, isolation_level=None)
+    try:
+        attacker.execute("DROP TRIGGER retained_search_budget_ledger")
+        attacker.execute(
+            "DELETE FROM search_budget_ledger WHERE entry_kind='DOWNSTREAM_WORK'"
+        )
+        with pytest.raises(SearchAuthorityError, match="retained downstream work"):
+            authority.review(no_work.review_decision_id)
+    finally:
+        attacker.close()
+        authority.close()
+
+
 def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> None:
     database = tmp_path / "tamper.sqlite3"
     authority = open_bounded_search_authority(database, applied_at=_AT)

@@ -294,8 +294,7 @@ class BoundedSearchReadPort(_NoEffect):
         ):
             raise SearchAuthorityError("Search Review retained columns differ")
         self._review_inventory(request)
-        if record.work_reference_digest is not None:
-            self._downstream_work_inventory(request)
+        self._downstream_work_inventory(request)
         return record
 
     @_total("Search budget replay failed")
@@ -1136,9 +1135,8 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
             )
             if not replay:
                 self._review_inventory(request)
-                existing_work: frozenset[str] = frozenset()
+                existing_work = self._downstream_work_inventory(request)
                 if record.work_reference_digest is not None:
-                    existing_work = self._downstream_work_inventory(request)
                     if (
                         record.work_reference_digest not in existing_work
                         and len(existing_work)
@@ -1244,8 +1242,7 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                         ),
                     )
             self._review_inventory(request)
-            if record.work_reference_digest is not None:
-                self._downstream_work_inventory(request)
+            self._downstream_work_inventory(request)
             self._finish()
         except BaseException as exc:
             self._finish(exc)
