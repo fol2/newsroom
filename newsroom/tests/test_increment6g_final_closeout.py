@@ -94,6 +94,8 @@ def test_expensive_lineage_cases_concentration_is_bounded() -> None:
     )
 
     assert sum(counts) == len(_EXPECTED_PROBE_IDS)
+    # Additive repository tests can shift the SHA-256 rank positions used by the
+    # balanced ten-shard allocator; keep the measured D3 concentration bounded.
     assert max(counts) <= 7
 
 
