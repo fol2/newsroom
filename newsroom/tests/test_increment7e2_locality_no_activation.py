@@ -17,6 +17,8 @@ from newsroom.increment7.locality_qualification import (
     LocalityDecisionOutcome,
     LocalityKind,
     LocalityProposalPosture,
+    LocalityQualificationBasis,
+    LocalityQualificationFactorRole,
     LocalityQualificationError,
     LocalityReference,
     LocalityServiceBoundary,
@@ -125,11 +127,17 @@ def _chain():
         coverage_unit_id=unit.coverage_unit_id,
         coverage_unit_digest=unit.digest,
         posture=LocalityProposalPosture.RESEARCH_ONLY,
-        qualification_basis_digests=(
-            "sha256:" + "7" * 64,
-            "sha256:" + "8" * 64,
+        qualification_bases=(
+            LocalityQualificationBasis(
+                LocalityQualificationFactorRole.ACCEPTED_COVERAGE_OR_REVIEWED_GAP,
+                "sha256:" + "7" * 64,
+            ),
+            LocalityQualificationBasis(
+                LocalityQualificationFactorRole.PROSPECTIVE_CONTRIBUTION,
+                "sha256:" + "8" * 64,
+            ),
         ),
-        provider_decision_digests=(_provider_qualifications()[0][1].digest,),
+        provider_proposal_digests=(_provider_qualifications()[0][0].digest,),
         proposed_source_reference_digests=("sha256:" + "d" * 64,),
         permanent_monitoring_rationale_digest="sha256:" + "1" * 64,
         expected_contribution_digest="sha256:" + "2" * 64,
@@ -141,15 +149,16 @@ def _chain():
         proposed_at="2026-08-14T00:00:02.000000Z",
     )
     decision = LocalityCoverageDecision(
-        _id(4),
-        proposal.proposal_id,
-        proposal.digest,
-        LocalityDecisionOutcome.RETAIN_RESEARCH_ONLY,
-        proposal.unresolved_gap_codes,
-        ("GAPS_REMAIN_EXPLICIT",),
-        "sha256:" + "f" * 64,
-        None,
-        "2026-08-14T00:00:03.000000Z",
+        decision_id=_id(4),
+        proposal_id=proposal.proposal_id,
+        proposal_digest=proposal.digest,
+        provider_decision_digests=(_provider_qualifications()[0][1].digest,),
+        outcome=LocalityDecisionOutcome.RETAIN_RESEARCH_ONLY,
+        assessed_gap_codes=proposal.unresolved_gap_codes,
+        reason_codes=("GAPS_REMAIN_EXPLICIT",),
+        decider_identity_digest="sha256:" + "f" * 64,
+        supersedes_decision_digest=None,
+        decided_at="2026-08-14T00:00:03.000000Z",
     )
     return reference, unit, proposal, decision
 
@@ -197,14 +206,14 @@ def test_reference_unit_and_proposal_bind_exact_boundaries_and_gaps() -> None:
             replace(decision, assessed_gap_codes=("UNASSESSED_GAP",)),
         )
     fabricated = replace(
-        proposal, provider_decision_digests=("sha256:" + "9" * 64,)
+        decision, provider_decision_digests=("sha256:" + "9" * 64,)
     )
     with pytest.raises(LocalityQualificationError, match="Provider Decision basis"):
         _validate(
             reference,
             unit,
+            proposal,
             fabricated,
-            replace(decision, proposal_digest=fabricated.digest),
         )
 
 
@@ -217,27 +226,21 @@ def test_provider_successor_ancestry_and_locality_chronology_are_exact() -> None
         supersedes_decision_digest=first.digest,
         decided_at="2026-08-14T00:00:01.500000Z",
     )
-    bound_proposal = replace(
-        proposal, provider_decision_digests=(successor.digest,)
-    )
-    bound_decision = replace(decision, proposal_digest=bound_proposal.digest)
+    bound_decision = replace(decision, provider_decision_digests=(successor.digest,))
     validate_locality_coverage_chain(
         reference,
         unit,
-        bound_proposal,
+        proposal,
         bound_decision,
         provider_qualifications=((provider, successor, (first,)),),
     )
-    late = replace(successor, decided_at="2026-08-14T00:00:02.500000Z")
-    late_proposal = replace(
-        proposal, provider_decision_digests=(late.digest,)
-    )
+    late = replace(successor, decided_at="2026-08-14T00:00:03.500000Z")
     with pytest.raises(LocalityQualificationError, match="chronology"):
         validate_locality_coverage_chain(
             reference,
             unit,
-            late_proposal,
-            replace(decision, proposal_digest=late_proposal.digest),
+            proposal,
+            replace(decision, provider_decision_digests=(late.digest,)),
             provider_qualifications=((provider, late, (first,)),),
         )
 
@@ -270,10 +273,10 @@ def test_locality_reference_identity_commits_boundary_ambiguity_dimensions() -> 
 
 def test_proposal_requires_multiple_qualification_bases_and_full_assessment() -> None:
     _, _, proposal, _ = _chain()
-    with pytest.raises(LocalityQualificationError, match="bounded array"):
+    with pytest.raises(LocalityQualificationError, match="independent ordered"):
         replace(
             proposal,
-            qualification_basis_digests=(proposal.qualification_basis_digests[0],),
+            qualification_bases=(proposal.qualification_bases[0],),
         )
     for field, value in (
         ("permanent_monitoring_rationale_digest", "sha256:" + "a" * 64),

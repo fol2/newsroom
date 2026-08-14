@@ -68,6 +68,14 @@ class LocalityProposalPosture(StrEnum):
     RESEARCH_ONLY = "RESEARCH_ONLY"
 
 
+class LocalityQualificationFactorRole(StrEnum):
+    ACCEPTED_COVERAGE_OR_REVIEWED_GAP = "ACCEPTED_COVERAGE_OR_REVIEWED_GAP"
+    PROSPECTIVE_CONTRIBUTION = "PROSPECTIVE_CONTRIBUTION"
+    AUDIENCE_NEED = "AUDIENCE_NEED"
+    RESILIENCE = "RESILIENCE"
+    OTHER_OWNER_APPROVED = "OTHER_OWNER_APPROVED"
+
+
 class LocalityDecisionOutcome(StrEnum):
     DEFERRED = "DEFERRED"
     REJECTED = "REJECTED"
@@ -227,7 +235,9 @@ def _record_dict(record: object, fields: tuple[str, ...]) -> dict[str, object]:
         if isinstance(value, StrEnum):
             value = value.value
         elif isinstance(value, tuple):
-            value = list(value)
+            value = [
+                item.to_dict() if hasattr(item, "to_dict") else item for item in value
+            ]
         result[field] = value
     return result
 
@@ -429,14 +439,47 @@ class LocalityCoverageUnit(_NoEffect):
         return result
 
 
+_QUALIFICATION_BASIS_FIELDS = ("factor_role", "reference_digest")
+
+
+@dataclass(frozen=True, slots=True)
+class LocalityQualificationBasis(_NoEffect):
+    factor_role: LocalityQualificationFactorRole
+    reference_digest: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "factor_role",
+            _enum(
+                LocalityQualificationFactorRole,
+                self.factor_role,
+                "factor_role",
+            ),
+        )
+        _digest(self.reference_digest, "reference_digest")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "factor_role": self.factor_role.value,
+            "reference_digest": self.reference_digest,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        if type(value) is not dict or tuple(value) != _QUALIFICATION_BASIS_FIELDS:
+            raise LocalityQualificationError("qualification basis fields differ")
+        return cls(**value)  # type: ignore[arg-type]
+
+
 _PROPOSAL_FIELDS = (
     "schema_version",
     "proposal_id",
     "coverage_unit_id",
     "coverage_unit_digest",
     "posture",
-    "qualification_basis_digests",
-    "provider_decision_digests",
+    "qualification_bases",
+    "provider_proposal_digests",
     "proposed_source_reference_digests",
     "permanent_monitoring_rationale_digest",
     "expected_contribution_digest",
@@ -455,8 +498,8 @@ class LocalityCoverageProposal(_NoEffect):
     coverage_unit_id: str
     coverage_unit_digest: str
     posture: LocalityProposalPosture
-    qualification_basis_digests: tuple[str, ...]
-    provider_decision_digests: tuple[str, ...]
+    qualification_bases: tuple[LocalityQualificationBasis, ...]
+    provider_proposal_digests: tuple[str, ...]
     proposed_source_reference_digests: tuple[str, ...]
     permanent_monitoring_rationale_digest: str
     expected_contribution_digest: str
@@ -483,21 +526,35 @@ class LocalityCoverageProposal(_NoEffect):
         )
         object.__setattr__(
             self,
-            "qualification_basis_digests",
-            _strings(
-                self.qualification_basis_digests,
-                "qualification_basis_digests",
-                required=True,
-                digests=True,
-                minimum=2,
-            ),
+            "qualification_bases",
+            tuple(
+                item
+                if type(item) is LocalityQualificationBasis
+                else LocalityQualificationBasis.from_dict(item)
+                for item in self.qualification_bases
+            )
+            if type(self.qualification_bases) is tuple
+            else (),
         )
+        if (
+            len(self.qualification_bases) < 2
+            or len(self.qualification_bases) > 64
+            or tuple(
+                sorted(self.qualification_bases, key=lambda item: item.factor_role.value)
+            )
+            != self.qualification_bases
+            or len({item.factor_role for item in self.qualification_bases})
+            != len(self.qualification_bases)
+        ):
+            raise LocalityQualificationError(
+                "qualification_bases must contain independent ordered factors"
+            )
         object.__setattr__(
             self,
-            "provider_decision_digests",
+            "provider_proposal_digests",
             _strings(
-                self.provider_decision_digests,
-                "provider_decision_digests",
+                self.provider_proposal_digests,
+                "provider_proposal_digests",
                 required=True,
                 digests=True,
             ),
@@ -543,9 +600,12 @@ class LocalityCoverageProposal(_NoEffect):
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
         value = _document(raw, LOCALITY_COVERAGE_PROPOSAL, _PROPOSAL_FIELDS)
+        value["qualification_bases"] = tuple(
+            LocalityQualificationBasis.from_dict(item)
+            for item in _array(value["qualification_bases"], "qualification_bases")
+        )
         for field in (
-            "qualification_basis_digests",
-            "provider_decision_digests",
+            "provider_proposal_digests",
             "proposed_source_reference_digests",
             "unresolved_gap_codes",
         ):
@@ -563,6 +623,7 @@ _DECISION_FIELDS = (
     "decision_id",
     "proposal_id",
     "proposal_digest",
+    "provider_decision_digests",
     "outcome",
     "assessed_gap_codes",
     "reason_codes",
@@ -577,6 +638,7 @@ class LocalityCoverageDecision(_NoEffect):
     decision_id: str
     proposal_id: str
     proposal_digest: str
+    provider_decision_digests: tuple[str, ...]
     outcome: LocalityDecisionOutcome
     assessed_gap_codes: tuple[str, ...]
     reason_codes: tuple[str, ...]
@@ -593,6 +655,16 @@ class LocalityCoverageDecision(_NoEffect):
         _uuid(self.decision_id, "decision_id")
         _uuid(self.proposal_id, "proposal_id")
         _digest(self.proposal_digest, "proposal_digest")
+        object.__setattr__(
+            self,
+            "provider_decision_digests",
+            _strings(
+                self.provider_decision_digests,
+                "provider_decision_digests",
+                required=True,
+                digests=True,
+            ),
+        )
         object.__setattr__(
             self,
             "outcome",
@@ -620,7 +692,11 @@ class LocalityCoverageDecision(_NoEffect):
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
         value = _document(raw, LOCALITY_COVERAGE_DECISION, _DECISION_FIELDS)
-        for field in ("assessed_gap_codes", "reason_codes"):
+        for field in (
+            "provider_decision_digests",
+            "assessed_gap_codes",
+            "reason_codes",
+        ):
             value[field] = tuple(_array(value[field], field))
         result = cls(**value)  # type: ignore[arg-type]
         if result.canonical_bytes != raw:
@@ -662,6 +738,7 @@ def validate_locality_coverage_chain(
         raise LocalityQualificationError(
             "locality chain requires exact Provider Decisions"
         )
+    provider_proposal_digests: list[str] = []
     provider_decision_digests: list[str] = []
     for qualification in provider_qualifications:
         if (
@@ -685,14 +762,20 @@ def validate_locality_coverage_chain(
             raise LocalityQualificationError(
                 "locality Provider Decision basis differs"
             ) from exc
-        if qualification[1].decided_at > proposal.proposed_at:
+        if qualification[1].decided_at > decision.decided_at:
             raise LocalityQualificationError(
                 "locality Provider Decision chronology differs"
             )
+        provider_proposal_digests.append(qualification[0].digest)
         provider_decision_digests.append(qualification[1].digest)
-    if tuple(sorted(set(provider_decision_digests))) != tuple(
-        provider_decision_digests
-    ) or tuple(provider_decision_digests) != proposal.provider_decision_digests:
+    if (
+        tuple(sorted(set(provider_proposal_digests)))
+        != tuple(provider_proposal_digests)
+        or tuple(sorted(set(provider_decision_digests)))
+        != tuple(provider_decision_digests)
+        or tuple(provider_proposal_digests) != proposal.provider_proposal_digests
+        or tuple(provider_decision_digests) != decision.provider_decision_digests
+    ):
         raise LocalityQualificationError("locality Provider Decision basis differs")
     if (
         unit.locality_reference_id != reference.locality_reference_id
@@ -757,6 +840,8 @@ __all__ = [
     "LocalityDecisionOutcome",
     "LocalityKind",
     "LocalityProposalPosture",
+    "LocalityQualificationBasis",
+    "LocalityQualificationFactorRole",
     "LocalityQualificationError",
     "LocalityReference",
     "LocalityServiceBoundary",
