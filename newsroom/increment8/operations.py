@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Self, TypeVar
 
 from newsroom.authority.canonical import (
     canonical_json_bytes,
@@ -25,6 +25,9 @@ from newsroom.increment8.readiness import (
 
 class OperationalAuthorityError(ValueError):
     """Operational state differs from the frozen fixture Profile."""
+
+
+_T = TypeVar("_T")
 
 
 class Urgency(StrEnum):
@@ -865,16 +868,19 @@ class OperationalAuthority:
             )
         self._connection = connection
 
-    def _insert(self, sql: str, values: tuple[object, ...]) -> int:
+    def _write(self, operation: Callable[[], _T]) -> _T:
         self._connection.execute("BEGIN IMMEDIATE")
         try:
-            cursor = self._connection.execute(sql, values)
+            result = operation()
             self._connection.execute("COMMIT")
-            return cursor.rowcount
+            return result
         except Exception:
             if self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             raise
+
+    def _insert(self, sql: str, values: tuple[object, ...]) -> int:
+        return self._write(lambda: self._connection.execute(sql, values).rowcount)
 
     def register_profile(self, profile: OperationalProfile) -> None:
         if (
@@ -993,83 +999,7 @@ class OperationalAuthority:
         ):
             raise OperationalAuthorityError("lease is forged or non-canonical")
         version = int(lease.payload["lease_version"])
-        retained_work: DueWork | None = None
-        limit = 0
-        if version == 1:
-            work = self._connection.execute(
-                "SELECT work_bytes FROM due_work WHERE work_id=? "
-                "ORDER BY state_version DESC LIMIT 1",
-                (lease.payload["work_id"],),
-            ).fetchone()
-            if work is None:
-                raise OperationalAuthorityError("lease work is absent")
-            retained_work = DueWork.from_canonical_bytes(bytes(work[0]))
-            expected = acquire_lease(
-                work=retained_work,
-                owner_digest=str(lease.payload["owner_digest"]),
-                acquired_at=str(lease.payload["acquired_at"]),
-                progress_digest=str(lease.payload["progress_digest"]),
-            )
-            if expected != lease:
-                raise OperationalAuthorityError("lease acquisition differs")
-            if retained_work.payload["state"] == WorkState.RETRY_PENDING.value:
-                retry = self._connection.execute(
-                    "SELECT finding_bytes FROM retry_findings WHERE work_id=? "
-                    "AND attempt_number=?",
-                    (retained_work.work_id, retained_work.payload["attempt_count"]),
-                ).fetchone()
-                if retry is None:
-                    raise OperationalAuthorityError("retry Finding is absent")
-                finding = RetryFinding.from_canonical_bytes(bytes(retry[0]))
-                next_due = finding.payload["next_due_at"]
-                if (
-                    finding.payload["work_digest"]
-                    != retained_work.payload["previous_digest"]
-                    or next_due is None
-                    or _dt(str(lease.payload["acquired_at"])) < _dt(str(next_due))
-                ):
-                    raise OperationalAuthorityError("retry backoff is not due")
-            limit = int(
-                INCREMENT_8_READINESS.operational_profile["execution"][
-                    "host_concurrency"
-                ]
-            )
-        else:
-            previous = self._connection.execute(
-                "SELECT lease_digest,lease_bytes FROM work_leases WHERE lease_id=? AND lease_version=?",
-                (lease.lease_id, version - 1),
-            ).fetchone()
-            if previous is None or previous[0] != lease.payload["previous_digest"]:
-                raise OperationalAuthorityError("lease predecessor differs")
-            retained = WorkLease.from_canonical_bytes(bytes(previous[1]))
-            if lease.payload["status"] == LeaseState.ACTIVE.value:
-                unchanged = {
-                    name: retained.payload[name]
-                    for name in (
-                        "lease_id",
-                        "work_id",
-                        "owner_digest",
-                        "acquired_at",
-                        "maximum_expires_at",
-                        "status",
-                    )
-                }
-                if any(
-                    lease.payload[name] != value for name, value in unchanged.items()
-                ) or (
-                    retained.payload["progress_digest"]
-                    == lease.payload["progress_digest"]
-                    or _dt(str(lease.payload["expires_at"]))
-                    < _dt(str(retained.payload["expires_at"]))
-                    or _dt(str(lease.payload["expires_at"]))
-                    > _dt(str(lease.payload["maximum_expires_at"]))
-                ):
-                    raise OperationalAuthorityError("lease renewal differs")
-            elif (
-                close_lease(retained, LeaseState(str(lease.payload["status"]))) != lease
-            ):
-                raise OperationalAuthorityError("lease close differs")
-        values = (
+        lease_values = (
             lease.lease_id,
             lease.payload["lease_version"],
             lease.canonical_bytes,
@@ -1084,24 +1014,133 @@ class OperationalAuthority:
             lease.payload["previous_digest"],
         )
         if version == 1:
-            assert retained_work is not None
-            inserted = self._insert(
-                "INSERT INTO work_leases SELECT ?,?,?,?,?,?,?,?,?,?,?,? WHERE "
-                "(SELECT COUNT(*) FROM work_leases l WHERE l.lease_version=("
-                "SELECT MAX(x.lease_version) FROM work_leases x "
-                "WHERE x.lease_id=l.lease_id) AND l.status='ACTIVE') < ? AND "
-                "EXISTS(SELECT 1 FROM due_work d WHERE d.work_id=? "
-                "AND d.work_digest=? AND d.state_version=(SELECT MAX(x.state_version) "
-                "FROM due_work x WHERE x.work_id=d.work_id) "
-                "AND d.state IN('QUEUED','RETRY_PENDING'))",
-                (*values, limit, retained_work.work_id, retained_work.digest),
+            work_row = self._connection.execute(
+                "SELECT work_bytes FROM due_work WHERE work_id=? "
+                "ORDER BY state_version DESC LIMIT 1",
+                (lease.payload["work_id"],),
+            ).fetchone()
+            if work_row is None:
+                raise OperationalAuthorityError("lease work is absent")
+            retained_work = DueWork.from_canonical_bytes(bytes(work_row[0]))
+            expected = acquire_lease(
+                work=retained_work,
+                owner_digest=str(lease.payload["owner_digest"]),
+                acquired_at=str(lease.payload["acquired_at"]),
+                progress_digest=str(lease.payload["progress_digest"]),
             )
-            if inserted != 1:
-                raise OperationalAuthorityError(
-                    "host concurrency or work authority differs"
+            if expected != lease:
+                raise OperationalAuthorityError("lease acquisition differs")
+            limit = int(
+                INCREMENT_8_READINESS.operational_profile["execution"][
+                    "host_concurrency"
+                ]
+            )
+
+            def commit_acquisition() -> None:
+                latest_row = self._connection.execute(
+                    "SELECT work_bytes FROM due_work WHERE work_id=? "
+                    "ORDER BY state_version DESC LIMIT 1",
+                    (lease.payload["work_id"],),
+                ).fetchone()
+                if latest_row is None:
+                    raise OperationalAuthorityError("lease work is absent")
+                latest = DueWork.from_canonical_bytes(bytes(latest_row[0]))
+                if latest != retained_work:
+                    raise OperationalAuthorityError("lease work authority changed")
+                acquired = _dt(str(lease.payload["acquired_at"]))
+                if latest.payload["state"] == WorkState.QUEUED.value:
+                    if acquired < _dt(str(latest.payload["due_at"])):
+                        raise OperationalAuthorityError("queued work is not due")
+                elif latest.payload["state"] == WorkState.RETRY_PENDING.value:
+                    retry_row = self._connection.execute(
+                        "SELECT finding_bytes FROM retry_findings WHERE work_id=? "
+                        "AND attempt_number=?",
+                        (latest.work_id, latest.payload["attempt_count"]),
+                    ).fetchone()
+                    if retry_row is None:
+                        raise OperationalAuthorityError("retry Finding is absent")
+                    finding = RetryFinding.from_canonical_bytes(bytes(retry_row[0]))
+                    next_due = finding.payload["next_due_at"]
+                    if (
+                        finding.payload["work_digest"]
+                        != latest.payload["previous_digest"]
+                        or finding.payload["classification"]
+                        != RetryClassification.RETRYABLE.value
+                        or finding.payload["retry_exhausted"] is not False
+                        or next_due is None
+                        or acquired < _dt(str(next_due))
+                    ):
+                        raise OperationalAuthorityError("retry backoff is not due")
+                else:
+                    raise OperationalAuthorityError("only ready work can be leased")
+                if self.active_lease_count() >= limit:
+                    raise OperationalAuthorityError("host concurrency is exhausted")
+                self._connection.execute(
+                    "INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    lease_values,
                 )
+                leased_work = transition_work(
+                    latest,
+                    state=WorkState.LEASED,
+                    attempt_count=int(latest.payload["attempt_count"]) + 1,
+                )
+                self._connection.execute(
+                    "INSERT INTO due_work VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        leased_work.work_id,
+                        leased_work.payload["state_version"],
+                        leased_work.canonical_bytes,
+                        leased_work.digest,
+                        leased_work.payload["profile_record_id"],
+                        leased_work.payload["logical_due_key"],
+                        leased_work.payload["scope_kind"],
+                        leased_work.payload["urgency"],
+                        leased_work.payload["state"],
+                        leased_work.payload["attempt_count"],
+                        leased_work.payload["due_at"],
+                        leased_work.payload["deadline_at"],
+                        leased_work.payload["previous_digest"],
+                        leased_work.payload["authority_version_digest"],
+                    ),
+                )
+
+            self._write(commit_acquisition)
             return
-        self._insert("INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", values)
+
+        previous = self._connection.execute(
+            "SELECT lease_digest,lease_bytes FROM work_leases WHERE lease_id=? AND lease_version=?",
+            (lease.lease_id, version - 1),
+        ).fetchone()
+        if previous is None or previous[0] != lease.payload["previous_digest"]:
+            raise OperationalAuthorityError("lease predecessor differs")
+        retained = WorkLease.from_canonical_bytes(bytes(previous[1]))
+        if lease.payload["status"] == LeaseState.ACTIVE.value:
+            unchanged = {
+                name: retained.payload[name]
+                for name in (
+                    "lease_id",
+                    "work_id",
+                    "owner_digest",
+                    "acquired_at",
+                    "maximum_expires_at",
+                    "status",
+                )
+            }
+            if any(
+                lease.payload[name] != value for name, value in unchanged.items()
+            ) or (
+                retained.payload["progress_digest"] == lease.payload["progress_digest"]
+                or _dt(str(lease.payload["expires_at"]))
+                < _dt(str(retained.payload["expires_at"]))
+                or _dt(str(lease.payload["expires_at"]))
+                > _dt(str(lease.payload["maximum_expires_at"]))
+            ):
+                raise OperationalAuthorityError("lease renewal differs")
+        elif close_lease(retained, LeaseState(str(lease.payload["status"]))) != lease:
+            raise OperationalAuthorityError("lease close differs")
+        self._insert(
+            "INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", lease_values
+        )
 
     def append_retry_finding(self, finding: RetryFinding) -> None:
         if (
@@ -1239,8 +1278,18 @@ class OperationalAuthority:
             Urgency.PLANNED.value: 2,
             Urgency.ROUTINE.value: 3,
         }
+        starvation_limit = int(
+            INCREMENT_8_READINESS.operational_profile["execution"][
+                "routine_starvation_limit_seconds"
+            ]
+        )
         ready.sort(
             key=lambda item: (
+                0
+                if item.payload["urgency"] == Urgency.ROUTINE.value
+                and _dt(instant) - _dt(str(item.payload["due_at"]))
+                >= timedelta(seconds=starvation_limit)
+                else 1,
                 priority[str(item.payload["urgency"])],
                 str(item.payload["deadline_at"]),
                 item.work_id,

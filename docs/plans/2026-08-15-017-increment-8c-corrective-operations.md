@@ -20,3 +20,10 @@ Corrective regressions cover multi-attempt retry lineage and backoff, early retr
 ## Non-effects
 
 Fixture operational authority only. No production scheduler activation, live provider, credentials, external egress, spend, shadow, canary, publication or locality effect.
+
+## Review corrections
+
+- Initial acquisition now commits the WorkLease and matching LEASED DueWork Version in one `BEGIN IMMEDIATE` transaction; restart cannot expose a leased item as due or strand it behind a deterministic lease identifier.
+- Both queued and retry acquisition enforce their exact due instant inside that same transaction.
+- Routine work that reaches the frozen starvation limit is promoted before the catch-up bound is applied.
+- Terminal retry Findings cannot create RETRY_PENDING work, and Finding insertion rechecks latest-work identity inside its serialised statement.
