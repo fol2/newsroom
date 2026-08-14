@@ -511,11 +511,13 @@ def _validate_retained_lifecycle(
 ) -> None:
     by_digest = {version.digest: version for version in versions}
     revision_successors: set[str] = set()
+    active = versions[0]
     previous: AgendaResolution | None = None
     for resolution in resolutions:
         bound = by_digest.get(resolution.agenda_version_digest)
         if (
             bound is None
+            or bound.digest != active.digest
             or bound.agenda_version_id != resolution.agenda_version_id
             or resolution.observed_at < bound.recorded_at
             or (previous is not None and resolution.observed_at < previous.observed_at)
@@ -564,9 +566,12 @@ def _validate_retained_lifecycle(
             if successor.digest in revision_successors:
                 raise AgendaAuthorityError("Agenda retained revision is duplicated")
             revision_successors.add(successor.digest)
+            active = successor
         previous = resolution
     if revision_successors != {version.digest for version in versions[1:]}:
         raise AgendaAuthorityError("Agenda retained Version revision coverage differs")
+    if active.digest != versions[-1].digest:
+        raise AgendaAuthorityError("Agenda retained active Version differs")
 
 
 _AUTHORITY_TOKEN = object()
