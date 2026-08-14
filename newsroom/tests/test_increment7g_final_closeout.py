@@ -14,6 +14,7 @@ from newsroom.increment7.closeout import (
     INCREMENT7_FINAL_CLOSEOUT_INVENTORY_DIGEST,
     INCREMENT7_FINAL_MIGRATION_HISTORY_DIGEST,
     INCREMENT7_FINAL_NON_EFFECTS,
+    INCREMENT7_FINAL_REQUIREMENTS,
     INCREMENT7_FINAL_SCHEMA_FINGERPRINT,
     INCREMENT7_FINAL_SCHEMA_VERSION,
     INCREMENT7G_FINAL_CLOSEOUT_CASES,
@@ -220,6 +221,9 @@ def test_increment7_closeout_inventory_and_contract_are_exact() -> None:
         "sha256:0d185ed45c925d8c85f79b6e5437fc717b596956802240bfe27bd15fe9499d8c"
     )
     assert INCREMENT7_FINAL_NON_EFFECTS == tuple(sorted(INCREMENT7_FINAL_NON_EFFECTS))
+    assert {case.requirement for case in INCREMENT7G_FINAL_CLOSEOUT_CASES} == (
+        INCREMENT7_FINAL_REQUIREMENTS
+    )
     assert increment7_final_migration_history(EXPECTED_MIGRATION_HISTORY) == tuple(
         EXPECTED_MIGRATION_HISTORY
     )

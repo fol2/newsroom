@@ -16,6 +16,7 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 
 
 INCREMENT7_CLOSEOUT_RECEIPT = "newsroom.increment7.closeout-receipt.v1"
+MAX_INCREMENT7_CLOSEOUT_BYTES = 1_048_576
 INCREMENT7_FINAL_SCHEMA_VERSION = 29
 INCREMENT7_FINAL_SCHEMA_FINGERPRINT = (
     "sha256:68194825ecc7c429b283204dbc1332a43481e04ca2681fcbf75886a984ea6f55"
@@ -38,6 +39,21 @@ INCREMENT7_FINAL_NON_EFFECTS = tuple(
             "SHADOW_OR_CANARY",
         }
     )
+)
+INCREMENT7_FINAL_REQUIREMENTS = frozenset(
+    {
+        "AGENDA_LIFECYCLE",
+        "AGENDA_NO_CLOCK_EFFECT",
+        "AGENDA_SEARCH_AUDIT_WATCH_REENTRY_PATH",
+        "BOUNDED_SEARCH_CHAIN",
+        "BOUNDED_WATCH_LIFECYCLE",
+        "CLOSED_WORLD_EXACT_MAIN_RECEIPT",
+        "EXPLICIT_EXPIRY_NO_CLOCK_EFFECT",
+        "INTEGRATED_ACTUAL_SERVICE_EVIDENCE",
+        "PRIVACY_BUDGET_LIMITS",
+        "PROSPECTIVE_ASSESSMENT",
+        "REVIEWED_GAP_AUTHORITY",
+    }
 )
 
 
@@ -145,6 +161,9 @@ class Increment7CloseoutReceipt:
 
     @classmethod
     def from_canonical_bytes(cls, payload: bytes) -> Increment7CloseoutReceipt:
+        if not payload or len(payload) > MAX_INCREMENT7_CLOSEOUT_BYTES:
+            raise Increment7CloseoutError("receipt size differs")
+
         def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             value: dict[str, object] = {}
             for key, item in pairs:
@@ -235,6 +254,18 @@ class Increment7CloseoutCase:
     lane: Increment7CloseoutLane
     test_id: str
     requirement: str
+
+    def __post_init__(self) -> None:
+        if not self.case_id or not self.case_id.isascii():
+            raise Increment7CloseoutError("closeout case identity differs")
+        if (
+            not self.test_id.startswith("newsroom.tests.test_")
+            or "::test_" not in self.test_id
+            or len(self.test_id) > 512
+        ):
+            raise Increment7CloseoutError("closeout test identity differs")
+        if self.requirement not in INCREMENT7_FINAL_REQUIREMENTS:
+            raise Increment7CloseoutError("closeout requirement differs")
 
     def canonical_value(self) -> dict[str, str]:
         return {
@@ -403,6 +434,8 @@ def validate_increment7_final_closeout_inventory() -> None:
         raise Increment7CloseoutError("duplicate closeout test identity")
     if {case.lane for case in cases} != set(Increment7CloseoutLane):
         raise Increment7CloseoutError("closeout lanes differ")
+    if {case.requirement for case in cases} != INCREMENT7_FINAL_REQUIREMENTS:
+        raise Increment7CloseoutError("closeout requirements differ")
     if INCREMENT7_FINAL_CLOSEOUT_INVENTORY_DIGEST != digest_bytes(
         canonical_json_bytes(_inventory_values())
     ):

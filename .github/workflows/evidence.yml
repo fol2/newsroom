@@ -1009,6 +1009,20 @@ jobs:
               != 'sha256:68194825ecc7c429b283204dbc1332a43481e04ca2681fcbf75886a984ea6f55'
               or increment7_inventory.get('migration_history_digest')
               != 'sha256:02e531a9279e316e7f131beabfef5b2f5d02f6b825b7312f4c6296028ffee4ff'
+              or increment7_inventory.get('requirements')
+              != [
+                  'AGENDA_LIFECYCLE',
+                  'AGENDA_NO_CLOCK_EFFECT',
+                  'AGENDA_SEARCH_AUDIT_WATCH_REENTRY_PATH',
+                  'BOUNDED_SEARCH_CHAIN',
+                  'BOUNDED_WATCH_LIFECYCLE',
+                  'CLOSED_WORLD_EXACT_MAIN_RECEIPT',
+                  'EXPLICIT_EXPIRY_NO_CLOCK_EFFECT',
+                  'INTEGRATED_ACTUAL_SERVICE_EVIDENCE',
+                  'PRIVACY_BUDGET_LIMITS',
+                  'PROSPECTIVE_ASSESSMENT',
+                  'REVIEWED_GAP_AUTHORITY',
+              ]
           ):
               raise SystemExit('increment7 closeout inventory differs')
           canonical_increment7_cases = []
