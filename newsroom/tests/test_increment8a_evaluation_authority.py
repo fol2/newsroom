@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
+from newsroom.authority.canonical import digest_bytes
 from newsroom.authority.increment8_evaluation_migrations import (
     INCREMENT8_EVALUATION_MIGRATION_CHECKSUM,
     INCREMENT8_EVALUATION_MIGRATION_NAME,
     Increment8EvaluationBackupError,
     prepare_increment8_evaluation_backup,
 )
-from newsroom.authority.canonical import digest_bytes
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
     EXPECTED_SCHEMA_FINGERPRINT,
@@ -129,8 +129,8 @@ def _report_bytes(
         )
         target = outcomes[target_index]
         case_document = json.loads(target.canonical_bytes)["payload"]
-        from newsroom.increment8.evaluation import EvaluationCase, ReviewLabel
         from newsroom.authority.canonical import canonical_json_bytes
+        from newsroom.increment8.evaluation import EvaluationCase, ReviewLabel
 
         case = EvaluationCase.from_canonical_bytes(
             canonical_json_bytes(case_document["case"])
@@ -162,10 +162,24 @@ def _report_bytes(
             blinded=previous_label.payload["blinded"],
             recorded_at=previous_label.payload["recorded_at"],
         )
+        replacement_secondary = (
+            None
+            if previous_secondary is None
+            else build_review_label(
+                case=case,
+                reviewer_identity_digest=previous_secondary.payload[
+                    "reviewer_identity_digest"
+                ],
+                role=ReviewRole.SECONDARY,
+                label=replacement_label.payload["label"],
+                blinded=previous_secondary.payload["blinded"],
+                recorded_at=previous_secondary.payload["recorded_at"],
+            )
+        )
         replacement = ReviewedCaseOutcome.build(
             case=case,
             review_label=replacement_label,
-            secondary_review_label=previous_secondary,
+            secondary_review_label=replacement_secondary,
             metric_eligible=target.metric_eligible,
             metric_success=target.metric_success,
             triage_eligible=target.triage_eligible,

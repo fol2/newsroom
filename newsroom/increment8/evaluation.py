@@ -1407,10 +1407,14 @@ class EvaluationAuthority:
             for query in (
                 "SELECT started_at FROM evaluation_runs WHERE run_id=?",
                 "SELECT cutoff_at FROM evaluation_cases WHERE run_id=?",
-                "SELECT recorded_at FROM evaluation_labels WHERE case_id IN "
-                "(SELECT case_id FROM evaluation_cases WHERE run_id=?)",
-                "SELECT decided_at FROM evaluation_adjudications WHERE case_id IN "
-                "(SELECT case_id FROM evaluation_cases WHERE run_id=?)",
+                (
+                    "SELECT recorded_at FROM evaluation_labels WHERE case_id IN "
+                    "(SELECT case_id FROM evaluation_cases WHERE run_id=?)"
+                ),
+                (
+                    "SELECT decided_at FROM evaluation_adjudications WHERE case_id IN "
+                    "(SELECT case_id FROM evaluation_cases WHERE run_id=?)"
+                ),
             )
             for row in self._connection.execute(query, (run_id,))
         ]
@@ -1428,7 +1432,7 @@ class EvaluationAuthority:
             raise EvaluationAuthorityError(
                 "Metric Report reviewed Case evidence differs"
             )
-        reported: dict[str, tuple[str, str, str | None]] = {}
+        reported: dict[str, tuple[str, str, str | None, str | None]] = {}
         for document in evidence:
             if not isinstance(document, Mapping) or not isinstance(
                 document.get("payload"), Mapping
@@ -1439,10 +1443,13 @@ class EvaluationAuthority:
             outcome = document["payload"]
             case_id = str(outcome.get("case_id"))
             secondary = outcome.get("secondary_review_label_digest")
+            adjudication = outcome.get("adjudication_digest")
             if (
                 case_id in reported
                 or secondary is not None
                 and not isinstance(secondary, str)
+                or adjudication is not None
+                and not isinstance(adjudication, str)
             ):
                 raise EvaluationAuthorityError(
                     "Metric Report reviewed Case evidence differs"
@@ -1451,21 +1458,31 @@ class EvaluationAuthority:
                 str(outcome.get("case_digest")),
                 str(outcome.get("review_label_digest")),
                 secondary,
+                adjudication,
             )
-        retained: dict[str, tuple[str, str, str | None]] = {}
+        retained: dict[str, tuple[str, str, str | None, str | None]] = {}
         rows = self._connection.execute(
             "SELECT c.case_id,c.case_digest,p.label_digest,"
             "(SELECT s.label_digest FROM evaluation_labels s "
-            "WHERE s.case_id=c.case_id AND s.review_role='SECONDARY') "
+            "WHERE s.case_id=c.case_id AND s.review_role='SECONDARY'),"
+            "(SELECT a.adjudication_digest FROM evaluation_adjudications a "
+            "WHERE a.case_id=c.case_id) "
             "FROM evaluation_cases c JOIN evaluation_labels p ON p.case_id=c.case_id "
             "WHERE c.run_id=? AND p.review_role='PRIMARY' ORDER BY c.case_id",
             (run_id,),
         ).fetchall()
-        for case_id, case_digest, primary_digest, secondary_digest in rows:
+        for (
+            case_id,
+            case_digest,
+            primary_digest,
+            secondary_digest,
+            adjudication_digest,
+        ) in rows:
             retained[str(case_id)] = (
                 str(case_digest),
                 str(primary_digest),
                 None if secondary_digest is None else str(secondary_digest),
+                None if adjudication_digest is None else str(adjudication_digest),
             )
         if reported != retained:
             raise EvaluationAuthorityError(

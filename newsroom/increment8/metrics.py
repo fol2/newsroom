@@ -19,6 +19,7 @@ from newsroom.authority.canonical import (
     validate_sha256_digest,
 )
 from newsroom.increment8.evaluation import (
+    AdjudicationDecision,
     EvaluationCase,
     EvaluationEpoch,
     EvaluationPlan,
@@ -97,7 +98,6 @@ _TRIAGE_ERROR_METRICS = (
     "false_development",
     "missed_development",
 )
-_MINIMUM_TRIAGE_OPPORTUNITIES = 10
 _EXPECTED_PERFORMANCE = tuple(
     sorted(
         str(name)
@@ -212,6 +212,7 @@ class ReviewedCaseOutcome:
     case_digest: str
     review_label_digest: str
     secondary_review_label_digest: str | None
+    adjudication_digest: str | None
     metric_eligible: Mapping[str, bool]
     metric_success: Mapping[str, bool]
     triage_eligible: Mapping[str, bool]
@@ -228,6 +229,7 @@ class ReviewedCaseOutcome:
         case: EvaluationCase,
         review_label: ReviewLabel,
         secondary_review_label: ReviewLabel | None = None,
+        adjudication: AdjudicationDecision | None = None,
         metric_eligible: Mapping[str, bool],
         metric_success: Mapping[str, bool],
         triage_eligible: Mapping[str, bool],
@@ -245,6 +247,13 @@ class ReviewedCaseOutcome:
                 if secondary_review_label is None
                 else ReviewLabel.from_canonical_bytes(
                     secondary_review_label.canonical_bytes
+                )
+            )
+            checked_adjudication = (
+                None
+                if adjudication is None
+                else AdjudicationDecision.from_canonical_bytes(
+                    adjudication.canonical_bytes
                 )
             )
         except (AttributeError, TypeError, ValueError) as exc:
@@ -268,6 +277,29 @@ class ReviewedCaseOutcome:
             == checked_label.payload.get("reviewer_identity_digest")
         ):
             raise MetricReportError("secondary ReviewLabel binding differs")
+        labels_disagree = (
+            checked_secondary is not None
+            and checked_secondary.payload.get("label")
+            != checked_label.payload.get("label")
+        )
+        if labels_disagree:
+            if (
+                checked_adjudication is None
+                or checked_adjudication != adjudication
+                or checked_adjudication.payload.get("case_id") != checked_case.case_id
+                or checked_adjudication.payload.get("primary_label_digest")
+                != checked_label.digest
+                or checked_adjudication.payload.get("secondary_label_digest")
+                != checked_secondary.digest
+                or checked_adjudication.payload.get("final_label")
+                not in {
+                    checked_label.payload.get("label"),
+                    checked_secondary.payload.get("label"),
+                }
+            ):
+                raise MetricReportError("adjudication binding differs")
+        elif checked_adjudication is not None:
+            raise MetricReportError("adjudication is only valid for a disagreement")
         try:
             facts = _membership_facts(checked_case.payload["membership_facts"])  # type: ignore[arg-type]
             expected_slices, expected_strata = _memberships(facts)
@@ -322,9 +354,14 @@ class ReviewedCaseOutcome:
             slice_success=slice_success,
             zero_tolerance_findings=findings,
         )
-        if checked_label.payload.get("label") != expected_label:
+        decision_label = (
+            checked_label.payload.get("label")
+            if checked_adjudication is None
+            else checked_adjudication.payload.get("final_label")
+        )
+        if decision_label != expected_label:
             raise MetricReportError(
-                "human ReviewLabel does not attest the per-Case outcomes"
+                "decision-bearing ReviewLabel does not attest the per-Case outcomes"
             )
         payload = {
             "case": _embedded(checked_case.canonical_bytes),
@@ -339,6 +376,14 @@ class ReviewedCaseOutcome:
             ),
             "secondary_review_label_digest": (
                 None if checked_secondary is None else checked_secondary.digest
+            ),
+            "adjudication": (
+                None
+                if checked_adjudication is None
+                else _embedded(checked_adjudication.canonical_bytes)
+            ),
+            "adjudication_digest": (
+                None if checked_adjudication is None else checked_adjudication.digest
             ),
             "metric_eligible": dict(sorted(metric_eligible.items())),
             "metric_success": dict(sorted(metric_success.items())),
@@ -355,6 +400,7 @@ class ReviewedCaseOutcome:
             checked_case.digest,
             checked_label.digest,
             None if checked_secondary is None else checked_secondary.digest,
+            None if checked_adjudication is None else checked_adjudication.digest,
             MappingProxyType(dict(sorted(metric_eligible.items()))),
             MappingProxyType(dict(sorted(metric_success.items()))),
             MappingProxyType(dict(sorted(triage_eligible.items()))),
@@ -389,17 +435,13 @@ class TriageErrorMeasurement:
         if errors > total:
             raise MetricReportError("triage errors exceed eligible opportunities")
         rate = 0 if total == 0 else errors * 1_000_000 // total
-        exposure_status = (
-            MeasurementStatus.PASS
-            if total >= _MINIMUM_TRIAGE_OPPORTUNITIES
-            else MeasurementStatus.NOT_EVALUATED
-        )
+        exposure_status = MeasurementStatus.PASS
         payload = {
             "metric_name": name,
             "error_count": errors,
             "denominator": total,
             "rate_ppm": rate,
-            "minimum_opportunities": _MINIMUM_TRIAGE_OPPORTUNITIES,
+            "minimum_opportunities": 0,
             "exposure_status": exposure_status.value,
             "decision_treatment": "MANDATORY_SEPARATE_REPORT_NO_POST_HOC_THRESHOLD",
         }
@@ -1014,6 +1056,14 @@ def _verify_case_outcomes(
         and "SECONDARY" in item["roles"]
         and item.get("human") is True
     }
+    authorised_adjudicators = {
+        str(item.get("identity_digest"))
+        for item in manifest
+        if isinstance(item, Mapping)
+        and isinstance(item.get("roles"), list)
+        and "ADJUDICATOR" in item["roles"]
+        and item.get("human") is True
+    }
     used_primary: set[str] = set()
     for item in checked:
         if not isinstance(item, ReviewedCaseOutcome):
@@ -1035,10 +1085,19 @@ def _verify_case_outcomes(
             if secondary_value is None
             else ReviewLabel.from_canonical_bytes(canonical_json_bytes(secondary_value))
         )
+        adjudication_value = payload["adjudication"]
+        adjudication = (
+            None
+            if adjudication_value is None
+            else AdjudicationDecision.from_canonical_bytes(
+                canonical_json_bytes(adjudication_value)
+            )
+        )
         rebuilt_item = ReviewedCaseOutcome.build(
             case=case,
             review_label=label,
             secondary_review_label=secondary,
+            adjudication=adjudication,
             metric_eligible=payload["metric_eligible"],  # type: ignore[arg-type]
             metric_success=payload["metric_success"],  # type: ignore[arg-type]
             triage_eligible=payload["triage_eligible"],  # type: ignore[arg-type]
@@ -1061,6 +1120,14 @@ def _verify_case_outcomes(
         ):
             raise MetricReportError(
                 "reviewed Case outcome uses an unauthorised secondary reviewer"
+            )
+        if (
+            adjudication is not None
+            and str(adjudication.payload.get("adjudicator_identity_digest"))
+            not in authorised_adjudicators
+        ):
+            raise MetricReportError(
+                "reviewed Case outcome uses an unauthorised adjudicator"
             )
         manifest = case.payload.get("input_manifest_digest")
         retained_label_digests = {label.digest}
@@ -1249,9 +1316,6 @@ def build_metric_report(
     stratum_exposure_sufficient = all(
         stratum_counts[name] >= minimum for name, minimum in stratum_minima.items()
     )
-    triage_exposure_sufficient = all(
-        item.exposure_status is MeasurementStatus.PASS for item in triage
-    )
     minimum_primary_reviewers = int(
         INCREMENT_8_READINESS.evaluation_plan["minimum_authorised_primary_reviewers"]
     )
@@ -1278,7 +1342,6 @@ def build_metric_report(
         total_cases < minimum_cases
         or primary_reviewer_count < minimum_primary_reviewers
         or not stratum_exposure_sufficient
-        or not triage_exposure_sufficient
         or metric_status is MeasurementStatus.NOT_EVALUATED
         or slice_status is MeasurementStatus.NOT_EVALUATED
     ):
@@ -1427,10 +1490,18 @@ def verify_metric_report_canonical_bytes(raw: bytes) -> MetricReport:
                     canonical_json_bytes(item["secondary_review_label"])
                 )
             )
+            adjudication = (
+                None
+                if item["adjudication"] is None
+                else AdjudicationDecision.from_canonical_bytes(
+                    canonical_json_bytes(item["adjudication"])
+                )
+            )
             rebuilt = ReviewedCaseOutcome.build(
                 case=case,
                 review_label=label,
                 secondary_review_label=secondary,
+                adjudication=adjudication,
                 metric_eligible=item["metric_eligible"],  # type: ignore[arg-type]
                 metric_success=item["metric_success"],  # type: ignore[arg-type]
                 triage_eligible=item["triage_eligible"],  # type: ignore[arg-type]
@@ -1579,8 +1650,8 @@ __all__ = [
     "MetricReportError",
     "PerformanceMeasurement",
     "RateMeasurement",
-    "ReviewedCaseOutcome",
     "RequiredSliceResult",
+    "ReviewedCaseOutcome",
     "RoleRecommendation",
     "SamplingMethod",
     "SourceContribution",

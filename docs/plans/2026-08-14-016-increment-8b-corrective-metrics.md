@@ -53,3 +53,8 @@ new release value outside the frozen readiness contract.
 This correction performs deterministic fixture/replay measurement only. It
 adds no persistence migration and authorises no live provider, credential,
 egress, spend, locality activation, shadow, canary or production effect.
+
+## Review correction
+
+- Disputed per-Case measurements now retain the canonical adjudication and derive decision-bearing values only from the adjudicator-selected ReviewLabel; the report identity check also binds that exact retained adjudication.
+- Development/correction error opportunity counts remain explicit measurements, but no unregistered post-hoc minimum is allowed to alter the frozen qualification decision.

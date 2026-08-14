@@ -10,9 +10,10 @@ from newsroom.authority.canonical import canonical_json_bytes
 from newsroom.increment8.evaluation import (
     EvaluationCase,
     ReviewLabel,
-    RightsStatus,
     ReviewRole,
+    RightsStatus,
     RunKind,
+    build_adjudication,
     build_case,
     build_evaluation_plan,
     build_review_label,
@@ -88,6 +89,7 @@ def _case_outcomes(
     count: int = 120,
     metric_fail: str | None = None,
     metric_failure_count: int | None = None,
+    triage_eligible_count: int = 120,
     metric_eligible_counts: Mapping[str, int] | None = None,
     slice_fail: str | None = None,
     insufficient_slice: str | None = None,
@@ -106,6 +108,11 @@ def _case_outcomes(
         str(item["identity_digest"])
         for item in plan.payload["authorised_human_manifest"]
         if "SECONDARY" in item["roles"]
+    )
+    adjudicator = next(
+        str(item["identity_digest"])
+        for item in plan.payload["authorised_human_manifest"]
+        if "ADJUDICATOR" in item["roles"]
     )
     output = []
     for index in range(count):
@@ -167,7 +174,9 @@ def _case_outcomes(
             if metric_fail != "reviewer_agreement" and index < failures_needed:
                 metric_success[metric_fail] = False
         triage = {name: False for name in _TRIAGE_NAMES}
-        triage_eligible = {name: True for name in _TRIAGE_NAMES}
+        triage_eligible = {
+            name: index < triage_eligible_count for name in _TRIAGE_NAMES
+        }
         if triage_error is not None and index == 0:
             triage[triage_error] = True
         slice_success = not (
@@ -191,6 +200,7 @@ def _case_outcomes(
             recorded_at=_AT,
         )
         secondary_label = None
+        adjudication = None
         if index < 24:
             secondary_identity = next(
                 identity
@@ -209,10 +219,20 @@ def _case_outcomes(
                 blinded=True,
                 recorded_at=_AT,
             )
+            if secondary_label.payload["label"] != label.payload["label"]:
+                adjudication = build_adjudication(
+                    case=case,
+                    primary=label,
+                    secondary=secondary_label,
+                    adjudicator_identity_digest=adjudicator,
+                    final_label=label.payload["label"],
+                    decided_at=_AT,
+                )
         outcome = ReviewedCaseOutcome.build(
             case=case,
             review_label=label,
             secondary_review_label=secondary_label,
+            adjudication=adjudication,
             metric_eligible=metric_eligible,
             metric_success=metric_success,
             triage_eligible=triage_eligible,
@@ -375,6 +395,79 @@ def test_reviewer_agreement_is_derived_from_independent_label_pairs() -> None:
     assert agreement["count"] == 20
     assert agreement["status"] == "FAIL"
     assert report.overall_status is MeasurementStatus.FAIL
+
+
+def test_adjudicated_secondary_assessment_is_decision_bearing() -> None:
+    context = _context()
+    outcomes = list(_case_outcomes(context=context))
+    original = outcomes[0]
+    payload = json.loads(original.canonical_bytes)["payload"]
+    case = EvaluationCase.from_canonical_bytes(canonical_json_bytes(payload["case"]))
+    primary = ReviewLabel.from_canonical_bytes(
+        canonical_json_bytes(payload["review_label"])
+    )
+    changed_success = dict(original.metric_success)
+    changed_success["candidate_precision"] = False
+    selected_label = reviewed_case_assessment_label(
+        case=case,
+        metric_eligible=original.metric_eligible,
+        metric_success=changed_success,
+        triage_eligible=original.triage_eligible,
+        triage_error=original.triage_error,
+        slice_success=original.slice_success,
+        zero_tolerance_findings=original.zero_tolerance_findings,
+    )
+    secondary = build_review_label(
+        case=case,
+        reviewer_identity_digest="sha256:" + "7" * 64,
+        role=ReviewRole.SECONDARY,
+        label=selected_label,
+        blinded=True,
+        recorded_at=_AT,
+    )
+    adjudication = build_adjudication(
+        case=case,
+        primary=primary,
+        secondary=secondary,
+        adjudicator_identity_digest="sha256:" + "8" * 64,
+        final_label=selected_label,
+        decided_at=_AT,
+    )
+    outcomes[0] = ReviewedCaseOutcome.build(
+        case=case,
+        review_label=primary,
+        secondary_review_label=secondary,
+        adjudication=adjudication,
+        metric_eligible=original.metric_eligible,
+        metric_success=changed_success,
+        triage_eligible=original.triage_eligible,
+        triage_error=original.triage_error,
+        slice_success=original.slice_success,
+        zero_tolerance_findings=original.zero_tolerance_findings,
+    )
+    report = _report(context=context, case_outcomes=tuple(outcomes))
+    precision = next(
+        item["payload"]
+        for item in report.payload["rate_evidence"]
+        if item["payload"]["metric_name"] == "candidate_precision"
+    )
+    assert precision["count"] == 119
+
+
+def test_triage_opportunity_count_is_reported_but_not_a_post_hoc_gate() -> None:
+    context = _context()
+    report = _report(
+        context=context,
+        case_outcomes=_case_outcomes(context=context, triage_eligible_count=1),
+    )
+    assert report.overall_status is MeasurementStatus.PASS
+    assert all(
+        item["payload"]["denominator"] == 1
+        and item["payload"]["minimum_opportunities"] == 0
+        and item["payload"]["decision_treatment"]
+        == "MANDATORY_SEPARATE_REPORT_NO_POST_HOC_THRESHOLD"
+        for item in report.payload["triage_error_evidence"]
+    )
 
 
 def test_every_frozen_exposure_minimum_is_enforced() -> None:
