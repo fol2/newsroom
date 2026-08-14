@@ -652,6 +652,36 @@ def test_root_identity_inventories_block_deleted_purpose_and_request_replacement
         attacker.close()
         request_authority.close()
 
+    dependent_database = tmp_path / "purpose-dependent-request.sqlite3"
+    dependent_authority = open_bounded_search_authority(
+        dependent_database, applied_at=_AT
+    )
+    purpose = _purpose()
+    dependent_authority.record_purpose(purpose.canonical_bytes)
+    attacker = sqlite3.connect(dependent_database, isolation_level=None)
+    replacement = replace(purpose, rights_policy_version="rights-v2")
+    try:
+        attacker.execute("DROP TRIGGER retained_search_purposes")
+        attacker.execute(
+            "DELETE FROM search_purposes WHERE purpose_id=?", (purpose.purpose_id,)
+        )
+        attacker.execute(
+            "INSERT INTO search_purposes VALUES(?,?,?,?,?,?)",
+            (
+                replacement.purpose_id,
+                replacement.canonical_bytes,
+                replacement.digest,
+                replacement.purpose_kind.value,
+                replacement.query_privacy.value,
+                replacement.created_at,
+            ),
+        )
+        with pytest.raises(SearchAuthorityError, match="retained purpose inventory"):
+            dependent_authority.record_request(_request(replacement).canonical_bytes)
+    finally:
+        attacker.close()
+        dependent_authority.close()
+
 
 def test_sql_request_limits_match_the_contract_safe_integer_ceiling(
     tmp_path: Path,
@@ -743,6 +773,10 @@ def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> No
         )
         with pytest.raises(SearchAuthorityError, match="retained columns"):
             authority.attempt(retained_id)
+        attacker.execute("DROP TRIGGER retained_search_attempts")
+        attacker.execute(
+            "DELETE FROM search_attempts WHERE attempt_id=?", (retained_id,)
+        )
         with pytest.raises(sqlite3.IntegrityError, match="immutable"):
             attacker.execute(
                 "UPDATE search_requests SET query_privacy='OTHER' WHERE request_id=?",
@@ -766,7 +800,7 @@ def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> No
             "DELETE FROM search_budget_ledger WHERE request_id=?",
             (records[1].request_id,),
         )
-        with pytest.raises(SearchAuthorityError, match="retained gross budget"):
+        with pytest.raises(SearchAuthorityError, match="retained request inventory"):
             authority.budget(records[1].request_id)
         attacker.execute("DROP TRIGGER immutable_search_requests")
         attacker.execute(

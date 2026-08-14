@@ -131,6 +131,7 @@ class BoundedSearchReadPort(_NoEffect):
             or record.created_at != row["created_at"]
         ):
             raise SearchAuthorityError("Search Purpose retained columns differ")
+        self._purpose_inventory()
         return record
 
     @_total("Search Request replay failed")
@@ -157,6 +158,7 @@ class BoundedSearchReadPort(_NoEffect):
             or record.requested_at != row["requested_at"]
         ):
             raise SearchAuthorityError("Search Request retained columns differ")
+        self._request_inventory(purpose)
         return record
 
     @_total("Search Attempt replay failed")
@@ -179,6 +181,7 @@ class BoundedSearchReadPort(_NoEffect):
             or record.started_at != row["started_at"]
         ):
             raise SearchAuthorityError("Search Attempt retained columns differ")
+        self._attempt_inventory(request)
         return record
 
     @_total("Search Outcome replay failed")
@@ -224,6 +227,7 @@ class BoundedSearchReadPort(_NoEffect):
             or record.recorded_at != row["recorded_at"]
         ):
             raise SearchAuthorityError("Search Result retained columns differ")
+        self._result_inventory(outcome)
         return record
 
     @_total("Search Review Decision replay failed")
@@ -248,6 +252,9 @@ class BoundedSearchReadPort(_NoEffect):
             or record.decided_at != row["decided_at"]
         ):
             raise SearchAuthorityError("Search Review retained columns differ")
+        self._review_inventory(request)
+        if record.work_reference_digest is not None:
+            self._downstream_work_inventory(request)
         return record
 
     @_total("Search budget replay failed")
