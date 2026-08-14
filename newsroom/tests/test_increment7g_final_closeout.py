@@ -224,14 +224,15 @@ def test_increment7_closeout_inventory_and_contract_are_exact() -> None:
     assert {case.requirement for case in INCREMENT7G_FINAL_CLOSEOUT_CASES} == (
         INCREMENT7_FINAL_REQUIREMENTS
     )
-    assert increment7_final_migration_history(EXPECTED_MIGRATION_HISTORY) == tuple(
-        EXPECTED_MIGRATION_HISTORY
+    increment7_history = tuple(EXPECTED_MIGRATION_HISTORY[:29])
+    assert increment7_final_migration_history(EXPECTED_MIGRATION_HISTORY) == (
+        increment7_history
     )
-    appended = (*EXPECTED_MIGRATION_HISTORY, (30, "future_authorised", "sha256:x"))
+    appended = (*increment7_history, (30, "future_authorised", "sha256:x"))
     assert increment7_final_migration_history(appended) == tuple(
-        EXPECTED_MIGRATION_HISTORY
+        increment7_history
     )
-    changed = list(EXPECTED_MIGRATION_HISTORY)
+    changed = list(increment7_history)
     changed[28] = (29, "changed", changed[28][2])
     with pytest.raises(Increment7CloseoutError, match="migration history"):
         increment7_final_migration_history(tuple(changed))

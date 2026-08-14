@@ -369,6 +369,7 @@ def test_v22_to_v23_preserves_retained_relationship_before_lineage_use(
         event_hypothesis_lineage_backup_paths,
     )
     from newsroom.authority.migrations import (
+        SCHEMA_VERSION,
         apply_pending_migrations,
         prepare_pending_migration_backup,
     )
@@ -402,6 +403,9 @@ def test_v22_to_v23_preserves_retained_relationship_before_lineage_use(
     from newsroom.authority.evaluation_feedback_migrations import (
         evaluation_feedback_backup_paths,
     )
+    from newsroom.authority.increment8_evaluation_migrations import (
+        increment8_evaluation_backup_paths,
+    )
     from newsroom.authority.local_watch_migrations import local_watch_backup_paths
     from newsroom.authority.planned_agenda_migrations import (
         planned_agenda_backup_paths,
@@ -417,9 +421,11 @@ def test_v22_to_v23_preserves_retained_relationship_before_lineage_use(
         path.unlink(missing_ok=True)
     for path in local_watch_backup_paths(seed[1]):
         path.unlink(missing_ok=True)
+    for path in increment8_evaluation_backup_paths(seed[1]):
+        path.unlink(missing_ok=True)
     assert prepare_pending_migration_backup(connection) is not None
     apply_pending_migrations(connection, applied_at="2042-01-03T00:00:00.000000Z")
-    assert connection.execute("PRAGMA user_version").fetchone() == (29,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
     assert (
         connection.execute(
             "SELECT * FROM event_hypothesis_relationship_decisions ORDER BY decision_id"
@@ -1435,6 +1441,7 @@ class _LineageAdapter:
     def open_handle(self, location, *, migrate: bool = False):
         if migrate:
             from newsroom.authority.migrations import (
+                SCHEMA_VERSION,
                 apply_pending_migrations,
                 prepare_pending_migration_backup,
             )
@@ -1445,10 +1452,12 @@ class _LineageAdapter:
                 apply_pending_migrations(
                     connection, applied_at="2042-01-03T00:00:00.000000Z"
                 )
-                assert connection.execute("PRAGMA user_version").fetchone() == (29,)
+                assert connection.execute("PRAGMA user_version").fetchone() == (
+                    SCHEMA_VERSION,
+                )
                 assert connection.execute(
                     "SELECT MAX(version) FROM authority_migrations"
-                ).fetchone() == (29,)
+                ).fetchone() == (SCHEMA_VERSION,)
             finally:
                 connection.close()
         return _ConformanceHandle(location)
