@@ -40,6 +40,7 @@ from newsroom.increment7.local_watch_authority import (
     LocalWatchReentryKind,
     open_local_watch_authority,
 )
+from newsroom.tests.authority_migration_compatibility import build_exact_prefix
 from newsroom.tests.test_increment6f2_feedback import _supplemental_reentry
 from newsroom.tests.test_increment7d1_local_watch_contracts import (
     D,
@@ -192,7 +193,7 @@ def test_command_and_reentry_are_strict_exact_governed_contracts() -> None:
         )
 
 
-def test_v29_fresh_create_has_exact_history_schema_and_allocated_tables() -> None:
+def test_current_fresh_create_retains_v29_history_and_allocated_tables() -> None:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
     apply_pending_migrations(connection, applied_at=_APPLIED)
@@ -202,9 +203,12 @@ def test_v29_fresh_create_has_exact_history_schema_and_allocated_tables() -> Non
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert SCHEMA_VERSION == LOCAL_WATCH_SCHEMA_VERSION == 29
-    assert EXPECTED_MIGRATION_HISTORY[-1][1] == LOCAL_WATCH_MIGRATION_NAME
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 29
+    assert SCHEMA_VERSION >= LOCAL_WATCH_SCHEMA_VERSION == 29
+    assert (
+        EXPECTED_MIGRATION_HISTORY[LOCAL_WATCH_SCHEMA_VERSION - 1][1]
+        == LOCAL_WATCH_MIGRATION_NAME
+    )
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
     assert {
         "event_scoped_local_watches",
@@ -217,32 +221,8 @@ def test_v29_fresh_create_has_exact_history_schema_and_allocated_tables() -> Non
 
 
 def _create_v28(path) -> sqlite3.Connection:
+    build_exact_prefix(path, 28)
     connection = sqlite3.connect(path, isolation_level=None)
-    connection.execute("PRAGMA foreign_keys=ON")
-    apply_pending_migrations(connection, applied_at=_APPLIED)
-    connection.execute("PRAGMA foreign_keys=OFF")
-    connection.execute("BEGIN EXCLUSIVE")
-    immutable = connection.execute(
-        "SELECT sql FROM sqlite_master "
-        "WHERE name='immutable_authority_migrations_delete'"
-    ).fetchone()[0]
-    connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
-    for table in (
-        "event_scoped_local_watch_closures",
-        "event_scoped_local_watch_heads",
-        "event_scoped_local_watch_versions",
-        "event_scoped_local_watches",
-    ):
-        for (name,) in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=?",
-            (table,),
-        ).fetchall():
-            connection.execute(f'DROP TRIGGER "{name}"')
-        connection.execute(f"DROP TABLE {table}")
-    connection.execute("DELETE FROM authority_migrations WHERE version=29")
-    connection.execute(immutable)
-    connection.execute("PRAGMA user_version=28")
-    connection.execute("COMMIT")
     connection.execute("PRAGMA foreign_keys=ON")
     return connection
 
@@ -275,7 +255,7 @@ def test_v28_upgrade_requires_backup_rolls_back_and_preserves_restore_point(
     )
     monkeypatch.setattr(migrations, "LOCAL_WATCH_MIGRATION_STATEMENTS", statements)
     apply_pending_migrations(connection, applied_at=_APPLIED)
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 29
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     restored = sqlite3.connect(backup, isolation_level=None)
     try:
         assert restored.execute("PRAGMA user_version").fetchone()[0] == 28

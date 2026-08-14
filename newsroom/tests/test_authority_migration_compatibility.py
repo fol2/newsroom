@@ -49,6 +49,7 @@ _EXPECTED_NAMES = {
     27: "bounded_search_authority_v27",
     28: "coverage_audit_authority_v28",
     29: "event_scoped_local_watch_authority_v29",
+    30: "increment8_evaluation_authority_v30",
 }
 _EXPECTED_CHECKSUMS = {
     13: "sha256:c3e5ae627dda1c04bebc50952786413d977bd399e67b7f5b87452794f08f49ab",
@@ -68,6 +69,7 @@ _EXPECTED_CHECKSUMS = {
     27: "sha256:ee5679aba6ceb3e95ba925febbbb7853369f93d055563ac85402d380377672b0",
     28: "sha256:c923daf18aed10bb9c197bfd588d816223d978668bda56c157438d1a4b7cc487",
     29: "sha256:ca57c62c9bfadc2ea0a09a3bf762f95854e413aa71d324a296b4c867c90dec7b",
+    30: "sha256:764306cbc8fced0b50657c87c2c8735aa07b6ed6b02b1d7ceec84afd9db7dc15",
 }
 
 _EXPECTED_MATRIX = """version | migration | objects | history fingerprint | schema fingerprint | object fingerprint
@@ -89,6 +91,7 @@ v26 | planned_agenda_authority_v26 | 1285 | sha256:d2cb21a981674513b4495ca19012e
 v27 | bounded_search_authority_v27 | 1347 | sha256:f4afb25765da01175b272333daaaef80b21416d9258a5ec4e09ffba59f878936 | sha256:d7fc1557bd02588969efdd53c749a2f125ab5bab146395c4cf8f7d51b1e32719 | sha256:ebd8c2d5739a09103f526fa682dadf66efa7646304b25f266265b91b70e55cbd
 v28 | coverage_audit_authority_v28 | 1381 | sha256:81792dba56950b37325ccdffe06b64f322379218a10264e949d57e7e0dec58d6 | sha256:a613b28a765b36fa9110bcdc2b9bc565c6e2bc0ed8b8381d77f5fcd734c39c48 | sha256:a8330e1d8ae8c9e181f0e2d1ebbde88a1386e934e93eaac3c3d292722c7fff35
 v29 | event_scoped_local_watch_authority_v29 | 1417 | sha256:02e531a9279e316e7f131beabfef5b2f5d02f6b825b7312f4c6296028ffee4ff | sha256:68194825ecc7c429b283204dbc1332a43481e04ca2681fcbf75886a984ea6f55 | sha256:75fc30052c67d91d4a439a3baadc6c3410f65d470d535906a0624d051a0f32cd
+v30 | increment8_evaluation_authority_v30 | 1456 | sha256:abcca56b09c0f49ea8315f21f66d252153c63fd572ba1eaa2bcd9a4215214808 | sha256:cf9a5ee83f6d3396d8d9fff4aa234ba252037dd4056e88f85afcb27c6c45bfd9 | sha256:ec469b35837aaf07827e9cde89aca928201e129f85ffd1f0f8046b0cd08ba26c
 """
 
 

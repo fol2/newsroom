@@ -682,6 +682,7 @@ def _validate_schema_prefix(
         for item in contract.allocations
         if item.migration_version is not None
     }
+    final_allocated_version = max(expected_names, default=contract.accepted_schema_version)
     for index, entry in enumerate(suffix, start=contract.accepted_schema_version + 1):
         if not isinstance(entry, tuple) or len(entry) != 3:
             errors.append("newsroom.authority.migrations: suffix entry is malformed")
@@ -694,11 +695,11 @@ def _validate_schema_prefix(
         ):
             errors.append("newsroom.authority.migrations: suffix is not contiguous")
         expected_name = expected_names.get(index)
-        if expected_name is None:
+        if expected_name is None and index <= final_allocated_version:
             errors.append(
                 f"newsroom.authority.migrations: v{index} is outside 7R allocation"
             )
-        elif name != expected_name:
+        elif expected_name is not None and name != expected_name:
             errors.append(
                 f"newsroom.authority.migrations: reserved v{index} name differs"
             )

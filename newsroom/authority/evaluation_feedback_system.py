@@ -10,6 +10,7 @@ from pathlib import Path
 from newsroom.authority._capability import _CapabilityIssuer
 from newsroom.authority._event_store import _EventAuthorityStore
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
+from newsroom.authority.increment8_evaluation_migrations import INCREMENT8_EVALUATION_TABLES
 from newsroom.authority.models import InlinePayload, SemanticCommand
 from newsroom.authority.policy import CommandRegistry, PayloadSchemaRegistry
 from newsroom.authority.service import CommandService
@@ -80,7 +81,7 @@ class _EvaluationFeedbackAuthorityRoot:
             "evaluation_handoffs",
             "evaluation_handoff_attempts",
             "evaluation_handoff_acknowledgements",
-        } != _V25_TABLES:
+        } - set(INCREMENT8_EVALUATION_TABLES) != _V25_TABLES:
             raise FeedbackContractError("Feedback retained table allocation differs")
         required_triggers = {
             "immutable_evaluation_feedback",

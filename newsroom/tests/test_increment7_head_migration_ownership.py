@@ -219,14 +219,12 @@ def test_reserved_additive_schema_suffix_is_checked(
 ) -> None:
     checksum = "sha256:" + "a" * 64
     assert validate_interface_inventory(INCREMENT_7_READINESS) == ()
+    wrong_name = list(authority_migrations.EXPECTED_MIGRATION_HISTORY)
+    wrong_name[26] = (27, "wrong_v27", checksum)
     monkeypatch.setattr(
         authority_migrations,
         "EXPECTED_MIGRATION_HISTORY",
-        authority_migrations.EXPECTED_MIGRATION_HISTORY[:-3]
-        + (
-            (27, "wrong_v27", checksum),
-            *authority_migrations.EXPECTED_MIGRATION_HISTORY[-2:],
-        ),
+        tuple(wrong_name),
     )
     assert any(
         "reserved v27 name differs" in finding
@@ -247,7 +245,7 @@ def test_reserved_additive_schema_suffix_is_checked(
         (version, f"reserved_v{version}", "sha256:" + "c" * 64)
         for version in range(27, 30)
     )
-    v30 = (30, "increment8_unallocated_v30", "sha256:" + "d" * 64)
+    v30 = (30, "increment8_authorised_v30", "sha256:" + "d" * 64)
     monkeypatch.setattr(
         authority_migrations,
         "EXPECTED_MIGRATION_HISTORY",
@@ -260,7 +258,7 @@ def test_reserved_additive_schema_suffix_is_checked(
     )
     monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 30)
     findings = validate_interface_inventory(INCREMENT_7_READINESS)
-    assert "newsroom.authority.migrations: v30 is outside 7R allocation" in findings
+    assert "newsroom.authority.migrations: v30 is outside 7R allocation" not in findings
 
     monkeypatch.setattr(
         authority_migrations,
