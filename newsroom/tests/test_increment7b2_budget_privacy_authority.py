@@ -653,6 +653,30 @@ def test_root_identity_inventories_block_deleted_purpose_and_request_replacement
         request_authority.close()
 
 
+def test_sql_request_limits_match_the_contract_safe_integer_ceiling(
+    tmp_path: Path,
+) -> None:
+    authority = open_bounded_search_authority(
+        tmp_path / "large-limits.sqlite3", applied_at=_AT
+    )
+    purpose = _purpose()
+    request = _request(purpose)
+    request = replace(
+        request,
+        limits=replace(
+            request.limits,
+            max_provider_calls=1_000_001,
+            max_results=1_000_001,
+            max_elapsed_seconds=1_000_001,
+        ),
+    )
+    try:
+        authority.record_purpose(purpose.canonical_bytes)
+        assert authority.record_request(request.canonical_bytes) == request
+    finally:
+        authority.close()
+
+
 def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> None:
     database = tmp_path / "tamper.sqlite3"
     authority = open_bounded_search_authority(database, applied_at=_AT)
