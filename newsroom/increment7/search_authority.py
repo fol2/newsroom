@@ -436,6 +436,51 @@ class BoundedSearchReadPort(_NoEffect):
             raise SearchAuthorityError("Search retained downstream work differs")
         return frozenset(work_references)
 
+    def _review_inventory(self, request: SearchRequest) -> None:
+        ledger_rows = self._connection.execute(
+            "SELECT ledger_entry_id,review_decision_id,ledger_digest,recorded_at "
+            "FROM search_budget_ledger WHERE request_id=? "
+            "AND entry_kind='REVIEW_DECISION' ORDER BY review_decision_id",
+            (request.request_id,),
+        ).fetchall()
+        retained_rows = self._connection.execute(
+            "SELECT review_decision_id,decision_digest,decided_at "
+            "FROM search_review_decisions WHERE request_id=? "
+            "ORDER BY review_decision_id",
+            (request.request_id,),
+        ).fetchall()
+        retained = {
+            str(row[0]): (str(row[1]), str(row[2])) for row in retained_rows
+        }
+        if {str(row[1]) for row in ledger_rows} != set(retained):
+            raise SearchAuthorityError("Search retained review inventory differs")
+        for row in ledger_rows:
+            decision_id = str(row[1])
+            decision_digest, decided_at = retained[decision_id]
+            expected_entry_id = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "entry_kind": "REVIEW_DECISION",
+                        "review_decision_id": decision_id,
+                    }
+                )
+            )
+            expected_digest = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "decision_digest": decision_digest,
+                        "request_id": request.request_id,
+                        "review_decision_id": decision_id,
+                    }
+                )
+            )
+            if (
+                row[0] != expected_entry_id
+                or row[2] != expected_digest
+                or row[3] != decided_at
+            ):
+                raise SearchAuthorityError("Search retained review inventory differs")
+
 
 class BoundedSearchAuthority(BoundedSearchReadPort):
     """Transactional v27 writer with exact replay and gross preauthorisation."""
@@ -787,6 +832,7 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                 raw,
             )
             if not replay:
+                self._review_inventory(request)
                 existing_work: frozenset[str] = frozenset()
                 if record.work_reference_digest is not None:
                     existing_work = self._downstream_work_inventory(request)
@@ -808,6 +854,43 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                         request.digest,
                         record.action.value,
                         record.work_reference_digest,
+                        record.decided_at,
+                    ),
+                )
+                review_entry_id = digest_bytes(
+                    canonical_json_bytes(
+                        {
+                            "entry_kind": "REVIEW_DECISION",
+                            "review_decision_id": record.review_decision_id,
+                        }
+                    )
+                )
+                review_ledger_digest = digest_bytes(
+                    canonical_json_bytes(
+                        {
+                            "decision_digest": record.digest,
+                            "request_id": request.request_id,
+                            "review_decision_id": record.review_decision_id,
+                        }
+                    )
+                )
+                self._connection.execute(
+                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        review_entry_id,
+                        "REVIEW_DECISION",
+                        None,
+                        None,
+                        record.review_decision_id,
+                        request.request_id,
+                        None,
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        review_ledger_digest,
                         record.decided_at,
                     ),
                 )
@@ -855,6 +938,7 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                             record.decided_at,
                         ),
                     )
+            self._review_inventory(request)
             if record.work_reference_digest is not None:
                 self._downstream_work_inventory(request)
             self._finish()

@@ -360,16 +360,15 @@ def test_exact_chain_replays_across_restart_without_provider_authority(
             attacker.execute("DROP TRIGGER retained_search_review_decisions")
             attacker.execute(
                 "DELETE FROM search_review_decisions WHERE review_decision_id=?",
-                (records[5].review_decision_id,),
+                (same_work.review_decision_id,),
             )
         finally:
             attacker.close()
-        with pytest.raises(SearchAuthorityError, match="retained downstream work"):
+        with pytest.raises(SearchAuthorityError, match="retained review inventory"):
             reopened.record_review(
                 replace(
-                    records[5],
-                    review_decision_id=_id(61),
-                    work_reference_digest="sha256:" + "6" * 64,
+                    same_work,
+                    decided_at="2026-08-14T00:00:09.000000Z",
                 ).canonical_bytes
             )
     finally:
