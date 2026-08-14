@@ -487,7 +487,7 @@ class ProviderDecision(_NoEffect):
 def validate_provider_decision(
     proposal: ProviderProposal,
     decision: ProviderDecision,
-    previous: ProviderDecision | None = None,
+    previous: ProviderDecision | tuple[ProviderDecision, ...] | None = None,
 ) -> None:
     _validate_provider_decision_binding(proposal, decision)
     if previous is None:
@@ -495,15 +495,26 @@ def validate_provider_decision(
             raise ProviderQualificationError(
                 "initial Provider Decision supersedes another"
             )
-    else:
-        _validate_provider_decision_binding(proposal, previous)
-        if (
-            decision.decision_id == previous.decision_id
-            or decision.proposal_id != previous.proposal_id
-            or decision.supersedes_decision_digest != previous.digest
-            or decision.decided_at < previous.decided_at
-        ):
-            raise ProviderQualificationError("Provider Decision predecessor differs")
+        return
+    chain = previous if type(previous) is tuple else (previous,)
+    if not chain or any(type(item) is not ProviderDecision for item in chain):
+        raise ProviderQualificationError("Provider Decision predecessor differs")
+    for item in chain:
+        _validate_provider_decision_binding(proposal, item)
+    if (
+        len({item.decision_id for item in chain}) != len(chain)
+        or len({item.digest for item in chain}) != len(chain)
+        or any(
+            current.supersedes_decision_digest != predecessor.digest
+            or current.decided_at < predecessor.decided_at
+            for predecessor, current in zip(chain, chain[1:])
+        )
+        or decision.decision_id in {item.decision_id for item in chain}
+        or decision.proposal_id != chain[-1].proposal_id
+        or decision.supersedes_decision_digest != chain[-1].digest
+        or decision.decided_at < chain[-1].decided_at
+    ):
+        raise ProviderQualificationError("Provider Decision predecessor differs")
 
 
 def _validate_provider_decision_binding(

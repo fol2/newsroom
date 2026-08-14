@@ -171,7 +171,13 @@ def test_decision_binds_exact_proposal_predecessor_and_chronology() -> None:
         supersedes_decision_digest=second.digest,
         decided_at="2026-08-14T00:00:03.000000Z",
     )
-    validate_provider_decision(proposal, third, second)
+    validate_provider_decision(proposal, third, (first, second))
+    with pytest.raises(ProviderQualificationError, match="predecessor"):
+        validate_provider_decision(
+            proposal,
+            replace(third, decision_id=first.decision_id),
+            (first, second),
+        )
     with pytest.raises(ProviderQualificationError, match="Proposal"):
         validate_provider_decision(
             proposal,
