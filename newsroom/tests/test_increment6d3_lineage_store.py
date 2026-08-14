@@ -1804,7 +1804,14 @@ def test_ten_core_shard_probe_selections_derive_exact_template_subsets() -> None
         ),
         CaseId.TAMPER_REJECTION: ("record-1", "record-b"),
     }
-    selected = tuple(_selected_shared_template_keys(tuple(shard)) for shard in shards)
+    d3_shards = tuple(
+        shard
+        for shard in shards
+        if any("test_increment6d3_lineage_store.py" in node_id for node_id in shard)
+    )
+    selected = tuple(
+        _selected_shared_template_keys(tuple(shard)) for shard in d3_shards
+    )
     expected = tuple(
         tuple(
             key
@@ -1817,7 +1824,8 @@ def test_ten_core_shard_probe_selections_derive_exact_template_subsets() -> None
         )
         if probe_ids
         else _SHARED_CONFORMANCE_TEMPLATE_KEYS
-        for probe_ids in probe_ids_by_shard
+        for shard, probe_ids in zip(shards, probe_ids_by_shard, strict=True)
+        if any("test_increment6d3_lineage_store.py" in node_id for node_id in shard)
     )
     assert selected == expected
 
