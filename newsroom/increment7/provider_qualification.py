@@ -478,6 +478,27 @@ def validate_provider_decision(
     decision: ProviderDecision,
     previous: ProviderDecision | None = None,
 ) -> None:
+    _validate_provider_decision_binding(proposal, decision)
+    if previous is None:
+        if decision.supersedes_decision_digest is not None:
+            raise ProviderQualificationError(
+                "initial Provider Decision supersedes another"
+            )
+    else:
+        _validate_provider_decision_binding(proposal, previous)
+        if (
+            decision.decision_id == previous.decision_id
+            or decision.proposal_id != previous.proposal_id
+            or decision.supersedes_decision_digest != previous.digest
+            or decision.decided_at < previous.decided_at
+        ):
+            raise ProviderQualificationError("Provider Decision predecessor differs")
+
+
+def _validate_provider_decision_binding(
+    proposal: ProviderProposal,
+    decision: ProviderDecision,
+) -> None:
     if type(proposal) is not ProviderProposal or type(decision) is not ProviderDecision:
         raise ProviderQualificationError(
             "Provider decision binding requires exact records"
@@ -495,19 +516,6 @@ def validate_provider_decision(
         raise ProviderQualificationError(
             "Provider Decision exceeds Proposal or current posture"
         )
-    if previous is None:
-        if decision.supersedes_decision_digest is not None:
-            raise ProviderQualificationError(
-                "initial Provider Decision supersedes another"
-            )
-    else:
-        validate_provider_decision(proposal, previous)
-        if (
-            decision.proposal_id != previous.proposal_id
-            or decision.supersedes_decision_digest != previous.digest
-            or decision.decided_at < previous.decided_at
-        ):
-            raise ProviderQualificationError("Provider Decision predecessor differs")
 
 
 __all__ = [
