@@ -677,6 +677,27 @@ def test_sql_request_limits_match_the_contract_safe_integer_ceiling(
         authority.close()
 
 
+def test_exact_outcome_replay_reconciles_its_retained_budget_entry(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "outcome-replay-ledger.sqlite3"
+    authority = open_bounded_search_authority(database, applied_at=_AT)
+    records = _record_chain(authority)
+    attacker = sqlite3.connect(database, isolation_level=None)
+    try:
+        attacker.execute("DROP TRIGGER retained_search_budget_ledger")
+        attacker.execute(
+            "DELETE FROM search_budget_ledger WHERE entry_kind='OUTCOME' "
+            "AND outcome_id=?",
+            (records[3].outcome_id,),
+        )
+        with pytest.raises(SearchAuthorityError, match="retained gross budget"):
+            authority.record_outcome(records[3].canonical_bytes)
+    finally:
+        attacker.close()
+        authority.close()
+
+
 def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> None:
     database = tmp_path / "tamper.sqlite3"
     authority = open_bounded_search_authority(database, applied_at=_AT)

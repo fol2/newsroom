@@ -974,6 +974,7 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                         record.completed_at,
                     ),
                 )
+            self.budget(request.request_id)
             self._finish()
         except BaseException as exc:
             self._finish(exc)
