@@ -706,12 +706,21 @@ def _validate_schema_prefix(
         or _authority_migrations.SCHEMA_VERSION < contract.accepted_schema_version
     ):
         errors.append("newsroom.authority.migrations: schema version regressed")
-    elif (
-        isinstance(history, tuple)
-        and history
-        and history[-1][0] != _authority_migrations.SCHEMA_VERSION
-    ):
-        errors.append("newsroom.authority.migrations: live history/version differ")
+    else:
+        tail_version: int | None = None
+        if isinstance(history, tuple) and history:
+            tail = history[-1]
+            if (
+                isinstance(tail, tuple)
+                and len(tail) == 3
+                and not isinstance(tail[0], bool)
+                and isinstance(tail[0], int)
+            ):
+                tail_version = tail[0]
+        if tail_version != _authority_migrations.SCHEMA_VERSION:
+            errors.append(
+                "newsroom.authority.migrations: live history/version differ"
+            )
     if (
         _authority_migrations.SCHEMA_VERSION == contract.accepted_schema_version
         and _authority_migrations.EXPECTED_SCHEMA_FINGERPRINT

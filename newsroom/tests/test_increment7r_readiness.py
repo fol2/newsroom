@@ -207,3 +207,20 @@ def test_7r_applies_no_migration_and_current_schema_remains_exact() -> None:
         assert not any(name.startswith(("planned_agenda_", "search_", "coverage_", "event_scoped_local_watch_")) for name in tables)
     finally:
         connection.close()
+
+
+def test_malformed_migration_tail_returns_drift_instead_of_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    malformed_history = (*authority_migrations.EXPECTED_MIGRATION_HISTORY, 26)
+    monkeypatch.setattr(
+        authority_migrations,
+        "EXPECTED_MIGRATION_HISTORY",
+        malformed_history,
+    )
+    monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 26)
+
+    findings = validate_interface_inventory(INCREMENT_7_READINESS)
+
+    assert "newsroom.authority.migrations: suffix entry is malformed" in findings
+    assert "newsroom.authority.migrations: live history/version differ" in findings
