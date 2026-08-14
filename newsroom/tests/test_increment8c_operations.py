@@ -8,8 +8,8 @@ import pytest
 from newsroom.authority import migrations
 from newsroom.increment6.handoffs import EvaluationHandoffStore, create_handoff
 from newsroom.increment8.operations import (
-    HandoffRegistrationAnchor,
     HandoffOperationalStatus,
+    HandoffRegistrationAnchor,
     LeaseState,
     OperationalAuthority,
     OperationalAuthorityError,
@@ -72,7 +72,9 @@ def test_v30_to_v31_requires_exact_backup_and_preserves_prefix(tmp_path) -> None
     receipt = migrations.prepare_pending_migration_backup(connection)
     assert receipt is not None
     migrations.apply_pending_migrations(connection, applied_at=_AT)
-    assert connection.execute("PRAGMA user_version").fetchone() == (migrations.SCHEMA_VERSION,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (
+        migrations.SCHEMA_VERSION,
+    )
     assert connection.execute(
         "SELECT version,name FROM authority_migrations WHERE version=31"
     ).fetchone() == (31, "increment8_operational_authority_v31")
@@ -99,7 +101,9 @@ def test_profile_and_due_work_are_exact_append_only_and_deduplicated(tmp_path) -
     connection.close()
 
 
-def test_due_selection_is_deterministic_urgent_first_and_catch_up_bounded(tmp_path) -> None:
+def test_due_selection_is_deterministic_urgent_first_and_catch_up_bounded(
+    tmp_path,
+) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)
     profile = _profile(authority)
@@ -111,7 +115,9 @@ def test_due_selection_is_deterministic_urgent_first_and_catch_up_bounded(tmp_pa
     connection.close()
 
 
-def test_lease_is_bounded_renewable_only_with_progress_and_append_only(tmp_path) -> None:
+def test_lease_is_bounded_renewable_only_with_progress_and_append_only(
+    tmp_path,
+) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)
     profile = _profile(authority)
@@ -126,7 +132,11 @@ def test_lease_is_bounded_renewable_only_with_progress_and_append_only(tmp_path)
     authority.append_lease(lease)
     assert authority.active_lease_count() == 1
     with pytest.raises(OperationalAuthorityError, match="valid progress"):
-        renew_lease(lease, progress_digest=str(lease.payload["progress_digest"]), renewed_at=_LATER)
+        renew_lease(
+            lease,
+            progress_digest=str(lease.payload["progress_digest"]),
+            renewed_at=_LATER,
+        )
     renewed = renew_lease(
         lease, progress_digest="sha256:" + "4" * 64, renewed_at=_LATER
     )
@@ -184,7 +194,13 @@ def test_retry_is_classified_bounded_and_never_refreshes_health(tmp_path) -> Non
     assert finding.payload["health_clock_refreshed"] is False
     assert finding.payload["editorial_no_news"] is False
     authority.append_retry_finding(finding)
-    exhausted = transition_work(_work(profile), state=WorkState.LEASED, attempt_count=3)
+    attempt_one = transition_work(
+        _work(profile), state=WorkState.LEASED, attempt_count=1
+    )
+    retry_one = transition_work(attempt_one, state=WorkState.RETRY_PENDING)
+    attempt_two = transition_work(retry_one, state=WorkState.LEASED, attempt_count=2)
+    retry_two = transition_work(attempt_two, state=WorkState.RETRY_PENDING)
+    exhausted = transition_work(retry_two, state=WorkState.LEASED, attempt_count=3)
     terminal = build_retry_finding(
         work=exhausted,
         classification=RetryClassification.RETRYABLE,
@@ -253,10 +269,14 @@ def test_capacity_evidence_covers_all_scenarios_and_frozen_limits() -> None:
     assert failed.payload["status"] == "FAIL"
 
 
-def test_handoff_anchor_is_atomic_for_profiled_registration_and_honest_for_history(tmp_path) -> None:
+def test_handoff_anchor_is_atomic_for_profiled_registration_and_honest_for_history(
+    tmp_path,
+) -> None:
     path, connection = _database(tmp_path)
     store = EvaluationHandoffStore(connection)
-    legacy = create_handoff("candidate-version:legacy", _D, "evaluation-sink:fixture", max_attempts=3)
+    legacy = create_handoff(
+        "candidate-version:legacy", _D, "evaluation-sink:fixture", max_attempts=3
+    )
     assert store.register(legacy) == legacy
     assert handoff_operational_status(connection, legacy.handoff_id) is (
         HandoffOperationalStatus.GRANDFATHERED_UNANCHORED
@@ -271,7 +291,9 @@ def test_handoff_anchor_is_atomic_for_profiled_registration_and_honest_for_histo
 
     authority = OperationalAuthority(connection)
     _profile(authority)
-    current = create_handoff("candidate-version:current", _D, "evaluation-sink:fixture", max_attempts=4)
+    current = create_handoff(
+        "candidate-version:current", _D, "evaluation-sink:fixture", max_attempts=4
+    )
     assert register_anchored_handoff(connection, current, registered_at=_AT) == current
     assert handoff_operational_status(connection, current.handoff_id) is (
         HandoffOperationalStatus.ANCHORED_ORIGINAL
@@ -294,11 +316,15 @@ def test_handoff_anchor_is_atomic_for_profiled_registration_and_honest_for_histo
     assert path.exists()
 
 
-def test_handoff_coherent_scalar_tamper_is_detected_even_if_v17_trigger_is_restored(tmp_path) -> None:
+def test_handoff_coherent_scalar_tamper_is_detected_even_if_v17_trigger_is_restored(
+    tmp_path,
+) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)
     _profile(authority)
-    handoff = create_handoff("candidate-version:tamper", _D, "evaluation-sink:fixture", max_attempts=3)
+    handoff = create_handoff(
+        "candidate-version:tamper", _D, "evaluation-sink:fixture", max_attempts=3
+    )
     register_anchored_handoff(connection, handoff, registered_at=_AT)
     trigger = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='evaluation_handoff_identity_guard'"
@@ -315,11 +341,15 @@ def test_handoff_coherent_scalar_tamper_is_detected_even_if_v17_trigger_is_resto
     connection.close()
 
 
-def test_self_consistent_anchor_rewrite_fails_against_pinned_registration_digest(tmp_path) -> None:
+def test_self_consistent_anchor_rewrite_fails_against_pinned_registration_digest(
+    tmp_path,
+) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)
     _profile(authority)
-    handoff = create_handoff("candidate-version:pinned", _D, "evaluation-sink:fixture", max_attempts=3)
+    handoff = create_handoff(
+        "candidate-version:pinned", _D, "evaluation-sink:fixture", max_attempts=3
+    )
     register_anchored_handoff(connection, handoff, registered_at=_AT)
     original = connection.execute(
         "SELECT anchor_bytes,anchor_digest FROM handoff_registration_anchors WHERE handoff_id=?",
@@ -349,9 +379,12 @@ def test_self_consistent_anchor_rewrite_fails_against_pinned_registration_digest
     assert handoff_operational_status(connection, handoff.handoff_id) is (
         HandoffOperationalStatus.ANCHORED_ORIGINAL
     )
-    assert handoff_operational_status(
-        connection, handoff.handoff_id, expected_anchor_digest=str(original[1])
-    ) is HandoffOperationalStatus.ANCHOR_MISMATCH
+    assert (
+        handoff_operational_status(
+            connection, handoff.handoff_id, expected_anchor_digest=str(original[1])
+        )
+        is HandoffOperationalStatus.ANCHOR_MISMATCH
+    )
     connection.close()
 
 
