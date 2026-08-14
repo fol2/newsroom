@@ -268,19 +268,21 @@ def test_v25_upgrade_requires_and_retains_exact_backup(tmp_path: Path) -> None:
     assert schema_fingerprint(retained) == PLANNED_AGENDA_PREDECESSOR_FINGERPRINT
     retained.close()
 
-
-def test_opener_prepares_every_supported_predecessor_backup(tmp_path: Path) -> None:
-    database = tmp_path / "v24.sqlite3"
-    connection = sqlite3.connect(database, isolation_level=None)
+    older_database = tmp_path / "v24.sqlite3"
+    connection = sqlite3.connect(older_database, isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
     apply_pending_migrations(connection, applied_at=_AT)
     _downgrade_empty_v26_to_v25(connection)
     _downgrade_empty_v25_to_v24(connection)
     connection.close()
 
-    authority = open_planned_agenda_authority(database, applied_at=_AT)
+    authority = open_planned_agenda_authority(older_database, applied_at=_AT)
     authority.close()
-    assert sqlite3.connect(database).execute("PRAGMA user_version").fetchone() == (26,)
+    checked = sqlite3.connect(older_database)
+    try:
+        assert checked.execute("PRAGMA user_version").fetchone() == (26,)
+    finally:
+        checked.close()
 
 
 def test_v26_failure_rolls_back_to_exact_v25(tmp_path: Path, monkeypatch) -> None:
@@ -442,40 +444,33 @@ def test_revision_is_atomic_cas_bound_and_status_matched(kind, status) -> None:
         resolution=resolution,
         current_version=prior,
     )
+    if kind is AgendaResolutionKind.RESCHEDULED:
+        unchanged_schedule = replace(
+            successor,
+            agenda_version_id=_id(25),
+            expected_subject="Updated description only",
+            asserted_start=prior.asserted_start,
+            asserted_end=prior.asserted_end,
+        )
+        unchanged_resolution = replace(
+            resolution,
+            resolution_id=_id(215),
+            successor_version_digest=unchanged_schedule.digest,
+        )
+        with pytest.raises(AgendaAuthorityError, match="schedule unchanged"):
+            authority.apply(
+                _command(
+                    AgendaCommandOperation.REVISE,
+                    315,
+                    version=unchanged_schedule,
+                    resolution=unchanged_resolution,
+                    current_version=prior,
+                ).canonical_bytes
+            )
     result = authority.apply(command.canonical_bytes)
     assert result.current_version == successor
     assert result.resolutions == (resolution,)
     assert authority.apply(command.canonical_bytes) == result
-
-
-def test_reschedule_requires_a_changed_schedule_assertion() -> None:
-    authority = open_planned_agenda_authority(":memory:", applied_at=_AT)
-    item, prior, _, _ = _create(authority)
-    unchanged_schedule = _version(
-        item,
-        25,
-        version_ordinal=2,
-        predecessor_version_digest=prior.digest,
-        source_revision_id=_id(35),
-        expected_subject="Updated description only",
-        recorded_at="2026-08-15T00:00:00.000000Z",
-    )
-    resolution = _resolution(
-        prior,
-        215,
-        AgendaResolutionKind.RESCHEDULED,
-        successor=unchanged_schedule.digest,
-    )
-    with pytest.raises(AgendaAuthorityError, match="schedule unchanged"):
-        authority.apply(
-            _command(
-                AgendaCommandOperation.REVISE,
-                315,
-                version=unchanged_schedule,
-                resolution=resolution,
-                current_version=prior,
-            ).canonical_bytes
-        )
 
 
 def test_two_writers_enforce_current_head_cas(tmp_path: Path) -> None:
