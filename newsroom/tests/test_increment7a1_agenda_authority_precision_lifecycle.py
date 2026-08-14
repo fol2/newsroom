@@ -197,6 +197,7 @@ def test_reschedule_is_an_exact_successor_and_preserves_prior_bytes() -> None:
 def test_successor_rejects_cross_item_gap_and_wrong_predecessor() -> None:
     prior = _version()
     for changes in (
+        {"agenda_version_id": prior.agenda_version_id},
         {"agenda_item_id": _id(99)},
         {"version_ordinal": 3},
         {"predecessor_version_digest": "sha256:" + "0" * 64},

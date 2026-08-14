@@ -599,7 +599,8 @@ def validate_agenda_successor(
             "Agenda successor values must be exact typed Versions"
         )
     if (
-        successor.agenda_item_id != prior.agenda_item_id
+        successor.agenda_version_id == prior.agenda_version_id
+        or successor.agenda_item_id != prior.agenda_item_id
         or successor.version_ordinal != prior.version_ordinal + 1
         or successor.predecessor_version_digest != prior.digest
     ):
