@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from newsroom.increment8.evaluation import (
 from newsroom.increment8.readiness import (
     INCREMENT_8_READINESS,
     INCREMENT_8_READINESS_DIGEST,
+    READINESS_CONTRACT_PATH,
 )
 from newsroom.tests.authority_migration_compatibility import build_exact_prefix
 
@@ -121,9 +123,9 @@ def test_v29_upgrade_fails_without_prepared_backup(tmp_path: Path) -> None:
 def test_plan_binds_exact_pre_measurement_values_and_round_trips() -> None:
     plan, epoch, run = _records()
     assert plan.payload["readiness_digest"] == INCREMENT_8_READINESS_DIGEST
-    assert plan.payload["plan_definition"] == {
-        key: value for key, value in INCREMENT_8_READINESS.evaluation_plan.items()
-    }
+    assert plan.payload["plan_definition"] == json.loads(
+        READINESS_CONTRACT_PATH.read_bytes()
+    )["payload"]["evaluation_plan"]
     assert plan.payload["calibration_may_qualify_selected_values"] is False
     assert epoch.payload["frozen"] is True
     assert run.payload["run_kind"] == "QUALIFICATION"

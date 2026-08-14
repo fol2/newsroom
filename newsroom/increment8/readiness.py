@@ -25,10 +25,162 @@ from newsroom.increment5._traceability_model import (
     DEFERRED_TO_INCREMENT_8_REQUIREMENTS,
 )
 
-READINESS_CONTRACT_PATH = Path(__file__).with_name("increment8_readiness_v1.json")
-EXPECTED_READINESS_DIGEST = (
+PRIOR_READINESS_CONTRACT_PATH = Path(__file__).with_name(
+    "increment8_readiness_v1.json"
+)
+READINESS_CONTRACT_PATH = Path(__file__).with_name("increment8_readiness_v2.json")
+PRIOR_READINESS_DIGEST = (
     "sha256:52ad9f2d6022e95d738fe24913db2f379a91f6c945319db613b1b50cdea07d4c"
 )
+EXPECTED_READINESS_DIGEST = (
+    "sha256:11fc66cb28b1cbe573b7148e8bafa5321dcf1ac676d114c1022fe2223af87c52"
+)
+
+EXPECTED_CORRECTION_BASE = {
+    "commit": "1c03102dde3a666cf72ee97197bbf339e42f5b4e",
+    "tree": "6ea8893cb1f5a0a33d6bf94abced81c9cea9a59c",
+    "schema_version": 32,
+    "schema_fingerprint": (
+        "sha256:3439b82ec6d212116e54765d50cace4d7f147b6ecc3e6ff84146b523c6fd5676"
+    ),
+    "migration_history_digest": (
+        "sha256:5a48fd76cd11f266e19a4b48174d0c009f320a8d00d3eeb281a558fc2d561910"
+    ),
+}
+
+EXPECTED_REQUIRED_SLICE_MANIFEST = (
+    {
+        "slice_id": "GEOGRAPHY_GLOBAL",
+        "minimum_completed_cases": 12,
+        "membership_rule": {
+            "field": "case_metadata.geography",
+            "operator": "EQ",
+            "value": "GLOBAL",
+        },
+    },
+    {
+        "slice_id": "GEOGRAPHY_HONG_KONG",
+        "minimum_completed_cases": 12,
+        "membership_rule": {
+            "field": "case_metadata.geography",
+            "operator": "EQ",
+            "value": "HONG_KONG",
+        },
+    },
+    {
+        "slice_id": "GEOGRAPHY_UNITED_KINGDOM",
+        "minimum_completed_cases": 12,
+        "membership_rule": {
+            "field": "case_metadata.geography",
+            "operator": "EQ",
+            "value": "UNITED_KINGDOM",
+        },
+    },
+    {
+        "slice_id": "LANGUAGE_EN_GB",
+        "minimum_completed_cases": 12,
+        "membership_rule": {
+            "field": "case_metadata.language",
+            "operator": "EQ",
+            "value": "EN_GB",
+        },
+    },
+    {
+        "slice_id": "LANGUAGE_MIXED_EN_GB_ZH_HANT_HK",
+        "minimum_completed_cases": 12,
+        "membership_rule": {
+            "field": "case_metadata.language",
+            "operator": "EQ",
+            "value": "MIXED_EN_GB_ZH_HANT_HK",
+        },
+    },
+    {
+        "slice_id": "LANGUAGE_ZH_HANT_HK",
+        "minimum_completed_cases": 12,
+        "membership_rule": {
+            "field": "case_metadata.language",
+            "operator": "EQ",
+            "value": "ZH_HANT_HK",
+        },
+    },
+    {
+        "slice_id": "SOURCE_MULTI_DOMAIN_CORROBORATED",
+        "minimum_completed_cases": 12,
+        "membership_rule": {
+            "field": "source_evidence.distinct_domain_count",
+            "operator": "GTE",
+            "value": 2,
+        },
+    },
+    {
+        "slice_id": "TRANSITION_FAILURE_HEAVY",
+        "minimum_completed_cases": 12,
+        "membership_rule": {
+            "field": "fixture.injected_failure_count",
+            "operator": "GTE",
+            "value": 2,
+        },
+    },
+    {
+        "slice_id": "URGENCY_URGENT",
+        "minimum_completed_cases": 12,
+        "membership_rule": {
+            "field": "case_metadata.urgency",
+            "operator": "EQ",
+            "value": "URGENT",
+        },
+    },
+)
+
+EXPECTED_CASE_STRATA_MANIFEST = (
+    {
+        "stratum_id": "NEGATIVE",
+        "minimum_completed_cases": 12,
+        "membership_rule": {
+            "field": "expected.candidate_outcome",
+            "operator": "EQ",
+            "value": "NO_CANDIDATE",
+        },
+    },
+    {
+        "stratum_id": "UNCHANGED",
+        "minimum_completed_cases": 12,
+        "membership_rule": {
+            "field": "expected.transition_outcome",
+            "operator": "EQ",
+            "value": "UNCHANGED",
+        },
+    },
+    {
+        "stratum_id": "FAILURE_HEAVY",
+        "minimum_completed_cases": 12,
+        "membership_rule": {
+            "field": "fixture.injected_failure_count",
+            "operator": "GTE",
+            "value": 2,
+        },
+    },
+)
+
+EXPECTED_REQUIRED_SLICE_POLICY = {
+    "all_manifest_slices_required_for_release": True,
+    "case_may_match_multiple_slices": True,
+    "counting_unit": "DISTINCT_CASE_DIGEST_PER_SLICE",
+    "invented_slices_allowed": False,
+    "membership_changes_after_first_result_allowed": False,
+    "membership_evaluated_from": "FROZEN_CASE_INPUT_MANIFEST_BEFORE_RESULT",
+    "policy_changes_after_first_result_allowed": False,
+}
+
+EXPECTED_CASE_STRATA_POLICY = {
+    "all_manifest_strata_required_for_release": True,
+    "case_may_match_multiple_strata": True,
+    "counting_unit": "DISTINCT_CASE_DIGEST_PER_STRATUM",
+    "invented_strata_allowed": False,
+    "membership_changes_after_first_result_allowed": False,
+    "membership_evaluated_from": "FROZEN_CASE_INPUT_MANIFEST_BEFORE_RESULT",
+    "policy_changes_after_first_result_allowed": False,
+}
 
 
 class Increment8ReadinessError(ValueError):
@@ -71,6 +223,12 @@ class Increment8ReadinessContract:
     accepted_schema_fingerprint: str
     accepted_last_migration_name: str
     accepted_migration_history: tuple[tuple[int, str, str], ...]
+    superseded_contract_digest: str
+    correction_base_commit: str
+    correction_base_tree: str
+    correction_base_schema_version: int
+    correction_base_schema_fingerprint: str
+    correction_base_migration_history_digest: str
     effective_when: str
     authority: Mapping[str, object]
     version_manifest: Mapping[str, object]
@@ -134,6 +292,29 @@ def _freeze(value: object) -> object:
     if isinstance(value, list):
         return tuple(_freeze(item) for item in value)
     return value
+
+
+def _thaw(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {name: _thaw(item) for name, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
+
+
+def _prior_payload() -> Mapping[str, object]:
+    try:
+        raw = PRIOR_READINESS_CONTRACT_PATH.read_bytes()
+        if digest_bytes(raw) != PRIOR_READINESS_DIGEST:
+            raise Increment8ReadinessError("prior readiness bytes differ")
+        document = _mapping(
+            json.loads(raw.decode("utf-8", errors="strict")), "prior contract"
+        )
+        return _mapping(document.get("payload"), "prior payload")
+    except Increment8ReadinessError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError) as exc:
+        raise Increment8ReadinessError("cannot read prior readiness contract") from exc
 
 
 def _frozen_mapping(value: object, field: str) -> Mapping[str, object]:
@@ -210,6 +391,21 @@ def _allocation(value: object, index: int) -> ChildAllocation:
 
 
 def _validate_contract(contract: Increment8ReadinessContract) -> None:
+    if contract.schema_version != "newsroom.increment8.readiness.v2":
+        raise Increment8ReadinessError("corrective readiness schema differs")
+    if contract.contract_version != "increment8-readiness-v2":
+        raise Increment8ReadinessError("corrective readiness version differs")
+    if contract.superseded_contract_digest != PRIOR_READINESS_DIGEST:
+        raise Increment8ReadinessError("superseded readiness identity differs")
+    correction_base = {
+        "commit": contract.correction_base_commit,
+        "tree": contract.correction_base_tree,
+        "schema_version": contract.correction_base_schema_version,
+        "schema_fingerprint": contract.correction_base_schema_fingerprint,
+        "migration_history_digest": contract.correction_base_migration_history_digest,
+    }
+    if correction_base != EXPECTED_CORRECTION_BASE:
+        raise Increment8ReadinessError("corrective base differs")
     if tuple(item.issue_number for item in contract.allocations) != tuple(
         range(462, 469)
     ):
@@ -281,12 +477,72 @@ def _validate_contract(contract: Increment8ReadinessContract) -> None:
     if contract.evaluation_plan.get("maximum_unresolved_release_disagreements") != 0:
         raise Increment8ReadinessError("release disagreement limit must remain zero")
     if (
+        contract.evaluation_plan.get("required_slice_manifest")
+        != EXPECTED_REQUIRED_SLICE_MANIFEST
+    ):
+        raise Increment8ReadinessError("required slice manifest differs")
+    if (
+        contract.evaluation_plan.get("case_strata_manifest")
+        != EXPECTED_CASE_STRATA_MANIFEST
+    ):
+        raise Increment8ReadinessError("Case stratum manifest differs")
+    if (
+        contract.evaluation_plan.get("required_slice_policy")
+        != EXPECTED_REQUIRED_SLICE_POLICY
+    ):
+        raise Increment8ReadinessError("required slice policy differs")
+    if (
+        contract.evaluation_plan.get("case_strata_policy")
+        != EXPECTED_CASE_STRATA_POLICY
+    ):
+        raise Increment8ReadinessError("Case stratum policy differs")
+    if (
         contract.operational_profile.get("capacity", {}).get(
             "maximum_external_spend_pence"
         )
         != 0
     ):  # type: ignore[union-attr]
         raise Increment8ReadinessError("profile external spend must remain zero")
+    migration_policy = contract.migration_policy
+    if migration_policy.get("additive_migrations_only") is not True:
+        raise Increment8ReadinessError("migration policy must remain additive")
+    if migration_policy.get("history_preservation_required") is not True:
+        raise Increment8ReadinessError("migration history preservation is required")
+    if migration_policy.get("policy_versions") != (30, 31, 32):
+        raise Increment8ReadinessError("migration policy version scope differs")
+
+    prior = _prior_payload()
+    prior_plan = _mapping(prior["evaluation_plan"], "prior evaluation_plan")
+    current_plan = _mapping(_thaw(contract.evaluation_plan), "evaluation_plan")
+    for name in (
+        "required_slice_manifest",
+        "required_slice_policy",
+        "case_strata_manifest",
+        "case_strata_policy",
+    ):
+        current_plan.pop(name, None)
+    if current_plan != prior_plan:
+        raise Increment8ReadinessError("accepted numerical Evaluation Plan differs")
+    if _thaw(contract.operational_profile) != prior["operational_profile"]:
+        raise Increment8ReadinessError("accepted numerical Operational Profile differs")
+    if _thaw(contract.authority) != prior["authority"]:
+        raise Increment8ReadinessError("accepted non-effect authority differs")
+    if list(contract.exclusions) != prior["exclusions"]:
+        raise Increment8ReadinessError("accepted exclusions differ")
+    prior_migration_policy = _mapping(
+        prior["migration_policy"], "prior migration_policy"
+    )
+    current_migration_policy = _mapping(
+        _thaw(contract.migration_policy), "migration_policy"
+    )
+    for name in (
+        "additive_migrations_only",
+        "history_preservation_required",
+        "policy_versions",
+    ):
+        current_migration_policy.pop(name, None)
+    if current_migration_policy != prior_migration_policy:
+        raise Increment8ReadinessError("accepted migration reservations differ")
 
 
 def load_increment8_readiness_contract(path: Path) -> Increment8ReadinessContract:
@@ -311,7 +567,7 @@ def load_increment8_readiness_contract(path: Path) -> Increment8ReadinessContrac
         raise Increment8ReadinessError("readiness record must use exact canonical JSON")
     contract_digest = digest_bytes(raw)
     if contract_digest != EXPECTED_READINESS_DIGEST:
-        raise Increment8ReadinessError("readiness bytes differ from reviewed v1")
+        raise Increment8ReadinessError("readiness bytes differ from reviewed v2")
 
     try:
         top = _mapping(document, "contract")
@@ -325,6 +581,8 @@ def load_increment8_readiness_contract(path: Path) -> Increment8ReadinessContrac
                 "issue_number",
                 "parent_issue_number",
                 "accepted_base",
+                "supersedes",
+                "correction_base",
                 "effective_when",
                 "authority",
                 "version_manifest",
@@ -350,6 +608,29 @@ def load_increment8_readiness_contract(path: Path) -> Increment8ReadinessContrac
                 "migration_history",
             },
             "accepted_base",
+        )
+        supersedes = _mapping(payload["supersedes"], "supersedes")
+        _exact_keys(
+            supersedes,
+            {"schema_version", "contract_version", "contract_digest"},
+            "supersedes",
+        )
+        if (
+            supersedes["schema_version"] != "newsroom.increment8.readiness.v1"
+            or supersedes["contract_version"] != "increment8-readiness-v1"
+        ):
+            raise Increment8ReadinessError("superseded readiness version differs")
+        correction_base = _mapping(payload["correction_base"], "correction_base")
+        _exact_keys(
+            correction_base,
+            {
+                "commit",
+                "tree",
+                "schema_version",
+                "schema_fingerprint",
+                "migration_history_digest",
+            },
+            "correction_base",
         )
         raw_allocations = payload["allocations"]
         raw_waves = payload["parallel_waves"]
@@ -382,6 +663,24 @@ def load_increment8_readiness_contract(path: Path) -> Increment8ReadinessContrac
             ),
             accepted_last_migration_name=str(accepted["last_migration_name"]),
             accepted_migration_history=_history(accepted["migration_history"]),
+            superseded_contract_digest=validate_sha256_digest(
+                str(supersedes["contract_digest"]),
+                field="supersedes.contract_digest",
+            ),
+            correction_base_commit=str(correction_base["commit"]),
+            correction_base_tree=str(correction_base["tree"]),
+            correction_base_schema_version=_integer(
+                correction_base["schema_version"],
+                "correction_base.schema_version",
+            ),
+            correction_base_schema_fingerprint=validate_sha256_digest(
+                str(correction_base["schema_fingerprint"]),
+                field="correction_base.schema_fingerprint",
+            ),
+            correction_base_migration_history_digest=validate_sha256_digest(
+                str(correction_base["migration_history_digest"]),
+                field="correction_base.migration_history_digest",
+            ),
             effective_when=str(payload["effective_when"]),
             authority=_frozen_mapping(payload["authority"], "authority"),
             version_manifest=_frozen_mapping(
