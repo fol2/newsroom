@@ -292,9 +292,9 @@ def test_accept_replay_snapshot_and_direct_tamper_fail_closed(tmp_path: Path) ->
     authority.close()
 
 
-def test_disposition_is_generic_ledger_anchored_and_replay_precedes_ports(
-    tmp_path: Path,
-) -> None:
+@pytest.fixture(scope="module")
+def _generic_disposition_state(tmp_path_factory: pytest.TempPathFactory):
+    tmp_path = tmp_path_factory.mktemp("feedback-disposition")
     location, args, feedback, obligation = _seed(tmp_path)
     authority = open_evaluation_feedback_authority_system(
         location.seed[1],
@@ -381,6 +381,22 @@ def test_disposition_is_generic_ledger_anchored_and_replay_precedes_ports(
         == 2
     )
     authority.close()
+    return location, args, feedback, obligation, accepted, disposition
+
+
+def test_disposition_is_generic_ledger_anchored_and_replay_precedes_ports(
+    _generic_disposition_state,
+) -> None:
+    _, _, _, _, accepted, disposition = _generic_disposition_state
+    assert disposition.obligation_id == accepted.obligation.obligation_id
+
+
+def test_disposition_restart_chain_is_terminal_and_tamper_evident(
+    _generic_disposition_state,
+) -> None:
+    location, args, feedback, obligation, accepted, disposition = (
+        _generic_disposition_state
+    )
     reopened = open_evaluation_feedback_authority_system(
         location.seed[1],
         retrieval_authority=args["retrieval_authority"],
