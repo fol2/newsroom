@@ -12,7 +12,11 @@ from newsroom.increment8.evaluation import ReleaseEvidenceDecision, ReleaseVerdi
 from newsroom.increment8.metrics import MeasurementStatus, MetricReport
 from newsroom.increment8.observability import HealthPosture, HealthVerdict, ObservabilityRecord, SecurityAdmission
 from newsroom.increment8.operations import CapacityEvidence, HandoffAnchorKind, HandoffRegistrationAnchor
-from newsroom.increment8.readiness import INCREMENT_8_READINESS_DIGEST
+from newsroom.increment8.readiness import (
+    INCREMENT_8_READINESS_DIGEST,
+    CorrectiveGate,
+    corrective_gate_authorised,
+)
 from newsroom.increment8.recovery import BackupManifest, FaultInjectionRun, FaultScenario, ReconciliationRun, RecoveryStatus, RestoreRun
 
 
@@ -199,6 +203,12 @@ def build_qualification_packet(
     p1_finding_count: int,
     material_p2_finding_count: int,
 ) -> QualificationPacket:
+    if not corrective_gate_authorised(
+        CorrectiveGate.QUALIFICATION_EVIDENCE_ACCEPTANCE
+    ):
+        raise AdmissionError(
+            "qualification packet construction is blocked by corrective readiness"
+        )
     _exact_record(release_decision, ReleaseEvidenceDecision, "release decision")
     _exact_record(capacity, CapacityEvidence, "capacity evidence")
     _exact_record(reconciliation, ReconciliationRun, "reconciliation")
@@ -280,6 +290,10 @@ def build_operational_admission_decision(
     owner_identity_digest: str,
     decision_recorded_at_digest: str,
 ) -> OperationalAdmissionDecision:
+    if not corrective_gate_authorised(CorrectiveGate.OPERATIONAL_ADMISSION):
+        raise AdmissionError(
+            "Operational Admission is blocked by corrective readiness"
+        )
     if not isinstance(packet, QualificationPacket) or packet.digest != digest_bytes(packet.canonical_bytes):
         raise AdmissionError("qualification packet differs")
     payload = {

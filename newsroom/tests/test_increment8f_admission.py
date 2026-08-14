@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import replace
+from inspect import signature
 
 import pytest
 
@@ -9,13 +9,15 @@ from newsroom.authority import migrations
 from newsroom.increment8.admission import (
     AdmissionError,
     CostLicenceEvidence,
-    Increment9Eligibility,
     IntendedHardwareEvidence,
-    OperationalAdmissionVerdict,
     build_operational_admission_decision,
     build_qualification_packet,
 )
-from newsroom.increment8.evaluation import ReleaseVerdict, build_release_decision
+from newsroom.increment8.evaluation import (
+    EvaluationAuthorityError,
+    ReleaseVerdict,
+    build_release_decision,
+)
 from newsroom.increment8.observability import ObservabilityRecord, SecurityAdmission
 from newsroom.increment8.operations import (
     HandoffAnchorKind,
@@ -33,7 +35,6 @@ from newsroom.tests.test_increment8b_metrics import _report, _run
 from newsroom.tests.test_increment8d_observability import _access, _health
 
 _D = "sha256:" + "1" * 64
-_D2 = "sha256:" + "2" * 64
 _AT = "2042-01-05T00:00:00.000000Z"
 _LATER = "2042-01-05T00:10:00.000000Z"
 _RETAIN = "2042-02-05T00:00:00.000000Z"
@@ -154,15 +155,8 @@ def _packet(tmp_path, **changes):
 
 
 def test_complete_packet_binds_every_gate_and_admits_only_fixture_operation(tmp_path) -> None:
-    packet = _packet(tmp_path)
-    decision = build_operational_admission_decision(
-        packet=packet, owner_identity_digest=_D, decision_recorded_at_digest=_D,
-    )
-    assert decision.verdict is OperationalAdmissionVerdict.FIXTURE_OPERATIONAL_ADMITTED
-    assert decision.increment9_eligibility is Increment9Eligibility.ELIGIBLE_FOR_SEPARATE_PLAN
-    assert b'"increment9_requires_separate_owner_approved_plan":true' in decision.canonical_bytes
-    assert b'"live_shadow_execution_authorised":false' in decision.canonical_bytes
-    assert b'"production_activation_authorised":false' in decision.canonical_bytes
+    with pytest.raises(EvaluationAuthorityError, match="corrective readiness"):
+        _packet(tmp_path)
 
 
 def test_hardware_cost_and_licence_values_are_exact_and_non_activating() -> None:
@@ -182,15 +176,17 @@ def test_hardware_cost_and_licence_values_are_exact_and_non_activating() -> None
 
 
 def test_missing_fault_scenario_or_blocking_security_fails_closed(tmp_path) -> None:
-    with pytest.raises(AdmissionError, match="fault-injection"):
-        _packet(tmp_path / "missing", fault_runs=_faults()[:-1])
-    blocked = replace(_security(), eligible=False)
-    with pytest.raises(AdmissionError, match="security"):
-        _packet(tmp_path / "blocked", security=blocked)
+    arguments = {
+        name: None for name in signature(build_qualification_packet).parameters
+    }
+    with pytest.raises(AdmissionError, match="packet construction.*corrective"):
+        build_qualification_packet(**arguments)
 
 
 def test_handoff_anchor_digest_and_substantive_review_are_hard_gates(tmp_path) -> None:
-    with pytest.raises(AdmissionError, match="Handoff"):
-        _packet(tmp_path / "anchor", expected_handoff_anchor_digest=_D2)
-    with pytest.raises(AdmissionError, match="blocking finding"):
-        _packet(tmp_path / "review", material_p2_finding_count=1)
+    with pytest.raises(AdmissionError, match="Operational Admission.*corrective"):
+        build_operational_admission_decision(
+            packet=object(),  # type: ignore[arg-type]
+            owner_identity_digest=_D,
+            decision_recorded_at_digest=_D,
+        )
