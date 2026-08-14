@@ -707,7 +707,7 @@ def test_sql_request_limits_match_the_contract_safe_integer_ceiling(
         authority.close()
 
 
-def test_exact_outcome_replay_reconciles_its_retained_budget_entry(
+def test_outcome_and_dependent_replays_reconcile_retained_budget_entry(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "outcome-replay-ledger.sqlite3"
@@ -721,8 +721,14 @@ def test_exact_outcome_replay_reconciles_its_retained_budget_entry(
             "AND outcome_id=?",
             (records[3].outcome_id,),
         )
-        with pytest.raises(SearchAuthorityError, match="retained gross budget"):
-            authority.record_outcome(records[3].canonical_bytes)
+        for replay in (
+            lambda: authority.outcome(records[3].outcome_id),
+            lambda: authority.record_outcome(records[3].canonical_bytes),
+            lambda: authority.record_result(records[4].canonical_bytes),
+            lambda: authority.record_review(records[5].canonical_bytes),
+        ):
+            with pytest.raises(SearchAuthorityError, match="retained gross budget"):
+                replay()
     finally:
         attacker.close()
         authority.close()
