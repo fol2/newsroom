@@ -10,8 +10,9 @@ A Metric Report is now constructed from the exact canonical Evaluation Plan,
 Epoch and qualification Run, plus one canonical `ReviewedCaseOutcome` for each
 prospective, reviewable Case. Each outcome embeds the frozen Case and the
 primary human ReviewLabel. The label token is the digest of the complete
-per-Case assessment, so caller-supplied aggregate counts or booleans cannot be
-substituted for reviewed evidence.
+per-Case assessment, including metric and triage opportunity eligibility, so
+caller-supplied aggregate counts or booleans cannot be substituted for
+reviewed evidence.
 
 The report derives, rather than accepts:
 
@@ -26,8 +27,11 @@ The report derives, rather than accepts:
 Canonical reconstruction checks the complete Plan/Epoch/Run chain, every Case,
 ReviewLabel, assessment, rate, performance result, slice result, zero-tolerance
 record, source contribution and ablation. The release authority additionally
-compares the report's exact Case and primary-label identities with its retained
-append-only records.
+compares the report's exact Case, primary-label and secondary-label identities
+with its retained append-only records for `PASS`, `FAIL` and `INCONCLUSIVE`
+verdicts. Reviewer agreement is derived only from retained independent
+primary/secondary label pairs; it is not accepted from the primary assessment
+mapping.
 
 Source contribution evidence retains sorted dependency-root digests and the
 report emits the root-to-source inventory. Shared wire or upstream roots are

@@ -138,6 +138,13 @@ def _report_bytes(
         previous_label = ReviewLabel.from_canonical_bytes(
             canonical_json_bytes(case_document["review_label"])
         )
+        previous_secondary = (
+            None
+            if case_document["secondary_review_label"] is None
+            else ReviewLabel.from_canonical_bytes(
+                canonical_json_bytes(case_document["secondary_review_label"])
+            )
+        )
         findings = tuple(sorted(zero_failures))
         replacement_label = build_review_label(
             case=case,
@@ -145,7 +152,9 @@ def _report_bytes(
             role=ReviewRole.PRIMARY,
             label=reviewed_case_assessment_label(
                 case=case,
+                metric_eligible=target.metric_eligible,
                 metric_success=target.metric_success,
+                triage_eligible=target.triage_eligible,
                 triage_error=target.triage_error,
                 slice_success=target.slice_success,
                 zero_tolerance_findings=findings,
@@ -156,7 +165,10 @@ def _report_bytes(
         replacement = ReviewedCaseOutcome.build(
             case=case,
             review_label=replacement_label,
+            secondary_review_label=previous_secondary,
+            metric_eligible=target.metric_eligible,
             metric_success=target.metric_success,
+            triage_eligible=target.triage_eligible,
             triage_error=target.triage_error,
             slice_success=target.slice_success,
             zero_tolerance_findings=findings,
@@ -393,20 +405,53 @@ def test_append_only_authority_retains_failed_run_and_rejects_mutation(
             prospective=True,
         )
         authority.register_case(case)
+        from newsroom.increment8.metrics import (
+            ReviewedCaseOutcome,
+            reviewed_case_assessment_label,
+        )
+        from newsroom.tests.test_increment8b_metrics import (
+            _CASE_RATE_NAMES,
+            _TRIAGE_NAMES,
+        )
+
+        metric_eligible = {name: True for name in _CASE_RATE_NAMES}
+        metric_success = {name: True for name in _CASE_RATE_NAMES}
+        metric_success["candidate_precision"] = False
+        triage_error = {name: False for name in _TRIAGE_NAMES}
+        triage_eligible = {name: True for name in _TRIAGE_NAMES}
         label = build_review_label(
             case=case,
             reviewer_identity_digest=REVIEWER_1,
             role=ReviewRole.PRIMARY,
-            label="route-a",
+            label=reviewed_case_assessment_label(
+                case=case,
+                metric_eligible=metric_eligible,
+                metric_success=metric_success,
+                triage_eligible=triage_eligible,
+                triage_error=triage_error,
+                slice_success=True,
+            ),
             blinded=True,
             recorded_at=T3,
         )
         authority.record_label(label)
+        case_outcome = ReviewedCaseOutcome.build(
+            case=case,
+            review_label=label,
+            metric_eligible=metric_eligible,
+            metric_success=metric_success,
+            triage_eligible=triage_eligible,
+            triage_error=triage_error,
+            slice_success=True,
+        )
         manifest = authority.evidence_manifest_digest(run.run_id)
         decision = build_release_decision(
             run=run,
             report_canonical_bytes=_report_bytes(
-                run, status="FAIL", evidence_manifest_digest=manifest
+                run,
+                status="FAIL",
+                evidence_manifest_digest=manifest,
+                case_outcomes=(case_outcome,),
             ),
             evidence_manifest_digest=manifest,
             verdict=ReleaseVerdict.INCONCLUSIVE,
@@ -456,7 +501,7 @@ def test_pass_requires_full_exposure_primary_labels_and_second_review_sample(
             owner_identity_digest=OWNER,
             decided_at=T5,
         )
-        with pytest.raises(EvaluationAuthorityError, match="exposure"):
+        with pytest.raises(EvaluationAuthorityError, match="outcomes differ"):
             authority.decide_release(candidate)
 
         # The authority gate also rejects a caller that bypasses the public
@@ -480,7 +525,7 @@ def test_pass_requires_full_exposure_primary_labels_and_second_review_sample(
                 "production_activation_authorised": False,
             }
         )
-        with pytest.raises(EvaluationAuthorityError, match="exposure"):
+        with pytest.raises(EvaluationAuthorityError, match="outcomes differ"):
             authority.decide_release(direct)
         assert connection.execute(
             "SELECT COUNT(*) FROM evaluation_release_decisions"

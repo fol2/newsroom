@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 
 import pytest
@@ -49,6 +50,7 @@ _RATE_NAMES = (
     "snowball_absorption",
     "unnecessary_candidate",
 )
+_CASE_RATE_NAMES = tuple(name for name in _RATE_NAMES if name != "reviewer_agreement")
 _TRIAGE_NAMES = ("false_correction", "false_development", "missed_development")
 
 
@@ -85,6 +87,8 @@ def _case_outcomes(
     context=None,
     count: int = 120,
     metric_fail: str | None = None,
+    metric_failure_count: int | None = None,
+    metric_eligible_counts: Mapping[str, int] | None = None,
     slice_fail: str | None = None,
     insufficient_slice: str | None = None,
     insufficient_stratum: str | None = None,
@@ -97,6 +101,11 @@ def _case_outcomes(
         str(item["identity_digest"])
         for item in plan.payload["authorised_human_manifest"]
         if "PRIMARY" in item["roles"]
+    )
+    secondary_reviewers = tuple(
+        str(item["identity_digest"])
+        for item in plan.payload["authorised_human_manifest"]
+        if "SECONDARY" in item["roles"]
     )
     output = []
     for index in range(count):
@@ -135,9 +144,13 @@ def _case_outcomes(
             urgent=urgent_member,
             zero_tolerance=zero_finding is not None and index == 0,
         )
-        metric_success = {name: True for name in _RATE_NAMES}
+        metric_eligible = {
+            name: index < (metric_eligible_counts or {}).get(name, count)
+            for name in _CASE_RATE_NAMES
+        }
+        metric_success = {name: True for name in _CASE_RATE_NAMES}
         if metric_fail is not None:
-            failures_needed = (
+            failures_needed = metric_failure_count or (
                 7
                 if metric_fail
                 in {
@@ -151,9 +164,10 @@ def _case_outcomes(
                 }
                 else 3
             )
-            if index < failures_needed:
+            if metric_fail != "reviewer_agreement" and index < failures_needed:
                 metric_success[metric_fail] = False
         triage = {name: False for name in _TRIAGE_NAMES}
+        triage_eligible = {name: True for name in _TRIAGE_NAMES}
         if triage_error is not None and index == 0:
             triage[triage_error] = True
         slice_success = not (
@@ -166,7 +180,9 @@ def _case_outcomes(
             role=ReviewRole.PRIMARY,
             label=reviewed_case_assessment_label(
                 case=case,
+                metric_eligible=metric_eligible,
                 metric_success=metric_success,
+                triage_eligible=triage_eligible,
                 triage_error=triage,
                 slice_success=slice_success,
                 zero_tolerance_findings=findings,
@@ -174,10 +190,32 @@ def _case_outcomes(
             blinded=True,
             recorded_at=_AT,
         )
+        secondary_label = None
+        if index < 24:
+            secondary_identity = next(
+                identity
+                for identity in secondary_reviewers
+                if identity != label.payload["reviewer_identity_digest"]
+            )
+            secondary_label = build_review_label(
+                case=case,
+                reviewer_identity_digest=secondary_identity,
+                role=ReviewRole.SECONDARY,
+                label=(
+                    "disagreement"
+                    if metric_fail == "reviewer_agreement" and index < 4
+                    else label.payload["label"]
+                ),
+                blinded=True,
+                recorded_at=_AT,
+            )
         outcome = ReviewedCaseOutcome.build(
             case=case,
             review_label=label,
+            secondary_review_label=secondary_label,
+            metric_eligible=metric_eligible,
             metric_success=metric_success,
+            triage_eligible=triage_eligible,
             triage_error=triage,
             slice_success=slice_success,
             zero_tolerance_findings=findings,
@@ -300,6 +338,45 @@ def test_rate_slice_and_zero_results_are_derived_not_caller_supplied() -> None:
     assert blocker.overall_status is MeasurementStatus.FAIL
 
 
+def test_conditional_rate_denominators_come_from_eligible_opportunities() -> None:
+    context = _context()
+    report = _report(
+        context=context,
+        case_outcomes=_case_outcomes(
+            context=context,
+            metric_fail="candidate_precision",
+            metric_failure_count=2,
+            metric_eligible_counts={"candidate_precision": 10},
+        ),
+    )
+    precision = next(
+        item["payload"]
+        for item in report.payload["rate_evidence"]
+        if item["payload"]["metric_name"] == "candidate_precision"
+    )
+    assert precision["denominator"] == 10
+    assert precision["count"] == 8
+    assert precision["rate_ppm"] == 800_000
+    assert report.overall_status is MeasurementStatus.FAIL
+
+
+def test_reviewer_agreement_is_derived_from_independent_label_pairs() -> None:
+    context = _context()
+    report = _report(
+        context=context,
+        case_outcomes=_case_outcomes(context=context, metric_fail="reviewer_agreement"),
+    )
+    agreement = next(
+        item["payload"]
+        for item in report.payload["rate_evidence"]
+        if item["payload"]["metric_name"] == "reviewer_agreement"
+    )
+    assert agreement["denominator"] == 24
+    assert agreement["count"] == 20
+    assert agreement["status"] == "FAIL"
+    assert report.overall_status is MeasurementStatus.FAIL
+
+
 def test_every_frozen_exposure_minimum_is_enforced() -> None:
     context = _context()
     assert (
@@ -389,7 +466,9 @@ def test_outcomes_require_exact_human_attestation_and_frozen_membership() -> Non
         ReviewedCaseOutcome.build(
             case=case,
             review_label=arbitrary,
+            metric_eligible=outcome.metric_eligible,
             metric_success=outcome.metric_success,
+            triage_eligible=outcome.triage_eligible,
             triage_error=outcome.triage_error,
             slice_success=outcome.slice_success,
         )
@@ -402,7 +481,9 @@ def test_outcomes_require_exact_human_attestation_and_frozen_membership() -> Non
         role=ReviewRole.PRIMARY,
         label=reviewed_case_assessment_label(
             case=forged_case,
+            metric_eligible=outcome.metric_eligible,
             metric_success=outcome.metric_success,
+            triage_eligible=outcome.triage_eligible,
             triage_error=outcome.triage_error,
             slice_success=outcome.slice_success,
         ),
@@ -413,7 +494,9 @@ def test_outcomes_require_exact_human_attestation_and_frozen_membership() -> Non
         ReviewedCaseOutcome.build(
             case=forged_case,
             review_label=forged_label,
+            metric_eligible=outcome.metric_eligible,
             metric_success=outcome.metric_success,
+            triage_eligible=outcome.triage_eligible,
             triage_error=outcome.triage_error,
             slice_success=outcome.slice_success,
         )

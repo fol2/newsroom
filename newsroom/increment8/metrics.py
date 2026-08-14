@@ -89,11 +89,15 @@ _MAXIMUM_METRICS = frozenset(
     }
 )
 _EXPECTED_METRICS = tuple(sorted(_MINIMUM_METRICS | _MAXIMUM_METRICS))
+_CASE_ATTESTED_METRICS = tuple(
+    name for name in _EXPECTED_METRICS if name != "reviewer_agreement"
+)
 _TRIAGE_ERROR_METRICS = (
     "false_correction",
     "false_development",
     "missed_development",
 )
+_MINIMUM_TRIAGE_OPPORTUNITIES = 10
 _EXPECTED_PERFORMANCE = tuple(
     sorted(
         str(name)
@@ -175,7 +179,9 @@ def _embedded(raw: bytes) -> dict[str, object]:
 def reviewed_case_assessment_label(
     *,
     case: EvaluationCase,
+    metric_eligible: Mapping[str, bool],
     metric_success: Mapping[str, bool],
+    triage_eligible: Mapping[str, bool],
     triage_error: Mapping[str, bool],
     slice_success: bool,
     zero_tolerance_findings: Sequence[str] = (),
@@ -187,7 +193,9 @@ def reviewed_case_assessment_label(
         {
             "schema_version": "newsroom.increment8.reviewed-case-assessment.v1",
             "case_digest": case.digest,
+            "metric_eligible": dict(sorted(metric_eligible.items())),
             "metric_success": dict(sorted(metric_success.items())),
+            "triage_eligible": dict(sorted(triage_eligible.items())),
             "triage_error": dict(sorted(triage_error.items())),
             "slice_success": slice_success,
             "zero_tolerance_findings": list(findings),
@@ -203,7 +211,10 @@ class ReviewedCaseOutcome:
     case_id: str
     case_digest: str
     review_label_digest: str
+    secondary_review_label_digest: str | None
+    metric_eligible: Mapping[str, bool]
     metric_success: Mapping[str, bool]
+    triage_eligible: Mapping[str, bool]
     triage_error: Mapping[str, bool]
     slice_success: bool
     zero_tolerance_findings: tuple[str, ...]
@@ -216,7 +227,10 @@ class ReviewedCaseOutcome:
         *,
         case: EvaluationCase,
         review_label: ReviewLabel,
+        secondary_review_label: ReviewLabel | None = None,
+        metric_eligible: Mapping[str, bool],
         metric_success: Mapping[str, bool],
+        triage_eligible: Mapping[str, bool],
         triage_error: Mapping[str, bool],
         slice_success: bool,
         zero_tolerance_findings: Sequence[str] = (),
@@ -225,6 +239,13 @@ class ReviewedCaseOutcome:
             checked_case = EvaluationCase.from_canonical_bytes(case.canonical_bytes)
             checked_label = ReviewLabel.from_canonical_bytes(
                 review_label.canonical_bytes
+            )
+            checked_secondary = (
+                None
+                if secondary_review_label is None
+                else ReviewLabel.from_canonical_bytes(
+                    secondary_review_label.canonical_bytes
+                )
             )
         except (AttributeError, TypeError, ValueError) as exc:
             raise MetricReportError("reviewed Case evidence is not canonical") from exc
@@ -238,6 +259,15 @@ class ReviewedCaseOutcome:
             or checked_case.payload.get("prospective") is not True
         ):
             raise MetricReportError("reviewed Case or label binding differs")
+        if checked_secondary is not None and (
+            checked_secondary != secondary_review_label
+            or checked_secondary.payload.get("case_id") != checked_case.case_id
+            or checked_secondary.payload.get("case_digest") != checked_case.digest
+            or checked_secondary.payload.get("review_role") != "SECONDARY"
+            or checked_secondary.payload.get("reviewer_identity_digest")
+            == checked_label.payload.get("reviewer_identity_digest")
+        ):
+            raise MetricReportError("secondary ReviewLabel binding differs")
         try:
             facts = _membership_facts(checked_case.payload["membership_facts"])  # type: ignore[arg-type]
             expected_slices, expected_strata = _memberships(facts)
@@ -250,17 +280,30 @@ class ReviewedCaseOutcome:
             is not (facts["case_metadata"]["urgency"] == "URGENT")  # type: ignore[index]
         ):
             raise MetricReportError("frozen Case membership differs")
+        if not isinstance(metric_eligible, Mapping) or tuple(
+            sorted(metric_eligible)
+        ) != (_CASE_ATTESTED_METRICS):
+            raise MetricReportError("per-Case metric eligibility inventory differs")
         if not isinstance(metric_success, Mapping) or tuple(sorted(metric_success)) != (
-            _EXPECTED_METRICS
+            _CASE_ATTESTED_METRICS
         ):
             raise MetricReportError("per-Case metric inventory differs")
         if not isinstance(triage_error, Mapping) or tuple(sorted(triage_error)) != (
             _TRIAGE_ERROR_METRICS
         ):
             raise MetricReportError("per-Case triage-error inventory differs")
+        if not isinstance(triage_eligible, Mapping) or tuple(
+            sorted(triage_eligible)
+        ) != (_TRIAGE_ERROR_METRICS):
+            raise MetricReportError("per-Case triage eligibility inventory differs")
         if not isinstance(slice_success, bool) or any(
             not isinstance(value, bool)
-            for value in (*metric_success.values(), *triage_error.values())
+            for value in (
+                *metric_eligible.values(),
+                *metric_success.values(),
+                *triage_eligible.values(),
+                *triage_error.values(),
+            )
         ):
             raise MetricReportError("per-Case outcomes must be boolean")
         findings = _sorted_tokens(
@@ -272,7 +315,9 @@ class ReviewedCaseOutcome:
             raise MetricReportError("zero-tolerance findings differ from the Case")
         expected_label = reviewed_case_assessment_label(
             case=checked_case,
+            metric_eligible=metric_eligible,
             metric_success=metric_success,
+            triage_eligible=triage_eligible,
             triage_error=triage_error,
             slice_success=slice_success,
             zero_tolerance_findings=findings,
@@ -287,7 +332,17 @@ class ReviewedCaseOutcome:
             "case_digest": checked_case.digest,
             "review_label": _embedded(checked_label.canonical_bytes),
             "review_label_digest": checked_label.digest,
+            "secondary_review_label": (
+                None
+                if checked_secondary is None
+                else _embedded(checked_secondary.canonical_bytes)
+            ),
+            "secondary_review_label_digest": (
+                None if checked_secondary is None else checked_secondary.digest
+            ),
+            "metric_eligible": dict(sorted(metric_eligible.items())),
             "metric_success": dict(sorted(metric_success.items())),
+            "triage_eligible": dict(sorted(triage_eligible.items())),
             "triage_error": dict(sorted(triage_error.items())),
             "slice_success": slice_success,
             "zero_tolerance_findings": list(findings),
@@ -299,7 +354,10 @@ class ReviewedCaseOutcome:
             checked_case.case_id,
             checked_case.digest,
             checked_label.digest,
+            None if checked_secondary is None else checked_secondary.digest,
+            MappingProxyType(dict(sorted(metric_eligible.items()))),
             MappingProxyType(dict(sorted(metric_success.items()))),
+            MappingProxyType(dict(sorted(triage_eligible.items()))),
             MappingProxyType(dict(sorted(triage_error.items()))),
             slice_success,
             findings,
@@ -314,6 +372,7 @@ class TriageErrorMeasurement:
     error_count: int
     denominator: int
     rate_ppm: int
+    exposure_status: MeasurementStatus
     decision_treatment: str
     canonical_bytes: bytes
     digest: str
@@ -326,15 +385,22 @@ class TriageErrorMeasurement:
         if name not in _TRIAGE_ERROR_METRICS:
             raise MetricReportError("triage error metric is not pre-registered")
         errors = _integer(error_count, "error_count")
-        total = _integer(denominator, "denominator", minimum=1)
+        total = _integer(denominator, "denominator")
         if errors > total:
             raise MetricReportError("triage errors exceed eligible opportunities")
-        rate = errors * 1_000_000 // total
+        rate = 0 if total == 0 else errors * 1_000_000 // total
+        exposure_status = (
+            MeasurementStatus.PASS
+            if total >= _MINIMUM_TRIAGE_OPPORTUNITIES
+            else MeasurementStatus.NOT_EVALUATED
+        )
         payload = {
             "metric_name": name,
             "error_count": errors,
             "denominator": total,
             "rate_ppm": rate,
+            "minimum_opportunities": _MINIMUM_TRIAGE_OPPORTUNITIES,
+            "exposure_status": exposure_status.value,
             "decision_treatment": "MANDATORY_SEPARATE_REPORT_NO_POST_HOC_THRESHOLD",
         }
         raw, record_digest = _record(
@@ -345,6 +411,7 @@ class TriageErrorMeasurement:
             errors,
             total,
             rate,
+            exposure_status,
             "MANDATORY_SEPARATE_REPORT_NO_POST_HOC_THRESHOLD",
             raw,
             record_digest,
@@ -380,11 +447,11 @@ class RateMeasurement:
         ):
             raise MetricReportError("metric is not pre-registered")
         numerator = _integer(count, "count")
-        total = _integer(denominator, "denominator", minimum=1)
+        total = _integer(denominator, "denominator")
         uncertainty = _integer(uncertainty_ppm, "uncertainty_ppm")
         if numerator > total or uncertainty > 1_000_000:
             raise MetricReportError("rate evidence exceeds its denominator")
-        rate = numerator * 1_000_000 // total
+        rate = 0 if total == 0 else numerator * 1_000_000 // total
         threshold_name = f"{name}_{'min' if name in _MINIMUM_METRICS else 'max'}"
         threshold = int(
             INCREMENT_8_READINESS.evaluation_plan["thresholds_ppm"][threshold_name]
@@ -399,9 +466,13 @@ class RateMeasurement:
             "direction": "MINIMUM" if name in _MINIMUM_METRICS else "MAXIMUM",
             "sampling_method": sampling_method.value,
             "uncertainty_ppm": uncertainty,
-            "status": MeasurementStatus.PASS.value
-            if passed
-            else MeasurementStatus.FAIL.value,
+            "status": (
+                MeasurementStatus.NOT_EVALUATED.value
+                if total == 0
+                else MeasurementStatus.PASS.value
+                if passed
+                else MeasurementStatus.FAIL.value
+            ),
         }
         raw, record_digest = _record("newsroom.increment8.rate-measurement.v1", payload)
         return cls(
@@ -412,7 +483,13 @@ class RateMeasurement:
             threshold,
             sampling_method,
             uncertainty,
-            MeasurementStatus.PASS if passed else MeasurementStatus.FAIL,
+            (
+                MeasurementStatus.NOT_EVALUATED
+                if total == 0
+                else MeasurementStatus.PASS
+                if passed
+                else MeasurementStatus.FAIL
+            ),
             raw,
             record_digest,
         )
@@ -929,6 +1006,14 @@ def _verify_case_outcomes(
         and "PRIMARY" in item["roles"]
         and item.get("human") is True
     }
+    authorised_secondary = {
+        str(item.get("identity_digest"))
+        for item in manifest
+        if isinstance(item, Mapping)
+        and isinstance(item.get("roles"), list)
+        and "SECONDARY" in item["roles"]
+        and item.get("human") is True
+    }
     used_primary: set[str] = set()
     for item in checked:
         if not isinstance(item, ReviewedCaseOutcome):
@@ -944,10 +1029,19 @@ def _verify_case_outcomes(
         label = ReviewLabel.from_canonical_bytes(
             canonical_json_bytes(payload["review_label"])
         )
+        secondary_value = payload["secondary_review_label"]
+        secondary = (
+            None
+            if secondary_value is None
+            else ReviewLabel.from_canonical_bytes(canonical_json_bytes(secondary_value))
+        )
         rebuilt_item = ReviewedCaseOutcome.build(
             case=case,
             review_label=label,
+            secondary_review_label=secondary,
+            metric_eligible=payload["metric_eligible"],  # type: ignore[arg-type]
             metric_success=payload["metric_success"],  # type: ignore[arg-type]
+            triage_eligible=payload["triage_eligible"],  # type: ignore[arg-type]
             triage_error=payload["triage_error"],  # type: ignore[arg-type]
             slice_success=payload["slice_success"],  # type: ignore[arg-type]
             zero_tolerance_findings=payload["zero_tolerance_findings"],  # type: ignore[arg-type]
@@ -960,11 +1054,24 @@ def _verify_case_outcomes(
                 "reviewed Case outcome uses an unauthorised reviewer"
             )
         used_primary.add(reviewer)
+        if (
+            secondary is not None
+            and str(secondary.payload.get("reviewer_identity_digest"))
+            not in authorised_secondary
+        ):
+            raise MetricReportError(
+                "reviewed Case outcome uses an unauthorised secondary reviewer"
+            )
         manifest = case.payload.get("input_manifest_digest")
-        if manifest in input_manifests or label.digest in label_digests:
+        retained_label_digests = {label.digest}
+        if secondary is not None:
+            retained_label_digests.add(secondary.digest)
+        if manifest in input_manifests or retained_label_digests.intersection(
+            label_digests
+        ):
             raise MetricReportError("reviewed Case evidence is duplicated")
         input_manifests.add(manifest)
-        label_digests.add(label.digest)
+        label_digests.update(retained_label_digests)
         rebuilt.append(rebuilt_item)
     return tuple(rebuilt), len(used_primary)
 
@@ -978,26 +1085,56 @@ def _derive_measurements(
     ZeroToleranceEvidence,
     Mapping[str, int],
 ]:
-    total = len(outcomes)
-    rates = tuple(
-        RateMeasurement.build(
-            metric_name=name,
-            count=(
-                sum(item.metric_success[name] for item in outcomes)
+    rates: list[RateMeasurement] = []
+    for name in _EXPECTED_METRICS:
+        if name == "reviewer_agreement":
+            agreements: list[bool] = []
+            for outcome in outcomes:
+                document = _document(
+                    outcome.canonical_bytes,
+                    "newsroom.increment8.reviewed-case-outcome.v1",
+                )
+                payload = document["payload"]
+                assert isinstance(payload, Mapping)
+                secondary = payload["secondary_review_label"]
+                if secondary is not None:
+                    assert isinstance(secondary, Mapping)
+                    primary = payload["review_label"]
+                    assert isinstance(primary, Mapping)
+                    agreements.append(
+                        primary["payload"]["label"]  # type: ignore[index]
+                        == secondary["payload"]["label"]  # type: ignore[index]
+                    )
+            eligible = len(agreements)
+            numerator = sum(agreements)
+        else:
+            eligible_outcomes = [
+                item for item in outcomes if item.metric_eligible[name]
+            ]
+            eligible = len(eligible_outcomes)
+            numerator = (
+                sum(item.metric_success[name] for item in eligible_outcomes)
                 if name in _MINIMUM_METRICS
-                else sum(not item.metric_success[name] for item in outcomes)
-            ),
-            denominator=total,
-            sampling_method=SamplingMethod.POPULATION,
-            uncertainty_ppm=0,
+                else sum(not item.metric_success[name] for item in eligible_outcomes)
+            )
+        rates.append(
+            RateMeasurement.build(
+                metric_name=name,
+                count=numerator,
+                denominator=eligible,
+                sampling_method=SamplingMethod.POPULATION,
+                uncertainty_ppm=0,
+            )
         )
-        for name in _EXPECTED_METRICS
-    )
     triage = tuple(
         TriageErrorMeasurement.build(
             metric_name=name,
-            error_count=sum(item.triage_error[name] for item in outcomes),
-            denominator=total,
+            error_count=sum(
+                item.triage_error[name]
+                for item in outcomes
+                if item.triage_eligible[name]
+            ),
+            denominator=sum(item.triage_eligible[name] for item in outcomes),
         )
         for name in _TRIAGE_ERROR_METRICS
     )
@@ -1038,7 +1175,7 @@ def _derive_measurements(
         for name in REQUIRED_SLICES
     )
     return (
-        rates,
+        tuple(rates),
         triage,
         slices,
         ZeroToleranceEvidence.build(zero_counts),
@@ -1112,14 +1249,18 @@ def build_metric_report(
     stratum_exposure_sufficient = all(
         stratum_counts[name] >= minimum for name, minimum in stratum_minima.items()
     )
+    triage_exposure_sufficient = all(
+        item.exposure_status is MeasurementStatus.PASS for item in triage
+    )
     minimum_primary_reviewers = int(
         INCREMENT_8_READINESS.evaluation_plan["minimum_authorised_primary_reviewers"]
     )
-    metric_status = (
-        MeasurementStatus.PASS
-        if all(item.status is MeasurementStatus.PASS for item in checked_rates)
-        else MeasurementStatus.FAIL
-    )
+    if any(item.status is MeasurementStatus.FAIL for item in checked_rates):
+        metric_status = MeasurementStatus.FAIL
+    elif any(item.status is MeasurementStatus.NOT_EVALUATED for item in checked_rates):
+        metric_status = MeasurementStatus.NOT_EVALUATED
+    else:
+        metric_status = MeasurementStatus.PASS
     performance_status = (
         MeasurementStatus.PASS
         if all(item.status is MeasurementStatus.PASS for item in checked_performance)
@@ -1137,6 +1278,8 @@ def build_metric_report(
         total_cases < minimum_cases
         or primary_reviewer_count < minimum_primary_reviewers
         or not stratum_exposure_sufficient
+        or not triage_exposure_sufficient
+        or metric_status is MeasurementStatus.NOT_EVALUATED
         or slice_status is MeasurementStatus.NOT_EVALUATED
     ):
         overall = MeasurementStatus.NOT_EVALUATED
@@ -1277,10 +1420,20 @@ def verify_metric_report_canonical_bytes(raw: bytes) -> MetricReport:
             label = ReviewLabel.from_canonical_bytes(
                 canonical_json_bytes(item["review_label"])
             )
+            secondary = (
+                None
+                if item["secondary_review_label"] is None
+                else ReviewLabel.from_canonical_bytes(
+                    canonical_json_bytes(item["secondary_review_label"])
+                )
+            )
             rebuilt = ReviewedCaseOutcome.build(
                 case=case,
                 review_label=label,
+                secondary_review_label=secondary,
+                metric_eligible=item["metric_eligible"],  # type: ignore[arg-type]
                 metric_success=item["metric_success"],  # type: ignore[arg-type]
+                triage_eligible=item["triage_eligible"],  # type: ignore[arg-type]
                 triage_error=item["triage_error"],  # type: ignore[arg-type]
                 slice_success=item["slice_success"],  # type: ignore[arg-type]
                 zero_tolerance_findings=item["zero_tolerance_findings"],  # type: ignore[arg-type]
