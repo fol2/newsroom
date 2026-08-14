@@ -220,6 +220,38 @@ _TERMINAL_KINDS = frozenset(
     }
 )
 
+_REVISION_STATUS_MATRIX = {
+    AgendaResolutionKind.RESCHEDULED: {
+        AgendaScheduleStatus.PROVISIONAL,
+        AgendaScheduleStatus.CONFIRMED,
+    },
+    AgendaResolutionKind.CANCELLED_WITH_SOURCE_EVIDENCE: {
+        AgendaScheduleStatus.CANCELLED
+    },
+    AgendaResolutionKind.POSTPONED_WITH_SOURCE_EVIDENCE: {
+        AgendaScheduleStatus.POSTPONED_WITHOUT_DATE
+    },
+    AgendaResolutionKind.WITHDRAWN_WITH_SOURCE_EVIDENCE: {
+        AgendaScheduleStatus.WITHDRAWN
+    },
+}
+
+
+def _schedule_assertion(version: PlannedAgendaVersion) -> tuple[object, ...]:
+    return (
+        version.time_precision,
+        version.asserted_start,
+        version.asserted_end,
+        version.time_zone,
+    )
+
+
+def _postponement_has_no_date(version: PlannedAgendaVersion) -> bool:
+    return version.time_precision is AgendaTimePrecision.UNKNOWN and all(
+        value is None
+        for value in (version.asserted_start, version.asserted_end, version.time_zone)
+    )
+
 
 _RESOLUTION_FIELDS = (
     "schema_version",
@@ -473,6 +505,70 @@ class PlannedAgendaSnapshot(_NoEffect):
             raise AgendaAuthorityError("Agenda snapshot binding differs")
 
 
+def _validate_retained_lifecycle(
+    versions: tuple[PlannedAgendaVersion, ...],
+    resolutions: tuple[AgendaResolution, ...],
+) -> None:
+    by_digest = {version.digest: version for version in versions}
+    revision_successors: set[str] = set()
+    previous: AgendaResolution | None = None
+    for resolution in resolutions:
+        bound = by_digest.get(resolution.agenda_version_digest)
+        if (
+            bound is None
+            or bound.agenda_version_id != resolution.agenda_version_id
+            or resolution.observed_at < bound.recorded_at
+            or (previous is not None and resolution.observed_at < previous.observed_at)
+        ):
+            raise AgendaAuthorityError("Agenda Resolution retained chronology differs")
+        if previous is not None and previous.kind in _TERMINAL_KINDS:
+            raise AgendaAuthorityError(
+                "Agenda retained lifecycle continues after terminal"
+            )
+        admitted_paths = {
+            digest_bytes(canonical_json_bytes(path.to_dict()))
+            for path in bound.occurrence_confirmation_paths
+        }
+        if resolution.confirmation_path_digest is not None and (
+            resolution.confirmation_path_digest not in admitted_paths
+        ):
+            raise AgendaAuthorityError("Agenda retained confirmation path differs")
+        if resolution.kind is AgendaResolutionKind.LATE_OCCURRENCE and (
+            previous is None
+            or previous.kind is not AgendaResolutionKind.MISSED_NOT_OBSERVED
+            or previous.agenda_version_id != resolution.agenda_version_id
+        ):
+            raise AgendaAuthorityError("Agenda retained late occurrence differs")
+        if resolution.kind in _REVISION_KINDS:
+            successor = by_digest.get(resolution.successor_version_digest or "")
+            if (
+                successor is None
+                or successor.version_ordinal != bound.version_ordinal + 1
+                or successor.predecessor_version_digest != bound.digest
+                or successor.recorded_at < bound.recorded_at
+                or resolution.observed_at < successor.recorded_at
+                or successor.schedule_status
+                not in _REVISION_STATUS_MATRIX[resolution.kind]
+            ):
+                raise AgendaAuthorityError("Agenda retained revision binding differs")
+            if (
+                resolution.kind is AgendaResolutionKind.RESCHEDULED
+                and _schedule_assertion(successor) == _schedule_assertion(bound)
+            ):
+                raise AgendaAuthorityError("Agenda retained reschedule differs")
+            if (
+                resolution.kind is AgendaResolutionKind.POSTPONED_WITH_SOURCE_EVIDENCE
+                and not _postponement_has_no_date(successor)
+            ):
+                raise AgendaAuthorityError("Agenda retained postponement differs")
+            if successor.digest in revision_successors:
+                raise AgendaAuthorityError("Agenda retained revision is duplicated")
+            revision_successors.add(successor.digest)
+        previous = resolution
+    if revision_successors != {version.digest for version in versions[1:]}:
+        raise AgendaAuthorityError("Agenda retained Version revision coverage differs")
+
+
 _AUTHORITY_TOKEN = object()
 
 
@@ -518,16 +614,22 @@ class PlannedAgendaReadPort(_NoEffect):
                 raise AgendaAuthorityError("Planned Agenda Version replay differs")
             if ordinal > 1:
                 validate_agenda_successor(versions[ordinal - 2], version)
+                if version.recorded_at < versions[ordinal - 2].recorded_at:
+                    raise AgendaAuthorityError(
+                        "Planned Agenda Version chronology differs"
+                    )
         return versions
 
     @_total("Agenda Resolution history failed")
     def resolutions(self, agenda_item_id: str) -> tuple[AgendaResolution, ...]:
         _uuid(agenda_item_id, "agenda_item_id")
         rows = self._connection.execute(
-            "SELECT r.resolution_bytes,r.resolution_digest,r.agenda_version_id,"
-            "r.agenda_version_digest,v.version_bytes,v.version_digest,v.recorded_at,"
-            "r.resolution_kind,r.evidence_digest,r.confirmation_path_digest,"
-            "r.baseline_evidence_digest,r.successor_version_digest,r.observed_at "
+            "SELECT r.resolution_bytes,r.resolution_digest,r.resolution_id,"
+            "r.agenda_item_id,r.agenda_version_id,r.agenda_version_digest,"
+            "r.resolution_ordinal,r.previous_resolution_digest,r.resolution_kind,"
+            "r.evidence_digest,r.confirmation_path_digest,r.baseline_evidence_digest,"
+            "r.successor_version_digest,r.observed_at,v.version_bytes,"
+            "v.version_digest,v.recorded_at "
             "FROM planned_agenda_resolutions r LEFT JOIN planned_agenda_versions v "
             "ON v.agenda_version_id=r.agenda_version_id "
             "AND v.agenda_item_id=r.agenda_item_id "
@@ -540,27 +642,31 @@ class PlannedAgendaReadPort(_NoEffect):
         )
         previous: AgendaResolution | None = None
         for ordinal, (resolution, stored) in enumerate(zip(resolutions, rows), 1):
-            if stored[4] is None:
+            if stored[14] is None:
                 raise AgendaAuthorityError("Agenda Resolution replay differs")
-            bound_version = PlannedAgendaVersion.from_canonical_bytes(bytes(stored[4]))
+            bound_version = PlannedAgendaVersion.from_canonical_bytes(bytes(stored[14]))
             if (
                 resolution.agenda_item_id != agenda_item_id
                 or resolution.resolution_ordinal != ordinal
                 or resolution.digest != stored[1]
-                or resolution.agenda_version_id != stored[2]
-                or resolution.agenda_version_digest != stored[3]
+                or resolution.resolution_id != stored[2]
+                or resolution.agenda_item_id != stored[3]
+                or resolution.agenda_version_id != stored[4]
+                or resolution.agenda_version_digest != stored[5]
+                or resolution.resolution_ordinal != stored[6]
+                or resolution.previous_resolution_digest != stored[7]
                 or bound_version.agenda_version_id != resolution.agenda_version_id
                 or bound_version.agenda_item_id != resolution.agenda_item_id
                 or bound_version.digest != resolution.agenda_version_digest
-                or bound_version.digest != stored[5]
-                or bound_version.recorded_at != stored[6]
+                or bound_version.digest != stored[15]
+                or bound_version.recorded_at != stored[16]
                 or resolution.observed_at < bound_version.recorded_at
-                or resolution.kind.value != stored[7]
-                or resolution.evidence_digest != stored[8]
-                or resolution.confirmation_path_digest != stored[9]
-                or resolution.baseline_evidence_digest != stored[10]
-                or resolution.successor_version_digest != stored[11]
-                or resolution.observed_at != stored[12]
+                or resolution.kind.value != stored[8]
+                or resolution.evidence_digest != stored[9]
+                or resolution.confirmation_path_digest != stored[10]
+                or resolution.baseline_evidence_digest != stored[11]
+                or resolution.successor_version_digest != stored[12]
+                or resolution.observed_at != stored[13]
                 or resolution.previous_resolution_digest
                 != (None if previous is None else previous.digest)
                 or (
@@ -570,6 +676,7 @@ class PlannedAgendaReadPort(_NoEffect):
             ):
                 raise AgendaAuthorityError("Agenda Resolution replay differs")
             previous = resolution
+        _validate_retained_lifecycle(self.versions(agenda_item_id), resolutions)
         return resolutions
 
     @_total("Planned Agenda load failed")
@@ -597,6 +704,11 @@ class PlannedAgendaReadPort(_NoEffect):
         versions = self.versions(agenda_item_id)
         if not versions:
             raise AgendaAuthorityError("Planned Agenda Version history is empty")
+        if (
+            versions[0].source_revision_id != item.created_from_source_revision_id
+            or versions[0].recorded_at < item.created_at
+        ):
+            raise AgendaAuthorityError("initial Agenda Version replay binding differs")
         current = versions[-1]
         if versions[0].agenda_version_id != row[4] or (
             current.agenda_version_id,
@@ -892,48 +1004,20 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
                 raise AgendaAuthorityError("Agenda revision chronology differs")
             if resolution.successor_version_digest != successor.digest:
                 raise AgendaAuthorityError("revision successor digest differs")
-            status_matrix = {
-                AgendaResolutionKind.RESCHEDULED: {
-                    AgendaScheduleStatus.PROVISIONAL,
-                    AgendaScheduleStatus.CONFIRMED,
-                },
-                AgendaResolutionKind.CANCELLED_WITH_SOURCE_EVIDENCE: {
-                    AgendaScheduleStatus.CANCELLED
-                },
-                AgendaResolutionKind.POSTPONED_WITH_SOURCE_EVIDENCE: {
-                    AgendaScheduleStatus.POSTPONED_WITHOUT_DATE
-                },
-                AgendaResolutionKind.WITHDRAWN_WITH_SOURCE_EVIDENCE: {
-                    AgendaScheduleStatus.WITHDRAWN
-                },
-            }
-            if successor.schedule_status not in status_matrix[resolution.kind]:
+            if (
+                successor.schedule_status
+                not in _REVISION_STATUS_MATRIX[resolution.kind]
+            ):
                 raise AgendaAuthorityError("revision status and resolution differ")
             if (
                 resolution.kind is AgendaResolutionKind.POSTPONED_WITH_SOURCE_EVIDENCE
-                and (
-                    successor.time_precision is not AgendaTimePrecision.UNKNOWN
-                    or any(
-                        value is not None
-                        for value in (
-                            successor.asserted_start,
-                            successor.asserted_end,
-                            successor.time_zone,
-                        )
-                    )
-                )
+                and not _postponement_has_no_date(successor)
             ):
                 raise AgendaAuthorityError("postponement invents a replacement date")
-            if resolution.kind is AgendaResolutionKind.RESCHEDULED and (
-                successor.time_precision,
-                successor.asserted_start,
-                successor.asserted_end,
-                successor.time_zone,
-            ) == (
-                snapshot.current_version.time_precision,
-                snapshot.current_version.asserted_start,
-                snapshot.current_version.asserted_end,
-                snapshot.current_version.time_zone,
+            if (
+                resolution.kind is AgendaResolutionKind.RESCHEDULED
+                and _schedule_assertion(successor)
+                == _schedule_assertion(snapshot.current_version)
             ):
                 raise AgendaAuthorityError("reschedule leaves schedule unchanged")
             self._insert_version(successor, command)
