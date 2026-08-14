@@ -735,11 +735,29 @@ def _validate_schema_prefix(
         "EXPECTED_SCHEMA_FINGERPRINT",
         None,
     )
+    try:
+        validate_sha256_digest(
+            live_fingerprint,
+            field="live schema fingerprint",
+        )
+    except (TypeError, ValueError):
+        errors.append(
+            "newsroom.authority.migrations: live fingerprint is malformed"
+        )
     if (
         live_version == contract.accepted_schema_version
         and live_fingerprint != contract.accepted_schema_fingerprint
     ):
         errors.append("newsroom.authority.migrations: accepted fingerprint differs")
+    elif (
+        isinstance(live_version, int)
+        and not isinstance(live_version, bool)
+        and live_version > contract.accepted_schema_version
+        and live_fingerprint == contract.accepted_schema_fingerprint
+    ):
+        errors.append(
+            "newsroom.authority.migrations: successor fingerprint did not advance"
+        )
     return errors
 
 

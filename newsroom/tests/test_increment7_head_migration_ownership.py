@@ -246,6 +246,27 @@ def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPa
         for item in findings
     )
 
+    monkeypatch.setattr(
+        authority_migrations,
+        "EXPECTED_SCHEMA_FINGERPRINT",
+        INCREMENT_7_READINESS.accepted_schema_fingerprint,
+    )
+    findings = validate_interface_inventory(INCREMENT_7_READINESS)
+    assert (
+        "newsroom.authority.migrations: successor fingerprint did not advance"
+        in findings
+    )
+    monkeypatch.setattr(
+        authority_migrations,
+        "EXPECTED_SCHEMA_FINGERPRINT",
+        None,
+    )
+    findings = validate_interface_inventory(INCREMENT_7_READINESS)
+    assert (
+        "newsroom.authority.migrations: live fingerprint is malformed"
+        in findings
+    )
+
     monkeypatch.delattr(
         authority_migrations,
         "EXPECTED_MIGRATION_HISTORY",
