@@ -690,7 +690,11 @@ def _validate_schema_prefix(
         if version != index:
             errors.append("newsroom.authority.migrations: suffix is not contiguous")
         expected_name = expected_names.get(index)
-        if expected_name is not None and name != expected_name:
+        if expected_name is None:
+            errors.append(
+                f"newsroom.authority.migrations: v{index} is outside 7R allocation"
+            )
+        elif name != expected_name:
             errors.append(
                 f"newsroom.authority.migrations: reserved v{index} name differs"
             )

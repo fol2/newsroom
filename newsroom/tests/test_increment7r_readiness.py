@@ -50,7 +50,9 @@ def test_readiness_is_bound_to_exact_final_increment6_head_and_v25_schema() -> N
     assert readiness.accepted_base_tree == _BASE_TREE
     assert readiness.accepted_schema_version == 25
     assert readiness.accepted_schema_fingerprint == _BASE_FINGERPRINT
-    assert readiness.accepted_migration_history == authority_migrations.EXPECTED_MIGRATION_HISTORY
+    assert readiness.accepted_migration_history == (
+        authority_migrations.EXPECTED_MIGRATION_HISTORY[:25]
+    )
     assert readiness.effective_when == "PRESENT_ON_MAIN_AFTER_REVIEWED_7R_MERGE"
     assert readiness.production_activation_authorised is False
     assert readiness.contract_digest == INCREMENT_7_READINESS_DIGEST
@@ -111,7 +113,7 @@ def test_migrations_v26_to_v29_are_contiguous_and_singly_owned() -> None:
     assert tuple(sorted(observed.values())) == tuple(range(26, 30))
     assert readiness.migration_policy["reservation_is_not_a_migration"] is True
     assert readiness.migration_policy["current_schema_version"] == 25
-    assert authority_migrations.SCHEMA_VERSION == 25
+    assert authority_migrations.SCHEMA_VERSION >= 25
 
 
 def test_dependency_graph_is_acyclic_and_g_is_last() -> None:
@@ -205,15 +207,54 @@ def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPa
     assert "newsroom.authority.migrations: suffix entry is malformed" in findings
     assert "newsroom.authority.migrations: live history/version differ" in findings
 
+    v29 = tuple(
+        (version, f"reserved_v{version}", "sha256:" + "c" * 64)
+        for version in range(27, 30)
+    )
+    v30 = (30, "increment8_unallocated_v30", "sha256:" + "d" * 64)
+    monkeypatch.setattr(
+        authority_migrations,
+        "EXPECTED_MIGRATION_HISTORY",
+        (*INCREMENT_7_READINESS.accepted_migration_history,
+         (26, "planned_agenda_authority_v26", checksum),
+         *v29,
+         v30),
+    )
+    monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 30)
+    findings = validate_interface_inventory(INCREMENT_7_READINESS)
+    assert "newsroom.authority.migrations: v30 is outside 7R allocation" in findings
 
-def test_7r_applies_no_migration_and_current_schema_remains_exact() -> None:
-    connection = sqlite3.connect(":memory:", isolation_level=None)
-    try:
-        connection.execute("PRAGMA foreign_keys=ON")
-        apply_pending_migrations(connection, applied_at="1970-01-01T00:00:00.000000Z")
-        assert connection.execute("PRAGMA user_version").fetchone() == (25,)
-        assert schema_fingerprint(connection) == _BASE_FINGERPRINT
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert not any(name.startswith(("planned_agenda_", "search_", "coverage_", "event_scoped_local_watch_")) for name in tables)
-    finally:
-        connection.close()
+
+def test_7r_accepts_the_exact_v25_prefix_without_applying_a_migration() -> None:
+    assert INCREMENT_7_READINESS.accepted_migration_history == (
+        authority_migrations.EXPECTED_MIGRATION_HISTORY[:25]
+    )
+    if authority_migrations.SCHEMA_VERSION == 25:
+        connection = sqlite3.connect(":memory:", isolation_level=None)
+        try:
+            connection.execute("PRAGMA foreign_keys=ON")
+            apply_pending_migrations(
+                connection,
+                applied_at="1970-01-01T00:00:00.000000Z",
+            )
+            assert connection.execute("PRAGMA user_version").fetchone() == (25,)
+            assert schema_fingerprint(connection) == _BASE_FINGERPRINT
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            assert not any(
+                name.startswith(
+                    (
+                        "planned_agenda_",
+                        "search_",
+                        "coverage_",
+                        "event_scoped_local_watch_",
+                    )
+                )
+                for name in tables
+            )
+        finally:
+            connection.close()
