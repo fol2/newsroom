@@ -252,68 +252,130 @@ class BoundedSearchReadPort(_NoEffect):
 
     @_total("Search budget replay failed")
     def budget(self, request_id: str) -> SearchBudgetSnapshot:
-        request = self.request(request_id)
-        rows = self._connection.execute(
-            "SELECT outcome_id,request_id,attempt_id,gross_cost_microunits,"
-            "cumulative_provider_calls,cumulative_results,"
-            "cumulative_gross_cost_microunits,ledger_digest,recorded_at "
-            "FROM search_budget_ledger WHERE request_id=? AND entry_kind='OUTCOME' "
-            "ORDER BY cumulative_provider_calls",
-            (request_id,),
-        ).fetchall()
-        outcome_ids = {
-            str(row[0])
-            for row in self._connection.execute(
-                "SELECT o.outcome_id FROM search_outcomes o "
-                "JOIN search_attempts a ON a.attempt_id=o.attempt_id "
-                "WHERE a.request_id=?",
+        owns_snapshot = not self._connection.in_transaction
+        if owns_snapshot:
+            self._connection.execute("BEGIN")
+        try:
+            request = self.request(request_id)
+            rows = self._connection.execute(
+                "SELECT outcome_id,request_id,attempt_id,gross_cost_microunits,"
+                "cumulative_provider_calls,cumulative_results,"
+                "cumulative_gross_cost_microunits,ledger_digest,recorded_at "
+                "FROM search_budget_ledger WHERE request_id=? AND entry_kind='OUTCOME' "
+                "ORDER BY cumulative_provider_calls",
                 (request_id,),
             ).fetchall()
+            outcome_ids = {
+                str(row[0])
+                for row in self._connection.execute(
+                    "SELECT o.outcome_id FROM search_outcomes o "
+                    "JOIN search_attempts a ON a.attempt_id=o.attempt_id "
+                    "WHERE a.request_id=?",
+                    (request_id,),
+                ).fetchall()
+            }
+            if outcome_ids != {str(row[0]) for row in rows}:
+                raise SearchAuthorityError("Search retained gross budget differs")
+            results = 0
+            cost = 0
+            ledger_digest = None
+            for calls, row in enumerate(rows, 1):
+                outcome = self.outcome(str(row[0]))
+                attempt = self.attempt(outcome.attempt_id)
+                results += outcome.result_count
+                cost += outcome.gross_cost_microunits
+                expected_digest = digest_bytes(
+                    canonical_json_bytes(
+                        {
+                            "attempt_id": attempt.attempt_id,
+                            "cumulative_gross_cost_microunits": cost,
+                            "cumulative_provider_calls": calls,
+                            "cumulative_results": results,
+                            "outcome_digest": outcome.digest,
+                            "request_id": request.request_id,
+                        }
+                    )
+                )
+                if (
+                    row[1] != request.request_id
+                    or row[2] != attempt.attempt_id
+                    or row[3] != outcome.gross_cost_microunits
+                    or row[4] != calls
+                    or row[5] != results
+                    or row[6] != cost
+                    or row[7] != expected_digest
+                    or row[8] != outcome.completed_at
+                ):
+                    raise SearchAuthorityError("Search retained gross budget differs")
+                ledger_digest = expected_digest
+            snapshot = SearchBudgetSnapshot(
+                request_id, len(rows), results, cost, ledger_digest
+            )
+            if (
+                snapshot.provider_calls > request.limits.max_provider_calls
+                or snapshot.result_count > request.limits.max_results
+                or snapshot.gross_cost_microunits
+                > request.limits.max_gross_cost_microunits
+            ):
+                raise SearchAuthorityError("Search retained gross budget differs")
+        except BaseException:
+            if owns_snapshot and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        if owns_snapshot:
+            self._connection.execute("COMMIT")
+        return snapshot
+
+    def _result_inventory(self, outcome: SearchOutcome) -> int:
+        ledger_rows = self._connection.execute(
+            "SELECT ledger_entry_id,result_reference_id,request_id,ledger_digest,"
+            "recorded_at FROM search_budget_ledger WHERE outcome_id=? "
+            "AND entry_kind='RESULT_REFERENCE' ORDER BY result_reference_id",
+            (outcome.outcome_id,),
+        ).fetchall()
+        retained_rows = self._connection.execute(
+            "SELECT result_reference_id,result_digest,request_id,recorded_at "
+            "FROM search_result_references WHERE outcome_id=? "
+            "ORDER BY result_reference_id",
+            (outcome.outcome_id,),
+        ).fetchall()
+        retained = {
+            str(row[0]): (str(row[1]), str(row[2]), str(row[3]))
+            for row in retained_rows
         }
-        if outcome_ids != {str(row[0]) for row in rows}:
-            raise SearchAuthorityError("Search retained gross budget differs")
-        results = 0
-        cost = 0
-        ledger_digest = None
-        for calls, row in enumerate(rows, 1):
-            outcome = self.outcome(str(row[0]))
-            attempt = self.attempt(outcome.attempt_id)
-            results += outcome.result_count
-            cost += outcome.gross_cost_microunits
+        if {str(row[1]) for row in ledger_rows} != set(retained):
+            raise SearchAuthorityError("Search retained result inventory differs")
+        for row in ledger_rows:
+            result_id = str(row[1])
+            result_digest, request_id, recorded_at = retained[result_id]
+            expected_entry_id = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "entry_kind": "RESULT_REFERENCE",
+                        "result_reference_id": result_id,
+                    }
+                )
+            )
             expected_digest = digest_bytes(
                 canonical_json_bytes(
                     {
-                        "attempt_id": attempt.attempt_id,
-                        "cumulative_gross_cost_microunits": cost,
-                        "cumulative_provider_calls": calls,
-                        "cumulative_results": results,
-                        "outcome_digest": outcome.digest,
-                        "request_id": request.request_id,
+                        "outcome_id": outcome.outcome_id,
+                        "request_id": request_id,
+                        "result_digest": result_digest,
+                        "result_reference_id": result_id,
                     }
                 )
             )
             if (
-                row[1] != request.request_id
-                or row[2] != attempt.attempt_id
-                or row[3] != outcome.gross_cost_microunits
-                or row[4] != calls
-                or row[5] != results
-                or row[6] != cost
-                or row[7] != expected_digest
-                or row[8] != outcome.completed_at
+                row[0] != expected_entry_id
+                or row[2] != request_id
+                or row[3] != expected_digest
+                or row[4] != recorded_at
             ):
-                raise SearchAuthorityError("Search retained gross budget differs")
-            ledger_digest = expected_digest
-        snapshot = SearchBudgetSnapshot(
-            request_id, len(rows), results, cost, ledger_digest
-        )
-        if (
-            snapshot.provider_calls > request.limits.max_provider_calls
-            or snapshot.result_count > request.limits.max_results
-            or snapshot.gross_cost_microunits > request.limits.max_gross_cost_microunits
-        ):
-            raise SearchAuthorityError("Search retained gross budget differs")
-        return snapshot
+                raise SearchAuthorityError("Search retained result inventory differs")
+        if len(retained) > outcome.result_count:
+            raise SearchAuthorityError("Search retained result inventory differs")
+        return len(retained)
 
     def _downstream_work_inventory(self, request: SearchRequest) -> frozenset[str]:
         rows = self._connection.execute(
@@ -602,11 +664,12 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                     )
                 )
                 self._connection.execute(
-                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         record.outcome_id,
                         "OUTCOME",
                         record.outcome_id,
+                        None,
                         None,
                         request.request_id,
                         attempt.attempt_id,
@@ -641,10 +704,7 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                 raw,
             )
             if not replay:
-                count = self._connection.execute(
-                    "SELECT count(*) FROM search_result_references WHERE outcome_id=?",
-                    (record.outcome_id,),
-                ).fetchone()[0]
+                count = self._result_inventory(outcome)
                 if count >= outcome.result_count:
                     raise SearchAuthorityError("Search retained result budget differs")
                 self._connection.execute(
@@ -662,6 +722,45 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                         record.recorded_at,
                     ),
                 )
+                entry_id = digest_bytes(
+                    canonical_json_bytes(
+                        {
+                            "entry_kind": "RESULT_REFERENCE",
+                            "result_reference_id": record.result_reference_id,
+                        }
+                    )
+                )
+                ledger_digest = digest_bytes(
+                    canonical_json_bytes(
+                        {
+                            "outcome_id": outcome.outcome_id,
+                            "request_id": record.request_id,
+                            "result_digest": record.digest,
+                            "result_reference_id": record.result_reference_id,
+                        }
+                    )
+                )
+                self._connection.execute(
+                    "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        entry_id,
+                        "RESULT_REFERENCE",
+                        outcome.outcome_id,
+                        record.result_reference_id,
+                        None,
+                        record.request_id,
+                        None,
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        ledger_digest,
+                        record.recorded_at,
+                    ),
+                )
+            self._result_inventory(outcome)
             self._finish()
         except BaseException as exc:
             self._finish(exc)
@@ -737,10 +836,11 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                         )
                     )
                     self._connection.execute(
-                        "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO search_budget_ledger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             entry_id,
                             "DOWNSTREAM_WORK",
+                            None,
                             None,
                             record.review_decision_id,
                             request.request_id,

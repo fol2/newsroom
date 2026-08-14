@@ -220,8 +220,9 @@ BOUNDED_SEARCH_MIGRATION_STATEMENTS: tuple[str, ...] = (
     ) STRICT""",
     f"""CREATE TABLE search_budget_ledger(
         ledger_entry_id TEXT PRIMARY KEY,
-        entry_kind TEXT NOT NULL CHECK(entry_kind IN ('OUTCOME','DOWNSTREAM_WORK')),
-        outcome_id TEXT UNIQUE REFERENCES search_outcomes(outcome_id),
+        entry_kind TEXT NOT NULL CHECK(entry_kind IN ('OUTCOME','RESULT_REFERENCE','DOWNSTREAM_WORK')),
+        outcome_id TEXT REFERENCES search_outcomes(outcome_id),
+        result_reference_id TEXT REFERENCES search_result_references(result_reference_id),
         review_decision_id TEXT UNIQUE REFERENCES search_review_decisions(review_decision_id),
         request_id TEXT NOT NULL REFERENCES search_requests(request_id),
         attempt_id TEXT UNIQUE REFERENCES search_attempts(attempt_id),
@@ -235,17 +236,28 @@ BOUNDED_SEARCH_MIGRATION_STATEMENTS: tuple[str, ...] = (
         recorded_at TEXT NOT NULL,
         UNIQUE(request_id,work_reference_digest),
         CHECK(
-            (entry_kind='OUTCOME' AND outcome_id IS NOT NULL AND review_decision_id IS NULL
+            (entry_kind='OUTCOME' AND outcome_id IS NOT NULL AND result_reference_id IS NULL
+             AND review_decision_id IS NULL
              AND attempt_id IS NOT NULL AND work_reference_digest IS NULL
              AND cumulative_provider_calls>=1 AND cumulative_downstream_work_items=0)
             OR
-            (entry_kind='DOWNSTREAM_WORK' AND outcome_id IS NULL AND review_decision_id IS NOT NULL
+            (entry_kind='RESULT_REFERENCE' AND outcome_id IS NOT NULL
+             AND result_reference_id IS NOT NULL AND review_decision_id IS NULL
+             AND attempt_id IS NULL AND work_reference_digest IS NULL
+             AND gross_cost_microunits=0 AND cumulative_provider_calls=0
+             AND cumulative_results=0 AND cumulative_gross_cost_microunits=0
+             AND cumulative_downstream_work_items=0)
+            OR
+            (entry_kind='DOWNSTREAM_WORK' AND outcome_id IS NULL
+             AND result_reference_id IS NULL AND review_decision_id IS NOT NULL
              AND attempt_id IS NULL AND work_reference_digest IS NOT NULL
              AND gross_cost_microunits=0 AND cumulative_provider_calls=0
              AND cumulative_results=0 AND cumulative_gross_cost_microunits=0
              AND cumulative_downstream_work_items>=1)
         )
     ) STRICT""",
+    "CREATE UNIQUE INDEX search_budget_outcome_identity ON search_budget_ledger(outcome_id) WHERE entry_kind='OUTCOME'",
+    "CREATE UNIQUE INDEX search_budget_result_identity ON search_budget_ledger(result_reference_id) WHERE entry_kind='RESULT_REFERENCE'",
     "CREATE UNIQUE INDEX search_budget_outcome_ordinal ON search_budget_ledger(request_id,cumulative_provider_calls) WHERE entry_kind='OUTCOME'",
     "CREATE UNIQUE INDEX search_budget_work_ordinal ON search_budget_ledger(request_id,cumulative_downstream_work_items) WHERE entry_kind='DOWNSTREAM_WORK'",
     """CREATE TRIGGER insert_once_search_purposes BEFORE INSERT ON search_purposes
@@ -267,7 +279,7 @@ BOUNDED_SEARCH_MIGRATION_STATEMENTS: tuple[str, ...] = (
        WHEN EXISTS(SELECT 1 FROM search_review_decisions WHERE review_decision_id=NEW.review_decision_id OR decision_digest=NEW.decision_digest)
        BEGIN SELECT RAISE(ABORT,'bounded Search identity already retained'); END""",
     """CREATE TRIGGER insert_once_search_budget_ledger BEFORE INSERT ON search_budget_ledger
-       WHEN EXISTS(SELECT 1 FROM search_budget_ledger WHERE ledger_entry_id=NEW.ledger_entry_id OR ledger_digest=NEW.ledger_digest OR outcome_id=NEW.outcome_id OR review_decision_id=NEW.review_decision_id OR attempt_id=NEW.attempt_id OR (request_id=NEW.request_id AND work_reference_digest=NEW.work_reference_digest AND NEW.work_reference_digest IS NOT NULL) OR (request_id=NEW.request_id AND entry_kind='OUTCOME' AND NEW.entry_kind='OUTCOME' AND cumulative_provider_calls=NEW.cumulative_provider_calls) OR (request_id=NEW.request_id AND entry_kind='DOWNSTREAM_WORK' AND NEW.entry_kind='DOWNSTREAM_WORK' AND cumulative_downstream_work_items=NEW.cumulative_downstream_work_items))
+       WHEN EXISTS(SELECT 1 FROM search_budget_ledger WHERE ledger_entry_id=NEW.ledger_entry_id OR ledger_digest=NEW.ledger_digest OR (entry_kind='OUTCOME' AND NEW.entry_kind='OUTCOME' AND outcome_id=NEW.outcome_id) OR result_reference_id=NEW.result_reference_id OR review_decision_id=NEW.review_decision_id OR attempt_id=NEW.attempt_id OR (request_id=NEW.request_id AND work_reference_digest=NEW.work_reference_digest AND NEW.work_reference_digest IS NOT NULL) OR (request_id=NEW.request_id AND entry_kind='OUTCOME' AND NEW.entry_kind='OUTCOME' AND cumulative_provider_calls=NEW.cumulative_provider_calls) OR (request_id=NEW.request_id AND entry_kind='DOWNSTREAM_WORK' AND NEW.entry_kind='DOWNSTREAM_WORK' AND cumulative_downstream_work_items=NEW.cumulative_downstream_work_items))
        BEGIN SELECT RAISE(ABORT,'bounded Search identity already retained'); END""",
     *tuple(
         f"CREATE TRIGGER immutable_{table} BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT,'immutable bounded Search record'); END"

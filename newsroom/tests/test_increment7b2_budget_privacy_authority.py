@@ -496,6 +496,80 @@ def test_concurrent_first_attempt_has_one_cas_winner(tmp_path: Path) -> None:
     ordered.close()
 
 
+def test_budget_replay_uses_one_read_snapshot_during_concurrent_commit(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "budget-snapshot.sqlite3"
+    reader = open_bounded_search_authority(database, applied_at=_AT)
+    reader._connection.execute("PRAGMA journal_mode=WAL")
+    _, request, _, _, _, _ = _record_chain(reader)
+    second_attempt = replace(
+        _attempt(request, 80, 2),
+        retry_ordinal=0,
+        started_at="2026-08-14T00:00:04.000000Z",
+    )
+    reader.record_attempt(second_attempt.canonical_bytes)
+    second_outcome = _outcome(second_attempt, 81, 25)
+    outcomes_query_started = threading.Event()
+    writer_finished = threading.Event()
+
+    def trace(statement: str) -> None:
+        if "SELECT o.outcome_id FROM search_outcomes" in statement:
+            outcomes_query_started.set()
+            assert writer_finished.wait(timeout=10)
+
+    def write_outcome() -> None:
+        writer = open_bounded_search_authority(database, applied_at=_AT)
+        try:
+            assert outcomes_query_started.wait(timeout=10)
+            writer.record_outcome(second_outcome.canonical_bytes)
+        finally:
+            writer.close()
+            writer_finished.set()
+
+    reader._connection.set_trace_callback(trace)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(write_outcome)
+            snapshot = reader.budget(request.request_id)
+            future.result(timeout=15)
+        assert snapshot.provider_calls == 1
+        assert snapshot.gross_cost_microunits == 100
+        assert reader.budget(request.request_id).provider_calls == 2
+        assert reader.budget(request.request_id).gross_cost_microunits == 125
+    finally:
+        reader._connection.set_trace_callback(None)
+        reader.close()
+
+
+def test_result_inventory_blocks_replacement_after_retained_row_deletion(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "result-inventory.sqlite3"
+    authority = open_bounded_search_authority(database, applied_at=_AT)
+    records = _record_chain(authority)
+    attacker = sqlite3.connect(database, isolation_level=None)
+    try:
+        attacker.execute("DROP TRIGGER retained_search_result_references")
+        attacker.execute(
+            "DELETE FROM search_result_references WHERE result_reference_id=?",
+            (records[4].result_reference_id,),
+        )
+        replacement = _result(records[2], records[3], 82)
+        with pytest.raises(SearchAuthorityError, match="retained result inventory"):
+            authority.record_result(replacement.canonical_bytes)
+        assert attacker.execute(
+            "SELECT result_reference_id FROM search_budget_ledger "
+            "WHERE entry_kind='RESULT_REFERENCE'"
+        ).fetchall() == [(records[4].result_reference_id,)]
+        assert attacker.execute(
+            "SELECT count(*) FROM search_result_references"
+        ).fetchone() == (0,)
+    finally:
+        attacker.close()
+        authority.close()
+
+
 def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> None:
     database = tmp_path / "tamper.sqlite3"
     authority = open_bounded_search_authority(database, applied_at=_AT)
