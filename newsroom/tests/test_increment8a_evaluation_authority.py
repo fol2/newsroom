@@ -93,13 +93,31 @@ def _facts(
 
 
 def _report_bytes(run, *, status: str = "PASS") -> bytes:
+    digests = [f"sha256:{index:064x}" for index in range(20, 30)]
     payload = {
         "run_id": run.run_id,
         "run_digest": run.digest,
+        "readiness_digest": INCREMENT_8_READINESS_DIGEST,
+        "case_count": 120,
+        "minimum_case_count": 120,
+        "coverage_scope": "REVIEWED_PROSPECTIVE_UNIVERSE_ONLY_NOT_ABSOLUTE_RECALL",
+        "rates": digests[0:2],
+        "performance": digests[2:4],
+        "required_slices": digests[4:6],
+        "zero_tolerance_digest": digests[6],
+        "source_contribution_digests": [digests[7]],
+        "ablation_digests": [digests[8]],
+        "metric_code_digest": digests[9],
+        "environment_digest": D1,
+        "sampling_manifest_digest": D2,
+        "label_manifest_digest": D3,
+        "deviation_digests": [],
         "metric_status": status,
+        "performance_status": status,
         "slice_status": status,
         "zero_tolerance_status": status,
         "overall_status": status,
+        "ablation_is_decision_bearing": False,
         "production_activation_authorised": False,
         "live_shadow_execution_authorised": False,
     }

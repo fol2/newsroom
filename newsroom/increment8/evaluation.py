@@ -296,14 +296,31 @@ def _verified_metric_report(
     required = {
         "run_id",
         "run_digest",
+        "readiness_digest",
+        "case_count",
+        "minimum_case_count",
+        "coverage_scope",
+        "rates",
+        "performance",
+        "required_slices",
+        "zero_tolerance_digest",
+        "source_contribution_digests",
+        "ablation_digests",
+        "metric_code_digest",
+        "environment_digest",
+        "sampling_manifest_digest",
+        "label_manifest_digest",
+        "deviation_digests",
         "metric_status",
+        "performance_status",
         "slice_status",
         "zero_tolerance_status",
         "overall_status",
+        "ablation_is_decision_bearing",
         "production_activation_authorised",
         "live_shadow_execution_authorised",
     }
-    if not isinstance(payload, dict) or not required <= set(payload):
+    if not isinstance(payload, dict) or set(payload) != required:
         raise EvaluationAuthorityError("Metric Report fields differ")
     if payload["run_id"] != run.run_id or payload["run_digest"] != run.digest:
         raise EvaluationAuthorityError("Metric Report Run binding differs")
@@ -311,6 +328,7 @@ def _verified_metric_report(
     summary: dict[str, str] = {}
     for field in (
         "metric_status",
+        "performance_status",
         "slice_status",
         "zero_tolerance_status",
         "overall_status",
@@ -319,13 +337,80 @@ def _verified_metric_report(
         if value not in allowed_statuses:
             raise EvaluationAuthorityError("Metric Report status differs")
         summary[field] = str(value)
-    if payload["overall_status"] == "PASS" and any(
-        payload[field] != "PASS"
-        for field in ("metric_status", "slice_status", "zero_tolerance_status")
-    ):
-        raise EvaluationAuthorityError("Metric Report PASS is internally inconsistent")
+    minimum_cases = int(
+        INCREMENT_8_READINESS.evaluation_plan["qualification_exposure"][  # type: ignore[index]
+            "minimum_completed_cases"
+        ]
+    )
+    case_count = payload["case_count"]
     if (
-        payload["production_activation_authorised"] is not False
+        isinstance(case_count, bool)
+        or not isinstance(case_count, int)
+        or case_count < 0
+        or payload["minimum_case_count"] != minimum_cases
+        or payload["readiness_digest"] != INCREMENT_8_READINESS_DIGEST
+        or payload["coverage_scope"]
+        != "REVIEWED_PROSPECTIVE_UNIVERSE_ONLY_NOT_ABSOLUTE_RECALL"
+    ):
+        raise EvaluationAuthorityError("Metric Report frozen boundary differs")
+    for field in (
+        "zero_tolerance_digest",
+        "metric_code_digest",
+        "environment_digest",
+        "sampling_manifest_digest",
+        "label_manifest_digest",
+    ):
+        _digest(payload[field], f"Metric Report {field}")
+    for field in (
+        "rates",
+        "performance",
+        "required_slices",
+        "source_contribution_digests",
+        "ablation_digests",
+        "deviation_digests",
+    ):
+        values = payload[field]
+        if not isinstance(values, list):
+            raise EvaluationAuthorityError("Metric Report inventory differs")
+        checked = tuple(_digest(item, f"Metric Report {field}") for item in values)
+        if len(checked) != len(set(checked)) or (
+            field == "deviation_digests" and checked != tuple(sorted(checked))
+        ):
+            raise EvaluationAuthorityError("Metric Report inventory differs")
+    if not all(
+        payload[field]
+        for field in (
+            "rates",
+            "performance",
+            "required_slices",
+            "source_contribution_digests",
+            "ablation_digests",
+        )
+    ):
+        raise EvaluationAuthorityError("Metric Report inventory is incomplete")
+    if payload["zero_tolerance_status"] == "FAIL":
+        derived_overall = "FAIL"
+    elif case_count < minimum_cases or payload["slice_status"] == "NOT_EVALUATED":
+        derived_overall = "NOT_EVALUATED"
+    elif all(
+        payload[field] == "PASS"
+        for field in (
+            "metric_status",
+            "performance_status",
+            "slice_status",
+            "zero_tolerance_status",
+        )
+    ):
+        derived_overall = "PASS"
+    else:
+        derived_overall = "FAIL"
+    if payload["overall_status"] != derived_overall:
+        raise EvaluationAuthorityError(
+            "Metric Report status is internally inconsistent"
+        )
+    if (
+        payload["ablation_is_decision_bearing"] is not False
+        or payload["production_activation_authorised"] is not False
         or payload["live_shadow_execution_authorised"] is not False
     ):
         raise EvaluationAuthorityError("Metric Report authority boundary differs")
@@ -1316,6 +1401,17 @@ class EvaluationAuthority:
         )
         if report_digest != decision.payload["report_digest"]:
             raise EvaluationAuthorityError("decision Metric Report digest differs")
+        if (
+            decision.payload["metrics_passed"]
+            is not (report_summary["metric_status"] == "PASS")
+            or decision.payload["required_slices_passed"]
+            is not (report_summary["slice_status"] == "PASS")
+            or decision.payload["zero_tolerance_failure_count"]
+            != (0 if report_summary["zero_tolerance_status"] == "PASS" else 1)
+        ):
+            raise EvaluationAuthorityError(
+                "decision gates differ from the retained Metric Report"
+            )
         current_manifest = self.evidence_manifest_digest(retained_run.run_id)
         if current_manifest != decision.payload["evidence_manifest_digest"]:
             raise EvaluationAuthorityError("decision evidence manifest differs")

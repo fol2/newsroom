@@ -389,6 +389,30 @@ def test_report_is_retained_and_reconstructed_not_a_caller_boolean(
     tmp_path: Path,
 ) -> None:
     _, _, run = _records()
+    minimal = {
+        "schema_version": "newsroom.increment8.metric-report.v1",
+        "payload": {
+            "run_id": run.run_id,
+            "run_digest": run.digest,
+            "metric_status": "PASS",
+            "slice_status": "PASS",
+            "zero_tolerance_status": "PASS",
+            "overall_status": "PASS",
+            "production_activation_authorised": False,
+            "live_shadow_execution_authorised": False,
+        },
+    }
+    with pytest.raises(EvaluationAuthorityError, match="fields differ"):
+        build_release_decision(
+            run=run,
+            report_canonical_bytes=json.dumps(
+                minimal, sort_keys=True, separators=(",", ":")
+            ).encode(),
+            evidence_manifest_digest=D1,
+            verdict=ReleaseVerdict.PASS,
+            owner_identity_digest=OWNER,
+            decided_at=T5,
+        )
     inconsistent = json.loads(_report_bytes(run))
     inconsistent["payload"]["metric_status"] = "FAIL"
     raw = json.dumps(inconsistent, sort_keys=True, separators=(",", ":")).encode()
@@ -428,5 +452,11 @@ def test_report_is_retained_and_reconstructed_not_a_caller_boolean(
         assert digest_bytes(report_raw) != direct.payload["report_digest"]
         with pytest.raises(EvaluationAuthorityError, match="Report digest"):
             authority.decide_release(direct)
+        contradictory_payload = dict(direct.payload)
+        contradictory_payload["report_digest"] = digest_bytes(report_raw)
+        contradictory_payload["metrics_passed"] = True
+        contradictory = ReleaseEvidenceDecision.build(contradictory_payload)
+        with pytest.raises(EvaluationAuthorityError, match="decision gates"):
+            authority.decide_release(contradictory)
     finally:
         connection.close()
