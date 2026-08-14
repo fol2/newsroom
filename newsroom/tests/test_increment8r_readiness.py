@@ -13,7 +13,9 @@ from newsroom.increment8 import (
     INCREMENT_8_READINESS_DIGEST,
     PRIOR_READINESS_CONTRACT_PATH,
     READINESS_CONTRACT_PATH,
+    CorrectiveGate,
     Increment8ReadinessError,
+    corrective_gate_authorised,
     load_increment8_readiness_contract,
 )
 
@@ -185,6 +187,11 @@ def test_corrective_contract_is_additive_and_preserves_the_reviewed_v1_record() 
         "qualification_evidence_acceptance_authorised": False,
         "sole_active_coding_issue": 462,
     }
+    assert all(
+        corrective_gate_authorised(gate) is False for gate in CorrectiveGate
+    )
+    with pytest.raises(Increment8ReadinessError, match="gate identity"):
+        corrective_gate_authorised("qualification_evidence_acceptance_authorised")  # type: ignore[arg-type]
 
 
 def test_all_110_increment8_requirements_have_one_owner() -> None:

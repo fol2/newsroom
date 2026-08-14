@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from newsroom.authority.canonical import digest_canonical
 from newsroom.authority.increment8_evaluation_migrations import (
     INCREMENT8_EVALUATION_MIGRATION_CHECKSUM,
     INCREMENT8_EVALUATION_MIGRATION_NAME,
@@ -24,6 +23,7 @@ from newsroom.increment8.evaluation import (
     EvaluationAuthority,
     EvaluationAuthorityError,
     EvaluationPlan,
+    ReleaseEvidenceDecision,
     ReleaseVerdict,
     ReviewRole,
     RightsStatus,
@@ -315,58 +315,39 @@ def test_pass_requires_full_exposure_primary_labels_and_second_review_sample(
         authority.register_plan(plan)
         authority.register_epoch(epoch)
         authority.register_run(run)
-        cases = []
-        for index in range(120):
-            case = build_case(
+        with pytest.raises(EvaluationAuthorityError, match="corrective readiness"):
+            build_release_decision(
                 run=run,
-                input_manifest_digest=digest_canonical({"case": index}),
-                cutoff_at=T0,
-                required_slices=SLICES,
-                rights_status=RightsStatus.REVIEWABLE,
-                prospective=True,
+                report_digest=D2,
+                verdict=ReleaseVerdict.PASS,
+                owner_identity_digest=OWNER,
+                decided_at=T1,
+                metrics_passed=True,
+                required_slices_passed=True,
+                zero_tolerance_failure_count=0,
             )
-            cases.append(case)
-            authority.register_case(case)
-        decision = build_release_decision(
-            run=run,
-            report_digest=D2,
-            verdict=ReleaseVerdict.PASS,
-            owner_identity_digest=OWNER,
-            decided_at=T1,
-            metrics_passed=True,
-            required_slices_passed=True,
-            zero_tolerance_failure_count=0,
+
+        # The authority gate also rejects a caller that bypasses the public
+        # builder and assembles canonical PASS-shaped bytes directly.
+        direct = ReleaseEvidenceDecision.build(
+            {
+                "run_id": run.run_id,
+                "run_digest": run.digest,
+                "report_digest": D2,
+                "verdict": ReleaseVerdict.PASS.value,
+                "owner_identity_digest": OWNER,
+                "decided_at": T1,
+                "metrics_passed": True,
+                "required_slices_passed": True,
+                "zero_tolerance_failure_count": 0,
+                "early_stopped": False,
+                "production_activation_authorised": False,
+            }
         )
-        with pytest.raises(EvaluationAuthorityError, match="primary review"):
-            authority.decide_release(decision)
-        for index, case in enumerate(cases):
-            authority.record_label(
-                build_review_label(
-                    case=case,
-                    reviewer_identity_digest=digest_canonical({"primary": index}),
-                    role=ReviewRole.PRIMARY,
-                    label="route-a",
-                    blinded=True,
-                    recorded_at=T1,
-                )
-            )
-            if index < 24:
-                authority.record_label(
-                    build_review_label(
-                        case=case,
-                        reviewer_identity_digest=digest_canonical({"secondary": index}),
-                        role=ReviewRole.SECONDARY,
-                        label="route-a",
-                        blinded=True,
-                        recorded_at=T1,
-                    )
-                )
-        authority.decide_release(decision)
-        assert (
-            connection.execute(
-                "SELECT verdict FROM evaluation_release_decisions"
-            ).fetchone()[0]
-            == "PASS"
-        )
+        with pytest.raises(EvaluationAuthorityError, match="corrective readiness"):
+            authority.decide_release(direct)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM evaluation_release_decisions"
+        ).fetchone() == (0,)
     finally:
         connection.close()

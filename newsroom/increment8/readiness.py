@@ -202,6 +202,12 @@ class GateTier(StrEnum):
     M = "M"
 
 
+class CorrectiveGate(StrEnum):
+    QUALIFICATION_EVIDENCE_ACCEPTANCE = "qualification_evidence_acceptance_authorised"
+    OPERATIONAL_ADMISSION = "operational_admission_authorised"
+    INCREMENT8_COMPLETION = "increment8_completion_authorised"
+
+
 @dataclass(frozen=True, slots=True)
 class ChildAllocation:
     issue_number: int
@@ -735,3 +741,14 @@ def load_increment8_readiness_contract(path: Path) -> Increment8ReadinessContrac
 
 INCREMENT_8_READINESS = load_increment8_readiness_contract(READINESS_CONTRACT_PATH)
 INCREMENT_8_READINESS_DIGEST = INCREMENT_8_READINESS.contract_digest
+
+
+def corrective_gate_authorised(gate: CorrectiveGate) -> bool:
+    """Return the exact v2 corrective gate without interpreting evidence."""
+
+    if not isinstance(gate, CorrectiveGate):
+        raise Increment8ReadinessError("corrective gate identity differs")
+    value = INCREMENT_8_READINESS.corrective_status.get(gate.value)
+    if not isinstance(value, bool):
+        raise Increment8ReadinessError("corrective gate value differs")
+    return value

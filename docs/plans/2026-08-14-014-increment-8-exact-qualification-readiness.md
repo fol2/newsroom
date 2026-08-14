@@ -27,6 +27,10 @@ acceptance and Operational Admission authority to false while #463, #464,
 #465, #466, #467, #428 and #468 remain corrective blockers. Consequently the
 retained v1 implementation may be used as a correction base, but none of its
 existing PASS-shaped objects is accepted as qualification or admission proof.
+The release builder and persistence authority, Qualification Packet builder
+and Operational Admission builder consume these gates and fail closed; a
+caller-constructed typed record does not bypass the persistence or admission
+boundary.
 
 The record assigns each of the 110 Increment 8 requirements exactly once to
 8A–8F.  It also makes #428 an explicit predecessor of 8F so an observed current

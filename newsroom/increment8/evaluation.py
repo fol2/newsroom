@@ -25,6 +25,8 @@ from newsroom.authority.canonical import (
 from newsroom.increment8.readiness import (
     INCREMENT_8_READINESS,
     INCREMENT_8_READINESS_DIGEST,
+    CorrectiveGate,
+    corrective_gate_authorised,
 )
 
 
@@ -471,6 +473,12 @@ def build_release_decision(
         raise EvaluationAuthorityError(
             "PASS differs from the pre-registered release rule"
         )
+    if verdict is ReleaseVerdict.PASS and not corrective_gate_authorised(
+        CorrectiveGate.QUALIFICATION_EVIDENCE_ACCEPTANCE
+    ):
+        raise EvaluationAuthorityError(
+            "qualification evidence acceptance is blocked by corrective readiness"
+        )
     payload = {
         "run_id": run.run_id,
         "run_digest": run.digest,
@@ -822,6 +830,12 @@ class EvaluationAuthority:
         }:
             raise EvaluationAuthorityError("release authority boundary differs")
         if decision.payload["verdict"] == ReleaseVerdict.PASS.value:
+            if not corrective_gate_authorised(
+                CorrectiveGate.QUALIFICATION_EVIDENCE_ACCEPTANCE
+            ):
+                raise EvaluationAuthorityError(
+                    "qualification evidence acceptance is blocked by corrective readiness"
+                )
             if (
                 run[0] != RunKind.QUALIFICATION.value
                 or decision.payload["metrics_passed"] is not True

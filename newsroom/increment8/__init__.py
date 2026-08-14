@@ -109,9 +109,11 @@ from .readiness import (
     PRIOR_READINESS_CONTRACT_PATH,
     READINESS_CONTRACT_PATH,
     ChildAllocation,
+    CorrectiveGate,
     GateTier,
     Increment8ReadinessContract,
     Increment8ReadinessError,
+    corrective_gate_authorised,
     load_increment8_readiness_contract,
 )
 from .recovery import (
@@ -149,6 +151,7 @@ __all__ = [
     "BackupManifest",
     "CapacityEvidence",
     "ChildAllocation",
+    "CorrectiveGate",
     "CoveragePath",
     "CoveragePosture",
     "CoverageVerdict",
@@ -242,6 +245,7 @@ __all__ = [
     "build_review_label",
     "close_lease",
     "classify_transport_outcome",
+    "corrective_gate_authorised",
     "create_checked_backup",
     "enqueue_due_work",
     "freeze_epoch",
