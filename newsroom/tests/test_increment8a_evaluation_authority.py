@@ -79,8 +79,8 @@ def _records(kind: RunKind = RunKind.QUALIFICATION):
 
 
 def test_v30_is_checked_additive_schema_and_exact_v29_backup(tmp_path: Path) -> None:
-    assert SCHEMA_VERSION == 30
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+    assert SCHEMA_VERSION >= 30
+    assert EXPECTED_MIGRATION_HISTORY[29] == (
         30,
         INCREMENT8_EVALUATION_MIGRATION_NAME,
         INCREMENT8_EVALUATION_MIGRATION_CHECKSUM,
@@ -93,7 +93,7 @@ def test_v30_is_checked_additive_schema_and_exact_v29_backup(tmp_path: Path) -> 
         receipt = prepare_increment8_evaluation_backup(connection, backup)
         assert receipt.backup_path == backup
         apply_pending_migrations(connection, applied_at=T1)
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 30
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"

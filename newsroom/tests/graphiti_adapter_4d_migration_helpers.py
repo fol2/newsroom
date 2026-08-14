@@ -102,6 +102,7 @@ def _drop_empty_v29_local_watch_schema(connection: sqlite3.Connection) -> None:
 
 
 def _drop_empty_v30_evaluation_schema(connection: sqlite3.Connection) -> None:
+    _drop_empty_v31_operational_schema(connection)
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 30:
         return
     from newsroom.authority.increment8_evaluation_migrations import (
@@ -155,6 +156,55 @@ def _drop_empty_v30_evaluation_schema(connection: sqlite3.Connection) -> None:
     connection.execute("DELETE FROM authority_migrations WHERE version=30")
     connection.execute(guard)
     connection.execute("PRAGMA user_version=29")
+
+
+def _drop_empty_v31_operational_schema(connection: sqlite3.Connection) -> None:
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 31:
+        return
+    from newsroom.authority.increment8_operational_migrations import (
+        INCREMENT8_OPERATIONAL_MIGRATION_CHECKSUM,
+        INCREMENT8_OPERATIONAL_MIGRATION_NAME,
+        INCREMENT8_OPERATIONAL_MIGRATION_STATEMENTS,
+        INCREMENT8_OPERATIONAL_TABLES,
+    )
+
+    def normalise(value: str) -> str:
+        return " ".join(value.split()).replace(" IF NOT EXISTS", "")
+
+    tables = INCREMENT8_OPERATIONAL_TABLES
+    placeholders = ",".join("?" for _ in tables)
+    objects = connection.execute(
+        f"SELECT type,name,sql FROM sqlite_master WHERE tbl_name IN ({placeholders}) "
+        "AND type IN ('table','trigger','index') AND sql IS NOT NULL",
+        tables,
+    ).fetchall()
+    if connection.execute(
+        "SELECT name,checksum FROM authority_migrations WHERE version=31"
+    ).fetchone() != (
+        INCREMENT8_OPERATIONAL_MIGRATION_NAME,
+        INCREMENT8_OPERATIONAL_MIGRATION_CHECKSUM,
+    ) or {normalise(str(row[2])) for row in objects} != {
+        normalise(statement) for statement in INCREMENT8_OPERATIONAL_MIGRATION_STATEMENTS
+    }:
+        raise sqlite3.DatabaseError(
+            "downgrade requires exact empty v31 operational schema"
+        )
+    for table in tables:
+        if connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone() != (0,):
+            raise sqlite3.DatabaseError("v31 operational tables must be empty")
+    guard = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' "
+        "AND name='immutable_authority_migrations_delete'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+    for object_type, name, _ in objects:
+        if object_type == "trigger":
+            connection.execute(f'DROP TRIGGER "{name}"')
+    for table in reversed(tables):
+        connection.execute(f'DROP TABLE "{table}"')
+    connection.execute("DELETE FROM authority_migrations WHERE version=31")
+    connection.execute(guard)
+    connection.execute("PRAGMA user_version=30")
 
 
 def drop_empty_v28_coverage_schema(connection: sqlite3.Connection) -> None:
