@@ -89,6 +89,7 @@ _BROAD_FILLER_WORDS = frozenset(
         "articles",
         "coverage",
         "for",
+        "from",
         "of",
         "on",
         "online",
@@ -241,9 +242,16 @@ def _is_generic_firehose(query: str) -> bool:
         if not (word.isdigit() and len(word) == 4 and 1900 <= int(word) <= 2100)
     )
     broad_vocabulary = _BROAD_SCOPE_WORDS | _BROAD_NEWS_WORDS | _BROAD_FILLER_WORDS
+    substantive_words = tuple(
+        word for word in semantic_words if word not in broad_vocabulary
+    )
     quoted_specific = any(
-        any(
-            word.casefold() not in broad_vocabulary
+        not any(
+            word.casefold() in _BROAD_NEWS_WORDS
+            for word in _QUERY_WORD.findall(match.group(1))
+        )
+        and any(
+            word.casefold() not in _BROAD_SCOPE_WORDS | _BROAD_FILLER_WORDS
             for word in _QUERY_WORD.findall(match.group(1))
         )
         for match in _QUOTED_PHRASE.finditer(query)
@@ -254,13 +262,22 @@ def _is_generic_firehose(query: str) -> bool:
         or any(word.isdigit() for word in semantic_words)
     )
     broad_only = bool(semantic_words) and set(semantic_words).issubset(broad_vocabulary)
-    category_firehose = (
-        bool(semantic_words)
-        and len(semantic_words) <= 5
-        and semantic_words[-1] in _BROAD_NEWS_WORDS
-        and any(word in _BROAD_SCOPE_WORDS for word in semantic_words[:-1])
+    broad_construction = (
+        any(word in _BROAD_SCOPE_WORDS | _BROAD_NEWS_WORDS for word in semantic_words)
+        and len(substantive_words) < 2
     )
-    return broad_only or (not has_specific_syntax and category_firehose)
+    return broad_only or (not has_specific_syntax and broad_construction)
+
+
+def _query_variants(value: object) -> tuple[str, ...]:
+    if type(value) is not tuple or not value or len(value) > MAX_SEQUENCE:
+        raise SearchContractError("query_variants must be a bounded ordered array")
+    variants = tuple(_text(item, "query_variants", MAX_QUERY_BYTES) for item in value)
+    if len(set(variants)) != len(variants):
+        raise SearchContractError("query_variants must be unique")
+    if any(_is_generic_firehose(item) for item in variants):
+        raise SearchContractError("generic search firehose is prohibited")
+    return variants
 
 
 def _enum[T: StrEnum](kind: type[T], value: object, field: str) -> T:
@@ -548,6 +565,7 @@ _REQUEST_FIELDS = (
     "query_template_id",
     "query_template_digest",
     "rendered_query",
+    "query_variants",
     "language_tags",
     "geography_bounds",
     "domain_bounds",
@@ -578,6 +596,7 @@ class SearchRequest(_NoEffect):
     query_template_id: str
     query_template_digest: str
     rendered_query: str
+    query_variants: tuple[str, ...]
     language_tags: tuple[str, ...]
     geography_bounds: tuple[str, ...]
     domain_bounds: tuple[str, ...]
@@ -614,6 +633,10 @@ class SearchRequest(_NoEffect):
         query = _text(self.rendered_query, "rendered_query", MAX_QUERY_BYTES)
         if _is_generic_firehose(query):
             raise SearchContractError("generic search firehose is prohibited")
+        variants = _query_variants(self.query_variants)
+        if variants[0] != query or len(variants) != self.limits.max_query_variants:
+            raise SearchContractError("Search query variant declaration differs")
+        object.__setattr__(self, "query_variants", variants)
         object.__setattr__(
             self,
             "language_tags",
@@ -693,6 +716,7 @@ class SearchRequest(_NoEffect):
             for item in value["allowed_downstream_routes"]
         )  # type: ignore[union-attr]
         for field in (
+            "query_variants",
             "language_tags",
             "geography_bounds",
             "domain_bounds",
@@ -739,8 +763,8 @@ def _public_url(value: object) -> str:
         or re.search(r"%(?![0-9A-F]{2})", url) is not None
     ):
         raise SearchContractError("Search result URL is not a bounded public pointer")
-    parts = urlsplit(url)
     try:
+        parts = urlsplit(url)
         port = parts.port
     except ValueError as exc:
         raise SearchContractError(
@@ -1233,10 +1257,10 @@ def validate_search_attempt(request: SearchRequest, attempt: SearchAttempt) -> N
         or attempt.provider_id != request.provider_id
         or attempt.provider_configuration_digest
         != request.provider_configuration_digest
-        or attempt.rendered_query_digest
-        != digest_bytes(request.rendered_query.encode())
         or attempt.attempt_ordinal > limits.max_provider_calls
         or attempt.variant_ordinal > limits.max_query_variants
+        or attempt.rendered_query_digest
+        != digest_bytes(request.query_variants[attempt.variant_ordinal - 1].encode())
         or attempt.language_ordinal > limits.max_languages
         or attempt.language_ordinal > len(request.language_tags)
         or attempt.page_number > limits.max_pages

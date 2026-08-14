@@ -82,6 +82,11 @@ def _request(purpose: SearchPurpose | None = None, **changes: object) -> SearchR
         "query_template_id": "recall-audit-v1",
         "query_template_digest": "sha256:" + "e" * 64,
         "rendered_query": 'site:gov.uk "policy decision"',
+        "query_variants": (
+            'site:gov.uk "policy decision"',
+            'site:gov.uk "policy announcement"',
+            'site:gov.uk "policy ruling"',
+        ),
         "language_tags": ("en-GB",),
         "geography_bounds": ("United Kingdom",),
         "domain_bounds": ("gov.uk",),
@@ -266,6 +271,8 @@ def test_generic_firehose_and_unbounded_amplification_fail_closed() -> None:
         "UK news online",
         "politics news articles",
         "news about politics",
+        "UK news website",
+        "latest news from UK",
     ):
         with pytest.raises(SearchContractError, match="firehose"):
             _request(rendered_query=query)
@@ -282,6 +289,17 @@ def test_generic_firehose_and_unbounded_amplification_fail_closed() -> None:
         validate_search_attempt(
             request,
             replace(_attempt(request), language_ordinal=2),
+        )
+    second_variant = replace(
+        _attempt(request),
+        variant_ordinal=2,
+        rendered_query_digest=digest_bytes(request.query_variants[1].encode()),
+    )
+    validate_search_attempt(request, second_variant)
+    with pytest.raises(SearchContractError, match="exceeds"):
+        validate_search_attempt(
+            request,
+            replace(second_variant, rendered_query_digest=digest_bytes(b"undeclared")),
         )
     with pytest.raises(SearchContractError, match="exceeds"):
         validate_search_attempt(
@@ -341,6 +359,7 @@ def test_provider_alteration_and_rights_limited_retention_are_explicit() -> None
         "HTTPS://example.org/report",
         "https://127.0.0.1/report",
         "https://example.org/%zz",
+        "https://[::1",
     ):
         with pytest.raises(SearchContractError, match="public pointer"):
             replace(result, url=malformed_url)
