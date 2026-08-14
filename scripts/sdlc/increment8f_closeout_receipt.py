@@ -21,6 +21,12 @@ from newsroom.increment8.closeout import (
     Increment8CloseoutError,
     increment8_final_migration_history,
 )
+from newsroom.increment8.readiness import (
+    INCREMENT_8_READINESS,
+    INCREMENT_8_READINESS_DIGEST,
+    CorrectiveGate,
+    corrective_gate_authorised,
+)
 from scripts.sdlc.contracts import ContractError, load_contract
 from scripts.sdlc.emit_evidence import sha256_identity
 from scripts.sdlc.increment5e2_closeout_receipt import (
@@ -39,6 +45,7 @@ from scripts.sdlc.shadow_decision import ShadowDecisionError, validate_shadow_de
 from scripts.sdlc.transport_replay import TransportReplayError, load_verified_transport
 
 FINAL_SCHEMA_VERSION = "newsroom.increment8.closeout-receipt.v1"
+BLOCKED_SCHEMA_VERSION = "newsroom.increment8.corrective-closeout-blocked.v1"
 
 
 class Increment8FCloseoutReceiptError(ValueError):
@@ -109,6 +116,26 @@ def build_final_receipt(
     try:
         root, head, tree = _git_identity(repo_root)
         _require_git_identity(root, head, tree)
+    except Increment5E2CloseoutReceiptError as exc:
+        raise Increment8FCloseoutReceiptError("validated_input") from exc
+    if not (
+        corrective_gate_authorised(CorrectiveGate.INCREMENT8_COMPLETION)
+        and corrective_gate_authorised(CorrectiveGate.OPERATIONAL_ADMISSION)
+    ):
+        blocked = {
+            "blocking_issues": list(
+                INCREMENT_8_READINESS.corrective_status["blocking_issues"]
+            ),
+            "completion_authorised": False,
+            "evaluated_sha": head,
+            "evaluated_tree_sha": tree,
+            "operational_admission_authorised": False,
+            "readiness_digest": INCREMENT_8_READINESS_DIGEST,
+            "schema_version": BLOCKED_SCHEMA_VERSION,
+            "status": "BLOCKED",
+        }
+        return {**blocked, "receipt_identity": sha256_identity(blocked)}
+    try:
         contract = load_contract(root)
         decision = validate_shadow_decision(
             _decision_payload(decision_path), contract=contract

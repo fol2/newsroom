@@ -23,6 +23,7 @@ from newsroom.tests.test_increment6g_closeout_receipt import (
 )
 from scripts.sdlc.emit_evidence import sha256_identity
 from scripts.sdlc.increment8f_closeout_receipt import (
+    BLOCKED_SCHEMA_VERSION,
     FINAL_SCHEMA_VERSION,
     Increment8FCloseoutReceiptError,
     build_final_receipt,
@@ -119,6 +120,28 @@ def _patch(monkeypatch, decision, transports) -> None:
         "scripts.sdlc.increment8f_closeout_receipt.load_verified_transport",
         lambda path: transports[Path(path).name],
     )
+    monkeypatch.setattr(
+        "scripts.sdlc.increment8f_closeout_receipt.corrective_gate_authorised",
+        lambda _gate: True,
+    )
+
+
+def test_corrective_blockade_emits_no_final_closeout_claim(tmp_path) -> None:
+    repo = _clean_clone(tmp_path)
+    receipt = build_final_receipt(
+        repo_root=repo,
+        core_transport_bundle_root=tmp_path / "absent-core",
+        service_transport_bundle_root=tmp_path / "absent-service",
+        decision_path=tmp_path / "absent-decision.json",
+    )
+    assert receipt["schema_version"] == BLOCKED_SCHEMA_VERSION
+    assert receipt["status"] == "BLOCKED"
+    assert receipt["completion_authorised"] is False
+    assert receipt["operational_admission_authorised"] is False
+    assert receipt["blocking_issues"] == [463, 464, 465, 466, 467, 428, 468]
+    assert "selected_cases" not in receipt
+    unsigned = dict(receipt)
+    assert unsigned.pop("receipt_identity") == sha256_identity(unsigned)
 
 
 def test_receipt_binds_exact_lanes_inventory_service_and_self_hash(
