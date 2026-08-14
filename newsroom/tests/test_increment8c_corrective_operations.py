@@ -230,6 +230,15 @@ def test_lease_acquisition_is_due_and_atomically_advances_work(tmp_path) -> None
         deadline_at="2042-01-05T01:00:00.000000Z",
         authority_version_digest=_D,
     )
+    forged_origin = operations.DueWork.build(
+        {
+            **future.payload,
+            "state": WorkState.LEASED.value,
+            "attempt_count": 1,
+        }
+    )
+    with pytest.raises(OperationalAuthorityError, match="lease acquisition"):
+        authority.append_work(forged_origin)
     authority.append_work(future)
     early = acquire_lease(
         work=future,
@@ -273,7 +282,7 @@ def test_starved_routine_work_is_promoted_before_catch_up_limit(
 ) -> None:
     profile_definition = dict(operations.INCREMENT_8_READINESS.operational_profile)
     schedule = dict(profile_definition["schedule"])
-    schedule["maximum_catch_up_items"] = 1
+    schedule["maximum_catch_up_items"] = 2
     profile_definition["schedule"] = schedule
     execution = dict(profile_definition["execution"])
     execution["routine_starvation_limit_seconds"] = 10
@@ -291,18 +300,25 @@ def test_starved_routine_work_is_promoted_before_catch_up_limit(
     profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
     authority.register_profile(profile)
     routine = _work(profile, "starvation:routine")
-    urgent = enqueue_due_work(
-        profile=profile,
-        logical_due_key="starvation:urgent",
-        scope_kind="FIXTURE_SOURCE",
-        urgency=Urgency.URGENT,
-        due_at="2042-01-05T00:00:20.000000Z",
-        deadline_at="2042-01-05T01:00:00.000000Z",
-        authority_version_digest=_D,
+    urgent = tuple(
+        enqueue_due_work(
+            profile=profile,
+            logical_due_key=f"starvation:urgent-{index}",
+            scope_kind="FIXTURE_SOURCE",
+            urgency=Urgency.URGENT,
+            due_at="2042-01-05T00:00:20.000000Z",
+            deadline_at="2042-01-05T01:00:00.000000Z",
+            authority_version_digest=_D,
+        )
+        for index in range(2)
     )
     authority.append_work(routine)
-    authority.append_work(urgent)
-    assert authority.due_work("2042-01-05T00:00:20.000000Z") == (routine,)
+    for item in urgent:
+        authority.append_work(item)
+    selected = authority.due_work("2042-01-05T00:00:20.000000Z")
+    assert len(selected) == 2
+    assert selected[0].payload["urgency"] == Urgency.URGENT.value
+    assert routine in selected
     connection.close()
 
 

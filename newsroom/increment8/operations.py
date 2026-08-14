@@ -912,19 +912,34 @@ class OperationalAuthority:
             or DueWork.from_canonical_bytes(work.canonical_bytes) != work
         ):
             raise OperationalAuthorityError("work is forged or non-canonical")
+        if work.payload["state"] == WorkState.LEASED.value:
+            raise OperationalAuthorityError(
+                "LEASED work must be committed by lease acquisition"
+            )
         version = int(work.payload["state_version"])
         if version == 1:
             profile = self._connection.execute(
-                "SELECT profile_digest FROM operational_profiles WHERE profile_id=?",
+                "SELECT profile_digest,profile_bytes FROM operational_profiles "
+                "WHERE profile_id=?",
                 (work.payload["profile_record_id"],),
             ).fetchone()
-            if profile != (work.payload["profile_digest"],):
+            if profile is None or profile[0] != work.payload["profile_digest"]:
                 raise OperationalAuthorityError("work Profile authority differs")
+            retained_profile = OperationalProfile.from_canonical_bytes(
+                bytes(profile[1])
+            )
+            expected_origin = enqueue_due_work(
+                profile=retained_profile,
+                logical_due_key=str(work.payload["logical_due_key"]),
+                scope_kind=str(work.payload["scope_kind"]),
+                urgency=Urgency(str(work.payload["urgency"])),
+                due_at=str(work.payload["due_at"]),
+                deadline_at=str(work.payload["deadline_at"]),
+                authority_version_digest=str(work.payload["authority_version_digest"]),
+            )
+            if expected_origin != work:
+                raise OperationalAuthorityError("initial work record differs")
         else:
-            if work.payload["state"] == WorkState.LEASED.value:
-                raise OperationalAuthorityError(
-                    "LEASED work must be committed by lease acquisition"
-                )
             previous = self._connection.execute(
                 "SELECT work_digest,work_bytes FROM due_work WHERE work_id=? AND state_version=?",
                 (work.work_id, version - 1),
@@ -1289,11 +1304,6 @@ class OperationalAuthority:
         )
         ready.sort(
             key=lambda item: (
-                0
-                if item.payload["urgency"] == Urgency.ROUTINE.value
-                and _dt(instant) - _dt(str(item.payload["due_at"]))
-                >= timedelta(seconds=starvation_limit)
-                else 1,
                 priority[str(item.payload["urgency"])],
                 str(item.payload["deadline_at"]),
                 item.work_id,
@@ -1304,7 +1314,30 @@ class OperationalAuthority:
                 "maximum_catch_up_items"
             ]
         )
-        return tuple(ready[:limit])
+        selected = ready[:limit]
+        starved = sorted(
+            (
+                item
+                for item in ready
+                if item.payload["urgency"] == Urgency.ROUTINE.value
+                and _dt(instant) - _dt(str(item.payload["due_at"]))
+                >= timedelta(seconds=starvation_limit)
+            ),
+            key=lambda item: (str(item.payload["deadline_at"]), item.work_id),
+        )
+        if (
+            starved
+            and starved[0] not in selected
+            and selected
+            and (
+                limit >= 2
+                or not any(
+                    item.payload["urgency"] == Urgency.URGENT.value for item in selected
+                )
+            )
+        ):
+            selected[-1] = starved[0]
+        return tuple(selected)
 
     def active_lease_count(self) -> int:
         return int(
