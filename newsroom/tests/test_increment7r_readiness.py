@@ -195,6 +195,16 @@ def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(authority_migrations, "EXPECTED_MIGRATION_HISTORY", authority_migrations.EXPECTED_MIGRATION_HISTORY[:-1] + ((26, "wrong_v26", checksum),))
     assert any("reserved v26 name differs" in finding for finding in validate_interface_inventory(INCREMENT_7_READINESS))
 
+    malformed_history = (*INCREMENT_7_READINESS.accepted_migration_history, 26)
+    monkeypatch.setattr(
+        authority_migrations,
+        "EXPECTED_MIGRATION_HISTORY",
+        malformed_history,
+    )
+    findings = validate_interface_inventory(INCREMENT_7_READINESS)
+    assert "newsroom.authority.migrations: suffix entry is malformed" in findings
+    assert "newsroom.authority.migrations: live history/version differ" in findings
+
 
 def test_7r_applies_no_migration_and_current_schema_remains_exact() -> None:
     connection = sqlite3.connect(":memory:", isolation_level=None)
@@ -207,20 +217,3 @@ def test_7r_applies_no_migration_and_current_schema_remains_exact() -> None:
         assert not any(name.startswith(("planned_agenda_", "search_", "coverage_", "event_scoped_local_watch_")) for name in tables)
     finally:
         connection.close()
-
-
-def test_malformed_migration_tail_returns_drift_instead_of_crashing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    malformed_history = (*authority_migrations.EXPECTED_MIGRATION_HISTORY, 26)
-    monkeypatch.setattr(
-        authority_migrations,
-        "EXPECTED_MIGRATION_HISTORY",
-        malformed_history,
-    )
-    monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 26)
-
-    findings = validate_interface_inventory(INCREMENT_7_READINESS)
-
-    assert "newsroom.authority.migrations: suffix entry is malformed" in findings
-    assert "newsroom.authority.migrations: live history/version differ" in findings
