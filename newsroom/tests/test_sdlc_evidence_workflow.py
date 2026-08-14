@@ -134,7 +134,26 @@ def test_job_graph_is_exact_and_decision_always_reports() -> None:
     assert jobs["core"]["if"] == "always() && needs.route.result == 'success'"
     assert jobs["core_shard"]["strategy"] == {
         "fail-fast": "false",
-        "matrix": {"shard": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]},
+        "matrix": {
+            "shard": [
+                "0",
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8",
+                "9",
+                "10",
+                "11",
+                "12",
+                "13",
+                "14",
+                "15",
+            ]
+        },
     }
     assert jobs["service"]["if"] == (
         "needs.route.result == 'success' && "

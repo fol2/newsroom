@@ -7,6 +7,17 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .canonical import digest_canonical
+from .bounded_search_migrations import (
+    BOUNDED_SEARCH_MIGRATION,
+    BOUNDED_SEARCH_MIGRATION_CHECKSUM,
+    BOUNDED_SEARCH_MIGRATION_NAME,
+    BOUNDED_SEARCH_MIGRATION_STATEMENTS,
+    BOUNDED_SEARCH_SCHEMA_VERSION,
+    BoundedSearchBackupReceipt,
+    bounded_search_backup_paths,
+    prepare_bounded_search_backup,
+    require_bounded_search_backup,
+)
 from .check_migrations import (
     CHECK_AUTHORITY_MIGRATION,
     CHECK_AUTHORITY_MIGRATION_CHECKSUM,
@@ -224,7 +235,7 @@ from .triage_work_item_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = PLANNED_AGENDA_SCHEMA_VERSION
+SCHEMA_VERSION = BOUNDED_SEARCH_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -674,11 +685,12 @@ def prepare_pending_migration_backup(
     | StoryCandidateBackupReceipt
     | EvaluationFeedbackBackupReceipt
     | PlannedAgendaBackupReceipt
+    | BoundedSearchBackupReceipt
     | None
 ):
     """Prepare the exact retained backup required by a checked predecessor."""
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if version not in {16, 17, 18, 19, 20, 21, 22, 23, 24, 25}:
+    if version not in {16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26}:
         return None
     database_path = next(
         str(row[2])
@@ -716,8 +728,11 @@ def prepare_pending_migration_backup(
     if version == 24:
         backup_path, _ = evaluation_feedback_backup_paths(database_path)
         return prepare_evaluation_feedback_backup(conn, backup_path)
-    backup_path, _ = planned_agenda_backup_paths(database_path)
-    return prepare_planned_agenda_backup(conn, backup_path)
+    if version == 25:
+        backup_path, _ = planned_agenda_backup_paths(database_path)
+        return prepare_planned_agenda_backup(conn, backup_path)
+    backup_path, _ = bounded_search_backup_paths(database_path)
+    return prepare_bounded_search_backup(conn, backup_path)
 
 
 def apply_migration(
@@ -1308,6 +1323,29 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                  PLANNED_AGENDA_MIGRATION_CHECKSUM, applied_at),
             )
             current = PLANNED_AGENDA_SCHEMA_VERSION
+        if current == PLANNED_AGENDA_SCHEMA_VERSION:
+            if 0 < starting_version < PLANNED_AGENDA_SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version={PLANNED_AGENDA_SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+                database_path = next(str(row[2]) for row in conn.execute("PRAGMA database_list") if row[1] == "main")
+                if not database_path:
+                    raise sqlite3.DatabaseError("existing multihop upgrade requires a file-backed database")
+                backup_path, _ = bounded_search_backup_paths(database_path)
+                prepare_bounded_search_backup(conn, backup_path)
+                conn.execute("BEGIN EXCLUSIVE")
+            if starting_version != 0:
+                require_bounded_search_backup(
+                    conn, expected_history=tuple((r.version, r.name, r.checksum) for r in MIGRATIONS
+                                                 if r.version <= PLANNED_AGENDA_SCHEMA_VERSION),
+                )
+            for statement in BOUNDED_SEARCH_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) VALUES(?,?,?,?)",
+                (BOUNDED_SEARCH_SCHEMA_VERSION, BOUNDED_SEARCH_MIGRATION_NAME,
+                 BOUNDED_SEARCH_MIGRATION_CHECKSUM, applied_at),
+            )
+            current = BOUNDED_SEARCH_SCHEMA_VERSION
         # fmt: on
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
@@ -1344,6 +1382,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     STORY_CANDIDATE_MIGRATION,
     EVALUATION_FEEDBACK_MIGRATION,
     PLANNED_AGENDA_MIGRATION,
+    BOUNDED_SEARCH_MIGRATION,
 )
 
 
@@ -1480,6 +1519,11 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         PLANNED_AGENDA_SCHEMA_VERSION,
         PLANNED_AGENDA_MIGRATION_NAME,
         PLANNED_AGENDA_MIGRATION_CHECKSUM,
+    ),
+    (
+        BOUNDED_SEARCH_SCHEMA_VERSION,
+        BOUNDED_SEARCH_MIGRATION_NAME,
+        BOUNDED_SEARCH_MIGRATION_CHECKSUM,
     ),
 )
 # fmt: on

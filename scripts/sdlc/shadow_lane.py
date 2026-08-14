@@ -41,7 +41,7 @@ _SAFE_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\x00-\x1f\x7f]{1,48}Z")
 _SUCCESSFUL_STEP_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
-_CORE_SHARD_NAMES = tuple(f"core-shard-{index}" for index in range(10))
+_CORE_SHARD_NAMES = tuple(f"core-shard-{index}" for index in range(16))
 _RECORD_KEYS = frozenset(
     {
         "schema_version",

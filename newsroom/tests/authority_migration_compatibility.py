@@ -178,6 +178,11 @@ PINNED_MIGRATION_HISTORY: tuple[HistoryRow, ...] = (
         "planned_agenda_authority_v26",
         "sha256:55e6e8878140714dc6fc6c8149357e1f15e4683fcb7ee0b31b168a737bfd3d4c",
     ),
+    (
+        27,
+        "bounded_search_authority_v27",
+        "sha256:ee5679aba6ceb3e95ba925febbbb7853369f93d055563ac85402d380377672b0",
+    ),
 )
 
 

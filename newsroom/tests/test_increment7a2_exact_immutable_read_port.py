@@ -208,6 +208,33 @@ def _downgrade_empty_v26_to_v25(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
 
 
+def _downgrade_empty_v27_to_v26(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA foreign_keys=OFF")
+    immutable = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name='immutable_authority_migrations_delete'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+    for table in (
+        "search_budget_ledger",
+        "search_review_decisions",
+        "search_result_references",
+        "search_outcomes",
+        "search_attempts",
+        "search_requests",
+        "search_purposes",
+    ):
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=?",
+            (table,),
+        ).fetchall():
+            connection.execute(f'DROP TRIGGER "{name}"')
+        connection.execute(f"DROP TABLE {table}")
+    connection.execute("DELETE FROM authority_migrations WHERE version=27")
+    connection.execute(immutable)
+    connection.execute("PRAGMA user_version=26")
+    connection.execute("PRAGMA foreign_keys=ON")
+
+
 def _downgrade_empty_v25_to_v24(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=OFF")
     immutable = connection.execute(
@@ -238,13 +265,14 @@ def test_v26_fresh_create_history_fingerprint_and_integrity() -> None:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
     apply_pending_migrations(connection, applied_at=_AT)
-    assert SCHEMA_VERSION == PLANNED_AGENDA_SCHEMA_VERSION == 26
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+    assert SCHEMA_VERSION == 27
+    assert PLANNED_AGENDA_SCHEMA_VERSION == 26
+    assert EXPECTED_MIGRATION_HISTORY[25] == (
         26,
         PLANNED_AGENDA_MIGRATION_NAME,
         PLANNED_AGENDA_MIGRATION_CHECKSUM,
     )
-    assert connection.execute("PRAGMA user_version").fetchone() == (26,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (27,)
     assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
@@ -255,6 +283,7 @@ def test_v25_upgrade_requires_and_retains_exact_backup(tmp_path: Path) -> None:
     connection = sqlite3.connect(database, isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
     apply_pending_migrations(connection, applied_at=_AT)
+    _downgrade_empty_v27_to_v26(connection)
     _downgrade_empty_v26_to_v25(connection)
     assert schema_fingerprint(connection) == PLANNED_AGENDA_PREDECESSOR_FINGERPRINT
     connection.close()
@@ -272,6 +301,7 @@ def test_v25_upgrade_requires_and_retains_exact_backup(tmp_path: Path) -> None:
     connection = sqlite3.connect(older_database, isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
     apply_pending_migrations(connection, applied_at=_AT)
+    _downgrade_empty_v27_to_v26(connection)
     _downgrade_empty_v26_to_v25(connection)
     _downgrade_empty_v25_to_v24(connection)
     connection.close()
@@ -280,7 +310,7 @@ def test_v25_upgrade_requires_and_retains_exact_backup(tmp_path: Path) -> None:
     authority.close()
     checked = sqlite3.connect(older_database)
     try:
-        assert checked.execute("PRAGMA user_version").fetchone() == (26,)
+        assert checked.execute("PRAGMA user_version").fetchone() == (27,)
     finally:
         checked.close()
 
@@ -290,6 +320,7 @@ def test_v26_failure_rolls_back_to_exact_v25(tmp_path: Path, monkeypatch) -> Non
     connection = sqlite3.connect(database, isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
     apply_pending_migrations(connection, applied_at=_AT)
+    _downgrade_empty_v27_to_v26(connection)
     _downgrade_empty_v26_to_v25(connection)
     backup, _ = planned_agenda_backup_paths(database.resolve())
     prepare_planned_agenda_backup(connection, backup)

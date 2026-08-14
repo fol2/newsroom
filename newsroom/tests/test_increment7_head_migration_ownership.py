@@ -22,7 +22,9 @@ from newsroom.increment7 import (
 
 _BASE_COMMIT = "ddd77f7e96ebe8df42861631dc47005c30048662"
 _BASE_TREE = "f5109a81962db2d4206426abfc152c890ef5d461"
-_BASE_FINGERPRINT = "sha256:353900bf5804f0b770489982541f3cff4fd30ea36fc75d19b9c63315d1b6ec06"
+_BASE_FINGERPRINT = (
+    "sha256:353900bf5804f0b770489982541f3cff4fd30ea36fc75d19b9c63315d1b6ec06"
+)
 _CHILD_ISSUES = tuple(range(435, 447))
 _MIGRATIONS = {437: 26, 439: 27, 443: 28, 445: 29}
 _WAVES = {
@@ -50,13 +52,16 @@ def test_readiness_is_bound_to_exact_final_increment6_head_and_v25_schema() -> N
     assert readiness.accepted_base_tree == _BASE_TREE
     assert readiness.accepted_schema_version == 25
     assert readiness.accepted_schema_fingerprint == _BASE_FINGERPRINT
-    assert readiness.accepted_migration_history == (
-        authority_migrations.EXPECTED_MIGRATION_HISTORY[:25]
+    assert (
+        readiness.accepted_migration_history
+        == (authority_migrations.EXPECTED_MIGRATION_HISTORY[:25])
     )
     assert readiness.effective_when == "PRESENT_ON_MAIN_AFTER_REVIEWED_7R_MERGE"
     assert readiness.production_activation_authorised is False
     assert readiness.contract_digest == INCREMENT_7_READINESS_DIGEST
-    assert readiness.contract_digest == digest_bytes(READINESS_CONTRACT_PATH.read_bytes())
+    assert readiness.contract_digest == digest_bytes(
+        READINESS_CONTRACT_PATH.read_bytes()
+    )
 
 
 def test_exact_inherited_interfaces_resolve_without_drift() -> None:
@@ -81,8 +86,17 @@ def test_exact_inherited_interfaces_resolve_without_drift() -> None:
 def test_all_atomic_owners_are_disjoint_and_transaction_ports_are_explicit() -> None:
     readiness = INCREMENT_7_READINESS
     assert tuple(item.issue_number for item in readiness.allocations) == _CHILD_ISSUES
-    for attribute in ("public_modules", "schema_ids", "table_names", "interface_ownership"):
-        values = [value for item in readiness.allocations for value in getattr(item, attribute)]
+    for attribute in (
+        "public_modules",
+        "schema_ids",
+        "table_names",
+        "interface_ownership",
+    ):
+        values = [
+            value
+            for item in readiness.allocations
+            for value in getattr(item, attribute)
+        ]
         assert len(values) == len(set(values))
     assert readiness.allocation_by_issue[437].public_modules == (
         "newsroom.increment7.agenda_authority",
@@ -120,13 +134,17 @@ def test_dependency_graph_is_acyclic_and_g_is_last() -> None:
     readiness = INCREMENT_7_READINESS
     assert readiness.parallel_waves == _WAVES
     wave_by_issue = {
-        issue: wave for wave, issues in readiness.parallel_waves.items() for issue in issues
+        issue: wave
+        for wave, issues in readiness.parallel_waves.items()
+        for issue in issues
     }
     assert set(wave_by_issue) == set(_CHILD_ISSUES)
     for allocation in readiness.allocations:
         for dependency in allocation.dependencies:
             if dependency in wave_by_issue:
-                assert wave_by_issue[dependency] < wave_by_issue[allocation.issue_number]
+                assert (
+                    wave_by_issue[dependency] < wave_by_issue[allocation.issue_number]
+                )
     assert readiness.allocation_by_issue[443].dependencies == (435, 439, 441, 442)
     assert readiness.allocation_by_issue[446].dependencies == tuple(range(435, 446))
 
@@ -140,7 +158,10 @@ def test_gate_tiers_and_disabled_runtime_boundary_are_explicit() -> None:
         assert readiness.allocation_by_issue[issue].gate_tier is GateTier.S
     assert readiness.allocation_by_issue[446].gate_tier is GateTier.M
     assert set(readiness.gate_requirements) == set(GateTier)
-    assert "AGENDA_SEARCH_AUDIT_WATCH_REENTRY_PATH" in readiness.gate_requirements[GateTier.M]
+    assert (
+        "AGENDA_SEARCH_AUDIT_WATCH_REENTRY_PATH"
+        in readiness.gate_requirements[GateTier.M]
+    )
     assert {
         "LIVE_SEARCH_PROVIDER",
         "RECURRING_QUERY",
@@ -151,7 +172,9 @@ def test_gate_tiers_and_disabled_runtime_boundary_are_explicit() -> None:
     } <= set(readiness.exclusions)
 
 
-def test_contract_is_canonical_and_changed_or_duplicate_bytes_fail_closed(tmp_path: Path) -> None:
+def test_contract_is_canonical_and_changed_or_duplicate_bytes_fail_closed(
+    tmp_path: Path,
+) -> None:
     raw = READINESS_CONTRACT_PATH.read_bytes()
     assert raw == canonical_json_bytes(json.loads(raw.decode("utf-8")))
     pretty = tmp_path / "pretty.json"
@@ -179,23 +202,33 @@ def test_contract_is_canonical_and_changed_or_duplicate_bytes_fail_closed(tmp_pa
 
 def test_inherited_module_drift_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     item = INCREMENT_7_READINESS.interface_inventory[1]
-    monkeypatch.setattr(item := readiness_module._INTERFACE_MODULES[item.module], "SUPPLEMENTAL_DISCOVERY_REENTRY", "CLOCK_CAN_CREATE_CANDIDATE")
+    monkeypatch.setattr(
+        item := readiness_module._INTERFACE_MODULES[item.module],
+        "SUPPLEMENTAL_DISCOVERY_REENTRY",
+        "CLOCK_CAN_CREATE_CANDIDATE",
+    )
     findings = validate_interface_inventory(INCREMENT_7_READINESS)
-    assert any("SUPPLEMENTAL_DISCOVERY_REENTRY: value differs" in finding for finding in findings)
+    assert any(
+        "SUPPLEMENTAL_DISCOVERY_REENTRY: value differs" in finding
+        for finding in findings
+    )
 
 
-def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reserved_additive_schema_suffix_is_checked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     checksum = "sha256:" + "a" * 64
-    monkeypatch.setattr(authority_migrations, "EXPECTED_MIGRATION_HISTORY", authority_migrations.EXPECTED_MIGRATION_HISTORY + ((27, "bounded_search_authority_v27", checksum),))
-    monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 27)
+    assert validate_interface_inventory(INCREMENT_7_READINESS) == ()
     monkeypatch.setattr(
         authority_migrations,
-        "EXPECTED_SCHEMA_FINGERPRINT",
-        "sha256:" + "b" * 64,
+        "EXPECTED_MIGRATION_HISTORY",
+        authority_migrations.EXPECTED_MIGRATION_HISTORY[:-1]
+        + ((27, "wrong_v27", checksum),),
     )
-    assert validate_interface_inventory(INCREMENT_7_READINESS) == ()
-    monkeypatch.setattr(authority_migrations, "EXPECTED_MIGRATION_HISTORY", authority_migrations.EXPECTED_MIGRATION_HISTORY[:-1] + ((27, "wrong_v27", checksum),))
-    assert any("reserved v27 name differs" in finding for finding in validate_interface_inventory(INCREMENT_7_READINESS))
+    assert any(
+        "reserved v27 name differs" in finding
+        for finding in validate_interface_inventory(INCREMENT_7_READINESS)
+    )
 
     malformed_history = (*INCREMENT_7_READINESS.accepted_migration_history, 26)
     monkeypatch.setattr(
@@ -215,10 +248,12 @@ def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         authority_migrations,
         "EXPECTED_MIGRATION_HISTORY",
-        (*INCREMENT_7_READINESS.accepted_migration_history,
-         (26, "planned_agenda_authority_v26", checksum),
-         *v29,
-         v30),
+        (
+            *INCREMENT_7_READINESS.accepted_migration_history,
+            (26, "planned_agenda_authority_v26", checksum),
+            *v29,
+            v30,
+        ),
     )
     monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 30)
     findings = validate_interface_inventory(INCREMENT_7_READINESS)
@@ -227,9 +262,11 @@ def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         authority_migrations,
         "EXPECTED_MIGRATION_HISTORY",
-        (*INCREMENT_7_READINESS.accepted_migration_history,
-         (26.0, "planned_agenda_authority_v26", checksum),
-         (27, "bounded_search_authority_v27", checksum)),
+        (
+            *INCREMENT_7_READINESS.accepted_migration_history,
+            (26.0, "planned_agenda_authority_v26", checksum),
+            (27, "bounded_search_authority_v27", checksum),
+        ),
     )
     monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 27)
     findings = validate_interface_inventory(INCREMENT_7_READINESS)
@@ -242,8 +279,7 @@ def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPa
     )
     findings = validate_interface_inventory(INCREMENT_7_READINESS)
     assert any(
-        "apply_pending_migrations: signature differs" in item
-        for item in findings
+        "apply_pending_migrations: signature differs" in item for item in findings
     )
 
     monkeypatch.setattr(
@@ -262,10 +298,7 @@ def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPa
         None,
     )
     findings = validate_interface_inventory(INCREMENT_7_READINESS)
-    assert (
-        "newsroom.authority.migrations: live fingerprint is malformed"
-        in findings
-    )
+    assert "newsroom.authority.migrations: live fingerprint is malformed" in findings
 
     monkeypatch.delattr(
         authority_migrations,
@@ -285,8 +318,9 @@ def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPa
 
 
 def test_7r_accepts_the_exact_v25_prefix_without_applying_a_migration() -> None:
-    assert INCREMENT_7_READINESS.accepted_migration_history == (
-        authority_migrations.EXPECTED_MIGRATION_HISTORY[:25]
+    assert (
+        INCREMENT_7_READINESS.accepted_migration_history
+        == (authority_migrations.EXPECTED_MIGRATION_HISTORY[:25])
     )
     if authority_migrations.SCHEMA_VERSION == 25:
         connection = sqlite3.connect(":memory:", isolation_level=None)

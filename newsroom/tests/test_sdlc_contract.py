@@ -78,7 +78,7 @@ def test_every_gate_lane_resolves_and_core_budget_is_below_six_minutes() -> None
     assert lanes["core"]["hard_timeout_seconds"] == 330
     assert lanes["core"] == {
         "bootstrap_once": True,
-        "shard_count": 10,
+        "shard_count": 16,
         "partition": "sha256_node_id_balanced",
         "workers_per_shard": 2,
         "distribution": "worksteal",
@@ -168,7 +168,7 @@ def test_unaccepted_core_worker_counts_fail_closed(worker_count: int) -> None:
 def test_unaccepted_core_shard_counts_fail_closed() -> None:
     contract = load_contract(REPO_ROOT)
 
-    for shard_count in (6, 8, 12):
+    for shard_count in (8, 10, 12):
         data = deepcopy(contract.data)
         data["lanes"]["core"]["shard_count"] = shard_count
 

@@ -193,7 +193,7 @@ clustering = [
 
 [lanes.core]
 bootstrap_once = true
-shard_count = 10
+shard_count = 16
 partition = "sha256_node_id_balanced"
 workers_per_shard = 2
 distribution = "worksteal"
