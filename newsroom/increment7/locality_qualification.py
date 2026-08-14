@@ -232,8 +232,14 @@ _REFERENCE_FIELDS = (
     "locality_kind",
     "canonical_code",
     "display_label",
+    "canonical_alias_set_digest",
+    "parent_geography_digest",
     "boundary_definition_version",
     "boundary_digest",
+    "authoritative_boundary_source_digest",
+    "validity_interval_digest",
+    "overlap_assessment_digest",
+    "uncertainty_assessment_digest",
     "provenance_digests",
     "recorded_at",
 )
@@ -245,8 +251,14 @@ class LocalityReference(_NoEffect):
     locality_kind: LocalityKind
     canonical_code: str
     display_label: str
+    canonical_alias_set_digest: str
+    parent_geography_digest: str
     boundary_definition_version: str
     boundary_digest: str
+    authoritative_boundary_source_digest: str
+    validity_interval_digest: str
+    overlap_assessment_digest: str
+    uncertainty_assessment_digest: str
     provenance_digests: tuple[str, ...]
     recorded_at: str
     schema_version: str = LOCALITY_REFERENCE
@@ -262,8 +274,17 @@ class LocalityReference(_NoEffect):
         )
         _token(self.canonical_code, "canonical_code")
         _text(self.display_label, "display_label", 512)
+        _digest(self.canonical_alias_set_digest, "canonical_alias_set_digest")
+        _digest(self.parent_geography_digest, "parent_geography_digest")
         _token(self.boundary_definition_version, "boundary_definition_version")
         _digest(self.boundary_digest, "boundary_digest")
+        for field in (
+            "authoritative_boundary_source_digest",
+            "validity_interval_digest",
+            "overlap_assessment_digest",
+            "uncertainty_assessment_digest",
+        ):
+            _digest(getattr(self, field), field)
         object.__setattr__(
             self,
             "provenance_digests",

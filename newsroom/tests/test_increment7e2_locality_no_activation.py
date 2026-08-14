@@ -33,14 +33,20 @@ def _id(value: int) -> str:
 
 def _chain():
     reference = LocalityReference(
-        _id(1),
-        LocalityKind.ADMINISTRATIVE_AREA,
-        "FIXTURE:AREA:001",
-        "Fixture Area",
-        "fixture-boundary-v1",
-        _D,
-        (_D,),
-        _AT,
+        locality_reference_id=_id(1),
+        locality_kind=LocalityKind.ADMINISTRATIVE_AREA,
+        canonical_code="FIXTURE:AREA:001",
+        display_label="Fixture Area",
+        canonical_alias_set_digest="sha256:" + "1" * 64,
+        parent_geography_digest="sha256:" + "2" * 64,
+        boundary_definition_version="fixture-boundary-v1",
+        boundary_digest=_D,
+        authoritative_boundary_source_digest="sha256:" + "3" * 64,
+        validity_interval_digest="sha256:" + "4" * 64,
+        overlap_assessment_digest="sha256:" + "5" * 64,
+        uncertainty_assessment_digest="sha256:" + "6" * 64,
+        provenance_digests=(_D,),
+        recorded_at=_AT,
     )
     unit = LocalityCoverageUnit(
         coverage_unit_id=_id(2),
@@ -150,6 +156,19 @@ def test_coverage_unit_identity_commits_every_qualified_scope_dimension() -> Non
         ("governing_evaluation_version_digest", "sha256:" + "f" * 64),
     ):
         assert replace(unit, **{field: value}).digest != unit.digest
+
+
+def test_locality_reference_identity_commits_boundary_ambiguity_dimensions() -> None:
+    reference, *_ = _chain()
+    for field, value in (
+        ("canonical_alias_set_digest", "sha256:" + "a" * 64),
+        ("parent_geography_digest", "sha256:" + "b" * 64),
+        ("authoritative_boundary_source_digest", "sha256:" + "c" * 64),
+        ("validity_interval_digest", "sha256:" + "d" * 64),
+        ("overlap_assessment_digest", "sha256:" + "e" * 64),
+        ("uncertainty_assessment_digest", "sha256:" + "f" * 64),
+    ):
+        assert replace(reference, **{field: value}).digest != reference.digest
 
 
 def test_proposal_requires_multiple_qualification_bases_and_full_assessment() -> None:
