@@ -22,7 +22,6 @@ from newsroom.increment8.operations import (
     build_capacity_evidence,
     build_operational_profile,
     build_retry_finding,
-    close_lease,
     enqueue_due_work,
     handoff_operational_status,
     quarantine_scope,
@@ -147,8 +146,13 @@ def test_lease_is_bounded_renewable_only_with_progress_and_append_only(
         lease, progress_digest="sha256:" + "4" * 64, renewed_at=_LATER
     )
     authority.append_lease(renewed)
-    released = close_lease(renewed, LeaseState.RELEASED)
-    authority.append_lease(released)
+    released, completed = authority.close_lease_and_transition(
+        lease=renewed,
+        lease_state=LeaseState.RELEASED,
+        work_state=WorkState.COMPLETED,
+    )
+    assert released.payload["status"] == LeaseState.RELEASED.value
+    assert completed.payload["state"] == WorkState.COMPLETED.value
     assert authority.active_lease_count() == 0
     connection.close()
 

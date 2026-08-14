@@ -30,3 +30,4 @@ Fixture operational authority only. No production scheduler activation, live pro
 - Version-one DueWork is reconstructed as the exact canonical QUEUED origin; every LEASED state is rejected from the general append path.
 - Starvation fairness reserves at most one bounded catch-up slot for the oldest starved Routine item while retaining an Urgent item whenever the batch can contain both.
 - A DueWork transition out of LEASED is conditionally inserted only after every active lease for that work is closed; retry attempts therefore cannot leak host-concurrency slots.
+- Lease closure cannot be appended independently: the closure Version and matching COMPLETED, RETRY_PENDING or QUARANTINED DueWork Version are committed together in one transaction, eliminating the closed-lease/LEASED-work crash gap.

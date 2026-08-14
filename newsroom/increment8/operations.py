@@ -947,6 +947,10 @@ class OperationalAuthority:
             if previous is None or previous[0] != work.payload["previous_digest"]:
                 raise OperationalAuthorityError("work predecessor differs")
             retained = DueWork.from_canonical_bytes(bytes(previous[1]))
+            if retained.payload["state"] == WorkState.LEASED.value:
+                raise OperationalAuthorityError(
+                    "LEASED work must transition with lease closure"
+                )
             expected = transition_work(
                 retained,
                 state=WorkState(str(work.payload["state"])),
@@ -1174,11 +1178,125 @@ class OperationalAuthority:
                 > _dt(str(lease.payload["maximum_expires_at"]))
             ):
                 raise OperationalAuthorityError("lease renewal differs")
-        elif close_lease(retained, LeaseState(str(lease.payload["status"]))) != lease:
-            raise OperationalAuthorityError("lease close differs")
+        else:
+            raise OperationalAuthorityError(
+                "lease closure must include its work transition"
+            )
         self._insert(
             "INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", lease_values
         )
+
+    def close_lease_and_transition(
+        self,
+        *,
+        lease: WorkLease,
+        lease_state: LeaseState,
+        work_state: WorkState,
+    ) -> tuple[WorkLease, DueWork]:
+        """Atomically close an active lease and append its work transition."""
+
+        if lease_state not in {LeaseState.RELEASED, LeaseState.ORPHANED}:
+            raise OperationalAuthorityError("lease close state differs")
+        if work_state not in {
+            WorkState.RETRY_PENDING,
+            WorkState.COMPLETED,
+            WorkState.QUARANTINED,
+        }:
+            raise OperationalAuthorityError("lease work close state differs")
+        try:
+            checked_lease = WorkLease.from_canonical_bytes(lease.canonical_bytes)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise OperationalAuthorityError("lease is forged or non-canonical") from exc
+        if checked_lease != lease or lease.payload["status"] != LeaseState.ACTIVE.value:
+            raise OperationalAuthorityError("only an active canonical lease can close")
+        work_row = self._connection.execute(
+            "SELECT work_bytes FROM due_work WHERE work_id=? "
+            "ORDER BY state_version DESC LIMIT 1",
+            (lease.payload["work_id"],),
+        ).fetchone()
+        if work_row is None:
+            raise OperationalAuthorityError("lease work is absent")
+        retained_work = DueWork.from_canonical_bytes(bytes(work_row[0]))
+        if retained_work.payload["state"] != WorkState.LEASED.value:
+            raise OperationalAuthorityError("lease work is not LEASED")
+        closed = close_lease(checked_lease, lease_state)
+        transitioned = transition_work(retained_work, state=work_state)
+
+        def commit_close() -> None:
+            latest_lease_row = self._connection.execute(
+                "SELECT lease_bytes FROM work_leases WHERE lease_id=? "
+                "ORDER BY lease_version DESC LIMIT 1",
+                (lease.lease_id,),
+            ).fetchone()
+            latest_work_row = self._connection.execute(
+                "SELECT work_bytes FROM due_work WHERE work_id=? "
+                "ORDER BY state_version DESC LIMIT 1",
+                (retained_work.work_id,),
+            ).fetchone()
+            if latest_lease_row is None or latest_work_row is None:
+                raise OperationalAuthorityError("lease close authority is absent")
+            latest_lease = WorkLease.from_canonical_bytes(bytes(latest_lease_row[0]))
+            latest_work = DueWork.from_canonical_bytes(bytes(latest_work_row[0]))
+            if latest_lease != checked_lease or latest_work != retained_work:
+                raise OperationalAuthorityError("lease close authority changed")
+            if work_state is WorkState.RETRY_PENDING:
+                finding_row = self._connection.execute(
+                    "SELECT finding_bytes FROM retry_findings WHERE work_id=? "
+                    "AND attempt_number=?",
+                    (latest_work.work_id, latest_work.payload["attempt_count"]),
+                ).fetchone()
+                if finding_row is None:
+                    raise OperationalAuthorityError(
+                        "retry transition lacks its Finding"
+                    )
+                finding = RetryFinding.from_canonical_bytes(bytes(finding_row[0]))
+                if (
+                    finding.payload["work_digest"] != latest_work.digest
+                    or finding.payload["classification"]
+                    != RetryClassification.RETRYABLE.value
+                    or finding.payload["retry_exhausted"] is not False
+                    or finding.payload["next_due_at"] is None
+                ):
+                    raise OperationalAuthorityError("retry transition Finding differs")
+            self._connection.execute(
+                "INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    closed.lease_id,
+                    closed.payload["lease_version"],
+                    closed.canonical_bytes,
+                    closed.digest,
+                    closed.payload["work_id"],
+                    closed.payload["owner_digest"],
+                    closed.payload["progress_digest"],
+                    closed.payload["acquired_at"],
+                    closed.payload["expires_at"],
+                    closed.payload["maximum_expires_at"],
+                    closed.payload["status"],
+                    closed.payload["previous_digest"],
+                ),
+            )
+            self._connection.execute(
+                "INSERT INTO due_work VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    transitioned.work_id,
+                    transitioned.payload["state_version"],
+                    transitioned.canonical_bytes,
+                    transitioned.digest,
+                    transitioned.payload["profile_record_id"],
+                    transitioned.payload["logical_due_key"],
+                    transitioned.payload["scope_kind"],
+                    transitioned.payload["urgency"],
+                    transitioned.payload["state"],
+                    transitioned.payload["attempt_count"],
+                    transitioned.payload["due_at"],
+                    transitioned.payload["deadline_at"],
+                    transitioned.payload["previous_digest"],
+                    transitioned.payload["authority_version_digest"],
+                ),
+            )
+
+        self._write(commit_close)
+        return closed, transitioned
 
     def append_retry_finding(self, finding: RetryFinding) -> None:
         if (
