@@ -261,6 +261,11 @@ def test_parser_rejects_noncanonical_duplicate_unknown_and_oversized_values() ->
     )
     with pytest.raises(AgendaContractError, match="duplicate object name"):
         PlannedAgendaVersion.from_canonical_bytes(duplicate)
+    oversized_integer = version.canonical_bytes.replace(
+        b'"version_ordinal":1', b'"version_ordinal":' + b"9" * 5_000
+    )
+    with pytest.raises(AgendaContractError, match="canonical JSON"):
+        PlannedAgendaVersion.from_canonical_bytes(oversized_integer)
     unknown = json.loads(version.canonical_bytes)
     unknown["creates_candidate"] = False
     with pytest.raises(AgendaContractError, match="fields are not exact"):

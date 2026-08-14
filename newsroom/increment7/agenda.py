@@ -218,6 +218,7 @@ def _load(raw: bytes, schema: str, fields: tuple[str, ...]) -> dict[str, object]
         json.JSONDecodeError,
         CanonicalizationError,
         RecursionError,
+        ValueError,
     ) as exc:
         raise AgendaContractError("Agenda bytes are not canonical JSON") from exc
     if raw != canonical:
