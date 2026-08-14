@@ -1,7 +1,7 @@
 # Increment 8B corrective metrics authority
 
-Issue: #464  
-Parent: #148  
+Issue: #464
+Parent: #148
 Dependency: #463
 
 ## Corrected authority boundary
