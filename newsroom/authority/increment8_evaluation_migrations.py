@@ -116,6 +116,15 @@ def require_increment8_evaluation_backup(
 
 
 _D = "substr({0},1,7)='sha256:' AND length({0})=71 AND substr({0},8) NOT GLOB '*[^0-9a-f]*'"
+INCREMENT8_EVALUATION_TABLES = (
+        "evaluation_plans",
+        "evaluation_epochs",
+        "evaluation_runs",
+        "evaluation_cases",
+        "evaluation_labels",
+        "evaluation_adjudications",
+        "evaluation_release_decisions",
+)
 INCREMENT8_EVALUATION_MIGRATION_STATEMENTS: tuple[str, ...] = (
     f"""CREATE TABLE evaluation_plans(
         plan_id TEXT PRIMARY KEY,
@@ -202,17 +211,11 @@ INCREMENT8_EVALUATION_MIGRATION_STATEMENTS: tuple[str, ...] = (
     ) STRICT""",
     *tuple(
         f"CREATE TRIGGER immutable_{table} BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT,'immutable Increment 8 evaluation record'); END"
-        for table in (
-            "evaluation_plans", "evaluation_epochs", "evaluation_runs", "evaluation_cases",
-            "evaluation_labels", "evaluation_adjudications", "evaluation_release_decisions",
-        )
+        for table in INCREMENT8_EVALUATION_TABLES
     ),
     *tuple(
         f"CREATE TRIGGER retained_{table} BEFORE DELETE ON {table} BEGIN SELECT RAISE(ABORT,'retained Increment 8 evaluation record'); END"
-        for table in (
-            "evaluation_plans", "evaluation_epochs", "evaluation_runs", "evaluation_cases",
-            "evaluation_labels", "evaluation_adjudications", "evaluation_release_decisions",
-        )
+        for table in INCREMENT8_EVALUATION_TABLES
     ),
 )
 INCREMENT8_EVALUATION_MIGRATION_CHECKSUM = digest_canonical({
