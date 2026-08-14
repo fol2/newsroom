@@ -173,6 +173,11 @@ PINNED_MIGRATION_HISTORY: tuple[HistoryRow, ...] = (
         "evaluation_feedback_authority_v25",
         "sha256:59fe3bd40a2e22e874b4e5b02448501deffc23597e11b442e35b18e39ead0496",
     ),
+    (
+        26,
+        "planned_agenda_authority_v26",
+        "sha256:6abc2fa425e1a76bef6a9ad016d65a221670d6857064f356e8603baa8148b531",
+    ),
 )
 
 

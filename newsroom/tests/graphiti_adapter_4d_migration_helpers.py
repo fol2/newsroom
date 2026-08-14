@@ -49,6 +49,55 @@ def drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
 
 def _drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
     """Remove an exact, empty v23 lineage schema atomically."""
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) == 26:
+        from newsroom.authority.planned_agenda_migrations import (
+            PLANNED_AGENDA_MIGRATION_CHECKSUM,
+            PLANNED_AGENDA_MIGRATION_NAME,
+            PLANNED_AGENDA_MIGRATION_STATEMENTS,
+        )
+
+        def normalise_agenda_sql(value: str) -> str:
+            return " ".join(value.split()).replace(" IF NOT EXISTS", "")
+
+        agenda_tables = (
+            "planned_agenda_items",
+            "planned_agenda_versions",
+            "planned_agenda_heads",
+            "planned_agenda_resolutions",
+        )
+        objects = connection.execute(
+            "SELECT type,name,sql FROM sqlite_master WHERE tbl_name IN (?,?,?,?) "
+            "AND type IN ('table','trigger')",
+            agenda_tables,
+        ).fetchall()
+        if connection.execute(
+            "SELECT name,checksum FROM authority_migrations WHERE version=26"
+        ).fetchone() != (
+            PLANNED_AGENDA_MIGRATION_NAME,
+            PLANNED_AGENDA_MIGRATION_CHECKSUM,
+        ) or {normalise_agenda_sql(str(row[2])) for row in objects} != {
+            normalise_agenda_sql(statement)
+            for statement in PLANNED_AGENDA_MIGRATION_STATEMENTS
+        }:
+            raise sqlite3.DatabaseError(
+                "downgrade requires exact empty v26 Planned Agenda schema"
+            )
+        for table in agenda_tables:
+            if connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone() != (0,):
+                raise sqlite3.DatabaseError("v26 Planned Agenda tables must be empty")
+        guard = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='immutable_authority_migrations_delete'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+        for object_type, name, _ in objects:
+            if object_type == "trigger":
+                connection.execute(f'DROP TRIGGER "{name}"')
+        for table in reversed(agenda_tables):
+            connection.execute(f'DROP TABLE "{table}"')
+        connection.execute("DELETE FROM authority_migrations WHERE version=26")
+        connection.execute(guard)
+        connection.execute("PRAGMA user_version=25")
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) == 25:
         from newsroom.authority.evaluation_feedback_migrations import (
             EVALUATION_FEEDBACK_MIGRATION_CHECKSUM,
