@@ -675,6 +675,11 @@ def validate_coverage_chain(
     ):
         raise CoverageContractError("Coverage chain requires exact records")
     observation_digests = {item.reference_digest for item in audit.observations}
+    unobserved_expectations = {
+        item.reference_digest
+        for item in audit.observations
+        if item.kind is CoverageObservationKind.EXPECTATION_NOT_OBSERVED
+    }
     if (
         audit.comparator_id != comparator.comparator_id
         or audit.comparator_digest != comparator.digest
@@ -688,6 +693,9 @@ def validate_coverage_chain(
         )
         or not set(gap.missing_expectation_digests).issubset(
             comparator.expectation_reference_digests
+        )
+        or not set(gap.missing_expectation_digests).issubset(
+            unobserved_expectations
         )
         or not set(gap.limitation_codes).issuperset(audit.limitation_codes)
         or decision.gap_id != gap.gap_id
@@ -708,6 +716,12 @@ def validate_coverage_chain(
         is not CoverageGapDisposition.DEFERRED_INSUFFICIENT_BASIS
     ):
         raise CoverageContractError("deferred Gap received a conclusive disposition")
+    if (
+        gap.gap_state is not CoverageGapState.DEFERRED_ASSESSMENT
+        and decision.disposition
+        is CoverageGapDisposition.DEFERRED_INSUFFICIENT_BASIS
+    ):
+        raise CoverageContractError("non-deferred Gap received a deferred disposition")
     if previous_decision is None:
         if decision.supersedes_decision_digest is not None:
             raise CoverageContractError("initial Gap Decision supersedes another")

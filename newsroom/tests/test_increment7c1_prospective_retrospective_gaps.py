@@ -189,6 +189,16 @@ def test_deferred_assessment_cannot_receive_conclusive_gap_disposition() -> None
                 deferred, disposition=CoverageGapDisposition.CONFIRMED_BEST_EFFORT_GAP
             ),
         )
+    with pytest.raises(CoverageContractError, match="non-deferred"):
+        validate_coverage_chain(
+            comparator,
+            audit,
+            gap,
+            replace(
+                decision,
+                disposition=CoverageGapDisposition.DEFERRED_INSUFFICIENT_BASIS,
+            ),
+        )
 
 
 def test_isolated_systemic_and_limitation_boundaries_fail_closed() -> None:
@@ -210,6 +220,19 @@ def test_isolated_systemic_and_limitation_boundaries_fail_closed() -> None:
             audit,
             gap,
             replace(decision, acknowledged_limitation_codes=("OTHER_LIMIT",)),
+        )
+    unrelated_observation = replace(
+        audit.observations[0],
+        kind=CoverageObservationKind.EDITORIAL_RECORD,
+    )
+    unrelated_audit = replace(audit, observations=(unrelated_observation,))
+    unrelated_gap = replace(gap, audit_digest=unrelated_audit.digest)
+    with pytest.raises(CoverageContractError, match="lineage"):
+        validate_coverage_chain(
+            comparator,
+            unrelated_audit,
+            unrelated_gap,
+            replace(decision, gap_digest=unrelated_gap.digest),
         )
 
 
