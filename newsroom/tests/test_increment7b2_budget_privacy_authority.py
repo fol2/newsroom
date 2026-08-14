@@ -387,6 +387,35 @@ def test_concurrent_first_attempt_has_one_cas_winner(tmp_path: Path) -> None:
     finally:
         connection.close()
 
+    ordered_database = tmp_path / "out-of-order.sqlite3"
+    ordered = open_bounded_search_authority(ordered_database, applied_at=_AT)
+    purpose = _purpose()
+    request = replace(
+        _request(purpose),
+        request_id=_id(40),
+        budget_reservation_digest="sha256:" + "4" * 64,
+        limits=replace(_request(purpose).limits, max_concurrent_attempts=2),
+    )
+    first = _attempt(request, 41, 1)
+    second = _attempt(request, 42, 2)
+    ordered.record_purpose(purpose.canonical_bytes)
+    ordered.record_request(request.canonical_bytes)
+    ordered.record_attempt(first.canonical_bytes)
+    ordered.record_attempt(second.canonical_bytes)
+    second_outcome = replace(
+        _outcome(second, 43, 40),
+        completed_at="2026-08-14T00:00:03.000000Z",
+    )
+    first_outcome = replace(
+        _outcome(first, 44, 40),
+        completed_at="2026-08-14T00:00:04.000000Z",
+    )
+    ordered.record_outcome(second_outcome.canonical_bytes)
+    ordered.record_outcome(first_outcome.canonical_bytes)
+    assert ordered.budget(request.request_id).provider_calls == 2
+    assert ordered.budget(request.request_id).gross_cost_microunits == 80
+    ordered.close()
+
 
 def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> None:
     database = tmp_path / "tamper.sqlite3"
@@ -399,6 +428,14 @@ def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> No
                 "UPDATE search_requests SET query_privacy='OTHER' WHERE request_id=?",
                 (records[1].request_id,),
             )
+        attacker.execute("DROP TRIGGER immutable_search_budget_ledger")
+        attacker.execute(
+            "UPDATE search_budget_ledger SET cumulative_gross_cost_microunits=1 "
+            "WHERE request_id=?",
+            (records[1].request_id,),
+        )
+        with pytest.raises(SearchAuthorityError, match="retained gross budget"):
+            authority.budget(records[1].request_id)
         attacker.execute("DROP TRIGGER immutable_search_requests")
         attacker.execute(
             "UPDATE search_requests SET query_privacy='OTHER' WHERE request_id=?",
@@ -409,3 +446,5 @@ def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> No
     finally:
         attacker.close()
         authority.close()
+    with pytest.raises(SearchAuthorityError, match="schema differs"):
+        open_bounded_search_authority(database, applied_at=_AT)

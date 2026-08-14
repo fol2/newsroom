@@ -14,9 +14,12 @@ from pathlib import Path
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.migrations import (
+    EXPECTED_MIGRATION_HISTORY,
+    EXPECTED_SCHEMA_FINGERPRINT,
     SCHEMA_VERSION,
     apply_pending_migrations,
     prepare_pending_migration_backup,
+    schema_fingerprint,
 )
 from newsroom.increment7.search import (
     SearchAttempt,
@@ -242,16 +245,48 @@ class BoundedSearchReadPort(_NoEffect):
     @_total("Search budget replay failed")
     def budget(self, request_id: str) -> SearchBudgetSnapshot:
         request = self.request(request_id)
-        row = self._connection.execute(
-            "SELECT cumulative_provider_calls,cumulative_results,"
-            "cumulative_gross_cost_microunits,ledger_digest FROM search_budget_ledger "
-            "WHERE request_id=? ORDER BY cumulative_provider_calls DESC LIMIT 1",
+        rows = self._connection.execute(
+            "SELECT outcome_id,request_id,attempt_id,gross_cost_microunits,"
+            "cumulative_provider_calls,cumulative_results,"
+            "cumulative_gross_cost_microunits,ledger_digest,recorded_at "
+            "FROM search_budget_ledger WHERE request_id=? "
+            "ORDER BY cumulative_provider_calls",
             (request_id,),
-        ).fetchone()
-        snapshot = (
-            SearchBudgetSnapshot(request_id, 0, 0, 0, None)
-            if row is None
-            else SearchBudgetSnapshot(request_id, row[0], row[1], row[2], row[3])
+        ).fetchall()
+        results = 0
+        cost = 0
+        ledger_digest = None
+        for calls, row in enumerate(rows, 1):
+            outcome = self.outcome(str(row[0]))
+            attempt = self.attempt(outcome.attempt_id)
+            results += outcome.result_count
+            cost += outcome.gross_cost_microunits
+            expected_digest = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "attempt_id": attempt.attempt_id,
+                        "cumulative_gross_cost_microunits": cost,
+                        "cumulative_provider_calls": calls,
+                        "cumulative_results": results,
+                        "outcome_digest": outcome.digest,
+                        "request_id": request.request_id,
+                    }
+                )
+            )
+            if (
+                row[1] != request.request_id
+                or row[2] != attempt.attempt_id
+                or row[3] != outcome.gross_cost_microunits
+                or row[4] != calls
+                or row[5] != results
+                or row[6] != cost
+                or row[7] != expected_digest
+                or row[8] != outcome.completed_at
+            ):
+                raise SearchAuthorityError("Search retained gross budget differs")
+            ledger_digest = expected_digest
+        snapshot = SearchBudgetSnapshot(
+            request_id, len(rows), results, cost, ledger_digest
         )
         if (
             snapshot.provider_calls > request.limits.max_provider_calls
@@ -432,8 +467,7 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                 results = previous.result_count + record.result_count
                 cost = previous.gross_cost_microunits + record.gross_cost_microunits
                 if (
-                    attempt.attempt_ordinal != calls
-                    or calls > request.limits.max_provider_calls
+                    calls > request.limits.max_provider_calls
                     or results > request.limits.max_results
                     or cost > request.limits.max_gross_cost_microunits
                 ):
@@ -600,8 +634,13 @@ def open_bounded_search_authority(
         if version < SCHEMA_VERSION:
             prepare_pending_migration_backup(connection)
         apply_pending_migrations(connection, applied_at=applied_at)
+        history = connection.execute(
+            "SELECT version,name,checksum FROM authority_migrations ORDER BY version"
+        ).fetchall()
         if (
             connection.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION
+            or history != list(EXPECTED_MIGRATION_HISTORY)
+            or schema_fingerprint(connection) != EXPECTED_SCHEMA_FINGERPRINT
             or connection.execute("PRAGMA foreign_key_check").fetchall()
             or connection.execute("PRAGMA quick_check").fetchone()[0] != "ok"
         ):
