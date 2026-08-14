@@ -12,6 +12,7 @@ from newsroom.increment8.evaluation import (
     EvaluationCase,
     ReleaseEvidenceDecision,
     ReleaseVerdict,
+    ReviewLabel,
     ReviewRole,
     RightsStatus,
     RunKind,
@@ -67,6 +68,12 @@ def _populate(
     positive_changed: bool = False,
     ordinary_second_reviews: bool = True,
 ):
+    from newsroom.increment8.metrics import reviewed_case_assessment_label
+    from newsroom.tests.test_increment8b_metrics import (
+        _CASE_RATE_NAMES,
+        _TRIAGE_NAMES,
+    )
+
     geographies = ("GLOBAL", "HONG_KONG", "UNITED_KINGDOM")
     languages = ("EN_GB", "MIXED_EN_GB_ZH_HANT_HK", "ZH_HANT_HK")
     cases = []
@@ -102,12 +109,20 @@ def _populate(
         secondary_identity = (
             REVIEWER_2 if primary_identity == REVIEWER_1 else REVIEWER_1
         )
+        assessment_label = reviewed_case_assessment_label(
+            case=case,
+            metric_eligible={name: True for name in _CASE_RATE_NAMES},
+            metric_success={name: True for name in _CASE_RATE_NAMES},
+            triage_eligible={name: True for name in _TRIAGE_NAMES},
+            triage_error={name: False for name in _TRIAGE_NAMES},
+            slice_success=True,
+        )
         authority.record_label(
             build_review_label(
                 case=case,
                 reviewer_identity_digest=primary_identity,
                 role=ReviewRole.PRIMARY,
-                label="expected-route",
+                label=assessment_label,
                 blinded=True,
                 recorded_at=T3,
             )
@@ -118,7 +133,7 @@ def _populate(
                     case=case,
                     reviewer_identity_digest=secondary_identity,
                     role=ReviewRole.SECONDARY,
-                    label="expected-route",
+                    label=assessment_label,
                     blinded=True,
                     recorded_at=T3,
                 )
@@ -130,23 +145,43 @@ def _populate(
 
 def _pass_candidate(authority: EvaluationAuthority, run):
     manifest = authority.evidence_manifest_digest(run.run_id)
-    slice_counts = {
-        "GEOGRAPHY_GLOBAL": 40,
-        "GEOGRAPHY_HONG_KONG": 40,
-        "GEOGRAPHY_UNITED_KINGDOM": 40,
-        "LANGUAGE_EN_GB": 40,
-        "LANGUAGE_MIXED_EN_GB_ZH_HANT_HK": 40,
-        "LANGUAGE_ZH_HANT_HK": 40,
-        "SOURCE_MULTI_DOMAIN_CORROBORATED": 120,
-        "TRANSITION_FAILURE_HEAVY": 120,
-        "URGENCY_URGENT": 24,
-    }
+    from newsroom.increment8.metrics import ReviewedCaseOutcome
+    from newsroom.tests.test_increment8b_metrics import (
+        _CASE_RATE_NAMES,
+        _TRIAGE_NAMES,
+    )
+
+    rows = authority._connection.execute(  # noqa: SLF001 - authority fixture proof
+        "SELECT c.case_bytes,p.label_bytes,(SELECT s.label_bytes FROM evaluation_labels s "
+        "WHERE s.case_id=c.case_id AND s.review_role='SECONDARY') "
+        "FROM evaluation_cases c JOIN evaluation_labels p ON p.case_id=c.case_id "
+        "WHERE c.run_id=? AND p.review_role='PRIMARY' ORDER BY c.case_id",
+        (run.run_id,),
+    ).fetchall()
+    outcomes = tuple(
+        ReviewedCaseOutcome.build(
+            case=EvaluationCase.from_canonical_bytes(bytes(case_raw)),
+            review_label=ReviewLabel.from_canonical_bytes(bytes(label_raw)),
+            secondary_review_label=(
+                None
+                if secondary_raw is None
+                else ReviewLabel.from_canonical_bytes(bytes(secondary_raw))
+            ),
+            metric_eligible={name: True for name in _CASE_RATE_NAMES},
+            metric_success={name: True for name in _CASE_RATE_NAMES},
+            triage_eligible={name: True for name in _TRIAGE_NAMES},
+            triage_error={name: False for name in _TRIAGE_NAMES},
+            slice_success=True,
+        )
+        for case_raw, label_raw, secondary_raw in rows
+    )
+    retained_outcomes = outcomes or None
     return build_release_decision(
         run=run,
         report_canonical_bytes=_report_bytes(
             run,
             evidence_manifest_digest=manifest,
-            slice_counts=slice_counts,
+            case_outcomes=retained_outcomes,
         ),
         evidence_manifest_digest=manifest,
         verdict=ReleaseVerdict.PASS,
@@ -340,11 +375,53 @@ def test_release_decision_seals_the_complete_evidence_manifest(tmp_path: Path) -
             prospective=True,
         )
         authority.register_case(case)
+        from newsroom.increment8.metrics import (
+            ReviewedCaseOutcome,
+            reviewed_case_assessment_label,
+        )
+        from newsroom.tests.test_increment8b_metrics import (
+            _CASE_RATE_NAMES,
+            _TRIAGE_NAMES,
+        )
+
+        metric_eligible = {name: True for name in _CASE_RATE_NAMES}
+        metric_success = {name: True for name in _CASE_RATE_NAMES}
+        metric_success["candidate_precision"] = False
+        triage_eligible = {name: True for name in _TRIAGE_NAMES}
+        triage_error = {name: False for name in _TRIAGE_NAMES}
+        primary = build_review_label(
+            case=case,
+            reviewer_identity_digest=REVIEWER_1,
+            role=ReviewRole.PRIMARY,
+            label=reviewed_case_assessment_label(
+                case=case,
+                metric_eligible=metric_eligible,
+                metric_success=metric_success,
+                triage_eligible=triage_eligible,
+                triage_error=triage_error,
+                slice_success=True,
+            ),
+            blinded=True,
+            recorded_at=T3,
+        )
+        authority.record_label(primary)
+        outcome = ReviewedCaseOutcome.build(
+            case=case,
+            review_label=primary,
+            metric_eligible=metric_eligible,
+            metric_success=metric_success,
+            triage_eligible=triage_eligible,
+            triage_error=triage_error,
+            slice_success=True,
+        )
         manifest = authority.evidence_manifest_digest(run.run_id)
         decision = build_release_decision(
             run=run,
             report_canonical_bytes=_report_bytes(
-                run, status="FAIL", evidence_manifest_digest=manifest
+                run,
+                status="FAIL",
+                evidence_manifest_digest=manifest,
+                case_outcomes=(outcome,),
             ),
             evidence_manifest_digest=manifest,
             verdict=ReleaseVerdict.INCONCLUSIVE,
@@ -393,7 +470,7 @@ def test_positive_changed_only_exposure_fails_frozen_strata(tmp_path: Path) -> N
     connection, authority, run = _registered(tmp_path)
     try:
         _populate(authority, run, positive_changed=True)
-        with pytest.raises(EvaluationAuthorityError, match="stratum"):
+        with pytest.raises(EvaluationAuthorityError, match="retained Metric Report"):
             authority.decide_release(_pass_candidate(authority, run))
     finally:
         connection.close()
@@ -403,7 +480,7 @@ def test_all_unreviewable_exposure_cannot_vacuously_pass(tmp_path: Path) -> None
     connection, authority, run = _registered(tmp_path)
     try:
         _populate(authority, run, reviewable=False)
-        with pytest.raises(EvaluationAuthorityError, match="reviewable exposure"):
+        with pytest.raises(EvaluationAuthorityError, match="outcomes differ"):
             authority.decide_release(_pass_candidate(authority, run))
     finally:
         connection.close()
@@ -413,7 +490,7 @@ def test_unreviewable_cases_do_not_fill_reviewed_exposure(tmp_path: Path) -> Non
     connection, authority, run = _registered(tmp_path)
     try:
         _populate(authority, run, reviewable_count=2)
-        with pytest.raises(EvaluationAuthorityError, match="reviewed qualification"):
+        with pytest.raises(EvaluationAuthorityError, match="retained Metric Report"):
             authority.decide_release(_pass_candidate(authority, run))
     finally:
         connection.close()
@@ -505,6 +582,31 @@ def test_report_is_retained_and_reconstructed_not_a_caller_boolean(
         contradictory = ReleaseEvidenceDecision.build(contradictory_payload)
         with pytest.raises(EvaluationAuthorityError, match="decision gates"):
             authority.decide_release(contradictory)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("verdict", [ReleaseVerdict.FAIL, ReleaseVerdict.INCONCLUSIVE])
+def test_non_pass_decisions_reject_foreign_reviewed_case_evidence(
+    tmp_path: Path, verdict: ReleaseVerdict
+) -> None:
+    connection, authority, run = _registered(tmp_path / verdict.value.lower())
+    try:
+        manifest = authority.evidence_manifest_digest(run.run_id)
+        report_raw = _report_bytes(
+            run, status="FAIL", evidence_manifest_digest=manifest
+        )
+        decision = build_release_decision(
+            run=run,
+            report_canonical_bytes=report_raw,
+            evidence_manifest_digest=manifest,
+            verdict=verdict,
+            owner_identity_digest=OWNER,
+            decided_at=T5,
+            early_stopped=True,
+        )
+        with pytest.raises(EvaluationAuthorityError, match="outcomes differ"):
+            authority.decide_release(decision)
     finally:
         connection.close()
 
