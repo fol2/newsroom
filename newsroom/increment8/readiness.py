@@ -33,7 +33,7 @@ PRIOR_READINESS_DIGEST = (
     "sha256:52ad9f2d6022e95d738fe24913db2f379a91f6c945319db613b1b50cdea07d4c"
 )
 EXPECTED_READINESS_DIGEST = (
-    "sha256:11fc66cb28b1cbe573b7148e8bafa5321dcf1ac676d114c1022fe2223af87c52"
+    "sha256:5fd68e242913561c812a443815bb67b3a7e0faa00ec4e1de657fe38c71078685"
 )
 
 EXPECTED_CORRECTION_BASE = {
@@ -46,6 +46,15 @@ EXPECTED_CORRECTION_BASE = {
     "migration_history_digest": (
         "sha256:5a48fd76cd11f266e19a4b48174d0c009f320a8d00d3eeb281a558fc2d561910"
     ),
+}
+
+EXPECTED_CORRECTIVE_STATUS = {
+    "blocking_issues": (463, 464, 465, 466, 467, 428, 468),
+    "increment8_completion_authorised": False,
+    "legacy_v1_results_are_qualification_evidence": False,
+    "operational_admission_authorised": False,
+    "qualification_evidence_acceptance_authorised": False,
+    "sole_active_coding_issue": 462,
 }
 
 EXPECTED_REQUIRED_SLICE_MANIFEST = (
@@ -229,6 +238,7 @@ class Increment8ReadinessContract:
     correction_base_schema_version: int
     correction_base_schema_fingerprint: str
     correction_base_migration_history_digest: str
+    corrective_status: Mapping[str, object]
     effective_when: str
     authority: Mapping[str, object]
     version_manifest: Mapping[str, object]
@@ -406,6 +416,8 @@ def _validate_contract(contract: Increment8ReadinessContract) -> None:
     }
     if correction_base != EXPECTED_CORRECTION_BASE:
         raise Increment8ReadinessError("corrective base differs")
+    if contract.corrective_status != EXPECTED_CORRECTIVE_STATUS:
+        raise Increment8ReadinessError("corrective qualification blockade differs")
     if tuple(item.issue_number for item in contract.allocations) != tuple(
         range(462, 469)
     ):
@@ -583,6 +595,7 @@ def load_increment8_readiness_contract(path: Path) -> Increment8ReadinessContrac
                 "accepted_base",
                 "supersedes",
                 "correction_base",
+                "corrective_status",
                 "effective_when",
                 "authority",
                 "version_manifest",
@@ -632,6 +645,7 @@ def load_increment8_readiness_contract(path: Path) -> Increment8ReadinessContrac
             },
             "correction_base",
         )
+        corrective_status = _mapping(payload["corrective_status"], "corrective_status")
         raw_allocations = payload["allocations"]
         raw_waves = payload["parallel_waves"]
         if not isinstance(raw_allocations, list) or not isinstance(raw_waves, list):
@@ -680,6 +694,9 @@ def load_increment8_readiness_contract(path: Path) -> Increment8ReadinessContrac
             correction_base_migration_history_digest=validate_sha256_digest(
                 str(correction_base["migration_history_digest"]),
                 field="correction_base.migration_history_digest",
+            ),
+            corrective_status=_frozen_mapping(
+                corrective_status, "corrective_status"
             ),
             effective_when=str(payload["effective_when"]),
             authority=_frozen_mapping(payload["authority"], "authority"),

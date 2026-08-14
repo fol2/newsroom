@@ -177,6 +177,14 @@ def test_corrective_contract_is_additive_and_preserves_the_reviewed_v1_record() 
     )
     assert "FROZEN_SLICE_AND_STRATUM_POLICY" in allocation.interface_ownership
     assert "MIGRATION_HISTORY_POLICY" in allocation.interface_ownership
+    assert readiness.corrective_status == {
+        "blocking_issues": (463, 464, 465, 466, 467, 428, 468),
+        "increment8_completion_authorised": False,
+        "legacy_v1_results_are_qualification_evidence": False,
+        "operational_admission_authorised": False,
+        "qualification_evidence_acceptance_authorised": False,
+        "sole_active_coding_issue": 462,
+    }
 
 
 def test_all_110_increment8_requirements_have_one_owner() -> None:

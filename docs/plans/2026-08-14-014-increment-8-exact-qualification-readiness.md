@@ -21,6 +21,13 @@ retains the exact reviewed v1 bytes and their
 `sha256:52ad9f2d6022e95d738fe24913db2f379a91f6c945319db613b1b50cdea07d4c`
 identity rather than rewriting that earlier decision.
 
+The corrective record is a planning authority, not qualification evidence. It
+sets Increment 8 completion, legacy-v1 result acceptance, qualification-result
+acceptance and Operational Admission authority to false while #463, #464,
+#465, #466, #467, #428 and #468 remain corrective blockers. Consequently the
+retained v1 implementation may be used as a correction base, but none of its
+existing PASS-shaped objects is accepted as qualification or admission proof.
+
 The record assigns each of the 110 Increment 8 requirements exactly once to
 8A–8F.  It also makes #428 an explicit predecessor of 8F so an observed current
 Handoff value can never be represented as its original registration value.
