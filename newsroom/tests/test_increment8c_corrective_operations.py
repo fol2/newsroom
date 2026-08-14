@@ -8,16 +8,19 @@ import pytest
 
 from newsroom.increment8 import operations
 from newsroom.increment8.operations import (
+    LeaseState,
     OperationalAuthority,
     OperationalAuthorityError,
     QuarantineRecord,
     QuarantineState,
     RetryClassification,
     Urgency,
+    WorkLease,
     WorkState,
     acquire_lease,
     build_operational_profile,
     build_retry_finding,
+    close_lease,
     enqueue_due_work,
     quarantine_scope,
     transition_work,
@@ -58,6 +61,19 @@ def _commit_lease(authority: OperationalAuthority, work, *, acquired_at: str = _
     )
 
 
+def _close_active(authority: OperationalAuthority, work_id: str) -> None:
+    row = authority._connection.execute(
+        "SELECT l.lease_bytes FROM work_leases l WHERE l.work_id=? "
+        "AND l.lease_version=(SELECT MAX(x.lease_version) FROM work_leases x "
+        "WHERE x.lease_id=l.lease_id) AND l.status='ACTIVE' "
+        "ORDER BY l.acquired_at DESC,l.lease_id LIMIT 1",
+        (work_id,),
+    ).fetchone()
+    assert row is not None
+    lease = WorkLease.from_canonical_bytes(bytes(row[0]))
+    authority.append_lease(close_lease(lease, LeaseState.RELEASED))
+
+
 def test_retry_uses_latest_work_version_and_exact_next_due_at(tmp_path) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)
@@ -75,6 +91,9 @@ def test_retry_uses_latest_work_version_and_exact_next_due_at(tmp_path) -> None:
     )
     authority.append_retry_finding(first_finding)
     retry_once = transition_work(leased_once, state=WorkState.RETRY_PENDING)
+    with pytest.raises(OperationalAuthorityError, match="active lease remains"):
+        authority.append_work(retry_once)
+    _close_active(authority, leased_once.work_id)
     authority.append_work(retry_once)
 
     assert authority.due_work(_T1) == ()
@@ -104,6 +123,7 @@ def test_retry_uses_latest_work_version_and_exact_next_due_at(tmp_path) -> None:
         failed_at=_T2,
     )
     authority.append_retry_finding(second_finding)
+    _close_active(authority, leased_twice.work_id)
     retry_twice = transition_work(leased_twice, state=WorkState.RETRY_PENDING)
     authority.append_work(retry_twice)
 
@@ -128,6 +148,7 @@ def test_retry_attempts_cannot_jump_or_enter_pending_without_finding(tmp_path) -
     with pytest.raises(OperationalAuthorityError, match="lease acquisition"):
         authority.append_work(direct_lease_state)
     leased = _commit_lease(authority, queued)
+    _close_active(authority, leased.work_id)
     retry_pending = transition_work(leased, state=WorkState.RETRY_PENDING)
     with pytest.raises(OperationalAuthorityError, match="lacks its Finding"):
         authority.append_work(retry_pending)
@@ -151,6 +172,7 @@ def test_terminal_retry_finding_cannot_leave_active_retry_pending_work(
         failed_at=_AT,
     )
     authority.append_retry_finding(terminal)
+    _close_active(authority, leased.work_id)
     retry_pending = transition_work(leased, state=WorkState.RETRY_PENDING)
     with pytest.raises(OperationalAuthorityError, match="Finding differs"):
         authority.append_work(retry_pending)
@@ -183,6 +205,7 @@ def test_retry_finding_rechecks_latest_work_inside_serialised_insert(
         nonlocal advanced
         if not advanced and sql.startswith("INSERT INTO retry_findings"):
             advanced = True
+            _close_active(competing, leased.work_id)
             competing.append_work(completed)
         return original_insert(self, sql, values)
 

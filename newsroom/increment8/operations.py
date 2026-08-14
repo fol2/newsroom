@@ -1009,7 +1009,26 @@ class OperationalAuthority:
                     "queue capacity or urgent reserve is exhausted"
                 )
             return
-        self._insert("INSERT INTO due_work VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
+        inserted = self._insert(
+            "INSERT INTO due_work SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE "
+            "EXISTS(SELECT 1 FROM due_work d WHERE d.work_id=? "
+            "AND d.work_digest=? AND d.state_version=(SELECT MAX(x.state_version) "
+            "FROM due_work x WHERE x.work_id=d.work_id)) AND "
+            "(? != 'LEASED' OR NOT EXISTS(SELECT 1 FROM work_leases l "
+            "WHERE l.work_id=? AND l.lease_version=(SELECT MAX(x.lease_version) "
+            "FROM work_leases x WHERE x.lease_id=l.lease_id) AND l.status='ACTIVE'))",
+            (
+                *values,
+                retained.work_id,
+                retained.digest,
+                retained.payload["state"],
+                retained.work_id,
+            ),
+        )
+        if inserted != 1:
+            raise OperationalAuthorityError(
+                "work predecessor changed or active lease remains"
+            )
 
     def append_lease(self, lease: WorkLease) -> None:
         if (

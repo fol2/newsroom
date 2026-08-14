@@ -29,3 +29,4 @@ Fixture operational authority only. No production scheduler activation, live pro
 - Terminal retry Findings cannot create RETRY_PENDING work, and Finding insertion rechecks latest-work identity inside its serialised statement.
 - Version-one DueWork is reconstructed as the exact canonical QUEUED origin; every LEASED state is rejected from the general append path.
 - Starvation fairness reserves at most one bounded catch-up slot for the oldest starved Routine item while retaining an Urgent item whenever the batch can contain both.
+- A DueWork transition out of LEASED is conditionally inserted only after every active lease for that work is closed; retry attempts therefore cannot leak host-concurrency slots.
