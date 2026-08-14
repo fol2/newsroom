@@ -761,6 +761,12 @@ def build_metric_report(
     )
     if len(deviations) != len(set(deviations)):
         raise MetricReportError("deviation digests must be unique")
+    sampling_digest = _digest(sampling_manifest_digest, "sampling_manifest_digest")
+    label_digest = _digest(label_manifest_digest, "label_manifest_digest")
+    if sampling_digest != label_digest:
+        raise MetricReportError(
+            "sampling and label evidence must share one authority manifest"
+        )
     payload: dict[str, object] = {
         "run_id": run.run_id,
         "run_digest": run.digest,
@@ -789,12 +795,8 @@ def build_metric_report(
         "ablation_evidence": [_embedded(item.canonical_bytes) for item in ablations],
         "metric_code_digest": _digest(metric_code_digest, "metric_code_digest"),
         "environment_digest": _digest(environment_digest, "environment_digest"),
-        "sampling_manifest_digest": _digest(
-            sampling_manifest_digest, "sampling_manifest_digest"
-        ),
-        "label_manifest_digest": _digest(
-            label_manifest_digest, "label_manifest_digest"
-        ),
+        "sampling_manifest_digest": sampling_digest,
+        "label_manifest_digest": label_digest,
         "deviation_digests": list(deviations),
         "metric_status": metric_status.value,
         "performance_status": performance_status.value,

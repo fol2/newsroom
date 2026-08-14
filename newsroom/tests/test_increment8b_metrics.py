@@ -178,7 +178,7 @@ def _report(**changes):
         "metric_code_digest": "sha256:" + "9" * 64,
         "environment_digest": "sha256:" + "a" * 64,
         "sampling_manifest_digest": "sha256:" + "b" * 64,
-        "label_manifest_digest": "sha256:" + "c" * 64,
+        "label_manifest_digest": "sha256:" + "b" * 64,
     }
     values.update(changes)
     return build_metric_report(**values)

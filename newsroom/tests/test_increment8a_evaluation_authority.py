@@ -93,9 +93,18 @@ def _facts(
 
 
 def _report_bytes(
-    run, *, status: str = "PASS", zero_failures: tuple[str, ...] = ()
+    run,
+    *,
+    status: str = "PASS",
+    zero_failures: tuple[str, ...] = (),
+    evidence_manifest_digest: str = D2,
+    slice_counts: dict[str, int] | None = None,
 ) -> bytes:
-    from newsroom.increment8.metrics import build_metric_report
+    from newsroom.increment8.metrics import (
+        REQUIRED_SLICES,
+        RequiredSliceResult,
+        build_metric_report,
+    )
     from newsroom.tests.test_increment8b_metrics import (
         _ablations,
         _contributions,
@@ -105,19 +114,31 @@ def _report_bytes(
         _zero,
     )
 
+    slices = (
+        _slices()
+        if slice_counts is None
+        else tuple(
+            RequiredSliceResult.build(
+                slice_id=name,
+                completed_cases=slice_counts[name],
+                success_count=slice_counts[name],
+            )
+            for name in REQUIRED_SLICES
+        )
+    )
     report = build_metric_report(
         run=run,
         case_count=120,
         rates=_rates(fail="candidate_precision" if status == "FAIL" else None),
         performance=_performance(),
-        slices=_slices(),
+        slices=slices,
         zero_tolerance=_zero(**{name: 1 for name in zero_failures}),
         contributions=_contributions(),
         ablations=_ablations(),
         metric_code_digest="sha256:" + "9" * 64,
         environment_digest="sha256:" + "a" * 64,
-        sampling_manifest_digest="sha256:" + "b" * 64,
-        label_manifest_digest="sha256:" + "c" * 64,
+        sampling_manifest_digest=evidence_manifest_digest,
+        label_manifest_digest=evidence_manifest_digest,
     )
     return report.canonical_bytes
 
@@ -341,10 +362,13 @@ def test_append_only_authority_retains_failed_run_and_rejects_mutation(
             recorded_at=T3,
         )
         authority.record_label(label)
+        manifest = authority.evidence_manifest_digest(run.run_id)
         decision = build_release_decision(
             run=run,
-            report_canonical_bytes=_report_bytes(run, status="FAIL"),
-            evidence_manifest_digest=authority.evidence_manifest_digest(run.run_id),
+            report_canonical_bytes=_report_bytes(
+                run, status="FAIL", evidence_manifest_digest=manifest
+            ),
+            evidence_manifest_digest=manifest,
             verdict=ReleaseVerdict.INCONCLUSIVE,
             owner_identity_digest=OWNER,
             decided_at=T5,
@@ -381,10 +405,13 @@ def test_pass_requires_full_exposure_primary_labels_and_second_review_sample(
         authority.register_plan(plan)
         authority.register_epoch(epoch)
         authority.register_run(run)
+        manifest = authority.evidence_manifest_digest(run.run_id)
         candidate = build_release_decision(
             run=run,
-            report_canonical_bytes=_report_bytes(run),
-            evidence_manifest_digest=authority.evidence_manifest_digest(run.run_id),
+            report_canonical_bytes=_report_bytes(
+                run, evidence_manifest_digest=manifest
+            ),
+            evidence_manifest_digest=manifest,
             verdict=ReleaseVerdict.PASS,
             owner_identity_digest=OWNER,
             decided_at=T5,
@@ -394,16 +421,15 @@ def test_pass_requires_full_exposure_primary_labels_and_second_review_sample(
 
         # The authority gate also rejects a caller that bypasses the public
         # builder and assembles canonical PASS-shaped bytes directly.
-        report = json.loads(_report_bytes(run))
+        report_raw = _report_bytes(run, evidence_manifest_digest=manifest)
+        report = json.loads(report_raw)
         direct = ReleaseEvidenceDecision.build(
             {
                 "run_id": run.run_id,
                 "run_digest": run.digest,
-                "report_digest": digest_bytes(_report_bytes(run)),
+                "report_digest": digest_bytes(report_raw),
                 "metric_report": report,
-                "evidence_manifest_digest": authority.evidence_manifest_digest(
-                    run.run_id
-                ),
+                "evidence_manifest_digest": manifest,
                 "verdict": ReleaseVerdict.PASS.value,
                 "owner_identity_digest": OWNER,
                 "decided_at": T5,

@@ -722,6 +722,16 @@ def build_release_decision(
     report, report_digest, report_summary = _verified_metric_report(
         report_canonical_bytes, run
     )
+    report_payload = report["payload"]
+    assert isinstance(report_payload, Mapping)
+    manifest_digest = _digest(evidence_manifest_digest, "evidence_manifest_digest")
+    if (
+        report_payload["sampling_manifest_digest"] != manifest_digest
+        or report_payload["label_manifest_digest"] != manifest_digest
+    ):
+        raise EvaluationAuthorityError(
+            "Metric Report differs from the authority evidence manifest"
+        )
     report_passed = report_summary["overall_status"] == "PASS"
     if verdict is ReleaseVerdict.PASS and (
         run.payload["run_kind"] != RunKind.QUALIFICATION.value
@@ -734,9 +744,7 @@ def build_release_decision(
         "run_digest": run.digest,
         "report_digest": report_digest,
         "metric_report": _thaw(report),
-        "evidence_manifest_digest": _digest(
-            evidence_manifest_digest, "evidence_manifest_digest"
-        ),
+        "evidence_manifest_digest": manifest_digest,
         "verdict": verdict.value,
         "owner_identity_digest": _digest(
             owner_identity_digest, "owner_identity_digest"
@@ -1305,7 +1313,7 @@ class EvaluationAuthority:
             raise EvaluationAuthorityError("decision Run is absent")
         retained_run = EvaluationRun.from_canonical_bytes(bytes(retained_run_row[0]))
         report_raw = canonical_json_bytes(decision.payload["metric_report"])
-        _, report_digest, report_summary = _verified_metric_report(
+        report_document, report_digest, report_summary = _verified_metric_report(
             report_raw, retained_run
         )
         if report_digest != decision.payload["report_digest"]:
@@ -1324,6 +1332,14 @@ class EvaluationAuthority:
         current_manifest = self.evidence_manifest_digest(retained_run.run_id)
         if current_manifest != decision.payload["evidence_manifest_digest"]:
             raise EvaluationAuthorityError("decision evidence manifest differs")
+        report_payload = report_document["payload"]
+        if not isinstance(report_payload, Mapping) or any(
+            report_payload[field] != current_manifest
+            for field in ("sampling_manifest_digest", "label_manifest_digest")
+        ):
+            raise EvaluationAuthorityError(
+                "Metric Report differs from the authority evidence manifest"
+            )
         plan = self._plan_for_run(retained_run.run_id)
         if decision.payload["owner_identity_digest"] not in _authorised_identities(
             plan, HumanAuthorityRole.RELEASE_OWNER
@@ -1347,7 +1363,10 @@ class EvaluationAuthority:
                 raise EvaluationAuthorityError(
                     "PASS differs from the pre-registered release rule"
                 )
-            self._require_pass_exposure(str(decision.payload["run_id"]))
+            self._require_pass_exposure(
+                str(decision.payload["run_id"]),
+                report_document["payload"],  # type: ignore[arg-type]
+            )
             if not corrective_gate_authorised(
                 CorrectiveGate.QUALIFICATION_EVIDENCE_ACCEPTANCE
             ):
@@ -1400,7 +1419,9 @@ class EvaluationAuthority:
             values, key=lambda item: _parse_timestamp(item, "evidence timestamp")
         )
 
-    def _require_pass_exposure(self, run_id: str) -> None:
+    def _require_pass_exposure(
+        self, run_id: str, report_payload: Mapping[str, object]
+    ) -> None:
         rows = self._connection.execute(
             "SELECT case_id,case_bytes,case_digest,rights_status,input_manifest_digest "
             "FROM evaluation_cases WHERE run_id=? ORDER BY case_id",
@@ -1424,7 +1445,9 @@ class EvaluationAuthority:
         required_secondary: set[str] = set()
         reviewable: set[str] = set()
         input_manifests: set[str] = set()
-        case_memberships: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {}
+        case_memberships: dict[
+            str, tuple[str, tuple[str, ...], tuple[str, ...], bool]
+        ] = {}
         for case_id, raw, case_digest, rights_status, input_manifest_digest in rows:
             case = EvaluationCase.from_canonical_bytes(bytes(raw))
             facts = _membership_facts(case.payload["membership_facts"])  # type: ignore[arg-type]
@@ -1450,6 +1473,7 @@ class EvaluationAuthority:
                 str(case_digest),
                 expected_slices,
                 expected_strata,
+                bool(case.payload["zero_tolerance"]),
             )
             for slice_name in expected_slices:
                 slice_cases[slice_name].add(str(case_digest))
@@ -1515,7 +1539,7 @@ class EvaluationAuthority:
             name: set() for name in stratum_manifest
         }
         for case_id in primary:
-            case_digest, slices, strata = case_memberships[case_id]
+            case_digest, slices, strata, _ = case_memberships[case_id]
             for name in slices:
                 reviewed_slice_cases[name].add(case_digest)
             for name in strata:
@@ -1533,6 +1557,44 @@ class EvaluationAuthority:
         ):
             raise EvaluationAuthorityError(
                 "reviewed Case-stratum exposure is insufficient"
+            )
+        if report_payload.get("case_count") != len(primary):
+            raise EvaluationAuthorityError(
+                "Metric Report Case count differs from reviewed evidence"
+            )
+        slice_evidence = report_payload.get("required_slice_evidence")
+        if not isinstance(slice_evidence, list):
+            raise EvaluationAuthorityError("Metric Report slice evidence differs")
+        reported_slice_counts: dict[str, int] = {}
+        for document in slice_evidence:
+            if not isinstance(document, Mapping) or not isinstance(
+                document.get("payload"), Mapping
+            ):
+                raise EvaluationAuthorityError("Metric Report slice evidence differs")
+            payload = document["payload"]
+            reported_slice_counts[str(payload["slice_id"])] = int(
+                payload["completed_cases"]
+            )
+        if reported_slice_counts != {
+            name: len(cases) for name, cases in reviewed_slice_cases.items()
+        }:
+            raise EvaluationAuthorityError(
+                "Metric Report slices differ from reviewed evidence"
+            )
+        zero_document = report_payload.get("zero_tolerance_evidence")
+        if not isinstance(zero_document, Mapping) or not isinstance(
+            zero_document.get("payload"), Mapping
+        ):
+            raise EvaluationAuthorityError(
+                "Metric Report zero-tolerance evidence differs"
+            )
+        zero_payload = zero_document["payload"]
+        counts = zero_payload.get("counts")
+        if not isinstance(counts, Mapping) or sum(counts.values()) != sum(  # type: ignore[arg-type]
+            int(case_memberships[case_id][3]) for case_id in primary
+        ):
+            raise EvaluationAuthorityError(
+                "Metric Report zero-tolerance count differs from reviewed evidence"
             )
 
         second_percent = int(

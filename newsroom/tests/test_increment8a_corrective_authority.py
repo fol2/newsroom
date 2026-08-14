@@ -129,10 +129,26 @@ def _populate(
 
 
 def _pass_candidate(authority: EvaluationAuthority, run):
+    manifest = authority.evidence_manifest_digest(run.run_id)
+    slice_counts = {
+        "GEOGRAPHY_GLOBAL": 40,
+        "GEOGRAPHY_HONG_KONG": 40,
+        "GEOGRAPHY_UNITED_KINGDOM": 40,
+        "LANGUAGE_EN_GB": 40,
+        "LANGUAGE_MIXED_EN_GB_ZH_HANT_HK": 40,
+        "LANGUAGE_ZH_HANT_HK": 40,
+        "SOURCE_MULTI_DOMAIN_CORROBORATED": 120,
+        "TRANSITION_FAILURE_HEAVY": 120,
+        "URGENCY_URGENT": 24,
+    }
     return build_release_decision(
         run=run,
-        report_canonical_bytes=_report_bytes(run),
-        evidence_manifest_digest=authority.evidence_manifest_digest(run.run_id),
+        report_canonical_bytes=_report_bytes(
+            run,
+            evidence_manifest_digest=manifest,
+            slice_counts=slice_counts,
+        ),
+        evidence_manifest_digest=manifest,
         verdict=ReleaseVerdict.PASS,
         owner_identity_digest=OWNER,
         decided_at=T5,
@@ -324,10 +340,13 @@ def test_release_decision_seals_the_complete_evidence_manifest(tmp_path: Path) -
             prospective=True,
         )
         authority.register_case(case)
+        manifest = authority.evidence_manifest_digest(run.run_id)
         decision = build_release_decision(
             run=run,
-            report_canonical_bytes=_report_bytes(run, status="FAIL"),
-            evidence_manifest_digest=authority.evidence_manifest_digest(run.run_id),
+            report_canonical_bytes=_report_bytes(
+                run, status="FAIL", evidence_manifest_digest=manifest
+            ),
+            evidence_manifest_digest=manifest,
             verdict=ReleaseVerdict.INCONCLUSIVE,
             owner_identity_digest=OWNER,
             decided_at=T5,
@@ -455,7 +474,10 @@ def test_report_is_retained_and_reconstructed_not_a_caller_boolean(
 
     connection, authority, retained_run = _registered(tmp_path / "direct")
     try:
-        report_raw = _report_bytes(retained_run, status="FAIL")
+        manifest = authority.evidence_manifest_digest(retained_run.run_id)
+        report_raw = _report_bytes(
+            retained_run, status="FAIL", evidence_manifest_digest=manifest
+        )
         report = json.loads(report_raw)
         direct = ReleaseEvidenceDecision.build(
             {
@@ -463,9 +485,7 @@ def test_report_is_retained_and_reconstructed_not_a_caller_boolean(
                 "run_digest": retained_run.digest,
                 "report_digest": _digest(500),
                 "metric_report": report,
-                "evidence_manifest_digest": authority.evidence_manifest_digest(
-                    retained_run.run_id
-                ),
+                "evidence_manifest_digest": manifest,
                 "verdict": ReleaseVerdict.INCONCLUSIVE.value,
                 "owner_identity_digest": OWNER,
                 "decided_at": T5,
@@ -498,7 +518,7 @@ def test_release_decision_retains_actual_zero_tolerance_failure_count() -> None:
             status="FAIL",
             zero_failures=("temporal_rewrite", "rights_breach"),
         ),
-        evidence_manifest_digest=D1,
+        evidence_manifest_digest=D2,
         verdict=ReleaseVerdict.FAIL,
         owner_identity_digest=OWNER,
         decided_at=T5,

@@ -126,7 +126,7 @@ def _packet(tmp_path, **changes):
     report = _report()
     release = build_release_decision(
         run=_run(), report_canonical_bytes=report.canonical_bytes,
-        evidence_manifest_digest=_D, verdict=ReleaseVerdict.PASS,
+        evidence_manifest_digest=report.payload["sampling_manifest_digest"], verdict=ReleaseVerdict.PASS,
         owner_identity_digest=_D, decided_at=_AT,
     )
     capacity = _capacity()
