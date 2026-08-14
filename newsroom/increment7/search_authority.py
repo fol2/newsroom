@@ -387,15 +387,34 @@ class BoundedSearchReadPort(_NoEffect):
             (outcome.outcome_id,),
         ).fetchall()
         retained_rows = self._connection.execute(
-            "SELECT result_reference_id,result_digest,request_id,recorded_at "
+            "SELECT result_reference_id,result_bytes,result_digest,outcome_id,"
+            "outcome_digest,request_id,request_digest,rank,page_number,recorded_at "
             "FROM search_result_references WHERE outcome_id=? "
             "ORDER BY result_reference_id",
             (outcome.outcome_id,),
         ).fetchall()
-        retained = {
-            str(row[0]): (str(row[1]), str(row[2]), str(row[3]))
-            for row in retained_rows
-        }
+        attempt = self.attempt(outcome.attempt_id)
+        retained: dict[str, tuple[str, str, str]] = {}
+        for row in retained_rows:
+            record = SearchResultReference.from_canonical_bytes(bytes(row[1]))
+            validate_search_result(outcome, record, attempt)
+            if (
+                record.result_reference_id != row[0]
+                or record.digest != row[2]
+                or record.outcome_id != row[3]
+                or record.outcome_digest != row[4]
+                or record.request_id != row[5]
+                or record.request_digest != row[6]
+                or record.rank != row[7]
+                or record.page_number != row[8]
+                or record.recorded_at != row[9]
+            ):
+                raise SearchAuthorityError("Search retained result inventory differs")
+            retained[record.result_reference_id] = (
+                record.digest,
+                record.request_id,
+                record.recorded_at,
+            )
         if {str(row[1]) for row in ledger_rows} != set(retained):
             raise SearchAuthorityError("Search retained result inventory differs")
         for row in ledger_rows:
@@ -438,13 +457,31 @@ class BoundedSearchReadPort(_NoEffect):
             (request.request_id,),
         ).fetchall()
         retained_rows = self._connection.execute(
-            "SELECT attempt_id,attempt_digest,started_at FROM search_attempts "
+            "SELECT attempt_id,attempt_bytes,attempt_digest,request_id,"
+            "request_digest,attempt_ordinal,variant_ordinal,language_ordinal,"
+            "page_number,retry_ordinal,branch_ordinal,started_at FROM search_attempts "
             "WHERE request_id=? ORDER BY attempt_id",
             (request.request_id,),
         ).fetchall()
-        retained = {
-            str(row[0]): (str(row[1]), str(row[2])) for row in retained_rows
-        }
+        retained: dict[str, tuple[str, str]] = {}
+        for row in retained_rows:
+            record = SearchAttempt.from_canonical_bytes(bytes(row[1]))
+            validate_search_attempt(request, record)
+            if (
+                record.attempt_id != row[0]
+                or record.digest != row[2]
+                or record.request_id != row[3]
+                or record.request_digest != row[4]
+                or record.attempt_ordinal != row[5]
+                or record.variant_ordinal != row[6]
+                or record.language_ordinal != row[7]
+                or record.page_number != row[8]
+                or record.retry_ordinal != row[9]
+                or record.branch_ordinal != row[10]
+                or record.started_at != row[11]
+            ):
+                raise SearchAuthorityError("Search retained attempt inventory differs")
+            retained[record.attempt_id] = (record.digest, record.started_at)
         if {str(row[1]) for row in ledger_rows} != set(retained):
             raise SearchAuthorityError("Search retained attempt inventory differs")
         for row in ledger_rows:
@@ -627,14 +664,29 @@ class BoundedSearchReadPort(_NoEffect):
             (request.request_id,),
         ).fetchall()
         retained_rows = self._connection.execute(
-            "SELECT review_decision_id,decision_digest,decided_at "
+            "SELECT review_decision_id,decision_bytes,decision_digest,request_id,"
+            "request_digest,action,work_reference_digest,decided_at "
             "FROM search_review_decisions WHERE request_id=? "
             "ORDER BY review_decision_id",
             (request.request_id,),
         ).fetchall()
-        retained = {
-            str(row[0]): (str(row[1]), str(row[2])) for row in retained_rows
-        }
+        retained: dict[str, tuple[str, str]] = {}
+        for row in retained_rows:
+            record = SearchReviewDecision.from_canonical_bytes(bytes(row[1]))
+            if (
+                record.review_decision_id != row[0]
+                or record.digest != row[2]
+                or request.request_id != row[3]
+                or request.digest != row[4]
+                or record.action.value != row[5]
+                or record.work_reference_digest != row[6]
+                or record.decided_at != row[7]
+            ):
+                raise SearchAuthorityError("Search retained review inventory differs")
+            retained[record.review_decision_id] = (
+                record.digest,
+                record.decided_at,
+            )
         if {str(row[1]) for row in ledger_rows} != set(retained):
             raise SearchAuthorityError("Search retained review inventory differs")
         for row in ledger_rows:

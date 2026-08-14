@@ -616,6 +616,74 @@ def test_attempt_concurrency_reconciles_outcome_interval_before_cas(
         authority.close()
 
 
+def test_attempt_retry_cas_reconciles_retained_coordinate_columns(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "attempt-coordinate.sqlite3"
+    authority = open_bounded_search_authority(database, applied_at=_AT)
+    purpose = _purpose()
+    request = replace(
+        _request(purpose),
+        limits=replace(
+            _request(purpose).limits,
+            max_retries=0,
+            max_concurrent_attempts=2,
+        ),
+    )
+    first = _attempt(request)
+    authority.record_purpose(purpose.canonical_bytes)
+    authority.record_request(request.canonical_bytes)
+    authority.record_attempt(first.canonical_bytes)
+    attacker = sqlite3.connect(database, isolation_level=None)
+    try:
+        attacker.execute("DROP TRIGGER immutable_search_attempts")
+        attacker.execute(
+            "UPDATE search_attempts SET variant_ordinal=2 WHERE attempt_id=?",
+            (first.attempt_id,),
+        )
+        second = replace(
+            _attempt(request, 87, 2),
+            variant_ordinal=1,
+            rendered_query_digest=digest_bytes(request.query_variants[0].encode()),
+            retry_ordinal=0,
+            started_at="2026-08-14T00:00:02.000000Z",
+        )
+        with pytest.raises(SearchAuthorityError, match="retained attempt inventory"):
+            authority.record_attempt(second.canonical_bytes)
+    finally:
+        attacker.close()
+        authority.close()
+
+
+def test_result_admission_reconciles_retained_rank_columns(tmp_path: Path) -> None:
+    database = tmp_path / "result-rank.sqlite3"
+    authority = open_bounded_search_authority(database, applied_at=_AT)
+    purpose = _purpose()
+    request = _request(purpose)
+    attempt = _attempt(request)
+    outcome = replace(_outcome(attempt), result_count=2)
+    first = _result(attempt, outcome)
+    authority.record_purpose(purpose.canonical_bytes)
+    authority.record_request(request.canonical_bytes)
+    authority.record_attempt(attempt.canonical_bytes)
+    authority.record_outcome(outcome.canonical_bytes)
+    authority.record_result(first.canonical_bytes)
+    attacker = sqlite3.connect(database, isolation_level=None)
+    try:
+        attacker.execute("DROP TRIGGER immutable_search_result_references")
+        attacker.execute(
+            "UPDATE search_result_references SET rank=2 "
+            "WHERE result_reference_id=?",
+            (first.result_reference_id,),
+        )
+        second = _result(attempt, outcome, 88)
+        with pytest.raises(SearchAuthorityError, match="retained result inventory"):
+            authority.record_result(second.canonical_bytes)
+    finally:
+        attacker.close()
+        authority.close()
+
+
 def test_result_inventory_blocks_replacement_after_retained_row_deletion(
     tmp_path: Path,
 ) -> None:
