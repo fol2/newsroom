@@ -235,6 +235,22 @@ def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPa
     findings = validate_interface_inventory(INCREMENT_7_READINESS)
     assert "newsroom.authority.migrations: suffix is not contiguous" in findings
 
+    monkeypatch.delattr(
+        authority_migrations,
+        "EXPECTED_MIGRATION_HISTORY",
+    )
+    monkeypatch.delattr(authority_migrations, "SCHEMA_VERSION")
+    monkeypatch.delattr(
+        authority_migrations,
+        "EXPECTED_SCHEMA_FINGERPRINT",
+    )
+    findings = validate_interface_inventory(INCREMENT_7_READINESS)
+    assert any("EXPECTED_MIGRATION_HISTORY: missing" in item for item in findings)
+    assert any("SCHEMA_VERSION: missing" in item for item in findings)
+    assert any("EXPECTED_SCHEMA_FINGERPRINT: missing" in item for item in findings)
+    assert "newsroom.authority.migrations: accepted history prefix differs" in findings
+    assert "newsroom.authority.migrations: schema version regressed" in findings
+
 
 def test_7r_accepts_the_exact_v25_prefix_without_applying_a_migration() -> None:
     assert INCREMENT_7_READINESS.accepted_migration_history == (

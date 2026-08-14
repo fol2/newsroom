@@ -668,7 +668,7 @@ def _validate_schema_prefix(
     """Admit additive successors while retaining the exact accepted v25 prefix."""
 
     errors: list[str] = []
-    history = _authority_migrations.EXPECTED_MIGRATION_HISTORY
+    history = getattr(_authority_migrations, "EXPECTED_MIGRATION_HISTORY", None)
     accepted = contract.accepted_migration_history
     if (
         not isinstance(history, tuple)
@@ -708,10 +708,11 @@ def _validate_schema_prefix(
             errors.append(
                 f"newsroom.authority.migrations: v{index} checksum is malformed"
             )
+    live_version = getattr(_authority_migrations, "SCHEMA_VERSION", None)
     if (
-        isinstance(_authority_migrations.SCHEMA_VERSION, bool)
-        or not isinstance(_authority_migrations.SCHEMA_VERSION, int)
-        or _authority_migrations.SCHEMA_VERSION < contract.accepted_schema_version
+        isinstance(live_version, bool)
+        or not isinstance(live_version, int)
+        or live_version < contract.accepted_schema_version
     ):
         errors.append("newsroom.authority.migrations: schema version regressed")
     else:
@@ -725,14 +726,18 @@ def _validate_schema_prefix(
                 and isinstance(tail[0], int)
             ):
                 tail_version = tail[0]
-        if tail_version != _authority_migrations.SCHEMA_VERSION:
+        if tail_version != live_version:
             errors.append(
                 "newsroom.authority.migrations: live history/version differ"
             )
+    live_fingerprint = getattr(
+        _authority_migrations,
+        "EXPECTED_SCHEMA_FINGERPRINT",
+        None,
+    )
     if (
-        _authority_migrations.SCHEMA_VERSION == contract.accepted_schema_version
-        and _authority_migrations.EXPECTED_SCHEMA_FINGERPRINT
-        != contract.accepted_schema_fingerprint
+        live_version == contract.accepted_schema_version
+        and live_fingerprint != contract.accepted_schema_fingerprint
     ):
         errors.append("newsroom.authority.migrations: accepted fingerprint differs")
     return errors

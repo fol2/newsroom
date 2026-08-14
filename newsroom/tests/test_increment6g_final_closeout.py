@@ -95,9 +95,8 @@ def test_expensive_lineage_cases_concentration_is_bounded() -> None:
 
     assert sum(counts) == len(_EXPECTED_PROBE_IDS)
     # Additive repository tests can shift the SHA-256 rank positions used by the
-    # balanced ten-shard allocator. Eight D3 probes remained below the retained
-    # 330-second hard envelope in the Increment 7R exact-head capacity run.
-    assert max(counts) <= 8
+    # balanced ten-shard allocator; keep the measured D3 concentration bounded.
+    assert max(counts) <= 7
 
 
 def test_increment6_closeout_migration_identity_accepts_only_an_exact_prefix() -> None:
