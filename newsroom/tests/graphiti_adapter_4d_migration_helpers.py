@@ -34,6 +34,72 @@ from newsroom.authority.triage_work_item_migrations import (
 )
 
 
+def drop_empty_v28_coverage_schema(connection: sqlite3.Connection) -> None:
+    """Remove the exact empty v28 Coverage Audit suffix atomically."""
+    savepoint = "checked_coverage_audit_downgrade"
+    connection.execute(f"SAVEPOINT {savepoint}")
+    try:
+        _drop_empty_v28_coverage_schema(connection)
+    except Exception:
+        connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
+def _drop_empty_v28_coverage_schema(connection: sqlite3.Connection) -> None:
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) == 28:
+        from newsroom.authority.coverage_audit_migrations import (
+            COVERAGE_AUDIT_MIGRATION_CHECKSUM,
+            COVERAGE_AUDIT_MIGRATION_NAME,
+            COVERAGE_AUDIT_MIGRATION_STATEMENTS,
+        )
+
+        def normalise_coverage_sql(value: str) -> str:
+            return " ".join(value.split()).replace(" IF NOT EXISTS", "")
+
+        coverage_tables = (
+            "coverage_audits",
+            "coverage_audit_observations",
+            "coverage_gaps",
+            "coverage_gap_decisions",
+        )
+        placeholders = ",".join("?" for _ in coverage_tables)
+        objects = connection.execute(
+            f"SELECT type,name,sql FROM sqlite_master WHERE tbl_name IN ({placeholders}) "
+            "AND type IN ('table','trigger','index') AND sql IS NOT NULL",
+            coverage_tables,
+        ).fetchall()
+        if connection.execute(
+            "SELECT name,checksum FROM authority_migrations WHERE version=28"
+        ).fetchone() != (
+            COVERAGE_AUDIT_MIGRATION_NAME,
+            COVERAGE_AUDIT_MIGRATION_CHECKSUM,
+        ) or {normalise_coverage_sql(str(row[2])) for row in objects} != {
+            normalise_coverage_sql(statement)
+            for statement in COVERAGE_AUDIT_MIGRATION_STATEMENTS
+        }:
+            raise sqlite3.DatabaseError(
+                "downgrade requires exact empty v28 Coverage Audit schema"
+            )
+        for table in coverage_tables:
+            if connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone() != (0,):
+                raise sqlite3.DatabaseError("v28 Coverage Audit tables must be empty")
+        guard = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='immutable_authority_migrations_delete'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+        for object_type, name, _ in objects:
+            if object_type == "trigger":
+                connection.execute(f'DROP TRIGGER "{name}"')
+        for table in reversed(coverage_tables):
+            connection.execute(f'DROP TABLE "{table}"')
+        connection.execute("DELETE FROM authority_migrations WHERE version=28")
+        connection.execute(guard)
+        connection.execute("PRAGMA user_version=27")
+
+
 def drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
     """Remove exact empty v24/v23 schemas as one rollback-safe operation."""
     savepoint = "checked_candidate_lineage_downgrade"
@@ -49,6 +115,7 @@ def drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
 
 def _drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
     """Remove an exact, empty v23 lineage schema atomically."""
+    _drop_empty_v28_coverage_schema(connection)
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) == 27:
         from newsroom.authority.bounded_search_migrations import (
             BOUNDED_SEARCH_MIGRATION_CHECKSUM,

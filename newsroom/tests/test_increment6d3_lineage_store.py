@@ -396,6 +396,9 @@ def test_v22_to_v23_preserves_retained_relationship_before_lineage_use(
     from newsroom.authority.bounded_search_migrations import (
         bounded_search_backup_paths,
     )
+    from newsroom.authority.coverage_audit_migrations import (
+        coverage_audit_backup_paths,
+    )
     from newsroom.authority.evaluation_feedback_migrations import (
         evaluation_feedback_backup_paths,
     )
@@ -409,9 +412,11 @@ def test_v22_to_v23_preserves_retained_relationship_before_lineage_use(
         path.unlink(missing_ok=True)
     for path in bounded_search_backup_paths(seed[1]):
         path.unlink(missing_ok=True)
+    for path in coverage_audit_backup_paths(seed[1]):
+        path.unlink(missing_ok=True)
     assert prepare_pending_migration_backup(connection) is not None
     apply_pending_migrations(connection, applied_at="2042-01-03T00:00:00.000000Z")
-    assert connection.execute("PRAGMA user_version").fetchone() == (27,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (28,)
     assert (
         connection.execute(
             "SELECT * FROM event_hypothesis_relationship_decisions ORDER BY decision_id"
@@ -1437,10 +1442,10 @@ class _LineageAdapter:
                 apply_pending_migrations(
                     connection, applied_at="2042-01-03T00:00:00.000000Z"
                 )
-                assert connection.execute("PRAGMA user_version").fetchone() == (27,)
+                assert connection.execute("PRAGMA user_version").fetchone() == (28,)
                 assert connection.execute(
                     "SELECT MAX(version) FROM authority_migrations"
-                ).fetchone() == (27,)
+                ).fetchone() == (28,)
             finally:
                 connection.close()
         return _ConformanceHandle(location)

@@ -48,6 +48,9 @@ from newsroom.increment7.search_authority import (
     SearchAuthorityError,
     open_bounded_search_authority,
 )
+from newsroom.tests.graphiti_adapter_4d_migration_helpers import (
+    drop_empty_v28_coverage_schema,
+)
 
 _AT = "2026-08-14T00:00:00.000000Z"
 _D = "sha256:" + "a" * 64
@@ -183,6 +186,7 @@ def _decision(result: SearchResultReference) -> SearchReviewDecision:
 
 
 def _downgrade_empty_v27_to_v26(connection: sqlite3.Connection) -> None:
+    drop_empty_v28_coverage_schema(connection)
     connection.execute("PRAGMA foreign_keys=OFF")
     immutable = connection.execute(
         "SELECT sql FROM sqlite_master WHERE name='immutable_authority_migrations_delete'"
@@ -229,8 +233,9 @@ def test_v27_fresh_history_fingerprint_integrity_and_reserved_tables() -> None:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
     apply_pending_migrations(connection, applied_at=_AT)
-    assert SCHEMA_VERSION == BOUNDED_SEARCH_SCHEMA_VERSION == 27
-    assert EXPECTED_MIGRATION_HISTORY[-1] == (
+    assert SCHEMA_VERSION == 28
+    assert BOUNDED_SEARCH_SCHEMA_VERSION == 27
+    assert EXPECTED_MIGRATION_HISTORY[-2] == (
         27,
         BOUNDED_SEARCH_MIGRATION_NAME,
         BOUNDED_SEARCH_MIGRATION_CHECKSUM,
@@ -280,7 +285,7 @@ def test_v26_upgrade_requires_exact_backup_and_rolls_back_atomically(
     assert schema_fingerprint(connection) == BOUNDED_SEARCH_PREDECESSOR_FINGERPRINT
     monkeypatch.setattr(migrations, "BOUNDED_SEARCH_MIGRATION_STATEMENTS", statements)
     apply_pending_migrations(connection, applied_at=_AT)
-    assert connection.execute("PRAGMA user_version").fetchone() == (27,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (28,)
     restored = sqlite3.connect(f"file:{backup}?mode=ro", uri=True)
     try:
         assert restored.execute("PRAGMA user_version").fetchone() == (26,)

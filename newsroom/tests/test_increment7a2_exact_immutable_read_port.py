@@ -44,6 +44,9 @@ from newsroom.increment7.agenda_authority import (
     PlannedAgendaCommand,
     open_planned_agenda_authority,
 )
+from newsroom.tests.graphiti_adapter_4d_migration_helpers import (
+    drop_empty_v28_coverage_schema,
+)
 
 _AT = "2026-08-14T00:00:00.000000Z"
 _ACTOR = "sha256:" + "a" * 64
@@ -209,6 +212,7 @@ def _downgrade_empty_v26_to_v25(connection: sqlite3.Connection) -> None:
 
 
 def _downgrade_empty_v27_to_v26(connection: sqlite3.Connection) -> None:
+    drop_empty_v28_coverage_schema(connection)
     connection.execute("PRAGMA foreign_keys=OFF")
     immutable = connection.execute(
         "SELECT sql FROM sqlite_master WHERE name='immutable_authority_migrations_delete'"
@@ -265,14 +269,14 @@ def test_v26_fresh_create_history_fingerprint_and_integrity() -> None:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
     apply_pending_migrations(connection, applied_at=_AT)
-    assert SCHEMA_VERSION == 27
+    assert SCHEMA_VERSION == 28
     assert PLANNED_AGENDA_SCHEMA_VERSION == 26
     assert EXPECTED_MIGRATION_HISTORY[25] == (
         26,
         PLANNED_AGENDA_MIGRATION_NAME,
         PLANNED_AGENDA_MIGRATION_CHECKSUM,
     )
-    assert connection.execute("PRAGMA user_version").fetchone() == (27,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (28,)
     assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
@@ -310,7 +314,7 @@ def test_v25_upgrade_requires_and_retains_exact_backup(tmp_path: Path) -> None:
     authority.close()
     checked = sqlite3.connect(older_database)
     try:
-        assert checked.execute("PRAGMA user_version").fetchone() == (27,)
+        assert checked.execute("PRAGMA user_version").fetchone() == (28,)
     finally:
         checked.close()
 
