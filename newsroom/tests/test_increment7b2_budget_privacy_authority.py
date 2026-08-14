@@ -310,6 +310,14 @@ def test_exact_chain_replays_across_restart_without_provider_authority(
         assert reread == record
         assert record.authorises_provider is False
     assert authority.budget(records[1].request_id).gross_cost_microunits == 100
+    with pytest.raises(SearchAuthorityError, match="downstream work budget"):
+        authority.record_review(
+            replace(
+                records[5],
+                review_decision_id=_id(60),
+                work_reference_digest="sha256:" + "6" * 64,
+            ).canonical_bytes
+        )
     assert isinstance(authority.read_port(), BoundedSearchReadPort)
     assert BOUNDED_SEARCH_AUTHORITY == "CHECKED_SQLITE_TRANSACTIONAL_V27"
     assert SEARCH_PROVIDER_PORT == "DISABLED_NO_IMPLEMENTATION"
@@ -432,6 +440,18 @@ def test_immutable_rows_and_relational_tamper_are_detected(tmp_path: Path) -> No
         attacker.execute(
             "UPDATE search_budget_ledger SET cumulative_gross_cost_microunits=1 "
             "WHERE request_id=?",
+            (records[1].request_id,),
+        )
+        with pytest.raises(SearchAuthorityError, match="retained gross budget"):
+            authority.budget(records[1].request_id)
+        attacker.execute(
+            "UPDATE search_budget_ledger SET cumulative_gross_cost_microunits=100 "
+            "WHERE request_id=?",
+            (records[1].request_id,),
+        )
+        attacker.execute("DROP TRIGGER retained_search_budget_ledger")
+        attacker.execute(
+            "DELETE FROM search_budget_ledger WHERE request_id=?",
             (records[1].request_id,),
         )
         with pytest.raises(SearchAuthorityError, match="retained gross budget"):

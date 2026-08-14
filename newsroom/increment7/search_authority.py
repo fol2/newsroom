@@ -253,6 +253,17 @@ class BoundedSearchReadPort(_NoEffect):
             "ORDER BY cumulative_provider_calls",
             (request_id,),
         ).fetchall()
+        outcome_ids = {
+            str(row[0])
+            for row in self._connection.execute(
+                "SELECT o.outcome_id FROM search_outcomes o "
+                "JOIN search_attempts a ON a.attempt_id=o.attempt_id "
+                "WHERE a.request_id=?",
+                (request_id,),
+            ).fetchall()
+        }
+        if outcome_ids != {str(row[0]) for row in rows}:
+            raise SearchAuthorityError("Search retained gross budget differs")
         results = 0
         cost = 0
         ledger_digest = None
@@ -581,6 +592,23 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
                 raw,
             )
             if not replay:
+                if record.work_reference_digest is not None:
+                    existing_work = {
+                        str(row[0])
+                        for row in self._connection.execute(
+                            "SELECT work_reference_digest FROM search_review_decisions "
+                            "WHERE request_id=? AND work_reference_digest IS NOT NULL",
+                            (request.request_id,),
+                        ).fetchall()
+                    }
+                    if (
+                        record.work_reference_digest not in existing_work
+                        and len(existing_work)
+                        >= request.limits.max_downstream_work_items
+                    ):
+                        raise SearchAuthorityError(
+                            "Search downstream work budget differs"
+                        )
                 self._connection.execute(
                     "INSERT INTO search_review_decisions VALUES(?,?,?,?,?,?,?,?)",
                     (
