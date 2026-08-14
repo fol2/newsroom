@@ -92,6 +92,7 @@ def _request(purpose: SearchPurpose | None = None, **changes: object) -> SearchR
         "rights_policy_version": purpose.rights_policy_version,
         "budget_reservation_digest": "sha256:" + "f" * 64,
         "allowed_downstream_routes": (SearchDownstreamRoute.COVERAGE_AUDIT,),
+        "coverage_basis": purpose.permitted_coverage,
         "context_reference_digest": "sha256:" + "1" * 64,
         "governing_policy_digests": (_D,),
         "requested_at": _AT,
@@ -180,7 +181,7 @@ def test_complete_search_record_chain_roundtrips_without_effects() -> None:
     validate_search_attempt(request, attempt)
     validate_search_outcome(attempt, outcome, request)
     validate_search_result(outcome, result, attempt)
-    validate_search_review((result,), decision)
+    validate_search_review((result,), decision, request)
     for record in (purpose, request, attempt, outcome, result, decision):
         assert type(record).from_canonical_bytes(record.canonical_bytes) == record
         assert record.authorises_provider is False
@@ -206,6 +207,16 @@ def test_purpose_specific_context_and_prospective_route_are_mandatory() -> None:
                 request, query_privacy=SearchQueryPrivacy.AGGREGATED_NON_IDENTIFYING
             ),
         )
+    with pytest.raises(SearchContractError, match="Purpose"):
+        validate_search_request(
+            purpose,
+            replace(request, coverage_basis=("US:ELECTION",)),
+        )
+    with pytest.raises(SearchContractError, match="Purpose"):
+        validate_search_request(
+            purpose,
+            replace(request, governing_policy_digests=("sha256:" + "8" * 64,)),
+        )
     with pytest.raises(SearchContractError, match="audit route"):
         validate_search_request(
             purpose,
@@ -216,7 +227,14 @@ def test_purpose_specific_context_and_prospective_route_are_mandatory() -> None:
 
 
 def test_generic_firehose_and_unbounded_amplification_fail_closed() -> None:
-    for query in ("UK news", "UK latest news", "politics news", "technology news"):
+    for query in (
+        "UK news",
+        '"UK news"',
+        "UK latest news",
+        "UK latest news 2026",
+        "politics news",
+        "technology news",
+    ):
         with pytest.raises(SearchContractError, match="firehose"):
             _request(rendered_query=query)
     with pytest.raises(SearchContractError, match="inconsistent"):
@@ -225,6 +243,11 @@ def test_generic_firehose_and_unbounded_amplification_fail_closed() -> None:
     attempt = replace(_attempt(request), page_number=3)
     with pytest.raises(SearchContractError, match="exceeds"):
         validate_search_attempt(request, attempt)
+    with pytest.raises(SearchContractError, match="exceeds"):
+        validate_search_attempt(
+            request,
+            replace(_attempt(request), language_ordinal=2),
+        )
     with pytest.raises(SearchContractError, match="exceeds"):
         validate_search_attempt(
             request,
@@ -327,7 +350,16 @@ def test_outcome_result_and_review_bind_exact_predecessors_and_budgets() -> None
         "2026-08-14T00:00:03.000000Z",
     )
     with pytest.raises(SearchContractError, match="result binding"):
-        validate_search_review((replace(result, result_reference_id=_id(8)),), decision)
+        validate_search_review(
+            (replace(result, result_reference_id=_id(8)),), decision, request
+        )
+    excluded = replace(
+        decision,
+        action=SearchReviewAction.CREATE_SEARCH_CHANNEL_SIGNAL,
+        work_reference_digest="sha256:" + "5" * 64,
+    )
+    with pytest.raises(SearchContractError, match="result binding"):
+        validate_search_review((result,), excluded, request)
 
 
 def test_unknown_duplicate_noncanonical_and_invalid_calendar_bytes_fail() -> None:

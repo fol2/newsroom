@@ -217,19 +217,31 @@ def _seconds_between(start: str, end: str) -> float:
 
 def _is_generic_firehose(query: str) -> bool:
     words = tuple(word.casefold() for word in _QUERY_WORD.findall(query))
-    has_specific_syntax = any(
-        marker in query for marker in ('"', "site:", "domain:", "intitle:")
-    ) or any(character.isdigit() for character in query)
-    broad_only = bool(words) and set(words).issubset(
+    semantic_words = tuple(
+        word
+        for word in words
+        if not (word.isdigit() and len(word) == 4 and 1900 <= int(word) <= 2100)
+    )
+    quoted_specific = '"' in query and any(
+        word not in _BROAD_SCOPE_WORDS | _BROAD_NEWS_WORDS for word in semantic_words
+    )
+    has_specific_syntax = (
+        quoted_specific
+        or any(
+            marker in query.casefold() for marker in ("site:", "domain:", "intitle:")
+        )
+        or any(word.isdigit() for word in semantic_words)
+    )
+    broad_only = bool(semantic_words) and set(semantic_words).issubset(
         _BROAD_SCOPE_WORDS | _BROAD_NEWS_WORDS
     )
     category_firehose = (
-        bool(words)
-        and len(words) <= 5
-        and words[-1] in _BROAD_NEWS_WORDS
-        and any(word in _BROAD_SCOPE_WORDS for word in words[:-1])
+        bool(semantic_words)
+        and len(semantic_words) <= 5
+        and semantic_words[-1] in _BROAD_NEWS_WORDS
+        and any(word in _BROAD_SCOPE_WORDS for word in semantic_words[:-1])
     )
-    return not has_specific_syntax and (broad_only or category_firehose)
+    return broad_only or (not has_specific_syntax and category_firehose)
 
 
 def _enum[T: StrEnum](kind: type[T], value: object, field: str) -> T:
@@ -527,6 +539,7 @@ _REQUEST_FIELDS = (
     "rights_policy_version",
     "budget_reservation_digest",
     "allowed_downstream_routes",
+    "coverage_basis",
     "context_reference_digest",
     "governing_policy_digests",
     "requested_at",
@@ -556,6 +569,7 @@ class SearchRequest(_NoEffect):
     rights_policy_version: str
     budget_reservation_digest: str
     allowed_downstream_routes: tuple[SearchDownstreamRoute, ...]
+    coverage_basis: tuple[str, ...]
     context_reference_digest: str | None
     governing_policy_digests: tuple[str, ...]
     requested_at: str
@@ -621,6 +635,11 @@ class SearchRequest(_NoEffect):
         if tuple(sorted(set(routes), key=str)) != routes:
             raise SearchContractError("Search Request routes must be unique and sorted")
         object.__setattr__(self, "allowed_downstream_routes", routes)
+        object.__setattr__(
+            self,
+            "coverage_basis",
+            _strings(self.coverage_basis, "coverage_basis", required=True),
+        )
         if self.context_reference_digest is not None:
             _digest(self.context_reference_digest, "context_reference_digest")
         object.__setattr__(
@@ -658,6 +677,7 @@ class SearchRequest(_NoEffect):
             "language_tags",
             "geography_bounds",
             "domain_bounds",
+            "coverage_basis",
             "governing_policy_digests",
         ):
             value[field] = tuple(value[field])  # type: ignore[arg-type]
@@ -1102,6 +1122,10 @@ def validate_search_request(purpose: SearchPurpose, request: SearchRequest) -> N
         or not set(request.allowed_downstream_routes).issubset(
             purpose.allowed_downstream_routes
         )
+        or not set(request.coverage_basis).issubset(purpose.permitted_coverage)
+        or not set(purpose.governing_policy_digests).issubset(
+            request.governing_policy_digests
+        )
         or request.requested_at < purpose.created_at
         or (
             request.window_end > request.window_start
@@ -1147,6 +1171,7 @@ def validate_search_attempt(request: SearchRequest, attempt: SearchAttempt) -> N
         or attempt.attempt_ordinal > limits.max_provider_calls
         or attempt.variant_ordinal > limits.max_query_variants
         or attempt.language_ordinal > limits.max_languages
+        or attempt.language_ordinal > len(request.language_tags)
         or attempt.page_number > limits.max_pages
         or attempt.retry_ordinal > limits.max_retries
         or attempt.branch_ordinal > limits.max_branches
@@ -1216,22 +1241,35 @@ def validate_search_result(
 
 
 def validate_search_review(
-    results: tuple[SearchResultReference, ...], decision: SearchReviewDecision
+    results: tuple[SearchResultReference, ...],
+    decision: SearchReviewDecision,
+    request: SearchRequest,
 ) -> None:
     if (
         type(results) is not tuple
         or not results
         or any(type(item) is not SearchResultReference for item in results)
         or type(decision) is not SearchReviewDecision
+        or type(request) is not SearchRequest
     ):
         raise SearchContractError("Search review binding requires exact records")
     ordered = tuple(sorted(results, key=lambda item: item.result_reference_id))
+    route_for_action = {
+        SearchReviewAction.NO_WORK: SearchDownstreamRoute.NO_WORK,
+        SearchReviewAction.CREATE_PUBLISHER_SOURCE_CHECK: SearchDownstreamRoute.PUBLISHER_SOURCE_CHECK,
+        SearchReviewAction.CREATE_SEARCH_CHANNEL_SIGNAL: SearchDownstreamRoute.SEARCH_CHANNEL_SIGNAL,
+        SearchReviewAction.RELATE_EXISTING_EDITORIAL_RECORD: SearchDownstreamRoute.EXISTING_EDITORIAL_RECORD,
+        SearchReviewAction.SUPPORT_COVERAGE_GAP_REVIEW: SearchDownstreamRoute.COVERAGE_AUDIT,
+        SearchReviewAction.QUERY_OR_PROVIDER_NOISE: SearchDownstreamRoute.NO_WORK,
+        SearchReviewAction.RIGHTS_SOURCE_OPERATIONAL_FOLLOW_UP: SearchDownstreamRoute.RIGHTS_SOURCE_OPERATIONAL_FOLLOW_UP,
+    }
     if (
         results != ordered
         or tuple(item.result_reference_id for item in results)
         != decision.result_reference_ids
         or tuple(item.digest for item in results) != decision.result_reference_digests
         or decision.decided_at < max(item.recorded_at for item in results)
+        or route_for_action[decision.action] not in request.allowed_downstream_routes
     ):
         raise SearchContractError("Search Review Decision result binding differs")
 
