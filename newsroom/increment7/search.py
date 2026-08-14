@@ -82,6 +82,20 @@ _BROAD_SCOPE_WORDS = frozenset(
 _BROAD_NEWS_WORDS = frozenset(
     {"breaking", "headlines", "latest", "news", "stories", "today", "updates"}
 )
+_BROAD_FILLER_WORDS = frozenset(
+    {
+        "about",
+        "article",
+        "articles",
+        "coverage",
+        "for",
+        "of",
+        "on",
+        "online",
+        "reports",
+        "the",
+    }
+)
 
 
 class SearchContractError(ValueError):
@@ -226,9 +240,10 @@ def _is_generic_firehose(query: str) -> bool:
         for word in words
         if not (word.isdigit() and len(word) == 4 and 1900 <= int(word) <= 2100)
     )
+    broad_vocabulary = _BROAD_SCOPE_WORDS | _BROAD_NEWS_WORDS | _BROAD_FILLER_WORDS
     quoted_specific = any(
         any(
-            word.casefold() not in _BROAD_SCOPE_WORDS | _BROAD_NEWS_WORDS
+            word.casefold() not in broad_vocabulary
             for word in _QUERY_WORD.findall(match.group(1))
         )
         for match in _QUOTED_PHRASE.finditer(query)
@@ -238,9 +253,7 @@ def _is_generic_firehose(query: str) -> bool:
         or _SPECIFIC_OPERATOR.search(query) is not None
         or any(word.isdigit() for word in semantic_words)
     )
-    broad_only = bool(semantic_words) and set(semantic_words).issubset(
-        _BROAD_SCOPE_WORDS | _BROAD_NEWS_WORDS
-    )
+    broad_only = bool(semantic_words) and set(semantic_words).issubset(broad_vocabulary)
     category_firehose = (
         bool(semantic_words)
         and len(semantic_words) <= 5
@@ -1343,7 +1356,11 @@ def validate_search_review(
             for item in results
         )
         or decision.decided_at < max(item.recorded_at for item in results)
-        or route_for_action[decision.action] not in request.allowed_downstream_routes
+        or (
+            produces_work
+            and route_for_action[decision.action]
+            not in request.allowed_downstream_routes
+        )
         or (produces_work and request.limits.max_downstream_work_items == 0)
     ):
         raise SearchContractError("Search Review Decision result binding differs")

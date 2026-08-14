@@ -184,6 +184,19 @@ def test_complete_search_record_chain_roundtrips_without_effects() -> None:
     validate_search_outcome(attempt, outcome, request)
     validate_search_result(outcome, result, attempt)
     validate_search_review((result,), decision, request)
+    for discard_action in (
+        SearchReviewAction.NO_WORK,
+        SearchReviewAction.QUERY_OR_PROVIDER_NOISE,
+    ):
+        validate_search_review(
+            (result,),
+            replace(
+                decision,
+                action=discard_action,
+                work_reference_digest=None,
+            ),
+            request,
+        )
     zero_request = replace(
         request,
         limits=replace(request.limits, max_downstream_work_items=0),
@@ -250,6 +263,9 @@ def test_generic_firehose_and_unbounded_amplification_fail_closed() -> None:
         "site: UK news",
         "domain: politics news",
         "intitle: UK latest news",
+        "UK news online",
+        "politics news articles",
+        "news about politics",
     ):
         with pytest.raises(SearchContractError, match="firehose"):
             _request(rendered_query=query)
