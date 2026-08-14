@@ -49,6 +49,59 @@ def drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
 
 def _drop_empty_v23_lineage_schema(connection: sqlite3.Connection) -> None:
     """Remove an exact, empty v23 lineage schema atomically."""
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) == 27:
+        from newsroom.authority.bounded_search_migrations import (
+            BOUNDED_SEARCH_MIGRATION_CHECKSUM,
+            BOUNDED_SEARCH_MIGRATION_NAME,
+            BOUNDED_SEARCH_MIGRATION_STATEMENTS,
+        )
+
+        def normalise_search_sql(value: str) -> str:
+            return " ".join(value.split()).replace(" IF NOT EXISTS", "")
+
+        search_tables = (
+            "search_purposes",
+            "search_requests",
+            "search_attempts",
+            "search_outcomes",
+            "search_result_references",
+            "search_review_decisions",
+            "search_budget_ledger",
+        )
+        placeholders = ",".join("?" for _ in search_tables)
+        objects = connection.execute(
+            f"SELECT type,name,sql FROM sqlite_master WHERE tbl_name IN ({placeholders}) "
+            "AND type IN ('table','trigger')",
+            search_tables,
+        ).fetchall()
+        if connection.execute(
+            "SELECT name,checksum FROM authority_migrations WHERE version=27"
+        ).fetchone() != (
+            BOUNDED_SEARCH_MIGRATION_NAME,
+            BOUNDED_SEARCH_MIGRATION_CHECKSUM,
+        ) or {normalise_search_sql(str(row[2])) for row in objects} != {
+            normalise_search_sql(statement)
+            for statement in BOUNDED_SEARCH_MIGRATION_STATEMENTS
+        }:
+            raise sqlite3.DatabaseError(
+                "downgrade requires exact empty v27 bounded Search schema"
+            )
+        for table in search_tables:
+            if connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone() != (0,):
+                raise sqlite3.DatabaseError("v27 bounded Search tables must be empty")
+        guard = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='immutable_authority_migrations_delete'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+        for object_type, name, _ in objects:
+            if object_type == "trigger":
+                connection.execute(f'DROP TRIGGER "{name}"')
+        for table in reversed(search_tables):
+            connection.execute(f'DROP TABLE "{table}"')
+        connection.execute("DELETE FROM authority_migrations WHERE version=27")
+        connection.execute(guard)
+        connection.execute("PRAGMA user_version=26")
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) == 26:
         from newsroom.authority.planned_agenda_migrations import (
             PLANNED_AGENDA_MIGRATION_CHECKSUM,
