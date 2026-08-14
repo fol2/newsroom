@@ -173,6 +173,8 @@ def test_decision_binds_exact_proposal_predecessor_and_chronology() -> None:
     )
     validate_provider_decision(proposal, third, (first, second))
     with pytest.raises(ProviderQualificationError, match="predecessor"):
+        validate_provider_decision(proposal, third, second)
+    with pytest.raises(ProviderQualificationError, match="predecessor"):
         validate_provider_decision(
             proposal,
             replace(third, decision_id=first.decision_id),

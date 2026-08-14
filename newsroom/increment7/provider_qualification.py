@@ -502,7 +502,8 @@ def validate_provider_decision(
     for item in chain:
         _validate_provider_decision_binding(proposal, item)
     if (
-        len({item.decision_id for item in chain}) != len(chain)
+        chain[0].supersedes_decision_digest is not None
+        or len({item.decision_id for item in chain}) != len(chain)
         or len({item.digest for item in chain}) != len(chain)
         or any(
             current.supersedes_decision_digest != predecessor.digest
