@@ -343,6 +343,18 @@ class ReviewedCaseOutcome:
             for name in _TRIAGE_ERROR_METRICS
         ):
             raise MetricReportError("triage error cannot be marked ineligible")
+        development_blockers = {
+            "false_development": "candidate_precision",
+            "missed_development": "candidate_recall",
+        }
+        if any(
+            triage_error[error_name]
+            and (not metric_eligible[metric_name] or metric_success[metric_name])
+            for error_name, metric_name in development_blockers.items()
+        ):
+            raise MetricReportError(
+                "development error differs from its decision-bearing blocker metric"
+            )
         findings = _sorted_tokens(
             zero_tolerance_findings, "zero_tolerance_findings", empty=True
         )

@@ -503,6 +503,38 @@ def test_triage_error_cannot_be_hidden_as_ineligible() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("error_name", "blocker_metric"),
+    (
+        ("false_development", "candidate_precision"),
+        ("missed_development", "candidate_recall"),
+    ),
+)
+def test_development_error_must_fail_its_frozen_blocker_metric(
+    error_name: str, blocker_metric: str
+) -> None:
+    context = _context()
+    outcome = _case_outcomes(context=context)[0]
+    payload = json.loads(outcome.canonical_bytes)["payload"]
+    case = EvaluationCase.from_canonical_bytes(canonical_json_bytes(payload["case"]))
+    primary = ReviewLabel.from_canonical_bytes(
+        canonical_json_bytes(payload["review_label"])
+    )
+    triage_error = dict(outcome.triage_error)
+    triage_error[error_name] = True
+    assert outcome.metric_success[blocker_metric] is True
+    with pytest.raises(MetricReportError, match="decision-bearing blocker"):
+        ReviewedCaseOutcome.build(
+            case=case,
+            review_label=primary,
+            metric_eligible=outcome.metric_eligible,
+            metric_success=outcome.metric_success,
+            triage_eligible=outcome.triage_eligible,
+            triage_error=triage_error,
+            slice_success=outcome.slice_success,
+        )
+
+
 def test_every_frozen_exposure_minimum_is_enforced() -> None:
     context = _context()
     assert (
