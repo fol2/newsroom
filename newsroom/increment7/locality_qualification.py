@@ -168,6 +168,12 @@ def _strings(
     return result
 
 
+def _array(value: object, field: str) -> list[object]:
+    if type(value) is not list:
+        raise LocalityQualificationError(f"{field} must be an array")
+    return value
+
+
 def _pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -275,7 +281,9 @@ class LocalityReference(_NoEffect):
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> Self:
         value = _document(raw, LOCALITY_REFERENCE, _REFERENCE_FIELDS)
-        value["provenance_digests"] = tuple(value["provenance_digests"])  # type: ignore[arg-type]
+        value["provenance_digests"] = tuple(
+            _array(value["provenance_digests"], "provenance_digests")
+        )
         result = cls(**value)  # type: ignore[arg-type]
         if result.canonical_bytes != raw:
             raise LocalityQualificationError("Locality Reference replay differs")
@@ -357,7 +365,7 @@ class LocalityCoverageUnit(_NoEffect):
     def from_canonical_bytes(cls, raw: bytes) -> Self:
         value = _document(raw, LOCALITY_COVERAGE_UNIT, _UNIT_FIELDS)
         for field in ("source_class_scope", "explicit_exclusions", "known_gap_codes"):
-            value[field] = tuple(value[field])  # type: ignore[arg-type]
+            value[field] = tuple(_array(value[field], field))
         result = cls(**value)  # type: ignore[arg-type]
         if result.canonical_bytes != raw:
             raise LocalityQualificationError("Locality Coverage Unit replay differs")
@@ -452,7 +460,7 @@ class LocalityCoverageProposal(_NoEffect):
             "proposed_source_reference_digests",
             "unresolved_gap_codes",
         ):
-            value[field] = tuple(value[field])  # type: ignore[arg-type]
+            value[field] = tuple(_array(value[field], field))
         result = cls(**value)  # type: ignore[arg-type]
         if result.canonical_bytes != raw:
             raise LocalityQualificationError(
@@ -524,7 +532,7 @@ class LocalityCoverageDecision(_NoEffect):
     def from_canonical_bytes(cls, raw: bytes) -> Self:
         value = _document(raw, LOCALITY_COVERAGE_DECISION, _DECISION_FIELDS)
         for field in ("assessed_gap_codes", "reason_codes"):
-            value[field] = tuple(value[field])  # type: ignore[arg-type]
+            value[field] = tuple(_array(value[field], field))
         result = cls(**value)  # type: ignore[arg-type]
         if result.canonical_bytes != raw:
             raise LocalityQualificationError(
@@ -538,7 +546,9 @@ def validate_locality_coverage_chain(
     unit: LocalityCoverageUnit,
     proposal: LocalityCoverageProposal,
     decision: LocalityCoverageDecision,
-    previous: LocalityCoverageDecision | None = None,
+    previous: (
+        LocalityCoverageDecision | tuple[LocalityCoverageDecision, ...] | None
+    ) = None,
 ) -> None:
     if any(
         type(value) is not kind
@@ -569,13 +579,34 @@ def validate_locality_coverage_chain(
             raise LocalityQualificationError(
                 "initial locality decision supersedes another"
             )
-    else:
-        validate_locality_coverage_chain(reference, unit, proposal, previous)
-        if (
-            decision.supersedes_decision_digest != previous.digest
-            or decision.decided_at < previous.decided_at
-        ):
-            raise LocalityQualificationError("locality decision predecessor differs")
+        return
+    chain = previous if type(previous) is tuple else (previous,)
+    if (
+        not chain
+        or any(type(item) is not LocalityCoverageDecision for item in chain)
+        or chain[0].supersedes_decision_digest is not None
+    ):
+        raise LocalityQualificationError("locality decision predecessor differs")
+    if (
+        any(
+            item.proposal_id != proposal.proposal_id
+            or item.proposal_digest != proposal.digest
+            or item.decided_at < proposal.proposed_at
+            or set(item.assessed_gap_codes) != set(proposal.unresolved_gap_codes)
+            for item in chain
+        )
+        or len({item.decision_id for item in chain}) != len(chain)
+        or len({item.digest for item in chain}) != len(chain)
+        or any(
+            current.supersedes_decision_digest != predecessor.digest
+            or current.decided_at < predecessor.decided_at
+            for predecessor, current in zip(chain, chain[1:])
+        )
+        or decision.decision_id in {item.decision_id for item in chain}
+        or decision.supersedes_decision_digest != chain[-1].digest
+        or decision.decided_at < chain[-1].decided_at
+    ):
+        raise LocalityQualificationError("locality decision predecessor differs")
 
 
 __all__ = [

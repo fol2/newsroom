@@ -139,6 +139,23 @@ def test_decisions_only_retain_defer_or_reject_and_chain_exactly() -> None:
         decided_at="2026-08-14T00:00:04.000000Z",
     )
     validate_locality_coverage_chain(reference, unit, proposal, second, first)
+    third = replace(
+        second,
+        decision_id=_id(6),
+        supersedes_decision_digest=second.digest,
+        decided_at="2026-08-14T00:00:05.000000Z",
+    )
+    validate_locality_coverage_chain(reference, unit, proposal, third, (first, second))
+    with pytest.raises(LocalityQualificationError, match="predecessor"):
+        validate_locality_coverage_chain(reference, unit, proposal, third, second)
+    with pytest.raises(LocalityQualificationError, match="predecessor"):
+        validate_locality_coverage_chain(
+            reference,
+            unit,
+            proposal,
+            replace(second, decision_id=first.decision_id),
+            first,
+        )
     with pytest.raises(LocalityQualificationError, match="predecessor"):
         validate_locality_coverage_chain(
             reference,
@@ -166,6 +183,10 @@ def test_unknown_duplicate_noncanonical_and_unbounded_arrays_fail_closed() -> No
         replace(
             unit, source_class_scope=tuple(f"SOURCE_{value:03d}" for value in range(65))
         )
+    malformed = json.loads(unit.canonical_bytes)
+    malformed["source_class_scope"] = None
+    with pytest.raises(LocalityQualificationError, match="must be an array"):
+        LocalityCoverageUnit.from_canonical_bytes(canonical_json_bytes(malformed))
 
 
 def test_locality_records_create_no_watch_editorial_or_external_effect() -> None:
