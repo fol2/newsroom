@@ -16,6 +16,12 @@ from newsroom.authority.canonical import (
     digest_bytes,
     validate_sha256_digest,
 )
+from newsroom.increment7.provider_qualification import (
+    ProviderDecision,
+    ProviderProposal,
+    ProviderQualificationError,
+    validate_provider_decision,
+)
 
 LOCALITY_REFERENCE = "newsroom.increment7.locality-reference.v1"
 LOCALITY_COVERAGE_UNIT = "newsroom.increment7.locality-coverage-unit.v1"
@@ -632,6 +638,8 @@ def validate_locality_coverage_chain(
     previous: (
         LocalityCoverageDecision | tuple[LocalityCoverageDecision, ...] | None
     ) = None,
+    *,
+    provider_qualifications: tuple[tuple[ProviderProposal, ProviderDecision], ...],
 ) -> None:
     if any(
         type(value) is not kind
@@ -643,6 +651,32 @@ def validate_locality_coverage_chain(
         )
     ):
         raise LocalityQualificationError("locality chain requires exact records")
+    if type(provider_qualifications) is not tuple or not provider_qualifications:
+        raise LocalityQualificationError(
+            "locality chain requires exact Provider Decisions"
+        )
+    provider_decision_digests: list[str] = []
+    for qualification in provider_qualifications:
+        if (
+            type(qualification) is not tuple
+            or len(qualification) != 2
+            or type(qualification[0]) is not ProviderProposal
+            or type(qualification[1]) is not ProviderDecision
+        ):
+            raise LocalityQualificationError(
+                "locality chain requires exact Provider Decisions"
+            )
+        try:
+            validate_provider_decision(*qualification)
+        except ProviderQualificationError as exc:
+            raise LocalityQualificationError(
+                "locality Provider Decision basis differs"
+            ) from exc
+        provider_decision_digests.append(qualification[1].digest)
+    if tuple(sorted(set(provider_decision_digests))) != tuple(
+        provider_decision_digests
+    ) or tuple(provider_decision_digests) != proposal.provider_decision_digests:
+        raise LocalityQualificationError("locality Provider Decision basis differs")
     if (
         unit.locality_reference_id != reference.locality_reference_id
         or unit.locality_reference_digest != reference.digest

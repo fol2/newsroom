@@ -22,6 +22,15 @@ from newsroom.increment7.locality_qualification import (
     LocalityServiceBoundary,
     validate_locality_coverage_chain,
 )
+from newsroom.increment7.provider_qualification import (
+    ProviderDecision,
+    ProviderKind,
+    ProviderPrerequisite,
+    ProviderPrerequisiteAssessment,
+    ProviderPrerequisiteOutcome,
+    ProviderProposal,
+    ProviderQualificationStatus,
+)
 
 _AT = "2026-08-14T00:00:00.000000Z"
 _D = "sha256:" + "a" * 64
@@ -29,6 +38,48 @@ _D = "sha256:" + "a" * 64
 
 def _id(value: int) -> str:
     return str(uuid.UUID(int=value, version=4))
+
+
+def _provider_qualifications() -> tuple[tuple[ProviderProposal, ProviderDecision], ...]:
+    provider = ProviderProposal(
+        _id(90),
+        "fixture-provider-locality",
+        ProviderKind.GDELT,
+        "Fixture GDELT",
+        ProviderQualificationStatus.HELD,
+        ("PUBLIC_NEWS_SEARCH",),
+        "research-snapshot-v1",
+        (_D,),
+        "sha256:" + "b" * 64,
+        _AT,
+    )
+    assessments = tuple(
+        ProviderPrerequisiteAssessment(
+            prerequisite,
+            ProviderPrerequisiteOutcome.MISSING,
+            None,
+        )
+        for prerequisite in ProviderPrerequisite
+    )
+    decision = ProviderDecision(
+        _id(91),
+        provider.proposal_id,
+        provider.digest,
+        ProviderQualificationStatus.HELD,
+        assessments,
+        None,
+        "sha256:" + "c" * 64,
+        ("CURRENT_POSTURE_RETAINED",),
+        "2026-08-14T00:00:00.500000Z",
+    )
+    return ((provider, decision),)
+
+
+def _validate(*args: object) -> None:
+    validate_locality_coverage_chain(
+        *args,  # type: ignore[arg-type]
+        provider_qualifications=_provider_qualifications(),
+    )
 
 
 def _chain():
@@ -76,7 +127,7 @@ def _chain():
             "sha256:" + "7" * 64,
             "sha256:" + "8" * 64,
         ),
-        provider_decision_digests=("sha256:" + "9" * 64,),
+        provider_decision_digests=(_provider_qualifications()[0][1].digest,),
         proposed_source_reference_digests=("sha256:" + "d" * 64,),
         permanent_monitoring_rationale_digest="sha256:" + "1" * 64,
         expected_contribution_digest="sha256:" + "2" * 64,
@@ -103,7 +154,7 @@ def _chain():
 
 def test_exact_locality_chain_roundtrips_without_completeness_or_activation() -> None:
     records = _chain()
-    validate_locality_coverage_chain(*records)
+    _validate(*records)
     kinds = (
         LocalityReference,
         LocalityCoverageUnit,
@@ -123,25 +174,35 @@ def test_exact_locality_chain_roundtrips_without_completeness_or_activation() ->
 def test_reference_unit_and_proposal_bind_exact_boundaries_and_gaps() -> None:
     reference, unit, proposal, decision = _chain()
     with pytest.raises(LocalityQualificationError, match="lineage"):
-        validate_locality_coverage_chain(
+        _validate(
             reference,
             replace(unit, locality_reference_digest="sha256:" + "0" * 64),
             proposal,
             decision,
         )
     with pytest.raises(LocalityQualificationError, match="lineage"):
-        validate_locality_coverage_chain(
+        _validate(
             reference,
             unit,
             replace(proposal, unresolved_gap_codes=("OTHER_GAP",)),
             decision,
         )
     with pytest.raises(LocalityQualificationError, match="lineage"):
-        validate_locality_coverage_chain(
+        _validate(
             reference,
             unit,
             proposal,
             replace(decision, assessed_gap_codes=("UNASSESSED_GAP",)),
+        )
+    fabricated = replace(
+        proposal, provider_decision_digests=("sha256:" + "9" * 64,)
+    )
+    with pytest.raises(LocalityQualificationError, match="Provider Decision basis"):
+        _validate(
+            reference,
+            unit,
+            fabricated,
+            replace(decision, proposal_digest=fabricated.digest),
         )
 
 
@@ -202,18 +263,18 @@ def test_decisions_only_retain_defer_or_reject_and_chain_exactly() -> None:
         supersedes_decision_digest=first.digest,
         decided_at="2026-08-14T00:00:04.000000Z",
     )
-    validate_locality_coverage_chain(reference, unit, proposal, second, first)
+    _validate(reference, unit, proposal, second, first)
     third = replace(
         second,
         decision_id=_id(6),
         supersedes_decision_digest=second.digest,
         decided_at="2026-08-14T00:00:05.000000Z",
     )
-    validate_locality_coverage_chain(reference, unit, proposal, third, (first, second))
+    _validate(reference, unit, proposal, third, (first, second))
     with pytest.raises(LocalityQualificationError, match="predecessor"):
-        validate_locality_coverage_chain(reference, unit, proposal, third, second)
+        _validate(reference, unit, proposal, third, second)
     with pytest.raises(LocalityQualificationError, match="predecessor"):
-        validate_locality_coverage_chain(
+        _validate(
             reference,
             unit,
             proposal,
@@ -221,7 +282,7 @@ def test_decisions_only_retain_defer_or_reject_and_chain_exactly() -> None:
             first,
         )
     with pytest.raises(LocalityQualificationError, match="predecessor"):
-        validate_locality_coverage_chain(
+        _validate(
             reference,
             unit,
             proposal,
