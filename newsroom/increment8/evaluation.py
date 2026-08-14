@@ -599,6 +599,8 @@ def build_case(
         if not isinstance(value, bool):
             raise EvaluationAuthorityError(f"{name} must be boolean")
     facts = _membership_facts(membership_facts)
+    if urgent is not (facts["case_metadata"]["urgency"] == "URGENT"):  # type: ignore[index]
+        raise EvaluationAuthorityError("urgent flag differs from frozen Case facts")
     slices, strata = _memberships(facts)
     _not_after(run.payload["started_at"], cutoff_at, boundary="Run to Case cutoff")
     payload = {

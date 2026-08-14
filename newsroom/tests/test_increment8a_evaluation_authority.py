@@ -229,6 +229,7 @@ def test_independent_review_and_adjudication_are_enforced() -> None:
         rights_status=RightsStatus.REVIEWABLE,
         prospective=True,
         launch_blocker=True,
+        urgent=True,
     )
     primary = build_review_label(
         case=case,

@@ -269,6 +269,16 @@ def test_case_membership_and_distinct_event_manifest_are_reconstructed(
         forged_payload["required_slices"] = ["INVENTED"]
         with pytest.raises(EvaluationAuthorityError, match="membership"):
             authority.register_case(EvaluationCase.build(forged_payload))
+        with pytest.raises(EvaluationAuthorityError, match="urgent flag"):
+            build_case(
+                run=run,
+                input_manifest_digest=D2,
+                cutoff_at=T2,
+                membership_facts=_facts(urgency="URGENT"),
+                rights_status=RightsStatus.REVIEWABLE,
+                prospective=True,
+                urgent=False,
+            )
         authority.register_case(case)
         duplicate_event = build_case(
             run=run,
@@ -277,6 +287,7 @@ def test_case_membership_and_distinct_event_manifest_are_reconstructed(
             membership_facts=_facts(urgency="URGENT"),
             rights_status=RightsStatus.REVIEWABLE,
             prospective=True,
+            urgent=True,
         )
         with pytest.raises(EvaluationAuthorityError, match="distinct events"):
             authority.register_case(duplicate_event)
