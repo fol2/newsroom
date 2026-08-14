@@ -269,14 +269,14 @@ def test_v26_fresh_create_history_fingerprint_and_integrity() -> None:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
     apply_pending_migrations(connection, applied_at=_AT)
-    assert SCHEMA_VERSION == 28
+    assert SCHEMA_VERSION == 29
     assert PLANNED_AGENDA_SCHEMA_VERSION == 26
     assert EXPECTED_MIGRATION_HISTORY[25] == (
         26,
         PLANNED_AGENDA_MIGRATION_NAME,
         PLANNED_AGENDA_MIGRATION_CHECKSUM,
     )
-    assert connection.execute("PRAGMA user_version").fetchone() == (28,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (29,)
     assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
@@ -314,7 +314,7 @@ def test_v25_upgrade_requires_and_retains_exact_backup(tmp_path: Path) -> None:
     authority.close()
     checked = sqlite3.connect(older_database)
     try:
-        assert checked.execute("PRAGMA user_version").fetchone() == (28,)
+        assert checked.execute("PRAGMA user_version").fetchone() == (29,)
     finally:
         checked.close()
 
@@ -478,27 +478,23 @@ def test_explicit_miss_then_late_occurrence_is_retained_and_terminal() -> None:
             ).canonical_bytes
         )
 
-    immutable_version = authority._connection.execute(  # noqa: SLF001
+    immutable_version = authority._connection.execute(
         "SELECT sql FROM sqlite_master WHERE name='immutable_planned_agenda_versions'"
     ).fetchone()[0]
-    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
-        "DROP TRIGGER immutable_planned_agenda_versions"
-    )
-    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+    authority._connection.execute("DROP TRIGGER immutable_planned_agenda_versions")
+    authority._connection.execute(
         "UPDATE planned_agenda_versions SET recorded_at=? WHERE agenda_version_id=?",
         ("2026-08-13T00:00:00.000000Z", version.agenda_version_id),
     )
-    authority._connection.execute(immutable_version)  # noqa: SLF001
+    authority._connection.execute(immutable_version)
     with pytest.raises(AgendaAuthorityError, match="Version replay differs"):
         authority.read_port().versions(item.agenda_item_id)
-    authority._connection.execute(  # noqa: SLF001 - restore retained fixture
-        "DROP TRIGGER immutable_planned_agenda_versions"
-    )
-    authority._connection.execute(  # noqa: SLF001 - restore retained fixture
+    authority._connection.execute("DROP TRIGGER immutable_planned_agenda_versions")
+    authority._connection.execute(
         "UPDATE planned_agenda_versions SET recorded_at=? WHERE agenda_version_id=?",
         (version.recorded_at, version.agenda_version_id),
     )
-    authority._connection.execute(immutable_version)  # noqa: SLF001
+    authority._connection.execute(immutable_version)
 
     retained_invalid = replace(
         further,
@@ -511,7 +507,7 @@ def test_explicit_miss_then_late_occurrence_is_retained_and_terminal() -> None:
         current_version=version,
         previous_resolution=late,
     )
-    authority._insert_resolution(  # noqa: SLF001 - pre-fix retained-row fixture
+    authority._insert_resolution(
         retained_invalid,
         retained_command,
     )
@@ -520,14 +516,12 @@ def test_explicit_miss_then_late_occurrence_is_retained_and_terminal() -> None:
         agenda_version_id=_id(9_999),
         agenda_version_digest="sha256:" + "9" * 64,
     )
-    immutable_resolution = authority._connection.execute(  # noqa: SLF001
+    immutable_resolution = authority._connection.execute(
         "SELECT sql FROM sqlite_master "
         "WHERE name='immutable_planned_agenda_resolutions'"
     ).fetchone()[0]
-    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
-        "DROP TRIGGER immutable_planned_agenda_resolutions"
-    )
-    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+    authority._connection.execute("DROP TRIGGER immutable_planned_agenda_resolutions")
+    authority._connection.execute(
         "UPDATE planned_agenda_resolutions SET resolution_bytes=?,resolution_digest=? "
         "WHERE resolution_id=?",
         (
@@ -536,8 +530,8 @@ def test_explicit_miss_then_late_occurrence_is_retained_and_terminal() -> None:
             retained_invalid.resolution_id,
         ),
     )
-    authority._connection.execute(immutable_resolution)  # noqa: SLF001
-    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+    authority._connection.execute(immutable_resolution)
+    authority._connection.execute(
         "UPDATE planned_agenda_heads SET current_resolution_digest=?,"
         "current_resolution_ordinal=? WHERE agenda_item_id=?",
         (forged_payload.digest, 3, item.agenda_item_id),
@@ -746,13 +740,13 @@ def test_retained_rows_reject_direct_mutation_and_delete(tmp_path: Path) -> None
     authority = open_planned_agenda_authority(database, applied_at=_AT)
     item, _, _, _ = _create(authority)
     with pytest.raises(sqlite3.DatabaseError):
-        authority._connection.execute(  # noqa: SLF001 - adversarial fixture proof
+        authority._connection.execute(
             "UPDATE planned_agenda_items SET stable_subject_key='tampered' "
             "WHERE agenda_item_id=?",
             (item.agenda_item_id,),
         )
     with pytest.raises(sqlite3.DatabaseError):
-        authority._connection.execute(  # noqa: SLF001 - adversarial fixture proof
+        authority._connection.execute(
             "DELETE FROM planned_agenda_versions WHERE agenda_item_id=?",
             (item.agenda_item_id,),
         )

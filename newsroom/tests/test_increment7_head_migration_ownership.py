@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -222,10 +222,10 @@ def test_reserved_additive_schema_suffix_is_checked(
     monkeypatch.setattr(
         authority_migrations,
         "EXPECTED_MIGRATION_HISTORY",
-        authority_migrations.EXPECTED_MIGRATION_HISTORY[:-2]
+        authority_migrations.EXPECTED_MIGRATION_HISTORY[:-3]
         + (
             (27, "wrong_v27", checksum),
-            authority_migrations.EXPECTED_MIGRATION_HISTORY[-1],
+            *authority_migrations.EXPECTED_MIGRATION_HISTORY[-2:],
         ),
     )
     assert any(
