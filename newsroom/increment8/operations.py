@@ -940,7 +940,13 @@ class OperationalAuthority:
                         "retry transition lacks its Finding"
                     )
                 retained_finding = RetryFinding.from_canonical_bytes(bytes(finding[0]))
-                if retained_finding.payload["work_digest"] != retained.digest:
+                if (
+                    retained_finding.payload["work_digest"] != retained.digest
+                    or retained_finding.payload["classification"]
+                    != RetryClassification.RETRYABLE.value
+                    or retained_finding.payload["retry_exhausted"] is not False
+                    or retained_finding.payload["next_due_at"] is None
+                ):
                     raise OperationalAuthorityError("retry transition Finding differs")
         values = (
             work.work_id,
@@ -1121,8 +1127,12 @@ class OperationalAuthority:
         )
         if expected != finding:
             raise OperationalAuthorityError("retry Finding differs")
-        self._insert(
-            "INSERT INTO retry_findings VALUES(?,?,?,?,?,?,?,?,?)",
+        inserted = self._insert(
+            "INSERT INTO retry_findings SELECT ?,?,?,?,?,?,?,?,? WHERE "
+            "EXISTS(SELECT 1 FROM due_work d WHERE d.work_id=? "
+            "AND d.work_digest=? AND d.state='LEASED' "
+            "AND d.state_version=(SELECT MAX(x.state_version) FROM due_work x "
+            "WHERE x.work_id=d.work_id))",
             (
                 finding.finding_id,
                 finding.canonical_bytes,
@@ -1133,8 +1143,12 @@ class OperationalAuthority:
                 finding.payload["dependency_scope"],
                 finding.payload["next_due_at"],
                 0,
+                finding.payload["work_id"],
+                finding.payload["work_digest"],
             ),
         )
+        if inserted != 1:
+            raise OperationalAuthorityError("retry latest-work authority changed")
 
     def append_quarantine(self, record: QuarantineRecord) -> None:
         if (

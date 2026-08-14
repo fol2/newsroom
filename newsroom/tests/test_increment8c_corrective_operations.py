@@ -115,6 +115,68 @@ def test_retry_attempts_cannot_jump_or_enter_pending_without_finding(tmp_path) -
     connection.close()
 
 
+def test_terminal_retry_finding_cannot_leave_active_retry_pending_work(
+    tmp_path,
+) -> None:
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = _work(profile, "retry:terminal")
+    authority.append_work(queued)
+    leased = transition_work(queued, state=WorkState.LEASED, attempt_count=1)
+    authority.append_work(leased)
+    terminal = build_retry_finding(
+        work=leased,
+        classification=RetryClassification.NON_RETRYABLE,
+        dependency_scope="FIXTURE_PROVIDER",
+        failed_at=_AT,
+    )
+    authority.append_retry_finding(terminal)
+    retry_pending = transition_work(leased, state=WorkState.RETRY_PENDING)
+    with pytest.raises(OperationalAuthorityError, match="Finding differs"):
+        authority.append_work(retry_pending)
+    connection.close()
+
+
+def test_retry_finding_rechecks_latest_work_inside_serialised_insert(
+    tmp_path, monkeypatch
+) -> None:
+    path, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = _work(profile, "retry:atomic")
+    authority.append_work(queued)
+    leased = transition_work(queued, state=WorkState.LEASED, attempt_count=1)
+    authority.append_work(leased)
+    finding = build_retry_finding(
+        work=leased,
+        classification=RetryClassification.RETRYABLE,
+        dependency_scope="FIXTURE_PROVIDER",
+        failed_at=_AT,
+    )
+    competing_connection = sqlite3.connect(path, isolation_level=None)
+    competing = OperationalAuthority(competing_connection)
+    completed = transition_work(leased, state=WorkState.COMPLETED)
+    original_insert = OperationalAuthority._insert
+    advanced = False
+
+    def insert_after_competing_write(self, sql, values):
+        nonlocal advanced
+        if not advanced and sql.startswith("INSERT INTO retry_findings"):
+            advanced = True
+            competing.append_work(completed)
+        return original_insert(self, sql, values)
+
+    monkeypatch.setattr(OperationalAuthority, "_insert", insert_after_competing_write)
+    with pytest.raises(OperationalAuthorityError, match="latest-work authority"):
+        authority.append_retry_finding(finding)
+    assert connection.execute("SELECT COUNT(*) FROM retry_findings").fetchone() == (0,)
+    competing_connection.close()
+    connection.close()
+
+
 def test_initial_quarantine_must_be_active_canonical_origin(tmp_path) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)
