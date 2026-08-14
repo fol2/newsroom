@@ -316,8 +316,15 @@ def test_create_replay_read_port_restart_and_no_effects(tmp_path: Path) -> None:
     item, version, command, snapshot = _create(authority)
     assert authority.apply(command.canonical_bytes) == snapshot
     with pytest.raises(AgendaAuthorityError, match="idempotency binding"):
+        authority.apply(replace(command, command_id=_id(9_999)).canonical_bytes)
+    _, _, second_command, _ = _create(authority, 50)
+    with pytest.raises(AgendaAuthorityError, match="idempotency binding"):
         authority.apply(
-            replace(command, command_id=_id(9_999)).canonical_bytes
+            replace(
+                command,
+                command_id=_id(9_998),
+                idempotency_key=second_command.idempotency_key,
+            ).canonical_bytes
         )
     assert authority.read_port().load(item.agenda_item_id) == snapshot
     assert authority.read_port().versions(item.agenda_item_id) == (version,)
@@ -354,6 +361,23 @@ def test_create_replay_read_port_restart_and_no_effects(tmp_path: Path) -> None:
     assert reopened.load(item.agenda_item_id).current_version == version
     reopened.close()
 
+    invalid = open_planned_agenda_authority(":memory:", applied_at=_AT)
+    invalid_item = _item(70)
+    invalid_version = _version(
+        invalid_item,
+        80,
+        source_revision_id=_id(81),
+    )
+    with pytest.raises(AgendaAuthorityError, match="initial Agenda Version binding"):
+        invalid.apply(
+            _command(
+                AgendaCommandOperation.CREATE,
+                90,
+                item=invalid_item,
+                version=invalid_version,
+            ).canonical_bytes
+        )
+
 
 def test_explicit_miss_then_late_occurrence_is_retained_and_terminal() -> None:
     authority = open_planned_agenda_authority(":memory:", applied_at=_AT)
@@ -384,6 +408,19 @@ def test_explicit_miss_then_late_occurrence_is_retained_and_terminal() -> None:
         current_version=version,
         previous_resolution=missed,
     )
+    with pytest.raises(AgendaAuthorityError, match="chronology"):
+        authority.apply(
+            replace(
+                late_command,
+                command_id=_id(9_302),
+                request_id=_id(10_302),
+                idempotency_key="agenda-command-9302",
+                resolution=replace(
+                    late,
+                    observed_at="2026-08-31T12:01:00.000000Z",
+                ),
+            ).canonical_bytes
+        )
     final = authority.apply(late_command.canonical_bytes)
     assert after_miss.resolutions == (missed,)
     assert final.resolutions == (missed, late)
@@ -405,6 +442,73 @@ def test_explicit_miss_then_late_occurrence_is_retained_and_terminal() -> None:
                 previous_resolution=late,
             ).canonical_bytes
         )
+
+    immutable_version = authority._connection.execute(  # noqa: SLF001
+        "SELECT sql FROM sqlite_master WHERE name='immutable_planned_agenda_versions'"
+    ).fetchone()[0]
+    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+        "DROP TRIGGER immutable_planned_agenda_versions"
+    )
+    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+        "UPDATE planned_agenda_versions SET recorded_at=? WHERE agenda_version_id=?",
+        ("2026-08-13T00:00:00.000000Z", version.agenda_version_id),
+    )
+    authority._connection.execute(immutable_version)  # noqa: SLF001
+    with pytest.raises(AgendaAuthorityError, match="Version replay differs"):
+        authority.read_port().versions(item.agenda_item_id)
+    authority._connection.execute(  # noqa: SLF001 - restore retained fixture
+        "DROP TRIGGER immutable_planned_agenda_versions"
+    )
+    authority._connection.execute(  # noqa: SLF001 - restore retained fixture
+        "UPDATE planned_agenda_versions SET recorded_at=? WHERE agenda_version_id=?",
+        (version.recorded_at, version.agenda_version_id),
+    )
+    authority._connection.execute(immutable_version)  # noqa: SLF001
+
+    retained_invalid = replace(
+        further,
+        observed_at="2026-09-01T12:00:30.000000Z",
+    )
+    retained_command = _command(
+        AgendaCommandOperation.RESOLVE,
+        304,
+        resolution=retained_invalid,
+        current_version=version,
+        previous_resolution=late,
+    )
+    authority._insert_resolution(  # noqa: SLF001 - pre-fix retained-row fixture
+        retained_invalid,
+        retained_command,
+    )
+    forged_payload = replace(
+        retained_invalid,
+        agenda_version_id=_id(9_999),
+        agenda_version_digest="sha256:" + "9" * 64,
+    )
+    immutable_resolution = authority._connection.execute(  # noqa: SLF001
+        "SELECT sql FROM sqlite_master "
+        "WHERE name='immutable_planned_agenda_resolutions'"
+    ).fetchone()[0]
+    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+        "DROP TRIGGER immutable_planned_agenda_resolutions"
+    )
+    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+        "UPDATE planned_agenda_resolutions SET resolution_bytes=?,resolution_digest=? "
+        "WHERE resolution_id=?",
+        (
+            forged_payload.canonical_bytes,
+            forged_payload.digest,
+            retained_invalid.resolution_id,
+        ),
+    )
+    authority._connection.execute(immutable_resolution)  # noqa: SLF001
+    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+        "UPDATE planned_agenda_heads SET current_resolution_digest=?,"
+        "current_resolution_ordinal=? WHERE agenda_item_id=?",
+        (forged_payload.digest, 3, item.agenda_item_id),
+    )
+    with pytest.raises(AgendaAuthorityError, match="replay differs"):
+        authority.read_port().resolutions(item.agenda_item_id)
 
 
 @pytest.mark.parametrize(
@@ -464,6 +568,46 @@ def test_revision_is_atomic_cas_bound_and_status_matched(kind, status) -> None:
                     315,
                     version=unchanged_schedule,
                     resolution=unchanged_resolution,
+                    current_version=prior,
+                ).canonical_bytes
+            )
+        backdated = replace(
+            successor,
+            agenda_version_id=_id(26),
+            recorded_at="2026-08-13T00:00:00.000000Z",
+        )
+        with pytest.raises(AgendaAuthorityError, match="revision chronology"):
+            authority.apply(
+                _command(
+                    AgendaCommandOperation.REVISE,
+                    316,
+                    version=backdated,
+                    resolution=replace(
+                        resolution,
+                        resolution_id=_id(216),
+                        successor_version_digest=backdated.digest,
+                    ),
+                    current_version=prior,
+                ).canonical_bytes
+            )
+    else:
+        postponed = replace(
+            successor,
+            agenda_version_id=_id(27),
+            schedule_status=AgendaScheduleStatus.POSTPONED_WITHOUT_DATE,
+        )
+        with pytest.raises(AgendaAuthorityError, match="replacement date"):
+            authority.apply(
+                _command(
+                    AgendaCommandOperation.REVISE,
+                    317,
+                    version=postponed,
+                    resolution=replace(
+                        resolution,
+                        resolution_id=_id(217),
+                        kind=AgendaResolutionKind.POSTPONED_WITH_SOURCE_EVIDENCE,
+                        successor_version_digest=postponed.digest,
+                    ),
                     current_version=prior,
                 ).canonical_bytes
             )
