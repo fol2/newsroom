@@ -384,6 +384,19 @@ def test_explicit_miss_then_late_occurrence_is_retained_and_terminal() -> None:
         current_version=version,
         previous_resolution=missed,
     )
+    with pytest.raises(AgendaAuthorityError, match="chronology"):
+        authority.apply(
+            replace(
+                late_command,
+                command_id=_id(9_302),
+                request_id=_id(10_302),
+                idempotency_key="agenda-command-9302",
+                resolution=replace(
+                    late,
+                    observed_at="2026-08-31T12:01:00.000000Z",
+                ),
+            ).canonical_bytes
+        )
     final = authority.apply(late_command.canonical_bytes)
     assert after_miss.resolutions == (missed,)
     assert final.resolutions == (missed, late)

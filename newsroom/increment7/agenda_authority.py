@@ -787,6 +787,10 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
             raise AgendaAuthorityError("Agenda Resolution current binding differs")
         if previous is not None and previous.kind in _TERMINAL_KINDS:
             raise AgendaAuthorityError("Agenda lifecycle is terminal")
+        if resolution.observed_at < current.recorded_at or (
+            previous is not None and resolution.observed_at < previous.observed_at
+        ):
+            raise AgendaAuthorityError("Agenda Resolution chronology differs")
         admitted_paths = {
             digest_bytes(canonical_json_bytes(path.to_dict()))
             for path in current.occurrence_confirmation_paths
