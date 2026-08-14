@@ -224,7 +224,7 @@ def validate_contract_data(
     if (
         core.get("shard_count") != 10
         or core.get("partition") != "sha256_node_id_balanced"
-        or core.get("workers_per_shard") != 2
+        or core.get("workers_per_shard") != 3
         or core.get("distribution") != "worksteal"
         or core.get("max_worker_restart") != 0
         or core.get("reducer_single_canonical_receipt") is not True

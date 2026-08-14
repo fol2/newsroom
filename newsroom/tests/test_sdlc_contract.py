@@ -80,7 +80,7 @@ def test_every_gate_lane_resolves_and_core_budget_is_below_six_minutes() -> None
         "bootstrap_once": True,
         "shard_count": 10,
         "partition": "sha256_node_id_balanced",
-        "workers_per_shard": 2,
+        "workers_per_shard": 3,
         "distribution": "worksteal",
         "max_worker_restart": 0,
         "per_shard_hard_timeout_seconds": 330,
@@ -155,7 +155,7 @@ def test_repository_timing_boundaries_are_caller_invariant(
         validate_contract_data(data)
 
 
-@pytest.mark.parametrize("worker_count", (1, 3, 4))
+@pytest.mark.parametrize("worker_count", (1, 2, 4))
 def test_unaccepted_core_worker_counts_fail_closed(worker_count: int) -> None:
     contract = load_contract(REPO_ROOT)
     data = deepcopy(contract.data)

@@ -624,10 +624,10 @@ def _run_reducer_fixture(
     return json.loads(aggregate_path.read_text(encoding="utf-8")), order
 
 
-def test_core_lane_uses_two_persistent_worksteal_workers(
+def test_core_lane_uses_three_persistent_worksteal_workers(
     tmp_path: Path,
 ) -> None:
-    assert lane_module._CORE_WORKER_COUNT == 2
+    assert lane_module._CORE_WORKER_COUNT == 3
     assert lane_module._CORE_DISTRIBUTION == "worksteal"
 
     command = lane_module._core_worker_command(
@@ -636,7 +636,7 @@ def test_core_lane_uses_two_persistent_worksteal_workers(
     )
 
     worker_flag = command.index("-n")
-    assert command[worker_flag + 1] == "2"
+    assert command[worker_flag + 1] == "3"
     assert "--dist=worksteal" in command
     assert "--max-worker-restart=0" in command
     assert command.count("xdist.plugin") == 1
@@ -649,7 +649,7 @@ import importlib
 import scripts.sdlc.workflow_lane as lane
 reloaded = importlib.reload(lane)
 assert reloaded is lane
-assert reloaded._CORE_WORKER_COUNT == 2
+assert reloaded._CORE_WORKER_COUNT == 3
 assert reloaded._CORE_DISTRIBUTION == 'worksteal'
 assert reloaded._CORE_TESTS == ('newsroom/tests',)
 """
@@ -754,7 +754,7 @@ def test_core_shard_command_has_fixed_scheduler_and_no_caller_file_surface(
     )
 
     assert command.count("xdist.plugin") == 1
-    assert command[command.index("-n") + 1] == "2"
+    assert command[command.index("-n") + 1] == "3"
     assert "--dist=worksteal" in command
     assert "--max-worker-restart=0" in command
     assert "newsroom/tests" not in command
