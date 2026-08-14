@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Self
 
 from newsroom.authority.canonical import (
@@ -24,12 +25,14 @@ from newsroom.authority.canonical import (
 PROVIDER_PROPOSAL = "newsroom.increment7.provider-proposal.v1"
 PROVIDER_DECISION = "newsroom.increment7.provider-decision.v1"
 PROVIDER_QUALIFICATION_AUTHORITY = "DECISION_RECORD_ONLY_NO_ACTIVATION"
-PROVIDER_CURRENT_POSTURE = {
-    "GDELT": "HELD",
-    "BRAVE_SEARCH": "RIGHTS_REVIEW_REQUIRED",
-    "SEARXNG": "RESEARCH",
-    "UNOFFICIAL_WRAPPER": "RESEARCH",
-}
+PROVIDER_CURRENT_POSTURE = MappingProxyType(
+    {
+        "GDELT": "HELD",
+        "BRAVE_SEARCH": "RIGHTS_REVIEW_REQUIRED",
+        "SEARXNG": "RESEARCH",
+        "UNOFFICIAL_WRAPPER": "RESEARCH",
+    }
+)
 MAX_PROVIDER_QUALIFICATION_BYTES = 1_048_576
 
 _UUID = re.compile(
@@ -182,6 +185,12 @@ def _pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise ProviderQualificationError(f"duplicate object name: {key}")
         result[key] = value
     return result
+
+
+def _array(value: object, field: str) -> tuple[object, ...]:
+    if type(value) is not list:
+        raise ProviderQualificationError(f"{field} must be an array")
+    return tuple(value)
 
 
 def _document(raw: bytes, schema: str, fields: tuple[str, ...]) -> dict[str, object]:
@@ -356,7 +365,7 @@ class ProviderProposal(_NoEffect):
     def from_canonical_bytes(cls, raw: bytes) -> Self:
         value = _document(raw, PROVIDER_PROPOSAL, _PROPOSAL_FIELDS)
         for field in ("capability_scope", "research_reference_digests"):
-            value[field] = tuple(value[field])  # type: ignore[arg-type]
+            value[field] = _array(value[field], field)
         result = cls(**value)  # type: ignore[arg-type]
         if result.canonical_bytes != raw:
             raise ProviderQualificationError("Provider Proposal replay differs")
@@ -431,7 +440,7 @@ class ProviderDecision(_NoEffect):
             self.status
             is ProviderQualificationStatus.QUALIFIED_FOR_SEPARATE_ADMISSION_REVIEW
         )
-        if qualified != all_satisfied:
+        if qualified and not all_satisfied:
             raise ProviderQualificationError(
                 "qualification status and prerequisites differ"
             )
@@ -464,9 +473,11 @@ class ProviderDecision(_NoEffect):
         value = _document(raw, PROVIDER_DECISION, _DECISION_FIELDS)
         value["prerequisite_assessments"] = tuple(
             ProviderPrerequisiteAssessment.from_dict(item)
-            for item in value["prerequisite_assessments"]  # type: ignore[union-attr]
+            for item in _array(
+                value["prerequisite_assessments"], "prerequisite_assessments"
+            )
         )
-        value["reason_codes"] = tuple(value["reason_codes"])  # type: ignore[arg-type]
+        value["reason_codes"] = _array(value["reason_codes"], "reason_codes")
         result = cls(**value)  # type: ignore[arg-type]
         if result.canonical_bytes != raw:
             raise ProviderQualificationError("Provider Decision replay differs")

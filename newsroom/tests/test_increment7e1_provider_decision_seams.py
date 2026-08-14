@@ -144,6 +144,14 @@ def test_prerequisites_are_complete_referenced_and_never_self_qualifying() -> No
     )
     with pytest.raises(ProviderQualificationError, match="current posture"):
         validate_provider_decision(proposal, qualified)
+    retained = replace(
+        qualified,
+        status=proposal.proposed_posture,
+        reason_codes=("SATISFIED_BUT_NOT_ADMITTED",),
+    )
+    validate_provider_decision(proposal, retained)
+    with pytest.raises(TypeError):
+        PROVIDER_CURRENT_POSTURE[ProviderKind.BRAVE_SEARCH.value] = "RESEARCH"  # type: ignore[index]
 
 
 def test_decision_binds_exact_proposal_predecessor_and_chronology() -> None:
@@ -196,6 +204,10 @@ def test_unknown_duplicate_and_noncanonical_bytes_fail_closed() -> None:
         ProviderProposal.from_canonical_bytes(duplicate)
     with pytest.raises(ProviderQualificationError, match="canonical JSON"):
         ProviderProposal.from_canonical_bytes(proposal.canonical_bytes + b" ")
+    malformed = json.loads(proposal.canonical_bytes)
+    malformed["capability_scope"] = None
+    with pytest.raises(ProviderQualificationError, match="must be an array"):
+        ProviderProposal.from_canonical_bytes(canonical_json_bytes(malformed))
 
 
 def test_rejection_is_a_record_not_provider_or_editorial_authority() -> None:
