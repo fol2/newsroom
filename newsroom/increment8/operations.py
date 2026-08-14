@@ -921,6 +921,10 @@ class OperationalAuthority:
             if profile != (work.payload["profile_digest"],):
                 raise OperationalAuthorityError("work Profile authority differs")
         else:
+            if work.payload["state"] == WorkState.LEASED.value:
+                raise OperationalAuthorityError(
+                    "LEASED work must be committed by lease acquisition"
+                )
             previous = self._connection.execute(
                 "SELECT work_digest,work_bytes FROM due_work WHERE work_id=? AND state_version=?",
                 (work.work_id, version - 1),

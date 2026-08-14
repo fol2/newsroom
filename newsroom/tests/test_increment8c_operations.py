@@ -91,8 +91,14 @@ def test_profile_and_due_work_are_exact_append_only_and_deduplicated(tmp_path) -
     assert authority.due_work(_AT) == (work,)
     with pytest.raises(sqlite3.IntegrityError):
         authority.append_work(work)
-    leased = transition_work(work, state=WorkState.LEASED, attempt_count=1)
-    authority.append_work(leased)
+    authority.append_lease(
+        acquire_lease(
+            work=work,
+            owner_digest="sha256:" + "2" * 64,
+            acquired_at=_AT,
+            progress_digest="sha256:" + "3" * 64,
+        )
+    )
     assert authority.due_work(_AT) == ()
     with pytest.raises(sqlite3.IntegrityError, match="immutable"):
         connection.execute("UPDATE due_work SET state='COMPLETED'")
@@ -183,7 +189,14 @@ def test_retry_is_classified_bounded_and_never_refreshes_health(tmp_path) -> Non
     work = _work(profile)
     authority.append_work(work)
     leased = transition_work(work, state=WorkState.LEASED, attempt_count=1)
-    authority.append_work(leased)
+    authority.append_lease(
+        acquire_lease(
+            work=work,
+            owner_digest="sha256:" + "2" * 64,
+            acquired_at=_AT,
+            progress_digest="sha256:" + "3" * 64,
+        )
+    )
     finding = build_retry_finding(
         work=leased,
         classification=RetryClassification.RETRYABLE,

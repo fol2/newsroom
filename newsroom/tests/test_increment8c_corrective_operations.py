@@ -42,6 +42,22 @@ def _work(profile, key: str):
     )
 
 
+def _commit_lease(authority: OperationalAuthority, work, *, acquired_at: str = _AT):
+    authority.append_lease(
+        acquire_lease(
+            work=work,
+            owner_digest="sha256:" + "2" * 64,
+            acquired_at=acquired_at,
+            progress_digest="sha256:" + "3" * 64,
+        )
+    )
+    return transition_work(
+        work,
+        state=WorkState.LEASED,
+        attempt_count=int(work.payload["attempt_count"]) + 1,
+    )
+
+
 def test_retry_uses_latest_work_version_and_exact_next_due_at(tmp_path) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)
@@ -50,8 +66,7 @@ def test_retry_uses_latest_work_version_and_exact_next_due_at(tmp_path) -> None:
     queued = _work(profile, "retry:latest")
     authority.append_work(queued)
 
-    leased_once = transition_work(queued, state=WorkState.LEASED, attempt_count=1)
-    authority.append_work(leased_once)
+    leased_once = _commit_lease(authority, queued)
     first_finding = build_retry_finding(
         work=leased_once,
         classification=RetryClassification.RETRYABLE,
@@ -107,8 +122,12 @@ def test_retry_attempts_cannot_jump_or_enter_pending_without_finding(tmp_path) -
     authority.append_work(queued)
     with pytest.raises(OperationalAuthorityError, match="exactly one"):
         transition_work(queued, state=WorkState.LEASED, attempt_count=2)
-    leased = transition_work(queued, state=WorkState.LEASED, attempt_count=1)
-    authority.append_work(leased)
+    direct_lease_state = transition_work(
+        queued, state=WorkState.LEASED, attempt_count=1
+    )
+    with pytest.raises(OperationalAuthorityError, match="lease acquisition"):
+        authority.append_work(direct_lease_state)
+    leased = _commit_lease(authority, queued)
     retry_pending = transition_work(leased, state=WorkState.RETRY_PENDING)
     with pytest.raises(OperationalAuthorityError, match="lacks its Finding"):
         authority.append_work(retry_pending)
@@ -124,8 +143,7 @@ def test_terminal_retry_finding_cannot_leave_active_retry_pending_work(
     authority.register_profile(profile)
     queued = _work(profile, "retry:terminal")
     authority.append_work(queued)
-    leased = transition_work(queued, state=WorkState.LEASED, attempt_count=1)
-    authority.append_work(leased)
+    leased = _commit_lease(authority, queued)
     terminal = build_retry_finding(
         work=leased,
         classification=RetryClassification.NON_RETRYABLE,
@@ -148,8 +166,7 @@ def test_retry_finding_rechecks_latest_work_inside_serialised_insert(
     authority.register_profile(profile)
     queued = _work(profile, "retry:atomic")
     authority.append_work(queued)
-    leased = transition_work(queued, state=WorkState.LEASED, attempt_count=1)
-    authority.append_work(leased)
+    leased = _commit_lease(authority, queued)
     finding = build_retry_finding(
         work=leased,
         classification=RetryClassification.RETRYABLE,
