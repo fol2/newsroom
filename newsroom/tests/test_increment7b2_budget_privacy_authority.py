@@ -541,6 +541,81 @@ def test_budget_replay_uses_one_read_snapshot_during_concurrent_commit(
         reader.close()
 
 
+def test_inventory_replay_uses_one_read_snapshot_during_concurrent_append(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "inventory-snapshot.sqlite3"
+    reader = open_bounded_search_authority(database, applied_at=_AT)
+    reader._connection.execute("PRAGMA journal_mode=WAL")
+    first = _purpose()
+    reader.record_purpose(first.canonical_bytes)
+    second = replace(first, purpose_id=_id(84))
+    retained_query_started = threading.Event()
+    writer_finished = threading.Event()
+
+    def trace(statement: str) -> None:
+        if statement.startswith("SELECT purpose_id,purpose_digest,created_at"):
+            retained_query_started.set()
+            assert writer_finished.wait(timeout=10)
+
+    def write_purpose() -> None:
+        writer = open_bounded_search_authority(database, applied_at=_AT)
+        try:
+            assert retained_query_started.wait(timeout=10)
+            writer.record_purpose(second.canonical_bytes)
+        finally:
+            writer.close()
+            writer_finished.set()
+
+    reader._connection.set_trace_callback(trace)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(write_purpose)
+            assert reader.purpose(first.purpose_id) == first
+            future.result(timeout=15)
+        assert reader.purpose(second.purpose_id) == second
+    finally:
+        reader._connection.set_trace_callback(None)
+        reader.close()
+
+
+def test_attempt_concurrency_reconciles_outcome_interval_before_cas(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "attempt-outcome-interval.sqlite3"
+    authority = open_bounded_search_authority(database, applied_at=_AT)
+    purpose = _purpose()
+    request = replace(
+        _request(purpose),
+        limits=replace(_request(purpose).limits, max_concurrent_attempts=1),
+    )
+    first = _attempt(request)
+    outcome = replace(
+        _outcome(first), completed_at="2026-08-14T00:00:05.000000Z"
+    )
+    authority.record_purpose(purpose.canonical_bytes)
+    authority.record_request(request.canonical_bytes)
+    authority.record_attempt(first.canonical_bytes)
+    authority.record_outcome(outcome.canonical_bytes)
+    attacker = sqlite3.connect(database, isolation_level=None)
+    try:
+        attacker.execute("DROP TRIGGER immutable_search_outcomes")
+        attacker.execute(
+            "UPDATE search_outcomes SET completed_at=? WHERE outcome_id=?",
+            ("2026-08-14T00:00:03.000000Z", outcome.outcome_id),
+        )
+        second = replace(
+            _attempt(request, 85, 2),
+            retry_ordinal=0,
+            started_at="2026-08-14T00:00:04.000000Z",
+        )
+        with pytest.raises(SearchAuthorityError, match="retained columns"):
+            authority.record_attempt(second.canonical_bytes)
+    finally:
+        attacker.close()
+        authority.close()
+
+
 def test_result_inventory_blocks_replacement_after_retained_row_deletion(
     tmp_path: Path,
 ) -> None:

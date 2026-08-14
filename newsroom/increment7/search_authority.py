@@ -77,6 +77,24 @@ def _total(label: str):
     return decorate
 
 
+def _snapshot(function):
+    def wrapped(self, *args: object, **kwargs: object):
+        owns_snapshot = not self._connection.in_transaction
+        if owns_snapshot:
+            self._connection.execute("BEGIN")
+        try:
+            result = function(self, *args, **kwargs)
+        except BaseException:
+            if owns_snapshot and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        if owns_snapshot:
+            self._connection.execute("COMMIT")
+        return result
+
+    return wrapped
+
+
 @dataclass(frozen=True, slots=True)
 class SearchBudgetSnapshot(_NoEffect):
     request_id: str
@@ -120,6 +138,7 @@ class BoundedSearchReadPort(_NoEffect):
         return record, values
 
     @_total("Search Purpose replay failed")
+    @_snapshot
     def purpose(self, purpose_id: str) -> SearchPurpose:
         record, row = self._record(
             "search_purposes", "purpose_id", purpose_id, SearchPurpose
@@ -135,6 +154,7 @@ class BoundedSearchReadPort(_NoEffect):
         return record
 
     @_total("Search Request replay failed")
+    @_snapshot
     def request(self, request_id: str) -> SearchRequest:
         record, row = self._record(
             "search_requests", "request_id", request_id, SearchRequest
@@ -162,6 +182,7 @@ class BoundedSearchReadPort(_NoEffect):
         return record
 
     @_total("Search Attempt replay failed")
+    @_snapshot
     def attempt(self, attempt_id: str) -> SearchAttempt:
         record, row = self._record(
             "search_attempts", "attempt_id", attempt_id, SearchAttempt
@@ -185,6 +206,7 @@ class BoundedSearchReadPort(_NoEffect):
         return record
 
     @_total("Search Outcome replay failed")
+    @_snapshot
     def outcome(self, outcome_id: str) -> SearchOutcome:
         owns_snapshot = not self._connection.in_transaction
         if owns_snapshot:
@@ -223,6 +245,7 @@ class BoundedSearchReadPort(_NoEffect):
         return record, request
 
     @_total("Search Result Reference replay failed")
+    @_snapshot
     def result(self, result_reference_id: str) -> SearchResultReference:
         record, row = self._record(
             "search_result_references",
@@ -248,6 +271,7 @@ class BoundedSearchReadPort(_NoEffect):
         return record
 
     @_total("Search Review Decision replay failed")
+    @_snapshot
     def review(self, review_decision_id: str) -> SearchReviewDecision:
         record, row = self._record(
             "search_review_decisions",
@@ -275,6 +299,7 @@ class BoundedSearchReadPort(_NoEffect):
         return record
 
     @_total("Search budget replay failed")
+    @_snapshot
     def budget(self, request_id: str) -> SearchBudgetSnapshot:
         owns_snapshot = not self._connection.in_transaction
         if owns_snapshot:
@@ -836,6 +861,7 @@ class BoundedSearchAuthority(BoundedSearchReadPort):
             )
             if not replay:
                 count = self._attempt_inventory(request)
+                self._outcome_inventory(request)
                 latest_started_at = self._connection.execute(
                     "SELECT max(started_at) FROM search_attempts WHERE request_id=?",
                     (record.request_id,),
