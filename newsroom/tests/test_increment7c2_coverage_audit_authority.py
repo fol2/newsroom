@@ -55,9 +55,7 @@ from newsroom.increment7.coverage_authority import (
     validate_coverage_command,
 )
 from newsroom.increment7.search import SearchReviewAction, SearchReviewDecision
-from newsroom.tests.graphiti_adapter_4d_migration_helpers import (
-    drop_empty_v29_local_watch_schema,
-)
+from newsroom.tests.authority_migration_compatibility import build_exact_prefix
 from newsroom.tests.test_increment7b1_gross_request_privacy import (
     _attempt,
     _outcome,
@@ -335,10 +333,13 @@ def test_v28_fresh_create_history_fingerprint_and_reserved_tables() -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert SCHEMA_VERSION == 29
+    assert SCHEMA_VERSION >= 29
     assert COVERAGE_AUDIT_SCHEMA_VERSION == 28
-    assert EXPECTED_MIGRATION_HISTORY[-2][1] == COVERAGE_AUDIT_MIGRATION_NAME
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 29
+    assert (
+        EXPECTED_MIGRATION_HISTORY[COVERAGE_AUDIT_SCHEMA_VERSION - 1][1]
+        == COVERAGE_AUDIT_MIGRATION_NAME
+    )
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
     assert {
         "coverage_audits",
@@ -351,33 +352,8 @@ def test_v28_fresh_create_history_fingerprint_and_reserved_tables() -> None:
 
 
 def _create_v27(path) -> sqlite3.Connection:
+    build_exact_prefix(path, 27)
     connection = sqlite3.connect(path, isolation_level=None)
-    connection.execute("PRAGMA foreign_keys=ON")
-    apply_pending_migrations(connection, applied_at=_APPLIED)
-    connection.execute("PRAGMA foreign_keys=OFF")
-    connection.execute("BEGIN EXCLUSIVE")
-    drop_empty_v29_local_watch_schema(connection)
-    immutable = connection.execute(
-        "SELECT sql FROM sqlite_master "
-        "WHERE name='immutable_authority_migrations_delete'"
-    ).fetchone()[0]
-    connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
-    for table in (
-        "coverage_gap_decisions",
-        "coverage_audit_observations",
-        "coverage_gaps",
-        "coverage_audits",
-    ):
-        for (name,) in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=?",
-            (table,),
-        ).fetchall():
-            connection.execute(f'DROP TRIGGER "{name}"')
-        connection.execute(f"DROP TABLE {table}")
-    connection.execute("DELETE FROM authority_migrations WHERE version=28")
-    connection.execute(immutable)
-    connection.execute("PRAGMA user_version=27")
-    connection.execute("COMMIT")
     connection.execute("PRAGMA foreign_keys=ON")
     return connection
 
@@ -410,7 +386,7 @@ def test_v27_upgrade_requires_exact_backup_and_preserves_restore_point(
     )
     monkeypatch.setattr(migrations, "COVERAGE_AUDIT_MIGRATION_STATEMENTS", statements)
     apply_pending_migrations(connection, applied_at=_APPLIED)
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 29
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
     restored = sqlite3.connect(backup, isolation_level=None)
     try:

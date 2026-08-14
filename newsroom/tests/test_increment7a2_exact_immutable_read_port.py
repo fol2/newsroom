@@ -44,6 +44,7 @@ from newsroom.increment7.agenda_authority import (
     PlannedAgendaCommand,
     open_planned_agenda_authority,
 )
+from newsroom.tests.authority_migration_compatibility import build_exact_prefix
 from newsroom.tests.graphiti_adapter_4d_migration_helpers import (
     drop_empty_v28_coverage_schema,
 )
@@ -269,14 +270,14 @@ def test_v26_fresh_create_history_fingerprint_and_integrity() -> None:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
     apply_pending_migrations(connection, applied_at=_AT)
-    assert SCHEMA_VERSION == 29
+    assert SCHEMA_VERSION >= 29
     assert PLANNED_AGENDA_SCHEMA_VERSION == 26
     assert EXPECTED_MIGRATION_HISTORY[25] == (
         26,
         PLANNED_AGENDA_MIGRATION_NAME,
         PLANNED_AGENDA_MIGRATION_CHECKSUM,
     )
-    assert connection.execute("PRAGMA user_version").fetchone() == (29,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
     assert schema_fingerprint(connection) == EXPECTED_SCHEMA_FINGERPRINT
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
@@ -284,11 +285,9 @@ def test_v26_fresh_create_history_fingerprint_and_integrity() -> None:
 
 def test_v25_upgrade_requires_and_retains_exact_backup(tmp_path: Path) -> None:
     database = tmp_path / "agenda.sqlite3"
+    build_exact_prefix(database, 25)
     connection = sqlite3.connect(database, isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
-    apply_pending_migrations(connection, applied_at=_AT)
-    _downgrade_empty_v27_to_v26(connection)
-    _downgrade_empty_v26_to_v25(connection)
     assert schema_fingerprint(connection) == PLANNED_AGENDA_PREDECESSOR_FINGERPRINT
     connection.close()
 
@@ -302,30 +301,22 @@ def test_v25_upgrade_requires_and_retains_exact_backup(tmp_path: Path) -> None:
     retained.close()
 
     older_database = tmp_path / "v24.sqlite3"
-    connection = sqlite3.connect(older_database, isolation_level=None)
-    connection.execute("PRAGMA foreign_keys=ON")
-    apply_pending_migrations(connection, applied_at=_AT)
-    _downgrade_empty_v27_to_v26(connection)
-    _downgrade_empty_v26_to_v25(connection)
-    _downgrade_empty_v25_to_v24(connection)
-    connection.close()
+    build_exact_prefix(older_database, 24)
 
     authority = open_planned_agenda_authority(older_database, applied_at=_AT)
     authority.close()
     checked = sqlite3.connect(older_database)
     try:
-        assert checked.execute("PRAGMA user_version").fetchone() == (29,)
+        assert checked.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
     finally:
         checked.close()
 
 
 def test_v26_failure_rolls_back_to_exact_v25(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "rollback.sqlite3"
+    build_exact_prefix(database, 25)
     connection = sqlite3.connect(database, isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
-    apply_pending_migrations(connection, applied_at=_AT)
-    _downgrade_empty_v27_to_v26(connection)
-    _downgrade_empty_v26_to_v25(connection)
     backup, _ = planned_agenda_backup_paths(database.resolve())
     prepare_planned_agenda_backup(connection, backup)
     monkeypatch.setattr(

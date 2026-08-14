@@ -193,6 +193,11 @@ PINNED_MIGRATION_HISTORY: tuple[HistoryRow, ...] = (
         "event_scoped_local_watch_authority_v29",
         "sha256:ca57c62c9bfadc2ea0a09a3bf762f95854e413aa71d324a296b4c867c90dec7b",
     ),
+    (
+        30,
+        "increment8_evaluation_authority_v30",
+        "sha256:764306cbc8fced0b50657c87c2c8735aa07b6ed6b02b1d7ceec84afd9db7dc15",
+    ),
 )
 
 

@@ -48,6 +48,7 @@ from newsroom.increment7.search_authority import (
     SearchAuthorityError,
     open_bounded_search_authority,
 )
+from newsroom.tests.authority_migration_compatibility import build_exact_prefix
 from newsroom.tests.graphiti_adapter_4d_migration_helpers import (
     drop_empty_v28_coverage_schema,
 )
@@ -233,9 +234,9 @@ def test_v27_fresh_history_fingerprint_integrity_and_reserved_tables() -> None:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
     apply_pending_migrations(connection, applied_at=_AT)
-    assert SCHEMA_VERSION == 29
+    assert SCHEMA_VERSION >= 29
     assert BOUNDED_SEARCH_SCHEMA_VERSION == 27
-    assert EXPECTED_MIGRATION_HISTORY[-3] == (
+    assert EXPECTED_MIGRATION_HISTORY[BOUNDED_SEARCH_SCHEMA_VERSION - 1] == (
         27,
         BOUNDED_SEARCH_MIGRATION_NAME,
         BOUNDED_SEARCH_MIGRATION_CHECKSUM,
@@ -263,10 +264,9 @@ def test_v26_upgrade_requires_exact_backup_and_rolls_back_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "search.sqlite3"
+    build_exact_prefix(database, 26)
     connection = sqlite3.connect(database, isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
-    apply_pending_migrations(connection, applied_at=_AT)
-    _downgrade_empty_v27_to_v26(connection)
     assert schema_fingerprint(connection) == BOUNDED_SEARCH_PREDECESSOR_FINGERPRINT
     with pytest.raises(Exception, match="prepared backup"):
         apply_pending_migrations(connection, applied_at=_AT)
@@ -285,7 +285,7 @@ def test_v26_upgrade_requires_exact_backup_and_rolls_back_atomically(
     assert schema_fingerprint(connection) == BOUNDED_SEARCH_PREDECESSOR_FINGERPRINT
     monkeypatch.setattr(migrations, "BOUNDED_SEARCH_MIGRATION_STATEMENTS", statements)
     apply_pending_migrations(connection, applied_at=_AT)
-    assert connection.execute("PRAGMA user_version").fetchone() == (29,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
     restored = sqlite3.connect(f"file:{backup}?mode=ro", uri=True)
     try:
         assert restored.execute("PRAGMA user_version").fetchone() == (26,)

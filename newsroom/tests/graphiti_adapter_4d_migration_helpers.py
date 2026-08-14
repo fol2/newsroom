@@ -48,6 +48,7 @@ def drop_empty_v29_local_watch_schema(connection: sqlite3.Connection) -> None:
 
 
 def _drop_empty_v29_local_watch_schema(connection: sqlite3.Connection) -> None:
+    _drop_empty_v30_evaluation_schema(connection)
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) == 29:
         from newsroom.authority.local_watch_migrations import (
             LOCAL_WATCH_MIGRATION_CHECKSUM,
@@ -98,6 +99,62 @@ def _drop_empty_v29_local_watch_schema(connection: sqlite3.Connection) -> None:
         connection.execute("DELETE FROM authority_migrations WHERE version=29")
         connection.execute(guard)
         connection.execute("PRAGMA user_version=28")
+
+
+def _drop_empty_v30_evaluation_schema(connection: sqlite3.Connection) -> None:
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 30:
+        return
+    from newsroom.authority.increment8_evaluation_migrations import (
+        INCREMENT8_EVALUATION_MIGRATION_CHECKSUM,
+        INCREMENT8_EVALUATION_MIGRATION_NAME,
+        INCREMENT8_EVALUATION_MIGRATION_STATEMENTS,
+    )
+
+    def normalise(value: str) -> str:
+        return " ".join(value.split()).replace(" IF NOT EXISTS", "")
+
+    tables = (
+        "evaluation_plans",
+        "evaluation_epochs",
+        "evaluation_runs",
+        "evaluation_cases",
+        "evaluation_labels",
+        "evaluation_adjudications",
+        "evaluation_release_decisions",
+    )
+    placeholders = ",".join("?" for _ in tables)
+    objects = connection.execute(
+        f"SELECT type,name,sql FROM sqlite_master WHERE tbl_name IN ({placeholders}) "
+        "AND type IN ('table','trigger','index') AND sql IS NOT NULL",
+        tables,
+    ).fetchall()
+    if connection.execute(
+        "SELECT name,checksum FROM authority_migrations WHERE version=30"
+    ).fetchone() != (
+        INCREMENT8_EVALUATION_MIGRATION_NAME,
+        INCREMENT8_EVALUATION_MIGRATION_CHECKSUM,
+    ) or {normalise(str(row[2])) for row in objects} != {
+        normalise(statement) for statement in INCREMENT8_EVALUATION_MIGRATION_STATEMENTS
+    }:
+        raise sqlite3.DatabaseError(
+            "downgrade requires exact empty v30 evaluation schema"
+        )
+    for table in tables:
+        if connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone() != (0,):
+            raise sqlite3.DatabaseError("v30 evaluation tables must be empty")
+    guard = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' "
+        "AND name='immutable_authority_migrations_delete'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+    for object_type, name, _ in objects:
+        if object_type == "trigger":
+            connection.execute(f'DROP TRIGGER "{name}"')
+    for table in reversed(tables):
+        connection.execute(f'DROP TABLE "{table}"')
+    connection.execute("DELETE FROM authority_migrations WHERE version=30")
+    connection.execute(guard)
+    connection.execute("PRAGMA user_version=29")
 
 
 def drop_empty_v28_coverage_schema(connection: sqlite3.Connection) -> None:
