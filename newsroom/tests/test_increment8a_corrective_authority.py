@@ -279,6 +279,19 @@ def test_case_membership_and_distinct_event_manifest_are_reconstructed(
                 prospective=True,
                 urgent=False,
             )
+        urgent_case = build_case(
+            run=run,
+            input_manifest_digest=D2,
+            cutoff_at=T2,
+            membership_facts=_facts(urgency="URGENT"),
+            rights_status=RightsStatus.REVIEWABLE,
+            prospective=True,
+            urgent=True,
+        )
+        direct_payload = dict(urgent_case.payload)
+        direct_payload["urgent"] = False
+        with pytest.raises(EvaluationAuthorityError, match="membership"):
+            authority.register_case(EvaluationCase.build(direct_payload))
         authority.register_case(case)
         duplicate_event = build_case(
             run=run,
@@ -402,7 +415,7 @@ def test_report_is_retained_and_reconstructed_not_a_caller_boolean(
             "live_shadow_execution_authorised": False,
         },
     }
-    with pytest.raises(EvaluationAuthorityError, match="fields differ"):
+    with pytest.raises(EvaluationAuthorityError, match="canonical reconstruction"):
         build_release_decision(
             run=run,
             report_canonical_bytes=json.dumps(
@@ -416,7 +429,7 @@ def test_report_is_retained_and_reconstructed_not_a_caller_boolean(
     inconsistent = json.loads(_report_bytes(run))
     inconsistent["payload"]["metric_status"] = "FAIL"
     raw = json.dumps(inconsistent, sort_keys=True, separators=(",", ":")).encode()
-    with pytest.raises(EvaluationAuthorityError, match="internally inconsistent"):
+    with pytest.raises(EvaluationAuthorityError, match="canonical reconstruction"):
         build_release_decision(
             run=run,
             report_canonical_bytes=raw,

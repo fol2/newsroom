@@ -7,6 +7,7 @@ production authority.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -139,6 +140,28 @@ def _record(schema_version: str, payload: Mapping[str, object]) -> tuple[bytes, 
         {"schema_version": schema_version, "payload": dict(payload)}
     )
     return raw, digest_bytes(raw)
+
+
+def _document(raw: bytes, schema_version: str) -> Mapping[str, object]:
+    try:
+        value = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise MetricReportError("metric evidence is not canonical JSON") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "payload"}
+        or value["schema_version"] != schema_version
+        or not isinstance(value["payload"], dict)
+        or canonical_json_bytes(value) != raw
+    ):
+        raise MetricReportError("metric evidence envelope differs")
+    return MappingProxyType(value)
+
+
+def _embedded(raw: bytes) -> dict[str, object]:
+    value = json.loads(raw.decode("utf-8", errors="strict"))
+    assert isinstance(value, dict)
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -541,6 +564,10 @@ class MetricReport:
     digest: str
     payload: Mapping[str, object]
 
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> MetricReport:
+        return verify_metric_report_canonical_bytes(raw)
+
 
 def _exact_named(
     records: Sequence[object], expected: tuple[str, ...], field: str
@@ -719,7 +746,9 @@ def build_metric_report(
         slice_status = MeasurementStatus.NOT_EVALUATED
     else:
         slice_status = MeasurementStatus.PASS
-    if total_cases < minimum_cases or slice_status is MeasurementStatus.NOT_EVALUATED:
+    if zero_tolerance.status is MeasurementStatus.FAIL:
+        overall = MeasurementStatus.FAIL
+    elif total_cases < minimum_cases or slice_status is MeasurementStatus.NOT_EVALUATED:
         overall = MeasurementStatus.NOT_EVALUATED
     elif all(
         status is MeasurementStatus.PASS
@@ -741,16 +770,29 @@ def build_metric_report(
     payload: dict[str, object] = {
         "run_id": run.run_id,
         "run_digest": run.digest,
+        "run": _embedded(run.canonical_bytes),
         "readiness_digest": INCREMENT_8_READINESS_DIGEST,
         "case_count": total_cases,
         "minimum_case_count": minimum_cases,
         "coverage_scope": "REVIEWED_PROSPECTIVE_UNIVERSE_ONLY_NOT_ABSOLUTE_RECALL",
         "rates": [item.digest for item in checked_rates],
+        "rate_evidence": [_embedded(item.canonical_bytes) for item in checked_rates],
         "performance": [item.digest for item in checked_performance],
+        "performance_evidence": [
+            _embedded(item.canonical_bytes) for item in checked_performance
+        ],
         "required_slices": [item.digest for item in checked_slices],
+        "required_slice_evidence": [
+            _embedded(item.canonical_bytes) for item in checked_slices
+        ],
         "zero_tolerance_digest": zero_tolerance.digest,
+        "zero_tolerance_evidence": _embedded(zero_tolerance.canonical_bytes),
         "source_contribution_digests": [item.digest for item in contributions],
+        "source_contribution_evidence": [
+            _embedded(item.canonical_bytes) for item in contributions
+        ],
         "ablation_digests": [item.digest for item in ablations],
+        "ablation_evidence": [_embedded(item.canonical_bytes) for item in ablations],
         "metric_code_digest": _digest(metric_code_digest, "metric_code_digest"),
         "environment_digest": _digest(environment_digest, "environment_digest"),
         "sampling_manifest_digest": _digest(
@@ -784,6 +826,155 @@ def build_metric_report(
     )
 
 
+def _evidence_payload(
+    value: object, schema_version: str
+) -> tuple[bytes, Mapping[str, object]]:
+    if not isinstance(value, dict):
+        raise MetricReportError("embedded metric evidence must be an object")
+    raw = canonical_json_bytes(value)
+    document = _document(raw, schema_version)
+    payload = document["payload"]
+    assert isinstance(payload, Mapping)
+    return raw, payload
+
+
+def verify_metric_report_canonical_bytes(raw: bytes) -> MetricReport:
+    """Reconstruct a Metric Report and every retained measurement from bytes."""
+
+    document = _document(raw, "newsroom.increment8.metric-report.v1")
+    payload = document["payload"]
+    assert isinstance(payload, Mapping)
+    try:
+        run_raw = canonical_json_bytes(payload["run"])
+        run = EvaluationRun.from_canonical_bytes(run_raw)
+
+        rates: list[RateMeasurement] = []
+        for value in payload["rate_evidence"]:  # type: ignore[union-attr]
+            item_raw, item = _evidence_payload(
+                value, "newsroom.increment8.rate-measurement.v1"
+            )
+            rebuilt = RateMeasurement.build(
+                metric_name=item["metric_name"],  # type: ignore[arg-type]
+                count=item["count"],  # type: ignore[arg-type]
+                denominator=item["denominator"],  # type: ignore[arg-type]
+                sampling_method=SamplingMethod(item["sampling_method"]),
+                uncertainty_ppm=item["uncertainty_ppm"],  # type: ignore[arg-type]
+            )
+            if rebuilt.canonical_bytes != item_raw:
+                raise MetricReportError("rate evidence differs after reconstruction")
+            rates.append(rebuilt)
+
+        performance: list[PerformanceMeasurement] = []
+        for value in payload["performance_evidence"]:  # type: ignore[union-attr]
+            item_raw, item = _evidence_payload(
+                value, "newsroom.increment8.performance-measurement.v1"
+            )
+            rebuilt = PerformanceMeasurement.build(
+                metric_name=item["metric_name"],  # type: ignore[arg-type]
+                observed_value=item["observed_value"],  # type: ignore[arg-type]
+            )
+            if rebuilt.canonical_bytes != item_raw:
+                raise MetricReportError(
+                    "performance evidence differs after reconstruction"
+                )
+            performance.append(rebuilt)
+
+        slices: list[RequiredSliceResult] = []
+        for value in payload["required_slice_evidence"]:  # type: ignore[union-attr]
+            item_raw, item = _evidence_payload(
+                value, "newsroom.increment8.required-slice-result.v1"
+            )
+            rebuilt = RequiredSliceResult.build(
+                slice_id=item["slice_id"],  # type: ignore[arg-type]
+                completed_cases=item["completed_cases"],  # type: ignore[arg-type]
+                success_count=item["success_count"],  # type: ignore[arg-type]
+            )
+            if rebuilt.canonical_bytes != item_raw:
+                raise MetricReportError("slice evidence differs after reconstruction")
+            slices.append(rebuilt)
+
+        zero_raw, zero_payload = _evidence_payload(
+            payload["zero_tolerance_evidence"],
+            "newsroom.increment8.zero-tolerance-evidence.v1",
+        )
+        zero = ZeroToleranceEvidence.build(zero_payload["counts"])  # type: ignore[arg-type]
+        if zero.canonical_bytes != zero_raw:
+            raise MetricReportError(
+                "zero-tolerance evidence differs after reconstruction"
+            )
+
+        contributions: list[SourceContribution] = []
+        for value in payload["source_contribution_evidence"]:  # type: ignore[union-attr]
+            item_raw, item = _evidence_payload(
+                value, "newsroom.increment8.source-contribution.v1"
+            )
+            rebuilt = SourceContribution.build(
+                source_id=item["source_id"],  # type: ignore[arg-type]
+                role=SourceRole(item["role"]),
+                provider_version_digest=item["provider_version_digest"],  # type: ignore[arg-type]
+                search_purpose=item["search_purpose"],  # type: ignore[arg-type]
+                unique_detection_count=item["unique_detection_count"],  # type: ignore[arg-type]
+                earlier_detection_count=item["earlier_detection_count"],  # type: ignore[arg-type]
+                resilience_case_count=item["resilience_case_count"],  # type: ignore[arg-type]
+                overlap_count=item["overlap_count"],  # type: ignore[arg-type]
+                noise_count=item["noise_count"],  # type: ignore[arg-type]
+                gross_cost_microunits=item["gross_cost_microunits"],  # type: ignore[arg-type]
+                rights_permitted=item["rights_permitted"],  # type: ignore[arg-type]
+                recommendation=RoleRecommendation(item["recommendation"]),
+                rationale_digest=item["rationale_digest"],  # type: ignore[arg-type]
+            )
+            if rebuilt.canonical_bytes != item_raw:
+                raise MetricReportError(
+                    "source contribution differs after reconstruction"
+                )
+            contributions.append(rebuilt)
+
+        ablations: list[AblationResult] = []
+        for value in payload["ablation_evidence"]:  # type: ignore[union-attr]
+            item_raw, item = _evidence_payload(
+                value, "newsroom.increment8.ablation-result.v1"
+            )
+            rebuilt = AblationResult.build(
+                component_id=item["component_id"],  # type: ignore[arg-type]
+                component_version_digest=item["component_version_digest"],  # type: ignore[arg-type]
+                evaluated_case_count=item["evaluated_case_count"],  # type: ignore[arg-type]
+                lost_detection_count=item["lost_detection_count"],  # type: ignore[arg-type]
+                earlier_detection_lost_count=item["earlier_detection_lost_count"],  # type: ignore[arg-type]
+                resilience_loss_count=item["resilience_loss_count"],  # type: ignore[arg-type]
+                noise_removed_count=item["noise_removed_count"],  # type: ignore[arg-type]
+                cost_removed_microunits=item["cost_removed_microunits"],  # type: ignore[arg-type]
+                affected_slices=item["affected_slices"],  # type: ignore[arg-type]
+            )
+            if rebuilt.canonical_bytes != item_raw:
+                raise MetricReportError(
+                    "ablation evidence differs after reconstruction"
+                )
+            ablations.append(rebuilt)
+
+        rebuilt_report = build_metric_report(
+            run=run,
+            case_count=payload["case_count"],  # type: ignore[arg-type]
+            rates=rates,
+            performance=performance,
+            slices=slices,
+            zero_tolerance=zero,
+            contributions=contributions,
+            ablations=ablations,
+            metric_code_digest=payload["metric_code_digest"],  # type: ignore[arg-type]
+            environment_digest=payload["environment_digest"],  # type: ignore[arg-type]
+            sampling_manifest_digest=payload["sampling_manifest_digest"],  # type: ignore[arg-type]
+            label_manifest_digest=payload["label_manifest_digest"],  # type: ignore[arg-type]
+            deviation_digests=payload["deviation_digests"],  # type: ignore[arg-type]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        if isinstance(exc, MetricReportError):
+            raise
+        raise MetricReportError("Metric Report reconstruction failed") from exc
+    if rebuilt_report.canonical_bytes != raw:
+        raise MetricReportError("Metric Report differs after reconstruction")
+    return rebuilt_report
+
+
 __all__ = [
     "REQUIRED_SLICES",
     "AblationResult",
@@ -799,4 +990,5 @@ __all__ = [
     "SourceRole",
     "ZeroToleranceEvidence",
     "build_metric_report",
+    "verify_metric_report_canonical_bytes",
 ]

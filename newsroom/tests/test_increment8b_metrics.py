@@ -14,6 +14,7 @@ from newsroom.increment8.metrics import (
     REQUIRED_SLICES,
     AblationResult,
     MeasurementStatus,
+    MetricReport,
     MetricReportError,
     PerformanceMeasurement,
     RateMeasurement,
@@ -196,6 +197,7 @@ def test_complete_report_is_canonical_bounded_and_non_activating() -> None:
     assert b'"schema_version":"newsroom.increment8.metric-report.v1"' in (
         report.canonical_bytes
     )
+    assert MetricReport.from_canonical_bytes(report.canonical_bytes) == report
 
 
 def test_every_rate_retains_count_denominator_sampling_and_uncertainty() -> None:
@@ -243,6 +245,10 @@ def test_required_slice_failure_and_insufficient_exposure_override_aggregate() -
 def test_zero_tolerance_failure_blocks_report() -> None:
     report = _report(zero_tolerance=_zero(temporal_rewrite=1))
     assert report.zero_tolerance_status is MeasurementStatus.FAIL
+    assert (
+        _report(case_count=1, zero_tolerance=_zero(temporal_rewrite=1)).overall_status
+        is MeasurementStatus.FAIL
+    )
     assert report.overall_status is MeasurementStatus.FAIL
 
 

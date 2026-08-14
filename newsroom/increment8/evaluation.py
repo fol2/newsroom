@@ -281,140 +281,33 @@ def _verified_metric_report(
 ) -> tuple[Mapping[str, object], str, Mapping[str, str]]:
     if not isinstance(raw, bytes):
         raise EvaluationAuthorityError("Metric Report must be canonical bytes")
-    try:
-        document = json.loads(raw.decode("utf-8", errors="strict"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise EvaluationAuthorityError("Metric Report is not canonical JSON") from exc
-    if canonical_json_bytes(document) != raw or not isinstance(document, dict):
-        raise EvaluationAuthorityError("Metric Report is not canonical JSON")
-    if (
-        set(document) != {"schema_version", "payload"}
-        or document["schema_version"] != "newsroom.increment8.metric-report.v1"
-    ):
-        raise EvaluationAuthorityError("Metric Report envelope differs")
-    payload = document["payload"]
-    required = {
-        "run_id",
-        "run_digest",
-        "readiness_digest",
-        "case_count",
-        "minimum_case_count",
-        "coverage_scope",
-        "rates",
-        "performance",
-        "required_slices",
-        "zero_tolerance_digest",
-        "source_contribution_digests",
-        "ablation_digests",
-        "metric_code_digest",
-        "environment_digest",
-        "sampling_manifest_digest",
-        "label_manifest_digest",
-        "deviation_digests",
-        "metric_status",
-        "performance_status",
-        "slice_status",
-        "zero_tolerance_status",
-        "overall_status",
-        "ablation_is_decision_bearing",
-        "production_activation_authorised",
-        "live_shadow_execution_authorised",
-    }
-    if not isinstance(payload, dict) or set(payload) != required:
-        raise EvaluationAuthorityError("Metric Report fields differ")
-    if payload["run_id"] != run.run_id or payload["run_digest"] != run.digest:
-        raise EvaluationAuthorityError("Metric Report Run binding differs")
-    allowed_statuses = {"PASS", "FAIL", "NOT_EVALUATED"}
-    summary: dict[str, str] = {}
-    for field in (
-        "metric_status",
-        "performance_status",
-        "slice_status",
-        "zero_tolerance_status",
-        "overall_status",
-    ):
-        value = payload[field]
-        if value not in allowed_statuses:
-            raise EvaluationAuthorityError("Metric Report status differs")
-        summary[field] = str(value)
-    minimum_cases = int(
-        INCREMENT_8_READINESS.evaluation_plan["qualification_exposure"][  # type: ignore[index]
-            "minimum_completed_cases"
-        ]
+    from newsroom.increment8.metrics import (
+        MetricReportError,
+        verify_metric_report_canonical_bytes,
     )
-    case_count = payload["case_count"]
-    if (
-        isinstance(case_count, bool)
-        or not isinstance(case_count, int)
-        or case_count < 0
-        or payload["minimum_case_count"] != minimum_cases
-        or payload["readiness_digest"] != INCREMENT_8_READINESS_DIGEST
-        or payload["coverage_scope"]
-        != "REVIEWED_PROSPECTIVE_UNIVERSE_ONLY_NOT_ABSOLUTE_RECALL"
-    ):
-        raise EvaluationAuthorityError("Metric Report frozen boundary differs")
-    for field in (
-        "zero_tolerance_digest",
-        "metric_code_digest",
-        "environment_digest",
-        "sampling_manifest_digest",
-        "label_manifest_digest",
-    ):
-        _digest(payload[field], f"Metric Report {field}")
-    for field in (
-        "rates",
-        "performance",
-        "required_slices",
-        "source_contribution_digests",
-        "ablation_digests",
-        "deviation_digests",
-    ):
-        values = payload[field]
-        if not isinstance(values, list):
-            raise EvaluationAuthorityError("Metric Report inventory differs")
-        checked = tuple(_digest(item, f"Metric Report {field}") for item in values)
-        if len(checked) != len(set(checked)) or (
-            field == "deviation_digests" and checked != tuple(sorted(checked))
-        ):
-            raise EvaluationAuthorityError("Metric Report inventory differs")
-    if not all(
-        payload[field]
-        for field in (
-            "rates",
-            "performance",
-            "required_slices",
-            "source_contribution_digests",
-            "ablation_digests",
-        )
-    ):
-        raise EvaluationAuthorityError("Metric Report inventory is incomplete")
-    if payload["zero_tolerance_status"] == "FAIL":
-        derived_overall = "FAIL"
-    elif case_count < minimum_cases or payload["slice_status"] == "NOT_EVALUATED":
-        derived_overall = "NOT_EVALUATED"
-    elif all(
-        payload[field] == "PASS"
-        for field in (
-            "metric_status",
-            "performance_status",
-            "slice_status",
-            "zero_tolerance_status",
-        )
-    ):
-        derived_overall = "PASS"
-    else:
-        derived_overall = "FAIL"
-    if payload["overall_status"] != derived_overall:
+
+    try:
+        report = verify_metric_report_canonical_bytes(raw)
+    except MetricReportError as exc:
         raise EvaluationAuthorityError(
-            "Metric Report status is internally inconsistent"
-        )
-    if (
-        payload["ablation_is_decision_bearing"] is not False
-        or payload["production_activation_authorised"] is not False
-        or payload["live_shadow_execution_authorised"] is not False
-    ):
-        raise EvaluationAuthorityError("Metric Report authority boundary differs")
-    return MappingProxyType(document), digest_bytes(raw), MappingProxyType(summary)
+            "Metric Report failed canonical reconstruction"
+        ) from exc
+    if report.run_id != run.run_id or report.payload["run_digest"] != run.digest:
+        raise EvaluationAuthorityError("Metric Report Run binding differs")
+    document = json.loads(raw.decode("utf-8", errors="strict"))
+    summary = MappingProxyType(
+        {
+            name: str(report.payload[name])
+            for name in (
+                "metric_status",
+                "performance_status",
+                "slice_status",
+                "zero_tolerance_status",
+                "overall_status",
+            )
+        }
+    )
+    return MappingProxyType(document), report.digest, summary
 
 
 def _thaw(value: object) -> object:
@@ -808,6 +701,13 @@ def build_release_decision(
 ) -> ReleaseEvidenceDecision:
     if not isinstance(run, EvaluationRun) or not isinstance(verdict, ReleaseVerdict):
         raise EvaluationAuthorityError("decision requires typed run and verdict")
+    if (
+        verdict is ReleaseVerdict.PASS
+        and run.payload["run_kind"] != RunKind.QUALIFICATION.value
+    ):
+        raise EvaluationAuthorityError(
+            "PASS differs from the pre-registered release rule"
+        )
     if not isinstance(early_stopped, bool):
         raise EvaluationAuthorityError("early_stopped must be boolean")
     report, report_digest, report_summary = _verified_metric_report(
@@ -1174,6 +1074,8 @@ class EvaluationAuthority:
         if (
             tuple(case.payload["required_slices"]) != slices  # type: ignore[arg-type]
             or tuple(case.payload["case_strata"]) != strata  # type: ignore[arg-type]
+            or case.payload["urgent"]
+            is not (facts["case_metadata"]["urgency"] == "URGENT")  # type: ignore[index]
         ):
             raise EvaluationAuthorityError("Case membership differs from frozen rules")
 
@@ -1527,6 +1429,8 @@ class EvaluationAuthority:
                 or case.payload["input_manifest_digest"] != input_manifest_digest
                 or tuple(case.payload["required_slices"]) != expected_slices  # type: ignore[arg-type]
                 or tuple(case.payload["case_strata"]) != expected_strata  # type: ignore[arg-type]
+                or case.payload["urgent"]
+                is not (facts["case_metadata"]["urgency"] == "URGENT")  # type: ignore[index]
             ):
                 raise EvaluationAuthorityError("retained Case identity differs")
             if input_manifest_digest in input_manifests:

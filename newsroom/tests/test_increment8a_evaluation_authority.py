@@ -12,7 +12,7 @@ from newsroom.authority.increment8_evaluation_migrations import (
     Increment8EvaluationBackupError,
     prepare_increment8_evaluation_backup,
 )
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import digest_bytes
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
     EXPECTED_SCHEMA_FINGERPRINT,
@@ -93,37 +93,31 @@ def _facts(
 
 
 def _report_bytes(run, *, status: str = "PASS") -> bytes:
-    digests = [f"sha256:{index:064x}" for index in range(20, 30)]
-    payload = {
-        "run_id": run.run_id,
-        "run_digest": run.digest,
-        "readiness_digest": INCREMENT_8_READINESS_DIGEST,
-        "case_count": 120,
-        "minimum_case_count": 120,
-        "coverage_scope": "REVIEWED_PROSPECTIVE_UNIVERSE_ONLY_NOT_ABSOLUTE_RECALL",
-        "rates": digests[0:2],
-        "performance": digests[2:4],
-        "required_slices": digests[4:6],
-        "zero_tolerance_digest": digests[6],
-        "source_contribution_digests": [digests[7]],
-        "ablation_digests": [digests[8]],
-        "metric_code_digest": digests[9],
-        "environment_digest": D1,
-        "sampling_manifest_digest": D2,
-        "label_manifest_digest": D3,
-        "deviation_digests": [],
-        "metric_status": status,
-        "performance_status": status,
-        "slice_status": status,
-        "zero_tolerance_status": status,
-        "overall_status": status,
-        "ablation_is_decision_bearing": False,
-        "production_activation_authorised": False,
-        "live_shadow_execution_authorised": False,
-    }
-    return canonical_json_bytes(
-        {"schema_version": "newsroom.increment8.metric-report.v1", "payload": payload}
+    from newsroom.increment8.metrics import build_metric_report
+    from newsroom.tests.test_increment8b_metrics import (
+        _ablations,
+        _contributions,
+        _performance,
+        _rates,
+        _slices,
+        _zero,
     )
+
+    report = build_metric_report(
+        run=run,
+        case_count=120,
+        rates=_rates(fail="candidate_precision" if status == "FAIL" else None),
+        performance=_performance(),
+        slices=_slices(),
+        zero_tolerance=_zero(),
+        contributions=_contributions(),
+        ablations=_ablations(),
+        metric_code_digest="sha256:" + "9" * 64,
+        environment_digest="sha256:" + "a" * 64,
+        sampling_manifest_digest="sha256:" + "b" * 64,
+        label_manifest_digest="sha256:" + "c" * 64,
+    )
+    return report.canonical_bytes
 
 
 def _database(path: Path) -> sqlite3.Connection:
@@ -295,10 +289,10 @@ def test_independent_review_and_adjudication_are_enforced() -> None:
 
 def test_calibration_and_early_stop_never_pass() -> None:
     _, _, calibration = _records(RunKind.CALIBRATION)
-    with pytest.raises(EvaluationAuthorityError, match="retained Metric Report"):
+    with pytest.raises(EvaluationAuthorityError, match="release rule"):
         build_release_decision(
             run=calibration,
-            report_canonical_bytes=_report_bytes(calibration),
+            report_canonical_bytes=b"not used for a calibration PASS",
             evidence_manifest_digest=D2,
             verdict=ReleaseVerdict.PASS,
             owner_identity_digest=OWNER,
