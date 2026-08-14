@@ -12,6 +12,7 @@ from newsroom.increment8.evaluation import (
     EvaluationCase,
     ReleaseEvidenceDecision,
     ReleaseVerdict,
+    ReviewLabel,
     ReviewRole,
     RightsStatus,
     RunKind,
@@ -67,6 +68,9 @@ def _populate(
     positive_changed: bool = False,
     ordinary_second_reviews: bool = True,
 ):
+    from newsroom.increment8.metrics import reviewed_case_assessment_label
+    from newsroom.tests.test_increment8b_metrics import _RATE_NAMES, _TRIAGE_NAMES
+
     geographies = ("GLOBAL", "HONG_KONG", "UNITED_KINGDOM")
     languages = ("EN_GB", "MIXED_EN_GB_ZH_HANT_HK", "ZH_HANT_HK")
     cases = []
@@ -102,12 +106,18 @@ def _populate(
         secondary_identity = (
             REVIEWER_2 if primary_identity == REVIEWER_1 else REVIEWER_1
         )
+        assessment_label = reviewed_case_assessment_label(
+            case=case,
+            metric_success={name: True for name in _RATE_NAMES},
+            triage_error={name: False for name in _TRIAGE_NAMES},
+            slice_success=True,
+        )
         authority.record_label(
             build_review_label(
                 case=case,
                 reviewer_identity_digest=primary_identity,
                 role=ReviewRole.PRIMARY,
-                label="expected-route",
+                label=assessment_label,
                 blinded=True,
                 recorded_at=T3,
             )
@@ -118,7 +128,7 @@ def _populate(
                     case=case,
                     reviewer_identity_digest=secondary_identity,
                     role=ReviewRole.SECONDARY,
-                    label="expected-route",
+                    label=assessment_label,
                     blinded=True,
                     recorded_at=T3,
                 )
@@ -130,23 +140,42 @@ def _populate(
 
 def _pass_candidate(authority: EvaluationAuthority, run):
     manifest = authority.evidence_manifest_digest(run.run_id)
-    slice_counts = {
-        "GEOGRAPHY_GLOBAL": 40,
-        "GEOGRAPHY_HONG_KONG": 40,
-        "GEOGRAPHY_UNITED_KINGDOM": 40,
-        "LANGUAGE_EN_GB": 40,
-        "LANGUAGE_MIXED_EN_GB_ZH_HANT_HK": 40,
-        "LANGUAGE_ZH_HANT_HK": 40,
-        "SOURCE_MULTI_DOMAIN_CORROBORATED": 120,
-        "TRANSITION_FAILURE_HEAVY": 120,
-        "URGENCY_URGENT": 24,
-    }
+    from newsroom.increment8.metrics import ReviewedCaseOutcome
+    from newsroom.tests.test_increment8b_metrics import _RATE_NAMES, _TRIAGE_NAMES
+
+    rows = authority._connection.execute(  # noqa: SLF001 - authority fixture proof
+        "SELECT c.case_bytes,l.label_bytes FROM evaluation_cases c "
+        "JOIN evaluation_labels l ON l.case_id=c.case_id "
+        "WHERE c.run_id=? AND l.review_role='PRIMARY' ORDER BY c.case_id",
+        (run.run_id,),
+    ).fetchall()
+    outcomes = tuple(
+        ReviewedCaseOutcome.build(
+            case=EvaluationCase.from_canonical_bytes(bytes(case_raw)),
+            review_label=ReviewLabel.from_canonical_bytes(bytes(label_raw)),
+            metric_success={name: True for name in _RATE_NAMES},
+            triage_error={name: False for name in _TRIAGE_NAMES},
+            slice_success=True,
+        )
+        for case_raw, label_raw in rows
+    )
+    stratum_counts = {"NEGATIVE": 0, "UNCHANGED": 0, "FAILURE_HEAVY": 0}
+    for case_raw, _ in rows:
+        case = EvaluationCase.from_canonical_bytes(bytes(case_raw))
+        for name in case.payload["case_strata"]:
+            stratum_counts[str(name)] += 1
+    retained_outcomes = (
+        outcomes
+        if len(outcomes) == 120
+        and all(value >= 12 for value in stratum_counts.values())
+        else None
+    )
     return build_release_decision(
         run=run,
         report_canonical_bytes=_report_bytes(
             run,
             evidence_manifest_digest=manifest,
-            slice_counts=slice_counts,
+            case_outcomes=retained_outcomes,
         ),
         evidence_manifest_digest=manifest,
         verdict=ReleaseVerdict.PASS,

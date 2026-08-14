@@ -98,41 +98,81 @@ def _report_bytes(
     status: str = "PASS",
     zero_failures: tuple[str, ...] = (),
     evidence_manifest_digest: str = D2,
-    slice_counts: dict[str, int] | None = None,
+    case_outcomes=None,
 ) -> bytes:
-    from newsroom.increment8.metrics import (
-        REQUIRED_SLICES,
-        RequiredSliceResult,
-        build_metric_report,
-    )
+    from newsroom.increment8.metrics import build_metric_report
     from newsroom.tests.test_increment8b_metrics import (
         _ablations,
+        _case_outcomes,
         _contributions,
         _performance,
-        _rates,
-        _slices,
-        _zero,
     )
 
-    slices = (
-        _slices()
-        if slice_counts is None
-        else tuple(
-            RequiredSliceResult.build(
-                slice_id=name,
-                completed_cases=slice_counts[name],
-                success_count=slice_counts[name],
-            )
-            for name in REQUIRED_SLICES
-        )
+    plan, epoch, expected_run = _records(RunKind(str(run.payload["run_kind"])))
+    assert expected_run == run
+    context = (plan, epoch, run)
+    outcomes = case_outcomes or _case_outcomes(
+        context=context,
+        metric_fail="candidate_precision" if status == "FAIL" else None,
+        zero_finding=zero_failures[0] if zero_failures else None,
     )
+    if len(zero_failures) > 1:
+        from newsroom.increment8.metrics import (
+            ReviewedCaseOutcome,
+            reviewed_case_assessment_label,
+        )
+
+        target_index = next(
+            index
+            for index, outcome in enumerate(outcomes)
+            if outcome.zero_tolerance_findings
+        )
+        target = outcomes[target_index]
+        case_document = json.loads(target.canonical_bytes)["payload"]
+        from newsroom.increment8.evaluation import EvaluationCase, ReviewLabel
+        from newsroom.authority.canonical import canonical_json_bytes
+
+        case = EvaluationCase.from_canonical_bytes(
+            canonical_json_bytes(case_document["case"])
+        )
+        previous_label = ReviewLabel.from_canonical_bytes(
+            canonical_json_bytes(case_document["review_label"])
+        )
+        findings = tuple(sorted(zero_failures))
+        replacement_label = build_review_label(
+            case=case,
+            reviewer_identity_digest=previous_label.payload["reviewer_identity_digest"],
+            role=ReviewRole.PRIMARY,
+            label=reviewed_case_assessment_label(
+                case=case,
+                metric_success=target.metric_success,
+                triage_error=target.triage_error,
+                slice_success=target.slice_success,
+                zero_tolerance_findings=findings,
+            ),
+            blinded=previous_label.payload["blinded"],
+            recorded_at=previous_label.payload["recorded_at"],
+        )
+        replacement = ReviewedCaseOutcome.build(
+            case=case,
+            review_label=replacement_label,
+            metric_success=target.metric_success,
+            triage_error=target.triage_error,
+            slice_success=target.slice_success,
+            zero_tolerance_findings=findings,
+        )
+        outcomes = (
+            *outcomes[:target_index],
+            replacement,
+            *outcomes[target_index + 1 :],
+        )
+        outcomes = tuple(sorted(outcomes, key=lambda item: item.case_id))
     report = build_metric_report(
+        plan=plan,
+        epoch=epoch,
         run=run,
-        case_count=120,
-        rates=_rates(fail="candidate_precision" if status == "FAIL" else None),
+        case_outcomes=outcomes,
         performance=_performance(),
-        slices=slices,
-        zero_tolerance=_zero(**{name: 1 for name in zero_failures}),
         contributions=_contributions(),
         ablations=_ablations(),
         metric_code_digest="sha256:" + "9" * 64,

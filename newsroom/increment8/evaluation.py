@@ -1532,6 +1532,39 @@ class EvaluationAuthority:
             raise EvaluationAuthorityError(
                 "reviewed qualification exposure is insufficient"
             )
+        outcome_evidence = report_payload.get("reviewed_case_outcome_evidence")
+        if not isinstance(outcome_evidence, list):
+            raise EvaluationAuthorityError(
+                "Metric Report reviewed Case evidence differs"
+            )
+        reported_outcomes: dict[str, tuple[str, str]] = {}
+        for document in outcome_evidence:
+            if not isinstance(document, Mapping) or not isinstance(
+                document.get("payload"), Mapping
+            ):
+                raise EvaluationAuthorityError(
+                    "Metric Report reviewed Case evidence differs"
+                )
+            outcome = document["payload"]
+            case_id = str(outcome.get("case_id"))
+            if case_id in reported_outcomes:
+                raise EvaluationAuthorityError(
+                    "Metric Report repeats reviewed Case evidence"
+                )
+            reported_outcomes[case_id] = (
+                str(outcome.get("case_digest")),
+                str(outcome.get("review_label_digest")),
+            )
+        if reported_outcomes != {
+            case_id: (
+                case_memberships[case_id][0],
+                label.digest,
+            )
+            for case_id, label in primary.items()
+        }:
+            raise EvaluationAuthorityError(
+                "Metric Report outcomes differ from retained reviews"
+            )
         reviewed_slice_cases: dict[str, set[str]] = {
             name: set() for name in slice_manifest
         }
