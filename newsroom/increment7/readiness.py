@@ -687,7 +687,11 @@ def _validate_schema_prefix(
             errors.append("newsroom.authority.migrations: suffix entry is malformed")
             continue
         version, name, checksum = entry
-        if version != index:
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version != index
+        ):
             errors.append("newsroom.authority.migrations: suffix is not contiguous")
         expected_name = expected_names.get(index)
         if expected_name is None:

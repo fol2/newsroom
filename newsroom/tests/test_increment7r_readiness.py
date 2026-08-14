@@ -224,6 +224,17 @@ def test_reserved_additive_schema_suffix_is_checked(monkeypatch: pytest.MonkeyPa
     findings = validate_interface_inventory(INCREMENT_7_READINESS)
     assert "newsroom.authority.migrations: v30 is outside 7R allocation" in findings
 
+    monkeypatch.setattr(
+        authority_migrations,
+        "EXPECTED_MIGRATION_HISTORY",
+        (*INCREMENT_7_READINESS.accepted_migration_history,
+         (26.0, "planned_agenda_authority_v26", checksum),
+         (27, "bounded_search_authority_v27", checksum)),
+    )
+    monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 27)
+    findings = validate_interface_inventory(INCREMENT_7_READINESS)
+    assert "newsroom.authority.migrations: suffix is not contiguous" in findings
+
 
 def test_7r_accepts_the_exact_v25_prefix_without_applying_a_migration() -> None:
     assert INCREMENT_7_READINESS.accepted_migration_history == (
