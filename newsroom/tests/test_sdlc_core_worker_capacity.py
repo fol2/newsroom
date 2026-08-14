@@ -15,7 +15,7 @@ from scripts.sdlc.run_gate import GateRunResult
 from scripts.sdlc.workflow_lane import WorkflowLaneError
 
 REPO_ROOT = Path(__file__).parents[2]
-EXPECTED_CORE_SHARD_COUNT = 12
+EXPECTED_CORE_SHARD_COUNT = 16
 
 
 def _contract_data() -> dict[str, object]:
@@ -995,6 +995,10 @@ def test_reducer_uses_source_shard_critical_path_plus_sequential_elapsed(
             100_000,
             90_000,
             80_000,
+            70_000,
+            60_000,
+            50_000,
+            40_000,
         ),
         reducer_elapsed_ms=19_000,
     )
@@ -1017,6 +1021,10 @@ def test_reducer_uses_source_shard_critical_path_plus_sequential_elapsed(
         100_000,
         90_000,
         80_000,
+        70_000,
+        60_000,
+        50_000,
+        40_000,
     ]
     assert accounting["reducer_lifecycle_ms"] == 19_000
     assert accounting["critical_path_ms"] == 219_000

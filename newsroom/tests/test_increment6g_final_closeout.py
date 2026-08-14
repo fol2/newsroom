@@ -95,9 +95,9 @@ def test_expensive_lineage_cases_concentration_is_bounded() -> None:
 
     assert sum(counts) == len(_EXPECTED_PROBE_IDS)
     # Additive repository tests can shift the SHA-256 rank positions used by the
-    # balanced twelve-shard allocator; keep the measured D3 concentration bounded.
-    assert len(shards) == 12
-    assert max(counts) <= 8
+    # balanced sixteen-shard allocator; keep the measured D3 concentration bounded.
+    assert len(shards) == 16
+    assert max(counts) <= 6
 
 
 def test_increment6_closeout_migration_identity_accepts_only_an_exact_prefix() -> None:

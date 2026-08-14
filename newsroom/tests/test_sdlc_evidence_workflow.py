@@ -148,6 +148,10 @@ def test_job_graph_is_exact_and_decision_always_reports() -> None:
                 "9",
                 "10",
                 "11",
+                "12",
+                "13",
+                "14",
+                "15",
             ]
         },
     }
