@@ -208,6 +208,32 @@ def _downgrade_empty_v26_to_v25(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
 
 
+def _downgrade_empty_v25_to_v24(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA foreign_keys=OFF")
+    immutable = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name='immutable_authority_migrations_delete'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+    objects = connection.execute(
+        "SELECT type,name FROM sqlite_master WHERE "
+        "tbl_name IN ('evaluation_feedback','evaluation_reconciliation_obligations',"
+        "'evaluation_reconciliation_dispositions') AND type IN ('table','trigger')"
+    ).fetchall()
+    for object_type, name in objects:
+        if object_type == "trigger":
+            connection.execute(f'DROP TRIGGER "{name}"')
+    for table in (
+        "evaluation_reconciliation_dispositions",
+        "evaluation_reconciliation_obligations",
+        "evaluation_feedback",
+    ):
+        connection.execute(f'DROP TABLE "{table}"')
+    connection.execute("DELETE FROM authority_migrations WHERE version=25")
+    connection.execute(immutable)
+    connection.execute("PRAGMA user_version=24")
+    connection.execute("PRAGMA foreign_keys=ON")
+
+
 def test_v26_fresh_create_history_fingerprint_and_integrity() -> None:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
@@ -243,6 +269,20 @@ def test_v25_upgrade_requires_and_retains_exact_backup(tmp_path: Path) -> None:
     retained.close()
 
 
+def test_opener_prepares_every_supported_predecessor_backup(tmp_path: Path) -> None:
+    database = tmp_path / "v24.sqlite3"
+    connection = sqlite3.connect(database, isolation_level=None)
+    connection.execute("PRAGMA foreign_keys=ON")
+    apply_pending_migrations(connection, applied_at=_AT)
+    _downgrade_empty_v26_to_v25(connection)
+    _downgrade_empty_v25_to_v24(connection)
+    connection.close()
+
+    authority = open_planned_agenda_authority(database, applied_at=_AT)
+    authority.close()
+    assert sqlite3.connect(database).execute("PRAGMA user_version").fetchone() == (26,)
+
+
 def test_v26_failure_rolls_back_to_exact_v25(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "rollback.sqlite3"
     connection = sqlite3.connect(database, isolation_level=None)
@@ -273,6 +313,10 @@ def test_create_replay_read_port_restart_and_no_effects(tmp_path: Path) -> None:
     authority = open_planned_agenda_authority(database, applied_at=_AT)
     item, version, command, snapshot = _create(authority)
     assert authority.apply(command.canonical_bytes) == snapshot
+    with pytest.raises(AgendaAuthorityError, match="idempotency binding"):
+        authority.apply(
+            replace(command, command_id=_id(9_999)).canonical_bytes
+        )
     assert authority.read_port().load(item.agenda_item_id) == snapshot
     assert authority.read_port().versions(item.agenda_item_id) == (version,)
     assert authority.read_port().resolutions(item.agenda_item_id) == ()
@@ -402,6 +446,36 @@ def test_revision_is_atomic_cas_bound_and_status_matched(kind, status) -> None:
     assert result.current_version == successor
     assert result.resolutions == (resolution,)
     assert authority.apply(command.canonical_bytes) == result
+
+
+def test_reschedule_requires_a_changed_schedule_assertion() -> None:
+    authority = open_planned_agenda_authority(":memory:", applied_at=_AT)
+    item, prior, _, _ = _create(authority)
+    unchanged_schedule = _version(
+        item,
+        25,
+        version_ordinal=2,
+        predecessor_version_digest=prior.digest,
+        source_revision_id=_id(35),
+        expected_subject="Updated description only",
+        recorded_at="2026-08-15T00:00:00.000000Z",
+    )
+    resolution = _resolution(
+        prior,
+        215,
+        AgendaResolutionKind.RESCHEDULED,
+        successor=unchanged_schedule.digest,
+    )
+    with pytest.raises(AgendaAuthorityError, match="schedule unchanged"):
+        authority.apply(
+            _command(
+                AgendaCommandOperation.REVISE,
+                315,
+                version=unchanged_schedule,
+                resolution=resolution,
+                current_version=prior,
+            ).canonical_bytes
+        )
 
 
 def test_two_writers_enforce_current_head_cas(tmp_path: Path) -> None:

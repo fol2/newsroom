@@ -26,8 +26,7 @@ from newsroom.authority.canonical import (
 from newsroom.authority.migrations import (
     SCHEMA_VERSION,
     apply_pending_migrations,
-    planned_agenda_backup_paths,
-    prepare_planned_agenda_backup,
+    prepare_pending_migration_backup,
 )
 from newsroom.increment7.agenda import (
     AgendaResolutionKind,
@@ -612,7 +611,7 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
         for table, byte_column in byte_columns.items():
             row = self._connection.execute(
                 f"SELECT agenda_item_id,request_id,actor_identity_digest,"
-                f"idempotency_key,{byte_column} FROM {table} WHERE request_id=? "
+                f"idempotency_key,command_digest,{byte_column} FROM {table} WHERE request_id=? "
                 "OR (actor_identity_digest=? AND idempotency_key=?)",
                 (
                     command.request_id,
@@ -637,7 +636,8 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
                     command.actor_identity_digest,
                     command.idempotency_key,
                 )
-                or bytes(row[4]) != expected[table]
+                or row[4] != digest_bytes(command.canonical_bytes)
+                or bytes(row[5]) != expected[table]
             ):
                 raise AgendaAuthorityError("Agenda idempotency binding conflicts")
         return item_ids.pop()
@@ -669,7 +669,7 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
                 self._finish()
                 return snapshot
             self._connection.execute(
-                "INSERT INTO planned_agenda_items VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO planned_agenda_items VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     item.agenda_item_id,
                     item.canonical_bytes,
@@ -678,6 +678,7 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
                     item.stable_subject_key,
                     version.agenda_version_id,
                     command.request_id,
+                    digest_bytes(command.canonical_bytes),
                     command.actor_identity_digest,
                     command.idempotency_key,
                     item.created_at,
@@ -706,7 +707,7 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
         self, version: PlannedAgendaVersion, command: PlannedAgendaCommand
     ) -> None:
         self._connection.execute(
-            "INSERT INTO planned_agenda_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO planned_agenda_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 version.agenda_version_id,
                 version.agenda_item_id,
@@ -717,6 +718,7 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
                 version.source_revision_id,
                 version.schedule_status.value,
                 command.request_id,
+                digest_bytes(command.canonical_bytes),
                 command.actor_identity_digest,
                 command.idempotency_key,
                 version.recorded_at,
@@ -741,7 +743,7 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
         self, resolution: AgendaResolution, command: PlannedAgendaCommand
     ) -> None:
         self._connection.execute(
-            "INSERT INTO planned_agenda_resolutions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO planned_agenda_resolutions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 resolution.resolution_id,
                 resolution.agenda_item_id,
@@ -757,6 +759,7 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
                 resolution.baseline_evidence_digest,
                 resolution.successor_version_digest,
                 command.request_id,
+                digest_bytes(command.canonical_bytes),
                 command.actor_identity_digest,
                 command.idempotency_key,
                 resolution.observed_at,
@@ -843,6 +846,18 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
             }
             if successor.schedule_status not in status_matrix[resolution.kind]:
                 raise AgendaAuthorityError("revision status and resolution differ")
+            if resolution.kind is AgendaResolutionKind.RESCHEDULED and (
+                successor.time_precision,
+                successor.asserted_start,
+                successor.asserted_end,
+                successor.time_zone,
+            ) == (
+                snapshot.current_version.time_precision,
+                snapshot.current_version.asserted_start,
+                snapshot.current_version.asserted_end,
+                snapshot.current_version.time_zone,
+            ):
+                raise AgendaAuthorityError("reschedule leaves schedule unchanged")
             self._insert_version(successor, command)
             self._insert_resolution(resolution, command)
             self._connection.execute(
@@ -924,10 +939,8 @@ def open_planned_agenda_authority(
     try:
         connection.execute("PRAGMA foreign_keys=ON")
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version == 25:
-            path = Path(str(database)).resolve()
-            backup, _ = planned_agenda_backup_paths(path)
-            prepare_planned_agenda_backup(connection, backup)
+        if version < SCHEMA_VERSION:
+            prepare_pending_migration_backup(connection)
         apply_pending_migrations(connection, applied_at=applied_at)
         if (
             connection.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION
