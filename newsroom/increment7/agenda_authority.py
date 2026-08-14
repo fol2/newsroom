@@ -31,6 +31,7 @@ from newsroom.authority.migrations import (
 from newsroom.increment7.agenda import (
     AgendaResolutionKind,
     AgendaScheduleStatus,
+    AgendaTimePrecision,
     PlannedAgendaItem,
     PlannedAgendaVersion,
     validate_agenda_successor,
@@ -658,7 +659,7 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
             "planned_agenda_resolutions": "resolution_bytes",
         }
         for table, byte_column in byte_columns.items():
-            row = self._connection.execute(
+            rows = self._connection.execute(
                 f"SELECT agenda_item_id,request_id,actor_identity_digest,"
                 f"idempotency_key,command_digest,{byte_column} FROM {table} WHERE request_id=? "
                 "OR (actor_identity_digest=? AND idempotency_key=?)",
@@ -667,9 +668,11 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
                     command.actor_identity_digest,
                     command.idempotency_key,
                 ),
-            ).fetchone()
-            if row is not None:
-                bindings[table] = tuple(row)
+            ).fetchall()
+            if len(rows) > 1:
+                raise AgendaAuthorityError("Agenda idempotency binding conflicts")
+            if rows:
+                bindings[table] = tuple(rows[0])
         if not bindings:
             return None
         if set(bindings) != set(expected):
@@ -700,6 +703,8 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
         if (
             version.agenda_item_id != item.agenda_item_id
             or version.version_ordinal != 1
+            or version.source_revision_id != item.created_from_source_revision_id
+            or version.recorded_at < item.created_at
         ):
             raise AgendaAuthorityError("initial Agenda Version binding differs")
         self._begin()
@@ -880,6 +885,11 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
             self._assert_cas(command, snapshot)
             validate_agenda_successor(snapshot.current_version, successor)
             self._validate_resolution(resolution, snapshot, revision=True)
+            if (
+                successor.recorded_at < snapshot.current_version.recorded_at
+                or resolution.observed_at < successor.recorded_at
+            ):
+                raise AgendaAuthorityError("Agenda revision chronology differs")
             if resolution.successor_version_digest != successor.digest:
                 raise AgendaAuthorityError("revision successor digest differs")
             status_matrix = {
@@ -899,6 +909,21 @@ class PlannedAgendaAuthority(PlannedAgendaReadPort):
             }
             if successor.schedule_status not in status_matrix[resolution.kind]:
                 raise AgendaAuthorityError("revision status and resolution differ")
+            if (
+                resolution.kind is AgendaResolutionKind.POSTPONED_WITH_SOURCE_EVIDENCE
+                and (
+                    successor.time_precision is not AgendaTimePrecision.UNKNOWN
+                    or any(
+                        value is not None
+                        for value in (
+                            successor.asserted_start,
+                            successor.asserted_end,
+                            successor.time_zone,
+                        )
+                    )
+                )
+            ):
+                raise AgendaAuthorityError("postponement invents a replacement date")
             if resolution.kind is AgendaResolutionKind.RESCHEDULED and (
                 successor.time_precision,
                 successor.asserted_start,
