@@ -492,7 +492,9 @@ class PlannedAgendaReadPort(_NoEffect):
     def versions(self, agenda_item_id: str) -> tuple[PlannedAgendaVersion, ...]:
         _uuid(agenda_item_id, "agenda_item_id")
         rows = self._connection.execute(
-            "SELECT version_bytes,version_digest FROM planned_agenda_versions "
+            "SELECT version_bytes,version_digest,recorded_at,agenda_version_id,"
+            "agenda_item_id,version_ordinal,predecessor_version_digest "
+            "FROM planned_agenda_versions "
             "WHERE agenda_item_id=? ORDER BY version_ordinal",
             (agenda_item_id,),
         ).fetchall()
@@ -500,7 +502,15 @@ class PlannedAgendaReadPort(_NoEffect):
             PlannedAgendaVersion.from_canonical_bytes(bytes(row[0])) for row in rows
         )
         for ordinal, (version, stored) in enumerate(zip(versions, rows), 1):
-            if version.version_ordinal != ordinal or version.digest != stored[1]:
+            if (
+                version.version_ordinal != ordinal
+                or version.digest != stored[1]
+                or version.recorded_at != stored[2]
+                or version.agenda_version_id != stored[3]
+                or version.agenda_item_id != stored[4]
+                or version.version_ordinal != stored[5]
+                or version.predecessor_version_digest != stored[6]
+            ):
                 raise AgendaAuthorityError("Planned Agenda Version replay differs")
             if ordinal > 1:
                 validate_agenda_successor(versions[ordinal - 2], version)
@@ -511,7 +521,7 @@ class PlannedAgendaReadPort(_NoEffect):
         _uuid(agenda_item_id, "agenda_item_id")
         rows = self._connection.execute(
             "SELECT r.resolution_bytes,r.resolution_digest,r.agenda_version_id,"
-            "r.agenda_version_digest,v.recorded_at "
+            "r.agenda_version_digest,v.version_bytes,v.version_digest,v.recorded_at "
             "FROM planned_agenda_resolutions r JOIN planned_agenda_versions v "
             "ON v.agenda_version_id=r.agenda_version_id "
             "AND v.agenda_item_id=r.agenda_item_id "
@@ -524,13 +534,19 @@ class PlannedAgendaReadPort(_NoEffect):
         )
         previous: AgendaResolution | None = None
         for ordinal, (resolution, stored) in enumerate(zip(resolutions, rows), 1):
+            bound_version = PlannedAgendaVersion.from_canonical_bytes(bytes(stored[4]))
             if (
                 resolution.agenda_item_id != agenda_item_id
                 or resolution.resolution_ordinal != ordinal
                 or resolution.digest != stored[1]
                 or resolution.agenda_version_id != stored[2]
                 or resolution.agenda_version_digest != stored[3]
-                or resolution.observed_at < stored[4]
+                or bound_version.agenda_version_id != resolution.agenda_version_id
+                or bound_version.agenda_item_id != resolution.agenda_item_id
+                or bound_version.digest != resolution.agenda_version_digest
+                or bound_version.digest != stored[5]
+                or bound_version.recorded_at != stored[6]
+                or resolution.observed_at < bound_version.recorded_at
                 or resolution.previous_resolution_digest
                 != (None if previous is None else previous.digest)
                 or (

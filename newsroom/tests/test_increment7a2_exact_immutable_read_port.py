@@ -417,6 +417,28 @@ def test_explicit_miss_then_late_occurrence_is_retained_and_terminal() -> None:
             ).canonical_bytes
         )
 
+    immutable_version = authority._connection.execute(  # noqa: SLF001
+        "SELECT sql FROM sqlite_master WHERE name='immutable_planned_agenda_versions'"
+    ).fetchone()[0]
+    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+        "DROP TRIGGER immutable_planned_agenda_versions"
+    )
+    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+        "UPDATE planned_agenda_versions SET recorded_at=? WHERE agenda_version_id=?",
+        ("2026-08-13T00:00:00.000000Z", version.agenda_version_id),
+    )
+    authority._connection.execute(immutable_version)  # noqa: SLF001
+    with pytest.raises(AgendaAuthorityError, match="Version replay differs"):
+        authority.read_port().versions(item.agenda_item_id)
+    authority._connection.execute(  # noqa: SLF001 - restore retained fixture
+        "DROP TRIGGER immutable_planned_agenda_versions"
+    )
+    authority._connection.execute(  # noqa: SLF001 - restore retained fixture
+        "UPDATE planned_agenda_versions SET recorded_at=? WHERE agenda_version_id=?",
+        (version.recorded_at, version.agenda_version_id),
+    )
+    authority._connection.execute(immutable_version)  # noqa: SLF001
+
     retained_invalid = replace(
         further,
         observed_at="2026-09-01T12:00:30.000000Z",
