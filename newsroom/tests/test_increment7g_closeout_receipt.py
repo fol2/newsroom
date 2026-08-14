@@ -181,7 +181,7 @@ def test_receipt_preserves_the_v29_prefix_after_a_future_migration(
     monkeypatch.setattr(
         receipt_module,
         "EXPECTED_MIGRATION_HISTORY",
-        (*EXPECTED_MIGRATION_HISTORY, (30, "future_authorised", "sha256:x")),
+        (*EXPECTED_MIGRATION_HISTORY[:29], (30, "future_authorised", "sha256:x")),
     )
     inventory = receipt_module._inventory()
     assert inventory["schema_version"] == 29

@@ -198,6 +198,11 @@ PINNED_MIGRATION_HISTORY: tuple[HistoryRow, ...] = (
         "increment8_evaluation_authority_v30",
         "sha256:764306cbc8fced0b50657c87c2c8735aa07b6ed6b02b1d7ceec84afd9db7dc15",
     ),
+    (
+        31,
+        "increment8_operational_authority_v31",
+        "sha256:b3a9535516836d7a0023cc0c030926edd8036b0fd8b31b9647342a9612152342",
+    ),
 )
 
 
