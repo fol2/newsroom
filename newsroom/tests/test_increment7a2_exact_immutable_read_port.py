@@ -419,6 +419,29 @@ def test_explicit_miss_then_late_occurrence_is_retained_and_terminal() -> None:
             ).canonical_bytes
         )
 
+    retained_invalid = replace(
+        further,
+        observed_at="2026-09-01T12:00:30.000000Z",
+    )
+    retained_command = _command(
+        AgendaCommandOperation.RESOLVE,
+        304,
+        resolution=retained_invalid,
+        current_version=version,
+        previous_resolution=late,
+    )
+    authority._insert_resolution(  # noqa: SLF001 - pre-fix retained-row fixture
+        retained_invalid,
+        retained_command,
+    )
+    authority._connection.execute(  # noqa: SLF001 - pre-fix retained-row fixture
+        "UPDATE planned_agenda_heads SET current_resolution_digest=?,"
+        "current_resolution_ordinal=? WHERE agenda_item_id=?",
+        (retained_invalid.digest, 3, item.agenda_item_id),
+    )
+    with pytest.raises(AgendaAuthorityError, match="replay differs"):
+        authority.read_port().resolutions(item.agenda_item_id)
+
 
 @pytest.mark.parametrize(
     ("kind", "status"),
