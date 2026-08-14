@@ -226,3 +226,7 @@ def test_unknown_duplicate_and_noncanonical_coverage_bytes_are_rejected() -> Non
         CoverageComparator.from_canonical_bytes(duplicate)
     with pytest.raises(CoverageContractError, match="canonical JSON"):
         CoverageComparator.from_canonical_bytes(comparator.canonical_bytes + b" ")
+    value = json.loads(comparator.canonical_bytes)
+    value["coverage_unit_digests"] = 1
+    with pytest.raises(CoverageContractError, match="bounded array"):
+        CoverageComparator.from_canonical_bytes(canonical_json_bytes(value))

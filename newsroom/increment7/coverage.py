@@ -175,6 +175,12 @@ def _strings(
     return result
 
 
+def _array(value: object, field: str) -> list[object]:
+    if type(value) is not list:
+        raise CoverageContractError(f"{field} must be a bounded array")
+    return value
+
+
 def _pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -356,7 +362,7 @@ class CoverageComparator(_NoEffect):
             "search_request_digests",
             "governing_policy_digests",
         ):
-            value[field] = tuple(value[field])  # type: ignore[arg-type]
+            value[field] = tuple(_array(value[field], field))
         result = cls(**value)  # type: ignore[arg-type]
         if result.canonical_bytes != raw:
             raise CoverageContractError("Coverage Comparator replay differs")
@@ -458,9 +464,11 @@ class CoverageAudit(_NoEffect):
         value = _document(raw, COVERAGE_AUDIT, _AUDIT_FIELDS)
         value["observations"] = tuple(
             CoverageObservation.from_dict(item)
-            for item in value["observations"]  # type: ignore[union-attr]
+            for item in _array(value["observations"], "observations")
         )
-        value["limitation_codes"] = tuple(value["limitation_codes"])  # type: ignore[arg-type]
+        value["limitation_codes"] = tuple(
+            _array(value["limitation_codes"], "limitation_codes")
+        )
         result = cls(**value)  # type: ignore[arg-type]
         if result.canonical_bytes != raw:
             raise CoverageContractError("Coverage Audit replay differs")
@@ -560,7 +568,7 @@ class CoverageGap(_NoEffect):
             "repetition_evidence_digests",
             "limitation_codes",
         ):
-            value[field] = tuple(value[field])  # type: ignore[arg-type]
+            value[field] = tuple(_array(value[field], field))
         result = cls(**value)  # type: ignore[arg-type]
         if result.canonical_bytes != raw:
             raise CoverageContractError("Coverage Gap replay differs")
@@ -642,7 +650,7 @@ class CoverageGapDecision(_NoEffect):
             "acknowledged_limitation_codes",
             "reason_codes",
         ):
-            value[field] = tuple(value[field])  # type: ignore[arg-type]
+            value[field] = tuple(_array(value[field], field))
         result = cls(**value)  # type: ignore[arg-type]
         if result.canonical_bytes != raw:
             raise CoverageContractError("Coverage Gap Decision replay differs")
