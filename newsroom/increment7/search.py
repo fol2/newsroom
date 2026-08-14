@@ -46,6 +46,9 @@ _UTC = re.compile(
     r"(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{6}Z\Z"
 )
 _QUERY_WORD = re.compile(r"[A-Za-z0-9]+")
+_DOMAIN_LABEL = re.compile(r"(?:[a-z0-9]|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9]))\Z")
+_SPECIFIC_OPERATOR = re.compile(r"(?:^|\s)(?:site|domain|intitle):\S+", re.IGNORECASE)
+_QUOTED_PHRASE = re.compile(r'"([^"\r\n]+)"')
 _BROAD_SCOPE_WORDS = frozenset(
     {
         "ai",
@@ -222,14 +225,16 @@ def _is_generic_firehose(query: str) -> bool:
         for word in words
         if not (word.isdigit() and len(word) == 4 and 1900 <= int(word) <= 2100)
     )
-    quoted_specific = '"' in query and any(
-        word not in _BROAD_SCOPE_WORDS | _BROAD_NEWS_WORDS for word in semantic_words
+    quoted_specific = any(
+        any(
+            word.casefold() not in _BROAD_SCOPE_WORDS | _BROAD_NEWS_WORDS
+            for word in _QUERY_WORD.findall(match.group(1))
+        )
+        for match in _QUOTED_PHRASE.finditer(query)
     )
     has_specific_syntax = (
         quoted_specific
-        or any(
-            marker in query.casefold() for marker in ("site:", "domain:", "intitle:")
-        )
+        or _SPECIFIC_OPERATOR.search(query) is not None
         or any(word.isdigit() for word in semantic_words)
     )
     broad_only = bool(semantic_words) and set(semantic_words).issubset(
@@ -699,10 +704,13 @@ def _domains(value: object) -> tuple[str, ...]:
         value, "domain_bounds", validator=lambda item, field: _text(item, field, 253)
     )
     for domain in domains:
+        labels = domain.split(".")
         if (
             domain != domain.lower()
             or urlsplit(f"https://{domain}").hostname != domain
-            or "." not in domain
+            or len(labels) < 2
+            or any(_DOMAIN_LABEL.fullmatch(label) is None for label in labels)
+            or all(label.isdigit() for label in labels)
         ):
             raise SearchContractError("domain_bounds must contain canonical hosts")
     return domains
@@ -1273,6 +1281,10 @@ def validate_search_review(
         SearchReviewAction.QUERY_OR_PROVIDER_NOISE: SearchDownstreamRoute.NO_WORK,
         SearchReviewAction.RIGHTS_SOURCE_OPERATIONAL_FOLLOW_UP: SearchDownstreamRoute.RIGHTS_SOURCE_OPERATIONAL_FOLLOW_UP,
     }
+    produces_work = decision.action not in {
+        SearchReviewAction.NO_WORK,
+        SearchReviewAction.QUERY_OR_PROVIDER_NOISE,
+    }
     if (
         results != ordered
         or tuple(item.result_reference_id for item in results)
@@ -1285,6 +1297,7 @@ def validate_search_review(
         )
         or decision.decided_at < max(item.recorded_at for item in results)
         or route_for_action[decision.action] not in request.allowed_downstream_routes
+        or (produces_work and request.limits.max_downstream_work_items == 0)
     ):
         raise SearchContractError("Search Review Decision result binding differs")
 

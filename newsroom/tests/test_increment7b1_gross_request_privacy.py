@@ -184,6 +184,17 @@ def test_complete_search_record_chain_roundtrips_without_effects() -> None:
     validate_search_outcome(attempt, outcome, request)
     validate_search_result(outcome, result, attempt)
     validate_search_review((result,), decision, request)
+    zero_request = replace(
+        request,
+        limits=replace(request.limits, max_downstream_work_items=0),
+    )
+    zero_result = replace(result, request_digest=zero_request.digest)
+    zero_decision = replace(
+        decision,
+        result_reference_digests=(zero_result.digest,),
+    )
+    with pytest.raises(SearchContractError, match="result binding"):
+        validate_search_review((zero_result,), zero_decision, zero_request)
     for record in (purpose, request, attempt, outcome, result, decision):
         assert type(record).from_canonical_bytes(record.canonical_bytes) == record
         assert record.authorises_provider is False
@@ -236,9 +247,15 @@ def test_generic_firehose_and_unbounded_amplification_fail_closed() -> None:
         "UK latest news 2026",
         "politics news",
         "technology news",
+        "site: UK news",
+        "domain: politics news",
+        "intitle: UK latest news",
     ):
         with pytest.raises(SearchContractError, match="firehose"):
             _request(rendered_query=query)
+    for domain in ("foo bar.com", "exa_mple.com", "-bad.com", "..com"):
+        with pytest.raises(SearchContractError, match="canonical hosts"):
+            _request(domain_bounds=(domain,))
     with pytest.raises(SearchContractError, match="inconsistent"):
         replace(_limits(), max_retries=4, max_provider_calls=4)
     request = _request()
