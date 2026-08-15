@@ -443,7 +443,15 @@ def test_legacy_active_lease_is_upgraded_by_bounded_renewal(tmp_path) -> None:
     authority = OperationalAuthority(connection)
     profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
     authority.register_profile(profile)
-    queued = _work(profile, "lease:legacy-renewal")
+    queued = enqueue_due_work(
+        profile=profile,
+        logical_due_key="lease:legacy-renewal",
+        scope_kind="FIXTURE_SOURCE",
+        urgency=Urgency.ROUTINE,
+        due_at=_AT,
+        deadline_at=_T5,
+        authority_version_digest=_D,
+    )
     authority.append_work(queued)
     current = acquire_lease(
         work=queued,
@@ -454,6 +462,8 @@ def test_legacy_active_lease_is_upgraded_by_bounded_renewal(tmp_path) -> None:
     legacy_payload = dict(current.payload)
     legacy_payload.pop("authority_deadline_at")
     legacy_payload.pop("renewed_at")
+    legacy_payload["expires_at"] = "2042-01-05T00:01:00.000000Z"
+    legacy_payload["maximum_expires_at"] = "2042-01-05T00:05:00.000000Z"
     legacy = operations.WorkLease.build(legacy_payload)
     connection.execute(
         "INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -500,6 +510,8 @@ def test_legacy_active_lease_is_upgraded_by_bounded_renewal(tmp_path) -> None:
     )
     authority.append_lease(renewed)
     assert renewed.payload["authority_deadline_at"] == queued.payload["deadline_at"]
+    assert renewed.payload["expires_at"] == _T5
+    assert renewed.payload["maximum_expires_at"] == _T5
     assert renewed.payload["renewed_at"] == _T5
     connection.close()
 

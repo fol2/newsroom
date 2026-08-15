@@ -459,10 +459,6 @@ def renew_lease(
     if progress == lease.payload["progress_digest"]:
         raise OperationalAuthorityError("lease renewal requires valid progress")
     renewed = _time(renewed_at, "renewed_at")
-    if _dt(renewed) < _dt(str(lease.payload["acquired_at"])) or _dt(renewed) > _dt(
-        str(lease.payload["expires_at"])
-    ):
-        raise OperationalAuthorityError("expired lease cannot be renewed")
     retained_authority_deadline = lease.payload.get("authority_deadline_at")
     if retained_authority_deadline is None and authority_deadline_at is None:
         raise OperationalAuthorityError(
@@ -478,13 +474,24 @@ def renew_lease(
         _time(authority_deadline_at, "authority_deadline_at")
     ) != _dt(authority_deadline):
         raise OperationalAuthorityError("lease authority deadline differs")
+    effective_expiry = min(
+        _dt(str(lease.payload["expires_at"])), _dt(authority_deadline)
+    )
+    if (
+        _dt(renewed) < _dt(str(lease.payload["acquired_at"]))
+        or _dt(renewed) > effective_expiry
+    ):
+        raise OperationalAuthorityError("expired lease cannot be renewed")
     seconds = int(
         INCREMENT_8_READINESS.operational_profile["execution"]["lease_renewal_seconds"]
     )  # type: ignore[index]
+    effective_maximum = min(
+        _dt(str(lease.payload["maximum_expires_at"])), _dt(authority_deadline)
+    )
     expires = max(
-        _dt(str(lease.payload["expires_at"])),
+        effective_expiry,
         min(
-            _dt(str(lease.payload["maximum_expires_at"])),
+            effective_maximum,
             _dt(renewed) + timedelta(seconds=seconds),
         ),
     )
@@ -493,6 +500,7 @@ def renew_lease(
         lease_version=int(lease.payload["lease_version"]) + 1,
         progress_digest=progress,
         expires_at=_canonical_time(expires),
+        maximum_expires_at=_canonical_time(effective_maximum),
         authority_deadline_at=_canonical_time(_dt(authority_deadline)),
         renewed_at=renewed,
         previous_digest=lease.digest,
@@ -1274,7 +1282,6 @@ class OperationalAuthority:
                     "work_id",
                     "owner_digest",
                     "acquired_at",
-                    "maximum_expires_at",
                     "status",
                     "closed_at",
                 )
