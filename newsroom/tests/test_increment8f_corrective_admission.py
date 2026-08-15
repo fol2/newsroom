@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from types import MappingProxyType
+
+import pytest
+
+import newsroom.increment8.admission as admission_module
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.increment8.admission import (
+    AdmissionError,
+    OperationalAdmissionDecision,
+    QualificationPacket,
+    build_operational_admission_decision,
+)
+from newsroom.increment8.observability import AlertPriority, HealthVerdict
+from newsroom.increment8.operations import CapacityEvidence
+from newsroom.increment8.recovery import ReconciliationRun
+from newsroom.tests.test_increment8f_admission import (
+    _D,
+    _capacity,
+    _health,
+    _observability,
+    _packet,
+    _reconciliation,
+    _security,
+)
+
+_D2 = "sha256:" + "2" * 64
+
+
+@pytest.fixture
+def admitted_gate(monkeypatch):
+    monkeypatch.setattr(admission_module, "corrective_gate_authorised", lambda _gate: True)
+
+
+def _rebuilt_packet(packet: QualificationPacket, document: dict) -> QualificationPacket:
+    raw = canonical_json_bytes(document)
+    payload = document["payload"]
+    return QualificationPacket(
+        MappingProxyType(payload["evidence_digests"]),
+        MappingProxyType(payload["retained_evidence"]),
+        raw,
+        digest_bytes(raw),
+    )
+
+
+def test_packet_retains_reconstructable_evidence_and_builds_exact_decision(
+    tmp_path, admitted_gate
+) -> None:
+    packet = _packet(tmp_path)
+    assert QualificationPacket.from_canonical_bytes(packet.canonical_bytes) == packet
+    assert set(packet.retained_evidence) == {
+        "release_decision",
+        "metric_report",
+        "capacity",
+        "health_postures",
+        "observability",
+        "security",
+        "reconciliation",
+        "backup",
+        "restore",
+        "restore_reconciliation",
+        "fault_runs",
+        "handoff_anchor",
+        "hardware",
+        "cost_licence",
+    }
+    decision = build_operational_admission_decision(
+        packet=packet,
+        owner_identity_digest=_D,
+        decision_recorded_at_digest=_D,
+    )
+    assert (
+        OperationalAdmissionDecision.from_canonical_bytes(decision.canonical_bytes)
+        == decision
+    )
+
+
+def test_decision_rejects_detached_packet_fields_and_missing_evidence(
+    tmp_path, admitted_gate
+) -> None:
+    packet = _packet(tmp_path)
+    detached = replace(
+        packet,
+        evidence_digests=MappingProxyType(
+            {**packet.evidence_digests, "handoff_anchor_digest": _D2}
+        ),
+    )
+    with pytest.raises(AdmissionError, match="qualification packet differs"):
+        build_operational_admission_decision(
+            packet=detached,
+            owner_identity_digest=_D,
+            decision_recorded_at_digest=_D,
+        )
+
+    document = json.loads(packet.canonical_bytes)
+    del document["payload"]["retained_evidence"]["security"]
+    incomplete = _rebuilt_packet(packet, document)
+    with pytest.raises(AdmissionError, match="qualification packet differs"):
+        build_operational_admission_decision(
+            packet=incomplete,
+            owner_identity_digest=_D,
+            decision_recorded_at_digest=_D,
+        )
+
+    document = json.loads(packet.canonical_bytes)
+    document["payload"]["evidence_digests"]["p1_finding_count"] = False
+    type_confused = _rebuilt_packet(packet, document)
+    with pytest.raises(AdmissionError, match="qualification packet differs"):
+        build_operational_admission_decision(
+            packet=type_confused,
+            owner_identity_digest=_D,
+            decision_recorded_at_digest=_D,
+        )
+
+
+def test_self_consistent_packet_cannot_rebind_retained_security(
+    tmp_path, admitted_gate
+) -> None:
+    packet = _packet(tmp_path)
+    document = json.loads(packet.canonical_bytes)
+    security = document["payload"]["retained_evidence"]["security"]
+    security["payload"]["rights_current"] = False
+    security["payload"]["eligible"] = True
+    security["payload"]["blocking_reasons"] = []
+    security_raw = canonical_json_bytes(security)
+    document["payload"]["evidence_digests"]["security_digest"] = digest_bytes(
+        security_raw
+    )
+    forged = _rebuilt_packet(packet, document)
+    with pytest.raises(AdmissionError, match="qualification packet differs"):
+        build_operational_admission_decision(
+            packet=forged,
+            owner_identity_digest=_D,
+            decision_recorded_at_digest=_D,
+        )
+
+
+def test_builder_reconstructs_detached_and_semantically_forged_evidence(
+    tmp_path, admitted_gate
+) -> None:
+    with pytest.raises(AdmissionError, match="security evidence"):
+        _packet(tmp_path / "security", security=replace(_security(), eligible=False))
+    with pytest.raises(AdmissionError, match="health evidence"):
+        _packet(
+            tmp_path / "health",
+            health_postures=[replace(_health(), verdict=HealthVerdict.HEALTHY_CHANGED)],
+        )
+    with pytest.raises(AdmissionError, match="observability evidence"):
+        _packet(
+            tmp_path / "observability",
+            observability=replace(_observability(), priority=AlertPriority.P1),
+        )
+
+    capacity = _capacity()
+    forged_capacity = CapacityEvidence.build(
+        {**capacity.payload, "cpu_cores": 0, "status": "PASS"}
+    )
+    with pytest.raises(AdmissionError, match="capacity evidence semantics"):
+        _packet(tmp_path / "capacity", capacity=forged_capacity)
+
+    reconciliation = _reconciliation()
+    forged_reconciliation = ReconciliationRun.build(
+        {
+            **reconciliation.payload,
+            "finding_counts": {
+                **reconciliation.payload["finding_counts"],  # type: ignore[dict-item]
+                "AMBIGUOUS_EFFECT": 1,
+            },
+            "status": "PASS",
+            "automatic_operation_blocked": False,
+        }
+    )
+    with pytest.raises(AdmissionError, match="reconciliation semantics"):
+        _packet(tmp_path / "reconciliation", reconciliation=forged_reconciliation)
+
+
+def test_stale_expected_handoff_anchor_and_decision_tamper_fail_closed(
+    tmp_path, admitted_gate
+) -> None:
+    with pytest.raises(AdmissionError, match="Handoff"):
+        _packet(tmp_path / "stale-anchor", expected_handoff_anchor_digest=_D2)
+
+    packet = _packet(tmp_path / "decision")
+    decision = build_operational_admission_decision(
+        packet=packet,
+        owner_identity_digest=_D,
+        decision_recorded_at_digest=_D,
+    )
+    with pytest.raises(AdmissionError, match="Operational Admission semantics"):
+        OperationalAdmissionDecision.from_canonical_bytes(
+            decision.canonical_bytes.replace(
+                b'"operational_admission_is_activation":false',
+                b'"operational_admission_is_activation":true',
+            )
+        )
