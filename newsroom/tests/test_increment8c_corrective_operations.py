@@ -215,6 +215,25 @@ def test_retry_finding_rechecks_latest_work_inside_serialised_insert(
     connection.close()
 
 
+def test_retry_failure_cannot_predate_exact_active_lease(tmp_path) -> None:
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = _work(profile, "retry:failure-time")
+    authority.append_work(queued)
+    _, leased = _commit_lease(authority, queued, acquired_at=_T2)
+    finding = build_retry_finding(
+        work=leased,
+        classification=RetryClassification.RETRYABLE,
+        dependency_scope="FIXTURE_PROVIDER",
+        failed_at=_T1,
+    )
+    with pytest.raises(OperationalAuthorityError, match="predates"):
+        authority.append_retry_finding(finding)
+    connection.close()
+
+
 def test_initial_quarantine_must_be_active_canonical_origin(tmp_path) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)
@@ -269,6 +288,27 @@ def test_lease_acquisition_is_due_and_atomically_advances_work(tmp_path) -> None
     )
     with pytest.raises(OperationalAuthorityError, match="not due"):
         authority.append_lease(early)
+    expired = enqueue_due_work(
+        profile=profile,
+        logical_due_key="lease:expired",
+        scope_kind="FIXTURE_SOURCE",
+        urgency=Urgency.ROUTINE,
+        due_at=_AT,
+        deadline_at=_T2,
+        authority_version_digest=_D,
+    )
+    authority.append_work(expired)
+    late = acquire_lease(
+        work=expired,
+        owner_digest="sha256:" + "4" * 64,
+        acquired_at=_T5,
+        progress_digest="sha256:" + "5" * 64,
+    )
+    with pytest.raises(OperationalAuthorityError, match="deadline"):
+        authority.append_lease(late)
+    authority.append_work(
+        transition_work(expired, state=WorkState.EXPLICITLY_CLOSED)
+    )
     due = acquire_lease(
         work=future,
         owner_digest="sha256:" + "2" * 64,
@@ -340,6 +380,52 @@ def test_starved_routine_work_is_promoted_before_catch_up_limit(
     assert len(selected) == 2
     assert selected[0].payload["urgency"] == Urgency.URGENT.value
     assert routine in selected
+    connection.close()
+
+
+def test_routine_promotion_preserves_each_present_higher_priority_class(
+    tmp_path, monkeypatch
+) -> None:
+    profile_definition = dict(operations.INCREMENT_8_READINESS.operational_profile)
+    schedule = dict(profile_definition["schedule"])
+    schedule["maximum_catch_up_items"] = 2
+    profile_definition["schedule"] = schedule
+    execution = dict(profile_definition["execution"])
+    execution["routine_starvation_limit_seconds"] = 10
+    profile_definition["execution"] = execution
+    monkeypatch.setattr(
+        operations,
+        "INCREMENT_8_READINESS",
+        replace(
+            operations.INCREMENT_8_READINESS,
+            operational_profile=profile_definition,
+        ),
+    )
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    routine = _work(profile, "fairness:routine")
+    higher = tuple(
+        enqueue_due_work(
+            profile=profile,
+            logical_due_key=f"fairness:{urgency.value.lower()}",
+            scope_kind="FIXTURE_SOURCE",
+            urgency=urgency,
+            due_at="2042-01-05T00:00:20.000000Z",
+            deadline_at="2042-01-05T01:00:00.000000Z",
+            authority_version_digest=_D,
+        )
+        for urgency in (Urgency.TIME_SENSITIVE, Urgency.PLANNED)
+    )
+    authority.append_work(routine)
+    for item in higher:
+        authority.append_work(item)
+    selected = authority.due_work("2042-01-05T00:00:20.000000Z")
+    assert {item.payload["urgency"] for item in selected} == {
+        Urgency.TIME_SENSITIVE.value,
+        Urgency.PLANNED.value,
+    }
     connection.close()
 
 

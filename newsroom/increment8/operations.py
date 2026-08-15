@@ -1090,6 +1090,8 @@ class OperationalAuthority:
                 if latest != retained_work:
                     raise OperationalAuthorityError("lease work authority changed")
                 acquired = _dt(str(lease.payload["acquired_at"]))
+                if acquired > _dt(str(latest.payload["deadline_at"])):
+                    raise OperationalAuthorityError("work deadline has expired")
                 if latest.payload["state"] == WorkState.QUEUED.value:
                     if acquired < _dt(str(latest.payload["due_at"])):
                         raise OperationalAuthorityError("queued work is not due")
@@ -1322,12 +1324,26 @@ class OperationalAuthority:
         )
         if expected != finding:
             raise OperationalAuthorityError("retry Finding differs")
+        active_lease = self._connection.execute(
+            "SELECT l.acquired_at FROM work_leases l WHERE l.work_id=? "
+            "AND l.lease_version=(SELECT MAX(x.lease_version) FROM work_leases x "
+            "WHERE x.lease_id=l.lease_id) AND l.status='ACTIVE' "
+            "ORDER BY l.acquired_at DESC,l.lease_id LIMIT 1",
+            (finding.payload["work_id"],),
+        ).fetchone()
+        if active_lease is None or _dt(str(finding.payload["failed_at"])) < _dt(
+            str(active_lease[0])
+        ):
+            raise OperationalAuthorityError("retry failure predates its active lease")
         inserted = self._insert(
             "INSERT INTO retry_findings SELECT ?,?,?,?,?,?,?,?,? WHERE "
             "EXISTS(SELECT 1 FROM due_work d WHERE d.work_id=? "
             "AND d.work_digest=? AND d.state='LEASED' "
             "AND d.state_version=(SELECT MAX(x.state_version) FROM due_work x "
-            "WHERE x.work_id=d.work_id))",
+            "WHERE x.work_id=d.work_id)) AND EXISTS(SELECT 1 FROM work_leases l "
+            "WHERE l.work_id=? AND l.acquired_at<=? AND l.status='ACTIVE' "
+            "AND l.lease_version=(SELECT MAX(x.lease_version) FROM work_leases x "
+            "WHERE x.lease_id=l.lease_id))",
             (
                 finding.finding_id,
                 finding.canonical_bytes,
@@ -1340,6 +1356,8 @@ class OperationalAuthority:
                 0,
                 finding.payload["work_id"],
                 finding.payload["work_digest"],
+                finding.payload["work_id"],
+                finding.payload["failed_at"],
             ),
         )
         if inserted != 1:
@@ -1462,18 +1480,24 @@ class OperationalAuthority:
             ),
             key=lambda item: (str(item.payload["deadline_at"]), item.work_id),
         )
-        if (
-            starved
-            and starved[0] not in selected
-            and selected
-            and (
-                limit >= 2
-                or not any(
-                    item.payload["urgency"] == Urgency.URGENT.value for item in selected
+        if starved and starved[0] not in selected and selected:
+            selected_counts = {
+                urgency.value: sum(
+                    item.payload["urgency"] == urgency.value for item in selected
                 )
+                for urgency in Urgency
+            }
+            replaceable = next(
+                (
+                    index
+                    for index in range(len(selected) - 1, -1, -1)
+                    if selected[index].payload["urgency"] == Urgency.ROUTINE.value
+                    or selected_counts[str(selected[index].payload["urgency"])] > 1
+                ),
+                None,
             )
-        ):
-            selected[-1] = starved[0]
+            if replaceable is not None:
+                selected[replaceable] = starved[0]
         return tuple(selected)
 
     def active_lease_count(self) -> int:

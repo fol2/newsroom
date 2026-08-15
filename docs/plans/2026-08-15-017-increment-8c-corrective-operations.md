@@ -31,3 +31,6 @@ Fixture operational authority only. No production scheduler activation, live pro
 - Starvation fairness reserves at most one bounded catch-up slot for the oldest starved Routine item while retaining an Urgent item whenever the batch can contain both.
 - A DueWork transition out of LEASED is conditionally inserted only after every active lease for that work is closed; retry attempts therefore cannot leak host-concurrency slots.
 - Lease closure cannot be appended independently: the closure Version and matching COMPLETED, RETRY_PENDING or QUARANTINED DueWork Version are committed together in one transaction, eliminating the closed-lease/LEASED-work crash gap.
+- Acquisition now enforces the retained deadline upper bound as well as the due/backoff lower bound; expired work remains explicit-close authority.
+- Retry failure time must be on or after the exact active lease acquisition and is rechecked inside Finding insertion.
+- Routine fairness uses only a duplicate-class slot, preserving at least one selected item from every present higher-priority class.
