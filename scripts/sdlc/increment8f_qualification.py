@@ -62,8 +62,14 @@ def execute_fixture_qualification(
         substantive_review_path.read_bytes()
     )
     try:
+        reviewed_commit = subprocess.check_output(
+            ("git", "rev-parse", f"{substantive_review.reviewed_head_sha}^{{commit}}"),
+            cwd=root,
+            text=True,
+            timeout=5,
+        ).strip()
         reviewed_tree = subprocess.check_output(
-            ("git", "rev-parse", f"{substantive_review.reviewed_head_sha}^{{tree}}"),
+            ("git", "rev-parse", f"{reviewed_commit}^{{tree}}"),
             cwd=root,
             text=True,
             timeout=5,
@@ -75,6 +81,7 @@ def execute_fixture_qualification(
     if (
         substantive_review.repository != "fol2/newsroom"
         or substantive_review.merge_sha != head
+        or reviewed_commit != substantive_review.reviewed_head_sha
         or reviewed_tree != tree
     ):
         raise Increment8FixtureQualificationError("substantive review identity differs")

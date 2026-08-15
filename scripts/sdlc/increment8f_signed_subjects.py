@@ -41,8 +41,14 @@ def validate_signed_subjects(
         substantive_review_path.read_bytes()
     )
     try:
+        reviewed_commit = subprocess.check_output(
+            ("git", "rev-parse", f"{substantive_review.reviewed_head_sha}^{{commit}}"),
+            cwd=repo_root,
+            text=True,
+            timeout=5,
+        ).strip()
         reviewed_tree = subprocess.check_output(
-            ("git", "rev-parse", f"{substantive_review.reviewed_head_sha}^{{tree}}"),
+            ("git", "rev-parse", f"{reviewed_commit}^{{tree}}"),
             cwd=repo_root,
             text=True,
             timeout=5,
@@ -54,6 +60,7 @@ def validate_signed_subjects(
     if (
         substantive_review.repository != "fol2/newsroom"
         or substantive_review.merge_sha != head
+        or reviewed_commit != substantive_review.reviewed_head_sha
         or substantive_review.review_provider != "chatgpt-codex-connector"
         or reviewed_tree != tree
         or canonical_json_bytes(packet.retained_evidence["substantive_review"])
